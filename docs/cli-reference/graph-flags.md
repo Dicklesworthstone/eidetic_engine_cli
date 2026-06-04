@@ -33,13 +33,15 @@ ee --fields standard --cards summary --meta graph pagerank \
 
 ## Context And Pack Flags
 
-`ee context "<task>"` is the main graph-aware retrieval surface. `ee pack` and
-`ee pack build` share most pack assembly flags, except `ee context` currently
-owns `--ppr-weight`, `--explain`, and `--no-pack-dna`.
+`ee pack "<task>"` is the canonical agent-facing context-pack surface. The
+soft-deprecated `ee context "<task>"` compatibility surface still owns several
+context-diagnostic flags that have not been promoted to `ee pack`, including
+`--ppr-weight`, `--stream`, `--include-tombstoned`, `--changed-symbol`, and
+`--changed-symbols-from-git`.
 
 | Command | Flag | Values | Default | Use |
 | --- | --- | --- | --- | --- |
-| `ee context` | `--max-tokens`, `-t` | integer | `4000` | Sets the context pack token budget. |
+| `ee context`, `ee pack`, `ee pack build` | `--max-tokens`, `-t` | integer | `4000` for `context`; omitted/adaptive for `pack` | Sets the context pack token budget. |
 | `ee context`, `ee pack`, `ee pack build` | `--candidate-pool` | integer | `100` for `context`; query-file/default for `pack` | Caps candidates retrieved before packing. |
 | `ee context`, `ee pack`, `ee pack build` | `--speed` | `instant`, `default`, `quality` | `default` for `context`; query-file/default for `pack` | Selects retrieval speed versus quality budget. |
 | `ee context`, `ee pack`, `ee pack build` | `--source-mode`, `--strict-source-mode` | `lexical_only`, `semantic_only`, `hybrid`; boolean strict flag | `hybrid`; strict false | Selects lexical, semantic, or hybrid retrieval before packing; strict mode fails instead of falling back. |
@@ -50,8 +52,8 @@ owns `--ppr-weight`, `--explain`, and `--no-pack-dna`.
 | `ee context`, `ee pack`, `ee pack build` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Reads the source-of-truth memory and graph-link tables. |
 | `ee context`, `ee pack`, `ee pack build` | `--index-dir <PATH>` | filesystem path | `<workspace>/.ee/index/` | Reads derived search indexes before graph-aware packing. |
 | `ee context`, `ee pack`, `ee pack build`, `ee search` | `--explain-performance` | boolean | false | Emits a redaction-safe query or pack performance report instead of normal hits or pack output. |
-| `ee context` | `--explain` | boolean | false | Adds graph-derived Pack DNA metadata to JSON output. |
-| `ee context` | `--no-pack-dna` | boolean | false | Suppresses `data.pack.packDna` even when `--explain` is set. |
+| `ee context`, `ee pack`, `ee pack build` | `--explain` | boolean | false | Adds pack explanation metadata to JSON output, including Pack DNA when available. |
+| `ee context`, `ee pack` | `--no-pack-dna` | boolean | false | Suppresses `data.pack.packDna` even when `--explain` is set. |
 | `ee context` | `--stream` | boolean | false | Emits `ee.pack.stream.v1` NDJSON frames; requires `--json`, `--robot`, `--format json`, or `--format jsonl` and cannot be combined with `--explain-performance`. |
 | `ee context` | `--include-tombstoned` | boolean | false | Includes tombstoned memories in context results and graph-aware ranking, with lifecycle metadata. Without this flag, tombstoned nodes are pruned before PPR and Pack DNA neighbor selection. |
 | `ee context` | `--changed-symbol <SYMBOL>` | repeatable string | omitted | Boosts memories linked to a changed Rust symbol selector. See [`symbol-graph.md`](../agent-ux/symbol-graph.md) for the current Rust-first contract and degraded states. |
@@ -60,25 +62,24 @@ owns `--ppr-weight`, `--explain`, and `--no-pack-dna`.
 | `ee context`, `ee pack`, `ee pack build` | `--no-rendered-text[=BOOL]` | optional boolean | false | Suppresses rendered pack text in JSON output. |
 | `ee context`, `ee pack`, `ee pack build` | `--no-skipped[=BOOL]` | optional boolean | false | Suppresses omitted/skipped item explanations. |
 | `ee context`, `ee pack`, `ee pack build` | `--no-meta[=BOOL]` | optional boolean | false | Suppresses pack metadata. |
-| `ee pack`, `ee pack build` | `--coordination-snapshot <PATH>` | JSON file path | omitted | Embeds a redacted coordination snapshot in the pack. |
-| `ee pack`, `ee pack build` | `--coordination-stale-after-ms <MS>` | integer milliseconds | package default | Marks coordination sources stale after the configured age. |
-| `ee pack`, `ee pack build` | `--include-non-affecting-degradations[=BOOL]` | optional boolean | false | Keeps non-affecting degraded signals in `data.degraded[]`. |
-| `ee pack`, `ee pack build` | `--as-of <RFC3339>` | timestamp | now | Replays validity-window filtering at a deterministic time. |
-| `ee pack`, `ee pack build` | `--include-expired` | boolean | false | Includes memories whose `valid_to` is before the reference time. |
-| `ee pack`, `ee pack build` | `--include-future` | boolean | false | Includes memories whose `valid_from` is after the reference time. |
-| `ee pack`, `ee pack build` | `--include-stale` | boolean | false | Includes memories marked with stale validity status in index metadata. |
+| `ee context`, `ee pack`, `ee pack build` | `--coordination-snapshot <PATH>` | JSON file path | omitted | Embeds a redacted coordination snapshot in the pack. |
+| `ee context`, `ee pack`, `ee pack build` | `--coordination-stale-after-ms <MS>` | integer milliseconds | package default | Marks coordination sources stale after the configured age. |
+| `ee context`, `ee pack`, `ee pack build` | `--include-non-affecting-degradations[=BOOL]` | optional boolean | false | Keeps non-affecting degraded signals in `data.degraded[]`. |
+| `ee context`, `ee pack`, `ee pack build` | `--as-of <RFC3339>` | timestamp | now | Replays validity-window filtering at a deterministic time. |
+| `ee context`, `ee pack`, `ee pack build` | `--include-expired` | boolean | false | Includes memories whose `valid_to` is before the reference time. |
+| `ee context`, `ee pack`, `ee pack build` | `--include-future` | boolean | false | Includes memories whose `valid_from` is after the reference time. |
+| `ee context`, `ee pack`, `ee pack build` | `--include-stale` | boolean | false | Includes memories marked with stale validity status in index metadata. |
 | `ee pack replay <PACK_ID>` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Replays a persisted pack selection ledger without rebuilding or reselecting context. |
 | `ee pack diff <PACK_A> <PACK_B>` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Compares two persisted pack ledgers and explains selection, freshness, or redaction drift. |
 
 Example:
 
 ```bash
-ee context "prepare release" --workspace . --profile thorough \
-  --ppr-weight 0.5 --explain --json
-ee context "ground release evidence" --workspace . --profile grounding --json
-ee context "map release dependencies" --workspace . --profile orientation --json
+ee pack "prepare release" --workspace . --profile thorough --explain --json
+ee pack "ground release evidence" --workspace . --profile grounding --json
+ee pack "map release dependencies" --workspace . --profile orientation --json
 ee context "prepare release" --workspace . --stream --format json
-ee context "prepare release" --workspace . --explain-performance --json
+ee pack "prepare release" --workspace . --explain-performance --json
 ee context "prepare release" --workspace . --ppr-weight 0.4 \
   --include-tombstoned --explain --json
 ee context "review changed context scoring" --workspace . \

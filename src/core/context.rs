@@ -440,7 +440,7 @@ impl CapabilitySet {
 
     /// All subsystems set to [`AccessLevel::Read`]. Suitable as the
     /// starting capability set for read-only commands such as
-    /// `ee status`, `ee search`, `ee why`, `ee context`.
+    /// `ee status`, `ee search`, `ee why`, and `ee pack`.
     #[must_use]
     pub const fn read_only() -> Self {
         Self {
