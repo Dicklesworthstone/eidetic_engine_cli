@@ -2135,6 +2135,51 @@ class ErrorHandling(unittest.TestCase):
 
 
 class ConsumerDecisionSchemaContract(unittest.TestCase):
+    def test_claim_gate_consumer_constants_match_claim_gate_schema(self):
+        schema = load_fixture(
+            "docs/schemas/swarm/ee.swarm.work_packet.claim_gate.v1.json"
+        )
+        source_authority = schema["definitions"]["sourceAuthority"]
+        command_action = schema["definitions"]["commandAction"]
+
+        self.assertEqual(schema["title"], consumer.CLAIM_GATE_SCHEMA)
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            [
+                "schema",
+                *[field for field, _reason in consumer.CLAIM_GATE_REQUIRED_FIELDS],
+            ],
+            schema["required"],
+        )
+        self.assertEqual(
+            set(schema["properties"]),
+            set(schema["required"]),
+        )
+        self.assertEqual(
+            [
+                field
+                for field, _reason in consumer.CLAIM_GATE_SOURCE_AUTHORITY_REQUIRED_FIELDS
+            ],
+            source_authority["required"],
+        )
+        self.assertEqual(
+            set(source_authority["properties"]),
+            set(source_authority["required"]),
+        )
+        self.assertFalse(source_authority["additionalProperties"])
+        self.assertEqual(
+            [
+                field
+                for field, _suffix in consumer.CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS
+            ],
+            command_action["required"],
+        )
+        self.assertEqual(
+            consumer.COMMAND_ACTION_ALLOWED_FIELDS,
+            set(command_action["properties"]),
+        )
+        self.assertFalse(command_action["additionalProperties"])
+
     def test_command_action_consumer_constants_match_work_packet_schema(self):
         schema = load_fixture("docs/schemas/swarm/ee.swarm.work_packet.v1.json")
         command_action = schema["definitions"]["commandAction"]
