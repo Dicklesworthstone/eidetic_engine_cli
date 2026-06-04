@@ -43,18 +43,22 @@
       }
     ],
     "recommendedAction": {
-      "action": "inspect_and_claim",
+      "action": "blocked_no_action",
       "candidateId": "bd-safe.1",
-      "safeToClaim": true,
+      "safeToClaim": false,
       "suggestedCommands": [
-        "br update bd-safe.1 --status in_progress --json"
+        "br --no-auto-import --allow-stale show bd-safe.1 --json",
+        "br doctor --json --no-db",
+        "ee swarm brief --workspace . --json"
       ],
       "suggestedCommandActions": [
         {
-          "commandId": "bead_show_candidate",
-          "displayCommand": "br show bd-safe.1 --json",
+          "commandId": "bead_show_candidate_stale_safe",
+          "displayCommand": "br --no-auto-import --allow-stale show bd-safe.1 --json",
           "argv": [
             "br",
+            "--no-auto-import",
+            "--allow-stale",
             "show",
             "bd-safe.1",
             "--json"
@@ -64,7 +68,41 @@
           "mutatesState": false,
           "requiredSubstrate": "beads",
           "when": "inspect_candidate",
-          "rationale": "Inspect the candidate without mutating tracker state."
+          "rationale": "Inspect the candidate without mutating a stale tracker index."
+        },
+        {
+          "commandId": "beads_doctor_no_db",
+          "displayCommand": "br doctor --json --no-db",
+          "argv": [
+            "br",
+            "doctor",
+            "--json",
+            "--no-db"
+          ],
+          "shellRequired": false,
+          "copySafety": "safe_structured_argv",
+          "mutatesState": false,
+          "requiredSubstrate": "beads",
+          "when": "before_claim",
+          "rationale": "Inspect tracker health without relying on the stale database."
+        },
+        {
+          "commandId": "swarm_brief_refresh",
+          "displayCommand": "ee swarm brief --workspace . --json",
+          "argv": [
+            "ee",
+            "swarm",
+            "brief",
+            "--workspace",
+            ".",
+            "--json"
+          ],
+          "shellRequired": false,
+          "copySafety": "safe_structured_argv",
+          "mutatesState": false,
+          "requiredSubstrate": "ee",
+          "when": "before_claim_or_closeout",
+          "rationale": "Refresh the read-only swarm input snapshot before acting."
         }
       ]
     },
@@ -76,10 +114,15 @@
         "status": "open",
         "priority": 2,
         "assignee": null,
-        "decision": "safe_to_claim",
+        "decision": "external_state_required",
         "collisionRisk": "none",
-        "unsafeReasons": [],
-        "staleReasons": [],
+        "unsafeReasons": [
+          "beads_requires_candidate_downgrade",
+          "beads_tracker_not_authoritative"
+        ],
+        "staleReasons": [
+          "beads_db_jsonl_count_mismatch"
+        ],
         "sourceRefs": [
           "br://bd-safe.1"
         ]
@@ -91,10 +134,11 @@
       "status": "open",
       "priority": 2,
       "assignee": null,
-      "decision": "safe_to_claim",
+      "decision": "external_state_required",
       "decisionReasons": [
-        "ready_unclaimed",
-        "no_dirty_path_overlap"
+        "beads_requires_candidate_downgrade",
+        "beads_tracker_not_authoritative",
+        "ready_unclaimed_visible_but_not_authoritative"
       ],
       "suggestedReservations": [],
       "proofObligations": [
@@ -153,9 +197,19 @@
       "safeToLaunchCargoVerification": true,
       "blockerCodes": []
     },
-    "requiredActions": [],
-    "doNotProceedBecause": [],
-    "safeToClaim": true,
+    "requiredActions": [
+      {
+        "order": 1,
+        "kind": "inspect",
+        "command": "br doctor --json --no-db",
+        "why": "Tracker counts do not match, so Beads claim mutation is unsafe."
+      }
+    ],
+    "doNotProceedBecause": [
+      "beads_db_jsonl_count_mismatch",
+      "beads_tracker_not_authoritative"
+    ],
+    "safeToClaim": false,
     "degraded": [
       {
         "code": "beads_db_jsonl_count_mismatch",

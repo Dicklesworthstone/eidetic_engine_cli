@@ -2115,6 +2115,108 @@ fn work_packet_bv_timeout_no_output_is_contractual() -> TestResult {
 }
 
 #[test]
+fn work_packet_tracker_mismatch_blocks_claim_mutation() -> TestResult {
+    // bd-1tlcd.3: when tracker integrity says Beads DB/JSONL state is not
+    // authoritative, a visible ready candidate must stay explainable but cannot
+    // become a Beads claim recommendation. This pins the real crowded-checkout
+    // contradiction where BV-style ranking can surface a candidate while the
+    // tracker itself requires repair before mutation.
+    let fixture_path = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("swarm_work_packet")
+        .join("tracker_mismatch.json");
+    let fixture = read_json(&fixture_path)?;
+    let packet = fixture
+        .pointer("/data")
+        .ok_or_else(|| "tracker mismatch fixture missing response data".to_owned())?;
+
+    if string_field(packet, "/schema", "tracker mismatch fixture")? != "ee.swarm.work_packet.v1" {
+        return Err("tracker mismatch fixture schema drifted".into());
+    }
+    if packet
+        .pointer("/trackerIntegrity/brReadsAuthoritative")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        return Err("tracker mismatch fixture must mark brReadsAuthoritative=false".into());
+    }
+    if packet
+        .pointer("/trackerIntegrity/requiresCandidateDowngrade")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err(
+            "tracker mismatch fixture must require candidate downgrade before claim".into(),
+        );
+    }
+    if packet
+        .pointer("/recommendedAction/safeToClaim")
+        .and_then(Value::as_bool)
+        != Some(false)
+        || packet.pointer("/safeToClaim").and_then(Value::as_bool) != Some(false)
+    {
+        return Err("tracker mismatch fixture must never recommend safeToClaim=true".into());
+    }
+    if string_field(
+        packet,
+        "/recommendedAction/action",
+        "tracker mismatch fixture",
+    )? != "blocked_no_action"
+    {
+        return Err("tracker mismatch fixture must use blocked_no_action".into());
+    }
+    if string_field(
+        packet,
+        "/candidates/0/decision",
+        "tracker mismatch fixture candidate",
+    )? == "safe_to_claim"
+    {
+        return Err("tracker mismatch candidate must not keep a safe_to_claim decision".into());
+    }
+
+    let rendered = serde_json::to_string(packet)
+        .map_err(|error| format!("serialize tracker mismatch fixture: {error}"))?;
+    for forbidden in ["br update", "--status in_progress", "br claim"] {
+        if rendered.contains(forbidden) {
+            return Err(format!(
+                "tracker mismatch fixture contains forbidden claim command marker {forbidden}"
+            ));
+        }
+    }
+
+    let actions = packet
+        .pointer("/recommendedAction/suggestedCommandActions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "tracker mismatch fixture missing suggestedCommandActions".to_owned())?;
+    if actions.is_empty() {
+        return Err("tracker mismatch fixture must keep read-only inspection actions".into());
+    }
+    for (index, action) in actions.iter().enumerate() {
+        if action.pointer("/mutatesState").and_then(Value::as_bool) != Some(false) {
+            return Err(format!("tracker mismatch action {index} must be read-only"));
+        }
+    }
+    let action_ids = actions
+        .iter()
+        .filter_map(|action| action.pointer("/commandId").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    for expected in [
+        "bead_show_candidate_stale_safe",
+        "beads_doctor_no_db",
+        "swarm_brief_refresh",
+    ] {
+        if !action_ids.contains(expected) {
+            return Err(format!(
+                "tracker mismatch fixture missing action {expected}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn swarm_schema_availability_matches_bead_state() -> TestResult {
     let issue_states = latest_issue_states()?;
     for case in SCHEMA_CASES {
