@@ -182,8 +182,9 @@ reason arrays, and the verdict.
 `true`. `sourceAuthority.rchRemoteOnlyRequired` and
 `sourceAuthority.rchSafeToLaunchCargoVerification` are separate so harnesses can
 fail closed when remote-only verification is required but the positive RCH proof
-is missing or false. `candidate_not_found` and `no_candidate` are explicit gate
-verdicts so harnesses do not infer safety from missing candidate data.
+is missing or false; a green local compile posture is not enough to claim Rust
+work. `candidate_not_found` and `no_candidate` are explicit gate verdicts so
+harnesses do not infer safety from missing candidate data.
 
 For explicit `--candidate <bead-id>` queries, `recommendedSafeToClaim` must be
 candidate-scoped before `safeToClaim` can become `true`. A packet-level

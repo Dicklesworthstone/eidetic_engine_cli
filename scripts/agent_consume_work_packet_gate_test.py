@@ -1653,6 +1653,25 @@ class WorkPacketDocsContract(unittest.TestCase):
             for marker in required_markers:
                 self.assertIn(marker, body, f"{relative_path} missing {marker!r}")
 
+    def test_agent_docs_pin_claim_gate_rch_remote_authority_rule(self):
+        required_markers = [
+            "sourceAuthority.rchRemoteOnlyRequired",
+            "sourceAuthority.rchSafeToLaunchCargoVerification",
+            "fail closed",
+            "remote-only verification is required",
+            "positive RCH proof is missing or false",
+            "green local compile posture is not enough",
+        ]
+        docs = [
+            "docs/agent-ux/swarm-work-packet.md",
+            "docs/swarm/work_packet.md",
+        ]
+
+        for relative_path in docs:
+            body = normalize_whitespace(load_text(relative_path))
+            for marker in required_markers:
+                self.assertIn(marker, body, f"{relative_path} missing {marker!r}")
+
     def test_agent_docs_pin_stale_swarm_brief_field_projection_guard(self):
         required_markers = [
             "ee swarm brief --fields summary --workspace . --json",

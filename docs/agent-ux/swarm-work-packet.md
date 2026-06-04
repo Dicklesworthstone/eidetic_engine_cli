@@ -22,6 +22,11 @@ and `verdict` is `safe_to_claim`. For explicit `--candidate` checks,
 `recommendedSafeToClaim` must describe that requested candidate, not a different
 packet recommendation.
 
+The gate exposes `sourceAuthority.rchRemoteOnlyRequired` separately from
+`sourceAuthority.rchSafeToLaunchCargoVerification`. Harnesses must fail closed
+when remote-only verification is required and the positive RCH proof is missing
+or false; a green local compile posture is not enough to claim Rust work.
+
 Version guard: if the installed `ee` rejects `--claim-gate` or `--candidate`
 as an unexpected argument, that binary is stale relative to the current
 source/docs contract. Stop at inspection, run no BV claim command, do not
