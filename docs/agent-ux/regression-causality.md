@@ -89,6 +89,101 @@ gate as a source verdict. First repair or rerun the remote-source proof. When
 the top hypothesis is `unknown_insufficient_evidence`, file a follow-up bead
 for the missing artifact instead of guessing from raw logs.
 
+Operator loop:
+
+1. Collect the smallest structured artifact set that already exists: RCH proof,
+   replay ledger, pack diff, perf report, degraded fixture, Beads/BV history, or
+   support-bundle summary.
+2. Build or inspect the causality capsule. The future CLI surface should return
+   `ee.response.v2` with a `data` payload shaped by
+   `ee.regression_causality.v1`.
+3. Follow only read-only `nextCommands` until evidence proves a source, fixture,
+   tracker, or environment owner. Heavy Rust checks stay behind RCH.
+4. Record whether the diagnosis helped or misled. If the capsule abstains, file
+   a follow-up bead for the missing artifact class instead of promoting a weak
+   hypothesis.
+
+## Redacted Examples
+
+### RCH Source-State Mismatch
+
+Inputs:
+
+- `verification_evidence`: `ee.rch.verify.v1` summary with
+  `status=rch_environment_failure`, `remote_source_materialized=false`, and
+  `source_materialization=remote_checkout_unverified`.
+- `git_metadata`: current `git_head`, `git_tree`, and dirty-status hash.
+- `beads_history`: blocker bead and retry window by id only.
+
+Expected lead:
+
+- top hypothesis `source_not_materialized`;
+- `authoritative: false`;
+- next command points at the RCH verifier or blocker ledger;
+- no source bead is closed until a proof shows the tested source actually
+  matched the current checkout.
+
+### Schema Drift
+
+Inputs:
+
+- `degraded_fixture`: fixture id and expected emission substrings;
+- `git_metadata`: schema file hash;
+- `e2e_event_log`: failing contract row with test id and artifact hash.
+
+Expected lead:
+
+- top hypothesis `schema_contract_drift`;
+- owner hints point at the schema or fixture surface;
+- next commands stay in static contract territory, such as `jq empty` and the
+  relevant schema/fixture test through RCH if Rust execution is required.
+
+### Perf Regression
+
+Inputs:
+
+- `perf_report`: `ee.perf.v1` budget or compare artifact;
+- `swarm_replay`: replay scorecard id and latency percentiles;
+- `support_bundle`: redacted bundle manifest id.
+
+Expected lead:
+
+- top hypothesis `perf_budget_regression`;
+- counter-evidence names missing workload or host-profile artifacts if present;
+- next commands prefer `ee perf explain-latency`, `ee perf compare`, or replay
+  inspection before broader benchmark work.
+
+### Pack-Quality Omission
+
+Inputs:
+
+- `pack_replay`: historical pack ledger id and hash;
+- `pack_diff`: omitted/added item summary and freshness posture;
+- `degraded_fixture`: any stale-index or source-mode degradation that affected
+  retrieval.
+
+Expected lead:
+
+- top hypothesis `pack_selection_change`, `stale_derived_asset`, or
+  `fixture_gap`, depending on which input is authoritative;
+- next commands point at `ee pack replay`, `ee pack diff`, or the missing
+  fixture owner;
+- raw pack text, raw memory bodies, and private paths remain absent.
+
+## Related Operator Surfaces
+
+- [RCH verification](../rch_verification.md) supplies selector admission,
+  source-materialization, known-blocker, and local-fallback evidence.
+- [Pack replay](../pack-replay.md) supplies pack replay and pack diff ledgers.
+- [Perf forensics](../perf-forensics-cookbook.md) supplies deterministic
+  latency, cache, and budget evidence.
+- [E2E event contract radar](../e2e-event-contract-radar.md) supplies
+  first-failure and contract-drift event rows.
+- [Swarm work packets](swarm-work-packet.md) and Beads/BV history supply tracker
+  and ownership evidence for crowded checkout failures.
+- Support bundles should carry only redacted summaries and stable artifact ids,
+  never raw logs, raw mail bodies, raw memory bodies, or host-private paths.
+
 ## Test Plan
 
 Contract coverage for this foundation must pin:

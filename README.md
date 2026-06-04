@@ -1943,6 +1943,7 @@ replacements, and tombstones each produce recorded entries visible via
 | [`docs/migration-guide.md`](docs/migration-guide.md) | DB schema migrations and upgrade paths |
 | [`docs/toon-output.md`](docs/toon-output.md) | TOON (Text-Only Object Notation) output format |
 | [`docs/pack-replay.md`](docs/pack-replay.md) | Pack replay, support-bundle safety, pack-quality operator guidance, and fixture authoring |
+| [`docs/agent-ux/regression-causality.md`](docs/agent-ux/regression-causality.md) | Regression-causality capsule workflow, redaction rules, and failed-gate operator examples |
 | [`docs/adr/0025-replayable-context-pack-selection-ledgers.md`](docs/adr/0025-replayable-context-pack-selection-ledgers.md) | Pack replay/diff ledger contract, freshness states, and support-bundle safety rules |
 | [`docs/adr/0038-auto-enrollment-zero-touch.md`](docs/adr/0038-auto-enrollment-zero-touch.md) | Optional zero-touch Tailscale mesh auto-enrollment design, invariants, and rejected alternatives |
 | [`docs/adr/`](docs/adr/) | Architectural decision records |
