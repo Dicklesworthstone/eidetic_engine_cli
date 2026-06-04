@@ -13,6 +13,25 @@ ee pack "prepare release" --workspace . --max-tokens 1000 --json \
 
 The contract check lives at `scripts/e2e_overhaul/agent_consumer.sh`.
 
+## Swarm Brief Field Projection Guard
+
+Use `ee swarm brief` as a read-only preflight before choosing work in a shared
+checkout. The compact summary projection is documented in both local and global
+flag positions:
+
+```bash
+ee swarm brief --fields summary --workspace . --json
+ee --fields summary swarm brief --workspace . --json
+```
+
+If either command returns an `ee.error.v2` usage failure such as
+`usage_unknown_field`, and `error.details.presetsAvailable` still lists
+`summary`, treat the installed binary as stale relative to the current
+source/docs contract. Fall back to `ee swarm brief --workspace . --json` only
+for read-only inspection. That fallback does not authorize Beads mutation:
+claim work only after the work-packet claim gate succeeds, and coordinate for
+an approved RCH/release-path rebuild if compact field projection is required.
+
 ## Work-Packet Claim Gate
 
 In shared checkouts, use Beads and BV to identify candidates, but do not treat

@@ -467,6 +467,29 @@ class WorkPacketDocsContract(unittest.TestCase):
             for marker in required_markers:
                 self.assertIn(marker, body, f"{relative_path} missing {marker!r}")
 
+    def test_agent_docs_pin_stale_swarm_brief_field_projection_guard(self):
+        required_markers = [
+            "ee swarm brief --fields summary --workspace . --json",
+            "ee --fields summary swarm brief --workspace . --json",
+            "usage_unknown_field",
+            "presetsAvailable",
+            "stale relative to the current source/docs contract",
+            "ee swarm brief --workspace . --json",
+            "read-only inspection",
+            "does not authorize Beads mutation",
+            "work-packet claim gate succeeds",
+            "RCH/release-path rebuild",
+        ]
+        docs = [
+            "README.md",
+            "docs/agent_integration.md",
+        ]
+
+        for relative_path in docs:
+            body = normalize_whitespace(load_text(relative_path))
+            for marker in required_markers:
+                self.assertIn(marker, body, f"{relative_path} missing {marker!r}")
+
 
 if __name__ == "__main__":
     runner = unittest.main(exit=False, verbosity=2, module="__main__")

@@ -700,6 +700,16 @@ after `swarm brief`:
 ee swarm brief --fields summary --workspace . --json
 ```
 
+If either summary form (`ee swarm brief --fields summary ...` or
+`ee --fields summary swarm brief ...`) returns an `ee.error.v2` usage failure
+such as `usage_unknown_field`, and `error.details.presetsAvailable` still lists
+`summary`, treat the installed binary as stale relative to the current
+source/docs contract. For read-only inspection, fall back to
+`ee swarm brief --workspace . --json`. That fallback does not authorize Beads
+mutation: claim work only after the work-packet claim gate succeeds, and
+coordinate for an approved RCH/release-path rebuild if compact field projection
+is required.
+
 Use the complete output when a harness needs every source array, including
 file-surface risks and resource-pressure hints. This output is intentionally
 larger; keep it behind an explicit `--fields full` in agent loops:
