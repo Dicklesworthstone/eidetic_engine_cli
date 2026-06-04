@@ -746,6 +746,38 @@ class ErrorHandling(unittest.TestCase):
             )
         )
 
+    def test_cli_safe_claim_gate_exits_zero_with_runnable_claim_action(self):
+        result, decision = run_consumer_cli(envelope(safe_gate()))
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertTrue(decision["safeToClaim"])
+        self.assertEqual(decision["sourceSchema"], "ee.swarm.work_packet.claim_gate.v1")
+        self.assertEqual(decision["candidateId"], "bd-safe.1")
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertTrue(claim["runnable"])
+        self.assertFalse(claim["reviewRequired"])
+        self.assertEqual(
+            claim["argv"],
+            ["br", "update", "bd-safe.1", "--status", "in_progress", "--json"],
+        )
+
+    def test_cli_inconsistent_claim_gate_exits_three_and_blocks_claim_action(self):
+        gate = safe_gate()
+        gate["recommendedSafeToClaim"] = False
+
+        result, decision = run_consumer_cli(envelope(gate))
+
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["sourceSchema"], "ee.swarm.work_packet.claim_gate.v1")
+        self.assertIn("claim_gate_recommended_not_safe", decision["whyNotSafe"])
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertTrue(claim["reviewRequired"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
     def test_cli_invalid_json_returns_machine_readable_fail_closed_decision(self):
         result = subprocess.run(
             [sys.executable, str(SCRIPT_DIR / "agent_consume_work_packet_gate.py")],
