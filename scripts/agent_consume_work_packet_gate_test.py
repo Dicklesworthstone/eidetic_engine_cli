@@ -75,6 +75,7 @@ def safe_gate():
             "agentMailStatus": "healthy",
             "reservationAuthoritative": True,
             "inboxAuthoritative": True,
+            "rchRemoteOnlyRequired": True,
             "rchSafeToLaunchCargoVerification": True,
             "sourceCount": 4,
         },
@@ -194,6 +195,7 @@ class ClaimGateConsumer(unittest.TestCase):
                 "trackerAuthoritative": "true",
                 "reservationAuthoritative": ["true"],
                 "inboxAuthoritative": {"value": True},
+                "rchRemoteOnlyRequired": "true",
                 "rchSafeToLaunchCargoVerification": 1,
                 "sourceCount": -1,
             }
@@ -205,6 +207,7 @@ class ClaimGateConsumer(unittest.TestCase):
         self.assertIsNone(decision["sourceSummary"]["trackerAuthoritative"])
         self.assertIsNone(decision["sourceSummary"]["reservationAuthoritative"])
         self.assertIsNone(decision["sourceSummary"]["inboxAuthoritative"])
+        self.assertIsNone(decision["sourceSummary"]["rchRemoteOnlyRequired"])
         self.assertIsNone(
             decision["sourceSummary"]["rchSafeToLaunchCargoVerification"]
         )
@@ -213,10 +216,41 @@ class ClaimGateConsumer(unittest.TestCase):
             "malformed_claim_gate_tracker_authoritative",
             "malformed_claim_gate_reservation_authoritative",
             "malformed_claim_gate_inbox_authoritative",
+            "malformed_claim_gate_rch_remote_only_required",
             "malformed_claim_gate_rch_safe_to_launch_cargo_verification",
             "malformed_claim_gate_source_count",
         ]:
             self.assertIn(reason, decision["whyNotSafe"])
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+
+    def test_claim_gate_remote_required_without_positive_proof_fails_closed(self):
+        gate = safe_gate()
+        gate["sourceAuthority"]["rchSafeToLaunchCargoVerification"] = None
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["sourceSummary"]["rchRemoteOnlyRequired"], True)
+        self.assertIsNone(
+            decision["sourceSummary"]["rchSafeToLaunchCargoVerification"]
+        )
+        self.assertIn("rch_remote_verification_required", decision["whyNotSafe"])
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+
+    def test_claim_gate_missing_remote_required_authority_fails_closed(self):
+        gate = safe_gate()
+        gate["sourceAuthority"].pop("rchRemoteOnlyRequired")
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIsNone(decision["sourceSummary"]["rchRemoteOnlyRequired"])
+        self.assertIn(
+            "claim_gate_rch_remote_only_required_missing",
+            decision["whyNotSafe"],
+        )
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
         self.assertFalse(claim["runnable"])
 

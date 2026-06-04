@@ -260,6 +260,7 @@
         "agentMailStatus",
         "reservationAuthoritative",
         "inboxAuthoritative",
+        "rchRemoteOnlyRequired",
         "rchSafeToLaunchCargoVerification",
         "sourceCount"
       ],
@@ -270,6 +271,7 @@
         "agentMailStatus": {"type": "string"},
         "reservationAuthoritative": {"type": ["boolean", "null"]},
         "inboxAuthoritative": {"type": ["boolean", "null"]},
+        "rchRemoteOnlyRequired": {"type": "boolean"},
         "rchSafeToLaunchCargoVerification": {"type": ["boolean", "null"]},
         "sourceCount": {"type": "integer", "minimum": 0}
       }
@@ -303,6 +305,7 @@
         "agentMailStatus": "healthy",
         "reservationAuthoritative": true,
         "inboxAuthoritative": true,
+        "rchRemoteOnlyRequired": true,
         "rchSafeToLaunchCargoVerification": true,
         "sourceCount": 4
       },

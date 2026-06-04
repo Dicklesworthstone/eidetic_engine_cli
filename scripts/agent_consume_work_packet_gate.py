@@ -194,6 +194,10 @@ def malformed_claim_gate_authority_reasons(gate):
             ),
             ("inboxAuthoritative", "malformed_claim_gate_inbox_authoritative"),
             (
+                "rchRemoteOnlyRequired",
+                "malformed_claim_gate_rch_remote_only_required",
+            ),
+            (
                 "rchSafeToLaunchCargoVerification",
                 "malformed_claim_gate_rch_safe_to_launch_cargo_verification",
             ),
@@ -331,6 +335,9 @@ def source_summary_from_gate(gate):
         ),
         "inboxAuthoritative": bool_or_none(authority.get("inboxAuthoritative")),
         "rchPosture": None,
+        "rchRemoteOnlyRequired": bool_or_none(
+            authority.get("rchRemoteOnlyRequired")
+        ),
         "rchSafeToLaunchCargoVerification": bool_or_none(
             authority.get("rchSafeToLaunchCargoVerification")
         ),
@@ -359,6 +366,7 @@ def source_summary_from_packet(packet):
         "rchPosture": redact_text(
             rch.get("posture") or legacy_verification.get("rchPosture"), 64
         ),
+        "rchRemoteOnlyRequired": rch_remote_verification_required(packet),
         "rchSafeToLaunchCargoVerification": bool_or_none(
             rch_safe_to_launch_cargo_verification(packet)
         ),
@@ -650,6 +658,13 @@ def claim_gate_consistency_reasons(gate):
         reasons.append("agent_mail_semantic_readiness_failed")
     if authority.get("rchSafeToLaunchCargoVerification") is False:
         reasons.append("rch_remote_verification_blocked")
+    if "rchRemoteOnlyRequired" not in authority:
+        reasons.append("claim_gate_rch_remote_only_required_missing")
+    elif (
+        authority.get("rchRemoteOnlyRequired") is True
+        and authority.get("rchSafeToLaunchCargoVerification") is not True
+    ):
+        reasons.append("rch_remote_verification_required")
 
     return compact_list(reasons)
 
@@ -779,6 +794,7 @@ def error_decision(code, source=None, envelope_degraded=None):
             "reservationAuthoritative": None,
             "inboxAuthoritative": None,
             "rchPosture": None,
+            "rchRemoteOnlyRequired": None,
             "rchSafeToLaunchCargoVerification": None,
             "sourceCount": 0,
         },

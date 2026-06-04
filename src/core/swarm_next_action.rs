@@ -729,6 +729,7 @@ pub struct SwarmWorkPacketClaimGateSourceAuthority {
     pub agent_mail_status: &'static str,
     pub reservation_authoritative: Option<bool>,
     pub inbox_authoritative: Option<bool>,
+    pub rch_remote_only_required: bool,
     pub rch_safe_to_launch_cargo_verification: Option<bool>,
     pub source_count: usize,
 }
@@ -1275,6 +1276,7 @@ impl SwarmWorkPacket {
                 agent_mail_status: self.coordination.agent_mail.status,
                 reservation_authoritative: self.coordination.agent_mail.reservation_authoritative,
                 inbox_authoritative: self.coordination.agent_mail.inbox_authoritative,
+                rch_remote_only_required: self.rch_proof_posture.remote_only_required,
                 rch_safe_to_launch_cargo_verification: self
                     .rch_proof_posture
                     .safe_to_launch_cargo_verification,

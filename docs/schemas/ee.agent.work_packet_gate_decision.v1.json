@@ -115,6 +115,7 @@
         "reservationAuthoritative": true,
         "inboxAuthoritative": true,
         "rchPosture": null,
+        "rchRemoteOnlyRequired": true,
         "rchSafeToLaunchCargoVerification": true,
         "sourceCount": 4
       },
@@ -139,6 +140,7 @@
         "reservationAuthoritative": null,
         "inboxAuthoritative": null,
         "rchPosture": null,
+        "rchRemoteOnlyRequired": null,
         "rchSafeToLaunchCargoVerification": null,
         "sourceCount": 0
       },
@@ -210,6 +212,7 @@
         "reservationAuthoritative",
         "inboxAuthoritative",
         "rchPosture",
+        "rchRemoteOnlyRequired",
         "rchSafeToLaunchCargoVerification",
         "sourceCount"
       ],
@@ -222,6 +225,7 @@
         "reservationAuthoritative": {"$ref": "#/$defs/nullableBoolean"},
         "inboxAuthoritative": {"$ref": "#/$defs/nullableBoolean"},
         "rchPosture": {"$ref": "#/$defs/nullableString"},
+        "rchRemoteOnlyRequired": {"$ref": "#/$defs/nullableBoolean"},
         "rchSafeToLaunchCargoVerification": {"$ref": "#/$defs/nullableBoolean"},
         "sourceCount": {
           "oneOf": [
