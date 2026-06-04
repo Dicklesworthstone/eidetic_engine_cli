@@ -2386,6 +2386,134 @@ mod tests {
     }
 
     #[test]
+    fn every_hypothesis_code_has_a_direct_trigger_or_abstention_path() {
+        let inputs = vec![
+            RegressionEvidenceInput::new(
+                "bd-ppbue.18:rch",
+                RegressionEvidenceKind::RchSelectorAdmission,
+                json!({
+                    "schema": "ee.rch.verify.v1",
+                    "status": "rch_environment_failure",
+                    "selector_admission_probe": {
+                        "status": "selection_failed",
+                        "local_fallback_refused": true
+                    },
+                    "source_materialization": "remote_checkout_unverified",
+                    "remote_source_materialized": false,
+                    "degradedCodes": ["rch_worker_topology_blocked"],
+                    "redactionStatus": "safe"
+                }),
+            ),
+            RegressionEvidenceInput::new(
+                "schema:contract",
+                RegressionEvidenceKind::VerificationEvidence,
+                json!({
+                    "status": "passed",
+                    "artifactHash": "blake3:schema-missing",
+                    "redactionStatus": "safe"
+                }),
+            ),
+            RegressionEvidenceInput::new(
+                "pack:replay",
+                RegressionEvidenceKind::PackReplay,
+                json!({
+                    "schema": "ee.pack_replay.v1",
+                    "stale": true,
+                    "artifactHash": "blake3:pack-stale",
+                    "redactionStatus": "safe"
+                }),
+            ),
+            RegressionEvidenceInput::new(
+                "perf:latency",
+                RegressionEvidenceKind::PerfReport,
+                json!({
+                    "schema": "ee.perf.v1",
+                    "status": "budget_exceeded",
+                    "degradedCodes": ["perf_latency_budget_exceeded"],
+                    "redactionStatus": "safe"
+                }),
+            ),
+            RegressionEvidenceInput::new(
+                "support:prompt-budget",
+                RegressionEvidenceKind::SupportBundle,
+                json!({
+                    "schema": "ee.support_bundle.v1",
+                    "status": "passed",
+                    "artifactHash": "blake3:support",
+                    "degradedCodes": ["prompt_budget_exceeded"],
+                    "redactionStatus": "safe"
+                }),
+            ),
+            RegressionEvidenceInput::new(
+                "pack:diff",
+                RegressionEvidenceKind::PackDiff,
+                json!({
+                    "schema": "ee.pack_diff.v1",
+                    "status": "passed",
+                    "degradedCodes": ["pack_selection_changed"],
+                    "redactionStatus": "safe"
+                }),
+            ),
+            RegressionEvidenceInput::new(
+                "bd-391ze.3:tracker",
+                RegressionEvidenceKind::BvHistory,
+                json!({
+                    "status": "available",
+                    "artifactHash": "blake3:tracker",
+                    "degradedCodes": ["bv_tracker_mismatch"],
+                    "redactionStatus": "hash_only"
+                }),
+            ),
+            RegressionEvidenceInput::new(
+                "fixture:missing",
+                RegressionEvidenceKind::DegradedFixture,
+                None,
+            ),
+        ];
+
+        let normalized = normalize_regression_evidence_inputs(&inputs);
+        let ranking = rank_regression_cause_hypotheses(&normalized.rows);
+        let actual_codes = ranking
+            .hypotheses
+            .iter()
+            .map(|hypothesis| hypothesis.code)
+            .collect::<BTreeSet<_>>();
+        let expected_codes = RegressionCauseHypothesisCode::ALL
+            .into_iter()
+            .filter(|code| *code != RegressionCauseHypothesisCode::UnknownInsufficientEvidence)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(actual_codes, expected_codes);
+        assert!(ranking.hypotheses.iter().all(|hypothesis| {
+            !hypothesis.authoritative && !hypothesis.next_commands.is_empty()
+        }));
+
+        let abstention_input = vec![RegressionEvidenceInput::new(
+            "git:clean",
+            RegressionEvidenceKind::GitMetadata,
+            json!({
+                "status": "passed",
+                "sourceMaterialization": "committed_tree",
+                "remoteSourceMaterialized": true,
+                "redactionStatus": "safe"
+            }),
+        )];
+        let abstention_rows = normalize_regression_evidence_inputs(&abstention_input);
+        let abstention = rank_regression_cause_hypotheses(&abstention_rows.rows);
+
+        assert_eq!(
+            abstention
+                .hypotheses
+                .first()
+                .map(|hypothesis| hypothesis.code),
+            Some(RegressionCauseHypothesisCode::UnknownInsufficientEvidence)
+        );
+        assert!(abstention.hypotheses.iter().all(|hypothesis| {
+            !hypothesis.authoritative && !hypothesis.next_commands.is_empty()
+        }));
+    }
+
+    #[test]
     fn golden_ranked_hypotheses_are_stable() {
         let inputs = vec![
             RegressionEvidenceInput::new(
