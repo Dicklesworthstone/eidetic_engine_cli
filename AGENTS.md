@@ -1141,14 +1141,27 @@ bv --robot-insights | jq '.Cycles'                         # Circular deps (must
 
 ## UBS — Ultimate Bug Scanner
 
-**Golden Rule:** `ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.
+**Golden Rule:** `ubs <changed-files>` before every commit when the selected UBS
+modules are static-only for the touched files. Exit 0 = safe. Exit >0 = fix &
+re-run.
+
+**RCH-only caveat for Rust on this Mac:** the UBS Rust module currently runs
+`cargo fmt`, `cargo clippy`, `cargo check`, and `cargo test --no-run`
+internally. That means `ubs --only=rust ...` is a local Cargo verification path
+unless UBS grows an explicit no-Cargo mode or is itself wrapped by an approved
+RCH path. Do **not** run UBS Rust scans in Codex sessions as a substitute for
+RCH-only verification. For Rust source changes, use the repo's RCH verification
+commands for Cargo work; for comment/docs-only Rust-file edits, prefer
+`rustfmt --edition 2024 --check <file>` plus `git diff --check`. If a UBS run
+accidentally starts local Cargo, report it honestly and do not count it as
+remote proof.
 
 ### Commands
 
 ```bash
 ubs file.rs file2.rs                    # Specific files (< 1s) — USE THIS
 ubs $(git diff --name-only --cached)    # Staged files — before commit
-ubs --only=rust,toml src/               # Language filter (3-5x faster)
+ubs --only=rust,toml src/               # Avoid in RCH-only Codex sessions; invokes local Cargo today
 ubs --ci --fail-on-warning .            # CI mode — before PR
 ubs .                                   # Whole project (ignores target/, Cargo.lock)
 ```

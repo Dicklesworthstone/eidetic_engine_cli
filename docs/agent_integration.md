@@ -87,6 +87,13 @@ checks local Git hooks for agent identity requirements, legacy Beads metadata
 mutation, local Cargo hooks that should route through RCH, unreadable hook-chain
 targets, and missing preflight-guard coverage.
 
+Do not use UBS Rust scans as a lightweight replacement for RCH verification in
+Codex sessions. The current UBS Rust module invokes Cargo internally, including
+local `cargo check`/`clippy`/`test --no-run`; that violates RCH-only proof
+policy on this Mac unless a future no-Cargo mode or approved RCH wrapper is
+used. If a UBS run starts local Cargo, disclose it as local contamination and do
+not count it as verification evidence.
+
 The no-build e2e harness for this diagnostic is
 `scripts/e2e_overhaul/hook_git_readiness.sh`. It creates real temporary Git
 repositories, requires `EE_BINARY` or an already-built `ee` binary, writes
