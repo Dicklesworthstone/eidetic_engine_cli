@@ -1017,8 +1017,9 @@ fn normalized_non_empty_str(input: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
 
+    use serde::Serialize;
     use serde_json::json;
 
     #[test]
@@ -1235,6 +1236,162 @@ mod tests {
                 .any(|field| field.contains("stderr"))
         );
         assert!(!row.summary.contains("/Users/"));
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct KindStatusMatrixReport {
+        schema: &'static str,
+        rows: Vec<KindStatusSummary>,
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct KindStatusSummary {
+        kind: String,
+        available: usize,
+        blocked: usize,
+        malformed: usize,
+        stale: usize,
+        failed_verdict_preserved: bool,
+        degraded_codes: Vec<String>,
+        redaction_statuses: Vec<String>,
+    }
+
+    #[test]
+    fn golden_kind_status_matrix_covers_all_evidence_kinds() {
+        let mut inputs = Vec::new();
+        for kind in RegressionEvidenceKind::ALL {
+            let kind_name = kind.as_str();
+            inputs.push(RegressionEvidenceInput::new(
+                format!("{kind_name}:success"),
+                kind,
+                json!({
+                    "schema": format!("ee.{kind_name}.v1"),
+                    "status": "passed",
+                    "artifactHash": format!("blake3:{kind_name}:success"),
+                    "redactionStatus": "safe"
+                }),
+            ));
+            inputs.push(RegressionEvidenceInput::new(
+                format!("{kind_name}:failure"),
+                kind,
+                json!({
+                    "schema": format!("ee.{kind_name}.v1"),
+                    "status": "failed",
+                    "artifactHash": format!("blake3:{kind_name}:failure"),
+                    "redactionStatus": "safe"
+                }),
+            ));
+            inputs.push(RegressionEvidenceInput::new(
+                format!("{kind_name}:degraded"),
+                kind,
+                json!({
+                    "schema": format!("ee.{kind_name}.v1"),
+                    "status": "passed",
+                    "artifactHash": format!("blake3:{kind_name}:degraded"),
+                    "degradedCodes": ["matrix_degraded"],
+                    "redactionStatus": "safe"
+                }),
+            ));
+            inputs.push(RegressionEvidenceInput::new(
+                format!("{kind_name}:stale"),
+                kind,
+                json!({
+                    "schema": format!("ee.{kind_name}.v1"),
+                    "stale": true,
+                    "artifactHash": format!("blake3:{kind_name}:stale"),
+                    "redactionStatus": "safe"
+                }),
+            ));
+            inputs.push(RegressionEvidenceInput::new(
+                format!("{kind_name}:blocked"),
+                kind,
+                json!({
+                    "schema": format!("ee.{kind_name}.v1"),
+                    "status": "blocked",
+                    "localFallbackRefused": true,
+                    "artifactHash": format!("blake3:{kind_name}:blocked"),
+                    "redactionStatus": "safe"
+                }),
+            ));
+            inputs.push(RegressionEvidenceInput::new(
+                format!("{kind_name}:malformed"),
+                kind,
+                json!("raw artifact should not be copied"),
+            ));
+        }
+
+        let report = normalize_regression_evidence_inputs(&inputs);
+        assert_eq!(
+            report.rows.len(),
+            RegressionEvidenceKind::ALL.len() * 6,
+            "each accepted evidence kind should have six matrix rows"
+        );
+
+        let mut rows = Vec::new();
+        for kind in RegressionEvidenceKind::ALL {
+            let kind_name = kind.as_str();
+            let kind_rows = report
+                .rows
+                .iter()
+                .filter(|row| row.kind == kind_name)
+                .collect::<Vec<_>>();
+            let degraded_codes = kind_rows
+                .iter()
+                .flat_map(|row| row.degraded_codes.iter().map(String::as_str))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let redaction_statuses = kind_rows
+                .iter()
+                .map(|row| row.redaction_status.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+
+            rows.push(KindStatusSummary {
+                kind: kind_name.to_owned(),
+                available: kind_rows
+                    .iter()
+                    .filter(|row| row.status == RegressionEvidenceStatus::Available)
+                    .count(),
+                blocked: kind_rows
+                    .iter()
+                    .filter(|row| row.status == RegressionEvidenceStatus::Blocked)
+                    .count(),
+                malformed: kind_rows
+                    .iter()
+                    .filter(|row| row.status == RegressionEvidenceStatus::Malformed)
+                    .count(),
+                stale: kind_rows
+                    .iter()
+                    .filter(|row| row.status == RegressionEvidenceStatus::Stale)
+                    .count(),
+                failed_verdict_preserved: kind_rows.iter().any(|row| {
+                    row.id.ends_with(":failure")
+                        && row.verdict.as_deref() == Some("failed")
+                        && row.status == RegressionEvidenceStatus::Available
+                }),
+                degraded_codes,
+                redaction_statuses,
+            });
+        }
+        rows.sort_by(|left, right| left.kind.cmp(&right.kind));
+
+        let matrix = KindStatusMatrixReport {
+            schema: "ee.regression_evidence_kind_status_matrix.v1",
+            rows,
+        };
+        let actual = serde_json::to_string_pretty(&matrix).expect("serialize kind status matrix");
+        let expected = include_str!(
+            "../../tests/fixtures/golden/regression_causality/kind_status_matrix.json"
+        )
+        .trim_end();
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
