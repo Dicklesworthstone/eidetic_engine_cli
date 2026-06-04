@@ -1475,6 +1475,87 @@ class ErrorHandling(unittest.TestCase):
 
 
 class ConsumerDecisionSchemaContract(unittest.TestCase):
+    def assert_decision_matches_schema_constraints(self, decision, schema):
+        source_schema = decision["sourceSchema"]
+        self.assertTrue(
+            source_schema is None
+            or source_schema
+            in schema["properties"]["sourceSchema"]["oneOf"][1]["enum"]
+        )
+        self.assertIsInstance(decision["safeToClaim"], bool)
+        self.assertTrue(
+            decision["candidateId"] is None
+            or isinstance(decision["candidateId"], str)
+        )
+        self.assertIsInstance(decision["decision"], str)
+        self.assertIsInstance(decision["action"], str)
+        self.assertIsInstance(decision["argvActions"], list)
+        self.assertIsInstance(decision["mutatingActionsRequireHuman"], bool)
+        self.assertIsInstance(decision["whyNotSafe"], list)
+        self.assertTrue(
+            all(isinstance(reason, str) for reason in decision["whyNotSafe"])
+        )
+        self.assertIsInstance(decision["degradedSummary"], list)
+        self.assertIsInstance(decision["legacyCommandStringsRefused"], int)
+        self.assertNotIsInstance(decision["legacyCommandStringsRefused"], bool)
+        self.assertGreaterEqual(decision["legacyCommandStringsRefused"], 0)
+
+        nullable_source_strings = {
+            "trackerHealth",
+            "agentMailStatus",
+            "rchPosture",
+        }
+        nullable_source_bools = {
+            "trackerAuthoritative",
+            "requiresCandidateDowngrade",
+            "reservationAuthoritative",
+            "inboxAuthoritative",
+            "rchRemoteOnlyRequired",
+            "rchSafeToLaunchCargoVerification",
+        }
+        source_summary = decision["sourceSummary"]
+        for key in nullable_source_strings:
+            self.assertTrue(
+                source_summary[key] is None or isinstance(source_summary[key], str),
+                f"sourceSummary.{key} has invalid type",
+            )
+        for key in nullable_source_bools:
+            self.assertTrue(
+                source_summary[key] is None or isinstance(source_summary[key], bool),
+                f"sourceSummary.{key} has invalid type",
+            )
+        source_count = source_summary["sourceCount"]
+        self.assertTrue(source_count is None or isinstance(source_count, int))
+        self.assertNotIsInstance(source_count, bool)
+        if source_count is not None:
+            self.assertGreaterEqual(source_count, 0)
+
+        action_kind_enum = set(
+            schema["$defs"]["argvAction"]["properties"]["actionKind"]["enum"]
+        )
+        for action in decision["argvActions"]:
+            self.assertIsInstance(action["commandId"], str)
+            self.assertIn(action["actionKind"], action_kind_enum)
+            self.assertIsInstance(action["argv"], list)
+            self.assertTrue(all(isinstance(part, str) for part in action["argv"]))
+            self.assertIsInstance(action["runnable"], bool)
+            self.assertIsInstance(action["reviewRequired"], bool)
+            self.assertIsInstance(action["mutatesState"], bool)
+            self.assertTrue(
+                action["requiredSubstrate"] is None
+                or isinstance(action["requiredSubstrate"], str)
+            )
+            self.assertTrue(action["when"] is None or isinstance(action["when"], str))
+            self.assertIsInstance(action["copySafety"], str)
+            self.assertIsInstance(action["reason"], str)
+
+        for entry in decision["degradedSummary"]:
+            self.assertIsInstance(entry["code"], str)
+            self.assertTrue(entry["source"] is None or isinstance(entry["source"], str))
+            self.assertTrue(
+                entry["severity"] is None or isinstance(entry["severity"], str)
+            )
+
     def test_consumer_decisions_match_schema_required_properties(self):
         schema = load_fixture(
             "docs/schemas/ee.agent.work_packet_gate_decision.v1.json"
@@ -1521,6 +1602,7 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
                     self.assertEqual(set(action), action_required)
                 for entry in decision["degradedSummary"]:
                     self.assertEqual(set(entry), degraded_required)
+                self.assert_decision_matches_schema_constraints(decision, schema)
 
     def test_schema_examples_match_consumer_decision_shape(self):
         schema = load_fixture(
@@ -1546,6 +1628,7 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
                     self.assertEqual(set(action), action_required)
                 for entry in example["degradedSummary"]:
                     self.assertEqual(set(entry), degraded_required)
+                self.assert_decision_matches_schema_constraints(example, schema)
 
                 if example["safeToClaim"]:
                     saw_safe = True
