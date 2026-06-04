@@ -1,0 +1,27 @@
+{
+  "schema": "ee.e2e_event_contract_radar.v1",
+  "generatedAt": "2026-06-04T00:00:00Z",
+  "mode": "advisory",
+  "verdict": "pass",
+  "summary": {
+    "scriptCount": 0,
+    "passCount": 0,
+    "advisoryGapCount": 0,
+    "knownGapCount": 0,
+    "failCount": 0,
+    "notApplicableCount": 0,
+    "failurePathCount": 0,
+    "missingFailureVerdictCount": 0,
+    "allowlistedGapCount": 0
+  },
+  "requirements": [
+    {
+      "id": "closed_object_contract",
+      "level": "must",
+      "description": "Unknown properties must be rejected at the report, row, and nested coverage-object levels."
+    }
+  ],
+  "matrix": [],
+  "degraded": [],
+  "unexpectedField": "negative fixture: schema validation must reject this property"
+}

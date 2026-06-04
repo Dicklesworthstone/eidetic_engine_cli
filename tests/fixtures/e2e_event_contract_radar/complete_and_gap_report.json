@@ -1,0 +1,113 @@
+{
+  "schema": "ee.e2e_event_contract_radar.v1",
+  "generatedAt": "2026-06-04T00:00:00Z",
+  "mode": "advisory",
+  "verdict": "advisory_gap",
+  "summary": {
+    "scriptCount": 2,
+    "passCount": 1,
+    "advisoryGapCount": 1,
+    "knownGapCount": 0,
+    "failCount": 0,
+    "notApplicableCount": 0,
+    "failurePathCount": 3,
+    "missingFailureVerdictCount": 1,
+    "allowlistedGapCount": 0
+  },
+  "requirements": [
+    {
+      "id": "command_lifecycle",
+      "level": "must",
+      "description": "Scripts that invoke ee commands log command_start and command_end evidence."
+    },
+    {
+      "id": "failure_verdicts",
+      "level": "must",
+      "description": "Every early failure path emits assert_fail or an equivalent failure-verdict event before exit."
+    },
+    {
+      "id": "support_bundle_paths",
+      "level": "should",
+      "description": "Command evidence records redaction-safe stdout and stderr artifact paths or hashes."
+    }
+  ],
+  "matrix": [
+    {
+      "scriptPath": "scripts/e2e_overhaul/swarm_replay_lab_smoke.sh",
+      "scriptPathHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "declaredEventSchemas": ["ee.test_event.v1"],
+      "status": "pass",
+      "coverage": {
+        "commandStart": "present",
+        "commandEnd": "present",
+        "assertOk": "present",
+        "failureVerdict": "present",
+        "schemaValidationStatus": "present",
+        "redactionStatus": "present",
+        "firstFailureDiagnosis": "present",
+        "stdoutArtifactPath": "present",
+        "stderrArtifactPath": "present",
+        "sanitizedEnv": "present"
+      },
+      "failurePaths": [
+        {
+          "branchId": "schema_validation_failed",
+          "line": 297,
+          "trigger": "jq schema/status validation failed",
+          "failureVerdict": "present",
+          "firstFailureDiagnosis": "present",
+          "artifactPaths": "present"
+        },
+        {
+          "branchId": "dry_run_command_failed",
+          "line": 226,
+          "trigger": "ee lab swarm replay --dry-run returned non-zero",
+          "failureVerdict": "present",
+          "firstFailureDiagnosis": "present",
+          "artifactPaths": "present"
+        }
+      ],
+      "allowlist": {
+        "status": "none",
+        "reason": "",
+        "owner": "",
+        "expiresAt": null
+      }
+    },
+    {
+      "scriptPath": "scripts/e2e_test.sh",
+      "scriptPathHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "declaredEventSchemas": ["ee.test_event.v1"],
+      "status": "advisory_gap",
+      "coverage": {
+        "commandStart": "present",
+        "commandEnd": "present",
+        "assertOk": "present",
+        "failureVerdict": "missing",
+        "schemaValidationStatus": "present",
+        "redactionStatus": "present",
+        "firstFailureDiagnosis": "missing",
+        "stdoutArtifactPath": "present",
+        "stderrArtifactPath": "present",
+        "sanitizedEnv": "present"
+      },
+      "failurePaths": [
+        {
+          "branchId": "pack_command_failed",
+          "line": 640,
+          "trigger": "pack command returned non-zero before event-log verdict",
+          "failureVerdict": "missing",
+          "firstFailureDiagnosis": "missing",
+          "artifactPaths": "present"
+        }
+      ],
+      "allowlist": {
+        "status": "none",
+        "reason": "",
+        "owner": "",
+        "expiresAt": null
+      }
+    }
+  ],
+  "degraded": []
+}

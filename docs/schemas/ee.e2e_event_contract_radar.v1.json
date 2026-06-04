@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ee.e2e_event_contract_radar.v1",
+  "title": "E2E Event Contract Radar Report",
+  "description": "Static evidence-coverage report for shell E2E scripts that emit ee.test_event.v1 rows. The report classifies whether each script logs command lifecycle events, assertion verdicts, schema/redaction status, artifact paths, sanitized environment posture, and first-failure diagnosis on success and failure paths.",
+  "type": "object",
+  "required": [
+    "schema",
+    "generatedAt",
+    "mode",
+    "verdict",
+    "summary",
+    "requirements",
+    "matrix",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "coverageStatus": {
+      "type": "string",
+      "enum": ["present", "missing", "not_applicable", "allowlisted"]
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "advisory_gap", "known_gap", "fail", "not_applicable"]
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^(blake3|sha256):[0-9a-f]{64}$"
+    },
+    "requirement": {
+      "type": "object",
+      "required": ["id", "level", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "level": {
+          "type": "string",
+          "enum": ["must", "should", "may"]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "required": [
+        "commandStart",
+        "commandEnd",
+        "assertOk",
+        "failureVerdict",
+        "schemaValidationStatus",
+        "redactionStatus",
+        "firstFailureDiagnosis",
+        "stdoutArtifactPath",
+        "stderrArtifactPath",
+        "sanitizedEnv"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "commandStart": { "$ref": "#/$defs/coverageStatus" },
+        "commandEnd": { "$ref": "#/$defs/coverageStatus" },
+        "assertOk": { "$ref": "#/$defs/coverageStatus" },
+        "failureVerdict": {
+          "$ref": "#/$defs/coverageStatus",
+          "description": "Coverage for an assert_fail row or an equivalent assert_result/failure-verdict row on every early failure branch."
+        },
+        "schemaValidationStatus": { "$ref": "#/$defs/coverageStatus" },
+        "redactionStatus": { "$ref": "#/$defs/coverageStatus" },
+        "firstFailureDiagnosis": { "$ref": "#/$defs/coverageStatus" },
+        "stdoutArtifactPath": { "$ref": "#/$defs/coverageStatus" },
+        "stderrArtifactPath": { "$ref": "#/$defs/coverageStatus" },
+        "sanitizedEnv": { "$ref": "#/$defs/coverageStatus" }
+      }
+    },
+    "failurePath": {
+      "type": "object",
+      "required": [
+        "branchId",
+        "line",
+        "trigger",
+        "failureVerdict",
+        "firstFailureDiagnosis",
+        "artifactPaths"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "branchId": {
+          "type": "string",
+          "pattern": "^[a-z][A-Za-z0-9_:-]*$"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "trigger": {
+          "type": "string",
+          "minLength": 1
+        },
+        "failureVerdict": { "$ref": "#/$defs/coverageStatus" },
+        "firstFailureDiagnosis": { "$ref": "#/$defs/coverageStatus" },
+        "artifactPaths": { "$ref": "#/$defs/coverageStatus" }
+      }
+    },
+    "allowlist": {
+      "type": "object",
+      "required": ["status", "reason", "owner", "expiresAt"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["none", "active", "expired"]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "expiresAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      }
+    },
+    "matrixRow": {
+      "type": "object",
+      "required": [
+        "scriptPath",
+        "scriptPathHash",
+        "declaredEventSchemas",
+        "status",
+        "coverage",
+        "failurePaths",
+        "allowlist"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "scriptPath": {
+          "type": "string",
+          "pattern": "^(scripts/|tests/).+\\.(sh|bash|ps1)$"
+        },
+        "scriptPathHash": { "$ref": "#/$defs/hash" },
+        "declaredEventSchemas": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^ee\\.[A-Za-z0-9_.-]+\\.v[0-9]+$"
+          },
+          "uniqueItems": true
+        },
+        "status": { "$ref": "#/$defs/verdict" },
+        "coverage": { "$ref": "#/$defs/coverage" },
+        "failurePaths": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/failurePath" }
+        },
+        "allowlist": { "$ref": "#/$defs/allowlist" }
+      }
+    },
+    "degraded": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema": { "const": "ee.e2e_event_contract_radar.v1" },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 UTC timestamp."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["advisory", "blocking"],
+      "description": "Advisory mode records gaps without failing the verify gate. Blocking mode treats unallowlisted gaps as gate failures."
+    },
+    "verdict": {
+      "$ref": "#/$defs/verdict",
+      "description": "Overall report verdict after applying the selected mode and any active allowlist entries."
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "scriptCount",
+        "passCount",
+        "advisoryGapCount",
+        "knownGapCount",
+        "failCount",
+        "notApplicableCount",
+        "failurePathCount",
+        "missingFailureVerdictCount",
+        "allowlistedGapCount"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "scriptCount": { "type": "integer", "minimum": 0 },
+        "passCount": { "type": "integer", "minimum": 0 },
+        "advisoryGapCount": { "type": "integer", "minimum": 0 },
+        "knownGapCount": { "type": "integer", "minimum": 0 },
+        "failCount": { "type": "integer", "minimum": 0 },
+        "notApplicableCount": { "type": "integer", "minimum": 0 },
+        "failurePathCount": { "type": "integer", "minimum": 0 },
+        "missingFailureVerdictCount": { "type": "integer", "minimum": 0 },
+        "allowlistedGapCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/requirement" },
+      "minItems": 1
+    },
+    "matrix": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/matrixRow" }
+    },
+    "degraded": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/degraded" }
+    }
+  }
+}
