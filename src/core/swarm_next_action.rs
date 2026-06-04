@@ -6641,7 +6641,7 @@ mod tests {
             db_record_count: 12,
             auto_import_enabled: true,
             external_changes_pending_import: true,
-            dirty_issue_count: 0,
+            dirty_issue_count: 1,
             merge_artifact_paths: &merge_artifact_paths,
             jsonl_parse_error: None,
         });
@@ -6682,6 +6682,53 @@ mod tests {
                 .iter()
                 .any(|command| command.contains("br update"))
         );
+    }
+
+    #[test]
+    fn work_packet_keeps_metadata_only_pending_import_claimable() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-metadata-only",
+            "Metadata-only stale marker should not block claims",
+            "beads_ready",
+            Some(1),
+        )]);
+        let merge_artifact_paths = Vec::new();
+        let tracker_integrity = compose_integrity_report(BeadsIntegrityInputs {
+            jsonl_path: ".beads/issues.jsonl",
+            db_path: ".beads/beads.db",
+            jsonl_record_count: 42,
+            db_record_count: 42,
+            auto_import_enabled: true,
+            external_changes_pending_import: true,
+            dirty_issue_count: 0,
+            merge_artifact_paths: &merge_artifact_paths,
+            jsonl_parse_error: None,
+        });
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action_with_tracker_integrity(
+            &brief,
+            &snapshot,
+            tracker_integrity,
+        );
+        let gate = packet.claim_gate(Some("bd-metadata-only"));
+
+        assert_eq!(
+            packet.tracker_integrity.health,
+            BeadsIntegrityHealth::ExternalChangesPendingImport
+        );
+        assert!(packet.tracker_integrity.br_reads_authoritative);
+        assert_eq!(packet.candidates[0].decision, "safe_to_claim");
+        assert!(
+            !packet.candidates[0]
+                .unsafe_reasons
+                .iter()
+                .any(|reason| reason.starts_with("beads_tracker_not_authoritative:"))
+        );
+        assert_eq!(gate.source_authority.tracker_authoritative, true);
+        assert_eq!(gate.verdict, "safe_to_claim");
+        assert!(gate.safe_to_claim);
+        assert!(gate.claim_command_action.is_some());
     }
 
     #[test]

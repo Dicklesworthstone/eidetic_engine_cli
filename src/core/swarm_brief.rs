@@ -18,6 +18,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::core::agent_detect::{AgentInventoryStatus, AgentStatusOptions, gather_agent_status};
+use crate::core::beads_integrity::{
+    BeadsIntegrityHealth, compose_integrity_report_from_br_doctor_json,
+};
 use crate::core::budget_delta_recommender::build_host_calibration_posture;
 use crate::core::git_ahead::{
     GIT_AHEAD_LOG_FORMAT, GitAheadLogState, GitAheadSnapshot, summarize_git_ahead,
@@ -1585,7 +1588,10 @@ fn collect_beads_freshness<R: SwarmBriefCommandRunner>(
             )]
         }
         Ok(output) => match parse_beads_sync_status_json(&output.stdout) {
-            Ok(status) if status.jsonl_newer || status.db_newer => {
+            Ok(status)
+                if (status.jsonl_newer || status.db_newer)
+                    && !beads_sync_status_is_metadata_only_drift(runner, options, &status) =>
+            {
                 *freshness = SwarmBriefSourceFreshness {
                     observed_at: status.last_import_time.clone(),
                     age_seconds: None,
@@ -1613,6 +1619,34 @@ fn collect_beads_freshness<R: SwarmBriefCommandRunner>(
             "br sync --status --json --no-auto-import --allow-stale",
         )],
     }
+}
+
+fn beads_sync_status_is_metadata_only_drift<R: SwarmBriefCommandRunner>(
+    runner: &R,
+    options: &SwarmBriefCollectOptions,
+    status: &BeadsSyncStatus,
+) -> bool {
+    if !(status.jsonl_newer && !status.db_newer && status.dirty_count == Some(0)) {
+        return false;
+    }
+    let args = ["doctor", "--json", "--no-db"];
+    let Ok(output) = runner.run("br", &args, &options.workspace, options.command_timeout_ms) else {
+        return false;
+    };
+    compose_integrity_report_from_br_doctor_json(
+        &output.stdout,
+        ".beads/issues.jsonl",
+        ".beads/beads.db",
+        true,
+    )
+    .is_ok_and(|report| {
+        report.health == BeadsIntegrityHealth::ExternalChangesPendingImport
+            && report.pending_import_count == 0
+            && report.dirty_issue_count == 0
+            && report.br_reads_authoritative
+            && report.jsonl_parse_error.is_none()
+            && report.jsonl_record_count == report.db_record_count
+    })
 }
 
 fn beads_tracker_stale_message_and_repair(
@@ -6917,6 +6951,7 @@ pub fn parse_beads_json(input: &str, source_bucket: &str) -> Result<Vec<SwarmBri
 struct BeadsSyncStatus {
     jsonl_newer: bool,
     db_newer: bool,
+    dirty_count: Option<u64>,
     last_import_time: Option<String>,
 }
 
@@ -6932,6 +6967,10 @@ fn parse_beads_sync_status_json(input: &str) -> Result<BeadsSyncStatus, String> 
             .get("db_newer")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        dirty_count: value
+            .get("dirty_count")
+            .or_else(|| value.get("dirtyCount"))
+            .and_then(Value::as_u64),
         last_import_time: string_field(&value, &["last_import_time", "lastImportTime"]),
     })
 }
@@ -11361,6 +11400,63 @@ mod tests {
                 .degraded
                 .iter()
                 .any(|item| item.code == BEADS_TRACKER_STALE_CODE)
+        );
+        match output.contribution {
+            SwarmBriefContribution::Beads(summary) => assert_eq!(summary.ready.len(), 1),
+            other => panic!("expected Beads contribution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn beads_sync_status_metadata_only_jsonl_newer_keeps_source_ready() {
+        let options = SwarmBriefCollectOptions::for_workspace(".");
+        let runner = FakeRunner::default()
+            .with_output(
+                "br",
+                &[
+                    "sync",
+                    "--status",
+                    "--json",
+                    "--no-auto-import",
+                    "--allow-stale",
+                ],
+                r#"{"dirty_count":0,"jsonl_newer":true,"db_newer":false,"last_import_time":"2026-06-04T19:42:30+00:00"}"#,
+            )
+            .with_output(
+                "br",
+                &["doctor", "--json", "--no-db"],
+                r#"{
+  "ok": true,
+  "checks": [
+    {"name":"jsonl.merge_artifacts","status":"ok","details":{"files":[]}},
+    {"name":"jsonl.parse","status":"ok","message":"Parsed 3347 records","details":{"records":3347}},
+    {"name":"counts.db_vs_jsonl","status":"ok","message":"Both have 3347 records","details":{"db":3347,"jsonl":3347}},
+    {"name":"sync.metadata","status":"ok","message":"External changes pending import","details":{"dirty_issues":0,"last_import":"2026-06-04T19:42:30+00:00","last_export":"2026-06-04T19:42:30+00:00","jsonl_hash":"e49435f610df6319"}}
+  ]
+}"#,
+            )
+            .with_output(
+                "br",
+                &["ready", "--json"],
+                r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
+            )
+            .with_output("br", &["blocked", "--json"], "[]")
+            .with_output("br", &["list", "--status", "in_progress", "--json"], "[]")
+            .with_output("br", &["list", "--status", "deferred", "--json"], "[]")
+            .with_output("br", &["dep", "cycles", "--json"], r#"{"cycles":[],"count":0}"#);
+
+        let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
+
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Ready);
+        assert_eq!(output.snapshot.freshness.state, "current");
+        assert!(
+            output
+                .snapshot
+                .degraded
+                .iter()
+                .all(|item| item.code != BEADS_TRACKER_STALE_CODE),
+            "metadata-only drift must not emit beads_tracker_stale: {:?}",
+            output.snapshot.degraded
         );
         match output.contribution {
             SwarmBriefContribution::Beads(summary) => assert_eq!(summary.ready.len(), 1),
