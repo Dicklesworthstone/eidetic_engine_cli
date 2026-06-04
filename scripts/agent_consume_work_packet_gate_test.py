@@ -151,6 +151,23 @@ class ClaimGateConsumer(unittest.TestCase):
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
         self.assertFalse(claim["runnable"])
 
+    def test_claim_gate_unsafe_or_stale_reason_contradiction_fails_closed(self):
+        gate = safe_gate()
+        gate["unsafeReasons"] = ["peer_dirty_file"]
+        gate["staleReasons"] = ["stale_assignee"]
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertTrue(decision["mutatingActionsRequireHuman"])
+        self.assertIn("claim_gate_unsafe_reasons_present", decision["whyNotSafe"])
+        self.assertIn("claim_gate_stale_reasons_present", decision["whyNotSafe"])
+        self.assertIn("peer_dirty_file", decision["whyNotSafe"])
+        self.assertIn("stale_assignee", decision["whyNotSafe"])
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
     def test_candidate_decision_mismatch_fails_closed(self):
         gate = safe_gate()
         gate["selectedCandidate"]["decision"] = "blocked_by_dependency"
@@ -361,6 +378,59 @@ class WorkPacketConsumer(unittest.TestCase):
         self.assertEqual(decision["decision"], "stale_but_reclaimable")
         self.assertIn("stale_assignee", decision["whyNotSafe"])
         self.assertIn("stale_but_reclaimable_requires_inspection", decision["whyNotSafe"])
+
+    def test_safe_work_packet_with_unsafe_reasons_fails_closed(self):
+        packet = {
+            "schema": "ee.swarm.work_packet.v1",
+            "safeToClaim": True,
+            "recommendedAction": {
+                "action": "inspect_and_claim",
+                "candidateId": "bd-contradiction.1",
+                "safeToClaim": True,
+                "suggestedCommands": [],
+                "suggestedCommandActions": [
+                    safe_action(
+                        "bead_claim_candidate",
+                        [
+                            "br",
+                            "update",
+                            "bd-contradiction.1",
+                            "--status",
+                            "in_progress",
+                            "--json",
+                        ],
+                        mutates=True,
+                    )
+                ],
+            },
+            "candidates": [
+                {
+                    "id": "bd-contradiction.1",
+                    "decision": "safe_to_claim",
+                    "unsafeReasons": ["peer_dirty_file"],
+                    "staleReasons": ["stale_assignee"],
+                }
+            ],
+            "coordination": {"agentMail": {"status": "healthy"}},
+            "trackerIntegrity": {"health": "ok", "brReadsAuthoritative": True},
+            "rchProofPosture": {
+                "safeToLaunchCargoVerification": True,
+                "blockerCodes": [],
+            },
+            "verification": {"requiredCommands": [], "staticChecks": []},
+            "doNotProceedBecause": ["global_stop_reason"],
+        }
+
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertTrue(decision["mutatingActionsRequireHuman"])
+        self.assertIn("peer_dirty_file", decision["whyNotSafe"])
+        self.assertIn("stale_assignee", decision["whyNotSafe"])
+        self.assertIn("global_stop_reason", decision["whyNotSafe"])
+        action = decision["argvActions"][0]
+        self.assertFalse(action["runnable"])
+        self.assertEqual(action["reason"], "mutating_action_requires_safe_gate")
 
     def test_no_candidate_packet_is_not_safe(self):
         packet = {

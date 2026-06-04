@@ -341,6 +341,12 @@ def packet_safe_to_claim(packet, candidate):
     if raw_safe is None:
         raw_safe = recommended.get("safeToClaim")
     decision = candidate.get("decision") if isinstance(candidate, dict) else None
+    unsafe_reasons = (
+        compact_list(candidate.get("unsafeReasons")) if isinstance(candidate, dict) else []
+    )
+    stale_reasons = (
+        compact_list(candidate.get("staleReasons")) if isinstance(candidate, dict) else []
+    )
     tracker = dict_or_empty(packet.get("trackerIntegrity"))
     coordination = dict_or_empty(packet.get("coordination"))
     agent_mail = dict_or_empty(coordination.get("agentMail"))
@@ -355,6 +361,9 @@ def packet_safe_to_claim(packet, candidate):
     return (
         raw_safe is True
         and decision == "safe_to_claim"
+        and not unsafe_reasons
+        and not stale_reasons
+        and not compact_list(packet.get("doNotProceedBecause"))
         and not malformed_packet_map_reasons(packet)
         and tracker_authoritative is not False
         and agent_mail.get("status") != "semantic_readiness_failed"
@@ -439,6 +448,10 @@ def claim_gate_consistency_reasons(gate):
 
     if gate.get("recommendedSafeToClaim") is not True:
         reasons.append("claim_gate_recommended_not_safe")
+    if compact_list(gate.get("unsafeReasons")):
+        reasons.append("claim_gate_unsafe_reasons_present")
+    if compact_list(gate.get("staleReasons")):
+        reasons.append("claim_gate_stale_reasons_present")
 
     candidate = gate.get("selectedCandidate")
     if not isinstance(candidate, dict):
