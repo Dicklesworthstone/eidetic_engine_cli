@@ -305,6 +305,11 @@ pub const PREFLIGHT_SCHEMAS: &[SchemaEntry] = &[
         SchemaCategory::Preflight,
     ),
     SchemaEntry::new(
+        "environment_attestation",
+        "ee.environment_attestation.v1",
+        SchemaCategory::Preflight,
+    ),
+    SchemaEntry::new(
         "recorder_start",
         "ee.recorder.start.v1",
         SchemaCategory::Recorder,
@@ -2445,6 +2450,188 @@ mod tests {
             "must have Graph category schemas",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn environment_attestation_schema_is_registered_and_exported() -> TestResult {
+        let versions: Vec<&str> = PREFLIGHT_SCHEMAS.iter().map(|s| s.version).collect();
+        ensure(
+            versions.contains(&"ee.environment_attestation.v1"),
+            "preflight schemas must include environment attestation",
+        )?;
+
+        let schema_path = repo_path("docs/schemas/ee.environment_attestation.v1.json");
+        let documented: JsonValue =
+            serde_json::from_str(&fs::read_to_string(&schema_path).map_err(|error| {
+                format!(
+                    "read environment attestation schema {}: {error}",
+                    schema_path.display()
+                )
+            })?)
+            .map_err(|error| {
+                format!(
+                    "parse environment attestation schema {}: {error}",
+                    schema_path.display()
+                )
+            })?;
+        let exported: JsonValue = serde_json::from_str(&ee::output::render_schema_export_json(
+            Some("ee.environment_attestation.v1"),
+        ))
+        .map_err(|error| format!("schema export ee.environment_attestation.v1: {error}"))?;
+
+        ensure_equal(
+            &exported,
+            &documented,
+            "environment attestation exported schema must match docs file",
+        )
+    }
+
+    #[test]
+    fn environment_attestation_schema_freezes_source_authority_contract() -> TestResult {
+        let schema_path = repo_path("docs/schemas/ee.environment_attestation.v1.json");
+        let schema: JsonValue =
+            serde_json::from_str(&fs::read_to_string(&schema_path).map_err(|error| {
+                format!(
+                    "read environment attestation schema {}: {error}",
+                    schema_path.display()
+                )
+            })?)
+            .map_err(|error| {
+                format!(
+                    "parse environment attestation schema {}: {error}",
+                    schema_path.display()
+                )
+            })?;
+
+        ensure_equal(
+            &schema["properties"]["schema"]["const"],
+            &JsonValue::String("ee.environment_attestation.v1".to_owned()),
+            "schema const",
+        )?;
+        ensure(
+            schema["description"].as_str().is_some_and(|description| {
+                description.contains("RCH-E327")
+                    && description.contains("not source compile/test failures")
+            }),
+            "schema description must distinguish environment blockers from source failures",
+        )?;
+
+        let source_enum = schema["$defs"]["sourceKind"]["enum"]
+            .as_array()
+            .ok_or("sourceKind enum must be an array")?;
+        for source in [
+            "installed_binary",
+            "source_tree",
+            "beads_tracker",
+            "agent_mail_mcp",
+            "agent_mail_probe",
+            "rch",
+            "rch_source_materialization",
+            "build_admission",
+            "local_cargo_tripwire",
+            "claim_gate",
+            "support_bundle_redaction",
+        ] {
+            ensure(
+                source_enum.contains(&JsonValue::String(source.to_owned())),
+                format!("sourceKind enum missing {source}"),
+            )?;
+        }
+
+        let verdict_enum = schema["$defs"]["attestationVerdict"]["enum"]
+            .as_array()
+            .ok_or("attestationVerdict enum must be an array")?;
+        for verdict in [
+            "safe_to_claim",
+            "coordinate_before_claim",
+            "remote_verification_admitted",
+            "proof_environment_blocked",
+            "source_authority_ambiguous",
+            "stale_binary_suspected",
+            "tracker_stale",
+            "local_cargo_bypass_detected",
+            "unknown_insufficient_evidence",
+        ] {
+            ensure(
+                verdict_enum.contains(&JsonValue::String(verdict.to_owned())),
+                format!("attestationVerdict enum missing {verdict}"),
+            )?;
+        }
+
+        let source_test_description = schema["$defs"]["sourceTestVerdict"]["description"]
+            .as_str()
+            .ok_or("sourceTestVerdict must describe environment blockers")?;
+        ensure(
+            source_test_description.contains("RCH-E327")
+                && source_test_description.contains("environment_blocked_before_source")
+                && source_test_description.contains("source_failed"),
+            "sourceTestVerdict must document that RCH topology blockers are not source failures",
+        )
+    }
+
+    #[test]
+    fn environment_attestation_examples_cover_minimal_contradicted_and_redaction() -> TestResult {
+        let schema_path = repo_path("docs/schemas/ee.environment_attestation.v1.json");
+        let schema: JsonValue =
+            serde_json::from_str(&fs::read_to_string(&schema_path).map_err(|error| {
+                format!(
+                    "read environment attestation schema {}: {error}",
+                    schema_path.display()
+                )
+            })?)
+            .map_err(|error| {
+                format!(
+                    "parse environment attestation schema {}: {error}",
+                    schema_path.display()
+                )
+            })?;
+
+        let examples = schema["examples"]
+            .as_array()
+            .ok_or("environment attestation examples must be an array")?;
+        ensure(
+            examples.len() >= 2,
+            "environment attestation schema must include minimal and contradicted examples",
+        )?;
+
+        let serialized_examples =
+            serde_json::to_string(examples).map_err(|error| error.to_string())?;
+        for forbidden in [
+            "/Users/",
+            "/home/",
+            "BEGIN PRIVATE KEY",
+            "ghp_",
+            "Bearer ",
+            "From: ",
+            "Subject: ",
+            "Message-ID:",
+            "raw_inbox",
+        ] {
+            ensure(
+                !serialized_examples.contains(forbidden),
+                format!("examples must not contain redaction-forbidden marker {forbidden}"),
+            )?;
+        }
+
+        ensure(
+            examples
+                .iter()
+                .any(|example| example["verdict"] == "unknown_insufficient_evidence"),
+            "examples must cover minimal unknown evidence verdict",
+        )?;
+        ensure(
+            examples.iter().any(|example| {
+                example["summary"]["sourceTestVerdict"] == "environment_blocked_before_source"
+                    && example["verdict"] == "proof_environment_blocked"
+            }),
+            "examples must cover environment-blocked-before-source verdict",
+        )?;
+        ensure(
+            serialized_examples.contains("\"authority\":\"contradicted\"")
+                && serialized_examples.contains("\"stale_binary_suspected\"")
+                && serialized_examples.contains("\"rch_worker_topology_blocked\""),
+            "examples must cover contradicted source, stale binary, and RCH topology blocker",
+        )
     }
 
     #[test]

@@ -327,6 +327,9 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 /// Schema identifier for the MCP manifest data payload.
 pub const MCP_MANIFEST_SCHEMA_V1: &str = "ee.mcp.manifest.v1";
 
+/// Schema identifier for the environment attestation payload.
+pub const ENVIRONMENT_ATTESTATION_SCHEMA_V1: &str = "ee.environment_attestation.v1";
+
 /// A single card in structured output.
 #[derive(Clone, Debug)]
 pub struct Card {
@@ -8808,6 +8811,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: agent_operating_contract_schema_definition,
         },
         SchemaEntry {
+            id: ENVIRONMENT_ATTESTATION_SCHEMA_V1,
+            version: "1",
+            description: "Read-only environment attestation and source-authority inventory",
+            category: "preflight",
+            definition: environment_attestation_schema_definition,
+        },
+        SchemaEntry {
             id: MCP_MANIFEST_SCHEMA_V1,
             version: "1",
             description: "MCP adapter manifest generated from ee's public command and schema registries",
@@ -9727,6 +9737,10 @@ fn completion_audit_report_schema_definition() -> String {
 
 fn agent_operating_contract_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.agent_operating_contract.v1.json").to_string()
+}
+
+fn environment_attestation_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.environment_attestation.v1.json").to_string()
 }
 
 fn mcp_manifest_schema_definition() -> String {

@@ -1,0 +1,493 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.environment_attestation.v1.json",
+  "title": "ee.environment_attestation.v1",
+  "description": "Read-only, redaction-safe source-authority and proof-admission attestation for agent claim gates, support bundles, and handoffs. Environment blockers such as RCH-E327, worker topology failures, and source-materialization failures are readiness verdicts; they are not source compile/test failures.",
+  "type": "object",
+  "required": [
+    "schema",
+    "attestationId",
+    "workspace",
+    "generatedAt",
+    "redactionStatus",
+    "summary",
+    "sourceAuthority",
+    "verdict",
+    "evidenceRefs",
+    "recoveryActions",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.environment_attestation.v1"},
+    "attestationId": {
+      "type": "string",
+      "pattern": "^environment_attestation_[a-f0-9]{24}$",
+      "description": "Deterministic content identifier for this redacted attestation."
+    },
+    "workspace": {
+      "$ref": "#/$defs/safeString",
+      "description": "Redacted workspace label or stable workspace hash, never an unredacted home path."
+    },
+    "generatedAt": {"type": "string", "format": "date-time"},
+    "redactionStatus": {
+      "type": "string",
+      "const": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content"
+    },
+    "summary": {"$ref": "#/$defs/summary"},
+    "sourceAuthority": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/sourceAuthorityEntry"}
+    },
+    "verdict": {"$ref": "#/$defs/attestationVerdict"},
+    "evidenceRefs": {"$ref": "#/$defs/stringArray"},
+    "recoveryActions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/recoveryAction"}
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradation"}
+    }
+  },
+  "$defs": {
+    "safeString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "not": {
+        "anyOf": [
+          {"pattern": "BEGIN PRIVATE KEY"},
+          {"pattern": "BEGIN OPENSSH PRIVATE KEY"},
+          {"pattern": "ghp_[A-Za-z0-9_]+"},
+          {"pattern": "Bearer [A-Za-z0-9._-]+"},
+          {"pattern": "DATABASE_URL="},
+          {"pattern": "From: "},
+          {"pattern": "Subject: "},
+          {"pattern": "Message-ID:"},
+          {"pattern": "body:"},
+          {"pattern": "raw_inbox"},
+          {"pattern": "stdout:"},
+          {"pattern": "stderr:"},
+          {"pattern": "/Users/[^\\s]+"},
+          {"pattern": "/home/[^\\s]+"}
+        ]
+      }
+    },
+    "stringArray": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/safeString"},
+      "uniqueItems": true
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["info", "low", "warning", "medium", "high", "critical"]
+    },
+    "attestationVerdict": {
+      "type": "string",
+      "enum": [
+        "safe_to_claim",
+        "coordinate_before_claim",
+        "unsafe_due_to_conflict",
+        "remote_verification_admitted",
+        "proof_environment_blocked",
+        "source_authority_ambiguous",
+        "stale_binary_suspected",
+        "tracker_stale",
+        "local_cargo_bypass_detected",
+        "unknown_insufficient_evidence"
+      ]
+    },
+    "sourceTestVerdict": {
+      "type": "string",
+      "enum": [
+        "not_evaluated",
+        "source_not_tested",
+        "source_passed",
+        "source_failed",
+        "environment_blocked_before_source",
+        "stale_source",
+        "unknown"
+      ],
+      "description": "Verdict about source compile/test evidence only. RCH-E327, topology, source-materialization, and local fallback refusal states must use environment_blocked_before_source rather than source_failed."
+    },
+    "sourceKind": {
+      "type": "string",
+      "enum": [
+        "installed_binary",
+        "source_tree",
+        "beads_tracker",
+        "bv_recommendation",
+        "agent_mail_mcp",
+        "agent_mail_probe",
+        "rch",
+        "rch_source_materialization",
+        "build_admission",
+        "local_cargo_tripwire",
+        "host_profile",
+        "claim_gate",
+        "file_reservations",
+        "support_bundle_redaction"
+      ]
+    },
+    "authority": {
+      "type": "string",
+      "enum": [
+        "authoritative",
+        "advisory",
+        "degraded",
+        "stale",
+        "unavailable",
+        "contradicted"
+      ]
+    },
+    "sourceStatus": {
+      "type": "string",
+      "enum": [
+        "not_collected",
+        "ok",
+        "stale",
+        "unavailable",
+        "degraded",
+        "blocked",
+        "contradicted",
+        "ambiguous",
+        "local_only",
+        "remote_ready",
+        "remote_blocked"
+      ]
+    },
+    "freshness": {
+      "type": "string",
+      "enum": ["current", "stale", "unknown", "not_applicable"]
+    },
+    "degradedCode": {
+      "type": "string",
+      "enum": [
+        "agent_mail_unavailable",
+        "agent_mail_probe_mismatch",
+        "beads_tracker_stale",
+        "beads_metadata_only_stale",
+        "bv_recommendation_stale",
+        "rch_unavailable",
+        "rch_worker_topology_blocked",
+        "rch_source_materialization_blocked",
+        "rch_remote_required_fallback_prevented",
+        "stale_binary_suspected",
+        "source_authority_ambiguous",
+        "local_cargo_bypass_detected",
+        "dirty_checkout_observed",
+        "build_admission_blocked",
+        "support_bundle_redaction_unverified",
+        "reservation_evidence_stale"
+      ]
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "safeToClaim",
+        "remoteVerificationAdmitted",
+        "sourceTestVerdict",
+        "environmentVerdict",
+        "localCargoFallbackObserved"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "safeToClaim": {"type": "boolean"},
+        "remoteVerificationAdmitted": {"type": ["boolean", "null"]},
+        "sourceTestVerdict": {"$ref": "#/$defs/sourceTestVerdict"},
+        "environmentVerdict": {"$ref": "#/$defs/attestationVerdict"},
+        "localCargoFallbackObserved": {"type": "boolean"}
+      }
+    },
+    "sourceAuthorityEntry": {
+      "type": "object",
+      "required": [
+        "source",
+        "authority",
+        "status",
+        "freshness",
+        "observedAt",
+        "summary",
+        "evidenceRefs",
+        "metrics",
+        "degradedCodes",
+        "recoveryActions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source": {"$ref": "#/$defs/sourceKind"},
+        "authority": {"$ref": "#/$defs/authority"},
+        "status": {"$ref": "#/$defs/sourceStatus"},
+        "freshness": {"$ref": "#/$defs/freshness"},
+        "observedAt": {"type": ["string", "null"], "format": "date-time"},
+        "summary": {"$ref": "#/$defs/safeString"},
+        "evidenceRefs": {"$ref": "#/$defs/stringArray"},
+        "metrics": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/metric"},
+          "uniqueItems": true
+        },
+        "degradedCodes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/degradedCode"},
+          "uniqueItems": true
+        },
+        "recoveryActions": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/recoveryAction"}
+        }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "required": ["name", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+        "value": {"$ref": "#/$defs/safeString"}
+      }
+    },
+    "recoveryAction": {
+      "type": "object",
+      "required": [
+        "priority",
+        "kind",
+        "command",
+        "mutatesState",
+        "requiredSubstrate",
+        "rationale"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "priority": {"type": "integer", "minimum": 0},
+        "kind": {
+          "type": "string",
+          "enum": [
+            "inspect",
+            "coordinate",
+            "sync",
+            "rebuild",
+            "rerun_remote",
+            "repair_environment",
+            "verify_redaction",
+            "human_decision"
+          ]
+        },
+        "command": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/commandAction"}
+          ]
+        },
+        "mutatesState": {"type": "boolean"},
+        "requiredSubstrate": {
+          "type": "string",
+          "enum": [
+            "agent_mail",
+            "beads",
+            "bv",
+            "ee",
+            "git",
+            "human",
+            "rch",
+            "static_local",
+            "none"
+          ]
+        },
+        "rationale": {"$ref": "#/$defs/safeString"}
+      }
+    },
+    "commandAction": {
+      "type": "object",
+      "required": [
+        "displayCommand",
+        "argv",
+        "shellRequired",
+        "copySafety"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "displayCommand": {"$ref": "#/$defs/safeString"},
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/safeString"}
+        },
+        "shellRequired": {"type": "boolean"},
+        "copySafety": {
+          "type": "string",
+          "enum": [
+            "safe_structured_argv",
+            "display_only",
+            "shell_required_review",
+            "forbidden_until_human_approval"
+          ]
+        }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"$ref": "#/$defs/degradedCode"},
+        "severity": {"$ref": "#/$defs/severity"},
+        "message": {"$ref": "#/$defs/safeString"},
+        "repair": {"type": ["string", "null"], "maxLength": 240}
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.environment_attestation.v1",
+      "attestationId": "environment_attestation_111111111111111111111111",
+      "workspace": "repo:25e38e130474e7f0292de2a3",
+      "generatedAt": "2026-06-04T20:00:00Z",
+      "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "unknown_insufficient_evidence",
+        "localCargoFallbackObserved": false
+      },
+      "sourceAuthority": [
+        {
+          "source": "beads_tracker",
+          "authority": "advisory",
+          "status": "not_collected",
+          "freshness": "unknown",
+          "observedAt": null,
+          "summary": "Beads status was not collected in this minimal report.",
+          "evidenceRefs": [],
+          "metrics": [],
+          "degradedCodes": [],
+          "recoveryActions": []
+        }
+      ],
+      "verdict": "unknown_insufficient_evidence",
+      "evidenceRefs": [],
+      "recoveryActions": [
+        {
+          "priority": 0,
+          "kind": "inspect",
+          "command": {
+            "displayCommand": "ee swarm brief --workspace . --include-rch --json",
+            "argv": ["ee", "swarm", "brief", "--workspace", ".", "--include-rch", "--json"],
+            "shellRequired": false,
+            "copySafety": "safe_structured_argv"
+          },
+          "mutatesState": false,
+          "requiredSubstrate": "ee",
+          "rationale": "Collect source-authority inputs before claiming work."
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "schema": "ee.environment_attestation.v1",
+      "attestationId": "environment_attestation_222222222222222222222222",
+      "workspace": "repo:25e38e130474e7f0292de2a3",
+      "generatedAt": "2026-06-04T20:05:00Z",
+      "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": false,
+        "sourceTestVerdict": "environment_blocked_before_source",
+        "environmentVerdict": "proof_environment_blocked",
+        "localCargoFallbackObserved": false
+      },
+      "sourceAuthority": [
+        {
+          "source": "installed_binary",
+          "authority": "contradicted",
+          "status": "stale",
+          "freshness": "stale",
+          "observedAt": "2026-06-04T20:05:00Z",
+          "summary": "Installed binary command surface is older than source docs.",
+          "evidenceRefs": ["schema://ee.swarm.work_packet.claim_gate.v1"],
+          "metrics": [{"name": "help_surface_match", "value": "false"}],
+          "degradedCodes": ["stale_binary_suspected"],
+          "recoveryActions": [
+            {
+              "priority": 0,
+              "kind": "coordinate",
+              "command": null,
+              "mutatesState": false,
+              "requiredSubstrate": "agent_mail",
+              "rationale": "Coordinate an approved rebuild instead of trusting stale binary output."
+            }
+          ]
+        },
+        {
+          "source": "rch",
+          "authority": "degraded",
+          "status": "remote_blocked",
+          "freshness": "current",
+          "observedAt": "2026-06-04T20:05:00Z",
+          "summary": "RCH-E327 blocked before Cargo; this is not a source test failure.",
+          "evidenceRefs": ["rch://proof/command_hash/example"],
+          "metrics": [
+            {"name": "remote_cargo_started", "value": "false"},
+            {"name": "local_fallback_refused", "value": "true"}
+          ],
+          "degradedCodes": [
+            "rch_worker_topology_blocked",
+            "rch_remote_required_fallback_prevented"
+          ],
+          "recoveryActions": [
+            {
+              "priority": 0,
+              "kind": "repair_environment",
+              "command": null,
+              "mutatesState": false,
+              "requiredSubstrate": "rch",
+              "rationale": "Repair worker topology or source materialization before treating proof as source evidence."
+            }
+          ]
+        }
+      ],
+      "verdict": "proof_environment_blocked",
+      "evidenceRefs": ["rch://proof/command_hash/example"],
+      "recoveryActions": [
+        {
+          "priority": 0,
+          "kind": "repair_environment",
+          "command": null,
+          "mutatesState": false,
+          "requiredSubstrate": "rch",
+          "rationale": "RCH topology/source-materialization blockers precede Cargo and must not be reported as source failures."
+        }
+      ],
+      "degraded": [
+        {
+          "code": "rch_worker_topology_blocked",
+          "severity": "high",
+          "message": "Remote verification was blocked before Cargo by RCH topology.",
+          "repair": "Repair RCH topology or source materialization, then rerun remote-only verification."
+        },
+        {
+          "code": "stale_binary_suspected",
+          "severity": "warning",
+          "message": "Installed binary surface does not match current source contract.",
+          "repair": "Coordinate an approved rebuild or use source-level contract evidence only."
+        }
+      ]
+    }
+  ],
+  "field_presets": {
+    "minimal": ["schema", "attestationId", "workspace", "summary", "verdict"],
+    "summary": ["schema", "attestationId", "workspace", "summary", "sourceAuthority", "verdict", "degraded"],
+    "standard": ["schema", "attestationId", "workspace", "generatedAt", "redactionStatus", "summary", "sourceAuthority", "verdict", "evidenceRefs", "recoveryActions", "degraded"],
+    "full": ["*"]
+  },
+  "x-ee-status": {
+    "shipped": true,
+    "available_in_build": true,
+    "tracking_bead": "bd-20453.1",
+    "notes": "Schema-first contract for the read-only environment attestation payload; runtime collection is intentionally separate follow-up work."
+  },
+  "x-ee-doc": "docs/environment_attestation.md"
+}
