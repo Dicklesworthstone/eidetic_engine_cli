@@ -117,8 +117,9 @@ must fail closed with consumer exit `3`.
 
 The compact `summary.jsonl` mirrors the same proof surface for closeout tools:
 it includes Beads/Cargo/RCH call counts, the generated packet consumer
-decision, unsafe-reason and command-action counts, fixture-matrix safe/unsafe
-counts, and the per-fixture decision summary.
+decision, unsafe-reason, degraded-summary, command-action, and max argv-part
+counts, fixture-matrix safe/unsafe counts, and the per-fixture decision
+summary.
 
 ## Required Guarantees
 

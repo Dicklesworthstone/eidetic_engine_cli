@@ -492,6 +492,8 @@ if not isinstance(decision, dict):
 safe_to_claim = decision.get("safeToClaim")
 argv_actions = decision.get("argvActions")
 why_not_safe = decision.get("whyNotSafe")
+degraded_summary = decision.get("degradedSummary")
+max_argv_part_count = 0
 
 check(
     "consumer_schema_current",
@@ -502,6 +504,18 @@ check("consumer_decision_string", isinstance(decision.get("decision"), str))
 check("consumer_action_string", isinstance(decision.get("action"), str))
 check("consumer_argv_actions_array", isinstance(argv_actions, list))
 check("consumer_why_not_safe_array", isinstance(why_not_safe, list))
+check("consumer_degraded_summary_array", isinstance(degraded_summary, list))
+
+if isinstance(argv_actions, list):
+    check("consumer_argv_actions_bounded", len(argv_actions) <= 16, str(len(argv_actions)))
+if isinstance(why_not_safe, list):
+    check("consumer_why_not_safe_bounded", len(why_not_safe) <= 16, str(len(why_not_safe)))
+if isinstance(degraded_summary, list):
+    check(
+        "consumer_degraded_summary_bounded",
+        len(degraded_summary) <= 16,
+        str(len(degraded_summary)),
+    )
 
 if safe_to_claim is False:
     check(
@@ -517,6 +531,15 @@ if isinstance(argv_actions, list):
             check("consumer_argv_action_object", False, str(index))
             continue
         command_id = str(action.get("commandId") or index)
+        argv = action.get("argv")
+        check("consumer_argv_action_argv_array", isinstance(argv, list), command_id)
+        if isinstance(argv, list):
+            max_argv_part_count = max(max_argv_part_count, len(argv))
+            check(
+                "consumer_argv_action_argv_bounded",
+                len(argv) <= 32,
+                f"{command_id}:{len(argv)}",
+            )
         if action.get("runnable") is True and action.get("mutatesState") is True:
             runnable_mutating.append(command_id)
         if (
@@ -540,6 +563,10 @@ summary = {
     "action": decision.get("action") or "",
     "why_not_safe_count": len(why_not_safe) if isinstance(why_not_safe, list) else 0,
     "argv_action_count": len(argv_actions) if isinstance(argv_actions, list) else 0,
+    "degraded_summary_count": len(degraded_summary)
+    if isinstance(degraded_summary, list)
+    else 0,
+    "max_argv_part_count": max_argv_part_count,
     "assertion_names": ",".join(assertions),
     "failures": failures,
 }
@@ -616,7 +643,9 @@ for fixture in fixtures:
     safe_to_claim = decision.get("safeToClaim")
     argv_actions = decision.get("argvActions")
     why_not_safe = decision.get("whyNotSafe")
+    degraded_summary = decision.get("degradedSummary")
     decision_name = str(decision.get("decision") or "")
+    max_argv_part_count = 0
 
     check(
         f"{fixture.name}:consumer_schema_current",
@@ -626,6 +655,25 @@ for fixture in fixtures:
     check(f"{fixture.name}:safe_to_claim_expected", safe_to_claim is expected_safe, str(safe_to_claim))
     check(f"{fixture.name}:argv_actions_array", isinstance(argv_actions, list))
     check(f"{fixture.name}:why_not_safe_array", isinstance(why_not_safe, list))
+    check(f"{fixture.name}:degraded_summary_array", isinstance(degraded_summary, list))
+    if isinstance(argv_actions, list):
+        check(
+            f"{fixture.name}:argv_actions_bounded",
+            len(argv_actions) <= 16,
+            str(len(argv_actions)),
+        )
+    if isinstance(why_not_safe, list):
+        check(
+            f"{fixture.name}:why_not_safe_bounded",
+            len(why_not_safe) <= 16,
+            str(len(why_not_safe)),
+        )
+    if isinstance(degraded_summary, list):
+        check(
+            f"{fixture.name}:degraded_summary_bounded",
+            len(degraded_summary) <= 16,
+            str(len(degraded_summary)),
+        )
 
     if expected_safe:
         check(f"{fixture.name}:safe_has_no_unsafe_reasons", why_not_safe == [])
@@ -643,6 +691,15 @@ for fixture in fixtures:
                 check(f"{fixture.name}:argv_action_object", False, str(index))
                 continue
             command_id = str(action.get("commandId") or index)
+            argv = action.get("argv")
+            check(f"{fixture.name}:argv_action_argv_array", isinstance(argv, list), command_id)
+            if isinstance(argv, list):
+                max_argv_part_count = max(max_argv_part_count, len(argv))
+                check(
+                    f"{fixture.name}:argv_action_argv_bounded",
+                    len(argv) <= 32,
+                    f"{command_id}:{len(argv)}",
+                )
             if action.get("runnable") is True and action.get("mutatesState") is True:
                 runnable_mutating.append(command_id)
             if (
@@ -673,9 +730,13 @@ for fixture in fixtures:
             "why_not_safe_count": len(why_not_safe)
             if isinstance(why_not_safe, list)
             else 0,
+            "degraded_summary_count": len(degraded_summary)
+            if isinstance(degraded_summary, list)
+            else 0,
             "argv_action_count": len(argv_actions)
             if isinstance(argv_actions, list)
             else 0,
+            "max_argv_part_count": max_argv_part_count,
         }
     )
 
@@ -692,6 +753,22 @@ summary = {
     "decision_summary": ",".join(
         f"{row['fixture']}:{row['decision']}:{str(row['safe_to_claim']).lower()}:{row['exit_code']}"
         for row in rows
+    ),
+    "max_why_not_safe_count": max(
+        (row["why_not_safe_count"] for row in rows),
+        default=0,
+    ),
+    "max_degraded_summary_count": max(
+        (row["degraded_summary_count"] for row in rows),
+        default=0,
+    ),
+    "max_argv_action_count": max(
+        (row["argv_action_count"] for row in rows),
+        default=0,
+    ),
+    "max_argv_part_count": max(
+        (row["max_argv_part_count"] for row in rows),
+        default=0,
     ),
     "assertion_names": ",".join(assertions),
     "failures": failures,
@@ -855,7 +932,9 @@ if parse_consumer_decision; then
         "decision" "$(json_field "$consumer_summary" "/decision")" \
         "action" "$(json_field "$consumer_summary" "/action")" \
         "why_not_safe_count" "$(json_field "$consumer_summary" "/why_not_safe_count")" \
+        "degraded_summary_count" "$(json_field "$consumer_summary" "/degraded_summary_count")" \
         "argv_action_count" "$(json_field "$consumer_summary" "/argv_action_count")" \
+        "max_argv_part_count" "$(json_field "$consumer_summary" "/max_argv_part_count")" \
         "assertion_names" "$(json_field "$consumer_summary" "/assertion_names")"
 else
     fail=1
@@ -874,6 +953,10 @@ if run_consumer_fixture_matrix; then
         "unsafe_fixture_count" "$(json_field "$fixture_matrix_summary" "/unsafe_fixture_count")" \
         "fixture_names" "$(json_field "$fixture_matrix_summary" "/fixture_names")" \
         "decision_summary" "$(json_field "$fixture_matrix_summary" "/decision_summary")" \
+        "max_why_not_safe_count" "$(json_field "$fixture_matrix_summary" "/max_why_not_safe_count")" \
+        "max_degraded_summary_count" "$(json_field "$fixture_matrix_summary" "/max_degraded_summary_count")" \
+        "max_argv_action_count" "$(json_field "$fixture_matrix_summary" "/max_argv_action_count")" \
+        "max_argv_part_count" "$(json_field "$fixture_matrix_summary" "/max_argv_part_count")" \
         "assertion_names" "$(json_field "$fixture_matrix_summary" "/assertion_names")"
 else
     fail=1
@@ -991,12 +1074,26 @@ payload = {
     "consumer_decision": consumer.get("decision") or "",
     "consumer_action": consumer.get("action") or "",
     "consumer_why_not_safe_count": as_int(consumer.get("why_not_safe_count")),
+    "consumer_degraded_summary_count": as_int(consumer.get("degraded_summary_count")),
     "consumer_argv_action_count": as_int(consumer.get("argv_action_count")),
+    "consumer_max_argv_part_count": as_int(consumer.get("max_argv_part_count")),
     "fixture_count": as_int(fixture_matrix.get("fixture_count")),
     "safe_fixture_count": as_int(fixture_matrix.get("safe_fixture_count")),
     "unsafe_fixture_count": as_int(fixture_matrix.get("unsafe_fixture_count")),
     "fixture_names": fixture_matrix.get("fixture_names") or "",
     "fixture_decision_summary": fixture_matrix.get("decision_summary") or "",
+    "fixture_max_why_not_safe_count": as_int(
+        fixture_matrix.get("max_why_not_safe_count")
+    ),
+    "fixture_max_degraded_summary_count": as_int(
+        fixture_matrix.get("max_degraded_summary_count")
+    ),
+    "fixture_max_argv_action_count": as_int(
+        fixture_matrix.get("max_argv_action_count")
+    ),
+    "fixture_max_argv_part_count": as_int(
+        fixture_matrix.get("max_argv_part_count")
+    ),
     "ok": ok == "true",
 }
 
