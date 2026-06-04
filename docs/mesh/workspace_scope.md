@@ -110,9 +110,9 @@ the future e2e isolation script.
 
 ## Query And Display Rules
 
-`ee search`, `ee context`, and `ee why` may surface cached mesh material only
-after it has passed the import decision for the current local workspace. They
-must preserve namespace provenance in machine output:
+`ee search`, `ee pack`, `ee context`, and `ee why` may surface cached mesh
+material only after it has passed the import decision for the current local
+workspace. These commands must preserve namespace provenance in machine output:
 
 - local memory id or cached remote material id
 - origin workspace alias, not raw remote path by default

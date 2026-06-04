@@ -192,7 +192,7 @@ gap, not as a storage failure.
 ```bash
 ee remember "RCH verification must stay remote-only." --workspace . --json
 ee memory link mem_a mem_b --relation supports --workspace . --json
-ee context "verify release" --workspace . --explain --json
+ee pack "verify release" --workspace . --explain --json
 ```
 
 Expected behavior:

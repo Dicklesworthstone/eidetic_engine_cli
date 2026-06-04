@@ -90,7 +90,7 @@ enabled = false
 enabled = true
 ```
 
-Agent effect: `ee context --explain --json` may emit Pack DNA for debugging,
+Agent effect: `ee pack --explain --json` may emit Pack DNA for debugging,
 but context ranking stays text-first. This is the safest profile when an agent
 is checking whether graph explanations are useful without changing selection
 order.
@@ -119,7 +119,7 @@ enabled = true
 enabled = true
 ```
 
-Agent effect: `ee insights --json`, `ee context --explain --json`, and
+Agent effect: `ee insights --json`, `ee pack --explain --json`, and
 `ee proximity <a> <b> --json` can all use graph-derived signals. If any graph
 family is stale or unavailable, the command must emit the relevant degraded
 entry rather than silently pretending the graph was complete.

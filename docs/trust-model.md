@@ -5,8 +5,8 @@ low-trust, stale, legacy, or instruction-like content from becoming authoritativ
 context for an agent.
 
 The canonical trust taxonomy is ADR 0009. The canonical context-pack UX contract
-is ADR 0007. This page connects those decisions to the lifecycle that `ee
-context`, `ee why`, curation, imports, and maintenance jobs must preserve.
+is ADR 0007. This page connects those decisions to the lifecycle that
+`ee pack`, `ee why`, curation, imports, and maintenance jobs must preserve.
 
 ## Lifecycle
 
@@ -16,8 +16,8 @@ Memories pass through five integration stages:
 | --- | --- | --- | --- |
 | Capture | `ee remember`, `ee import cass`, `ee import eidetic-legacy --dry-run` | Creates or previews memory evidence with provenance. | `ee.response.v2` or `ee.error.v2` |
 | Classify | redaction, trust class, source metadata | Assigns `trust_class`, `trust_subclass`, confidence, utility, and redaction posture. | `ee.memory.v1` fields |
-| Retrieve | `ee search`, `ee context` | Selects candidates without hiding degraded capabilities. | score components and `degraded[]` |
-| Pack | `ee context` | Emits compact context with provenance, trust signals, and advisory notes. | pack hash and provenance footer |
+| Retrieve | `ee search`, `ee pack` | Selects candidates without hiding degraded capabilities. | score components and `degraded[]` |
+| Pack | `ee pack` | Emits compact context with provenance, trust signals, and advisory notes. | pack hash and provenance footer |
 | Learn | `ee outcome`, `ee curate candidates`, steward jobs | Proposes promotion, demotion, supersession, or quarantine. | audit log plus `ee why <memory-id>` |
 
 No lifecycle step silently upgrades, deletes, consolidates, or tombstones a
@@ -134,7 +134,7 @@ trust; it only reports whether local signing is required for authoritative use.
 
 ## Command Integration
 
-- `ee context "<task>" --json` must include selected memories, provenance,
+- `ee pack "<task>" --json` must include selected memories, provenance,
   degraded capabilities, stable ordering, and a reproducible pack hash.
 - `ee why <memory-id> --json` must explain storage source, retrieval score,
   trust class, confidence, utility, pack selection, and audit history.

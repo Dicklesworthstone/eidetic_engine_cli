@@ -37,7 +37,7 @@ bytes from a previous request.
 
 Arena mode is an internal allocation strategy. It must not affect:
 
-- `ee context --json` response bytes after volatile fields are normalized by
+- `ee pack --json` response bytes after volatile fields are normalized by
   the existing determinism harness.
 - Markdown, JSONL stream trailer, and any other renderer over the same pack.
 - `data.pack.hash` and persisted `pack_records.pack_hash`.
