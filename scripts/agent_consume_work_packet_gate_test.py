@@ -978,6 +978,70 @@ class ErrorHandling(unittest.TestCase):
         self.assertIn("rch_verify_build_admission_denied", codes)
         self.assertIn("rch_worker_topology_blocked", codes)
 
+    def test_cli_error_degraded_summary_redacts_secret_shaped_fields(self):
+        token = "ghp_" + "00112233445566778899aabbccddeeff0011"
+        fine_grained = "github_" + "pat_" + "00112233445566778899aabbccddeeff"
+        home_path = "/Users/jemanuel/private/project"
+        payload = {
+            "schema": "ee.error.v2",
+            "error": {
+                "code": "build_admission_refused",
+                "details": {
+                    "degraded": [
+                        {
+                            "code": f"blocked:{token}",
+                            "source": home_path,
+                            "severity": f"Bearer {token}",
+                        }
+                    ],
+                    "sourceProvenance": [
+                        {
+                            "code": f"from:{home_path}",
+                            "source": fine_grained,
+                            "severity": "warning",
+                        }
+                    ],
+                },
+            },
+            "degraded": [
+                {
+                    "code": f"envelope:{home_path}",
+                    "source": "agent_mail",
+                    "severity": "high",
+                }
+            ],
+        }
+
+        result, decision = run_consumer_cli(payload)
+        serialized = json.dumps(decision)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertNotIn("ghp_", result.stdout)
+        self.assertNotIn("github_" + "pat_", result.stdout)
+        self.assertNotIn("/Users/", result.stdout)
+        self.assertNotIn("ghp_", serialized)
+        self.assertNotIn("github_" + "pat_", serialized)
+        self.assertNotIn("/Users/", serialized)
+        self.assertIn(
+            {
+                "code": "blocked:[redacted]",
+                "source": "[redacted]",
+                "severity": "Bearer [redacted]",
+            },
+            decision["degradedSummary"],
+        )
+        self.assertIn(
+            {
+                "code": "from:[redacted]",
+                "source": "[redacted]",
+                "severity": "warning",
+            },
+            decision["degradedSummary"],
+        )
+
     def test_non_object_input_fails_closed(self):
         decision = consumer.consume(["not", "a", "response"])
 
