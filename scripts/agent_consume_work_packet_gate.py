@@ -108,7 +108,9 @@ def degraded_summary(payload, envelope_degraded=None):
 
 
 def source_summary_from_gate(gate):
-    authority = gate.get("sourceAuthority", {})
+    authority = gate.get("sourceAuthority")
+    if not isinstance(authority, dict):
+        authority = {}
     return {
         "trackerHealth": redact_text(authority.get("trackerHealth"), 64),
         "trackerAuthoritative": authority.get("trackerAuthoritative"),
@@ -366,15 +368,59 @@ def packet_why_not_safe(packet, candidate, safe_to_claim):
     return compact_list(reasons)
 
 
+def claim_gate_consistency_reasons(gate):
+    reasons = []
+    if gate.get("safeToClaim") is not True:
+        reasons.append("claim_gate_safe_flag_not_true")
+
+    verdict = gate.get("verdict")
+    if verdict != "safe_to_claim":
+        reasons.append(f"claim_gate_verdict:{redact_text(verdict or 'unknown', 64)}")
+
+    if gate.get("recommendedSafeToClaim") is not True:
+        reasons.append("claim_gate_recommended_not_safe")
+
+    candidate = gate.get("selectedCandidate")
+    if not isinstance(candidate, dict):
+        reasons.append("claim_gate_candidate_missing")
+    else:
+        candidate_decision = candidate.get("decision")
+        if candidate_decision != "safe_to_claim":
+            reasons.append(
+                "claim_gate_candidate_decision:"
+                f"{redact_text(candidate_decision or 'unknown', 64)}"
+            )
+
+    if not isinstance(gate.get("claimCommandAction"), dict):
+        reasons.append("claim_gate_missing_claim_action")
+
+    authority = gate.get("sourceAuthority")
+    if not isinstance(authority, dict):
+        reasons.append("claim_gate_source_authority_missing")
+        return compact_list(reasons)
+
+    if authority.get("trackerAuthoritative") is not True:
+        tracker_health = redact_text(authority.get("trackerHealth") or "unknown", 64)
+        reasons.append(f"claim_gate_tracker_not_authoritative:{tracker_health}")
+    if authority.get("agentMailStatus") == "semantic_readiness_failed":
+        reasons.append("agent_mail_semantic_readiness_failed")
+    if authority.get("rchSafeToLaunchCargoVerification") is False:
+        reasons.append("rch_remote_verification_blocked")
+
+    return compact_list(reasons)
+
+
 def consume_claim_gate(gate, envelope_degraded=None):
-    safe_to_claim = gate.get("safeToClaim") is True and gate.get("verdict") == "safe_to_claim"
+    consistency_reasons = claim_gate_consistency_reasons(gate)
+    safe_to_claim = not consistency_reasons
     candidate = gate.get("selectedCandidate")
     candidate_id = None
     if isinstance(candidate, dict):
         candidate_id = candidate.get("id")
     candidate_id = candidate_id or gate.get("requestedCandidateId")
 
-    why_not_safe = compact_list(gate.get("unsafeReasons"))
+    why_not_safe = list(consistency_reasons)
+    why_not_safe.extend(compact_list(gate.get("unsafeReasons")))
     why_not_safe.extend(compact_list(gate.get("staleReasons")))
     if not safe_to_claim and not why_not_safe:
         why_not_safe.append(f"verdict:{redact_text(gate.get('verdict') or 'unknown', 64)}")

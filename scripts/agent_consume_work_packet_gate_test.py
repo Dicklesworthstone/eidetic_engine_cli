@@ -113,6 +113,59 @@ class ClaimGateConsumer(unittest.TestCase):
         self.assertFalse(claim["reviewRequired"])
         self.assertEqual(claim["argv"][:3], ["br", "update", "bd-safe.1"])
 
+    def test_recommended_safe_mismatch_fails_closed(self):
+        gate = safe_gate()
+        gate["recommendedSafeToClaim"] = False
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertTrue(decision["mutatingActionsRequireHuman"])
+        self.assertIn("claim_gate_recommended_not_safe", decision["whyNotSafe"])
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertTrue(claim["reviewRequired"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
+    def test_source_authority_mismatch_fails_closed(self):
+        gate = safe_gate()
+        gate["sourceAuthority"]["trackerAuthoritative"] = False
+        gate["sourceAuthority"]["trackerHealth"] = "db_jsonl_count_mismatch"
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_tracker_not_authoritative:db_jsonl_count_mismatch",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+
+    def test_candidate_decision_mismatch_fails_closed(self):
+        gate = safe_gate()
+        gate["selectedCandidate"]["decision"] = "blocked_by_dependency"
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_candidate_decision:blocked_by_dependency",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+
+    def test_missing_claim_action_fails_closed(self):
+        gate = safe_gate()
+        gate["claimCommandAction"] = None
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn("claim_gate_missing_claim_action", decision["whyNotSafe"])
+        self.assertFalse(any(a["actionKind"] == "claim" for a in decision["argvActions"]))
+
     def test_shell_required_and_display_only_actions_are_review_required(self):
         gate = safe_gate()
         gate["nextCommandActions"].append(
