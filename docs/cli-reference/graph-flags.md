@@ -18,7 +18,7 @@ These flags are accepted by every command:
 | `--json` / `-j` | boolean | false | Emits machine-readable JSON when the command supports it. |
 | `--robot` | boolean | false | Uses agent-oriented output defaults; currently implies JSON where supported. |
 | `--format <FORMAT>` | `human`, `json`, `toon`, `jsonl`, `compact`, `hook`, `markdown`, `mermaid` | `human` | Selects the renderer. Graph exports and Mermaid-style outputs should use explicit formats. |
-| `--fields <PRESET|FIELD_LIST>` | preset or comma-separated canonical fields | `standard` | Narrows or expands JSON fields for agent consumers. |
+| `--fields <PRESET|FIELD_LIST>` | preset or comma-separated canonical fields | `standard` generally; `summary` for bare JSON-like `status` and `swarm brief` | Narrows or expands JSON fields for agent consumers. |
 | `--cards <LEVEL>` | `none`, `summary`, `math`, `full` | `math` | Controls card verbosity for human-oriented renderers. |
 | `--schema` | boolean | false | Prints the JSON schema for the response envelope and exits. |
 | `--schema-version <VERSION>` | `v0`, `v1` | `v1` | Selects the response envelope schema version. |
@@ -349,7 +349,7 @@ bead or runs an RCH-gated verification.
 
 | Command | Flag | Values | Default | Use |
 | --- | --- | --- | --- | --- |
-| `ee swarm brief` | `--sources <LIST>` | comma-separated: `default`, `all`, `none`, `git`, `beads`, `bv`, `agent-mail`, `rch`, `host-profile`, `agent-inventory` | `default` | Selects read-only inputs for the coordination brief. |
+| `ee swarm brief` | `--sources <LIST>` | comma-separated: `default`, `all`, `none`, `git`, `beads`, `bv`, `agent-mail`, `rch`, `host-profile`, `agent-inventory` | `default` | Selects read-only inputs for the coordination brief. Bare JSON-like output uses the compact `summary` field preset; use `--fields full` for the full report. |
 | `ee swarm next-action` | `--sources <LIST>` | same as `ee swarm brief` | `default`; includes RCH for next-action | Selects read-only inputs for work allocation. |
 | `ee swarm brief`, `ee swarm next-action` | `--include-rch` | boolean | false | Adds the optional RCH status probe; equivalent to including `rch` in `--sources`. |
 | `ee swarm brief`, `ee swarm next-action` | `--agent-mail-snapshot <PATH>` | JSON file path | omitted | Includes a redacted Agent Mail snapshot without mutating live mail. If omitted for brief, the Agent Mail source reports snapshot absence and a bounded `127.0.0.1:8765/health` probe result. |
