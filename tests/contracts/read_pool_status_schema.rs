@@ -428,7 +428,7 @@ fn read_pool_status_report_default_emits_zero_counters() -> TestResult {
 
     // `gather()` is the const-context constructor used by `StatusReport::gather`
     // when no process-local pool has reported stats yet. It must agree with
-    // `Default` so the stub state is honest at both call sites.
+    // `Default` so the zero-observation state is honest at both call sites.
     let gathered = ReadPoolStatusReport::gather();
     if gathered != report {
         return Err(format!(
