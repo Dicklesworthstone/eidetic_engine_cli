@@ -2684,6 +2684,14 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
                     command_action["properties"][field].get("minLength", 1),
                     1,
                 )
+        self.assertEqual(
+            [{"$ref": "#/definitions/safeCommandString"}],
+            command_action["properties"]["rationale"]["allOf"],
+        )
+        self.assertEqual(
+            240,
+            command_action["properties"]["rationale"]["maxLength"],
+        )
 
     def assert_decision_matches_schema_constraints(self, decision, schema):
         source_schema = decision["sourceSchema"]

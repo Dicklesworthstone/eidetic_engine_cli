@@ -130,19 +130,8 @@
         "requiredSubstrate": {"$ref": "#/definitions/commandSubstrate"},
         "when": {"$ref": "#/definitions/safeCommandString"},
         "rationale": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 240,
-          "not": {
-            "anyOf": [
-              {"pattern": "BEGIN PRIVATE KEY"},
-              {"pattern": "ghp_[A-Za-z0-9_]+"},
-              {"pattern": "DATABASE_URL="},
-              {"pattern": "From: "},
-              {"pattern": "Subject: "},
-              {"pattern": "Message-ID:"}
-            ]
-          }
+          "allOf": [{"$ref": "#/definitions/safeCommandString"}],
+          "maxLength": 240
         }
       },
       "allOf": [
