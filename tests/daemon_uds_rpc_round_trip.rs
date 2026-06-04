@@ -17,8 +17,9 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,7 @@ use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 type TestResult = Result<(), String>;
 const TEST_AGENT_ID: &str = "agent-daemon-uds-test";
 const TEST_WORKSPACE_ID: &str = "workspace-daemon-uds-test";
+const SEEDED_DB_WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
@@ -58,6 +60,14 @@ fn connect_client(socket_path: &Path) -> Result<UnixStream, String> {
     Ok(stream)
 }
 
+fn secure_socket_path(root: &Path, file_name: &str) -> Result<PathBuf, String> {
+    let socket_dir = root.join("daemon-sockets");
+    fs::create_dir_all(&socket_dir).map_err(|error| format!("create socket dir: {error}"))?;
+    fs::set_permissions(&socket_dir, fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("secure socket dir permissions: {error}"))?;
+    Ok(socket_dir.join(file_name))
+}
+
 fn context_request(
     request_id: &'static str,
     agent_id: &'static str,
@@ -75,10 +85,9 @@ fn seed_context_workspace(root: &Path) -> Result<(std::path::PathBuf, std::path:
     let database = ee_dir.join("ee.db");
     let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
     connection.migrate().map_err(|error| error.to_string())?;
-    let workspace_id = "wsp_daemonudsrpc000000000001";
     connection
         .insert_workspace(
-            workspace_id,
+            SEEDED_DB_WORKSPACE_ID,
             &CreateWorkspaceInput {
                 path: workspace.to_string_lossy().into_owned(),
                 name: Some("daemon-uds-context".to_string()),
@@ -89,7 +98,7 @@ fn seed_context_workspace(root: &Path) -> Result<(std::path::PathBuf, std::path:
         .insert_memory(
             "mem_00000000000000000000005001",
             &CreateMemoryInput {
-                workspace_id: workspace_id.to_string(),
+                workspace_id: SEEDED_DB_WORKSPACE_ID.to_string(),
                 level: "procedural".to_string(),
                 kind: "rule".to_string(),
                 content: "Daemon context canonical pack must preserve release provenance."
@@ -593,7 +602,7 @@ fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> Test
 #[test]
 fn daemon_context_returns_canonical_pack_response_with_provenance() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-ctx.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-ctx.sock")?;
     let (workspace, database) = seed_context_workspace(temp.path())?;
 
     let mut handle = start_server_for_workspace(&socket_path, TEST_WORKSPACE_ID)
@@ -674,7 +683,7 @@ fn daemon_context_returns_canonical_pack_response_with_provenance() -> TestResul
 #[test]
 fn daemon_context_zero_timeout_refuses_before_pack_execution() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-ctx-timeout.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-ctx-timeout.sock")?;
     let (workspace, database) = seed_context_workspace(temp.path())?;
 
     let mut handle = start_server_for_workspace(&socket_path, TEST_WORKSPACE_ID)
@@ -696,7 +705,7 @@ fn daemon_context_zero_timeout_refuses_before_pack_execution() -> TestResult {
 #[test]
 fn daemon_context_wrong_workspace_returns_method_unauthorized_over_wire() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-ctx-auth.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-ctx-auth.sock")?;
 
     let mut handle = start_server_for_workspace(&socket_path, TEST_WORKSPACE_ID)
         .map_err(|error| format!("start_server_for_workspace: {error}"))?;
