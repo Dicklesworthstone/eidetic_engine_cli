@@ -267,12 +267,20 @@ class WorkPacketConsumer(unittest.TestCase):
                 {"bv", "beads"},
             ),
             (
+                "tests/fixtures/swarm_work_packet/beads_command_timeout_no_output.json",
+                {"beads", "agent_mail"},
+            ),
+            (
                 "tests/fixtures/swarm_work_packet/rollup_only_no_claimable_child.json",
                 {"beads"},
             ),
             (
                 "tests/fixtures/swarm_work_packet/crowded_checkout.json",
                 {"beads", "agent_mail", "git"},
+            ),
+            (
+                "tests/fixtures/swarm_work_packet/agent_mail_database_contention_timeout.json",
+                {"agent_mail", "beads", "rch"},
             ),
             (
                 "tests/fixtures/swarm_work_packet/agent_mail_degraded_read_only.json",
@@ -370,6 +378,28 @@ class WorkPacketConsumer(unittest.TestCase):
         codes = {entry["code"] for entry in decision["degradedSummary"]}
         self.assertIn("agent_mail_unavailable", codes)
         self.assertIn("rch_worker_topology_blocked", codes)
+
+    def test_beads_timeout_fixture_blocks_claim_from_stale_fallback(self):
+        packet = load_fixture(
+            "tests/fixtures/swarm_work_packet/beads_command_timeout_no_output.json"
+        )
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["candidateId"], "bd-owned")
+        self.assertEqual(decision["decision"], "blocked")
+        self.assertIn("source_health:beads_timeout_no_output", decision["whyNotSafe"])
+        self.assertIn("fallback_row_already_owned", decision["whyNotSafe"])
+        self.assertIn("fallback_rows_not_authoritative", decision["whyNotSafe"])
+        self.assertIn(
+            "beads_tracker_not_authoritative:db_jsonl_count_mismatch",
+            decision["whyNotSafe"],
+        )
+        self.assertIn("tracker_requires_candidate_downgrade", decision["whyNotSafe"])
+        self.assertGreaterEqual(decision["legacyCommandStringsRefused"], 2)
+        self.assertEqual(decision["sourceSummary"]["trackerAuthoritative"], False)
+        codes = {entry["code"] for entry in decision["degradedSummary"]}
+        self.assertIn("beads_unavailable", codes)
 
     def test_crowded_checkout_fixture_exposes_collision_reasons(self):
         packet = load_fixture("tests/fixtures/swarm_work_packet/crowded_checkout.json")
