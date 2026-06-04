@@ -190,7 +190,7 @@
           }
         }
       },
-      "description": "High-severity risk, failure, anti-pattern memories that matched the command. Per AGENTS.md bd-3usjw.6, full memory-query coverage is still in progress; matchedMemories may be empty in the current build."
+      "description": "Risk, failure, and anti-pattern memories that matched the command. CLI guard paths query workspace memories when a destructive rule matches; this array is empty for non-destructive commands or when no matching risk memories are available, in which case no_risk_memories appears in degraded[]."
     },
     "degraded": {
       "type": "array",

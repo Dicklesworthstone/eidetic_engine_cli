@@ -8563,7 +8563,7 @@ ee search 'completely unrelated query' --workspace . --json
 
 **Introduced by:** bd-3usjw.6 (epic CLOSE_THE_GAP)
 
-**Trigger.** A destructive command is recognized, but the workspace has no high-severity risk, anti-pattern, or failure memories to surface.
+**Trigger.** A destructive command is recognized, but the workspace has no matching risk, anti-pattern, or failure memories to surface.
 
 **Setup.**
 
@@ -8577,7 +8577,7 @@ ee init --workspace .
 ee preflight check --cmd 'rm -rf build-output' --workspace . --json
 ```
 
-**Expected emission.** Message contains: `No matching high-severity risk memories ... destructive command`
+**Expected emission.** Message contains: `Destructive command was recognized ... no matching risk, anti-pattern, or failure memories`
 
 **Repair hint.** `ee remember --workspace . --kind risk --severity high`
 

@@ -11,7 +11,7 @@
   "severity": "info",
   "repair_present": true,
   "trigger": {
-    "description": "A destructive command is recognized, but the workspace has no high-severity risk, anti-pattern, or failure memories to surface.",
+    "description": "A destructive command is recognized, but the workspace has no matching risk, anti-pattern, or failure memories to surface.",
     "setup_commands": [
       "ee init --workspace ."
     ],
@@ -21,8 +21,8 @@
     "code": "no_risk_memories",
     "severity": "info",
     "message_contains": [
-      "No matching high-severity risk memories",
-      "destructive command"
+      "Destructive command was recognized",
+      "no matching risk, anti-pattern, or failure memories"
     ],
     "repair_contains": "ee remember --workspace . --kind risk --severity high",
     "repair_string": "ee remember --workspace . --kind risk --severity high \"Document this destructive-command risk.\" --json"

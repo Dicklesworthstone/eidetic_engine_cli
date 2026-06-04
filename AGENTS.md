@@ -46,10 +46,13 @@ Hook integration rules:
   rate-limit behavior are audited separately.
 - Keep `tests/fixtures/destructive_patterns/commands.json` in sync when adding
   new built-in destructive-command patterns.
-- Current guard coverage is rule/registry based. The full `bd-3usjw.6`
-  contract also requires matching destructive commands against high-severity
-  `risk`, `anti-pattern`, and `failure` memories with provenance; do not close
-  that bead until the memory-query layer and its e2e evidence exist.
+- The guard combines rule/registry matching with risk-memory lookup. When a
+  destructive command matches a guard rule, current CLI paths query stored
+  `risk`, `anti-pattern`, and `failure` memories, surface `matchedMemories`
+  with provenance when present, and emit `no_risk_memories` when none match.
+  Keep public CLI e2e coverage (`tests/e2e_trauma_guard.rs`,
+  `tests/trauma_guard_wired.rs`, and bypass-token audit tests) aligned when
+  changing this contract.
 
 ---
 

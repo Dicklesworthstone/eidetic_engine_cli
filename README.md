@@ -63,7 +63,7 @@ warnings. Each item carries an evidence pointer and a score breakdown.
 | **Hybrid retrieval** | BM25 + vector search via Frankensearch's `TwoTierSearcher`, with deterministic ranking and fusion; local RRF-shaped data is diagnostic-only and never owns final ordering |
 | **Explainable scores** | Every returned memory shows component scores, freshness, confidence, and which sources support it |
 | **Procedural rules with decay** | Confidence ages out, harmful feedback demotes faster than helpful feedback promotes |
-| **Anti-patterns first-class** | Trauma-guard surfaces high-severity risk memories before destructive actions |
+| **Anti-patterns first-class** | Trauma-guard surfaces matching risk, anti-pattern, and failure memories before destructive actions |
 | **Graph-aware** | PageRank, HITS, PPR, Gomory-Hu proximity, dominance, causal paths, structural health, Pack DNA, and skyline views |
 | **CASS session import** | Mines your existing `cass` corpus (Claude Code, Codex, Cursor, Gemini, ChatGPT) for evidence |
 | **Context profiles** | `compact`, `balanced`, `grounding`, `orientation`, `thorough`, and `submodular` quota/objective mixes |

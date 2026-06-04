@@ -24,6 +24,7 @@ use ee::db::{CreateWorkspaceInput, DbConnection, StoredMemory, audit_actions};
 
 const DESTRUCTIVE_PATTERN_FIXTURE: &str =
     include_str!("fixtures/destructive_patterns/commands.json");
+const NO_RISK_MEMORIES_FIXTURE: &str = include_str!("fixtures/failure_modes/no_risk_memories.json");
 
 fn opts(command: &str) -> PreflightGuardOptions {
     PreflightGuardOptions {
@@ -184,12 +185,31 @@ fn trauma_guard_memory_match_orders_by_score_then_memory_id() {
 #[test]
 fn no_risk_memories_degradation_pins_fixture_code_and_repair() {
     let degraded = no_risk_memories_degradation();
+    let fixture: serde_json::Value = serde_json::from_str(NO_RISK_MEMORIES_FIXTURE)
+        .expect("no_risk_memories fixture must be JSON");
+    let expected = fixture
+        .get("expected_emission")
+        .expect("no_risk_memories fixture must include expected_emission");
 
-    assert_eq!(degraded.code, "no_risk_memories");
-    assert_eq!(degraded.severity, "info");
+    assert_eq!(degraded.code, expected["code"].as_str().expect("code"));
+    assert_eq!(
+        degraded.severity,
+        expected["severity"].as_str().expect("severity")
+    );
+    for substring in expected["message_contains"]
+        .as_array()
+        .expect("message_contains")
+    {
+        let substring = substring.as_str().expect("message substring");
+        assert!(
+            degraded.message.contains(substring),
+            "no_risk_memories message should contain fixture substring {substring:?}; got {:?}",
+            degraded.message
+        );
+    }
     assert_eq!(
         degraded.repair,
-        "ee remember --workspace . --kind risk --severity high \"Document this destructive-command risk.\" --json"
+        expected["repair_string"].as_str().expect("repair_string")
     );
 }
 
