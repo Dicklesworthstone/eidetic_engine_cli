@@ -16,6 +16,12 @@ OUTPUT_SCHEMA = "ee.agent.work_packet_gate_decision.v1"
 CLAIM_GATE_SCHEMA = "ee.swarm.work_packet.claim_gate.v1"
 WORK_PACKET_SCHEMA = "ee.swarm.work_packet.v1"
 SAFE_COPY = "safe_structured_argv"
+MACHINE_RESPONSE_SCHEMAS = {
+    "ee.error.v2",
+    "ee.response.v2",
+    CLAIM_GATE_SCHEMA,
+    WORK_PACKET_SCHEMA,
+}
 
 SECRET_PATTERNS = [
     re.compile(r"BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY"),
@@ -613,9 +619,26 @@ def error_decision(code):
 
 
 def load_response():
+    text = sys.stdin.read()
     try:
-        return json.load(sys.stdin)
+        return json.loads(text)
     except json.JSONDecodeError:
+        candidates = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                isinstance(value, dict)
+                and value.get("schema") in MACHINE_RESPONSE_SCHEMAS
+            ):
+                candidates.append(value)
+        if candidates:
+            return candidates[-1]
         return {
             "schema": "ee.error.v2",
             "success": False,

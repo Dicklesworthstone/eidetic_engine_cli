@@ -595,6 +595,41 @@ class ErrorHandling(unittest.TestCase):
         self.assertFalse(decision["mutatingActionsRequireHuman"])
         self.assertIn("error:invalid_json", decision["whyNotSafe"])
 
+    def test_cli_noisy_error_output_uses_last_machine_envelope(self):
+        noisy_log = {
+            "timestamp": "2026-06-04T11:09:01Z",
+            "level": "WARN",
+            "fields": {
+                "message": "emitting error envelope",
+                "schema": "ee.error.v2",
+                "code": "usage",
+            },
+            "target": "ee::output::error",
+        }
+        error_envelope = {
+            "schema": "ee.error.v2",
+            "error": {
+                "code": "usage",
+                "message": "unexpected argument '--claim-gate' found",
+                "details": {},
+            },
+        }
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / "agent_consume_work_packet_gate.py")],
+            input=json.dumps(noisy_log) + "\n" + json.dumps(error_envelope) + "\n",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, "")
+        decision = json.loads(result.stdout)
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
+        self.assertNotIn("error:invalid_json", decision["whyNotSafe"])
+
     def test_error_envelope_returns_machine_readable_block(self):
         decision = consumer.consume(
             {
