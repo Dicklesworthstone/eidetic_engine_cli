@@ -1,0 +1,428 @@
+{
+  "schema": "ee.environment_attestation.fixture_matrix.v1",
+  "cases": [
+    {
+      "case": "clean_remote_ready",
+      "summary": {
+        "safeToClaim": true,
+        "remoteVerificationAdmitted": true,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "remote_verification_admitted",
+        "localCargoFallbackObserved": false
+      },
+      "verdict": "remote_verification_admitted",
+      "sourceAuthority": [
+        {
+          "source": "source_tree",
+          "authority": "authoritative",
+          "status": "ok",
+          "freshness": "current",
+          "degradedCodes": [],
+          "recoveryActions": []
+        },
+        {
+          "source": "beads_tracker",
+          "authority": "authoritative",
+          "status": "ok",
+          "freshness": "current",
+          "degradedCodes": [],
+          "recoveryActions": []
+        },
+        {
+          "source": "bv_recommendation",
+          "authority": "advisory",
+          "status": "ok",
+          "freshness": "current",
+          "degradedCodes": [],
+          "recoveryActions": []
+        },
+        {
+          "source": "agent_mail_probe",
+          "authority": "authoritative",
+          "status": "ok",
+          "freshness": "current",
+          "degradedCodes": [],
+          "recoveryActions": []
+        },
+        {
+          "source": "rch",
+          "authority": "authoritative",
+          "status": "remote_ready",
+          "freshness": "current",
+          "degradedCodes": [],
+          "recoveryActions": []
+        }
+      ],
+      "degradedCodes": [],
+      "recoveryActions": []
+    },
+    {
+      "case": "stale_binary_suspected",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "stale_binary_suspected",
+        "localCargoFallbackObserved": false
+      },
+      "verdict": "stale_binary_suspected",
+      "sourceAuthority": [
+        {
+          "source": "source_tree",
+          "authority": "degraded",
+          "status": "degraded",
+          "freshness": "current",
+          "degradedCodes": [
+            "stale_binary_suspected"
+          ],
+          "recoveryActions": [
+            {
+              "kind": "inspect",
+              "command": "ee --version",
+              "mutatesState": false,
+              "requiredSubstrate": "static_local"
+            }
+          ]
+        }
+      ],
+      "degradedCodes": [
+        "stale_binary_suspected"
+      ],
+      "recoveryActions": [
+        {
+          "kind": "inspect",
+          "command": "ee --version",
+          "mutatesState": false,
+          "requiredSubstrate": "static_local"
+        }
+      ]
+    },
+    {
+      "case": "tracker_stale_and_bv_blocked",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "tracker_stale",
+        "localCargoFallbackObserved": false
+      },
+      "verdict": "tracker_stale",
+      "sourceAuthority": [
+        {
+          "source": "beads_tracker",
+          "authority": "stale",
+          "status": "stale",
+          "freshness": "current",
+          "degradedCodes": [
+            "beads_tracker_stale"
+          ],
+          "recoveryActions": [
+            {
+              "kind": "sync",
+              "command": "br sync --import-only",
+              "mutatesState": true,
+              "requiredSubstrate": "beads"
+            }
+          ]
+        },
+        {
+          "source": "bv_recommendation",
+          "authority": "degraded",
+          "status": "degraded",
+          "freshness": "current",
+          "degradedCodes": [
+            "bv_recommendation_stale"
+          ],
+          "recoveryActions": [
+            {
+              "kind": "inspect",
+              "command": "br --no-auto-import --allow-stale ready --json",
+              "mutatesState": false,
+              "requiredSubstrate": "beads"
+            }
+          ]
+        }
+      ],
+      "degradedCodes": [
+        "beads_tracker_stale",
+        "bv_recommendation_stale"
+      ],
+      "recoveryActions": [
+        {
+          "kind": "inspect",
+          "command": "br --no-auto-import --allow-stale ready --json",
+          "mutatesState": false,
+          "requiredSubstrate": "beads"
+        },
+        {
+          "kind": "sync",
+          "command": "br sync --import-only",
+          "mutatesState": true,
+          "requiredSubstrate": "beads"
+        }
+      ]
+    },
+    {
+      "case": "agent_mail_probe_unavailable",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "coordinate_before_claim",
+        "localCargoFallbackObserved": false
+      },
+      "verdict": "coordinate_before_claim",
+      "sourceAuthority": [
+        {
+          "source": "agent_mail_probe",
+          "authority": "unavailable",
+          "status": "unavailable",
+          "freshness": "unknown",
+          "degradedCodes": [
+            "agent_mail_unavailable"
+          ],
+          "recoveryActions": [
+            {
+              "kind": "coordinate",
+              "command": null,
+              "mutatesState": false,
+              "requiredSubstrate": "agent_mail"
+            }
+          ]
+        }
+      ],
+      "degradedCodes": [
+        "agent_mail_unavailable"
+      ],
+      "recoveryActions": [
+        {
+          "kind": "coordinate",
+          "command": null,
+          "mutatesState": false,
+          "requiredSubstrate": "agent_mail"
+        }
+      ]
+    },
+    {
+      "case": "rch_topology_blocked_before_cargo",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": false,
+        "sourceTestVerdict": "environment_blocked_before_source",
+        "environmentVerdict": "proof_environment_blocked",
+        "localCargoFallbackObserved": false
+      },
+      "verdict": "proof_environment_blocked",
+      "sourceAuthority": [
+        {
+          "source": "rch",
+          "authority": "degraded",
+          "status": "remote_blocked",
+          "freshness": "current",
+          "degradedCodes": [
+            "rch_worker_topology_blocked"
+          ],
+          "recoveryActions": [
+            {
+              "kind": "repair_environment",
+              "command": "rch status --json",
+              "mutatesState": false,
+              "requiredSubstrate": "rch"
+            }
+          ]
+        }
+      ],
+      "degradedCodes": [
+        "rch_worker_topology_blocked"
+      ],
+      "recoveryActions": [
+        {
+          "kind": "repair_environment",
+          "command": "rch status --json",
+          "mutatesState": false,
+          "requiredSubstrate": "rch"
+        }
+      ]
+    },
+    {
+      "case": "local_cargo_bypass_detected",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "local_cargo_bypass_detected",
+        "localCargoFallbackObserved": true
+      },
+      "verdict": "local_cargo_bypass_detected",
+      "sourceAuthority": [
+        {
+          "source": "source_tree",
+          "authority": "authoritative",
+          "status": "ok",
+          "freshness": "current",
+          "degradedCodes": [],
+          "recoveryActions": []
+        },
+        {
+          "source": "local_cargo_tripwire",
+          "authority": "contradicted",
+          "status": "blocked",
+          "freshness": "current",
+          "degradedCodes": [
+            "local_cargo_bypass_detected"
+          ],
+          "recoveryActions": [
+            {
+              "kind": "human_decision",
+              "command": null,
+              "mutatesState": false,
+              "requiredSubstrate": "human"
+            }
+          ]
+        }
+      ],
+      "degradedCodes": [
+        "local_cargo_bypass_detected"
+      ],
+      "recoveryActions": [
+        {
+          "kind": "human_decision",
+          "command": null,
+          "mutatesState": false,
+          "requiredSubstrate": "human"
+        }
+      ]
+    },
+    {
+      "case": "reservation_conflict",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "unsafe_due_to_conflict",
+        "localCargoFallbackObserved": false
+      },
+      "verdict": "unsafe_due_to_conflict",
+      "sourceAuthority": [
+        {
+          "source": "agent_mail_probe",
+          "authority": "authoritative",
+          "status": "ok",
+          "freshness": "current",
+          "degradedCodes": [],
+          "recoveryActions": []
+        },
+        {
+          "source": "file_reservations",
+          "authority": "advisory",
+          "status": "blocked",
+          "freshness": "current",
+          "degradedCodes": [
+            "reservation_evidence_stale"
+          ],
+          "recoveryActions": [
+            {
+              "kind": "coordinate",
+              "command": null,
+              "mutatesState": false,
+              "requiredSubstrate": "agent_mail"
+            }
+          ]
+        }
+      ],
+      "degradedCodes": [
+        "reservation_evidence_stale"
+      ],
+      "recoveryActions": [
+        {
+          "kind": "coordinate",
+          "command": null,
+          "mutatesState": false,
+          "requiredSubstrate": "agent_mail"
+        }
+      ]
+    },
+    {
+      "case": "dirty_source_checkout",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "coordinate_before_claim",
+        "localCargoFallbackObserved": false
+      },
+      "verdict": "coordinate_before_claim",
+      "sourceAuthority": [
+        {
+          "source": "source_tree",
+          "authority": "degraded",
+          "status": "degraded",
+          "freshness": "current",
+          "degradedCodes": [
+            "dirty_checkout_observed"
+          ],
+          "recoveryActions": [
+            {
+              "kind": "coordinate",
+              "command": "git status --short --branch --untracked-files=all",
+              "mutatesState": false,
+              "requiredSubstrate": "git"
+            }
+          ]
+        }
+      ],
+      "degradedCodes": [
+        "dirty_checkout_observed"
+      ],
+      "recoveryActions": [
+        {
+          "kind": "coordinate",
+          "command": "git status --short --branch --untracked-files=all",
+          "mutatesState": false,
+          "requiredSubstrate": "git"
+        }
+      ]
+    },
+    {
+      "case": "source_authority_ambiguous_empty",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "source_authority_ambiguous",
+        "localCargoFallbackObserved": false
+      },
+      "verdict": "source_authority_ambiguous",
+      "sourceAuthority": [
+        {
+          "source": "claim_gate",
+          "authority": "unavailable",
+          "status": "not_collected",
+          "freshness": "unknown",
+          "degradedCodes": [
+            "source_authority_ambiguous"
+          ],
+          "recoveryActions": [
+            {
+              "kind": "inspect",
+              "command": "ee swarm brief --workspace . --include-rch --json",
+              "mutatesState": false,
+              "requiredSubstrate": "ee"
+            }
+          ]
+        }
+      ],
+      "degradedCodes": [
+        "source_authority_ambiguous"
+      ],
+      "recoveryActions": [
+        {
+          "kind": "inspect",
+          "command": "ee swarm brief --workspace . --include-rch --json",
+          "mutatesState": false,
+          "requiredSubstrate": "ee"
+        }
+      ]
+    }
+  ]
+}
