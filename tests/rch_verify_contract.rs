@@ -2463,6 +2463,54 @@ fn synthetic_remote_test_failure_with_timeout_env_is_remote_failure() -> TestRes
 }
 
 #[test]
+fn synthetic_transport_failure_does_not_promote_warning_span_to_first_error() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &["--", "cargo", "check", "--all-targets"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "warning: method `mesh_two_tier_budget` is never used\n  --> tests/../src/mesh/anti_entropy_protocol.rs:130:8\n[RCH] remote vmi1227854 failed [RCH-E104] SSH command timed out after 300s\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "321731"),
+        ],
+    )?;
+    if status.success() {
+        return Err("RCH transport failure should preserve non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse transport failure: {error}"))?;
+    if report["status"] != "remote_failure" {
+        return Err(format!(
+            "RCH transport timeout should preserve existing status: {report}"
+        ));
+    }
+    if report["first_error_file"] != Value::Null || report["first_error_line"] != Value::Null {
+        return Err(format!(
+            "warning span should not be reported as first_error: {report}"
+        ));
+    }
+    if !report["error_codes"]
+        .as_array()
+        .ok_or_else(|| "missing error_codes".to_owned())?
+        .iter()
+        .any(|code| code.as_str() == Some("RCH-E104"))
+    {
+        return Err(format!("missing RCH-E104 error code: {report}"));
+    }
+    if report["summary_markdown"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("first_error:")
+    {
+        return Err(format!(
+            "summary should omit warning-only first_error: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn synthetic_pre_cargo_disk_full_extracts_selected_worker() -> TestResult {
     let (status, stdout, _stderr) = run_script_with_env(
         &["--", "cargo", "test", "--lib", "task_frame"],

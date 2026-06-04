@@ -1968,9 +1968,15 @@ def redact(text):
 def first_error_location(text):
     if not text:
         return (None, None)
+    current_diagnostic = None
     for line in text.splitlines():
+        stripped = line.lstrip()
+        if re.match(r"error(?:\[[^\]]+\])?:", stripped):
+            current_diagnostic = "error"
+        elif re.match(r"warning(?:\[[^\]]+\])?:", stripped):
+            current_diagnostic = "warning"
         match = re.search(r"-->\s+([^:\s][^:]*):(\d+):\d+", line)
-        if match:
+        if match and current_diagnostic == "error":
             return (redact(match.group(1)), int(match.group(2)))
     return (None, None)
 
