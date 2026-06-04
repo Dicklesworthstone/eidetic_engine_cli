@@ -348,6 +348,14 @@ mod tests {
         events.iter().find(|e| e.target == target)
     }
 
+    fn find_required<'a>(events: &'a [CapturedEvent], target: &str) -> &'a CapturedEvent {
+        if let Some(event) = find(events, target) {
+            event
+        } else {
+            panic!("missing graph telemetry event {target}");
+        }
+    }
+
     /// Every constant in `ALL_GRAPH_TELEMETRY_EVENTS` carries the
     /// `ee.graph.` prefix, so a query-language filter
     /// `target ~= '^ee\.graph\.'` reliably scopes to graph
@@ -389,7 +397,7 @@ mod tests {
                 lock_wait_ms: 3,
             });
         });
-        let event = find(&events, SNAPSHOT_REFRESH_EVENT).expect("snapshot refresh emitted");
+        let event = find_required(&events, SNAPSHOT_REFRESH_EVENT);
         assert_eq!(event.level, Level::INFO);
         assert_eq!(
             event.fields.get("graph_type").map(String::as_str),
@@ -426,7 +434,7 @@ mod tests {
                 sampling_used: false,
             });
         });
-        let event = find(&events, ALGORITHM_COMPUTE_EVENT).expect("algorithm compute emitted");
+        let event = find_required(&events, ALGORITHM_COMPUTE_EVENT);
         assert_eq!(event.level, Level::DEBUG);
         assert_eq!(
             event.fields.get("algorithm").map(String::as_str),
@@ -464,7 +472,7 @@ mod tests {
                 elapsed_ms: 210,
             });
         });
-        let event = find(&events, ALGORITHM_TIMEOUT_EVENT).expect("algorithm timeout emitted");
+        let event = find_required(&events, ALGORITHM_TIMEOUT_EVENT);
         assert_eq!(event.level, Level::WARN);
         assert_eq!(
             event.fields.get("algorithm").map(String::as_str),
@@ -488,7 +496,7 @@ mod tests {
                 elapsed_ms: 9,
             });
         });
-        let event = find(&events, ALGORITHM_CANCELLED_EVENT).expect("algorithm cancelled emitted");
+        let event = find_required(&events, ALGORITHM_CANCELLED_EVENT);
         assert_eq!(event.level, Level::INFO);
         assert_eq!(
             event.fields.get("algorithm").map(String::as_str),
@@ -512,8 +520,8 @@ mod tests {
                 params_hash: "blake3:beef",
             });
         });
-        let hit = find(&events, CACHE_HIT_EVENT).expect("cache hit emitted");
-        let miss = find(&events, CACHE_MISS_EVENT).expect("cache miss emitted");
+        let hit = find_required(&events, CACHE_HIT_EVENT);
+        let miss = find_required(&events, CACHE_MISS_EVENT);
         assert_eq!(hit.level, Level::TRACE);
         assert_eq!(miss.level, Level::TRACE);
         assert_eq!(
