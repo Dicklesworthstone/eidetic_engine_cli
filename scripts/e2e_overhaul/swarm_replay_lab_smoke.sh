@@ -21,24 +21,59 @@ ARTIFACT_DIR="$RUN_ROOT/artifacts"
 EVENT_LOG="$ARTIFACT_DIR/events.jsonl"
 TRACE_PATH="$ARTIFACT_DIR/smoke-swarm-workload.json"
 TEST_ID="swarm_replay_lab_smoke"
+SETUP_STDOUT="$ARTIFACT_DIR/setup.stdout.txt"
+SETUP_STDERR="$ARTIFACT_DIR/setup.stderr.txt"
+VALIDATION_STDERR="$ARTIFACT_DIR/validation.stderr.txt"
 
 mkdir -p "$WORKSPACE" "$RUN_HOME" "$ARTIFACT_DIR"
 : >"$EVENT_LOG"
-
-if [ ! -x "$EE_BIN" ]; then
-    printf 'error: ee binary not found or not executable: %s\n' "$EE_BIN" >&2
-    printf '       run the Cargo test/build gate through RCH before this smoke.\n' >&2
-    exit 3
-fi
-
-if ! command -v jq >/dev/null 2>&1; then
-    printf 'error: jq is required for swarm replay lab smoke\n' >&2
-    exit 2
-fi
+: >"$SETUP_STDOUT"
+: >"$SETUP_STDERR"
+: >"$VALIDATION_STDERR"
 
 now_iso() {
     date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
+
+emit_setup_assert_result_with_artifact_paths_and_exit() {
+    local label="$1"
+    local first_failure_diagnosis="$2"
+    local exit_code="$3"
+    local stdout_artifact_path="$4"
+    local stderr_artifact_path="$5"
+    printf '{"schema":"ee.test_event.v1","ts":"%s","test_id":"%s","kind":"assert_result","fields":{"label":"%s","command":"setup","workspace":"[WORKSPACE]","sanitized_env":{"HOME":"[RUN_HOME]","NO_COLOR":"1","EE_WORKSPACE":"[unset]"},"exit_code":%s,"elapsed_ms":0,"stdout_artifact_path":"%s","stderr_artifact_path":"%s","schema_validation_status":"not_run","redaction_status":"passed","first_failure_diagnosis":"%s","replay_status":"not_started","rch_status":"not_started"}}\n' \
+        "$(now_iso)" \
+        "$TEST_ID" \
+        "$label" \
+        "$exit_code" \
+        "$stdout_artifact_path" \
+        "$stderr_artifact_path" \
+        "$first_failure_diagnosis" >>"$EVENT_LOG"
+    exit "$exit_code"
+}
+
+if [ ! -x "$EE_BIN" ]; then
+    printf 'error: ee binary not found or not executable: %s\n' "$EE_BIN" >"$SETUP_STDERR"
+    printf '       run the Cargo test/build gate through RCH before this smoke.\n' >>"$SETUP_STDERR"
+    cat "$SETUP_STDERR" >&2
+    emit_setup_assert_result_with_artifact_paths_and_exit \
+        "setup_ee_binary_unavailable" \
+        "ee_binary_unavailable" \
+        3 \
+        "[RUN]/artifacts/setup.stdout.txt" \
+        "[RUN]/artifacts/setup.stderr.txt"
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+    printf 'error: jq is required for swarm replay lab smoke\n' >"$SETUP_STDERR"
+    cat "$SETUP_STDERR" >&2
+    emit_setup_assert_result_with_artifact_paths_and_exit \
+        "setup_jq_unavailable" \
+        "jq_unavailable" \
+        2 \
+        "[RUN]/artifacts/setup.stdout.txt" \
+        "[RUN]/artifacts/setup.stderr.txt"
+fi
 
 now_ms() {
     local value
@@ -266,6 +301,59 @@ emit_assert_ok() {
     printf '%s\n' "$event"
 }
 
+emit_assert_result_with_artifact_paths_and_exit() {
+    local label="$1"
+    local command_text="$2"
+    local first_failure_diagnosis="$3"
+    local exit_code="$4"
+    local command_exit_code="$5"
+    local command_elapsed_ms="$6"
+    local stdout_file="$7"
+    local stderr_file="$8"
+    local event
+    event="$(
+        jq -cn \
+            --arg schema "ee.test_event.v1" \
+            --arg ts "$(now_iso)" \
+            --arg test_id "$TEST_ID" \
+            --arg label "$label" \
+            --arg command_text "$command_text" \
+            --arg first_failure_diagnosis "$first_failure_diagnosis" \
+            --arg stdout_artifact_path "$(path_tail "$stdout_file")" \
+            --arg stderr_artifact_path "$(path_tail "$stderr_file")" \
+            --argjson exit_code "$command_exit_code" \
+            --argjson elapsed_ms "$command_elapsed_ms" \
+            '{
+              schema: $schema,
+              ts: $ts,
+              test_id: $test_id,
+              kind: "assert_result",
+              fields: {
+                label: $label,
+                command: $command_text,
+                workspace: "[WORKSPACE]",
+                sanitized_env: {
+                  HOME: "[RUN_HOME]",
+                  NO_COLOR: "1",
+                  EE_WORKSPACE: "[unset]"
+                },
+                exit_code: $exit_code,
+                elapsed_ms: $elapsed_ms,
+                stdout_artifact_path: $stdout_artifact_path,
+                stderr_artifact_path: $stderr_artifact_path,
+                schema_validation_status: "failed",
+                redaction_status: "passed",
+                first_failure_diagnosis: $first_failure_diagnosis,
+                replay_status: "failed",
+                rch_status: "not_proven"
+              }
+            }'
+    )"
+    printf '%s\n' "$event" >>"$EVENT_LOG"
+    printf 'error: %s\n' "$first_failure_diagnosis" >&2
+    exit "$exit_code"
+}
+
 run_ee() {
     local label="$1"
     shift
@@ -294,20 +382,50 @@ validate_event_log() {
     local line
     while IFS= read -r line; do
         lines=$((lines + 1))
-        printf '%s\n' "$line" | jq -e '
+        if ! printf '%s\n' "$line" | jq -e '
           .schema == "ee.test_event.v1"
           and (.ts | type == "string")
           and .test_id == "swarm_replay_lab_smoke"
-          and (.kind | IN("command_start", "command_end", "assert_ok"))
-        ' >/dev/null
-    done <"$EVENT_LOG"
+          and (.kind | IN("command_start", "command_end", "assert_ok", "assert_result"))
+        ' >/dev/null; then
+            printf 'error: event log line %s failed schema validation\n' "$lines" >"$VALIDATION_STDERR"
+            cat "$VALIDATION_STDERR" >&2
+            emit_assert_result_with_artifact_paths_and_exit \
+                "event_log_schema_validation_failed" \
+                "validate event log" \
+                "event_log_schema_validation_failed" \
+                1 \
+                1 \
+                0 \
+                "$EVENT_LOG" \
+                "$VALIDATION_STDERR"
+        fi
+    done < <(cat "$EVENT_LOG")
     if [ "$lines" -lt 5 ]; then
-        printf 'error: expected at least 5 test events, got %s\n' "$lines" >&2
-        exit 1
+        printf 'error: expected at least 5 test events, got %s\n' "$lines" >"$VALIDATION_STDERR"
+        cat "$VALIDATION_STDERR" >&2
+        emit_assert_result_with_artifact_paths_and_exit \
+            "event_log_too_short" \
+            "validate event log" \
+            "event_log_too_short" \
+            1 \
+            1 \
+            0 \
+            "$EVENT_LOG" \
+            "$VALIDATION_STDERR"
     fi
     if grep -Fq "$WORKSPACE" "$EVENT_LOG" || grep -Fq "$RUN_ROOT" "$EVENT_LOG"; then
-        printf 'error: event log leaked raw workspace or run root path: %s\n' "$EVENT_LOG" >&2
-        exit 1
+        printf 'error: event log leaked raw workspace or run root path\n' >"$VALIDATION_STDERR"
+        cat "$VALIDATION_STDERR" >&2
+        emit_assert_result_with_artifact_paths_and_exit \
+            "event_log_redaction_failed" \
+            "validate event log" \
+            "event_log_redaction_failed" \
+            1 \
+            1 \
+            0 \
+            "$EVENT_LOG" \
+            "$VALIDATION_STDERR"
     fi
 }
 
@@ -320,16 +438,34 @@ run_ee generate-workload \
 
 if [ "$LAST_EXIT_CODE" -ne 0 ]; then
     printf 'error: generate-workload exited %s\n' "$LAST_EXIT_CODE" >&2
-    exit 1
+    emit_assert_result_with_artifact_paths_and_exit \
+        "generate_workload_command_failed" \
+        "ee --workspace [WORKSPACE] --json lab generate-workload --fixture-seed smoke_replay_lab_smoke_001 --profile small" \
+        "generate_workload_command_failed" \
+        1 \
+        "$LAST_EXIT_CODE" \
+        "$LAST_ELAPSED_MS" \
+        "$LAST_STDOUT" \
+        "$LAST_STDERR"
 fi
 
-jq -e '
+if ! jq -e '
   .schema == "ee.swarm_workload.v1"
   and .sideEffectFree == true
   and .agentCount == 4
   and (.commandSequence | length) == 6
   and .resourceProfileHints.profile == "ci_smoke"
-' "$LAST_STDOUT" >/dev/null
+' "$LAST_STDOUT" >/dev/null; then
+    emit_assert_result_with_artifact_paths_and_exit \
+        "generate_workload_schema_validation_failed" \
+        "ee --workspace [WORKSPACE] --json lab generate-workload --fixture-seed smoke_replay_lab_smoke_001 --profile small" \
+        "generate_workload_schema_validation_failed" \
+        1 \
+        1 \
+        "$LAST_ELAPSED_MS" \
+        "$LAST_STDOUT" \
+        "$LAST_STDERR"
+fi
 
 cp "$LAST_STDOUT" "$TRACE_PATH"
 
@@ -342,10 +478,18 @@ run_ee swarm-replay-dry-run \
 
 if [ "$LAST_EXIT_CODE" -ne 6 ]; then
     printf 'error: dry-run replay expected exit 6 for missing RCH proof, got %s\n' "$LAST_EXIT_CODE" >&2
-    exit 1
+    emit_assert_result_with_artifact_paths_and_exit \
+        "swarm_replay_exit_code_unexpected" \
+        "ee --workspace [WORKSPACE] --json lab swarm replay --trace [RUN]/artifacts/smoke-swarm-workload.json --dry-run" \
+        "swarm_replay_exit_code_unexpected" \
+        1 \
+        "$LAST_EXIT_CODE" \
+        "$LAST_ELAPSED_MS" \
+        "$LAST_STDOUT" \
+        "$LAST_STDERR"
 fi
 
-jq -e '
+if ! jq -e '
   .schema == "ee.swarm_replay_result.v1"
   and .sideEffectFree == true
   and .status == "degraded"
@@ -358,13 +502,31 @@ jq -e '
   and .redactionStatus.absoluteHostPathPresent == false
   and (.warnings | any(contains("swarm_replay_dry_run_admission_only")))
   and (.warnings | any(contains("swarm_replay_rch_proof_missing")))
-' "$LAST_STDOUT" >/dev/null
+' "$LAST_STDOUT" >/dev/null; then
+    emit_assert_result_with_artifact_paths_and_exit \
+        "swarm_replay_schema_validation_failed" \
+        "ee --workspace [WORKSPACE] --json lab swarm replay --trace [RUN]/artifacts/smoke-swarm-workload.json --dry-run" \
+        "swarm_replay_schema_validation_failed" \
+        1 \
+        1 \
+        "$LAST_ELAPSED_MS" \
+        "$LAST_STDOUT" \
+        "$LAST_STDERR"
+fi
 
 if grep -Fq "$WORKSPACE" "$LAST_STDOUT" ||
     grep -Fq "$RUN_ROOT" "$LAST_STDOUT" ||
     grep -Eq '/Users/|/data/projects/|SECRET_TOKEN|raw task content|raw query text|memory body payload|mail body payload|HOME=/' "$LAST_STDOUT"; then
     printf 'error: replay output leaked private or raw fixture content\n' >&2
-    exit 1
+    emit_assert_result_with_artifact_paths_and_exit \
+        "swarm_replay_redaction_failed" \
+        "ee --workspace [WORKSPACE] --json lab swarm replay --trace [RUN]/artifacts/smoke-swarm-workload.json --dry-run" \
+        "swarm_replay_redaction_failed" \
+        1 \
+        1 \
+        "$LAST_ELAPSED_MS" \
+        "$LAST_STDOUT" \
+        "$LAST_STDERR"
 fi
 
 FIRST_FAILURE_DIAGNOSIS="$(
