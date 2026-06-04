@@ -502,6 +502,9 @@ mod graph_surfaces_conformance_v1;
 #[path = "contracts/swarm_brief_conformance_v1.rs"]
 mod swarm_brief_conformance_v1;
 
+#[path = "contracts/swarm_work_packet_claim_gate_conformance.rs"]
+mod swarm_work_packet_claim_gate_conformance;
+
 #[path = "contracts/curate_outcome_audit_schema_contract.rs"]
 mod curate_outcome_audit_schema_contract;
 

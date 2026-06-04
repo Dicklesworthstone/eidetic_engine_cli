@@ -1,6 +1,6 @@
 # Swarm Work Packet
 
-Schema: `ee.swarm.work_packet.v1`
+Schemas: `ee.swarm.work_packet.v1`, `ee.swarm.work_packet.claim_gate.v1`
 
 `ee.swarm.work_packet.v1` is the deterministic, redacted, read-only artifact
 emitted by `ee swarm work-packet --json` before an agent chooses work in a
@@ -12,6 +12,13 @@ provenance, and exact reasons a task is safe, unsafe, blocked, or stale.
 The packet composes existing read-only collectors from `ee swarm brief` and
 `ee swarm next-action`. It must not parse Beads, BV, Agent Mail, RCH, or Git
 with a second independent vocabulary when a collector already exists.
+
+`ee.swarm.work_packet.claim_gate.v1` is the planned `bd-1tlcd.1` projection for
+`ee swarm work-packet --claim-gate --json` and
+`ee swarm work-packet --claim-gate --candidate <bead-id> --json`. It answers a
+single question over the same packet evidence: whether a selected candidate is
+safe to claim now. The schema is marked unshipped until that CLI mode emits the
+contract in current builds.
 
 Versioning: field renames, changed decision semantics, or changed mutation
 policy semantics require a new schema version. Additive fields may remain in
@@ -130,6 +137,29 @@ Implementation contract:
 Non-goals: work packets do not claim Beads, reserve files, send Agent Mail,
 stage Git changes, run Cargo, delete files, schedule agents, or replace Beads,
 Agent Mail, BV, RCH, `ee swarm brief`, or `ee swarm next-action`.
+
+## Claim-gate projection (bd-1tlcd.1)
+
+The claim gate is a read-only projection over `ee.swarm.work_packet.v1`, not a
+second collector and not a mutating helper. It carries `schema =
+ee.swarm.work_packet.claim_gate.v1`, the source `packetId`, a deterministic
+`gateId`, the selected or requested candidate, source-authority booleans, sorted
+reason arrays, and the verdict.
+
+`safeToClaim` is `true` only when the selected candidate decision is
+`safe_to_claim` and the source packet's `recommendedAction.safeToClaim` is
+`true`. `candidate_not_found` and `no_candidate` are explicit gate verdicts so
+harnesses do not infer safety from missing candidate data.
+
+`nextCommandActions[]` is restricted to non-mutating inspection commands:
+`mutatesState` must be `false`. The mutating Beads claim command, when one is
+safe to show, lives only in `claimCommandAction`. When `safeToClaim` is `false`,
+`claimCommandAction` must be `null`.
+
+Non-goals for the claim gate: it does not update Beads, reserve files, send
+Agent Mail, run Cargo, mutate Git, delete files, or bypass human approval for
+destructive actions. It only makes the existing packet decision mechanically
+checkable by agent harnesses.
 
 ## Agent Mail fallback semantics (bd-2z5ly.8)
 

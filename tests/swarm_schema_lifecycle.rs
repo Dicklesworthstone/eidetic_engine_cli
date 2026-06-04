@@ -181,6 +181,13 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         shipped: true,
     },
     SchemaCase {
+        id: "ee.swarm.work_packet.claim_gate.v1",
+        file_name: "ee.swarm.work_packet.claim_gate.v1.json",
+        doc_path: "docs/swarm/work_packet.md",
+        tracking_bead: "bd-1tlcd.1",
+        shipped: false,
+    },
+    SchemaCase {
         // bd-1zb7k.14.1 is closed in the beads tracker (the synthetic
         // incident scenario schema and fixture catalog landed), so the
         // schema is now shipped and available in build.
@@ -312,6 +319,12 @@ const DRIFT_CASES: &[DriftCase] = &[
         command: "ee swarm work-packet --json",
         json_path: ".examples[\"ee.swarm.work_packet.v1\"]",
         fixture_manifest_key: "ee.swarm.work_packet.v1",
+    },
+    DriftCase {
+        schema_id: "ee.swarm.work_packet.claim_gate.v1",
+        command: "ee swarm work-packet --claim-gate --json",
+        json_path: ".data",
+        fixture_manifest_key: "ee.swarm.work_packet.claim_gate.v1",
     },
     DriftCase {
         schema_id: "ee.swarm_incident.v1",

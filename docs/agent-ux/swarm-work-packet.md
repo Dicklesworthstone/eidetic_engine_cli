@@ -13,16 +13,25 @@ send mail, stage files, run Cargo, or execute destructive commands. Agents still
 claim work through Beads, coordinate through Agent Mail, and reserve files with
 the reservation service when those systems are healthy enough.
 
+`ee swarm work-packet --claim-gate --json` is the planned `bd-1tlcd.1`
+read-only gate over the same evidence. Its payload schema is
+`ee.swarm.work_packet.claim_gate.v1`; it separates non-mutating
+`nextCommandActions[]` from the optional mutating `claimCommandAction`.
+Harnesses should only consider the claim command when `safeToClaim` is `true`
+and `verdict` is `safe_to_claim`.
+
 ## Intended Flow
 
 ```bash
 ee swarm next-action --workspace . --include-rch --json
 ee swarm work-packet --workspace . --include-rch --json
+ee swarm work-packet --workspace . --include-rch --claim-gate --json
 ```
 
 After inspecting the packet:
 
-1. If `safeToClaim` is `true`, claim the bead with `br update ... --status in_progress`.
+1. If the claim gate reports `safeToClaim=true`, inspect
+   `nextCommandActions[]`, then use `claimCommandAction` for the Beads claim.
 2. Reserve the packet's suggested file patterns through Agent Mail when Mail is healthy.
 3. Send a short coordination note in the bead thread.
 4. Run only the verification commands listed in `verification.requiredCommands`.

@@ -959,6 +959,65 @@
       },
       "degraded": []
     },
+    "ee.swarm.work_packet.claim_gate.v1": {
+      "schema": "ee.swarm.work_packet.claim_gate.v1",
+      "gateId": "swarm_work_packet_claim_gate_111111111111111111111111",
+      "packetId": "swarm_work_packet_222222222222222222222222",
+      "workspace": "repo:25e38e130474e7f0292de2a3",
+      "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+      "requestedCandidateId": "bd-example.1",
+      "verdict": "safe_to_claim",
+      "safeToClaim": true,
+      "selectedCandidate": {
+        "id": "bd-example.1",
+        "title": "Document a small schema improvement",
+        "source": "beads_ready",
+        "status": "open",
+        "priority": 2,
+        "assignee": null,
+        "decision": "safe_to_claim",
+        "collisionRisk": "none"
+      },
+      "recommendedAction": "inspect_and_claim",
+      "recommendedSafeToClaim": true,
+      "sourceAuthority": {
+        "trackerAuthoritative": true,
+        "trackerHealth": "ok",
+        "agentMailStatus": "healthy",
+        "reservationAuthoritative": true,
+        "inboxAuthoritative": true,
+        "rchSafeToLaunchCargoVerification": true,
+        "sourceCount": 4
+      },
+      "unsafeReasons": [],
+      "staleReasons": [],
+      "sourceRefs": ["br://bd-example.1"],
+      "degradedCodes": [],
+      "nextCommandActions": [
+        {
+          "commandId": "bead_show_candidate",
+          "displayCommand": "br show bd-example.1 --json",
+          "argv": ["br", "show", "bd-example.1", "--json"],
+          "shellRequired": false,
+          "copySafety": "safe_structured_argv",
+          "mutatesState": false,
+          "requiredSubstrate": "beads",
+          "when": "before_claim",
+          "rationale": "Inspect the candidate before mutating tracker state."
+        }
+      ],
+      "claimCommandAction": {
+        "commandId": "bead_claim_candidate",
+        "displayCommand": "br update bd-example.1 --status in_progress --json",
+        "argv": ["br", "update", "bd-example.1", "--status", "in_progress", "--json"],
+        "shellRequired": false,
+        "copySafety": "safe_structured_argv",
+        "mutatesState": true,
+        "requiredSubstrate": "beads",
+        "when": "after_reservation",
+        "rationale": "Claim only after the gate verdict is safe_to_claim and reservations are held."
+      }
+    },
     "ee.swarm_incident.v1": {
       "schema": "ee.swarm_incident.v1",
       "scenarioId": "rch_topology_blocked",

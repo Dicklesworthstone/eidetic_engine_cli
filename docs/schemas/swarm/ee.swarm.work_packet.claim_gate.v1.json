@@ -1,0 +1,335 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.swarm.work_packet.claim_gate.v1.json",
+  "title": "ee.swarm.work_packet.claim_gate.v1",
+  "description": "Read-only claim gate projection derived from ee.swarm.work_packet.v1 for agent harnesses that need a deterministic may-I-claim verdict before mutating Beads or reserving files.",
+  "type": "object",
+  "required": [
+    "schema",
+    "gateId",
+    "packetId",
+    "workspace",
+    "redactionStatus",
+    "requestedCandidateId",
+    "verdict",
+    "safeToClaim",
+    "selectedCandidate",
+    "recommendedAction",
+    "recommendedSafeToClaim",
+    "sourceAuthority",
+    "unsafeReasons",
+    "staleReasons",
+    "sourceRefs",
+    "degradedCodes",
+    "nextCommandActions",
+    "claimCommandAction"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.swarm.work_packet.claim_gate.v1"},
+    "gateId": {
+      "type": "string",
+      "pattern": "^swarm_work_packet_claim_gate_[a-f0-9]{24}$",
+      "description": "Deterministic content identifier for this gate projection."
+    },
+    "packetId": {
+      "type": "string",
+      "pattern": "^swarm_work_packet_[a-f0-9]{24}$",
+      "description": "The source work-packet content identifier."
+    },
+    "workspace": {
+      "type": "string",
+      "description": "Redacted workspace label or stable workspace hash, never an unredacted home path."
+    },
+    "redactionStatus": {
+      "type": "string",
+      "const": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content"
+    },
+    "requestedCandidateId": {
+      "type": ["string", "null"],
+      "description": "The explicitly requested Bead ID when the harness asks about one candidate, otherwise null for the recommended/default candidate."
+    },
+    "verdict": {"$ref": "#/definitions/gateVerdict"},
+    "safeToClaim": {"type": "boolean"},
+    "selectedCandidate": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/definitions/selectedCandidate"}
+      ]
+    },
+    "recommendedAction": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The source packet recommendedAction.action value."
+    },
+    "recommendedSafeToClaim": {
+      "type": ["boolean", "null"],
+      "description": "The source packet recommendedAction.safeToClaim value when present."
+    },
+    "sourceAuthority": {"$ref": "#/definitions/sourceAuthority"},
+    "unsafeReasons": {"$ref": "#/definitions/stringArray"},
+    "staleReasons": {"$ref": "#/definitions/stringArray"},
+    "sourceRefs": {"$ref": "#/definitions/stringArray"},
+    "degradedCodes": {"$ref": "#/definitions/stringArray"},
+    "nextCommandActions": {
+      "type": "array",
+      "description": "Non-mutating inspection actions only. Claim/reopen/update actions are never mixed into this array.",
+      "items": {"$ref": "#/definitions/inspectionCommandAction"}
+    },
+    "claimCommandAction": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/definitions/commandAction"}
+      ],
+      "description": "Mutating Beads claim guidance. Present only when safeToClaim is true and verdict is safe_to_claim."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"safeToClaim": {"const": false}},
+        "required": ["safeToClaim"]
+      },
+      "then": {
+        "properties": {"claimCommandAction": {"const": null}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"safeToClaim": {"const": true}},
+        "required": ["safeToClaim"]
+      },
+      "then": {
+        "properties": {"verdict": {"const": "safe_to_claim"}}
+      }
+    }
+  ],
+  "definitions": {
+    "stringArray": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "safeString": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "anyOf": [
+          {"pattern": "BEGIN PRIVATE KEY"},
+          {"pattern": "BEGIN OPENSSH PRIVATE KEY"},
+          {"pattern": "ghp_[A-Za-z0-9_]+"},
+          {"pattern": "Bearer [A-Za-z0-9._-]+"},
+          {"pattern": "DATABASE_URL="},
+          {"pattern": "From: "},
+          {"pattern": "Subject: "},
+          {"pattern": "Message-ID:"},
+          {"pattern": "body:"},
+          {"pattern": "raw_inbox"},
+          {"pattern": "stdout:"},
+          {"pattern": "stderr:"},
+          {"pattern": "/Users/[^\\s]+"},
+          {"pattern": "/home/[^\\s]+"}
+        ]
+      }
+    },
+    "argvArray": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/definitions/safeString"}
+    },
+    "copySafety": {
+      "type": "string",
+      "enum": [
+        "safe_structured_argv",
+        "display_only",
+        "shell_required_review",
+        "forbidden_until_human_approval"
+      ]
+    },
+    "commandSubstrate": {
+      "type": "string",
+      "enum": ["agent_mail", "beads", "bv", "ee", "git", "human", "jq", "rch", "static_local", "none"]
+    },
+    "commandAction": {
+      "type": "object",
+      "required": [
+        "commandId",
+        "displayCommand",
+        "argv",
+        "shellRequired",
+        "copySafety",
+        "mutatesState",
+        "requiredSubstrate",
+        "when",
+        "rationale"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "commandId": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]+$"},
+        "displayCommand": {"$ref": "#/definitions/safeString"},
+        "argv": {"$ref": "#/definitions/argvArray"},
+        "shellRequired": {"type": "boolean"},
+        "copySafety": {"$ref": "#/definitions/copySafety"},
+        "mutatesState": {"type": "boolean"},
+        "requiredSubstrate": {"$ref": "#/definitions/commandSubstrate"},
+        "when": {"$ref": "#/definitions/safeString"},
+        "rationale": {"$ref": "#/definitions/safeString"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"shellRequired": {"const": true}}, "required": ["shellRequired"]},
+          "then": {"properties": {"copySafety": {"enum": ["shell_required_review", "forbidden_until_human_approval"]}}}
+        },
+        {
+          "if": {"properties": {"copySafety": {"const": "safe_structured_argv"}}, "required": ["copySafety"]},
+          "then": {"properties": {"shellRequired": {"const": false}}}
+        }
+      ]
+    },
+    "inspectionCommandAction": {
+      "description": "Read-only inspection action derived from commandAction. Claim, reopen, update, Cargo, Git staging, and Agent Mail send actions are not valid here.",
+      "allOf": [
+        {"$ref": "#/definitions/commandAction"}
+      ],
+      "required": ["mutatesState"],
+      "properties": {
+        "mutatesState": {"const": false}
+      }
+    },
+    "gateVerdict": {
+      "type": "string",
+      "enum": [
+        "safe_to_claim",
+        "already_owned",
+        "unsafe_due_to_conflict",
+        "blocked_by_dependency",
+        "blocked_by_verification",
+        "stale_but_reclaimable",
+        "stale_review",
+        "external_state_required",
+        "release_operator_required",
+        "rollup_only",
+        "blocked_rollup",
+        "coordinate_first",
+        "blocked",
+        "stale_or_advisory",
+        "skip",
+        "candidate_not_found",
+        "no_candidate"
+      ]
+    },
+    "selectedCandidate": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "source",
+        "status",
+        "priority",
+        "assignee",
+        "decision",
+        "collisionRisk"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "title": {"type": "string"},
+        "source": {"type": "string"},
+        "status": {"type": "string"},
+        "priority": {"type": ["integer", "null"]},
+        "assignee": {"type": ["string", "null"]},
+        "decision": {"$ref": "#/definitions/gateVerdict"},
+        "collisionRisk": {"type": "string", "enum": ["none", "low", "medium", "high", "unknown"]}
+      }
+    },
+    "sourceAuthority": {
+      "type": "object",
+      "required": [
+        "trackerAuthoritative",
+        "trackerHealth",
+        "agentMailStatus",
+        "reservationAuthoritative",
+        "inboxAuthoritative",
+        "rchSafeToLaunchCargoVerification",
+        "sourceCount"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "trackerAuthoritative": {"type": "boolean"},
+        "trackerHealth": {"type": "string"},
+        "agentMailStatus": {"type": "string"},
+        "reservationAuthoritative": {"type": ["boolean", "null"]},
+        "inboxAuthoritative": {"type": ["boolean", "null"]},
+        "rchSafeToLaunchCargoVerification": {"type": ["boolean", "null"]},
+        "sourceCount": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.swarm.work_packet.claim_gate.v1",
+      "gateId": "swarm_work_packet_claim_gate_111111111111111111111111",
+      "packetId": "swarm_work_packet_222222222222222222222222",
+      "workspace": "repo:25e38e130474e7f0292de2a3",
+      "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+      "requestedCandidateId": "bd-example.1",
+      "verdict": "safe_to_claim",
+      "safeToClaim": true,
+      "selectedCandidate": {
+        "id": "bd-example.1",
+        "title": "Document a small schema improvement",
+        "source": "beads_ready",
+        "status": "open",
+        "priority": 2,
+        "assignee": null,
+        "decision": "safe_to_claim",
+        "collisionRisk": "none"
+      },
+      "recommendedAction": "inspect_and_claim",
+      "recommendedSafeToClaim": true,
+      "sourceAuthority": {
+        "trackerAuthoritative": true,
+        "trackerHealth": "ok",
+        "agentMailStatus": "healthy",
+        "reservationAuthoritative": true,
+        "inboxAuthoritative": true,
+        "rchSafeToLaunchCargoVerification": true,
+        "sourceCount": 4
+      },
+      "unsafeReasons": [],
+      "staleReasons": [],
+      "sourceRefs": ["br://bd-example.1"],
+      "degradedCodes": [],
+      "nextCommandActions": [
+        {
+          "commandId": "bead_show_candidate",
+          "displayCommand": "br show bd-example.1 --json",
+          "argv": ["br", "show", "bd-example.1", "--json"],
+          "shellRequired": false,
+          "copySafety": "safe_structured_argv",
+          "mutatesState": false,
+          "requiredSubstrate": "beads",
+          "when": "before_claim",
+          "rationale": "Inspect the candidate before mutating tracker state."
+        }
+      ],
+      "claimCommandAction": {
+        "commandId": "bead_claim_candidate",
+        "displayCommand": "br update bd-example.1 --status in_progress --json",
+        "argv": ["br", "update", "bd-example.1", "--status", "in_progress", "--json"],
+        "shellRequired": false,
+        "copySafety": "safe_structured_argv",
+        "mutatesState": true,
+        "requiredSubstrate": "beads",
+        "when": "after_reservation",
+        "rationale": "Claim only after the gate verdict is safe_to_claim and reservations are held."
+      }
+    }
+  ],
+  "x-ee-status": {
+    "shipped": false,
+    "available_in_build": false,
+    "tracking_bead": "bd-1tlcd.1",
+    "notes": "Schema/contract support for the planned read-only --claim-gate mode; mark shipped only after bd-1tlcd.1 closes with emitted CLI support."
+  },
+  "x-ee-doc": "docs/swarm/work_packet.md"
+}

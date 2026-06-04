@@ -27,6 +27,12 @@ The work-packet contract is `ee.swarm.work_packet.v1`. It is emitted by
 `ee swarm work-packet --json` as a deterministic read-only onboarding artifact
 composed from existing swarm brief and next-action evidence.
 
+The planned claim-gate contract is `ee.swarm.work_packet.claim_gate.v1`. It is
+the read-only `ee swarm work-packet --claim-gate --json` projection for
+answering whether a selected candidate may be claimed. It is tracked by
+`bd-1tlcd.1` and remains marked unshipped until the CLI surface is emitted by
+current builds.
+
 Each schema carries `x-ee-status` so agents can distinguish implemented
 surfaces from documented future contracts. A schema with `"shipped": false`
 must point at an open or in-progress Bead and must also set

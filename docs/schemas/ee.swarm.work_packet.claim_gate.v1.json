@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.swarm.work_packet.claim_gate.v1.json",
+  "title": "ee.swarm.work_packet.claim_gate.v1",
+  "description": "Response-envelope schema for the read-only swarm work-packet claim-gate command. The canonical payload contract lives in docs/schemas/swarm/ee.swarm.work_packet.claim_gate.v1.json.",
+  "type": "object",
+  "required": ["schema", "success", "data", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v2"},
+    "success": {"type": "boolean", "const": true},
+    "data": {
+      "type": "object",
+      "required": [
+        "schema",
+        "gateId",
+        "packetId",
+        "verdict",
+        "safeToClaim",
+        "nextCommandActions",
+        "claimCommandAction"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.swarm.work_packet.claim_gate.v1"},
+        "gateId": {"type": "string"},
+        "packetId": {"type": "string"},
+        "verdict": {"type": "string"},
+        "safeToClaim": {"type": "boolean"},
+        "nextCommandActions": {"type": "array"},
+        "claimCommandAction": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "object"}
+          ]
+        }
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradation"}
+    }
+  },
+  "field_presets": {
+    "minimal": ["*"],
+    "summary": ["*"],
+    "standard": ["*"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": true,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]},
+        "source": {"type": "string"},
+        "sources": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    }
+  }
+}
