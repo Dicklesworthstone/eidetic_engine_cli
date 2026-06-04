@@ -64,7 +64,7 @@
     },
     "recommendedSafeToClaim": {
       "type": ["boolean", "null"],
-      "description": "The source packet recommendedAction.safeToClaim value when present."
+      "description": "Whether the selected or requested candidate is safe under the packet recommendation, candidate identity, tracker authority, Agent Mail authority, and RCH posture."
     },
     "sourceAuthority": {"$ref": "#/definitions/sourceAuthority"},
     "unsafeReasons": {"$ref": "#/definitions/stringArray"},
