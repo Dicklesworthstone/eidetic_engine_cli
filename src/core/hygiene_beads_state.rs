@@ -36,7 +36,7 @@
 //! - **Truncation safety** — the JSONL content scan stops after
 //!   [`BEADS_JSONL_MAX_INSPECT_BYTES`] and emits
 //!   [`degraded::JSONL_INSPECTION_TRUNCATED`]; classification of the
-//!   inspected prefix is unaffected.
+//!   inspected complete-record prefix is unaffected.
 
 use serde::Serialize;
 
@@ -368,18 +368,28 @@ fn scan_jsonl_content(content: Option<&[u8]>) -> (bool, Option<usize>, Vec<&'sta
         }
     };
     let mut bytes = raw;
-    if bytes.len() > BEADS_JSONL_MAX_INSPECT_BYTES {
+    let truncated = bytes.len() > BEADS_JSONL_MAX_INSPECT_BYTES;
+    if truncated {
         bytes = &bytes[..BEADS_JSONL_MAX_INSPECT_BYTES];
         degraded.push(degraded::JSONL_INSPECTION_TRUNCATED);
     }
     let text = match std::str::from_utf8(bytes) {
         Ok(text) => text,
+        Err(error) if truncated && error.error_len().is_none() => {
+            std::str::from_utf8(&bytes[..error.valid_up_to()])
+                .expect("valid_up_to must split at a UTF-8 boundary")
+        }
         Err(_) => {
             // Non-UTF-8 content in a JSONL export is itself a parse
             // error; report at line 0 (the file as a whole).
             degraded.push(degraded::PARSE_ERROR);
             return (false, Some(0), finalized_degraded_codes(degraded));
         }
+    };
+    let text = if truncated {
+        complete_jsonl_record_prefix(text)
+    } else {
+        text
     };
     let mut conflict_markers_found = false;
     let mut parse_error_line: Option<usize> = None;
@@ -411,6 +421,16 @@ fn scan_jsonl_content(content: Option<&[u8]>) -> (bool, Option<usize>, Vec<&'sta
         parse_error_line,
         finalized_degraded_codes(degraded),
     )
+}
+
+fn complete_jsonl_record_prefix(text: &str) -> &str {
+    if text.is_empty() || text.ends_with('\n') {
+        return text;
+    }
+    match text.rfind('\n') {
+        Some(index) => &text[..=index],
+        None => "",
+    }
 }
 
 fn finalized_degraded_codes(mut degraded: Vec<&'static str>) -> Vec<&'static str> {
@@ -753,6 +773,68 @@ mod tests {
             metadata_signal: BeadsMetadataSignal::Unknown,
             reservations: &[],
         });
+        assert!(
+            state
+                .degraded_codes
+                .contains(&degraded::JSONL_INSPECTION_TRUNCATED)
+        );
+    }
+
+    #[test]
+    fn truncated_jsonl_content_ignores_incomplete_trailing_record() {
+        let mut body = Vec::with_capacity(BEADS_JSONL_MAX_INSPECT_BYTES + 128);
+        body.extend_from_slice(b"{\"id\":\"bd-a\",\"title\":\"complete\"}\n");
+        body.extend_from_slice(b"{\"id\":\"bd-b\",\"title\":\"");
+        while body.len() <= BEADS_JSONL_MAX_INSPECT_BYTES {
+            body.push(b'a');
+        }
+        body.extend_from_slice(b"\"}\n");
+
+        let snap = snapshot(vec![entry(BEADS_JSONL_RELATIVE_PATH, ".", "M", "ordinary")]);
+        let state = classify_beads_state(BeadsHygieneInputs {
+            snapshot: &snap,
+            jsonl_content: Some(&body),
+            self_agent_name: Some("TopazSpring"),
+            metadata_signal: BeadsMetadataSignal::Unknown,
+            reservations: &[],
+        });
+
+        assert_eq!(state.classification, BeadsClassification::BeadsExportOnly);
+        assert!(state.parse_error_line.is_none());
+        assert!(!state.degraded_codes.contains(&degraded::PARSE_ERROR));
+        assert!(
+            state
+                .degraded_codes
+                .contains(&degraded::JSONL_INSPECTION_TRUNCATED)
+        );
+    }
+
+    #[test]
+    fn truncated_jsonl_content_preserves_complete_record_parse_errors() {
+        let mut body = Vec::with_capacity(BEADS_JSONL_MAX_INSPECT_BYTES + 128);
+        body.extend_from_slice(b"{\"id\":\"bd-a\",\"title\":\"complete\"}\n");
+        body.extend_from_slice(b"{not valid json}\n");
+        body.extend_from_slice(b"{\"id\":\"bd-b\",\"title\":\"");
+        while body.len() <= BEADS_JSONL_MAX_INSPECT_BYTES {
+            body.push(b'a');
+        }
+        body.extend_from_slice(b"\"}\n");
+
+        let snap = snapshot(vec![entry(BEADS_JSONL_RELATIVE_PATH, ".", "M", "ordinary")]);
+        let state = classify_beads_state(BeadsHygieneInputs {
+            snapshot: &snap,
+            jsonl_content: Some(&body),
+            self_agent_name: Some("TopazSpring"),
+            metadata_signal: BeadsMetadataSignal::Unknown,
+            reservations: &[],
+        });
+
+        assert_eq!(
+            state.classification,
+            BeadsClassification::BeadsConflictOrParseError
+        );
+        assert_eq!(state.parse_error_line, Some(2));
+        assert!(state.degraded_codes.contains(&degraded::PARSE_ERROR));
         assert!(
             state
                 .degraded_codes
