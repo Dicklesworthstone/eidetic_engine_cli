@@ -85,6 +85,11 @@ CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS = [
 COMMAND_ACTION_ALLOWED_FIELDS = {
     field for field, _suffix in CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS
 }
+COMMAND_ACTION_SAFE_STRING_FIELDS = [
+    ("displayCommand", "display_command"),
+    ("when", "when"),
+    ("rationale", "rationale"),
+]
 MACHINE_RESPONSE_SCHEMAS = {
     "ee.error.v2",
     "ee.response.v2",
@@ -346,11 +351,7 @@ def malformed_command_action_reasons(action, reason_prefix, reason_scope="claim_
     ):
         reasons.append(f"malformed_{reason_scope}_{reason_prefix}_command_id")
 
-    for field, suffix in [
-        ("displayCommand", "display_command"),
-        ("when", "when"),
-        ("rationale", "rationale"),
-    ]:
+    for field, suffix in COMMAND_ACTION_SAFE_STRING_FIELDS:
         value = action.get(field)
         if field in action and safe_command_string_malformed(value):
             reasons.append(f"malformed_{reason_scope}_{reason_prefix}_{suffix}")

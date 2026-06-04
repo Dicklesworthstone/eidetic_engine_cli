@@ -2135,6 +2135,51 @@ class ErrorHandling(unittest.TestCase):
 
 
 class ConsumerDecisionSchemaContract(unittest.TestCase):
+    def test_command_action_consumer_constants_match_work_packet_schema(self):
+        schema = load_fixture("docs/schemas/swarm/ee.swarm.work_packet.v1.json")
+        command_action = schema["definitions"]["commandAction"]
+
+        self.assertEqual(
+            consumer.COPY_SAFETY_VALUES,
+            set(schema["definitions"]["copySafety"]["enum"]),
+        )
+        self.assertEqual(
+            consumer.SHELL_REQUIRED_COPY_SAFETY_VALUES,
+            set(
+                command_action["allOf"][0]["then"]["properties"]["copySafety"]["enum"]
+            ),
+        )
+        self.assertEqual(
+            consumer.COMMAND_SUBSTRATE_VALUES,
+            set(schema["definitions"]["commandSubstrate"]["enum"]),
+        )
+        self.assertEqual(
+            [
+                field
+                for field, _suffix in consumer.CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS
+            ],
+            command_action["required"],
+        )
+        self.assertEqual(
+            consumer.COMMAND_ACTION_ALLOWED_FIELDS,
+            set(command_action["properties"]),
+        )
+        self.assertFalse(command_action["additionalProperties"])
+        self.assertEqual(
+            consumer.COMMAND_ID_PATTERN.pattern,
+            command_action["properties"]["commandId"]["pattern"],
+        )
+        self.assertEqual(
+            [field for field, _suffix in consumer.COMMAND_ACTION_SAFE_STRING_FIELDS],
+            ["displayCommand", "when", "rationale"],
+        )
+        for field, _suffix in consumer.COMMAND_ACTION_SAFE_STRING_FIELDS:
+            with self.subTest(field=field):
+                self.assertGreaterEqual(
+                    command_action["properties"][field].get("minLength", 1),
+                    1,
+                )
+
     def assert_decision_matches_schema_constraints(self, decision, schema):
         source_schema = decision["sourceSchema"]
         self.assertTrue(
