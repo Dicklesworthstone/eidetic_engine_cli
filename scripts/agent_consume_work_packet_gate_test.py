@@ -166,6 +166,39 @@ class ClaimGateConsumer(unittest.TestCase):
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
         self.assertFalse(claim["runnable"])
 
+    def test_malformed_source_authority_scalars_fail_closed_and_emit_schema_types(self):
+        gate = safe_gate()
+        gate["sourceAuthority"].update(
+            {
+                "trackerAuthoritative": "true",
+                "reservationAuthoritative": ["true"],
+                "inboxAuthoritative": {"value": True},
+                "rchSafeToLaunchCargoVerification": 1,
+                "sourceCount": -1,
+            }
+        )
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIsNone(decision["sourceSummary"]["trackerAuthoritative"])
+        self.assertIsNone(decision["sourceSummary"]["reservationAuthoritative"])
+        self.assertIsNone(decision["sourceSummary"]["inboxAuthoritative"])
+        self.assertIsNone(
+            decision["sourceSummary"]["rchSafeToLaunchCargoVerification"]
+        )
+        self.assertIsNone(decision["sourceSummary"]["sourceCount"])
+        for reason in [
+            "malformed_claim_gate_tracker_authoritative",
+            "malformed_claim_gate_reservation_authoritative",
+            "malformed_claim_gate_inbox_authoritative",
+            "malformed_claim_gate_rch_safe_to_launch_cargo_verification",
+            "malformed_claim_gate_source_count",
+        ]:
+            self.assertIn(reason, decision["whyNotSafe"])
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+
     def test_claim_gate_unsafe_or_stale_reason_contradiction_fails_closed(self):
         gate = safe_gate()
         gate["unsafeReasons"] = ["peer_dirty_file"]
@@ -673,6 +706,82 @@ class WorkPacketConsumer(unittest.TestCase):
         self.assertIn("malformed_agent_mail", decision["whyNotSafe"])
         self.assertIn("malformed_rch_proof_posture", decision["whyNotSafe"])
         self.assertIn("malformed_verification", decision["whyNotSafe"])
+
+    def test_malformed_authority_scalar_fields_downgrade_otherwise_safe_packet(self):
+        packet = {
+            "schema": "ee.swarm.work_packet.v1",
+            "safeToClaim": True,
+            "recommendedAction": {
+                "action": "inspect_and_claim",
+                "candidateId": "bd-safe-looking.2",
+                "safeToClaim": True,
+                "suggestedCommands": [],
+                "suggestedCommandActions": [
+                    safe_action(
+                        "bead_claim_candidate",
+                        [
+                            "br",
+                            "update",
+                            "bd-safe-looking.2",
+                            "--status",
+                            "in_progress",
+                            "--json",
+                        ],
+                        mutates=True,
+                    )
+                ],
+            },
+            "candidates": [
+                {
+                    "id": "bd-safe-looking.2",
+                    "decision": "safe_to_claim",
+                    "unsafeReasons": [],
+                    "staleReasons": [],
+                }
+            ],
+            "coordination": {
+                "agentMail": {
+                    "status": "healthy",
+                    "reservationAuthoritative": "true",
+                    "inboxAuthoritative": [],
+                }
+            },
+            "trackerIntegrity": {
+                "health": "ok",
+                "brReadsAuthoritative": "true",
+                "requiresCandidateDowngrade": "false",
+            },
+            "rchProofPosture": {
+                "safeToLaunchCargoVerification": "true",
+                "blockerCodes": [],
+            },
+            "sourceProvenance": [{"code": "beads_ready"}],
+            "degraded": [],
+        }
+
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertTrue(decision["mutatingActionsRequireHuman"])
+        self.assertIsNone(decision["sourceSummary"]["trackerAuthoritative"])
+        self.assertIsNone(decision["sourceSummary"]["requiresCandidateDowngrade"])
+        self.assertIsNone(decision["sourceSummary"]["reservationAuthoritative"])
+        self.assertIsNone(decision["sourceSummary"]["inboxAuthoritative"])
+        self.assertIsNone(
+            decision["sourceSummary"]["rchSafeToLaunchCargoVerification"]
+        )
+        self.assertEqual(decision["sourceSummary"]["sourceCount"], 1)
+        for reason in [
+            "malformed_tracker_br_reads_authoritative",
+            "malformed_tracker_requires_candidate_downgrade",
+            "malformed_agent_mail_reservation_authoritative",
+            "malformed_agent_mail_inbox_authoritative",
+            "malformed_rch_safe_to_launch_cargo_verification",
+        ]:
+            self.assertIn(reason, decision["whyNotSafe"])
+        claim = decision["argvActions"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
 
     def test_secret_shaped_strings_are_redacted_and_not_runnable(self):
         gate = safe_gate()

@@ -73,6 +73,30 @@ def dict_or_empty(value):
     return value if isinstance(value, dict) else {}
 
 
+def bool_or_none(value):
+    return value if isinstance(value, bool) else None
+
+
+def nonnegative_int_or_none(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
+def malformed_boolean_field_reasons(container, field_reasons):
+    if not isinstance(container, dict):
+        return []
+
+    reasons = []
+    for field, reason in field_reasons:
+        value = container.get(field)
+        if field in container and value is not None and not isinstance(value, bool):
+            reasons.append(reason)
+    return reasons
+
+
 def malformed_packet_map_reasons(packet):
     reasons = []
     for key, reason in [
@@ -93,6 +117,88 @@ def malformed_packet_map_reasons(packet):
     agent_mail = coordination.get("agentMail")
     if agent_mail is not None and not isinstance(agent_mail, dict):
         reasons.append("malformed_agent_mail")
+    return reasons
+
+
+def malformed_packet_scalar_reasons(packet):
+    tracker = dict_or_empty(packet.get("trackerIntegrity"))
+    coordination = dict_or_empty(packet.get("coordination"))
+    agent_mail = dict_or_empty(coordination.get("agentMail"))
+    rch = dict_or_empty(packet.get("rchProofPosture"))
+    legacy_verification = dict_or_empty(packet.get("verification"))
+
+    reasons = []
+    reasons.extend(
+        malformed_boolean_field_reasons(
+            tracker,
+            [
+                ("brReadsAuthoritative", "malformed_tracker_br_reads_authoritative"),
+                (
+                    "requiresCandidateDowngrade",
+                    "malformed_tracker_requires_candidate_downgrade",
+                ),
+            ],
+        )
+    )
+    reasons.extend(
+        malformed_boolean_field_reasons(
+            agent_mail,
+            [
+                (
+                    "reservationAuthoritative",
+                    "malformed_agent_mail_reservation_authoritative",
+                ),
+                ("inboxAuthoritative", "malformed_agent_mail_inbox_authoritative"),
+            ],
+        )
+    )
+    reasons.extend(
+        malformed_boolean_field_reasons(
+            rch,
+            [
+                (
+                    "safeToLaunchCargoVerification",
+                    "malformed_rch_safe_to_launch_cargo_verification",
+                )
+            ],
+        )
+    )
+    reasons.extend(
+        malformed_boolean_field_reasons(
+            legacy_verification,
+            [("remoteOnlySafe", "malformed_verification_remote_only_safe")],
+        )
+    )
+    return reasons
+
+
+def malformed_claim_gate_authority_reasons(gate):
+    authority = gate.get("sourceAuthority")
+    if not isinstance(authority, dict):
+        return []
+
+    reasons = malformed_boolean_field_reasons(
+        authority,
+        [
+            ("trackerAuthoritative", "malformed_claim_gate_tracker_authoritative"),
+            (
+                "reservationAuthoritative",
+                "malformed_claim_gate_reservation_authoritative",
+            ),
+            ("inboxAuthoritative", "malformed_claim_gate_inbox_authoritative"),
+            (
+                "rchSafeToLaunchCargoVerification",
+                "malformed_claim_gate_rch_safe_to_launch_cargo_verification",
+            ),
+        ],
+    )
+    source_count = authority.get("sourceCount")
+    if (
+        "sourceCount" in authority
+        and source_count is not None
+        and nonnegative_int_or_none(source_count) is None
+    ):
+        reasons.append("malformed_claim_gate_source_count")
     return reasons
 
 
@@ -170,16 +276,18 @@ def source_summary_from_gate(gate):
         authority = {}
     return {
         "trackerHealth": redact_text(authority.get("trackerHealth"), 64),
-        "trackerAuthoritative": authority.get("trackerAuthoritative"),
+        "trackerAuthoritative": bool_or_none(authority.get("trackerAuthoritative")),
         "requiresCandidateDowngrade": None,
         "agentMailStatus": redact_text(authority.get("agentMailStatus"), 64),
-        "reservationAuthoritative": authority.get("reservationAuthoritative"),
-        "inboxAuthoritative": authority.get("inboxAuthoritative"),
-        "rchPosture": None,
-        "rchSafeToLaunchCargoVerification": authority.get(
-            "rchSafeToLaunchCargoVerification"
+        "reservationAuthoritative": bool_or_none(
+            authority.get("reservationAuthoritative")
         ),
-        "sourceCount": authority.get("sourceCount"),
+        "inboxAuthoritative": bool_or_none(authority.get("inboxAuthoritative")),
+        "rchPosture": None,
+        "rchSafeToLaunchCargoVerification": bool_or_none(
+            authority.get("rchSafeToLaunchCargoVerification")
+        ),
+        "sourceCount": nonnegative_int_or_none(authority.get("sourceCount")),
     }
 
 
@@ -192,17 +300,23 @@ def source_summary_from_packet(packet):
     legacy_verification = dict_or_empty(packet.get("verification"))
     return {
         "trackerHealth": redact_text(tracker.get("health"), 64),
-        "trackerAuthoritative": tracker.get("brReadsAuthoritative"),
-        "requiresCandidateDowngrade": tracker.get("requiresCandidateDowngrade"),
+        "trackerAuthoritative": bool_or_none(tracker.get("brReadsAuthoritative")),
+        "requiresCandidateDowngrade": bool_or_none(
+            tracker.get("requiresCandidateDowngrade")
+        ),
         "agentMailStatus": redact_text(agent_mail_status, 64),
-        "reservationAuthoritative": agent_mail.get("reservationAuthoritative"),
-        "inboxAuthoritative": agent_mail.get("inboxAuthoritative"),
+        "reservationAuthoritative": bool_or_none(
+            agent_mail.get("reservationAuthoritative")
+        ),
+        "inboxAuthoritative": bool_or_none(agent_mail.get("inboxAuthoritative")),
         "rchPosture": redact_text(
             rch.get("posture") or legacy_verification.get("rchPosture"), 64
         ),
-        "rchSafeToLaunchCargoVerification": rch.get("safeToLaunchCargoVerification")
-        if "safeToLaunchCargoVerification" in rch
-        else legacy_verification.get("remoteOnlySafe"),
+        "rchSafeToLaunchCargoVerification": bool_or_none(
+            rch.get("safeToLaunchCargoVerification")
+            if "safeToLaunchCargoVerification" in rch
+            else legacy_verification.get("remoteOnlySafe")
+        ),
         "sourceCount": len(list_items(packet.get("sourceProvenance"))),
     }
 
@@ -381,6 +495,7 @@ def packet_safe_to_claim(packet, candidate):
         and not stale_reasons
         and not compact_list(packet.get("doNotProceedBecause"))
         and not malformed_packet_map_reasons(packet)
+        and not malformed_packet_scalar_reasons(packet)
         and tracker_authoritative is not False
         and agent_mail.get("status") != "semantic_readiness_failed"
         and rch_safe is not False
@@ -424,6 +539,7 @@ def packet_why_not_safe(packet, candidate, safe_to_claim):
             reasons.append("stale_but_reclaimable_requires_inspection")
 
     reasons.extend(malformed_packet_map_reasons(packet))
+    reasons.extend(malformed_packet_scalar_reasons(packet))
 
     tracker = dict_or_empty(packet.get("trackerIntegrity"))
     if tracker.get("brReadsAuthoritative") is False:
@@ -487,6 +603,8 @@ def claim_gate_consistency_reasons(gate):
     if not isinstance(authority, dict):
         reasons.append("claim_gate_source_authority_missing")
         return compact_list(reasons)
+
+    reasons.extend(malformed_claim_gate_authority_reasons(gate))
 
     if authority.get("trackerAuthoritative") is not True:
         tracker_health = redact_text(authority.get("trackerHealth") or "unknown", 64)
