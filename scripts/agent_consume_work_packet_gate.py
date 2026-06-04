@@ -59,6 +59,9 @@ CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS = [
     ("when", "when"),
     ("rationale", "rationale"),
 ]
+COMMAND_ACTION_ALLOWED_FIELDS = {
+    field for field, _suffix in CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS
+}
 MACHINE_RESPONSE_SCHEMAS = {
     "ee.error.v2",
     "ee.response.v2",
@@ -276,6 +279,11 @@ def malformed_command_action_reasons(action, reason_prefix, reason_scope="claim_
         return []
 
     reasons = []
+    for field in action:
+        if field not in COMMAND_ACTION_ALLOWED_FIELDS:
+            reasons.append(f"malformed_{reason_scope}_{reason_prefix}_unexpected_field")
+            break
+
     for field, suffix in CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS:
         if field not in action:
             reasons.append(f"missing_{reason_scope}_{reason_prefix}_{suffix}")

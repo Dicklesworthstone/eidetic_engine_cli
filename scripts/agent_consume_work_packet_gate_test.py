@@ -382,6 +382,25 @@ class ClaimGateConsumer(unittest.TestCase):
                 ][0]
                 self.assertFalse(action["runnable"])
 
+    def test_extra_command_action_fields_fail_closed(self):
+        gate = safe_gate()
+        gate["nextCommandActions"][0]["shellCommand"] = "br show bd-safe.1 --json"
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "malformed_claim_gate_next_command_action_unexpected_field",
+            decision["whyNotSafe"],
+        )
+        action = [
+            action
+            for action in decision["argvActions"]
+            if action["actionKind"] == "inspection"
+        ][0]
+        self.assertFalse(action["runnable"])
+        self.assertEqual(action["reason"], "malformed_command_action")
+
     def test_malformed_command_action_fields_fail_closed(self):
         gate = safe_gate()
         gate["nextCommandActions"][0].update(
@@ -849,6 +868,45 @@ class WorkPacketConsumer(unittest.TestCase):
                         for action in decision["argvActions"]
                     )
                 )
+
+    def test_extra_packet_command_action_fields_fail_closed(self):
+        packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        action = safe_action(
+            "bead_claim_candidate",
+            ["br", "update", "bd-safe", "--status", "in_progress", "--json"],
+            mutates=True,
+        )
+        action["shellCommand"] = "br update bd-safe --status in_progress --json"
+        packet["data"]["recommendedAction"] = {
+            "action": "inspect_and_claim",
+            "candidateId": "bd-safe",
+            "safeToClaim": True,
+            "suggestedCommands": [],
+            "suggestedCommandActions": [action],
+        }
+        packet["data"]["candidates"] = [
+            {
+                "id": "bd-safe",
+                "decision": "safe_to_claim",
+                "unsafeReasons": [],
+                "staleReasons": [],
+            }
+        ]
+
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "malformed_packet_recommended_command_action_unexpected_field",
+            decision["whyNotSafe"],
+        )
+        claim = [
+            action
+            for action in decision["argvActions"]
+            if action["actionKind"] == "recommended"
+        ][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "malformed_command_action")
 
     def test_null_packet_command_action_required_fields_fail_closed(self):
         for field, suffix in consumer.CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS:
