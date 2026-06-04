@@ -3,13 +3,14 @@
 
 Reads an `ee swarm work-packet --json` or
 `ee swarm work-packet --claim-gate --json` response from stdin and emits a
-small JSON decision for agent harnesses. The consumer never executes commands
-and never shell-parses legacy command strings.
+small JSON decision for agent harnesses. The consumer never executes commands;
+legacy command strings are used only as diagnostic provenance.
 """
 
 import argparse
 import json
 import re
+import shlex
 import sys
 
 OUTPUT_SCHEMA = "ee.agent.work_packet_gate_decision.v1"
@@ -1257,7 +1258,10 @@ def stale_claim_gate_binary_error(error):
 
 def invocation_is_swarm_work_packet(invocation):
     if isinstance(invocation, str):
-        parts = invocation.split()
+        try:
+            parts = shlex.split(invocation)
+        except ValueError:
+            return False
     elif isinstance(invocation, list):
         parts = [part for part in invocation if isinstance(part, str) and part]
     else:

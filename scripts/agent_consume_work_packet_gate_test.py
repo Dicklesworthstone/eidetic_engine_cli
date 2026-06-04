@@ -2233,6 +2233,51 @@ class ErrorHandling(unittest.TestCase):
         self.assertEqual(decision["argvActions"], [])
         self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
 
+    def test_stale_claim_gate_binary_detection_accepts_quoted_string_global_flag_value(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "usage",
+                    "message": "unexpected argument '--candidate' found",
+                    "details": {
+                        "invocation": (
+                            'ee --workspace "/tmp/project root" swarm work-packet '
+                            "--candidate bd-safe.1"
+                        )
+                    },
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
+
+    def test_stale_claim_gate_binary_detection_malformed_string_invocation_does_not_force_surface(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "usage",
+                    "message": "unexpected argument '--candidate' found",
+                    "details": {
+                        "invocation": (
+                            'ee --workspace "/tmp/project root swarm work-packet '
+                            "--candidate bd-safe.1"
+                        )
+                    },
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertIn("error:usage", decision["whyNotSafe"])
+        self.assertNotIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
+
     def test_stale_claim_gate_binary_detection_accepts_equals_global_flags(self):
         decision = consumer.consume(
             {
