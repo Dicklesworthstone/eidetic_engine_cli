@@ -49,9 +49,20 @@ the JSON event.
 `ee swarm brief` does not call live Agent Mail MCP tools. Without
 `--agent-mail-snapshot`, it only performs a tiny bounded probe of
 `127.0.0.1:8765/health` so the degraded message can say whether the local health
-endpoint appears reachable. Pass a redacted output file from this script with
-`--agent-mail-snapshot <path>` when the brief must include reservations, unread
-counts, or thread freshness.
+endpoint appears reachable.
+
+The output from `scripts/swarm_coordination_health.sh` is health evidence only.
+It uses schema `ee.swarm.coordination_health.v1` and can explain degraded
+transport or semantic-readiness failures, but it does not contain reservations,
+agent inventory, unread counts, or thread freshness. Do not treat it as a full
+Agent Mail snapshot.
+
+When the brief must include reservations, unread counts, or thread freshness,
+pass a redacted Agent Mail snapshot with `--agent-mail-snapshot <path>`. The
+snapshot must follow the producer contract in
+`docs/swarm/coordination_snapshot.md`: it should include the
+`file_reservations`, `agents`, `inbox`, and `threads` arrays, using empty arrays
+only for classes the producer actually checked.
 
 Useful environment overrides:
 
