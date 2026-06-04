@@ -983,11 +983,18 @@ These two labels are **mutually exclusive** and govern what "closing a bead" mea
    stale, blocked by RCH, or reports any other verdict, stop at inspection and
    coordinate through Agent Mail or Beads comments.
 
+   The RCH authority fields are intentionally separate: when
+   `sourceAuthority.rchRemoteOnlyRequired` is true,
+   `sourceAuthority.rchSafeToLaunchCargoVerification` must also be true.
+   Harnesses fail closed when remote-only verification is required and the
+   positive RCH proof is missing or false; a green local compile posture is not
+   enough to claim Rust work.
+
    Version guard: if the installed `ee` rejects `--claim-gate` or
    `--candidate` as an unexpected argument, treat that binary as stale relative
-   to the current source/docs contract. Stop and coordinate for an approved
-   RCH/release-path rebuild; do not run a BV claim command and do not rebuild
-   or install `ee` locally with Cargo as a workaround.
+   to the current source/docs contract. Stop at inspection, coordinate for an
+   approved RCH/release-path rebuild, run no BV claim command, and do not
+   rebuild or install `ee` locally with Cargo as a workaround.
 
 3. **Reserve edit surface (Mail):**
    ```

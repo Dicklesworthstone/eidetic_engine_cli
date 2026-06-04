@@ -767,12 +767,18 @@ Operator workflow for crowded repos:
    If the installed `ee` rejects `--claim-gate` or `--candidate` as an
    unexpected argument, treat that binary as stale relative to the current
    source/docs contract. Stop at inspection, coordinate for an approved
-   RCH/release-path rebuild, and do not run a BV claim command or local Cargo
-   install as a workaround.
+   RCH/release-path rebuild, run no BV claim command, and do not use local
+   Cargo install as a workaround.
 4. Reserve edit surfaces through Agent Mail and mark the bead with
    `br update <id> --status in_progress --json` only when the gate reports
    `safeToClaim=true`, `verdict=safe_to_claim`, and a structured
    `claimCommandAction` for that candidate.
+   The RCH authority fields are intentionally separate:
+   `sourceAuthority.rchRemoteOnlyRequired=true` requires
+   `sourceAuthority.rchSafeToLaunchCargoVerification=true`. Harnesses fail
+   closed when remote-only verification is required and the positive RCH proof
+   is missing or false; a green local compile posture is not enough to claim
+   Rust work.
    The reference consumer output schema is
    `docs/schemas/ee.agent.work_packet_gate_decision.v1.json`.
 5. Use RCH for Cargo verification, especially when the brief reports `rec.resource_pressure.use_rch_for_cargo`.

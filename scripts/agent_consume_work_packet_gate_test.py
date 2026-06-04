@@ -1644,6 +1644,8 @@ class WorkPacketDocsContract(unittest.TestCase):
             "RCH/release-path rebuild",
         ]
         docs = [
+            "AGENTS.md",
+            "README.md",
             "docs/agent-ux/swarm-work-packet.md",
             "docs/swarm/work_packet.md",
         ]
@@ -1663,6 +1665,8 @@ class WorkPacketDocsContract(unittest.TestCase):
             "green local compile posture is not enough",
         ]
         docs = [
+            "AGENTS.md",
+            "README.md",
             "docs/agent-ux/swarm-work-packet.md",
             "docs/swarm/work_packet.md",
         ]
