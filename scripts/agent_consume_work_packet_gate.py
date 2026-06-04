@@ -111,6 +111,7 @@ SECRET_PATTERNS = [
     re.compile(r"Bearer [A-Za-z0-9._-]+"),
     re.compile(r"\b(?:DATABASE_URL|TOKEN|API_KEY|SECRET|PASSWORD)=[^\s]+"),
     re.compile(r"\b(?:From|Subject|Message-ID):\s*[^\n]+"),
+    re.compile(r"\bbody:[^\n]*"),
     re.compile(r"\b(?:raw_inbox|stdout|stderr):[^\n]*"),
     re.compile(r"/(?:Users|home)/[^\s]+"),
 ]

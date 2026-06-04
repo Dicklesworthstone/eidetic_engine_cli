@@ -489,6 +489,21 @@ class ClaimGateConsumer(unittest.TestCase):
         self.assertFalse(claim["runnable"])
         self.assertEqual(claim["reason"], "malformed_command_action")
 
+    def test_safe_command_string_body_marker_fails_closed(self):
+        gate = safe_gate()
+        gate["claimCommandAction"]["when"] = "body: raw mailbox content"
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "malformed_claim_gate_claim_command_action_when",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "malformed_command_action")
+
     def test_display_only_claim_action_fails_closed_even_when_schema_valid(self):
         gate = safe_gate()
         gate["claimCommandAction"]["copySafety"] = "display_only"
