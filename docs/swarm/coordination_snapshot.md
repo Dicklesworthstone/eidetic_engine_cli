@@ -117,17 +117,24 @@ degraded note through the health or semantic-readiness fields.
 ## Mutation Boundary
 
 Snapshot collection must be read-only. Allowed sources include read-only Agent
-Mail inventory, reservation, inbox-count, and thread-summary calls, plus the
-health script:
+Mail inventory, reservation, inbox-count, and thread-summary calls. Inbox calls
+must be body-free, must not pass `--include-bodies`, and must not mark messages
+read.
 
 ```bash
-scripts/swarm_coordination_health.sh
 am agents list --project "$PWD" --json
 am file_reservations list "$PWD" --active-only
 am robot reservations --project "$PWD" --all --format json
 am robot status --project "$PWD" --format json
 am mail inbox --project "$PWD" --agent "$AGENT_NAME" --limit 20 --json
 ```
+
+`scripts/swarm_coordination_health.sh` is not a full snapshot producer because
+it can run smoke checks, including send checks. Its
+`ee.swarm.coordination_health.v1` output may be merged into snapshot diagnostics
+as health evidence, but the full producer must not rely on that script as the
+source for reservations, inbox counts, agent roster, or thread freshness unless
+a future no-send snapshot mode is added and tested.
 
 Forbidden during snapshot production:
 
