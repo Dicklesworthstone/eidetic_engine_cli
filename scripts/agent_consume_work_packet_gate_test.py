@@ -268,6 +268,23 @@ class ClaimGateConsumer(unittest.TestCase):
         self.assertFalse(claim["runnable"])
         self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
 
+    def test_missing_required_claim_gate_fields_fail_closed(self):
+        for field, reason in consumer.CLAIM_GATE_REQUIRED_FIELDS:
+            with self.subTest(field=field):
+                gate = safe_gate()
+                gate.pop(field)
+
+                decision = consumer.consume(envelope(gate))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertIn(reason, decision["whyNotSafe"])
+                self.assertFalse(
+                    any(
+                        action["runnable"] and action["mutatesState"]
+                        for action in decision["argvActions"]
+                    )
+                )
+
     def test_malformed_next_command_action_entry_fails_closed(self):
         gate = safe_gate()
         gate["nextCommandActions"].append("br show bd-safe.1 --json")

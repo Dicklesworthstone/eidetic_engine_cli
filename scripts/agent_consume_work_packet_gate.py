@@ -16,6 +16,25 @@ OUTPUT_SCHEMA = "ee.agent.work_packet_gate_decision.v1"
 CLAIM_GATE_SCHEMA = "ee.swarm.work_packet.claim_gate.v1"
 WORK_PACKET_SCHEMA = "ee.swarm.work_packet.v1"
 SAFE_COPY = "safe_structured_argv"
+CLAIM_GATE_REQUIRED_FIELDS = [
+    ("gateId", "missing_claim_gate_gate_id"),
+    ("packetId", "missing_claim_gate_packet_id"),
+    ("workspace", "missing_claim_gate_workspace"),
+    ("redactionStatus", "missing_claim_gate_redaction_status"),
+    ("requestedCandidateId", "missing_claim_gate_requested_candidate_id"),
+    ("verdict", "missing_claim_gate_verdict"),
+    ("safeToClaim", "missing_claim_gate_safe_to_claim"),
+    ("selectedCandidate", "missing_claim_gate_selected_candidate"),
+    ("recommendedAction", "missing_claim_gate_recommended_action"),
+    ("recommendedSafeToClaim", "missing_claim_gate_recommended_safe_to_claim"),
+    ("sourceAuthority", "missing_claim_gate_source_authority"),
+    ("unsafeReasons", "missing_claim_gate_unsafe_reasons"),
+    ("staleReasons", "missing_claim_gate_stale_reasons"),
+    ("sourceRefs", "missing_claim_gate_source_refs"),
+    ("degradedCodes", "missing_claim_gate_degraded_codes"),
+    ("nextCommandActions", "missing_claim_gate_next_command_actions"),
+    ("claimCommandAction", "missing_claim_gate_claim_command_action"),
+]
 MACHINE_RESPONSE_SCHEMAS = {
     "ee.error.v2",
     "ee.response.v2",
@@ -215,6 +234,10 @@ def malformed_claim_gate_authority_reasons(gate):
 
 def malformed_claim_gate_reasons(gate):
     reasons = []
+    for field, reason in CLAIM_GATE_REQUIRED_FIELDS:
+        if field not in gate:
+            reasons.append(reason)
+
     reasons.extend(
         malformed_boolean_field_reasons(
             gate,
