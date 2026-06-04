@@ -221,8 +221,6 @@ import re
 import sys
 
 packet_path, summary_path = sys.argv[1], sys.argv[2]
-with open(packet_path, encoding="utf-8") as handle:
-    root = json.load(handle)
 
 failures = []
 assertions = []
@@ -231,6 +229,18 @@ def check(name, passed, detail=""):
     assertions.append(name)
     if not passed:
         failures.append(f"{name}{':' + detail if detail else ''}")
+
+try:
+    with open(packet_path, encoding="utf-8") as handle:
+        root = json.load(handle)
+    check("packet_json_parseable", True)
+except json.JSONDecodeError as error:
+    root = {}
+    check(
+        "packet_json_parseable",
+        False,
+        f"line_{error.lineno}_column_{error.colno}",
+    )
 
 def dict_or_empty(value):
     return value if isinstance(value, dict) else {}
