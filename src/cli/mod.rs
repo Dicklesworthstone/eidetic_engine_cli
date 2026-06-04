@@ -682,6 +682,9 @@ pub enum Command {
     /// Trace causal chains over recorder runs, packs, preflights, tripwires, and procedures.
     #[command(subcommand)]
     Causal(CausalCommand),
+    /// Explain likely regression causes from existing structured artifacts.
+    #[command(subcommand)]
+    Regress(RegressCommand),
     /// Manage and verify executable claims.
     #[command(subcommand)]
     Claim(ClaimCommand),
@@ -5141,6 +5144,70 @@ pub enum CausalCommand {
     Estimate(CausalEstimateArgs),
     /// Produce dry-run-first promotion plans for memory posture changes.
     PromotePlan(CausalPromotePlanArgs),
+}
+
+/// Subcommands for `ee regress`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum RegressCommand {
+    /// Build a read-only regression-causality capsule from structured artifacts.
+    Explain(RegressExplainArgs),
+}
+
+/// Arguments for `ee regress explain`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct RegressExplainArgs {
+    /// Structured artifact input in the form KIND=PATH.
+    ///
+    /// KIND must be one of the accepted regression-causality evidence kinds,
+    /// such as verification_evidence, rch_selector_admission, pack_diff,
+    /// perf_report, beads_history, bv_history, or support_bundle.
+    #[arg(long = "from", value_name = "KIND=PATH", required = true)]
+    pub from: Vec<String>,
+
+    /// Surface being explained.
+    #[arg(long, value_enum, default_value_t = RegressionSurfaceArg::Unknown)]
+    pub surface: RegressionSurfaceArg,
+
+    /// Optional workspace hash or fingerprint to copy into the subject.
+    #[arg(long = "workspace-hash", value_name = "HASH")]
+    pub workspace_hash: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum RegressionSurfaceArg {
+    #[value(name = "verification_gate", alias = "verification-gate")]
+    VerificationGate,
+    #[value(name = "swarm_replay", alias = "swarm-replay")]
+    SwarmReplay,
+    #[value(name = "e2e_event_radar", alias = "e2e-event-radar")]
+    E2eEventRadar,
+    #[value(name = "pack_quality", alias = "pack-quality")]
+    PackQuality,
+    #[value(name = "perf_budget", alias = "perf-budget")]
+    PerfBudget,
+    #[value(name = "tracker_state", alias = "tracker-state")]
+    TrackerState,
+    #[value(name = "support_bundle", alias = "support-bundle")]
+    SupportBundle,
+    #[default]
+    #[value(name = "unknown")]
+    Unknown,
+}
+
+impl RegressionSurfaceArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::VerificationGate => "verification_gate",
+            Self::SwarmReplay => "swarm_replay",
+            Self::E2eEventRadar => "e2e_event_radar",
+            Self::PackQuality => "pack_quality",
+            Self::PerfBudget => "perf_budget",
+            Self::TrackerState => "tracker_state",
+            Self::SupportBundle => "support_bundle",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Arguments for `ee causal trace`.
@@ -10099,6 +10166,9 @@ where
                 handle_causal_promote_plan(&cli, args, stdout, stderr)
             }
         },
+        Some(Command::Regress(RegressCommand::Explain(ref args))) => {
+            handle_regress_explain(&cli, args, stdout, stderr)
+        }
         Some(Command::Claim(ref claim_cmd)) => match claim_cmd {
             ClaimCommand::List(args) => handle_claim_list(&cli, args, stdout, stderr),
             ClaimCommand::Show(args) => handle_claim_show(&cli, args, stdout, stderr),
@@ -41024,6 +41094,373 @@ where
 // EE-451: Causal trace handlers
 // ============================================================================
 
+const REGRESSION_CAUSALITY_ARTIFACT_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegressionCausalityCapsule {
+    schema: &'static str,
+    subject: RegressionCausalitySubject,
+    source_state: RegressionCausalitySourceState,
+    evidence_sources: Vec<crate::models::RegressionCapsuleEvidenceSource>,
+    hypotheses: Vec<crate::models::regression_causality::RegressionCauseHypothesis>,
+    redaction: RegressionCausalityRedaction,
+    degraded: Vec<RegressionCausalityDegradedEntry>,
+    next_commands: Vec<crate::models::regression_causality::RegressionCausalityCommand>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegressionCausalitySubject {
+    surface: &'static str,
+    artifact_kind: String,
+    artifact_id: Option<String>,
+    command_hash: Option<String>,
+    observed_at: Option<String>,
+    workspace_hash: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegressionCausalitySourceState {
+    materialization: &'static str,
+    verification_attribution: Option<String>,
+    local_dirty: Option<bool>,
+    remote_source_materialized: Option<bool>,
+    source_hash: Option<String>,
+    degraded_codes: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegressionCausalityRedaction {
+    raw_logs_present: bool,
+    raw_mail_bodies_present: bool,
+    raw_memory_bodies_present: bool,
+    private_paths_present: bool,
+    secret_scan_applied: bool,
+    truncation_applied: bool,
+    hashes_only: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegressionCausalityDegradedEntry {
+    code: String,
+    severity: crate::models::RegressionCausalitySeverity,
+    message: String,
+    evidence_source_id: Option<String>,
+}
+
+fn handle_regress_explain<W, E>(
+    cli: &Cli,
+    args: &RegressExplainArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let inputs = match regression_evidence_inputs_from_args(args) {
+        Ok(inputs) => inputs,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let capsule = build_regression_causality_capsule(cli, args, &inputs);
+    let json = match serde_json::to_string(&serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": &capsule,
+        "degraded": [],
+    })) {
+        Ok(rendered) => output::render_response_json_for_schema_version(
+            &rendered,
+            cli.response_schema_version(),
+        ),
+        Err(error) => {
+            let domain_error = DomainError::Configuration {
+                message: format!("Failed to serialize regression causality capsule: {error}"),
+                repair: Some("Fix the regression causality serializer.".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_regression_causality_human(&capsule))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(json + "\n")),
+    }
+}
+
+fn regression_evidence_inputs_from_args(
+    args: &RegressExplainArgs,
+) -> Result<Vec<crate::models::RegressionEvidenceInput>, DomainError> {
+    args.from
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| regression_evidence_input_from_spec(index, spec))
+        .collect()
+}
+
+fn regression_evidence_input_from_spec(
+    index: usize,
+    spec: &str,
+) -> Result<crate::models::RegressionEvidenceInput, DomainError> {
+    let Some((raw_kind, raw_path)) = spec.split_once('=') else {
+        return Err(DomainError::Usage {
+            message: format!("Regression evidence input `{spec}` must use KIND=PATH."),
+            repair: Some(
+                "Use `ee regress explain --from verification_evidence=proof.json --json`."
+                    .to_owned(),
+            ),
+        });
+    };
+    let kind = crate::models::RegressionEvidenceKind::parse(raw_kind).ok_or_else(|| {
+        DomainError::Usage {
+            message: format!("Unsupported regression evidence kind `{raw_kind}`."),
+            repair: Some(format!(
+                "Use one of: {}.",
+                crate::models::RegressionEvidenceKind::ALL
+                    .into_iter()
+                    .map(crate::models::RegressionEvidenceKind::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    })?;
+    if raw_path.trim().is_empty() {
+        return Err(DomainError::Usage {
+            message: format!("Regression evidence input `{spec}` has an empty path."),
+            repair: Some("Pass a JSON artifact path after KIND=.".to_owned()),
+        });
+    }
+
+    let path = PathBuf::from(raw_path);
+    let bytes = fs::read(&path).map_err(|error| DomainError::Import {
+        message: format!("Failed to read regression evidence artifact: {error}"),
+        repair: Some("Pass a readable JSON artifact path to --from.".to_owned()),
+    })?;
+    if bytes.len() > REGRESSION_CAUSALITY_ARTIFACT_MAX_BYTES {
+        return Err(DomainError::Import {
+            message: format!(
+                "Regression evidence artifact exceeds the {} byte cap.",
+                REGRESSION_CAUSALITY_ARTIFACT_MAX_BYTES
+            ),
+            repair: Some("Pass a compact structured summary instead of raw logs.".to_owned()),
+        });
+    }
+    let artifact = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {
+        DomainError::Import {
+            message: format!("Regression evidence artifact is not valid JSON: {error}"),
+            repair: Some("Regenerate the producing command with JSON output.".to_owned()),
+        }
+    })?;
+    let artifact_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+    Ok(crate::models::RegressionEvidenceInput::new(
+        format!("evidence:{}:{}", index + 1, kind.as_str()),
+        kind,
+        Some(artifact),
+    )
+    .with_artifact_hash(artifact_hash))
+}
+
+fn build_regression_causality_capsule(
+    cli: &Cli,
+    args: &RegressExplainArgs,
+    inputs: &[crate::models::RegressionEvidenceInput],
+) -> RegressionCausalityCapsule {
+    let normalization = crate::models::normalize_regression_evidence_inputs(inputs);
+    let ranking =
+        crate::models::regression_causality::rank_regression_cause_hypotheses(&normalization.rows);
+    let evidence_sources = normalization
+        .rows
+        .iter()
+        .map(crate::models::NormalizedRegressionEvidenceRow::capsule_source)
+        .collect::<Vec<_>>();
+    let degraded = normalization
+        .degraded
+        .iter()
+        .chain(ranking.degraded.iter())
+        .map(|entry| RegressionCausalityDegradedEntry {
+            code: entry.code.clone(),
+            severity: entry.severity,
+            message: entry.message.clone(),
+            evidence_source_id: entry.evidence_source_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    let source_state = regression_causality_source_state(&normalization.rows);
+    let next_commands = regression_causality_next_commands(&ranking.hypotheses);
+    let subject = regression_causality_subject(cli, args, inputs, &normalization.rows);
+    let redaction = RegressionCausalityRedaction {
+        raw_logs_present: false,
+        raw_mail_bodies_present: false,
+        raw_memory_bodies_present: false,
+        private_paths_present: false,
+        secret_scan_applied: true,
+        truncation_applied: normalization.rows.iter().any(|row| {
+            !row.provenance.suppressed_fields.is_empty()
+                || row.degraded_codes.iter().any(|code| {
+                    code == "regression_evidence_raw_output_suppressed"
+                        || code == "regression_evidence_private_path_redacted"
+                })
+        }),
+        hashes_only: normalization
+            .rows
+            .iter()
+            .all(|row| row.artifact_hash.is_some()),
+    };
+
+    RegressionCausalityCapsule {
+        schema: crate::models::REGRESSION_CAUSALITY_SCHEMA_V1,
+        subject,
+        source_state,
+        evidence_sources,
+        hypotheses: ranking.hypotheses,
+        redaction,
+        degraded,
+        next_commands,
+    }
+}
+
+fn regression_causality_subject(
+    cli: &Cli,
+    args: &RegressExplainArgs,
+    inputs: &[crate::models::RegressionEvidenceInput],
+    rows: &[crate::models::NormalizedRegressionEvidenceRow],
+) -> RegressionCausalitySubject {
+    let artifact_kind = if inputs.len() == 1 {
+        inputs
+            .first()
+            .map(|input| input.kind.clone())
+            .unwrap_or_else(|| "unknown".to_owned())
+    } else {
+        "explicit_artifact_list".to_owned()
+    };
+    let artifact_id = if inputs.len() == 1 {
+        inputs.first().map(|input| input.id.clone())
+    } else {
+        Some(regression_input_set_id(inputs))
+    };
+    let workspace_hash = args
+        .workspace_hash
+        .clone()
+        .or_else(|| cli.workspace.as_deref().map(regression_workspace_hash));
+
+    RegressionCausalitySubject {
+        surface: args.surface.as_str(),
+        artifact_kind,
+        artifact_id,
+        command_hash: rows.iter().find_map(|row| row.command_hash.clone()),
+        observed_at: rows.iter().find_map(|row| row.observed_at.clone()),
+        workspace_hash,
+    }
+}
+
+fn regression_input_set_id(inputs: &[crate::models::RegressionEvidenceInput]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for input in inputs {
+        hasher.update(input.id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(input.kind.as_bytes());
+        hasher.update(b"\0");
+        if let Some(hash) = &input.artifact_hash_override {
+            hasher.update(hash.as_bytes());
+        }
+        hasher.update(b"\0");
+    }
+    format!(
+        "evidence-set:{}",
+        &hasher.finalize().to_hex().to_string()[..16]
+    )
+}
+
+fn regression_workspace_hash(path: &Path) -> String {
+    format!(
+        "blake3:{}",
+        blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes()).to_hex()
+    )
+}
+
+fn regression_causality_source_state(
+    rows: &[crate::models::NormalizedRegressionEvidenceRow],
+) -> RegressionCausalitySourceState {
+    let materialization = rows
+        .iter()
+        .map(|row| row.source_materialization)
+        .find(|materialization| {
+            !matches!(
+                materialization,
+                crate::models::RegressionSourceMaterialization::Unknown
+                    | crate::models::RegressionSourceMaterialization::NotApplicable
+            )
+        })
+        .unwrap_or(crate::models::RegressionSourceMaterialization::Unknown);
+    let mut degraded_codes = rows
+        .iter()
+        .flat_map(|row| row.degraded_codes.iter().cloned())
+        .collect::<Vec<_>>();
+    degraded_codes.sort();
+    degraded_codes.dedup();
+
+    RegressionCausalitySourceState {
+        materialization: materialization.as_str(),
+        verification_attribution: None,
+        local_dirty: None,
+        remote_source_materialized: rows.iter().find_map(|row| row.remote_source_materialized),
+        source_hash: rows.iter().find_map(|row| row.source_hash.clone()),
+        degraded_codes,
+    }
+}
+
+fn regression_causality_next_commands(
+    hypotheses: &[crate::models::regression_causality::RegressionCauseHypothesis],
+) -> Vec<crate::models::regression_causality::RegressionCausalityCommand> {
+    let mut commands = Vec::new();
+    for command in hypotheses
+        .iter()
+        .flat_map(|hypothesis| hypothesis.next_commands.iter())
+    {
+        if !commands.iter().any(
+            |existing: &crate::models::regression_causality::RegressionCausalityCommand| {
+                existing.command == command.command && existing.rationale == command.rationale
+            },
+        ) {
+            commands.push(command.clone());
+        }
+    }
+    commands
+}
+
+fn render_regression_causality_human(capsule: &RegressionCausalityCapsule) -> String {
+    let Some(top) = capsule.hypotheses.first() else {
+        return format!(
+            "Regression causality: no hypotheses\n  Evidence sources: {}\n",
+            capsule.evidence_sources.len()
+        );
+    };
+    let next_command = top
+        .next_commands
+        .first()
+        .map(|command| command.command.as_str())
+        .unwrap_or("no next command");
+    format!(
+        "Regression causality: {} ({:.0}% confidence, {})\n  Evidence sources: {}\n  Next: {}\n",
+        top.code,
+        top.confidence * 100.0,
+        top.severity,
+        capsule.evidence_sources.len(),
+        next_command
+    )
+}
+
 fn handle_causal_trace<W, E>(
     cli: &Cli,
     args: &CausalTraceArgs,
@@ -47704,6 +48141,9 @@ impl NormalizedInvocation {
                     CausalCommand::Estimate(_) => "causal estimate".to_string(),
                     CausalCommand::PromotePlan(_) => "causal promote-plan".to_string(),
                 },
+                Command::Regress(regress) => match regress {
+                    RegressCommand::Explain(_) => "regress explain".to_string(),
+                },
                 Command::Claim(claim) => match claim {
                     ClaimCommand::List(_) => "claim list".to_string(),
                     ClaimCommand::Show(_) => "claim show".to_string(),
@@ -48840,10 +49280,11 @@ mod tests {
         MIGRATION_REPAIR_COMMAND, MaintenanceCommand, MaintenanceWalCheckpointArgs,
         MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat, PackCommand,
         PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
-        ReflectRequestLedgerCommand, RuleCommand, ShadowMode, SituationCommand, StatusArgs,
-        SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmWorkPacketArgs, TaskFrameCommand,
-        TaskFrameSubgoalCommand, VerifyCommand, VerifyRchCommand, WorkflowCommand,
-        WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode, db_inspect_redact_source_uri,
+        ReflectRequestLedgerCommand, RegressCommand, RegressExplainArgs, RegressionSurfaceArg,
+        RuleCommand, ShadowMode, SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs,
+        SwarmCommand, SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand,
+        VerifyCommand, VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
+        WorkspaceHygieneMode, db_inspect_redact_source_uri,
         format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
         init_report_exit_code, json_with_data_result_path, mesh, orient_next_commands,
         parse_completion_audit_evidence_input, parse_context_profile,
@@ -49525,6 +49966,116 @@ mod tests {
             &after,
             &(true, Some(Command::Status(StatusArgs::default()))),
             "--json after status parse",
+        )
+    }
+
+    #[test]
+    fn parser_accepts_regress_explain_artifact_inputs() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "regress",
+            "explain",
+            "--from",
+            "verification_evidence=proof.json",
+            "--from",
+            "bv_history=bv.json",
+            "--surface",
+            "verification_gate",
+            "--workspace-hash",
+            "blake3:workspace",
+        ])
+        .map_err(|error| format!("failed to parse regress explain: {:?}", error.kind()))?;
+
+        ensure_equal(
+            &parsed.command,
+            &Some(Command::Regress(RegressCommand::Explain(
+                RegressExplainArgs {
+                    from: vec![
+                        "verification_evidence=proof.json".to_owned(),
+                        "bv_history=bv.json".to_owned(),
+                    ],
+                    surface: RegressionSurfaceArg::VerificationGate,
+                    workspace_hash: Some("blake3:workspace".to_owned()),
+                },
+            ))),
+            "regress explain parse",
+        )
+    }
+
+    #[test]
+    fn regress_explain_json_returns_causality_capsule_without_path_leak() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let artifact_path = tempdir.path().join("proof.json");
+        fs::write(
+            &artifact_path,
+            r#"{
+  "schema": "ee.verification_evidence.v1",
+  "status": "rch_environment_failure",
+  "commandHash": "blake3:command",
+  "observedAt": "2026-06-04T19:00:00Z",
+  "sourceState": {
+    "sourceHash": "blake3:source",
+    "remoteSourceMaterialized": false
+  },
+  "degraded": [
+    {"code": "rch_verify_remote_source_unknown"}
+  ]
+}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        let from_arg = format!("verification_evidence={}", artifact_path.display());
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "regress",
+            "explain",
+            "--from",
+            &from_arg,
+            "--surface",
+            "verification_gate",
+            "--workspace-hash",
+            "blake3:workspace",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "regress explain exit")?;
+        ensure(stderr.is_empty(), "regress explain JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!(crate::models::REGRESSION_CAUSALITY_SCHEMA_V1),
+            "capsule schema",
+        )?;
+        ensure_equal(
+            &value["data"]["subject"]["surface"],
+            &serde_json::json!("verification_gate"),
+            "subject surface",
+        )?;
+        ensure_equal(
+            &value["data"]["hypotheses"][0]["code"],
+            &serde_json::json!("source_not_materialized"),
+            "top hypothesis",
+        )?;
+        ensure_equal(
+            &value["data"]["redaction"]["rawLogsPresent"],
+            &serde_json::json!(false),
+            "raw logs absent",
+        )?;
+        ensure(
+            value["data"]["evidenceSources"][0]["artifactHash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "artifact hash should be redaction-safe",
+        )?;
+        ensure(
+            !stdout.contains(&artifact_path.to_string_lossy().to_string()),
+            "capsule output must not leak input artifact path",
         )
     }
 

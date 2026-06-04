@@ -1153,6 +1153,10 @@ impl EffectManifest {
                 "causal estimate",
                 "Estimate causal uplift from persisted or scoped causal evidence",
             ),
+            CommandEffect::read_only(
+                "regress explain",
+                "Build a regression-causality capsule from explicit structured artifacts",
+            ),
             CommandEffect::read_only("check", "Quick posture summary"),
             CommandEffect::read_only("claim list", "List executable claims from claims.yaml"),
             CommandEffect::read_only("claim show", "Inspect one executable claim"),

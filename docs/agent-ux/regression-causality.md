@@ -94,14 +94,29 @@ Operator loop:
 1. Collect the smallest structured artifact set that already exists: RCH proof,
    replay ledger, pack diff, perf report, degraded fixture, Beads/BV history, or
    support-bundle summary.
-2. Build or inspect the causality capsule. The future CLI surface should return
-   `ee.response.v2` with a `data` payload shaped by
-   `ee.regression_causality.v1`.
+2. Build or inspect the causality capsule with the read-only CLI surface:
+
+   ```bash
+   ee regress explain \
+     --from verification_evidence=proof.json \
+     --from bv_history=bv-history.json \
+     --surface verification_gate \
+     --json
+   ```
+
+   Each `--from` argument is `KIND=PATH`; `KIND` must be one of the accepted
+   evidence classes above. The command returns `ee.response.v2` with
+   `data.schema = "ee.regression_causality.v1"`.
 3. Follow only read-only `nextCommands` until evidence proves a source, fixture,
    tracker, or environment owner. Heavy Rust checks stay behind RCH.
 4. Record whether the diagnosis helped or misled. If the capsule abstains, file
    a follow-up bead for the missing artifact class instead of promoting a weak
    hypothesis.
+
+`ee regress explain` reads explicit JSON artifacts, hashes their contents, and
+normalizes them into redaction-safe evidence rows. It does not open the ee
+database, write audit rows, mutate Beads, run shell commands, or copy raw logs
+into the capsule.
 
 ## Redacted Examples
 

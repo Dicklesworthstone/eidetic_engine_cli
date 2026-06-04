@@ -50,6 +50,7 @@ Bead: eidetic_engine_cli-i6vu
 | `outcome-quarantine *` | `core::quarantine` | Mechanical | DB | Quarantine review |
 | `pack` | `core::pack` | Mechanical | DB, indexes | Context pack from query doc |
 | `recorder *` | `core::recorder` | Mechanical | DB, filesystem | Activity recording |
+| `regress explain` | `models::regression_causality` + CLI capsule builder | Mechanical | explicit JSON artifact files | Read-only regression-causality capsule; hashes inputs and emits deterministic hypotheses without opening the DB |
 | `remember` | `core::remember` | Mechanical | DB | Store memory |
 | `rule *` | `core::rule` | Mechanical | DB | Procedural rule management |
 | `schema *` | `core::schema` | Mechanical | static | Schema list/export |
@@ -120,8 +121,8 @@ supporting unit and contract coverage in `src/models/demo.rs` and
 
 ## Summary Statistics
 
-- **Total command families**: 46
-- **Mechanical**: 32 (70%)
+- **Total command families**: 47
+- **Mechanical**: 33 (70%)
 - **Mixed (needs split)**: 9 (20%)
 - **Agent Skill (move to workflow)**: 5 (10%)
 - **Degraded/unavailable public command families with active contracts**: 21
