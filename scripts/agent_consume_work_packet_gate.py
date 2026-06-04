@@ -480,8 +480,7 @@ def consume(response):
         return error_decision("invalid_json_shape")
     if response.get("success") is False:
         error = response.get("error", {})
-        code = error.get("code") if isinstance(error, dict) else "unknown_error"
-        return error_decision(code or "unknown_error")
+        return error_decision(classify_error_code(error))
 
     payload = get_payload(response)
     if not isinstance(payload, dict):
@@ -494,6 +493,20 @@ def consume(response):
     if schema == WORK_PACKET_SCHEMA:
         return consume_work_packet(payload, envelope_degraded)
     return error_decision(f"unsupported_schema:{redact_text(schema or 'unknown', 64)}")
+
+
+def classify_error_code(error):
+    if not isinstance(error, dict):
+        return "unknown_error"
+
+    rendered = json.dumps(error, sort_keys=True)
+    if "unexpected argument" in rendered and (
+        "--claim-gate" in rendered or "--candidate" in rendered
+    ):
+        return "stale_claim_gate_binary"
+
+    code = error.get("code")
+    return code or "unknown_error"
 
 
 def error_decision(code):

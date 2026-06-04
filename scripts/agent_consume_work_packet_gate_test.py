@@ -385,6 +385,36 @@ class ErrorHandling(unittest.TestCase):
         self.assertEqual(decision["decision"], "error")
         self.assertIn("error:migration_required", decision["whyNotSafe"])
 
+    def test_stale_claim_gate_binary_error_fails_closed(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "success": False,
+                "error": {
+                    "code": "usage_error",
+                    "message": "unexpected argument '--claim-gate' found",
+                    "details": {
+                        "invocation": [
+                            "ee",
+                            "swarm",
+                            "work-packet",
+                            "--claim-gate",
+                            "--candidate",
+                            "bd-safe.1",
+                            "--json",
+                        ]
+                    },
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["action"], "blocked_no_action")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertFalse(decision["mutatingActionsRequireHuman"])
+        self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
+
 
 if __name__ == "__main__":
     runner = unittest.main(exit=False, verbosity=2, module="__main__")
