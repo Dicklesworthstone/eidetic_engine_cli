@@ -322,6 +322,84 @@ class ClaimGateConsumer(unittest.TestCase):
         self.assertFalse(claim["runnable"])
         self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
 
+    def test_missing_required_next_command_action_fields_fail_closed(self):
+        for field, suffix in consumer.CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS:
+            with self.subTest(field=field):
+                gate = safe_gate()
+                gate["nextCommandActions"][0].pop(field)
+
+                decision = consumer.consume(envelope(gate))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertIn(
+                    f"missing_claim_gate_next_command_action_{suffix}",
+                    decision["whyNotSafe"],
+                )
+                claim = [
+                    action
+                    for action in decision["argvActions"]
+                    if action["actionKind"] == "claim"
+                ][0]
+                self.assertFalse(claim["runnable"])
+
+    def test_missing_required_claim_command_action_fields_fail_closed(self):
+        for field, suffix in consumer.CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS:
+            with self.subTest(field=field):
+                gate = safe_gate()
+                gate["claimCommandAction"].pop(field)
+
+                decision = consumer.consume(envelope(gate))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertIn(
+                    f"missing_claim_gate_claim_command_action_{suffix}",
+                    decision["whyNotSafe"],
+                )
+                self.assertFalse(
+                    any(
+                        action["runnable"] and action["mutatesState"]
+                        for action in decision["argvActions"]
+                    )
+                )
+
+    def test_malformed_command_action_fields_fail_closed(self):
+        gate = safe_gate()
+        gate["nextCommandActions"][0].update(
+            {
+                "commandId": ["bead_show_candidate"],
+                "displayCommand": {"command": "br show bd-safe.1 --json"},
+                "shellRequired": "false",
+                "copySafety": ["safe_structured_argv"],
+                "requiredSubstrate": 1,
+                "when": ["after_gate"],
+                "rationale": {"why": "fixture action"},
+            }
+        )
+        gate["claimCommandAction"]["argv"] = "br update bd-safe.1 --status in_progress --json"
+        gate["claimCommandAction"]["mutatesState"] = "true"
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        for reason in [
+            "malformed_claim_gate_next_command_action_command_id",
+            "malformed_claim_gate_next_command_action_display_command",
+            "malformed_claim_gate_next_command_action_shell_required",
+            "malformed_claim_gate_next_command_action_copy_safety",
+            "malformed_claim_gate_next_command_action_required_substrate",
+            "malformed_claim_gate_next_command_action_when",
+            "malformed_claim_gate_next_command_action_rationale",
+            "malformed_claim_gate_claim_command_action_argv",
+            "malformed_claim_gate_claim_command_action_mutates_state",
+        ]:
+            self.assertIn(reason, decision["whyNotSafe"])
+        self.assertFalse(
+            any(
+                action["runnable"] and action["mutatesState"]
+                for action in decision["argvActions"]
+            )
+        )
+
     def test_claim_gate_remote_required_without_positive_proof_fails_closed(self):
         gate = safe_gate()
         gate["sourceAuthority"]["rchSafeToLaunchCargoVerification"] = None

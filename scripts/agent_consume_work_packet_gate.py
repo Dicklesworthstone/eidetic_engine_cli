@@ -48,6 +48,17 @@ CLAIM_GATE_SOURCE_AUTHORITY_REQUIRED_FIELDS = [
     ),
     ("sourceCount", "missing_claim_gate_source_count"),
 ]
+CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS = [
+    ("commandId", "command_id"),
+    ("displayCommand", "display_command"),
+    ("argv", "argv"),
+    ("shellRequired", "shell_required"),
+    ("copySafety", "copy_safety"),
+    ("mutatesState", "mutates_state"),
+    ("requiredSubstrate", "required_substrate"),
+    ("when", "when"),
+    ("rationale", "rationale"),
+]
 MACHINE_RESPONSE_SCHEMAS = {
     "ee.error.v2",
     "ee.response.v2",
@@ -260,6 +271,42 @@ def malformed_claim_gate_authority_reasons(gate):
     return reasons
 
 
+def malformed_command_action_reasons(action, reason_prefix):
+    if not isinstance(action, dict):
+        return []
+
+    reasons = []
+    for field, suffix in CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS:
+        if field not in action:
+            reasons.append(f"missing_claim_gate_{reason_prefix}_{suffix}")
+
+    for field, suffix in [
+        ("commandId", "command_id"),
+        ("displayCommand", "display_command"),
+        ("copySafety", "copy_safety"),
+        ("requiredSubstrate", "required_substrate"),
+        ("when", "when"),
+        ("rationale", "rationale"),
+    ]:
+        value = action.get(field)
+        if field in action and value is not None and not isinstance(value, str):
+            reasons.append(f"malformed_claim_gate_{reason_prefix}_{suffix}")
+
+    for field, suffix in [
+        ("shellRequired", "shell_required"),
+        ("mutatesState", "mutates_state"),
+    ]:
+        value = action.get(field)
+        if field in action and value is not None and not isinstance(value, bool):
+            reasons.append(f"malformed_claim_gate_{reason_prefix}_{suffix}")
+
+    argv = action.get("argv")
+    if "argv" in action and argv is not None and not isinstance(argv, list):
+        reasons.append(f"malformed_claim_gate_{reason_prefix}_argv")
+
+    return reasons
+
+
 def malformed_claim_gate_reasons(gate):
     reasons = []
     for field, reason in CLAIM_GATE_REQUIRED_FIELDS:
@@ -305,6 +352,9 @@ def malformed_claim_gate_reasons(gate):
             if not isinstance(action, dict):
                 reasons.append("malformed_claim_gate_next_command_action")
                 break
+            reasons.extend(
+                malformed_command_action_reasons(action, "next_command_action")
+            )
 
     candidate = gate.get("selectedCandidate")
     if candidate is not None and not isinstance(candidate, dict):
@@ -317,6 +367,12 @@ def malformed_claim_gate_reasons(gate):
             value = candidate.get(field)
             if field in candidate and value is not None and not isinstance(value, str):
                 reasons.append(reason)
+
+    claim_action = gate.get("claimCommandAction")
+    if isinstance(claim_action, dict):
+        reasons.extend(
+            malformed_command_action_reasons(claim_action, "claim_command_action")
+        )
 
     return reasons
 
