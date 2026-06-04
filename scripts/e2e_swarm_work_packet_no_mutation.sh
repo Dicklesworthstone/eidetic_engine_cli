@@ -223,26 +223,6 @@ import sys
 packet_path, summary_path = sys.argv[1], sys.argv[2]
 with open(packet_path, encoding="utf-8") as handle:
     root = json.load(handle)
-packet = root.get("data", root) if isinstance(root, dict) else {}
-
-actions = []
-
-def add_action(path, action):
-    if isinstance(action, dict):
-        actions.append((path, action))
-
-recommended = packet.get("recommendedAction") or {}
-for index, action in enumerate(recommended.get("suggestedCommandActions") or []):
-    add_action(f"recommendedAction.suggestedCommandActions[{index}]", action)
-
-verification = packet.get("verification") or {}
-for section in ("requiredCommands", "staticChecks"):
-    for index, command in enumerate(verification.get(section) or []):
-        add_action(f"verification.{section}[{index}].commandAction", command.get("commandAction"))
-
-agent_mail = ((packet.get("coordination") or {}).get("agentMail") or {})
-for index, fallback in enumerate(agent_mail.get("fallbackActions") or []):
-    add_action(f"coordination.agentMail.fallbackActions[{index}].commandAction", fallback.get("commandAction"))
 
 failures = []
 assertions = []
@@ -251,6 +231,61 @@ def check(name, passed, detail=""):
     assertions.append(name)
     if not passed:
         failures.append(f"{name}{':' + detail if detail else ''}")
+
+def dict_or_empty(value):
+    return value if isinstance(value, dict) else {}
+
+def list_items(value):
+    return value if isinstance(value, list) else []
+
+root_is_object = isinstance(root, dict)
+check("root_json_object", root_is_object)
+root_obj = dict_or_empty(root)
+payload = root_obj.get("data", root_obj)
+check("packet_payload_object", isinstance(payload, dict))
+packet = dict_or_empty(payload)
+
+actions = []
+
+def add_action(path, action):
+    if isinstance(action, dict):
+        actions.append((path, action))
+    elif action is not None:
+        check("command_action_object", False, path)
+
+recommended_raw = packet.get("recommendedAction")
+if recommended_raw is not None:
+    check("recommended_action_object", isinstance(recommended_raw, dict))
+recommended = dict_or_empty(recommended_raw)
+for index, action in enumerate(list_items(recommended.get("suggestedCommandActions"))):
+    add_action(f"recommendedAction.suggestedCommandActions[{index}]", action)
+
+verification_raw = packet.get("verification")
+if verification_raw is not None:
+    check("verification_object", isinstance(verification_raw, dict))
+verification = dict_or_empty(verification_raw)
+for section in ("requiredCommands", "staticChecks"):
+    for index, command in enumerate(list_items(verification.get(section))):
+        path = f"verification.{section}[{index}].commandAction"
+        if isinstance(command, dict):
+            add_action(path, command.get("commandAction"))
+        elif command is not None:
+            check("verification_command_object", False, path)
+
+coordination_raw = packet.get("coordination")
+if coordination_raw is not None:
+    check("coordination_object", isinstance(coordination_raw, dict))
+coordination = dict_or_empty(coordination_raw)
+agent_mail_raw = coordination.get("agentMail")
+if agent_mail_raw is not None:
+    check("agent_mail_object", isinstance(agent_mail_raw, dict))
+agent_mail = dict_or_empty(agent_mail_raw)
+for index, fallback in enumerate(list_items(agent_mail.get("fallbackActions"))):
+    path = f"coordination.agentMail.fallbackActions[{index}].commandAction"
+    if isinstance(fallback, dict):
+        add_action(path, fallback.get("commandAction"))
+    elif fallback is not None:
+        check("agent_mail_fallback_object", False, path)
 
 command_ids = []
 copy_safety_values = []
@@ -290,7 +325,9 @@ for path, action in actions:
 check("safe_static_command_present", safe_static_count > 0)
 check("display_or_shell_review_action_present", review_count > 0)
 
-mutation_policy = packet.get("mutationPolicy") or {}
+mutation_policy_raw = packet.get("mutationPolicy")
+check("mutation_policy_object", isinstance(mutation_policy_raw, dict))
+mutation_policy = dict_or_empty(mutation_policy_raw)
 for field in (
     "claimsBeads",
     "reservesFiles",
@@ -302,7 +339,9 @@ for field in (
     check(f"mutation_policy_{field}_false", mutation_policy.get(field) is False)
 check("mutation_policy_side_effect_free", mutation_policy.get("sideEffectFree") is True)
 
-degraded = packet.get("degraded") or root.get("degraded") or []
+packet_degraded = list_items(packet.get("degraded"))
+root_degraded = list_items(root_obj.get("degraded"))
+degraded = packet_degraded or root_degraded
 degraded_codes = sorted({
     str(item.get("code"))
     for item in degraded
