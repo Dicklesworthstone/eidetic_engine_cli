@@ -1,0 +1,98 @@
+{
+  "schema": "ee.regression_evidence_normalization.v1",
+  "rows": [
+    {
+      "id": "evidence:beads",
+      "kind": "beads_history",
+      "schema": null,
+      "status": "redacted_only",
+      "verdict": "available",
+      "artifactHash": "blake3:beads",
+      "commandHash": null,
+      "observedAt": "2026-06-04T01:30:00Z",
+      "sourceHash": null,
+      "redactionStatus": "hash_only",
+      "authoritative": true,
+      "summary": "Normalized beads_history evidence `evidence:beads` as hash-only or redacted-only evidence.",
+      "degradedCodes": [],
+      "provenance": {
+        "sourceFields": [
+          "artifactHash",
+          "observedAt",
+          "redactionStatus",
+          "status"
+        ],
+        "suppressedFields": []
+      }
+    },
+    {
+      "id": "evidence:events",
+      "kind": "e2e_event_log",
+      "schema": "ee.test_event.v1",
+      "status": "available",
+      "verdict": "failed",
+      "artifactHash": "blake3:events",
+      "commandHash": null,
+      "observedAt": "2026-06-04T01:31:00Z",
+      "sourceHash": null,
+      "redactionStatus": "safe",
+      "authoritative": true,
+      "summary": "Normalized e2e_event_log evidence `evidence:events` as an available redaction-safe summary.",
+      "degradedCodes": [
+        "regression_evidence_raw_output_suppressed"
+      ],
+      "provenance": {
+        "sourceFields": [
+          "artifactHash",
+          "redactionStatus",
+          "schema",
+          "status",
+          "timestamp"
+        ],
+        "suppressedFields": [
+          "stderrTail"
+        ]
+      }
+    },
+    {
+      "id": "evidence:rch",
+      "kind": "rch_selector_admission",
+      "schema": "ee.rch.selector_admission_probe.v1",
+      "status": "blocked",
+      "verdict": "selection_failed",
+      "artifactHash": null,
+      "commandHash": "blake3:verify-command",
+      "observedAt": null,
+      "sourceHash": "git:tree-123",
+      "redactionStatus": "safe",
+      "authoritative": true,
+      "summary": "Normalized rch_selector_admission evidence `evidence:rch` as a first-class blocked state.",
+      "degradedCodes": [
+        "rch_verify_remote_source_unknown"
+      ],
+      "provenance": {
+        "sourceFields": [
+          "commandHash",
+          "redactionStatus",
+          "schema",
+          "selectorAdmission",
+          "selectorAdmission.localFallbackRefused",
+          "sourceState",
+          "sourceState.degradedCodes",
+          "sourceState.sourceHash",
+          "status"
+        ],
+        "suppressedFields": []
+      }
+    }
+  ],
+  "degraded": [
+    {
+      "code": "regression_evidence_raw_output_suppressed",
+      "severity": "info",
+      "message": "Evidence source `evidence:events` contained raw output fields that were not copied.",
+      "evidenceSourceId": "evidence:events",
+      "repair": "Use bounded output summaries or content hashes instead of raw stdout, stderr, or logs."
+    }
+  ]
+}

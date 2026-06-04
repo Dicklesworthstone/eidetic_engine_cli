@@ -30,6 +30,7 @@ pub mod progress;
 pub mod provenance;
 pub mod query;
 pub mod recorder;
+pub mod regression_causality;
 pub mod release;
 pub mod repro;
 pub mod revision;
@@ -230,6 +231,14 @@ pub use recorder::{
     RecorderEventChainStatus, RecorderEventType, RecorderFieldSchema, RecorderObjectSchema,
     RecorderPayload, RecorderRunMeta, RecorderRunStatus, RedactionStatus, RedactionStatusSnapshot,
     recorder_schema_catalog_json, recorder_schemas, validate_rationale_summary,
+};
+pub use regression_causality::{
+    NormalizedRegressionEvidenceRow, REGRESSION_CAUSALITY_SCHEMA_V1,
+    REGRESSION_EVIDENCE_NORMALIZATION_SCHEMA_V1, RegressionCapsuleEvidenceSource,
+    RegressionCausalitySeverity, RegressionEvidenceInput, RegressionEvidenceKind,
+    RegressionEvidenceNormalizationReport, RegressionEvidenceProvenance, RegressionEvidenceStatus,
+    RegressionNormalizationDegradation, RegressionRedactionStatus, RegressionSourceMaterialization,
+    normalize_regression_evidence_inputs,
 };
 pub use release::{
     RELEASE_ARTIFACT_SCHEMA_V1, RELEASE_BINARY_NAME, RELEASE_MANIFEST_SCHEMA_V1,
