@@ -750,18 +750,27 @@ Operator workflow for crowded repos:
 
 1. Run `ee swarm brief --workspace . --json`.
 2. Inspect recommendations, blocked beads, degraded sources, and file-surface risks.
-3. Reserve edit surfaces through Agent Mail, then mark the bead with `br update <id> --status in_progress --json`.
-4. Use RCH for Cargo verification, especially when the brief reports `rec.resource_pressure.use_rch_for_cargo`.
-5. Rerun the brief after large edits, after reservation changes, and before handoff.
+3. Choose a candidate from Beads/BV, then run the read-only claim gate before any mutation:
+   ```bash
+   ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json
+   ```
+4. Reserve edit surfaces through Agent Mail and mark the bead with
+   `br update <id> --status in_progress --json` only when the gate reports
+   `safeToClaim=true`, `verdict=safe_to_claim`, and a structured
+   `claimCommandAction` for that candidate.
+5. Use RCH for Cargo verification, especially when the brief reports `rec.resource_pressure.use_rch_for_cargo`.
+6. Rerun the brief after large edits, after reservation changes, and before handoff.
 
 The brief sits beside the existing tools. `br ready --json` remains the source
 of ready-work records, and `bv --robot-triage` remains the graph-aware ranking
-engine. Agent Mail remains the authority for reservations and coordination
-messages. Handoff capsules and support bundles carry diagnostic snapshots such
-as `swarm_brief_summary.json`, but a live brief is still the preflight before
-new claims. Profile reports and performance forensics diagnose host behavior in
-detail; the brief only carries enough posture to steer choices such as routing
-Cargo through RCH.
+engine. `ee swarm work-packet --claim-gate --json` is the claim-safety gate
+that must agree before an agent uses a BV copy-paste claim command or mutates
+Beads in a shared checkout. Agent Mail remains the authority for reservations
+and coordination messages. Handoff capsules and support bundles carry
+diagnostic snapshots such as `swarm_brief_summary.json`, but a live brief and
+claim gate are still the preflight before new claims. Profile reports and
+performance forensics diagnose host behavior in detail; the brief only carries
+enough posture to steer choices such as routing Cargo through RCH.
 
 The command never claims work, never reserves files, never releases files,
 never sends mail, never runs builds, never edits files, never mutates Beads,
@@ -1436,6 +1445,7 @@ Add to your `AGENTS.md` or hook setup:
 ```text
 Before starting substantial work, run:
   ee swarm brief --workspace . --json
+  ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json
   ee pack "<task>" --workspace . --read-only --source-mode lexical_only --max-tokens 4000 --format markdown
 
 When you discover a durable project convention:
@@ -1859,8 +1869,11 @@ metadata, but single-machine local-first usage works with `--mesh off`.
 
 **What should an agent run first in a crowded checkout?**
 Start with `ee swarm brief --workspace . --json` and
-`ee workspace hygiene --workspace . --json`, then use Agent Mail or Beads for
-the actual claim/reservation workflow.
+`ee workspace hygiene --workspace . --json`, use Beads/BV to identify a
+candidate, and run
+`ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json`
+before any Beads claim mutation. Use Agent Mail for the actual reservation and
+coordination workflow once the gate is safe.
 
 **How do I inspect current command contracts?**
 Use `ee --help`, `ee help <command path>`, `ee --help-json`, `ee schema list`,

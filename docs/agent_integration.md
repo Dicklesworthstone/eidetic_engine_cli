@@ -13,6 +13,37 @@ ee pack "prepare release" --workspace . --max-tokens 1000 --json \
 
 The contract check lives at `scripts/e2e_overhaul/agent_consumer.sh`.
 
+## Work-Packet Claim Gate
+
+In shared checkouts, use Beads and BV to identify candidates, but do not treat
+their copy-paste claim commands as authority to mutate state. Before claiming a
+bead or reserving edit paths, ask `ee` for the read-only work-packet claim
+gate:
+
+```bash
+ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json \
+  | scripts/agent_consume_work_packet_gate.py
+```
+
+The consumer emits `ee.agent.work_packet_gate_decision.v1` with
+`safeToClaim`, `candidateId`, `decision`, `argvActions`,
+`mutatingActionsRequireHuman`, `whyNotSafe`, and source/degraded summaries.
+Harnesses may only run a mutating claim action when the decision reports
+`safeToClaim=true` and the claim action is `runnable=true`. Every other
+verdict is inspection-only: coordinate through Agent Mail or Beads comments,
+preserve exact RCH blockers, and do not substitute local Cargo proof.
+
+The gate and consumer are intentionally read-only. They must not claim Beads,
+reserve files, send Agent Mail, mutate git, run Cargo, or launch RCH. Prefer
+structured `argvActions[].argv` over display strings; never shell-parse
+`commandTemplate`, `suggestedCommands`, or `displayCommand`.
+
+The fixture-driven consumer check is:
+
+```bash
+python3 scripts/agent_consume_work_packet_gate_test.py
+```
+
 For shared-checkout commit readiness, see
 [`docs/agent-ux/workspace-hygiene.md`](agent-ux/workspace-hygiene.md). The
 workspace hygiene surface is read-only and explains dirty-path buckets,

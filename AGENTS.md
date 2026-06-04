@@ -962,24 +962,42 @@ These two labels are **mutually exclusive** and govern what "closing a bead" mea
 
 ### Typical Agent Flow
 
-1. **Pick ready work (Beads):**
+1. **Pick candidate work (Beads/BV):**
    ```bash
-   br ready --json  # Choose highest priority, no blockers
+   br ready --json      # Authoritative ready-work records
+   bv --robot-triage    # Graph-aware ranking and planning, robot mode only
    ```
 
-2. **Reserve edit surface (Mail):**
+2. **Gate the claim (read-only work packet):**
+   ```bash
+   ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json
+   ```
+   In crowded or dirty shared checkouts, the work-packet claim gate is the
+   safety decision before mutation. `bv` copy-paste claim commands are
+   advisory ranking output; do not run them unless the claim gate reports
+   `safeToClaim=true`, `verdict=safe_to_claim`, and a structured
+   `claimCommandAction` for the same candidate. If the gate is degraded,
+   stale, blocked by RCH, or reports any other verdict, stop at inspection and
+   coordinate through Agent Mail or Beads comments.
+
+3. **Reserve edit surface (Mail):**
    ```
    file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true, reason="br-123")
    ```
 
-3. **Announce start (Mail):**
+4. **Announce start (Mail):**
    ```
    send_message(..., thread_id="br-123", subject="[br-123] Start: <title>", ack_required=true)
    ```
 
-4. **Work and update:** Reply in-thread with progress
+5. **Claim after the gate and reservation are safe:**
+   ```bash
+   br update <id> --status=in_progress --json
+   ```
 
-5. **Complete and release:**
+6. **Work and update:** Reply in-thread with progress
+
+7. **Complete and release:**
    ```bash
    br close 123 --reason "Completed"
    br sync --flush-only  # Export to JSONL (no git operations)
@@ -1022,6 +1040,18 @@ bv is a graph-aware triage engine for Beads projects (`.beads/beads.jsonl`). It 
 bv --robot-triage        # THE MEGA-COMMAND: start here
 bv --robot-next          # Minimal: just the single top pick + claim command
 ```
+
+The `claim_command` field in BV robot output is advisory. Before mutating
+Beads in a shared checkout, check the candidate with:
+
+```bash
+ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json
+```
+
+Only a matching `safeToClaim=true` / `verdict=safe_to_claim` claim gate may
+unlock the Beads claim. Treat every other verdict, tracker-integrity downgrade,
+Agent Mail semantic-readiness failure, or RCH verification blocker as a stop
+condition for auto-claiming.
 
 ### Command Reference
 
@@ -1292,11 +1322,13 @@ br sync --flush-only  # Export to JSONL (NO git operations)
 
 ### Workflow Pattern
 
-1. **Start**: Run `br ready` to find actionable work
-2. **Claim**: Use `br update <id> --status=in_progress`
-3. **Work**: Implement the task
-4. **Complete**: Use `br close <id>`
-5. **Sync**: Run `br sync --flush-only` then manually commit
+1. **Start**: Run `br ready --json` and `bv --robot-triage` to find candidate work.
+2. **Gate**: Run `ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json`.
+3. **Reserve**: Reserve the intended edit paths through Agent Mail.
+4. **Claim**: Use `br update <id> --status=in_progress --json` only after the gate and reservation are safe.
+5. **Work**: Implement the task.
+6. **Complete**: Use `br close <id> --reason "Completed"`.
+7. **Sync**: Run `br sync --flush-only` then manually commit.
 
 ### Key Concepts
 
