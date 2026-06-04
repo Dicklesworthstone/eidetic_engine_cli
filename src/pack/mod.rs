@@ -10511,7 +10511,7 @@ mod tests {
 
     #[test]
     fn mmr_similarity_cache_matches_full_selected_scan() -> TestResult {
-        let selected = vec![
+        let selected = [
             candidate_with_content(1, 1.0, 0.5, 10, "Run cargo fmt --check before release.")?
                 .with_diversity_key("release-formatting"),
             candidate_with_content(2, 0.8, 0.5, 10, "Verify release checksums.")?

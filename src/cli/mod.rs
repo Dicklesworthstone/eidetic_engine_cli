@@ -193,9 +193,9 @@ use crate::core::preflight_token::{
     verify_bypass_token as verify_preflight_bypass_token,
 };
 use crate::core::profile::{
-    HostProfileProbeOptions, HostResourceProbeReport, OperatingProfile, ProfileConfigError,
-    ProfileConfigOptions, ProfileConfigReport, VerificationRecipe, apply_profile_config,
-    plan_profile_config,
+    HostProfileProbeOptions, HostResourceProbeReport, MemoryProbe, OperatingProfile,
+    ProfileConfigError, ProfileConfigOptions, ProfileConfigReport, VerificationRecipe,
+    apply_profile_config, plan_profile_config,
 };
 use crate::core::proof_verify::{
     ProofCheckReport, ProofCheckStatus, SystemProofCommandRunner, run_proof_checks,
@@ -17259,10 +17259,15 @@ fn lab_swarm_replay_host_observation(cli: &Cli) -> SwarmReplayHostProfileObserva
     let logical_cpu_count = std::thread::available_parallelism()
         .ok()
         .and_then(|count| u16::try_from(count.get()).ok());
+    let memory = MemoryProbe::gather();
+    let available_memory_mb = memory
+        .available_bytes
+        .or(memory.total_bytes)
+        .map(|bytes| bytes / (1024 * 1024));
     let workspace = lab_workspace(cli);
     SwarmReplayHostProfileObservation {
         logical_cpu_count,
-        available_memory_mb: None,
+        available_memory_mb,
         target_dir_posture: lab_host_path_posture("CARGO_TARGET_DIR"),
         tmpdir_posture: lab_host_path_posture("TMPDIR"),
         rch_available: Some(

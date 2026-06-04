@@ -389,6 +389,7 @@ This runs all readiness gates in order, stopping at the first failure:
 | 5.5 | Proof verification |
 | 6 | Unit, contract, golden, binary, test, and example targets |
 | 6 | Basic E2E |
+| 6.06 | Replay lab smoke E2E |
 | 6.5 | Overhaul integration when `VERIFY_OVERHAUL` is enabled |
 | 6.6 | Fake Tailscale harness |
 | 7 | Advanced E2E |
@@ -834,6 +835,14 @@ with companion agent-facing notes in [`docs/swarm/`](docs/swarm/). The catalog
 covers producer metadata, trust lanes, verification evidence, coordination
 snapshots, resource profiles, pack SLOs, recommendations, consensus, conflicts,
 fixture manifests, and planned handoff memory-set fingerprints.
+
+The replay-lab workflow is documented in
+[`docs/agent-ux/workload-replay.md`](docs/agent-ux/workload-replay.md) and
+[`docs/agent-ux/swarm-replay-contracts.md`](docs/agent-ux/swarm-replay-contracts.md).
+Use `ee lab swarm replay --trace <workload.json> --dry-run --json` for the
+side-effect-free smoke path. `./scripts/verify.sh` runs the no-Cargo smoke
+script, while standard and large-host replay proofs stay behind RCH-only
+`scripts/rch_verify.sh` commands.
 
 Every schema carries an `x-ee-status` marker. Agents should treat
 `"shipped": false` as documentation for a future surface, not runtime

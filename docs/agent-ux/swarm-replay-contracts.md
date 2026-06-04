@@ -41,6 +41,59 @@ Replay ledgers do not include replay execution timestamps; volatile measurement
 fields are normalized and named under `volatileFieldsStripped` when they are
 excluded from replay hashes.
 
+## Verification Tiers
+
+Smoke verification is the no-Cargo path:
+
+```bash
+./scripts/e2e_overhaul/swarm_replay_lab_smoke.sh
+```
+
+It generates a small workload, runs `ee lab swarm replay --dry-run`, and logs
+`ee.test_event.v1` command/assertion rows with sanitized environment posture,
+elapsed time, exit code, stdout/stderr artifact references, schema validation
+status, redaction status, and first-failure diagnosis. A smoke run proves that
+the public workflow, redaction gates, and result ledger shape are wired. It
+does not prove standard or large-host replay performance.
+
+Standard verification stays RCH-only:
+
+```bash
+RCH_REQUIRE_REMOTE=1 ./scripts/rch_verify.sh \
+  --bead-id bd-ppbue.8 \
+  --summary \
+  --no-write \
+  --known-blocker-override \
+  -- cargo test --test e2e_lab_swarm_workload_generator \
+  lab_swarm_replay_executes_small_generated_fixture_with_artifact_ledger \
+  -- --nocapture
+```
+
+Large-host fixture coverage also stays RCH-only:
+
+```bash
+RCH_REQUIRE_REMOTE=1 ./scripts/rch_verify.sh \
+  --bead-id bd-ppbue.8 \
+  --summary \
+  --no-write \
+  --known-blocker-override \
+  -- cargo test --test e2e_lab_swarm_workload_generator \
+  lab_generate_workload_emits_all_profiles_as_redaction_safe_json \
+  -- --nocapture
+```
+
+Closeout checklist:
+
+1. `scripts/e2e_overhaul/swarm_replay_lab_smoke.sh` passes locally without
+   invoking Cargo.
+2. `shellcheck` or `bash -n` covers touched shell scripts.
+3. Markdown docs name `ee lab swarm replay`, not the older `ee lab replay`
+   trace form.
+4. RCH proof is attached with a remote pass, or the tracker records the exact
+   selector/blocker fingerprint and local Cargo count `0`.
+5. `jq empty .beads/issues.jsonl` and `br dep cycles --json` pass before the
+   Beads closeout commit.
+
 These contracts are intentionally smaller than a runner API. Later beads can
 build fixture generation, admission checks, replay execution, and support
 bundle export on top of them without inventing new public fields.

@@ -883,13 +883,13 @@ mod tests {
         // End-to-end sort lock: shuffled inputs must produce the same
         // byte-identical order after `sort_by(compare_explanation_cost)`.
         // This is the actual call-site invariant at line 187.
-        let mut order_a = vec![
+        let mut order_a = [
             make("nan_a", f64::NAN),
             make("two_b", 2.0),
             make("one_c", 1.0),
             make("nan_d", f64::NAN),
         ];
-        let mut order_b = vec![
+        let mut order_b = [
             make("two_b", 2.0),
             make("nan_d", f64::NAN),
             make("one_c", 1.0),
