@@ -77,6 +77,7 @@ pub fn load_bead_affinity_from_jsonl(
     target_bead_id: &str,
 ) -> Result<BeadAffinityBead, BeadAffinityLoadError> {
     let mut saw_any_line = false;
+    let mut target_bead = None;
     for (idx, raw) in jsonl.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() {
@@ -88,9 +89,12 @@ pub fn load_bead_affinity_from_jsonl(
                 line_number: idx + 1,
                 message: error.to_string(),
             })?;
-        if record.id == target_bead_id {
-            return Ok(build_bead(record));
+        if record.id == target_bead_id && target_bead.is_none() {
+            target_bead = Some(build_bead(record));
         }
+    }
+    if let Some(bead) = target_bead {
+        return Ok(bead);
     }
     if !saw_any_line {
         return Err(BeadAffinityLoadError::EmptyInput);
@@ -186,6 +190,21 @@ mod tests {
         }
         let err = load_bead_affinity_from_jsonl(jsonl, "bd-2942u").unwrap_err();
         assert_eq!(err.degraded_code(), "bead_affinity_unavailable");
+    }
+
+    #[test]
+    fn malformed_line_after_target_fails_closed() {
+        let jsonl = concat!(
+            r#"{"id":"bd-2942u","title":"Target","description":"","labels":[]}"#,
+            "\n",
+            "not-json\n",
+        );
+        match load_bead_affinity_from_jsonl(jsonl, "bd-2942u").unwrap_err() {
+            BeadAffinityLoadError::MalformedLine { line_number, .. } => {
+                assert_eq!(line_number, 2)
+            }
+            other => panic!("expected MalformedLine, got {other:?}"),
+        }
     }
 
     #[test]
