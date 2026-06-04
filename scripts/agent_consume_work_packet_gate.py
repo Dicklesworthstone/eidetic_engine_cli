@@ -18,6 +18,7 @@ CLAIM_GATE_SCHEMA = "ee.swarm.work_packet.claim_gate.v1"
 WORK_PACKET_SCHEMA = "ee.swarm.work_packet.v1"
 SAFE_COPY = "safe_structured_argv"
 DECISION_DIAGNOSTIC_LIMIT = 16
+DECISION_ACTION_LIMIT = 16
 COPY_SAFETY_VALUES = {
     "safe_structured_argv",
     "display_only",
@@ -870,11 +871,18 @@ def action_looks_like_beads_mutation(action):
 
 def command_actions_from_gate(gate, safe_to_claim):
     actions = []
+    claim_action = gate.get("claimCommandAction")
+    inspection_limit = (
+        DECISION_ACTION_LIMIT - 1
+        if isinstance(claim_action, dict)
+        else DECISION_ACTION_LIMIT
+    )
     for action in list_items(gate.get("nextCommandActions")):
+        if len(actions) >= inspection_limit:
+            break
         if isinstance(action, dict):
             actions.append(classify_action(action, safe_to_claim, "inspection"))
-    claim_action = gate.get("claimCommandAction")
-    if isinstance(claim_action, dict):
+    if isinstance(claim_action, dict) and len(actions) < DECISION_ACTION_LIMIT:
         actions.append(classify_action(claim_action, safe_to_claim, "claim"))
     return actions
 
@@ -882,10 +890,15 @@ def command_actions_from_gate(gate, safe_to_claim):
 def command_actions_from_packet(packet, safe_to_claim):
     actions = []
     legacy_refused = 0
+
+    def add_action(action, action_kind):
+        if len(actions) < DECISION_ACTION_LIMIT:
+            actions.append(classify_action(action, safe_to_claim, action_kind))
+
     recommended = dict_or_empty(packet.get("recommendedAction"))
     for action in list_items(recommended.get("suggestedCommandActions")):
         if isinstance(action, dict):
-            actions.append(classify_action(action, safe_to_claim, "recommended"))
+            add_action(action, "recommended")
     legacy_refused += count_legacy_command_strings(recommended.get("suggestedCommands"))
 
     verification = dict_or_empty(packet.get("verification"))
@@ -894,9 +907,7 @@ def command_actions_from_packet(packet, safe_to_claim):
             if not isinstance(command, dict):
                 continue
             if isinstance(command.get("commandAction"), dict):
-                actions.append(
-                    classify_action(command["commandAction"], safe_to_claim, key)
-                )
+                add_action(command["commandAction"], key)
             elif command.get("commandTemplate"):
                 legacy_refused += 1
 
@@ -906,9 +917,7 @@ def command_actions_from_packet(packet, safe_to_claim):
         if not isinstance(fallback, dict):
             continue
         if isinstance(fallback.get("commandAction"), dict):
-            actions.append(
-                classify_action(fallback["commandAction"], safe_to_claim, "fallback")
-            )
+            add_action(fallback["commandAction"], "fallback")
         elif fallback.get("command"):
             legacy_refused += 1
 

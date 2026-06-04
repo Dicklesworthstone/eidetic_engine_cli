@@ -161,6 +161,34 @@ class ClaimGateConsumer(unittest.TestCase):
         self.assertFalse(claim["reviewRequired"])
         self.assertEqual(claim["argv"][:3], ["br", "update", "bd-safe.1"])
 
+    def test_many_inspection_actions_are_bounded_but_claim_is_preserved(self):
+        gate = safe_gate()
+        gate["nextCommandActions"] = [
+            safe_action(
+                f"inspect_{index}",
+                ["br", "show", f"bd-extra.{index}", "--json"],
+            )
+            for index in range(32)
+        ]
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertTrue(decision["safeToClaim"])
+        self.assertEqual(
+            len(decision["argvActions"]),
+            consumer.DECISION_ACTION_LIMIT,
+        )
+        self.assertEqual(decision["argvActions"][0]["commandId"], "inspect_0")
+        self.assertEqual(
+            decision["argvActions"][-2]["commandId"],
+            f"inspect_{consumer.DECISION_ACTION_LIMIT - 2}",
+        )
+        self.assertEqual(decision["argvActions"][-1]["actionKind"], "claim")
+        self.assertEqual(
+            decision["argvActions"][-1]["commandId"],
+            "bead_claim_candidate",
+        )
+
     def test_recommended_safe_mismatch_fails_closed(self):
         gate = safe_gate()
         gate["recommendedSafeToClaim"] = False
@@ -1061,6 +1089,47 @@ class WorkPacketConsumer(unittest.TestCase):
         self.assertEqual(decision["whyNotSafe"], [])
         self.assertEqual(decision["sourceSummary"]["reservationAuthoritative"], True)
         self.assertEqual(decision["sourceSummary"]["inboxAuthoritative"], True)
+
+    def test_packet_command_actions_are_bounded(self):
+        packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        packet["data"]["recommendedAction"] = {
+            "action": "inspect_and_claim",
+            "candidateId": "bd-bounded-actions.1",
+            "safeToClaim": True,
+            "suggestedCommands": [],
+            "suggestedCommandActions": [
+                safe_action(
+                    f"recommended_{index}",
+                    ["ee", "status", "--json"],
+                )
+                for index in range(32)
+            ],
+        }
+        packet["data"]["candidates"] = [
+            {
+                "id": "bd-bounded-actions.1",
+                "decision": "safe_to_claim",
+                "unsafeReasons": [],
+                "staleReasons": [],
+            }
+        ]
+
+        decision = consumer.consume(packet)
+
+        self.assertTrue(decision["safeToClaim"])
+        self.assertEqual(
+            len(decision["argvActions"]),
+            consumer.DECISION_ACTION_LIMIT,
+        )
+        self.assertEqual(decision["argvActions"][0]["commandId"], "recommended_0")
+        self.assertEqual(
+            decision["argvActions"][-1]["commandId"],
+            f"recommended_{consumer.DECISION_ACTION_LIMIT - 1}",
+        )
+        self.assertNotIn(
+            f"recommended_{consumer.DECISION_ACTION_LIMIT}",
+            {action["commandId"] for action in decision["argvActions"]},
+        )
 
     def test_missing_required_packet_recommended_command_action_fields_fail_closed(self):
         for field, suffix in consumer.CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS:
@@ -2802,6 +2871,10 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
         self.assertEqual(64, schema["properties"]["decision"]["maxLength"])
         self.assertEqual(64, schema["properties"]["action"]["maxLength"])
         self.assertEqual(
+            consumer.DECISION_ACTION_LIMIT,
+            schema["properties"]["argvActions"]["maxItems"],
+        )
+        self.assertEqual(
             160,
             schema["properties"]["whyNotSafe"]["items"]["maxLength"],
         )
@@ -2877,6 +2950,10 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
             "action",
         )
         self.assertIsInstance(decision["argvActions"], list)
+        self.assertLessEqual(
+            len(decision["argvActions"]),
+            schema["properties"]["argvActions"]["maxItems"],
+        )
         self.assertIsInstance(decision["mutatingActionsRequireHuman"], bool)
         self.assertIsInstance(decision["whyNotSafe"], list)
         self.assertLessEqual(

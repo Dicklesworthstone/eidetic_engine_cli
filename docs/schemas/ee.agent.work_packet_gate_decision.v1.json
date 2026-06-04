@@ -47,6 +47,7 @@
     "action": {"type": "string", "maxLength": 64},
     "argvActions": {
       "type": "array",
+      "maxItems": 16,
       "items": {"$ref": "#/$defs/argvAction"}
     },
     "mutatingActionsRequireHuman": {"type": "boolean"},
