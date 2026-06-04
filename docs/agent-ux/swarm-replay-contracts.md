@@ -94,6 +94,36 @@ Closeout checklist:
 5. `jq empty .beads/issues.jsonl` and `br dep cycles --json` pass before the
    Beads closeout commit.
 
-These contracts are intentionally smaller than a runner API. Later beads can
-build fixture generation, admission checks, replay execution, and support
-bundle export on top of them without inventing new public fields.
+These contracts are intentionally smaller than a runner API. The implementation
+plan is tracked under `bd-ppbue`; inspect live Beads state before claiming,
+closing, or changing dependencies because tracker authority can be degraded in
+crowded checkouts.
+
+Current orientation map:
+
+- `bd-ppbue.1`: define `ee.swarm_workload.v1` and
+  `ee.swarm_replay_result.v1`.
+- `bd-ppbue.2`: build deterministic workload fixture generation.
+- `bd-ppbue.3`: add the `ee lab swarm replay` runner and machine-readable
+  ledgers.
+- `bd-ppbue.4`: add SLO budgets and output-size guardrails to replay results.
+- `bd-ppbue.5`: add host-profile admission for large-machine replay runs.
+- `bd-ppbue.6`: emit compact verification proof capsules from replay and RCH
+  gates.
+- `bd-ppbue.7`: export replay summaries through support bundles and handoffs.
+- `bd-ppbue.8`: wire docs, examples, smoke verification, and RCH-only proof
+  instructions.
+- `bd-ppbue.9`: add generator evidence ledgers for fixture reproducibility.
+- `bd-ppbue.10` and `bd-ppbue.11`: expose reservation pressure and stalled-work
+  liveness signals for crowded swarms.
+- `bd-ppbue.12` and `bd-ppbue.13`: harden malformed-trace handling and promote
+  recorded agent workload traces into fixtures.
+- `bd-ppbue.14` through `bd-ppbue.18`: classify RCH selector/admission and
+  remote-source materialization failures so replay evidence is not mistaken for
+  a source verdict.
+- `bd-ppbue.19` through `bd-ppbue.27`: pin schema, public registry, and SLO
+  conformance coverage as the contracts mature.
+
+Do not claim the `bd-ppbue` epic as implementation work. Claim a concrete child
+only when the tracker is authoritative, dependencies and reservations are clear,
+and required Rust verification can stay RCH-only.
