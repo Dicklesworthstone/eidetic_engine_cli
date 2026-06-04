@@ -1163,9 +1163,11 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
                     && files
                         .iter()
                         .any(|file| file.as_str() == Some("swarm_replay_summary.json"))
+                    && files
+                        .iter()
+                        .any(|file| file.as_str() == Some("regression_causality_summary.json"))
             }),
-        "support bundle create report must advertise QoS, incident, and replay summary files"
-            .to_owned(),
+        "support bundle create report must advertise QoS, incident, replay, and regression causality summary files".to_owned(),
     )?;
     ensure_json_pointer(
         &result.parsed,
@@ -1217,6 +1219,12 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
         bundle_dir.join("qos_lane_summary.json").is_file(),
         "bundle must contain qos_lane_summary.json".to_owned(),
     )?;
+    ensure(
+        bundle_dir
+            .join("regression_causality_summary.json")
+            .is_file(),
+        "bundle must contain regression_causality_summary.json".to_owned(),
+    )?;
     let manifest = fs::read_to_string(bundle_dir.join("manifest.json"))
         .map_err(|error| format!("failed to read support bundle manifest: {error}"))?;
     let manifest_json: Value = serde_json::from_str(&manifest)
@@ -1234,9 +1242,12 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
                 }) && files.iter().any(|entry| {
                     entry.pointer("/path").and_then(Value::as_str)
                         == Some("swarm_replay_summary.json")
+                }) && files.iter().any(|entry| {
+                    entry.pointer("/path").and_then(Value::as_str)
+                        == Some("regression_causality_summary.json")
                 })
             }),
-        "support bundle manifest must include QoS, incident, and replay summary files".to_owned(),
+        "support bundle manifest must include QoS, incident, replay, and regression causality summary files".to_owned(),
     )?;
     let pack_replay_summary = fs::read_to_string(bundle_dir.join("pack_replay_summary.json"))
         .map_err(|error| format!("failed to read pack replay support summary: {error}"))?;
@@ -1384,6 +1395,98 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
     ensure(
         swarm_incident_summary_json.pointer("/withinSizeBudget") == Some(&json!(true)),
         "swarm incident summary must stay within the documented size budget".to_owned(),
+    )?;
+    let regression_causality_summary = fs::read_to_string(
+        bundle_dir.join("regression_causality_summary.json"),
+    )
+    .map_err(|error| format!("failed to read regression causality support summary: {error}"))?;
+    let regression_causality_summary_json: Value =
+        serde_json::from_str(&regression_causality_summary)
+            .map_err(|error| format!("regression causality support summary must parse: {error}"))?;
+    ensure_json_pointer(
+        &regression_causality_summary_json,
+        "/schema",
+        json!("ee.support_bundle.regression_causality_summary.v1"),
+        "support bundle regression causality summary schema",
+    )?;
+    ensure_json_pointer(
+        &regression_causality_summary_json,
+        "/sourceSchema",
+        json!("ee.regression_causality.v1"),
+        "support bundle regression causality source schema",
+    )?;
+    ensure_json_pointer(
+        &regression_causality_summary_json,
+        "/redactionStatus",
+        json!("derived_redaction_safe_no_raw_logs"),
+        "support bundle regression causality redaction posture",
+    )?;
+    ensure_json_pointer(
+        &regression_causality_summary_json,
+        "/redaction/inputArtifactsCopied",
+        json!(false),
+        "support bundle regression causality summary does not copy input artifacts",
+    )?;
+    ensure_json_pointer(
+        &regression_causality_summary_json,
+        "/redaction/rawLogsPresent",
+        json!(false),
+        "support bundle regression causality summary omits raw logs",
+    )?;
+    ensure_json_pointer(
+        &regression_causality_summary_json,
+        "/redaction/rawMailBodiesPresent",
+        json!(false),
+        "support bundle regression causality summary omits raw mail bodies",
+    )?;
+    ensure_json_pointer(
+        &regression_causality_summary_json,
+        "/redaction/rawMemoryBodiesPresent",
+        json!(false),
+        "support bundle regression causality summary omits raw memory bodies",
+    )?;
+    ensure_json_pointer(
+        &regression_causality_summary_json,
+        "/redaction/privatePathsPresent",
+        json!(false),
+        "support bundle regression causality summary omits private paths",
+    )?;
+    ensure_json_pointer(
+        &regression_causality_summary_json,
+        "/redaction/hashesOnly",
+        json!(true),
+        "support bundle regression causality summary keeps normalized inputs hash-only",
+    )?;
+    ensure_json_pointer(
+        &regression_causality_summary_json,
+        "/redaction/secretScanApplied",
+        json!(true),
+        "support bundle regression causality summary records secret-scan posture",
+    )?;
+    ensure(
+        regression_causality_summary_json
+            .pointer("/topHypotheses")
+            .and_then(Value::as_array)
+            .is_some_and(|hypotheses| !hypotheses.is_empty()),
+        "regression causality summary must include top hypotheses".to_owned(),
+    )?;
+    ensure(
+        regression_causality_summary_json
+            .pointer("/normalization/rows")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| !rows.is_empty()),
+        "regression causality summary must include normalized evidence rows".to_owned(),
+    )?;
+    ensure(
+        regression_causality_summary_json
+            .pointer("/ranking/hypotheses")
+            .and_then(Value::as_array)
+            .is_some_and(|hypotheses| {
+                hypotheses
+                    .iter()
+                    .all(|hypothesis| hypothesis.pointer("/authoritative") == Some(&json!(false)))
+            }),
+        "regression causality hypotheses must remain non-authoritative".to_owned(),
     )?;
     let qos_lane_summary = fs::read_to_string(bundle_dir.join("qos_lane_summary.json"))
         .map_err(|error| format!("failed to read QoS lane support summary: {error}"))?;

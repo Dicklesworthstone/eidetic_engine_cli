@@ -473,6 +473,15 @@ and full ledger payloads. Tests must keep that summary parseable as
 `ee.support_bundle.pack_replay_summary.v1` and prove secret-like query or
 provenance text does not appear in the bundle.
 
+Support-bundle regression-causality evidence is covered by
+`regression_causality_summary.json`. That artifact records the
+`ee.support_bundle.regression_causality_summary.v1` schema, points back to
+`ee.regression_causality.v1`, keeps normalized evidence rows and ranked
+non-authoritative hypotheses, and records redaction posture. Tests must prove it
+omits raw logs, raw mail bodies, raw memory bodies, private paths, and copied
+input artifacts while retaining hash/provenance-based evidence for handoff and
+support triage.
+
 ## Replay, Freshness, and Egress Tests
 
 Pack replay and evidence freshness testing verifies that:

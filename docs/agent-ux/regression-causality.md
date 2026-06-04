@@ -181,8 +181,11 @@ Expected lead:
   first-failure and contract-drift event rows.
 - [Swarm work packets](swarm-work-packet.md) and Beads/BV history supply tracker
   and ownership evidence for crowded checkout failures.
-- Support bundles should carry only redacted summaries and stable artifact ids,
-  never raw logs, raw mail bodies, raw memory bodies, or host-private paths.
+- Support bundles carry `regression_causality_summary.json` as a derived,
+  redaction-safe support artifact. It keeps normalized evidence rows, ranked
+  non-authoritative hypotheses, summary provenance, and redaction posture while
+  omitting raw logs, raw mail bodies, raw memory bodies, host-private paths, and
+  copied input artifacts.
 
 ## Test Plan
 
@@ -197,7 +200,10 @@ Contract coverage for this foundation must pin:
   and counter-evidence effect;
 - field presets for minimal, summary, standard, and full output;
 - redaction consts and an example that does not contain raw logs, host-private
-  paths, secrets, raw mail bodies, or raw memory bodies.
+  paths, secrets, raw mail bodies, or raw memory bodies;
+- support-bundle integration that proves
+  `ee.support_bundle.regression_causality_summary.v1` is present, parseable,
+  hash/provenance based, and non-authoritative.
 
-Later implementation beads should add producer tests, golden fixtures, no-mock
-e2e logs, support-bundle integration, and RCH-only focused Cargo proof.
+Later implementation beads should add the agent-facing CLI/report producer,
+broader golden fixtures, no-mock e2e logs, and RCH-only focused Cargo proof.
