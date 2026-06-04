@@ -110,6 +110,11 @@ fixture, `healthy_small.json`; crowded-checkout, degraded-Mail,
 tracker-mismatch, rollup, BV-timeout, Beads-timeout, and RCH-blocked fixtures
 must fail closed with consumer exit `3`.
 
+The compact `summary.jsonl` mirrors the same proof surface for closeout tools:
+it includes Beads/Cargo/RCH call counts, the generated packet consumer
+decision, unsafe-reason and command-action counts, fixture-matrix safe/unsafe
+counts, and the per-fixture decision summary.
+
 ## Required Guarantees
 
 - The packet uses the standard `ee.response.v2` success envelope.

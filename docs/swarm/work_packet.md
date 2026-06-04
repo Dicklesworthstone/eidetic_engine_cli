@@ -86,6 +86,11 @@ fixture into the reference consumer, including payload-only fixtures and
 (`healthy_small.json`) and all degraded, crowded, tracker-mismatch, rollup,
 timeout, and RCH-blocked fixtures failing closed with exit `3`.
 
+The final `summary.jsonl` is the closeout-friendly digest of those phases. It
+includes Beads, Cargo, and RCH call counts; the generated packet consumer
+schema, exit code, decision, action, and counts; fixture-matrix safe/unsafe
+counts; and the per-fixture decision summary.
+
 ## Beads tracker integrity (bd-2z5ly.9)
 
 `trackerIntegrity` is the packet's bounded view of Beads JSONL/DB health. It is

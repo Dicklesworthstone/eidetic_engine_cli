@@ -935,9 +935,75 @@ emit_phase "final_result" \
     "ok" "$ok" \
     "assertion_names" "final_exit_status"
 
-printf '{"schema":"ee.packet_no_mutation.v1","ts":"%s","artifact_root":"%s","sandbox":"%s","br_call_count":%s,"mutating_calls":%s,"ok":%s}\n' \
-    "$ts" "$artifact_root" "$sandbox" "$call_count" "$mutating_calls" "$ok" \
-    >"$summary"
+python3 - "$summary" "$ts" "$artifact_root" "$sandbox" "$call_count" \
+    "$mutating_calls" "$cargo_calls" "$rch_calls" "$consumer_exit" \
+    "$consumer_summary" "$fixture_matrix_summary" "$ok" <<'PY'
+import json
+import sys
+
+(
+    summary_path,
+    ts,
+    artifact_root,
+    sandbox,
+    br_call_count,
+    mutating_calls,
+    cargo_calls,
+    rch_calls,
+    consumer_exit,
+    consumer_summary_path,
+    fixture_matrix_summary_path,
+    ok,
+) = sys.argv[1:]
+
+
+def as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def load_json(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+consumer = load_json(consumer_summary_path)
+fixture_matrix = load_json(fixture_matrix_summary_path)
+
+payload = {
+    "schema": "ee.packet_no_mutation.v1",
+    "ts": ts,
+    "artifact_root": artifact_root,
+    "sandbox": sandbox,
+    "br_call_count": as_int(br_call_count),
+    "mutating_calls": as_int(mutating_calls),
+    "cargo_calls": as_int(cargo_calls),
+    "rch_calls": as_int(rch_calls),
+    "consumer_exit": as_int(consumer_exit),
+    "consumer_schema": consumer.get("schema") or "",
+    "consumer_safe_to_claim": consumer.get("safe_to_claim") or "",
+    "consumer_decision": consumer.get("decision") or "",
+    "consumer_action": consumer.get("action") or "",
+    "consumer_why_not_safe_count": as_int(consumer.get("why_not_safe_count")),
+    "consumer_argv_action_count": as_int(consumer.get("argv_action_count")),
+    "fixture_count": as_int(fixture_matrix.get("fixture_count")),
+    "safe_fixture_count": as_int(fixture_matrix.get("safe_fixture_count")),
+    "unsafe_fixture_count": as_int(fixture_matrix.get("unsafe_fixture_count")),
+    "fixture_names": fixture_matrix.get("fixture_names") or "",
+    "fixture_decision_summary": fixture_matrix.get("decision_summary") or "",
+    "ok": ok == "true",
+}
+
+with open(summary_path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+PY
 
 cat "$summary"
 
