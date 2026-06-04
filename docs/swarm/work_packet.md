@@ -73,6 +73,19 @@ index around packet generation, logs `ee.test_event.v1` phases, refuses mutating
 `br` subcommands, and shims Cargo/RCH so packet generation cannot accidentally
 become verification.
 
+The smoke harness also runs the generated packet through
+`scripts/agent_consume_work_packet_gate.py` and records a `consumer_decision`
+phase. That phase proves the reference consumer can parse the packet without
+executing commands, reports `safeToClaim`, records `whyNotSafe` coverage, and
+asserts unsafe packets do not expose runnable mutating or claim actions.
+
+Fixture-matrix coverage is part of the same script. The
+`fixture_matrix_consumer` phase feeds every `tests/fixtures/swarm_work_packet`
+fixture into the reference consumer, including payload-only fixtures and
+`ee.response.v2` envelopes. The expected posture is one safe fixture
+(`healthy_small.json`) and all degraded, crowded, tracker-mismatch, rollup,
+timeout, and RCH-blocked fixtures failing closed with exit `3`.
+
 ## Beads tracker integrity (bd-2z5ly.9)
 
 `trackerIntegrity` is the packet's bounded view of Beads JSONL/DB health. It is

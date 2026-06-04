@@ -96,6 +96,20 @@ Agent Mail stand-in, and the git index. It also installs PATH shims that refuse
 mutating Beads subcommands and fail the run if packet generation attempts Cargo
 or RCH execution.
 
+Default fixture mode also proves the agent-facing consumer path. After packet
+generation, the harness pipes the packet through
+`scripts/agent_consume_work_packet_gate.py` and logs a `consumer_decision`
+phase with the consumer schema, exit code, `safe_to_claim`, decision, action,
+unsafe-reason count, and command-action count. Unsafe packets must produce
+non-empty `whyNotSafe` and must not expose runnable mutating or claim actions.
+
+The same run also executes the reference consumer against every
+`tests/fixtures/swarm_work_packet/*.json` fixture and logs
+`fixture_matrix_consumer`. The current matrix expects exactly one claim-safe
+fixture, `healthy_small.json`; crowded-checkout, degraded-Mail,
+tracker-mismatch, rollup, BV-timeout, Beads-timeout, and RCH-blocked fixtures
+must fail closed with consumer exit `3`.
+
 ## Required Guarantees
 
 - The packet uses the standard `ee.response.v2` success envelope.
