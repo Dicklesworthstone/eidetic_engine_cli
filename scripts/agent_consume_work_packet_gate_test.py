@@ -1015,6 +1015,38 @@ class ErrorHandling(unittest.TestCase):
             decision["whyNotSafe"],
         )
 
+    def test_cli_unsupported_payload_schema_redacts_secret_shaped_schema_name(self):
+        token = "ghp_" + "abcdef0123456789abcdef0123456789abcd"
+        home_path = "/home/agent/private/project"
+        payload = {
+            "schema": "ee.response.v2",
+            "success": True,
+            "data": {
+                "schema": f"ee.unexpected.{token}.{home_path}",
+                "recommendedAction": {
+                    "candidateId": "bd-unsafe.1",
+                    "safeToClaim": True,
+                },
+            },
+        }
+
+        result, decision = run_consumer_cli(payload)
+        serialized = json.dumps(decision)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertNotIn("ghp_", result.stdout)
+        self.assertNotIn("/home/", result.stdout)
+        self.assertNotIn("ghp_", serialized)
+        self.assertNotIn("/home/", serialized)
+        self.assertIn(
+            "error:unsupported_schema:ee.unexpected.[redacted].[redacted]",
+            decision["whyNotSafe"],
+        )
+
     def test_stale_claim_gate_binary_error_fails_closed(self):
         decision = consumer.consume(
             {
