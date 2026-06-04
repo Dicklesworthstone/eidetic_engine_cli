@@ -4,27 +4,27 @@
 # Update path: UPDATE_GOLDENS=1 cargo test --test contracts \
 #   mesh_serve_mcp_degraded_code_catalog -- --exact; review the diff.
 #
-# Total codes:                51
-# With failure-mode fixture:  26
-# In docs/degraded_code_taxonomy.md: 27
-# In docs/degraded_codes.md (## header): 19
+# Total codes:                53
+# With failure-mode fixture:  34
+# In docs/degraded_code_taxonomy.md: 35
+# In docs/degraded_codes.md (## header): 34
 #
 # Columns: code | fixture | taxonomy | gen-docs | const | source
 #
-auto_enrollment_already_complete                     ·         ·          ·      AUTO_ENROLLMENT_ALREADY_COMPLETE_CODE :: src/mesh/auto_enrollment.rs
-auto_enrollment_audit_failed                         ·         ·          ·      AUTO_ENROLLMENT_AUDIT_FAILED_CODE :: src/mesh/auto_enrollment.rs
-auto_enrollment_blocked_by_policy                    ·         ·          ·      AUTO_ENROLLMENT_BLOCKED_BY_POLICY_CODE :: src/mesh/auto_enrollment.rs
-auto_enrollment_concurrent_attempt                   ·         ·          ·      AUTO_ENROLLMENT_CONCURRENT_ATTEMPT_CODE :: src/mesh/auto_enrollment.rs
-auto_enrollment_invalid_override_node_key            ·         ·          ·      AUTO_ENROLLMENT_INVALID_OVERRIDE_NODE_KEY_CODE :: src/mesh/auto_enrollment.rs
-auto_enrollment_manual_config_present                ✓         ✓          ·      AUTO_ENROLLMENT_MANUAL_CONFIG_PRESENT_CODE :: src/mesh/auto_enrollment.rs
-auto_enrollment_manual_migration_unmatched_peer_set     ✓         ✓          ·      AUTO_ENROLLMENT_MANUAL_MIGRATION_UNMATCHED_PEER_SET_CODE :: src/mesh/auto_enrollment.rs
-auto_enrollment_no_eligible_peers                    ✓         ✓          ·      AUTO_ENROLLMENT_NO_ELIGIBLE_PEERS_CODE :: src/mesh/auto_enrollment.rs
-auto_enrollment_node_key_changed                     ·         ·          ·      AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE :: src/mesh/identity_change_guard.rs
-auto_enrollment_partial_failure                      ✓         ✓          ·      AUTO_ENROLLMENT_PARTIAL_FAILURE_CODE :: src/mesh/auto_enrollment.rs
-auto_enrollment_sync_once_failed                     ·         ·          ·      AUTO_ENROLLMENT_SYNC_ONCE_FAILED_CODE :: src/mesh/auto_enrollment.rs
-auto_enrollment_tailnet_changed                      ✓         ✓          ·      AUTO_ENROLLMENT_TAILNET_CHANGED_CODE :: src/mesh/auto_enrollment.rs
-discovery_cache_invalidated_tailnet_changed          ✓         ✓          ·      DISCOVERY_CACHE_TAILNET_CHANGED_CODE :: src/mesh/discovery_cache.rs
-discovery_cache_stale_due_to_workspace_mismatch      ✓         ✓          ·      DISCOVERY_CACHE_WORKSPACE_MISMATCH_CODE :: src/mesh/discovery_cache.rs
+auto_enrollment_already_complete                     ✓         ✓          ✓      AUTO_ENROLLMENT_ALREADY_COMPLETE_CODE :: src/mesh/auto_enrollment.rs
+auto_enrollment_audit_failed                         ✓         ✓          ✓      AUTO_ENROLLMENT_AUDIT_FAILED_CODE :: src/mesh/auto_enrollment.rs
+auto_enrollment_blocked_by_policy                    ✓         ✓          ✓      AUTO_ENROLLMENT_BLOCKED_BY_POLICY_CODE :: src/mesh/auto_enrollment.rs
+auto_enrollment_concurrent_attempt                   ✓         ✓          ✓      AUTO_ENROLLMENT_CONCURRENT_ATTEMPT_CODE :: src/mesh/auto_enrollment.rs
+auto_enrollment_invalid_override_node_key            ✓         ✓          ✓      AUTO_ENROLLMENT_INVALID_OVERRIDE_NODE_KEY_CODE :: src/mesh/auto_enrollment.rs
+auto_enrollment_manual_config_present                ✓         ✓          ✓      AUTO_ENROLLMENT_MANUAL_CONFIG_PRESENT_CODE :: src/mesh/auto_enrollment.rs
+auto_enrollment_manual_migration_unmatched_peer_set     ✓         ✓          ✓      AUTO_ENROLLMENT_MANUAL_MIGRATION_UNMATCHED_PEER_SET_CODE :: src/mesh/auto_enrollment.rs
+auto_enrollment_no_eligible_peers                    ✓         ✓          ✓      AUTO_ENROLLMENT_NO_ELIGIBLE_PEERS_CODE :: src/mesh/auto_enrollment.rs
+auto_enrollment_node_key_changed                     ✓         ✓          ✓      AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE :: src/mesh/identity_change_guard.rs
+auto_enrollment_partial_failure                      ✓         ✓          ✓      AUTO_ENROLLMENT_PARTIAL_FAILURE_CODE :: src/mesh/auto_enrollment.rs
+auto_enrollment_sync_once_failed                     ✓         ✓          ✓      AUTO_ENROLLMENT_SYNC_ONCE_FAILED_CODE :: src/mesh/auto_enrollment.rs
+auto_enrollment_tailnet_changed                      ✓         ✓          ✓      AUTO_ENROLLMENT_TAILNET_CHANGED_CODE :: src/mesh/auto_enrollment.rs
+discovery_cache_invalidated_tailnet_changed          ✓         ✓          ✓      DISCOVERY_CACHE_TAILNET_CHANGED_CODE :: src/mesh/discovery_cache.rs
+discovery_cache_stale_due_to_workspace_mismatch      ✓         ✓          ✓      DISCOVERY_CACHE_WORKSPACE_MISMATCH_CODE :: src/mesh/discovery_cache.rs
 discovery_policy_empty_allowlist                     ✓         ✓          ✓      DISCOVERY_POLICY_EMPTY_ALLOWLIST_CODE :: src/mesh/discovery_policy.rs
 discovery_policy_no_ee_mesh_tag                      ✓         ✓          ✓      DISCOVERY_POLICY_NO_EE_MESH_TAG_CODE :: src/mesh/discovery_policy.rs
 drift_grace_soft_stale_peer_count_high               ·         ✓          ·      DRIFT_GRACE_SOFT_STALE_PEER_COUNT_HIGH_CODE :: src/mesh/peer_state.rs
@@ -57,6 +57,8 @@ mesh_workspace_uninitialized                         ·         ·          ·  
 no_ee_peers_on_tailnet                               ✓         ✓          ✓      NO_EE_PEERS_ON_TAILNET_CODE :: src/mesh/tailscale_autodiscovery.rs
 peer_discovery_budget_exhausted                      ✓         ✓          ✓      PEER_DISCOVERY_BUDGET_EXHAUSTED_CODE :: src/mesh/tailscale_autodiscovery.rs
 peer_discovery_workspace_mismatch                    ✓         ✓          ✓      PEER_DISCOVERY_WORKSPACE_MISMATCH_CODE :: src/mesh/tailscale_autodiscovery.rs
+serve_unavailable_v1                                 ✓         ✓          ✓      SERVE_UNAVAILABLE_V1_CODE :: src/serve.rs
+size_limit_exceeded                                  ·         ·          ·      MCP_SIZE_LIMIT_EXCEEDED_CODE :: src/mcp.rs
 steward_auto_enroll_consecutive_failures             ·         ·          ·      STEWARD_AUTO_ENROLL_CONSECUTIVE_FAILURES_CODE :: src/mesh/steward_decision.rs
 steward_auto_enroll_daily_cap_reached                ·         ·          ·      STEWARD_AUTO_ENROLL_DAILY_CAP_REACHED_CODE :: src/mesh/steward_decision.rs
 steward_auto_enroll_disabled                         ·         ·          ·      STEWARD_AUTO_ENROLL_DISABLED_CODE :: src/mesh/steward_decision.rs
