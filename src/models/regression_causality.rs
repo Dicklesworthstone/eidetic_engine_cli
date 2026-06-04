@@ -260,6 +260,8 @@ pub struct NormalizedRegressionEvidenceRow {
     pub command_hash: Option<String>,
     pub observed_at: Option<String>,
     pub source_hash: Option<String>,
+    pub source_materialization: RegressionSourceMaterialization,
+    pub remote_source_materialized: Option<bool>,
     pub redaction_status: RegressionRedactionStatus,
     pub authoritative: bool,
     pub summary: String,
@@ -456,6 +458,16 @@ fn normalize_one(
             &["environment", "workspaceFingerprint"],
         ],
     );
+    let source_materialization = source_materialization_from_artifact(artifact);
+    let remote_source_materialized = first_path_bool(
+        artifact,
+        &[
+            &["remoteSourceMaterialized"],
+            &["remote_source_materialized"],
+            &["sourceState", "remoteSourceMaterialized"],
+            &["source_state", "remote_source_materialized"],
+        ],
+    );
     let mut degraded_codes = collect_degraded_codes(artifact);
     let (suppressed_fields, private_path_seen, raw_output_seen) = suppressed_field_report(artifact);
     let redaction_status = redaction_status_from_artifact(artifact, private_path_seen);
@@ -485,6 +497,14 @@ fn normalize_one(
             Some(&input.id),
             "Use bounded output summaries or content hashes instead of raw stdout, stderr, or logs.",
         ));
+    }
+    if matches!(
+        source_materialization,
+        RegressionSourceMaterialization::RemoteCheckoutUnverified
+            | RegressionSourceMaterialization::SourceStateRefused
+    ) || remote_source_materialized == Some(false)
+    {
+        degraded_codes.push("regression_evidence_source_not_materialized".to_owned());
     }
     if schema_id.is_none()
         && matches!(
@@ -523,6 +543,8 @@ fn normalize_one(
         command_hash,
         observed_at,
         source_hash,
+        source_materialization,
+        remote_source_materialized,
         redaction_status,
         authoritative: status != RegressionEvidenceStatus::Unsupported,
         summary: evidence_summary(
@@ -555,6 +577,8 @@ fn empty_row(
         command_hash: None,
         observed_at: None,
         source_hash: None,
+        source_materialization: RegressionSourceMaterialization::Unknown,
+        remote_source_materialized: None,
         redaction_status,
         authoritative: false,
         summary: summary.to_owned(),
@@ -619,6 +643,27 @@ fn status_from_artifact(artifact: &JsonValue, verdict: Option<&str>) -> Regressi
     if path_bool(artifact, &["localFallbackRefused"]).unwrap_or(false)
         || path_bool(artifact, &["selectorAdmission", "localFallbackRefused"]).unwrap_or(false)
         || path_bool(artifact, &["selector_admission", "local_fallback_refused"]).unwrap_or(false)
+        || path_bool(
+            artifact,
+            &["selectorAdmissionProbe", "localFallbackRefused"],
+        )
+        .unwrap_or(false)
+        || path_bool(
+            artifact,
+            &["selector_admission_probe", "local_fallback_refused"],
+        )
+        .unwrap_or(false)
+        || (source_materialization_from_artifact(artifact)
+            == RegressionSourceMaterialization::RemoteCheckoutUnverified
+            && first_path_bool(
+                artifact,
+                &[
+                    &["remoteSourceMaterialized"],
+                    &["remote_source_materialized"],
+                    &["sourceState", "remoteSourceMaterialized"],
+                    &["source_state", "remote_source_materialized"],
+                ],
+            ) == Some(false))
     {
         return RegressionEvidenceStatus::Blocked;
     }
@@ -630,12 +675,41 @@ fn status_from_artifact(artifact: &JsonValue, verdict: Option<&str>) -> Regressi
         "missing" => RegressionEvidenceStatus::Missing,
         "malformed" | "invalid" | "parse_error" => RegressionEvidenceStatus::Malformed,
         "stale" => RegressionEvidenceStatus::Stale,
-        "blocked" | "selection_failed" | "source_state_refused" | "fallback_refused" => {
-            RegressionEvidenceStatus::Blocked
-        }
+        "blocked"
+        | "selection_failed"
+        | "source_state_refused"
+        | "fallback_refused"
+        | "rch_environment_failure" => RegressionEvidenceStatus::Blocked,
         "unsupported" => RegressionEvidenceStatus::Unsupported,
         "redacted_only" | "hash_only" => RegressionEvidenceStatus::RedactedOnly,
         _ => RegressionEvidenceStatus::Available,
+    }
+}
+
+fn source_materialization_from_artifact(artifact: &JsonValue) -> RegressionSourceMaterialization {
+    let explicit = first_path_string(
+        artifact,
+        &[
+            &["sourceMaterialization"],
+            &["source_materialization"],
+            &["sourceState", "materialization"],
+            &["source_state", "materialization"],
+        ],
+    );
+
+    let explicit_token = explicit.as_deref().map(normalized_token);
+    match explicit_token.as_deref() {
+        Some("committed_tree") => RegressionSourceMaterialization::CommittedTree,
+        Some("dirty_source_materialized") => {
+            RegressionSourceMaterialization::DirtySourceMaterialized
+        }
+        Some("remote_checkout_unverified") => {
+            RegressionSourceMaterialization::RemoteCheckoutUnverified
+        }
+        Some("source_state_refused") => RegressionSourceMaterialization::SourceStateRefused,
+        Some("not_applicable") => RegressionSourceMaterialization::NotApplicable,
+        Some("unknown") => RegressionSourceMaterialization::Unknown,
+        Some(_) | None => RegressionSourceMaterialization::Unknown,
     }
 }
 
@@ -874,6 +948,12 @@ fn path_bool(artifact: &JsonValue, path: &[&str]) -> Option<bool> {
     path_value(artifact, path).and_then(JsonValue::as_bool)
 }
 
+fn first_path_bool(artifact: &JsonValue, paths: &[&[&str]]) -> Option<bool> {
+    paths
+        .iter()
+        .find_map(|path| path_value(artifact, path).and_then(JsonValue::as_bool))
+}
+
 fn path_value<'a>(artifact: &'a JsonValue, path: &[&str]) -> Option<&'a JsonValue> {
     let mut value = artifact;
     for segment in path {
@@ -1082,6 +1162,42 @@ mod tests {
         assert_eq!(
             statuses.get("evidence:bundle"),
             Some(&RegressionEvidenceStatus::RedactedOnly)
+        );
+    }
+
+    #[test]
+    fn rch_environment_failure_with_unmaterialized_remote_source_is_blocked() {
+        let inputs = vec![RegressionEvidenceInput::new(
+            "evidence:rch-live",
+            RegressionEvidenceKind::RchSelectorAdmission,
+            json!({
+                "schema": "ee.rch.verify.v1",
+                "status": "rch_environment_failure",
+                "commandHash": "blake3:verify-command",
+                "selector_admission_probe": {
+                    "status": "selection_failed",
+                    "selection_failure_reason": "all_workers_preflight_failed",
+                    "local_fallback_refused": true
+                },
+                "source_materialization": "remote_checkout_unverified",
+                "remote_source_materialized": false,
+                "redactionStatus": "safe"
+            }),
+        )];
+
+        let report = normalize_regression_evidence_inputs(&inputs);
+        let row = &report.rows[0];
+
+        assert_eq!(row.status, RegressionEvidenceStatus::Blocked);
+        assert_eq!(
+            row.source_materialization,
+            RegressionSourceMaterialization::RemoteCheckoutUnverified
+        );
+        assert_eq!(row.remote_source_materialized, Some(false));
+        assert!(
+            row.degraded_codes
+                .iter()
+                .any(|code| code == "regression_evidence_source_not_materialized")
         );
     }
 
