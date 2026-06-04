@@ -975,6 +975,7 @@ fn effect_manifest_tracks_certificate_and_quarantine_as_real_read_only_surfaces(
         "certificate list",
         "certificate show",
         "certificate verify",
+        "diag environment-attestation",
         "diag quarantine list",
         "diag quarantine show",
     ] {

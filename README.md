@@ -1052,7 +1052,7 @@ base retrieval signal dominant.
 | `ee preflight check --cmd "<command>" --json` | Command-facing policy guard for shell hooks; use `--stdin` or `--cmd-base64` when an outer harness may block risky argv text before `ee` can inspect it |
 | `ee tripwire list` / `check` | Inspect and check preflight tripwires |
 | `ee diag plan-cache` | EQL query plan-cache counters and integration posture |
-| `ee diag disk-pressure` / `build-admission` / `artifacts` | Storage, artifact, and build-admission diagnostics |
+| `ee diag environment-attestation` / `disk-pressure` / `build-admission` / `artifacts` | Read-only environment, storage, artifact, and build-admission diagnostics |
 | `ee diag graph` / `graph-snapshot` / `search` | Graph, snapshot, and retrieval diagnostics |
 | `ee diag integrity` / `dependencies` / `streams` | Integrity, dependency, and stdout/stderr stream checks |
 | `ee verify ingest` / `ee verify rch ingest` / `ee verify rch blockers` / `ee verify rch runs` / `proofs` / `broker lookup` / `closure-guidance` | Verification evidence, durable RCH proof ledger queries, proof checks, reusable RCH evidence, and closeout guidance |

@@ -60,6 +60,7 @@ Beads, reserve files, run Cargo, rebuild binaries, or send Agent Mail.
 The intended flow is:
 
 ```bash
+ee diag environment-attestation --workspace . --include-rch --json
 ee swarm brief --workspace . --include-rch --json
 ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json
 ee schema export ee.environment_attestation.v1
@@ -70,3 +71,10 @@ surfaces rather than duplicate their internals. In particular, claim-gate
 `sourceAuthority` is a summary projection; an environment attestation should
 preserve the per-source inventory that explains why a source is authoritative,
 advisory, stale, unavailable, or contradicted.
+
+`ee diag environment-attestation` is read-only. It wraps the shared collector in
+an `ee.response.v2` envelope and emits an `ee.environment_attestation.v1`
+payload on JSON stdout. The command reports the Agent Mail probe/snapshot source
+that `ee swarm brief` can observe from inside the CLI; live MCP Agent Mail state
+remains an external coordination substrate unless a redacted snapshot is passed
+explicitly.

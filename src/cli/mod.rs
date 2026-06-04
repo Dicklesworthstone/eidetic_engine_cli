@@ -96,6 +96,10 @@ use crate::core::doctor::{
     DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport, IntegrityDiagnosticsOptions,
     IntegrityDiagnosticsReport,
 };
+use crate::core::environment_attestation::{
+    EnvironmentAttestationReport, EnvironmentAttestationSourceStatus,
+    collect_environment_attestation,
+};
 use crate::curate::{REFLECTION_RESULT_MAX_JSON_BYTES, ReflectionSourcePackageLimits};
 // `crate::core::doctor_runtime::CapabilitiesReport` is referenced via its
 // fully-qualified path at the single call site below to avoid colliding with
@@ -2872,6 +2876,8 @@ pub enum DiagCommand {
     Dependencies,
     /// Report disk capacity, artifact consumers, and preservation-only repair plans.
     DiskPressure(DiagDiskPressureArgs),
+    /// Report read-only workspace/source/proof environment attestation.
+    EnvironmentAttestation(DiagEnvironmentAttestationArgs),
     /// Report graph module readiness, capabilities, and metrics.
     Graph,
     /// Report redacted host topology and resource profile inputs.
@@ -3080,6 +3086,38 @@ pub struct DiagBuildAdmissionArgs {
     /// Artifact sync-down destination to preflight. May be repeated.
     #[arg(long = "artifact-destination", value_name = "PATH")]
     pub artifact_destinations: Vec<PathBuf>,
+}
+
+/// Arguments for `ee diag environment-attestation`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagEnvironmentAttestationArgs {
+    /// Comma-separated sources to collect: default, all, none, git, beads, bv, agent-mail, rch, host-profile, agent-inventory.
+    #[arg(long, value_name = "LIST", default_value = "default")]
+    pub sources: String,
+
+    /// Include the optional RCH status probe. Equivalent to adding rch to --sources.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_rch: bool,
+
+    /// Redacted Agent Mail snapshot JSON to include. No live Agent Mail mutation is performed.
+    #[arg(long, value_name = "PATH")]
+    pub agent_mail_snapshot: Option<PathBuf>,
+
+    /// Comma-separated agent connector slugs to inspect when agent-inventory is enabled.
+    #[arg(long, value_name = "SLUGS")]
+    pub agent_inventory_only: Option<String>,
+
+    /// Number of recent git commits to include when the git source is enabled.
+    #[arg(long, value_name = "N", default_value_t = 8)]
+    pub max_recent_commits: usize,
+
+    /// Per-source command timeout budget in milliseconds.
+    #[arg(long, value_name = "MS", default_value_t = 1_500)]
+    pub command_timeout_ms: u64,
+
+    /// Fail with exit code 6 when any selected source is unavailable, not configured, or skipped.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub require_sources: bool,
 }
 
 /// Arguments for `ee diag memory-validity`.
@@ -10257,6 +10295,9 @@ where
                 }
             }
             DiagCommand::DiskPressure(args) => handle_diag_disk_pressure(&cli, args, stdout),
+            DiagCommand::EnvironmentAttestation(args) => {
+                handle_diag_environment_attestation(&cli, args, stdout, stderr)
+            }
             DiagCommand::Graph => handle_diag_graph(&cli, stdout),
             DiagCommand::HostProfile(args) => handle_diag_host_profile(&cli, args, stdout),
             DiagCommand::GraphSnapshot(args) => {
@@ -22522,6 +22563,139 @@ where
             write_stdout(stdout, &(workspace_response_json_v2(&report) + "\n"))
         }
     }
+}
+
+fn handle_diag_environment_attestation<W, E>(
+    cli: &Cli,
+    args: &DiagEnvironmentAttestationArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let mut enabled_sources = match parse_swarm_brief_sources(&args.sources, args.include_rch) {
+        Ok(sources) => sources,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    if args.sources.trim().eq_ignore_ascii_case("default") {
+        enabled_sources.insert(SwarmBriefSourceKind::Rch);
+    }
+
+    let mut options = SwarmBriefCollectOptions::for_workspace(cli.resolve_workspace());
+    options.max_recent_commits = args.max_recent_commits;
+    options.include_rch = enabled_sources.contains(&SwarmBriefSourceKind::Rch);
+    options.enabled_sources = enabled_sources;
+    options.agent_mail_snapshot_path = args.agent_mail_snapshot.clone();
+    options.agent_inventory_only_connectors = args
+        .agent_inventory_only
+        .as_deref()
+        .map(parse_comma_separated_values);
+    options.command_timeout_ms = args.command_timeout_ms;
+
+    let runner = SystemSwarmBriefCommandRunner;
+    let report = collect_environment_attestation(&options, &runner);
+    let unavailable_sources = environment_attestation_unavailable_sources(&report);
+    if args.require_sources && !unavailable_sources.is_empty() {
+        let error = DomainError::UnsatisfiedDegradedMode {
+            message: format!(
+                "Required environment attestation sources are unavailable: {}.",
+                unavailable_sources.join(", ")
+            ),
+            repair: Some(
+                "Run without --require-sources, adjust --sources, or provide --agent-mail-snapshot."
+                    .to_string(),
+            ),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let _ = writeln!(
+                stderr,
+                "environment attestation: verdict={} source_test_verdict={} degraded={}",
+                serialized_enum_str(&report.verdict),
+                serialized_enum_str(&report.summary.source_test_verdict),
+                report.degraded.len()
+            );
+            write_stdout(stdout, &render_environment_attestation_human(&report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&diag_environment_attestation_response_json(&report))
+                + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(diag_environment_attestation_response_json(&report) + "\n"),
+        ),
+    }
+}
+
+fn environment_attestation_unavailable_sources(
+    report: &EnvironmentAttestationReport,
+) -> Vec<String> {
+    report
+        .source_authority
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.status,
+                EnvironmentAttestationSourceStatus::NotCollected
+                    | EnvironmentAttestationSourceStatus::Unavailable
+                    | EnvironmentAttestationSourceStatus::Blocked
+                    | EnvironmentAttestationSourceStatus::Ambiguous
+            )
+        })
+        .map(|entry| entry.source.as_str().to_owned())
+        .collect()
+}
+
+fn render_environment_attestation_human(report: &EnvironmentAttestationReport) -> String {
+    let mut out = format!(
+        "environment attestation\n\nverdict: {}\nsource test verdict: {}\nsources: {}\ndegraded: {}\nredaction: {}\n",
+        serialized_enum_str(&report.verdict),
+        serialized_enum_str(&report.summary.source_test_verdict),
+        report.source_authority.len(),
+        report.degraded.len(),
+        report.redaction_status
+    );
+    for action in &report.recovery_actions {
+        out.push_str(&format!(
+            "\n{}: {}\n",
+            serialized_enum_str(&action.kind),
+            action.rationale
+        ));
+        if let Some(command) = &action.command {
+            out.push_str(&format!("Next: {}\n", command.display_command));
+        }
+    }
+    out
+}
+
+fn serialized_enum_str<T>(value: &T) -> String
+where
+    T: serde::Serialize,
+{
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn diag_environment_attestation_response_json(report: &EnvironmentAttestationReport) -> String {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": report,
+        "degraded": &report.degraded,
+    })
+    .to_string()
 }
 
 fn handle_diag_plan_cache<W>(cli: &Cli, stdout: &mut W) -> ProcessExitCode
@@ -48230,6 +48404,9 @@ impl NormalizedInvocation {
                     DiagCommand::DatabaseSkew(_) => "diag database-skew".to_string(),
                     DiagCommand::Dependencies => "diag dependencies".to_string(),
                     DiagCommand::DiskPressure(_) => "diag disk-pressure".to_string(),
+                    DiagCommand::EnvironmentAttestation(_) => {
+                        "diag environment-attestation".to_string()
+                    }
                     DiagCommand::Graph => "diag graph".to_string(),
                     DiagCommand::HostProfile(_) => "diag host-profile".to_string(),
                     DiagCommand::GraphSnapshot(_) => "diag graph-snapshot".to_string(),
@@ -49285,9 +49462,9 @@ mod tests {
         SwarmCommand, SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand,
         VerifyCommand, VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
         WorkspaceHygieneMode, db_inspect_redact_source_uri,
-        format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
-        init_report_exit_code, json_with_data_result_path, mesh, orient_next_commands,
-        parse_completion_audit_evidence_input, parse_context_profile,
+        diag_environment_attestation_response_json, format_search_json_with_mesh_and_recalibration,
+        hook_git_readiness_response_json, init_report_exit_code, json_with_data_result_path, mesh,
+        orient_next_commands, parse_completion_audit_evidence_input, parse_context_profile,
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json, run, write_index_rebuild_error,
@@ -57433,6 +57610,143 @@ mod tests {
             }
             _ => Err("expected diag build-admission command".to_string()),
         }
+    }
+
+    #[test]
+    fn diag_environment_attestation_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--workspace",
+            ".",
+            "diag",
+            "environment-attestation",
+            "--sources",
+            "git,agent-mail",
+            "--include-rch",
+            "--agent-mail-snapshot",
+            "snapshot.json",
+            "--agent-inventory-only",
+            "codex,claude",
+            "--max-recent-commits",
+            "3",
+            "--command-timeout-ms",
+            "250",
+            "--require-sources",
+            "--json",
+        ])
+        .map_err(|e| {
+            format!(
+                "failed to parse diag environment-attestation: {:?}",
+                e.kind()
+            )
+        })?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::EnvironmentAttestation(args))) => {
+                ensure_equal(&args.sources, &"git,agent-mail".to_owned(), "sources")?;
+                ensure_equal(&args.include_rch, &true, "include rch")?;
+                ensure_equal(
+                    &args.agent_mail_snapshot,
+                    &Some(PathBuf::from("snapshot.json")),
+                    "agent mail snapshot",
+                )?;
+                ensure_equal(
+                    &args.agent_inventory_only,
+                    &Some("codex,claude".to_owned()),
+                    "agent inventory only",
+                )?;
+                ensure_equal(&args.max_recent_commits, &3, "max recent commits")?;
+                ensure_equal(&args.command_timeout_ms, &250, "command timeout")?;
+                ensure_equal(&args.require_sources, &true, "require sources")
+            }
+            _ => Err("expected diag environment-attestation command".to_string()),
+        }
+    }
+
+    #[test]
+    fn diag_environment_attestation_response_contract() -> TestResult {
+        let brief = crate::core::swarm_brief::SwarmBriefReport::empty(Path::new("."));
+        let fixed_at = chrono::DateTime::parse_from_rfc3339("2026-06-04T00:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&chrono::Utc);
+        let report = crate::core::environment_attestation::environment_attestation_from_swarm_brief(
+            &brief, fixed_at,
+        );
+        let response = diag_environment_attestation_response_json(&report);
+        let value: serde_json::Value =
+            serde_json::from_str(&response).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v2"),
+            "response schema",
+        )?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "success")?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!("ee.environment_attestation.v1"),
+            "attestation schema",
+        )?;
+        ensure_equal(
+            &value["data"]["redactionStatus"],
+            &serde_json::json!(
+                "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content"
+            ),
+            "redaction status",
+        )?;
+        ensure(
+            value["data"]["sourceAuthority"].as_array().is_some(),
+            "sourceAuthority array present",
+        )?;
+        ensure_equal(
+            &value["degraded"],
+            &value["data"]["degraded"],
+            "top-level degraded mirrors attestation degraded entries",
+        )
+    }
+
+    #[test]
+    fn diag_environment_attestation_json_writes_machine_data_to_stdout_only() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "diag",
+            "environment-attestation",
+            "--sources",
+            "none",
+            "--json",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "diag environment-attestation json exit",
+        )?;
+        ensure(stderr.is_empty(), "json stderr must be empty")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v2"),
+            "response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!("ee.environment_attestation.v1"),
+            "attestation schema",
+        )?;
+        ensure(
+            value["data"]["sourceAuthority"]
+                .as_array()
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item["source"] == serde_json::json!("local_cargo_tripwire"))
+                }),
+            "local cargo tripwire source is reported without running cargo",
+        )
     }
 
     #[test]

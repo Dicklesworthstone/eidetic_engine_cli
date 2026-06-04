@@ -1191,6 +1191,10 @@ impl EffectManifest {
             CommandEffect::read_only_db("demo verify", "Verify demo artifacts"),
             CommandEffect::read_only_db("diag claims", "Inspect claim diagnostics"),
             CommandEffect::read_only_db("diag dependencies", "Inspect dependency diagnostics"),
+            CommandEffect::read_only_db(
+                "diag environment-attestation",
+                "Inspect environment attestation diagnostics",
+            ),
             CommandEffect::read_only_db("diag graph", "Inspect graph diagnostics"),
             CommandEffect::read_only_db("diag integrity", "Inspect storage integrity diagnostics"),
             CommandEffect::read_only_db("diag quarantine list", "List quarantine entries"),
