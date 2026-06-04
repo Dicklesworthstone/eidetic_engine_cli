@@ -189,6 +189,33 @@ class ClaimGateConsumer(unittest.TestCase):
             "bead_claim_candidate",
         )
 
+    def test_oversized_claim_action_argv_fails_gate_closed(self):
+        gate = safe_gate()
+        gate["claimCommandAction"]["argv"] = [
+            "br",
+            "update",
+            "bd-safe.1",
+            "--status",
+            "in_progress",
+            "--json",
+            *[
+                f"--extra-{index}"
+                for index in range(consumer.DECISION_ARGV_PART_LIMIT)
+            ],
+        ]
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_claim_action_not_safe_structured_argv",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["argv"], [])
+        self.assertEqual(claim["reason"], "argv_too_long")
+
     def test_recommended_safe_mismatch_fails_closed(self):
         gate = safe_gate()
         gate["recommendedSafeToClaim"] = False
@@ -1130,6 +1157,49 @@ class WorkPacketConsumer(unittest.TestCase):
             f"recommended_{consumer.DECISION_ACTION_LIMIT}",
             {action["commandId"] for action in decision["argvActions"]},
         )
+
+    def test_packet_oversized_argv_is_not_runnable(self):
+        packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        packet["data"]["recommendedAction"] = {
+            "action": "inspect_and_claim",
+            "candidateId": "bd-oversized-argv.1",
+            "safeToClaim": True,
+            "suggestedCommands": [],
+            "suggestedCommandActions": [
+                safe_action(
+                    "oversized_argv",
+                    [
+                        "ee",
+                        *[
+                            f"arg-{index}"
+                            for index in range(consumer.DECISION_ARGV_PART_LIMIT)
+                        ],
+                    ],
+                )
+            ],
+        }
+        packet["data"]["candidates"] = [
+            {
+                "id": "bd-oversized-argv.1",
+                "decision": "safe_to_claim",
+                "unsafeReasons": [],
+                "staleReasons": [],
+            }
+        ]
+
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "malformed_packet_recommended_command_action_argv",
+            decision["whyNotSafe"],
+        )
+        action = decision["argvActions"][0]
+        self.assertEqual(action["commandId"], "oversized_argv")
+        self.assertFalse(action["runnable"])
+        self.assertTrue(action["reviewRequired"])
+        self.assertEqual(action["argv"], [])
+        self.assertEqual(action["reason"], "argv_too_long")
 
     def test_missing_required_packet_recommended_command_action_fields_fail_closed(self):
         for field, suffix in consumer.CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS:
@@ -2875,6 +2945,10 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
             schema["properties"]["argvActions"]["maxItems"],
         )
         self.assertEqual(
+            consumer.DECISION_ARGV_PART_LIMIT,
+            action["argv"]["maxItems"],
+        )
+        self.assertEqual(
             160,
             schema["properties"]["whyNotSafe"]["items"]["maxLength"],
         )
@@ -3028,6 +3102,10 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
             )
             self.assertIn(action["actionKind"], action_kind_enum)
             self.assertIsInstance(action["argv"], list)
+            self.assertLessEqual(
+                len(action["argv"]),
+                action_schema["argv"]["maxItems"],
+            )
             self.assertTrue(all(isinstance(part, str) for part in action["argv"]))
             for index, part in enumerate(action["argv"]):
                 assert_max_length(

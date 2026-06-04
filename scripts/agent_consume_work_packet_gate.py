@@ -19,6 +19,7 @@ WORK_PACKET_SCHEMA = "ee.swarm.work_packet.v1"
 SAFE_COPY = "safe_structured_argv"
 DECISION_DIAGNOSTIC_LIMIT = 16
 DECISION_ACTION_LIMIT = 16
+DECISION_ARGV_PART_LIMIT = 32
 COPY_SAFETY_VALUES = {
     "safe_structured_argv",
     "display_only",
@@ -396,7 +397,10 @@ def malformed_command_action_reasons(action, reason_prefix, reason_scope="claim_
     argv = action.get("argv")
     if "argv" in action and not isinstance(argv, list):
         reasons.append(f"malformed_{reason_scope}_{reason_prefix}_argv")
-    elif isinstance(argv, list) and any(safe_command_string_malformed(part) for part in argv):
+    elif isinstance(argv, list) and (
+        len(argv) > DECISION_ARGV_PART_LIMIT
+        or any(safe_command_string_malformed(part) for part in argv)
+    ):
         reasons.append(f"malformed_{reason_scope}_{reason_prefix}_argv")
 
     shell_required = action.get("shellRequired")
@@ -722,6 +726,7 @@ def classify_action(action, safe_to_claim, action_kind):
     argv_input = action.get("argv")
     argv = []
     argv_invalid = False
+    argv_too_long = False
     argv_redacted = False
     metadata_invalid = any(
         reason
@@ -731,7 +736,8 @@ def classify_action(action, safe_to_claim, action_kind):
         if not reason.endswith("_argv")
     )
     if isinstance(argv_input, list):
-        for part in argv_input:
+        argv_too_long = len(argv_input) > DECISION_ARGV_PART_LIMIT
+        for part in argv_input[:DECISION_ARGV_PART_LIMIT]:
             if not isinstance(part, str):
                 argv_invalid = True
                 continue
@@ -754,6 +760,7 @@ def classify_action(action, safe_to_claim, action_kind):
         copy_safety == SAFE_COPY
         and not shell_required
         and bool(argv)
+        and not argv_too_long
         and not argv_invalid
         and not argv_redacted
         and not metadata_invalid
@@ -762,6 +769,8 @@ def classify_action(action, safe_to_claim, action_kind):
 
     if metadata_invalid:
         reason = "malformed_command_action"
+    elif argv_too_long:
+        reason = "argv_too_long"
     elif argv_invalid:
         reason = "invalid_argv_item"
     elif not argv:
@@ -843,6 +852,7 @@ def claim_action_is_safe_structured_argv(action):
         and action.get("shellRequired") is False
         and isinstance(argv, list)
         and bool(argv)
+        and len(argv) <= DECISION_ARGV_PART_LIMIT
         and not any(safe_command_string_malformed(part) for part in argv)
     )
 

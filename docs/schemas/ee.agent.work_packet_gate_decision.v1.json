@@ -218,6 +218,7 @@
         },
         "argv": {
           "type": "array",
+          "maxItems": 32,
           "items": {"type": "string", "maxLength": 120}
         },
         "runnable": {"type": "boolean"},
