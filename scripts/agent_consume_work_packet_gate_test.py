@@ -642,6 +642,46 @@ class ErrorHandling(unittest.TestCase):
         self.assertEqual(decision["decision"], "error")
         self.assertIn("error:migration_required", decision["whyNotSafe"])
 
+    def test_error_envelope_preserves_degraded_summary(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "build_admission_refused",
+                    "details": {
+                        "degraded": [
+                            {
+                                "code": "rch_verify_build_admission_denied",
+                                "source": "rch",
+                                "severity": "high",
+                            }
+                        ],
+                        "sourceProvenance": [
+                            {
+                                "code": "rch_worker_topology_blocked",
+                                "source": "rch",
+                            }
+                        ],
+                    },
+                },
+                "degraded": [
+                    {
+                        "code": "agent_mail_unavailable",
+                        "source": "agent_mail",
+                        "severity": "warning",
+                    }
+                ],
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertIn("error:build_admission_refused", decision["whyNotSafe"])
+        codes = {entry["code"] for entry in decision["degradedSummary"]}
+        self.assertIn("agent_mail_unavailable", codes)
+        self.assertIn("rch_verify_build_admission_denied", codes)
+        self.assertIn("rch_worker_topology_blocked", codes)
+
     def test_stale_claim_gate_binary_error_fails_closed(self):
         decision = consumer.consume(
             {

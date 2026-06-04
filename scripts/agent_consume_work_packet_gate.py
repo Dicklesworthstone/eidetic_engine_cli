@@ -140,6 +140,13 @@ def degraded_summary(payload, envelope_degraded=None):
         add_objects(payload.get("degraded"))
         add_objects(payload.get("degradedCodes"))
         add_objects(payload.get("sourceProvenance"))
+        error = dict_or_empty(payload.get("error"))
+        error_details = dict_or_empty(error.get("details"))
+        add_objects(error.get("degraded"))
+        add_objects(error.get("degradedCodes"))
+        add_objects(error_details.get("degraded"))
+        add_objects(error_details.get("degradedCodes"))
+        add_objects(error_details.get("sourceProvenance"))
         coordination = dict_or_empty(payload.get("coordination"))
         agent_mail = dict_or_empty(coordination.get("agentMail"))
         for code in compact_list(agent_mail.get("degradedCodes")):
@@ -558,14 +565,14 @@ def consume(response):
     if not isinstance(response, dict):
         return error_decision("invalid_json_shape")
     if response.get("schema") == "ee.error.v2":
-        return error_decision(classify_error_code(response.get("error", {})))
+        return error_decision(classify_error_code(response.get("error", {})), response)
     if response.get("success") is False:
         error = response.get("error", {})
-        return error_decision(classify_error_code(error))
+        return error_decision(classify_error_code(error), response)
 
     payload = get_payload(response)
     if not isinstance(payload, dict):
-        return error_decision("missing_payload")
+        return error_decision("missing_payload", response)
 
     envelope_degraded = response.get("degraded") if response is not payload else None
     schema = payload.get("schema")
@@ -573,7 +580,11 @@ def consume(response):
         return consume_claim_gate(payload, envelope_degraded)
     if schema == WORK_PACKET_SCHEMA:
         return consume_work_packet(payload, envelope_degraded)
-    return error_decision(f"unsupported_schema:{redact_text(schema or 'unknown', 64)}")
+    return error_decision(
+        f"unsupported_schema:{redact_text(schema or 'unknown', 64)}",
+        payload,
+        envelope_degraded,
+    )
 
 
 def classify_error_code(error):
@@ -590,7 +601,7 @@ def classify_error_code(error):
     return code or "unknown_error"
 
 
-def error_decision(code):
+def error_decision(code, source=None, envelope_degraded=None):
     code = redact_text(code or "unknown_error", 96)
     return {
         "schema": OUTPUT_SCHEMA,
@@ -613,7 +624,7 @@ def error_decision(code):
             "rchSafeToLaunchCargoVerification": None,
             "sourceCount": 0,
         },
-        "degradedSummary": [],
+        "degradedSummary": degraded_summary(source, envelope_degraded),
         "legacyCommandStringsRefused": 0,
     }
 
