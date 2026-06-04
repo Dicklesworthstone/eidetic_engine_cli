@@ -8,6 +8,11 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
+use ee::models::regression_causality::{
+    RegressionCausalitySeverity, RegressionCauseHypothesisCode, RegressionCounterEvidenceEffect,
+    RegressionEvidenceKind, RegressionEvidenceStatus, RegressionOwnerHintKind,
+    RegressionRedactionStatus, RegressionSourceMaterialization,
+};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -112,55 +117,6 @@ const SURFACES: &[&str] = &[
     "support_bundle",
     "unknown",
 ];
-const MATERIALIZATIONS: &[&str] = &[
-    "committed_tree",
-    "dirty_source_materialized",
-    "remote_checkout_unverified",
-    "source_state_refused",
-    "not_applicable",
-    "unknown",
-];
-const EVIDENCE_KINDS: &[&str] = &[
-    "verification_evidence",
-    "rch_selector_admission",
-    "swarm_replay",
-    "e2e_event_log",
-    "pack_replay",
-    "pack_diff",
-    "perf_report",
-    "beads_history",
-    "bv_history",
-    "degraded_fixture",
-    "git_metadata",
-    "support_bundle",
-];
-const EVIDENCE_STATUSES: &[&str] = &[
-    "available",
-    "missing",
-    "malformed",
-    "stale",
-    "blocked",
-    "unsupported",
-    "redacted_only",
-];
-const REDACTION_STATUSES: &[&str] = &["safe", "redacted", "hash_only", "refused", "unknown"];
-const HYPOTHESIS_CODES: &[&str] = &[
-    "source_not_materialized",
-    "schema_contract_drift",
-    "stale_derived_asset",
-    "known_environment_blocker",
-    "output_budget_regression",
-    "fixture_gap",
-    "pack_selection_change",
-    "perf_budget_regression",
-    "tracker_state_mismatch",
-    "unknown_insufficient_evidence",
-];
-const SEVERITIES: &[&str] = &["info", "low", "warning", "medium", "high", "critical"];
-const OWNER_HINT_KINDS: &[&str] = &["bead", "agent", "module", "command", "unknown"];
-const COUNTER_EVIDENCE_EFFECTS: &[&str] =
-    &["supports", "weakens", "neutral", "missing_required_source"];
-
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -436,6 +392,18 @@ fn regression_causality_schema_field_presets_are_pinned() -> TestResult {
 #[test]
 fn regression_causality_schema_enum_vocabularies_are_pinned() -> TestResult {
     let schema = load_schema()?;
+    let materializations =
+        RegressionSourceMaterialization::ALL.map(RegressionSourceMaterialization::as_str);
+    let evidence_kinds = RegressionEvidenceKind::ALL.map(RegressionEvidenceKind::as_str);
+    let evidence_statuses = RegressionEvidenceStatus::ALL.map(RegressionEvidenceStatus::as_str);
+    let redaction_statuses = RegressionRedactionStatus::ALL.map(RegressionRedactionStatus::as_str);
+    let hypothesis_codes =
+        RegressionCauseHypothesisCode::ALL.map(RegressionCauseHypothesisCode::as_str);
+    let severities = RegressionCausalitySeverity::ALL.map(RegressionCausalitySeverity::as_str);
+    let owner_hint_kinds = RegressionOwnerHintKind::ALL.map(RegressionOwnerHintKind::as_str);
+    let counter_evidence_effects =
+        RegressionCounterEvidenceEffect::ALL.map(RegressionCounterEvidenceEffect::as_str);
+
     for (pointer, expected, label) in [
         (
             "/$defs/subject/properties/surface/enum",
@@ -444,42 +412,42 @@ fn regression_causality_schema_enum_vocabularies_are_pinned() -> TestResult {
         ),
         (
             "/$defs/sourceState/properties/materialization/enum",
-            MATERIALIZATIONS,
+            &materializations,
             "regression causality source materialization enum",
         ),
         (
             "/$defs/evidenceSource/properties/kind/enum",
-            EVIDENCE_KINDS,
+            &evidence_kinds,
             "regression causality evidence kind enum",
         ),
         (
             "/$defs/evidenceSource/properties/status/enum",
-            EVIDENCE_STATUSES,
+            &evidence_statuses,
             "regression causality evidence status enum",
         ),
         (
             "/$defs/evidenceSource/properties/redactionStatus/enum",
-            REDACTION_STATUSES,
+            &redaction_statuses,
             "regression causality evidence redaction status enum",
         ),
         (
             "/$defs/hypothesis/properties/code/enum",
-            HYPOTHESIS_CODES,
+            &hypothesis_codes,
             "regression causality hypothesis code enum",
         ),
         (
             "/$defs/severity/enum",
-            SEVERITIES,
+            &severities,
             "regression causality severity enum",
         ),
         (
             "/$defs/ownerHint/properties/kind/enum",
-            OWNER_HINT_KINDS,
+            &owner_hint_kinds,
             "regression causality owner hint kind enum",
         ),
         (
             "/$defs/counterEvidence/properties/effect/enum",
-            COUNTER_EVIDENCE_EFFECTS,
+            &counter_evidence_effects,
             "regression causality counter-evidence effect enum",
         ),
     ] {

@@ -93,6 +93,16 @@ pub enum RegressionEvidenceStatus {
 }
 
 impl RegressionEvidenceStatus {
+    pub const ALL: [Self; 7] = [
+        Self::Available,
+        Self::Missing,
+        Self::Malformed,
+        Self::Stale,
+        Self::Blocked,
+        Self::Unsupported,
+        Self::RedactedOnly,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -124,6 +134,14 @@ pub enum RegressionRedactionStatus {
 }
 
 impl RegressionRedactionStatus {
+    pub const ALL: [Self; 5] = [
+        Self::Safe,
+        Self::Redacted,
+        Self::HashOnly,
+        Self::Refused,
+        Self::Unknown,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -154,6 +172,15 @@ pub enum RegressionSourceMaterialization {
 }
 
 impl RegressionSourceMaterialization {
+    pub const ALL: [Self; 6] = [
+        Self::CommittedTree,
+        Self::DirtySourceMaterialized,
+        Self::RemoteCheckoutUnverified,
+        Self::SourceStateRefused,
+        Self::NotApplicable,
+        Self::Unknown,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -185,6 +212,15 @@ pub enum RegressionCausalitySeverity {
 }
 
 impl RegressionCausalitySeverity {
+    pub const ALL: [Self; 6] = [
+        Self::Info,
+        Self::Low,
+        Self::Warning,
+        Self::Medium,
+        Self::High,
+        Self::Critical,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -341,6 +377,19 @@ pub enum RegressionCauseHypothesisCode {
 }
 
 impl RegressionCauseHypothesisCode {
+    pub const ALL: [Self; 10] = [
+        Self::SourceNotMaterialized,
+        Self::SchemaContractDrift,
+        Self::StaleDerivedAsset,
+        Self::KnownEnvironmentBlocker,
+        Self::OutputBudgetRegression,
+        Self::FixtureGap,
+        Self::PackSelectionChange,
+        Self::PerfBudgetRegression,
+        Self::TrackerStateMismatch,
+        Self::UnknownInsufficientEvidence,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -373,6 +422,31 @@ pub enum RegressionCounterEvidenceEffect {
     MissingRequiredSource,
 }
 
+impl RegressionCounterEvidenceEffect {
+    pub const ALL: [Self; 4] = [
+        Self::Supports,
+        Self::Weakens,
+        Self::Neutral,
+        Self::MissingRequiredSource,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Supports => "supports",
+            Self::Weakens => "weakens",
+            Self::Neutral => "neutral",
+            Self::MissingRequiredSource => "missing_required_source",
+        }
+    }
+}
+
+impl fmt::Display for RegressionCounterEvidenceEffect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegressionCounterEvidence {
@@ -389,6 +463,33 @@ pub enum RegressionOwnerHintKind {
     Module,
     Command,
     Unknown,
+}
+
+impl RegressionOwnerHintKind {
+    pub const ALL: [Self; 5] = [
+        Self::Bead,
+        Self::Agent,
+        Self::Module,
+        Self::Command,
+        Self::Unknown,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bead => "bead",
+            Self::Agent => "agent",
+            Self::Module => "module",
+            Self::Command => "command",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for RegressionOwnerHintKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
