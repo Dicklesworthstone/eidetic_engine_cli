@@ -35,6 +35,19 @@ CLAIM_GATE_REQUIRED_FIELDS = [
     ("nextCommandActions", "missing_claim_gate_next_command_actions"),
     ("claimCommandAction", "missing_claim_gate_claim_command_action"),
 ]
+CLAIM_GATE_SOURCE_AUTHORITY_REQUIRED_FIELDS = [
+    ("trackerAuthoritative", "missing_claim_gate_tracker_authoritative"),
+    ("trackerHealth", "missing_claim_gate_tracker_health"),
+    ("agentMailStatus", "missing_claim_gate_agent_mail_status"),
+    ("reservationAuthoritative", "missing_claim_gate_reservation_authoritative"),
+    ("inboxAuthoritative", "missing_claim_gate_inbox_authoritative"),
+    ("rchRemoteOnlyRequired", "missing_claim_gate_rch_remote_only_required"),
+    (
+        "rchSafeToLaunchCargoVerification",
+        "missing_claim_gate_rch_safe_to_launch_cargo_verification",
+    ),
+    ("sourceCount", "missing_claim_gate_source_count"),
+]
 MACHINE_RESPONSE_SCHEMAS = {
     "ee.error.v2",
     "ee.response.v2",
@@ -203,25 +216,40 @@ def malformed_claim_gate_authority_reasons(gate):
     if not isinstance(authority, dict):
         return []
 
-    reasons = malformed_boolean_field_reasons(
-        authority,
-        [
-            ("trackerAuthoritative", "malformed_claim_gate_tracker_authoritative"),
-            (
-                "reservationAuthoritative",
-                "malformed_claim_gate_reservation_authoritative",
-            ),
-            ("inboxAuthoritative", "malformed_claim_gate_inbox_authoritative"),
-            (
-                "rchRemoteOnlyRequired",
-                "malformed_claim_gate_rch_remote_only_required",
-            ),
-            (
-                "rchSafeToLaunchCargoVerification",
-                "malformed_claim_gate_rch_safe_to_launch_cargo_verification",
-            ),
-        ],
+    reasons = []
+    for field, reason in CLAIM_GATE_SOURCE_AUTHORITY_REQUIRED_FIELDS:
+        if field not in authority:
+            reasons.append(reason)
+
+    reasons.extend(
+        malformed_boolean_field_reasons(
+            authority,
+            [
+                ("trackerAuthoritative", "malformed_claim_gate_tracker_authoritative"),
+                (
+                    "reservationAuthoritative",
+                    "malformed_claim_gate_reservation_authoritative",
+                ),
+                ("inboxAuthoritative", "malformed_claim_gate_inbox_authoritative"),
+                (
+                    "rchRemoteOnlyRequired",
+                    "malformed_claim_gate_rch_remote_only_required",
+                ),
+                (
+                    "rchSafeToLaunchCargoVerification",
+                    "malformed_claim_gate_rch_safe_to_launch_cargo_verification",
+                ),
+            ],
+        )
     )
+    for field, reason in [
+        ("trackerHealth", "malformed_claim_gate_tracker_health"),
+        ("agentMailStatus", "malformed_claim_gate_agent_mail_status"),
+    ]:
+        value = authority.get(field)
+        if field in authority and value is not None and not isinstance(value, str):
+            reasons.append(reason)
+
     source_count = authority.get("sourceCount")
     if (
         "sourceCount" in authority

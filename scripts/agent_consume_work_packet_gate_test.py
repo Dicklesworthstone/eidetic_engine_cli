@@ -188,11 +188,30 @@ class ClaimGateConsumer(unittest.TestCase):
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
         self.assertFalse(claim["runnable"])
 
+    def test_missing_required_source_authority_fields_fail_closed(self):
+        for field, reason in consumer.CLAIM_GATE_SOURCE_AUTHORITY_REQUIRED_FIELDS:
+            with self.subTest(field=field):
+                gate = safe_gate()
+                gate["sourceAuthority"].pop(field)
+
+                decision = consumer.consume(envelope(gate))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertIn(reason, decision["whyNotSafe"])
+                claim = [
+                    action
+                    for action in decision["argvActions"]
+                    if action["actionKind"] == "claim"
+                ][0]
+                self.assertFalse(claim["runnable"])
+
     def test_malformed_source_authority_scalars_fail_closed_and_emit_schema_types(self):
         gate = safe_gate()
         gate["sourceAuthority"].update(
             {
                 "trackerAuthoritative": "true",
+                "trackerHealth": ["ok"],
+                "agentMailStatus": {"status": "healthy"},
                 "reservationAuthoritative": ["true"],
                 "inboxAuthoritative": {"value": True},
                 "rchRemoteOnlyRequired": "true",
@@ -214,6 +233,8 @@ class ClaimGateConsumer(unittest.TestCase):
         self.assertIsNone(decision["sourceSummary"]["sourceCount"])
         for reason in [
             "malformed_claim_gate_tracker_authoritative",
+            "malformed_claim_gate_tracker_health",
+            "malformed_claim_gate_agent_mail_status",
             "malformed_claim_gate_reservation_authoritative",
             "malformed_claim_gate_inbox_authoritative",
             "malformed_claim_gate_rch_remote_only_required",
