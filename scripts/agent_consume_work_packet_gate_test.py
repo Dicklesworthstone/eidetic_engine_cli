@@ -1036,6 +1036,16 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
 
 
 class WorkPacketDocsContract(unittest.TestCase):
+    def test_work_packet_docs_reference_consumer_decision_schema(self):
+        body = normalize_whitespace(load_text("docs/swarm/work_packet.md"))
+        for marker in [
+            "ee.agent.work_packet_gate_decision.v1",
+            "docs/schemas/ee.agent.work_packet_gate_decision.v1.json",
+            "scripts/agent_consume_work_packet_gate.py",
+            "consumer_decision",
+        ]:
+            self.assertIn(marker, body)
+
     def test_schema_examples_do_not_mark_degraded_authority_claim_safe(self):
         schema = load_fixture("docs/schemas/swarm/ee.swarm.work_packet.v1.json")
         examples = schema.get("examples")

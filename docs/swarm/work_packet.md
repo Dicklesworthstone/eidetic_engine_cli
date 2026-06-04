@@ -1,6 +1,8 @@
 # Swarm Work Packet
 
 Schemas: `ee.swarm.work_packet.v1`, `ee.swarm.work_packet.claim_gate.v1`
+Reference consumer output: `ee.agent.work_packet_gate_decision.v1`
+(`docs/schemas/ee.agent.work_packet_gate_decision.v1.json`).
 
 `ee.swarm.work_packet.v1` is the deterministic, redacted, read-only artifact
 emitted by `ee swarm work-packet --json` before an agent chooses work in a
@@ -76,8 +78,9 @@ become verification.
 The smoke harness also runs the generated packet through
 `scripts/agent_consume_work_packet_gate.py` and records a `consumer_decision`
 phase. That phase proves the reference consumer can parse the packet without
-executing commands, reports `safeToClaim`, records `whyNotSafe` coverage, and
-asserts unsafe packets do not expose runnable mutating or claim actions.
+executing commands, reports `safeToClaim`, records `whyNotSafe` coverage,
+emits the harness decision schema above, and asserts unsafe packets do not
+expose runnable mutating or claim actions.
 
 Fixture-matrix coverage is part of the same script. The
 `fixture_matrix_consumer` phase feeds every `tests/fixtures/swarm_work_packet`
