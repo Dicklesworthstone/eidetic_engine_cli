@@ -151,6 +151,11 @@ reason arrays, and the verdict.
 `true`. `candidate_not_found` and `no_candidate` are explicit gate verdicts so
 harnesses do not infer safety from missing candidate data.
 
+For explicit `--candidate <bead-id>` queries, `recommendedSafeToClaim` must be
+candidate-scoped before `safeToClaim` can become `true`. A packet-level
+recommendation for a different Bead must not satisfy this condition or unlock
+`claimCommandAction`.
+
 `nextCommandActions[]` is restricted to non-mutating inspection commands:
 `mutatesState` must be `false`. The mutating Beads claim command, when one is
 safe to show, lives only in `claimCommandAction`. When `safeToClaim` is `false`,

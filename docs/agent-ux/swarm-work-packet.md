@@ -18,7 +18,9 @@ read-only gate over the same evidence. Its payload schema is
 `ee.swarm.work_packet.claim_gate.v1`; it separates non-mutating
 `nextCommandActions[]` from the optional mutating `claimCommandAction`.
 Harnesses should only consider the claim command when `safeToClaim` is `true`
-and `verdict` is `safe_to_claim`.
+and `verdict` is `safe_to_claim`. For explicit `--candidate` checks,
+`recommendedSafeToClaim` must describe that requested candidate, not a different
+packet recommendation.
 
 ## Intended Flow
 

@@ -286,6 +286,16 @@ fn claim_gate_sample_payloads_are_redacted_and_safe() -> TestResult {
         assert_payload_has_required_fields(&sample, &required, context)?;
         assert_no_forbidden_markers(&sample, context)?;
         assert_next_actions_are_read_only(&sample, context)?;
+        if sample.pointer("/safeToClaim").and_then(Value::as_bool) == Some(true)
+            && sample
+                .pointer("/recommendedSafeToClaim")
+                .and_then(Value::as_bool)
+                != Some(true)
+        {
+            return Err(format!(
+                "{context} must set recommendedSafeToClaim=true when safeToClaim=true"
+            ));
+        }
         if sample.pointer("/safeToClaim").and_then(Value::as_bool) == Some(false)
             && !sample
                 .pointer("/claimCommandAction")
@@ -331,6 +341,38 @@ fn claim_gate_schema_forbids_mutating_inspection_actions() -> TestResult {
     });
     if !unsafe_rule_forces_null_claim {
         return Err("safeToClaim=false must force claimCommandAction=null".into());
+    }
+
+    let safe_rule = all_of
+        .iter()
+        .find(|rule| {
+            rule.pointer("/if/properties/safeToClaim/const")
+                .and_then(Value::as_bool)
+                == Some(true)
+        })
+        .ok_or_else(|| "claim gate payload schema missing safeToClaim=true rule".to_owned())?;
+    if safe_rule
+        .pointer("/then/properties/recommendedSafeToClaim/const")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err("safeToClaim=true must force recommendedSafeToClaim=true".into());
+    }
+    if string_at(
+        safe_rule,
+        "/then/properties/selectedCandidate/properties/decision/const",
+        "safeToClaim=true rule",
+    )? != "safe_to_claim"
+    {
+        return Err("safeToClaim=true must force selectedCandidate.decision=safe_to_claim".into());
+    }
+    if string_at(
+        safe_rule,
+        "/then/properties/claimCommandAction/type",
+        "safeToClaim=true rule",
+    )? != "object"
+    {
+        return Err("safeToClaim=true must force claimCommandAction to be an object".into());
     }
 
     Ok(())

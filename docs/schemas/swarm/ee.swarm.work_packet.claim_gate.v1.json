@@ -100,7 +100,18 @@
         "required": ["safeToClaim"]
       },
       "then": {
-        "properties": {"verdict": {"const": "safe_to_claim"}}
+        "properties": {
+          "verdict": {"const": "safe_to_claim"},
+          "recommendedSafeToClaim": {"const": true},
+          "selectedCandidate": {
+            "type": "object",
+            "required": ["decision"],
+            "properties": {
+              "decision": {"const": "safe_to_claim"}
+            }
+          },
+          "claimCommandAction": {"type": "object"}
+        }
       }
     }
   ],
