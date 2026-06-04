@@ -205,5 +205,26 @@ Contract coverage for this foundation must pin:
   `ee.support_bundle.regression_causality_summary.v1` is present, parseable,
   hash/provenance based, and non-authoritative.
 
-Later implementation beads should add the agent-facing CLI/report producer,
-broader golden fixtures, no-mock e2e logs, and RCH-only focused Cargo proof.
+## Implementation Work Breakdown
+
+The implementation plan is tracked under `bd-391ze`. Before claiming or closing
+anything, inspect live Beads state and tracker authority; this map is for
+orientation and must not override `br show` or claim-gate evidence.
+
+- `bd-391ze.1`: define the schema and evidence inventory.
+- `bd-391ze.2`: normalize inputs from verifier, replay, pack, perf, Beads, BV,
+  and git artifacts.
+- `bd-391ze.3`: rank deterministic hypotheses with counter-evidence and
+  abstention behavior.
+- `bd-391ze.4`: add the agent-facing CLI/report producer.
+- `bd-391ze.5`: export capsules through support bundles and handoffs.
+- `bd-391ze.6`: prove the feature with contracts, goldens, no-mock e2e logs,
+  and RCH-only focused Cargo proof.
+- `bd-391ze.7`: finish operator-loop documentation after the producer and proof
+  surfaces exist.
+- `bd-391ze.8`: keep the public schema registry and drift gates aware of
+  `ee.regression_causality.v1`.
+
+Do not claim the epic as implementation work. Claim a concrete child only when
+the tracker is authoritative, dependencies are satisfied, file reservations are
+clear, and required Rust verification can stay RCH-only.
