@@ -144,6 +144,12 @@ signal with the repair command, such as
 `ee config set graph.feature.hits_profiles.enabled true` or
 `ee config set graph.feature.load_bearing.enabled true`.
 
+Some registered sections are metadata-only until their evidence builders land:
+`comprehensiveRules`, `kCore`, `kTruss`, `revisionFrontiers`, and
+`topMemories`. Selecting one of these sections still returns schema-valid
+output, but `degradedSignals[]` includes `insights_section_unavailable`; treat
+its empty `items[]` as unavailable evidence, not as a real graph result.
+
 ## Causal Command Flags
 
 `ee causal` is the graph-derived explanation surface for recorder, pack,

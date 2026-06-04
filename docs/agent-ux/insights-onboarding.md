@@ -22,6 +22,12 @@ The response data uses `ee.insights.v1`. Read these fields first:
 - `degradedSignals[]`: section-level graph problems. Do not ignore this array;
   it explains empty or missing sections.
 
+`availableSections` means the binary recognizes the section name, not that the
+section has DB-backed evidence today. If `degradedSignals[]` contains
+`insights_section_unavailable`, treat the listed sections as metadata-only
+registered surfaces. They may return schema-valid empty `items[]`, but agents
+should not use them as evidence until the degraded signal disappears.
+
 Worked example:
 
 ```json
@@ -50,6 +56,11 @@ Worked example:
 If `sections[]` is empty and `degradedSignals[]` contains
 `graph.workspace_empty`, seed memories or use `ee remember` before treating the
 graph as informative.
+
+If `degradedSignals[]` contains `insights_section_unavailable`, prefer sections
+with non-empty evidence. The current metadata-only registered sections are
+`comprehensiveRules`, `kCore`, `kTruss`, `revisionFrontiers`, and
+`topMemories`.
 
 ## Section Workflow
 
