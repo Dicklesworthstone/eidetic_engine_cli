@@ -22649,6 +22649,7 @@ fn environment_attestation_unavailable_sources(
                 EnvironmentAttestationSourceStatus::NotCollected
                     | EnvironmentAttestationSourceStatus::Unavailable
                     | EnvironmentAttestationSourceStatus::Blocked
+                    | EnvironmentAttestationSourceStatus::RemoteBlocked
                     | EnvironmentAttestationSourceStatus::Ambiguous
             )
         })
@@ -49462,9 +49463,10 @@ mod tests {
         SwarmCommand, SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand,
         VerifyCommand, VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
         WorkspaceHygieneMode, db_inspect_redact_source_uri,
-        diag_environment_attestation_response_json, format_search_json_with_mesh_and_recalibration,
-        hook_git_readiness_response_json, init_report_exit_code, json_with_data_result_path, mesh,
-        orient_next_commands, parse_completion_audit_evidence_input, parse_context_profile,
+        diag_environment_attestation_response_json, environment_attestation_unavailable_sources,
+        format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
+        init_report_exit_code, json_with_data_result_path, mesh, orient_next_commands,
+        parse_completion_audit_evidence_input, parse_context_profile,
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json, run, write_index_rebuild_error,
@@ -57702,6 +57704,43 @@ mod tests {
             &value["degraded"],
             &value["data"]["degraded"],
             "top-level degraded mirrors attestation degraded entries",
+        )
+    }
+
+    #[test]
+    fn diag_environment_attestation_require_sources_treats_remote_blocked_as_unavailable()
+    -> TestResult {
+        use crate::core::environment_attestation::{
+            EnvironmentAttestationAuthority, EnvironmentAttestationFreshness,
+            EnvironmentAttestationSourceAuthorityEntry, EnvironmentAttestationSourceKind,
+            EnvironmentAttestationSourceStatus,
+        };
+
+        let brief = crate::core::swarm_brief::SwarmBriefReport::empty(Path::new("."));
+        let fixed_at = chrono::DateTime::parse_from_rfc3339("2026-06-04T00:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&chrono::Utc);
+        let mut report =
+            crate::core::environment_attestation::environment_attestation_from_swarm_brief(
+                &brief, fixed_at,
+            );
+        report.source_authority = vec![EnvironmentAttestationSourceAuthorityEntry {
+            source: EnvironmentAttestationSourceKind::Rch,
+            authority: EnvironmentAttestationAuthority::Degraded,
+            status: EnvironmentAttestationSourceStatus::RemoteBlocked,
+            freshness: EnvironmentAttestationFreshness::Current,
+            observed_at: None,
+            summary: "RCH blocked before Cargo.".to_owned(),
+            evidence_refs: Vec::new(),
+            metrics: Vec::new(),
+            degraded_codes: Vec::new(),
+            recovery_actions: Vec::new(),
+        }];
+
+        ensure_equal(
+            &environment_attestation_unavailable_sources(&report),
+            &vec!["rch".to_owned()],
+            "RemoteBlocked sources fail --require-sources",
         )
     }
 
