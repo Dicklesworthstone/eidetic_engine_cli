@@ -151,6 +151,7 @@ the common cases:
 | Fixture | Verdict | Lesson |
 | --- | --- | --- |
 | `complete.sh` | `pass` | Direct exits are acceptable when each branch already emits verdict evidence with diagnosis and artifact paths. |
+| `comment_only_event_reference.sh` | `not_applicable` | Comment-only references to `ee.test_event.v1` and evidence fields do not make a helper a logged E2E. |
 | `success_only.sh` | `advisory_gap` | Success events are not enough; early failures need their own verdict row. |
 | `set_e_implicit_exit.sh` | `advisory_gap` | `jq -e` can terminate a `set -e` script before an assertion row is written. Wrap it in `if ! jq -e ...; then emit verdict; fi`. |
 | `cleanup_trap_only.sh` | `advisory_gap` | Cleanup traps do not replace command lifecycle and assertion evidence. |

@@ -23,18 +23,19 @@ actual_report |
     .schema == "ee.e2e_event_contract_radar.v1"
     and .verdict == "advisory_gap"
     and .summary == {
-      scriptCount: 5,
+      scriptCount: 6,
       passCount: 1,
       advisoryGapCount: 3,
       knownGapCount: 0,
       failCount: 0,
-      notApplicableCount: 1,
+      notApplicableCount: 2,
       failurePathCount: 5,
       missingFailureVerdictCount: 3,
       allowlistedGapCount: 0
     }
     and (.matrix | map(.scriptPath)) == [
       "tests/fixtures/e2e_event_contract_radar/scripts/cleanup_trap_only.sh",
+      "tests/fixtures/e2e_event_contract_radar/scripts/comment_only_event_reference.sh",
       "tests/fixtures/e2e_event_contract_radar/scripts/complete.sh",
       "tests/fixtures/e2e_event_contract_radar/scripts/no_event_logging.sh",
       "tests/fixtures/e2e_event_contract_radar/scripts/set_e_implicit_exit.sh",
@@ -45,6 +46,13 @@ actual_report |
       | select(.scriptPath == "tests/fixtures/e2e_event_contract_radar/scripts/complete.sh")
       | .status == "pass"
         and ([.failurePaths[].assertFailOrResult] | all(. == "present"))
+    )
+    and (
+      .matrix[]
+      | select(.scriptPath == "tests/fixtures/e2e_event_contract_radar/scripts/comment_only_event_reference.sh")
+      | .status == "not_applicable"
+        and (.declaredEventSchemas | length) == 0
+        and (.failurePaths | length) == 0
     )
     and (
       .matrix[]

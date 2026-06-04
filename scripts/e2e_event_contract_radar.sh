@@ -193,7 +193,20 @@ fi
 contains_regex() {
   local path="$1"
   local regex="$2"
-  grep -Eq "$regex" "$path"
+  grep -Eq "$regex" < <(awk '!/^[[:space:]]*#/' "$path")
+}
+
+schema_ids_for() {
+  local path="$1"
+  awk '!/^[[:space:]]*#/' "$path" |
+    grep -hoE 'ee\.[A-Za-z0-9_.-]+\.v[0-9]+' ||
+    true
+}
+
+emits_test_event() {
+  local path="$1"
+  contains_regex "$path" \
+    '("schema"[[:space:]]*:[[:space:]]*"ee\.test_event\.v1"|schema:[[:space:]]*"ee\.test_event\.v1"|--arg[[:space:]]+schema[[:space:]]+"ee\.test_event\.v1")'
 }
 
 coverage_status() {
@@ -214,7 +227,7 @@ line_window() {
   local start=$((line - 8))
   local end=$((line + 2))
   [ "$start" -lt 1 ] && start=1
-  awk -v start="$start" -v end="$end" 'NR >= start && NR <= end { print }' "$path"
+  awk -v start="$start" -v end="$end" 'NR >= start && NR <= end && $0 !~ /^[[:space:]]*#/ { print }' "$path"
 }
 
 status_from_window() {
@@ -356,9 +369,9 @@ scan_script() {
   local command_start command_end assert_ok assert_fail schema_status redaction_status diagnosis_status stdout_status stderr_status env_status
   local coverage status missing_count branch_missing allowlist allowlist_status
 
-  declared="$(grep -hoE 'ee\.[A-Za-z0-9_.-]+\.v[0-9]+' "$abs" 2>/dev/null | sort -u | jq -R . | jq -s 'unique')"
+  declared="$(schema_ids_for "$abs" | sort -u | jq -R . | jq -s 'unique')"
   has_event=0
-  if printf '%s' "$declared" | jq -e 'index("ee.test_event.v1") != null' >/dev/null; then
+  if emits_test_event "$abs"; then
     has_event=1
   fi
   has_set_e=0
