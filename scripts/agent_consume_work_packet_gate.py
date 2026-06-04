@@ -1265,10 +1265,48 @@ def invocation_is_swarm_work_packet(invocation):
         parts[0] = "ee"
     if not parts or parts[0] != "ee":
         return False
-    return any(
-        parts[index : index + 2] == ["swarm", "work-packet"]
-        for index in range(1, len(parts) - 1)
-    )
+    command_parts = first_ee_command_parts(parts[1:])
+    return command_parts[:2] == ["swarm", "work-packet"]
+
+
+EE_GLOBAL_FLAGS_WITH_VALUE = {
+    "--config",
+    "--database",
+    "--fields",
+    "--format",
+    "--profile",
+    "--workspace",
+}
+
+EE_GLOBAL_FLAGS_WITHOUT_VALUE = {
+    "--help",
+    "--json",
+    "--markdown",
+    "--no-color",
+    "--quiet",
+    "--version",
+}
+
+
+def first_ee_command_parts(parts):
+    command_parts = []
+    skip_next = False
+    for part in parts:
+        if skip_next:
+            skip_next = False
+            continue
+        if not command_parts:
+            if part in EE_GLOBAL_FLAGS_WITH_VALUE:
+                skip_next = True
+                continue
+            if any(
+                part.startswith(f"{flag}=") for flag in EE_GLOBAL_FLAGS_WITH_VALUE
+            ):
+                continue
+            if part in EE_GLOBAL_FLAGS_WITHOUT_VALUE:
+                continue
+        command_parts.append(part)
+    return command_parts
 
 
 def error_decision(code, source=None, envelope_degraded=None):

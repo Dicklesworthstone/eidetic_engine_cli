@@ -2190,6 +2190,33 @@ class ErrorHandling(unittest.TestCase):
         self.assertEqual(decision["argvActions"], [])
         self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
 
+    def test_stale_claim_gate_binary_detection_accepts_equals_global_flags(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "usage",
+                    "message": "unexpected argument '--candidate' found",
+                    "details": {
+                        "invocation": [
+                            "ee",
+                            "--workspace=.",
+                            "--format=json",
+                            "swarm",
+                            "work-packet",
+                            "--candidate",
+                            "bd-safe.1",
+                        ]
+                    },
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
+
     def test_stale_claim_gate_binary_detection_global_flags_do_not_force_surface(self):
         decision = consumer.consume(
             {
@@ -2206,6 +2233,33 @@ class ErrorHandling(unittest.TestCase):
                             "compare",
                             "--candidate",
                             "candidate.json",
+                        ]
+                    },
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertIn("error:usage", decision["whyNotSafe"])
+        self.assertNotIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
+
+    def test_stale_claim_gate_binary_detection_help_path_does_not_force_surface(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "usage",
+                    "message": "unexpected argument '--candidate' found",
+                    "details": {
+                        "invocation": [
+                            "ee",
+                            "help",
+                            "swarm",
+                            "work-packet",
+                            "--candidate",
+                            "bd-safe.1",
                         ]
                     },
                 },
