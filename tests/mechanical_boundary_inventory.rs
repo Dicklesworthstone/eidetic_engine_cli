@@ -1,6 +1,7 @@
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
 const INVENTORY: &str = include_str!("../docs/mechanical-boundary-command-inventory.md");
 const README_SOURCE: &str = include_str!("../README.md");
+const AGENT_INTEGRATION_SOURCE: &str = include_str!("../docs/agent_integration.md");
 const SKILL_STANDARDS: &str = include_str!("../skills/ee-skill-standards/SKILL.md");
 const PROCEDURE_DISTILLATION_SKILL: &str =
     include_str!("../skills/procedure-distillation/SKILL.md");
@@ -1070,6 +1071,7 @@ fn readme_pins_swarm_brief_operator_workflow() -> Result<(), String> {
         "ee --fields full swarm brief --workspace . --include-rch --json",
         "ee swarm brief --workspace . --sources git,beads,bv,agent-mail --require-sources --json",
         "ee swarm brief --workspace . --agent-mail-snapshot <snapshot.json> --json",
+        "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json",
         ".data.topRecommendations[]",
         "safe_surface_candidate",
         ".data.beads.blocked[]",
@@ -1080,6 +1082,11 @@ fn readme_pins_swarm_brief_operator_workflow() -> Result<(), String> {
         "rec.work_selection.no_ready_beads",
         "br ready --json",
         "bv --robot-triage",
+        "safeToClaim=true",
+        "verdict=safe_to_claim",
+        "claimCommandAction",
+        "claim-safety gate",
+        "bv copy-paste claim command",
         "swarm_brief_summary.json",
         "never claims work",
         "never reserves files",
@@ -1091,6 +1098,48 @@ fn readme_pins_swarm_brief_operator_workflow() -> Result<(), String> {
         if !README_SOURCE.contains(required) {
             return Err(format!(
                 "README swarm brief workflow docs missing required marker `{required}`"
+            ));
+        }
+    }
+
+    let gate_marker =
+        "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json";
+    let claim_marker = "br update <id> --status in_progress --json";
+    let gate_pos = README_SOURCE
+        .find(gate_marker)
+        .ok_or_else(|| format!("README missing claim gate marker `{gate_marker}`"))?;
+    let claim_pos = README_SOURCE
+        .find(claim_marker)
+        .ok_or_else(|| format!("README missing claim command marker `{claim_marker}`"))?;
+
+    if gate_pos >= claim_pos {
+        return Err(format!(
+            "README must introduce the work-packet claim gate before the Beads claim command `{claim_marker}`"
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn agent_integration_pins_work_packet_claim_gate_consumer() -> Result<(), String> {
+    for required in [
+        "## Work-Packet Claim Gate",
+        "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json",
+        "scripts/agent_consume_work_packet_gate.py",
+        "ee.agent.work_packet_gate_decision.v1",
+        "safeToClaim=true",
+        "runnable=true",
+        "Every other\nverdict is inspection-only",
+        "intentionally read-only",
+        "must not claim Beads",
+        "mutate git",
+        "run Cargo",
+        "do not substitute local Cargo proof",
+    ] {
+        if !AGENT_INTEGRATION_SOURCE.contains(required) {
+            return Err(format!(
+                "agent integration docs missing claim-gate marker `{required}`"
             ));
         }
     }
