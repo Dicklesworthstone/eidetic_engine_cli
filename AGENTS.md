@@ -980,6 +980,12 @@ These two labels are **mutually exclusive** and govern what "closing a bead" mea
    stale, blocked by RCH, or reports any other verdict, stop at inspection and
    coordinate through Agent Mail or Beads comments.
 
+   Version guard: if the installed `ee` rejects `--claim-gate` or
+   `--candidate` as an unexpected argument, treat that binary as stale relative
+   to the current source/docs contract. Stop and coordinate for an approved
+   RCH/release-path rebuild; do not run a BV claim command and do not rebuild
+   or install `ee` locally with Cargo as a workaround.
+
 3. **Reserve edit surface (Mail):**
    ```
    file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true, reason="br-123")
@@ -1052,6 +1058,10 @@ Only a matching `safeToClaim=true` / `verdict=safe_to_claim` claim gate may
 unlock the Beads claim. Treat every other verdict, tracker-integrity downgrade,
 Agent Mail semantic-readiness failure, or RCH verification blocker as a stop
 condition for auto-claiming.
+
+If the installed `ee` binary rejects `--claim-gate` or `--candidate`, it is
+stale relative to this source contract. Stop and coordinate instead of running
+the BV claim command, and do not rebuild or install with local Cargo.
 
 ### Command Reference
 

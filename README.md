@@ -754,6 +754,11 @@ Operator workflow for crowded repos:
    ```bash
    ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json
    ```
+   If the installed `ee` rejects `--claim-gate` or `--candidate` as an
+   unexpected argument, treat that binary as stale relative to the current
+   source/docs contract. Stop at inspection, coordinate for an approved
+   RCH/release-path rebuild, and do not run a BV claim command or local Cargo
+   install as a workaround.
 4. Reserve edit surfaces through Agent Mail and mark the bead with
    `br update <id> --status in_progress --json` only when the gate reports
    `safeToClaim=true`, `verdict=safe_to_claim`, and a structured

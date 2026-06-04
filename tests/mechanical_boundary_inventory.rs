@@ -1,6 +1,7 @@
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
 const INVENTORY: &str = include_str!("../docs/mechanical-boundary-command-inventory.md");
 const README_SOURCE: &str = include_str!("../README.md");
+const AGENTS_SOURCE: &str = include_str!("../AGENTS.md");
 const AGENT_INTEGRATION_SOURCE: &str = include_str!("../docs/agent_integration.md");
 const SKILL_STANDARDS: &str = include_str!("../skills/ee-skill-standards/SKILL.md");
 const PROCEDURE_DISTILLATION_SKILL: &str =
@@ -1087,6 +1088,10 @@ fn readme_pins_swarm_brief_operator_workflow() -> Result<(), String> {
         "claimCommandAction",
         "claim-safety gate",
         "bv copy-paste claim command",
+        "unexpected argument",
+        "stale relative to the current\n   source/docs contract",
+        "approved\n   RCH/release-path rebuild",
+        "do not run a BV claim command or local Cargo\n   install as a workaround",
         "swarm_brief_summary.json",
         "never claims work",
         "never reserves files",
@@ -1126,6 +1131,10 @@ fn agent_integration_pins_work_packet_claim_gate_consumer() -> Result<(), String
     for required in [
         "## Work-Packet Claim Gate",
         "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json",
+        "unexpected\nargument",
+        "stale relative to the current source/docs\ncontract",
+        "approved RCH/release-path\nrebuild",
+        "do not run a BV claim command or local Cargo install as a\nworkaround",
         "scripts/agent_consume_work_packet_gate.py",
         "ee.agent.work_packet_gate_decision.v1",
         "safeToClaim=true",
@@ -1140,6 +1149,25 @@ fn agent_integration_pins_work_packet_claim_gate_consumer() -> Result<(), String
         if !AGENT_INTEGRATION_SOURCE.contains(required) {
             return Err(format!(
                 "agent integration docs missing claim-gate marker `{required}`"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn agents_md_pins_claim_gate_stale_binary_stop_condition() -> Result<(), String> {
+    for required in [
+        "if the installed `ee` rejects `--claim-gate` or\n   `--candidate`",
+        "stale relative\n   to the current source/docs contract",
+        "approved\n   RCH/release-path rebuild",
+        "do not run a BV claim command",
+        "do not rebuild\n   or install `ee` locally with Cargo as a workaround",
+    ] {
+        if !AGENTS_SOURCE.contains(required) {
+            return Err(format!(
+                "AGENTS.md missing claim-gate stale-binary stop marker `{required}`"
             ));
         }
     }

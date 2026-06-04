@@ -25,6 +25,12 @@ ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> -
   | scripts/agent_consume_work_packet_gate.py
 ```
 
+If the installed `ee` rejects `--claim-gate` or `--candidate` as an unexpected
+argument, treat that binary as stale relative to the current source/docs
+contract. Stop at inspection, coordinate for an approved RCH/release-path
+rebuild, and do not run a BV claim command or local Cargo install as a
+workaround.
+
 The consumer emits `ee.agent.work_packet_gate_decision.v1` with
 `safeToClaim`, `candidateId`, `decision`, `argvActions`,
 `mutatingActionsRequireHuman`, `whyNotSafe`, and source/degraded summaries.
