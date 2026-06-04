@@ -362,6 +362,26 @@ class ClaimGateConsumer(unittest.TestCase):
                     )
                 )
 
+    def test_null_required_command_action_fields_fail_closed(self):
+        for field, suffix in consumer.CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS:
+            with self.subTest(field=field):
+                gate = safe_gate()
+                gate["nextCommandActions"][0][field] = None
+
+                decision = consumer.consume(envelope(gate))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertIn(
+                    f"malformed_claim_gate_next_command_action_{suffix}",
+                    decision["whyNotSafe"],
+                )
+                action = [
+                    action
+                    for action in decision["argvActions"]
+                    if action["actionKind"] == "inspection"
+                ][0]
+                self.assertFalse(action["runnable"])
+
     def test_malformed_command_action_fields_fail_closed(self):
         gate = safe_gate()
         gate["nextCommandActions"][0].update(
@@ -821,6 +841,48 @@ class WorkPacketConsumer(unittest.TestCase):
                 self.assertFalse(decision["safeToClaim"])
                 self.assertIn(
                     f"missing_packet_recommended_command_action_{suffix}",
+                    decision["whyNotSafe"],
+                )
+                self.assertFalse(
+                    any(
+                        action["runnable"] and action["mutatesState"]
+                        for action in decision["argvActions"]
+                    )
+                )
+
+    def test_null_packet_command_action_required_fields_fail_closed(self):
+        for field, suffix in consumer.CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS:
+            with self.subTest(field=field):
+                packet = load_fixture(
+                    "tests/fixtures/swarm_work_packet/healthy_small.json"
+                )
+                action = safe_action(
+                    "bead_claim_candidate",
+                    ["br", "update", "bd-safe", "--status", "in_progress", "--json"],
+                    mutates=True,
+                )
+                action[field] = None
+                packet["data"]["recommendedAction"] = {
+                    "action": "inspect_and_claim",
+                    "candidateId": "bd-safe",
+                    "safeToClaim": True,
+                    "suggestedCommands": [],
+                    "suggestedCommandActions": [action],
+                }
+                packet["data"]["candidates"] = [
+                    {
+                        "id": "bd-safe",
+                        "decision": "safe_to_claim",
+                        "unsafeReasons": [],
+                        "staleReasons": [],
+                    }
+                ]
+
+                decision = consumer.consume(packet)
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertIn(
+                    f"malformed_packet_recommended_command_action_{suffix}",
                     decision["whyNotSafe"],
                 )
                 self.assertFalse(

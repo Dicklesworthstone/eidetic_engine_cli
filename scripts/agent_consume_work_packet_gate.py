@@ -289,7 +289,7 @@ def malformed_command_action_reasons(action, reason_prefix, reason_scope="claim_
         ("rationale", "rationale"),
     ]:
         value = action.get(field)
-        if field in action and value is not None and not isinstance(value, str):
+        if field in action and not isinstance(value, str):
             reasons.append(f"malformed_{reason_scope}_{reason_prefix}_{suffix}")
 
     for field, suffix in [
@@ -297,11 +297,11 @@ def malformed_command_action_reasons(action, reason_prefix, reason_scope="claim_
         ("mutatesState", "mutates_state"),
     ]:
         value = action.get(field)
-        if field in action and value is not None and not isinstance(value, bool):
+        if field in action and not isinstance(value, bool):
             reasons.append(f"malformed_{reason_scope}_{reason_prefix}_{suffix}")
 
     argv = action.get("argv")
-    if "argv" in action and argv is not None and not isinstance(argv, list):
+    if "argv" in action and not isinstance(argv, list):
         reasons.append(f"malformed_{reason_scope}_{reason_prefix}_argv")
 
     return reasons
@@ -619,6 +619,9 @@ def classify_action(action, safe_to_claim, action_kind):
     argv = []
     argv_invalid = False
     argv_redacted = False
+    metadata_invalid = bool(
+        malformed_command_action_reasons(action, "runtime_command_action", "action")
+    )
     if isinstance(argv_input, list):
         for part in argv_input:
             if not isinstance(part, str):
@@ -645,10 +648,13 @@ def classify_action(action, safe_to_claim, action_kind):
         and bool(argv)
         and not argv_invalid
         and not argv_redacted
+        and not metadata_invalid
     )
     runnable = has_safe_argv and (not mutates_state or safe_to_claim)
 
-    if argv_invalid:
+    if metadata_invalid:
+        reason = "malformed_command_action"
+    elif argv_invalid:
         reason = "invalid_argv_item"
     elif not argv:
         reason = "missing_structured_argv"
