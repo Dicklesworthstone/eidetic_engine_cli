@@ -22,6 +22,12 @@ and `verdict` is `safe_to_claim`. For explicit `--candidate` checks,
 `recommendedSafeToClaim` must describe that requested candidate, not a different
 packet recommendation.
 
+Version guard: if the installed `ee` rejects `--claim-gate` or `--candidate`
+as an unexpected argument, that binary is stale relative to the current
+source/docs contract. Stop at inspection, run no BV claim command, do not
+rebuild or install `ee` with local Cargo, and coordinate for an approved
+RCH/release-path rebuild instead.
+
 ## Intended Flow
 
 ```bash

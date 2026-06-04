@@ -97,6 +97,14 @@ def load_fixture(relative_path):
         return json.load(fh)
 
 
+def load_text(relative_path):
+    return (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def normalize_whitespace(text):
+    return " ".join(text.split())
+
+
 class ClaimGateConsumer(unittest.TestCase):
     def test_safe_claim_gate_returns_structured_argv_actions(self):
         decision = consumer.consume(envelope(safe_gate()))
@@ -436,6 +444,28 @@ class ErrorHandling(unittest.TestCase):
         self.assertEqual(decision["argvActions"], [])
         self.assertFalse(decision["mutatingActionsRequireHuman"])
         self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
+
+
+class WorkPacketDocsContract(unittest.TestCase):
+    def test_work_packet_docs_pin_stale_binary_stop_condition(self):
+        required_markers = [
+            "rejects `--claim-gate` or `--candidate`",
+            "unexpected argument",
+            "stale relative to the current source/docs contract",
+            "Stop at inspection",
+            "no BV claim command",
+            "local Cargo",
+            "RCH/release-path rebuild",
+        ]
+        docs = [
+            "docs/agent-ux/swarm-work-packet.md",
+            "docs/swarm/work_packet.md",
+        ]
+
+        for relative_path in docs:
+            body = normalize_whitespace(load_text(relative_path))
+            for marker in required_markers:
+                self.assertIn(marker, body, f"{relative_path} missing {marker!r}")
 
 
 if __name__ == "__main__":

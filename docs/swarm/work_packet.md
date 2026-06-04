@@ -20,6 +20,12 @@ single question over the same packet evidence: whether a selected candidate is
 safe to claim now. The schema is marked unshipped until that CLI mode emits the
 contract in current builds.
 
+If the installed `ee` rejects `--claim-gate` or `--candidate` as an unexpected
+argument, treat that binary as stale relative to the current source/docs
+contract. Stop at inspection, run no BV claim command, avoid local Cargo
+rebuild/install workarounds, and coordinate for an approved RCH/release-path
+rebuild.
+
 Versioning: field renames, changed decision semantics, or changed mutation
 policy semantics require a new schema version. Additive fields may remain in
 `ee.swarm.work_packet.v1` only when consumers can safely ignore them and the
