@@ -803,6 +803,29 @@ class ErrorHandling(unittest.TestCase):
         self.assertEqual(action["copySafety"], "copy:[redacted]")
         self.assertEqual(action["reason"], "copy_safety:copy:[redacted]")
 
+    def test_cli_redacts_secret_shaped_source_summary_fields(self):
+        gate = safe_gate()
+        token = "ghp_" + "8899aabbccddeeff00112233445566778899"
+        home_path = "/Users/jemanuel/private/project"
+        gate["sourceAuthority"]["trackerHealth"] = f"ok:{home_path}"
+        gate["sourceAuthority"]["agentMailStatus"] = f"healthy:{token}"
+
+        result, decision = run_consumer_cli(envelope(gate))
+        serialized = json.dumps(decision)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertTrue(decision["safeToClaim"])
+        self.assertNotIn("ghp_", result.stdout)
+        self.assertNotIn("/Users/", result.stdout)
+        self.assertNotIn("ghp_", serialized)
+        self.assertNotIn("/Users/", serialized)
+        self.assertEqual(decision["sourceSummary"]["trackerHealth"], "ok:[redacted]")
+        self.assertEqual(
+            decision["sourceSummary"]["agentMailStatus"],
+            "healthy:[redacted]",
+        )
+
     def test_cli_from_stdin_flag_keeps_machine_readable_decision(self):
         result, decision = run_consumer_cli(envelope(safe_gate()), ["--from-stdin"])
 
