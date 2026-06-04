@@ -71,6 +71,7 @@ const GIT_UNAVAILABLE_CODE: &str = "git_unavailable";
 const BEADS_UNAVAILABLE_CODE: &str = "beads_unavailable";
 const BEADS_COMMAND_TIMEOUT_CODE: &str = "beads_command_timeout";
 const BEADS_NO_OUTPUT_CODE: &str = "beads_no_output";
+const BEADS_TRACKER_METADATA_DRIFT_CODE: &str = "beads_tracker_metadata_drift";
 const BEADS_TRACKER_STALE_CODE: &str = "beads_tracker_stale";
 const BV_COMMAND_TIMEOUT_CODE: &str = "bv_command_timeout";
 const BV_NO_OUTPUT_CODE: &str = "bv_no_output";
@@ -462,7 +463,11 @@ impl SwarmBriefSourceSnapshot {
     }
 
     fn with_degraded(mut self, degraded: Vec<SwarmBriefDegradation>) -> Self {
-        if !degraded.is_empty() && self.status == SwarmBriefSourceStatus::Ready {
+        if degraded
+            .iter()
+            .any(SwarmBriefDegradation::affects_source_status)
+            && self.status == SwarmBriefSourceStatus::Ready
+        {
             self.status = SwarmBriefSourceStatus::Degraded;
         }
         self.degraded = degraded;
@@ -491,6 +496,22 @@ pub struct SwarmBriefDegradation {
 
 impl SwarmBriefDegradation {
     #[must_use]
+    pub fn info(
+        source: SwarmBriefSourceKind,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        repair: impl Into<Option<String>>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            source,
+            severity: "info",
+            message: redact_brief_text(&message.into()),
+            repair: repair.into(),
+        }
+    }
+
+    #[must_use]
     pub fn warning(
         source: SwarmBriefSourceKind,
         code: impl Into<String>,
@@ -504,6 +525,10 @@ impl SwarmBriefDegradation {
             message: redact_brief_text(&message.into()),
             repair: repair.into(),
         }
+    }
+
+    fn affects_source_status(&self) -> bool {
+        self.severity != "info"
     }
 }
 
@@ -1588,23 +1613,24 @@ fn collect_beads_freshness<R: SwarmBriefCommandRunner>(
             )]
         }
         Ok(output) => match parse_beads_sync_status_json(&output.stdout) {
-            Ok(status)
-                if (status.jsonl_newer || status.db_newer)
-                    && !beads_sync_status_is_metadata_only_drift(runner, options, &status) =>
-            {
-                *freshness = SwarmBriefSourceFreshness {
-                    observed_at: status.last_import_time.clone(),
-                    age_seconds: None,
-                    stale_after_seconds: None,
-                    state: "stale",
-                };
-                let (message, repair) = beads_tracker_stale_message_and_repair(&status);
-                vec![SwarmBriefDegradation::warning(
-                    SwarmBriefSourceKind::Beads,
-                    BEADS_TRACKER_STALE_CODE,
-                    message,
-                    Some(repair.to_string()),
-                )]
+            Ok(status) if status.jsonl_newer || status.db_newer => {
+                if beads_sync_status_is_metadata_only_drift(runner, options, &status) {
+                    vec![beads_tracker_metadata_drift_degradation()]
+                } else {
+                    *freshness = SwarmBriefSourceFreshness {
+                        observed_at: status.last_import_time.clone(),
+                        age_seconds: None,
+                        stale_after_seconds: None,
+                        state: "stale",
+                    };
+                    let (message, repair) = beads_tracker_stale_message_and_repair(&status);
+                    vec![SwarmBriefDegradation::warning(
+                        SwarmBriefSourceKind::Beads,
+                        BEADS_TRACKER_STALE_CODE,
+                        message,
+                        Some(repair.to_string()),
+                    )]
+                }
             }
             Ok(_) => Vec::new(),
             Err(message) => vec![SwarmBriefDegradation::warning(
@@ -1647,6 +1673,15 @@ fn beads_sync_status_is_metadata_only_drift<R: SwarmBriefCommandRunner>(
             && report.jsonl_parse_error.is_none()
             && report.jsonl_record_count == report.db_record_count
     })
+}
+
+fn beads_tracker_metadata_drift_degradation() -> SwarmBriefDegradation {
+    SwarmBriefDegradation::info(
+        SwarmBriefSourceKind::Beads,
+        BEADS_TRACKER_METADATA_DRIFT_CODE,
+        "Beads sync metadata reports JSONL freshness drift, but br doctor reports DB/JSONL content parity and zero dirty issues; br reads remain authoritative.",
+        Some("br sync --flush-only --json".to_string()),
+    )
 }
 
 fn beads_tracker_stale_message_and_repair(
@@ -11457,6 +11492,17 @@ mod tests {
                 .all(|item| item.code != BEADS_TRACKER_STALE_CODE),
             "metadata-only drift must not emit beads_tracker_stale: {:?}",
             output.snapshot.degraded
+        );
+        let metadata_drift = output
+            .snapshot
+            .degraded
+            .iter()
+            .find(|item| item.code == BEADS_TRACKER_METADATA_DRIFT_CODE)
+            .expect("metadata-only drift should emit an info diagnostic");
+        assert_eq!(metadata_drift.severity, "info");
+        assert_eq!(
+            metadata_drift.repair.as_deref(),
+            Some("br sync --flush-only --json")
         );
         match output.contribution {
             SwarmBriefContribution::Beads(summary) => assert_eq!(summary.ready.len(), 1),

@@ -1224,6 +1224,37 @@ ee swarm work-packet --workspace . --json
 
 ---
 
+## `beads_tracker_metadata_drift`
+
+**Severity:** info
+
+**Surfaces:** swarm brief, swarm work-packet
+
+**Introduced by:** bd-2glil (epic C)
+
+**Trigger.** Swarm brief sees br sync metadata report JSONL freshness drift, then confirms with br doctor that DB and JSONL record counts match and dirty_count is zero.
+
+**Setup.**
+
+```bash
+# create a Beads workspace where br sync --status --json reports jsonl_newer=true and dirty_count=0
+# ensure br doctor --json --no-db reports equal DB/JSONL counts, zero dirty issues, and no parse or merge-artifact hazards
+```
+
+**Invocation.**
+
+```bash
+ee swarm brief --sources beads --workspace . --json
+```
+
+**Expected emission.** Message contains: `Beads sync metadata reports JSONL freshness drift ... br reads remain authoritative`
+
+**Repair hint.** `br sync --flush-only --json`
+
+**Fixture.** [`tests/fixtures/failure_modes/beads_tracker_metadata_drift.json`](../tests/fixtures/failure_modes/beads_tracker_metadata_drift.json)
+
+---
+
 ## `beads_tracker_stale`
 
 **Severity:** warning

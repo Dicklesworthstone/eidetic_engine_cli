@@ -747,7 +747,7 @@ dispatch executes the canonical pack path instead.
 | `quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 | `trust_quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 
-#### Coordination / external tools (29)
+#### Coordination / external tools (30)
 | Code | Severity | Bead |
 |------|----------|------|
 | `agent_mail_unavailable` | medium | bd-2nkbn (Agent Mail resilience) |
@@ -756,6 +756,7 @@ dispatch executes the canonical pack path instead.
 | `agent_status_unavailable` | low | (TBD) |
 | `beads_command_timeout` | warning | bd-2z5ly.9.3 (S) |
 | `beads_no_output` | warning | bd-2z5ly.9.3 (S) |
+| `beads_tracker_metadata_drift` | info | bd-2glil |
 | `beads_tracker_stale` | warning | bd-1zb7k.13.3 (C3) |
 | `beads_unavailable` | medium | bd-1zb7k.4 (S3) |
 | `bv_command_timeout` | warning | bd-2z5ly.10 (S) |

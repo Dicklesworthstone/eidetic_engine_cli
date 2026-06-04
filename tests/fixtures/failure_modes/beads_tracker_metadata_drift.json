@@ -1,0 +1,56 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "beads_tracker_metadata_drift",
+  "introduced_by": {
+    "bead": "bd-2glil",
+    "epic_letter": "C"
+  },
+  "surfaces": [
+    "swarm brief",
+    "swarm work-packet"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Swarm brief sees br sync metadata report JSONL freshness drift, then confirms with br doctor that DB and JSONL record counts match and dirty_count is zero.",
+    "setup_commands": [
+      "# create a Beads workspace where br sync --status --json reports jsonl_newer=true and dirty_count=0",
+      "# ensure br doctor --json --no-db reports equal DB/JSONL counts, zero dirty issues, and no parse or merge-artifact hazards"
+    ],
+    "invocation": "ee swarm brief --sources beads --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "beads_tracker_metadata_drift",
+    "severity": "info",
+    "message_contains": [
+      "Beads sync metadata reports JSONL freshness drift",
+      "br reads remain authoritative"
+    ],
+    "repair_contains": "br sync --flush-only --json",
+    "repair_string": "br sync --flush-only --json",
+    "repair_command_regex": "(?<cmd>br sync --flush-only --json)",
+    "repair_safety": [
+      {
+        "appliesTo": "br sync --flush-only --json",
+        "command": "br sync --flush-only --json",
+        "riskClass": "mutating_external_coordination_repair",
+        "preflightCommand": "ee preflight check --cmd 'br sync --flush-only --json' --workspace . --json",
+        "requiresHumanApproval": false,
+        "mutatesExternalState": true,
+        "mutatesTrackerState": true,
+        "privacyClass": "tracker_metadata_only",
+        "nextAction": "coordinate_first",
+        "ruleId": "repair_safety:mutating_external_coordination_repair",
+        "source": "repair_action_safety",
+        "reasonCode": "external_coordination_repair_command",
+        "evidence": [
+          "beads_mutation_command"
+        ],
+        "preconditions": [
+          "shared_state_coordination_required"
+        ],
+        "manualStep": "Coordinate before mutating shared tracker state."
+      }
+    ]
+  }
+}

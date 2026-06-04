@@ -492,12 +492,11 @@ fn br_reads_authoritative_for_health(
 ) -> bool {
     match health {
         BeadsIntegrityHealth::Ok => true,
+        BeadsIntegrityHealth::MergeArtifactsWarn => true,
         BeadsIntegrityHealth::ExternalChangesPendingImport => {
             pending_import_count == 0 && dirty_issue_count == 0
         }
-        BeadsIntegrityHealth::MergeArtifactsWarn
-        | BeadsIntegrityHealth::DbJsonlCountMismatch
-        | BeadsIntegrityHealth::JsonlParseError => false,
+        BeadsIntegrityHealth::DbJsonlCountMismatch | BeadsIntegrityHealth::JsonlParseError => false,
     }
 }
 
@@ -717,6 +716,11 @@ mod tests {
             &report.requires_candidate_downgrade,
             &false,
             "merge warn must not downgrade candidate safety",
+        )?;
+        ensure_equal(
+            &report.br_reads_authoritative,
+            &true,
+            "merge artifacts are warning-only for br read authority",
         )?;
         ensure(
             report.recovery_hint.is_some(),
