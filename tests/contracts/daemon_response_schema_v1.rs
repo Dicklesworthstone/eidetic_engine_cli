@@ -220,7 +220,9 @@ fn daemon_response_schema_documents_seed_error_codes() -> TestResult {
         "daemon_method_unauthorized",
         "daemon_request_decode_failed",
         "daemon_request_schema_mismatch",
-        "daemon_ann_warmload_not_yet_implemented",
+        "daemon_context_params_invalid",
+        "daemon_context_deadline_exceeded",
+        "daemon_context_execution_failed",
     ] {
         if !description.contains(code) {
             return Err(format!("schema error.description missing {code}"));

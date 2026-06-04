@@ -2,7 +2,7 @@
 //! (bd-oja31 skeleton). Wraps the framing in
 //! [`super::protocol`] with the seed dispatch table for
 //! `ee.daemon.capabilities`, `ee.daemon.echo`, and the
-//! workspace-bound `ee.daemon.context` stub.
+//! workspace-bound `ee.daemon.context` pack path.
 //!
 //! Threading: each accepted connection is dispatched onto a bounded
 //! worker pool (capped at [`super::DAEMON_MAX_INFLIGHT`], overridable
@@ -36,14 +36,23 @@ use std::time::{Duration, Instant};
 use rustix::fs::{FlockOperation, flock};
 
 use crate::config::env_registry::{self, EnvVar};
+use crate::core::context::{
+    ContextPackOptions, ContextPackOutputOptionOverrides, ContextPackOutputOptions,
+    attach_pack_dna_to_context_response, run_context_pack_with_performance,
+};
+use crate::core::search::SearchSourceMode;
+use crate::models::{MemoryScope, QueryFilters, RedactionLevel};
+use crate::output::{ContextJsonRenderOptions, render_context_response_json_with_options};
+use crate::pack::{ContextPackProfile, DEFAULT_COORDINATION_STALE_AFTER_MS, PackResourceProfile};
+use crate::search::SpeedMode;
 
 use super::protocol::{
     DaemonRequest, DaemonResponse, FrameReadError, read_request, write_response,
 };
 use super::{
-    DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE, DAEMON_DEFAULT_RPC_TIMEOUT, DAEMON_MAX_INFLIGHT,
-    DAEMON_METHOD_UNAUTHORIZED_CODE, DAEMON_OVERLOADED_CODE, DAEMON_PEER_UNAUTHORIZED_CODE,
-    DAEMON_SETSOCKOPT_FAILED_CODE, DaemonStartError, current_euid,
+    DAEMON_DEFAULT_RPC_TIMEOUT, DAEMON_MAX_INFLIGHT, DAEMON_METHOD_UNAUTHORIZED_CODE,
+    DAEMON_OVERLOADED_CODE, DAEMON_PEER_UNAUTHORIZED_CODE, DAEMON_SETSOCKOPT_FAILED_CODE,
+    DaemonStartError, current_euid,
 };
 
 /// Method dispatch name for the round-trip integrity check.
@@ -55,8 +64,21 @@ pub const METHOD_CAPABILITIES: &str = "ee.daemon.capabilities";
 /// Error code returned when the diagnostic echo method is not enabled.
 pub const DAEMON_ECHO_DISABLED_CODE: &str = "daemon_echo_disabled";
 
-/// Method dispatch name for the warm-loaded `ee context` stub.
+/// Method dispatch name for the warm-loaded `ee pack` path.
 pub const METHOD_CONTEXT: &str = "ee.daemon.context";
+
+/// Error code returned when `ee.daemon.context` params cannot be
+/// mapped to the canonical pack request shape.
+pub const DAEMON_CONTEXT_PARAMS_INVALID_CODE: &str = "daemon_context_params_invalid";
+
+/// Error code returned when `ee.daemon.context` refuses a request
+/// before pack execution because its explicit deadline/budget has
+/// already expired.
+pub const DAEMON_CONTEXT_DEADLINE_EXCEEDED_CODE: &str = "daemon_context_deadline_exceeded";
+
+/// Error code returned when the canonical pack path fails before it can
+/// produce an `ee.response.v2` envelope.
+pub const DAEMON_CONTEXT_EXECUTION_FAILED_CODE: &str = "daemon_context_execution_failed";
 
 /// Error code returned when a request's `method` field does not match
 /// any registered handler.
@@ -1251,7 +1273,7 @@ fn handle_connection(
     let request_id = request.request_id.clone();
     let dispatched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         super::metrics::instrument_dispatch(&request.method, metrics.as_ref(), || {
-            dispatch_with_policy(&request, dispatch_policy.as_ref())
+            dispatch_with_policy_and_shutdown(&request, dispatch_policy.as_ref(), shutdown.as_ref())
         })
     }));
     let response = match dispatched {
@@ -1368,22 +1390,29 @@ pub fn dispatch(request: &DaemonRequest) -> DaemonResponse {
     dispatch_with_echo_policy(request, daemon_echo_enabled())
 }
 
-fn dispatch_with_policy(request: &DaemonRequest, policy: &DaemonDispatchPolicy) -> DaemonResponse {
+fn dispatch_with_policy_and_shutdown(
+    request: &DaemonRequest,
+    policy: &DaemonDispatchPolicy,
+    shutdown: &AtomicBool,
+) -> DaemonResponse {
     dispatch_with_echo_policy_and_workspace(
         request,
         daemon_echo_enabled(),
         policy.bound_workspace_id(),
+        shutdown,
     )
 }
 
 fn dispatch_with_echo_policy(request: &DaemonRequest, echo_enabled: bool) -> DaemonResponse {
-    dispatch_with_echo_policy_and_workspace(request, echo_enabled, None)
+    let shutdown = AtomicBool::new(false);
+    dispatch_with_echo_policy_and_workspace(request, echo_enabled, None, &shutdown)
 }
 
 fn dispatch_with_echo_policy_and_workspace(
     request: &DaemonRequest,
     echo_enabled: bool,
     bound_workspace_id: Option<&str>,
+    shutdown: &AtomicBool,
 ) -> DaemonResponse {
     if request.schema != super::DAEMON_REQUEST_SCHEMA_V1 {
         return DaemonResponse::err(
@@ -1441,16 +1470,400 @@ fn dispatch_with_echo_policy_and_workspace(
             DAEMON_ECHO_DISABLED_CODE,
             "ee.daemon.echo is disabled by default; set EE_DAEMON_ENABLE_ECHO=1 for local diagnostics.",
         ),
-        METHOD_CONTEXT => DaemonResponse::err(
+        METHOD_CONTEXT => dispatch_context(request, shutdown),
+        _ => unreachable!("registered daemon methods are handled above"),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DaemonContextParams {
+    query: String,
+    workspace_path: PathBuf,
+    database_path: Option<PathBuf>,
+    index_dir: Option<PathBuf>,
+    max_tokens: Option<u32>,
+    candidate_pool: Option<u32>,
+    max_results: Option<u32>,
+    profile: Option<ContextPackProfile>,
+    speed: SpeedMode,
+    source_mode: SearchSourceMode,
+    strict_source_mode: bool,
+    pack_profile: crate::core::context::ContextPackOutputProfile,
+    resource_profile: PackResourceProfile,
+    no_coverage_fill: Option<bool>,
+    no_rendered_text: Option<bool>,
+    no_skipped: Option<bool>,
+    no_meta: Option<bool>,
+    include_non_affecting_degradations: Option<bool>,
+    explain: bool,
+    no_pack_dna: bool,
+    read_only: bool,
+    timeout_ms: Option<u64>,
+}
+
+impl DaemonContextParams {
+    fn from_value(value: &serde_json::Value) -> Result<Self, String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "`params` must be a JSON object for ee.daemon.context".to_string())?;
+        let query = required_string_any(object, &["task", "query"])?;
+        let workspace_path =
+            required_path_any(object, &["workspacePath", "workspace_path", "workspace"])?;
+        let profile = Some(
+            optional_string_any(object, &["profile"])?
+                .map(|value| parse_daemon_context_profile(&value))
+                .transpose()?
+                .unwrap_or(ContextPackProfile::Balanced),
+        );
+        let speed = optional_string_any(object, &["speed"])?
+            .map(|value| parse_daemon_speed_mode(&value))
+            .transpose()?
+            .unwrap_or_default();
+        let source_mode = optional_string_any(object, &["sourceMode", "source_mode"])?
+            .map(|value| parse_daemon_source_mode(&value))
+            .transpose()?
+            .unwrap_or_default();
+        let pack_profile = optional_string_any(object, &["packProfile", "pack_profile"])?
+            .map(|value| parse_daemon_pack_output_profile(&value))
+            .transpose()?
+            .unwrap_or_default();
+        let resource_profile =
+            optional_string_any(object, &["resourceProfile", "resource_profile"])?
+                .map(|value| {
+                    value
+                        .parse::<PackResourceProfile>()
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()?
+                .unwrap_or_default();
+
+        Ok(Self {
+            query,
+            workspace_path,
+            database_path: optional_path_any(
+                object,
+                &["databasePath", "database_path", "database"],
+            )?,
+            index_dir: optional_path_any(object, &["indexDir", "index_dir"])?,
+            max_tokens: optional_u32_any(object, &["maxTokens", "max_tokens"])?,
+            candidate_pool: optional_u32_any(object, &["candidatePool", "candidate_pool"])?,
+            max_results: optional_u32_any(object, &["maxResults", "max_results"])?,
+            profile,
+            speed,
+            source_mode,
+            strict_source_mode: optional_bool_any(
+                object,
+                &["strictSourceMode", "strict_source_mode"],
+            )?
+            .unwrap_or(false),
+            pack_profile,
+            resource_profile,
+            no_coverage_fill: optional_bool_any(object, &["noCoverageFill", "no_coverage_fill"])?,
+            no_rendered_text: optional_bool_any(object, &["noRenderedText", "no_rendered_text"])?,
+            no_skipped: optional_bool_any(object, &["noSkipped", "no_skipped"])?,
+            no_meta: optional_bool_any(object, &["noMeta", "no_meta"])?,
+            include_non_affecting_degradations: optional_bool_any(
+                object,
+                &[
+                    "includeNonAffectingDegradations",
+                    "include_non_affecting_degradations",
+                ],
+            )?,
+            explain: optional_bool_any(object, &["explain"])?.unwrap_or(false),
+            no_pack_dna: optional_bool_any(object, &["noPackDna", "no_pack_dna"])?.unwrap_or(false),
+            read_only: optional_bool_any(object, &["readOnly", "read_only"])?.unwrap_or(false),
+            timeout_ms: optional_u64_any(
+                object,
+                &["timeoutMs", "timeout_ms", "deadlineMs", "deadline_ms"],
+            )?,
+        })
+    }
+
+    fn output_options(&self) -> ContextPackOutputOptions {
+        ContextPackOutputOptions::for_profile(self.pack_profile)
+            .with_overrides(ContextPackOutputOptionOverrides {
+                no_coverage_fill: self.no_coverage_fill,
+                no_rendered_text: self.no_rendered_text,
+                no_skipped: self.no_skipped,
+                no_meta: self.no_meta,
+                include_non_affecting_degradations: self.include_non_affecting_degradations,
+            })
+            .with_resource_profile(self.resource_profile)
+    }
+
+    fn context_options(&self) -> ContextPackOptions {
+        ContextPackOptions {
+            workspace_path: self.workspace_path.clone(),
+            database_path: self.database_path.clone(),
+            index_dir: self.index_dir.clone(),
+            query: self.query.clone(),
+            speed: self.speed,
+            source_mode: self.source_mode,
+            strict_source_mode: self.strict_source_mode,
+            filters: QueryFilters::default(),
+            profile: self.profile,
+            max_tokens: self.max_tokens,
+            candidate_pool: self.candidate_pool,
+            max_results: self.max_results,
+            include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            redaction_level: RedactionLevel::Minimal,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
+            pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: DEFAULT_COORDINATION_STALE_AFTER_MS,
+            output_options: self.output_options(),
+            persist_pack: !self.read_only,
+        }
+    }
+}
+
+fn dispatch_context(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonResponse {
+    if shutdown.load(Ordering::SeqCst) {
+        return daemon_shutting_down_response(
             request.request_id.clone(),
             request.agent_id.clone(),
             request.workspace_id.clone(),
-            DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE,
-            "ee.daemon.context is a stub until the ANN warm-load slice ships; \
-             the CLI client should fall back to the in-process `ee context` path.",
-        )
-        .with_degraded(DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE),
-        _ => unreachable!("registered daemon methods are handled above"),
+        );
+    }
+    let params = match DaemonContextParams::from_value(&request.params) {
+        Ok(params) => params,
+        Err(message) => {
+            return DaemonResponse::err(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                DAEMON_CONTEXT_PARAMS_INVALID_CODE,
+                format!("invalid ee.daemon.context params: {message}"),
+            );
+        }
+    };
+    if matches!(params.timeout_ms, Some(0)) {
+        return DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_CONTEXT_DEADLINE_EXCEEDED_CODE,
+            "ee.daemon.context deadline expired before pack execution started.",
+        );
+    }
+
+    let options = params.context_options();
+    let mut context_response =
+        match run_context_pack_with_performance(&options, "pack").map(|run| run.response) {
+            Ok(response) => response,
+            Err(error) => {
+                return DaemonResponse::err(
+                    request.request_id.clone(),
+                    request.agent_id.clone(),
+                    request.workspace_id.clone(),
+                    DAEMON_CONTEXT_EXECUTION_FAILED_CODE,
+                    format!("ee.daemon.context could not assemble the canonical pack: {error}"),
+                );
+            }
+        };
+
+    if shutdown.load(Ordering::SeqCst) {
+        return daemon_shutting_down_response(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+        );
+    }
+    if params.explain && !params.no_pack_dna {
+        let database_path = options
+            .database_path
+            .clone()
+            .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+        attach_pack_dna_to_context_response(&database_path, &mut context_response);
+    }
+
+    let render_options = ContextJsonRenderOptions::from(options.output_options);
+    let rendered = render_context_response_json_with_options(&context_response, render_options);
+    if rendered.len() > super::DAEMON_RESPONSE_MAX_BYTES {
+        return DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_CONTEXT_EXECUTION_FAILED_CODE,
+            format!(
+                "ee.daemon.context rendered {} bytes, exceeding the {}-byte daemon response cap; \
+                 lower maxTokens or use the in-process CLI pack path.",
+                rendered.len(),
+                super::DAEMON_RESPONSE_MAX_BYTES
+            ),
+        );
+    }
+    let result = match serde_json::from_str::<serde_json::Value>(&rendered) {
+        Ok(result) => result,
+        Err(error) => {
+            return DaemonResponse::err(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                DAEMON_CONTEXT_EXECUTION_FAILED_CODE,
+                format!("ee.daemon.context rendered invalid canonical JSON: {error}"),
+            );
+        }
+    };
+    let degraded_codes = result
+        .pointer("/data/degraded")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("code").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut response = DaemonResponse::ok(
+        request.request_id.clone(),
+        request.agent_id.clone(),
+        request.workspace_id.clone(),
+        result,
+    );
+    for code in degraded_codes {
+        response = response.with_degraded(code);
+    }
+    response
+}
+
+fn required_string_any(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Result<String, String> {
+    let Some(value) = optional_string_any(object, keys)? else {
+        return Err(format!("missing required field `{}`", keys[0]));
+    };
+    if value.trim().is_empty() {
+        return Err(format!("field `{}` must not be blank", keys[0]));
+    }
+    Ok(value)
+}
+
+fn optional_string_any(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Result<Option<String>, String> {
+    for key in keys {
+        if let Some(value) = object.get(*key) {
+            return value
+                .as_str()
+                .map(|text| Some(text.to_owned()))
+                .ok_or_else(|| format!("field `{key}` must be a string"));
+        }
+    }
+    Ok(None)
+}
+
+fn required_path_any(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Result<PathBuf, String> {
+    let value = required_string_any(object, keys)?;
+    Ok(PathBuf::from(value))
+}
+
+fn optional_path_any(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Result<Option<PathBuf>, String> {
+    optional_string_any(object, keys).map(|value| value.map(PathBuf::from))
+}
+
+fn optional_bool_any(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Result<Option<bool>, String> {
+    for key in keys {
+        if let Some(value) = object.get(*key) {
+            return value
+                .as_bool()
+                .map(Some)
+                .ok_or_else(|| format!("field `{key}` must be a boolean"));
+        }
+    }
+    Ok(None)
+}
+
+fn optional_u32_any(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Result<Option<u32>, String> {
+    optional_u64_any(object, keys)?
+        .map(|value| {
+            u32::try_from(value).map_err(|_| format!("field `{}` must fit in u32", keys[0]))
+        })
+        .transpose()
+}
+
+fn optional_u64_any(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Result<Option<u64>, String> {
+    for key in keys {
+        if let Some(value) = object.get(*key) {
+            return value
+                .as_u64()
+                .map(Some)
+                .ok_or_else(|| format!("field `{key}` must be an unsigned integer"));
+        }
+    }
+    Ok(None)
+}
+
+fn parse_daemon_context_profile(value: &str) -> Result<ContextPackProfile, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "compact" => Ok(ContextPackProfile::Compact),
+        "balanced" => Ok(ContextPackProfile::Balanced),
+        "grounding" => Ok(ContextPackProfile::Grounding),
+        "orientation" => Ok(ContextPackProfile::Orientation),
+        "thorough" => Ok(ContextPackProfile::Thorough),
+        "submodular" => Ok(ContextPackProfile::Submodular),
+        _ => Err(format!(
+            "Invalid context profile `{value}`. Expected compact, balanced, grounding, orientation, thorough, or submodular."
+        )),
+    }
+}
+
+fn parse_daemon_speed_mode(value: &str) -> Result<SpeedMode, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "instant" => Ok(SpeedMode::Instant),
+        "default" => Ok(SpeedMode::Default),
+        "quality" => Ok(SpeedMode::Quality),
+        _ => Err(format!(
+            "Invalid speed mode `{value}`. Expected instant, default, or quality."
+        )),
+    }
+}
+
+fn parse_daemon_source_mode(value: &str) -> Result<SearchSourceMode, String> {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "lexical_only" | "lexical" => Ok(SearchSourceMode::LexicalOnly),
+        "semantic_only" | "semantic" => Ok(SearchSourceMode::SemanticOnly),
+        "hybrid" => Ok(SearchSourceMode::Hybrid),
+        _ => Err(format!(
+            "Invalid source mode `{value}`. Expected lexical_only, semantic_only, or hybrid."
+        )),
+    }
+}
+
+fn parse_daemon_pack_output_profile(
+    value: &str,
+) -> Result<crate::core::context::ContextPackOutputProfile, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "lean" => Ok(crate::core::context::ContextPackOutputProfile::Lean),
+        "standard" => Ok(crate::core::context::ContextPackOutputProfile::Standard),
+        "verbose" => Ok(crate::core::context::ContextPackOutputProfile::Verbose),
+        _ => Err(format!(
+            "Invalid pack output profile `{value}`. Expected lean, standard, or verbose."
+        )),
     }
 }
 
@@ -1848,8 +2261,8 @@ mod tests {
             request.request_id.clone(),
             request.agent_id.clone(),
             Some("workspace-spoofed".to_owned()),
-            DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE,
-            "warmload not yet implemented",
+            DAEMON_CONTEXT_PARAMS_INVALID_CODE,
+            "invalid ee.daemon.context params",
         );
 
         let error = client_round_trip_against_single_response(&request, response)
@@ -1865,7 +2278,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_context_returns_warmload_not_yet_implemented() {
+    fn dispatch_context_rejects_missing_workspace_path() {
         let request = context_request(
             "req-ctx-001",
             TEST_AGENT_ID,
@@ -1874,12 +2287,26 @@ mod tests {
         let response = dispatch(&request);
         assert!(response.result.is_none());
         let error = response.error.as_ref().expect("must have error");
-        assert_eq!(error.code, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE);
-        assert!(
-            response
-                .degraded_codes
-                .contains(&DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE.to_owned())
+        assert_eq!(error.code, DAEMON_CONTEXT_PARAMS_INVALID_CODE);
+        assert!(response.degraded_codes.is_empty());
+    }
+
+    #[test]
+    fn dispatch_context_zero_timeout_fails_before_pack_execution() {
+        let request = context_request(
+            "req-ctx-timeout-001",
+            TEST_AGENT_ID,
+            serde_json::json!({
+                "task": "ship daemon",
+                "workspacePath": "/tmp/ee-daemon-context-timeout-test",
+                "timeoutMs": 0
+            }),
         );
+        let response = dispatch(&request);
+        assert!(response.result.is_none());
+        let error = response.error.as_ref().expect("must have error");
+        assert_eq!(error.code, DAEMON_CONTEXT_DEADLINE_EXCEEDED_CODE);
+        assert!(response.degraded_codes.is_empty());
     }
 
     #[test]
@@ -1923,8 +2350,13 @@ mod tests {
             serde_json::json!({"task": "ship daemon"}),
         );
         request.workspace_id = Some("workspace-other".to_owned());
-        let response =
-            dispatch_with_echo_policy_and_workspace(&request, false, Some(TEST_WORKSPACE_ID));
+        let shutdown = AtomicBool::new(false);
+        let response = dispatch_with_echo_policy_and_workspace(
+            &request,
+            false,
+            Some(TEST_WORKSPACE_ID),
+            &shutdown,
+        );
         let error = response.error.as_ref().expect("must have error");
         assert_eq!(error.code, DAEMON_METHOD_UNAUTHORIZED_CODE);
     }
@@ -2414,8 +2846,8 @@ mod tests {
             client_round_trip(first.socket_path(), &request).expect("first daemon remains live");
         assert_eq!(response.request_id, "req-live-existing-001");
         assert_eq!(response.agent_id, TEST_AGENT_ID);
-        let error = response.error.as_ref().expect("context stub error");
-        assert_eq!(error.code, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE);
+        let error = response.error.as_ref().expect("context params error");
+        assert_eq!(error.code, DAEMON_CONTEXT_PARAMS_INVALID_CODE);
 
         first.shutdown().expect("shutdown");
     }
@@ -2477,7 +2909,7 @@ mod tests {
             .error
             .as_ref()
             .expect("same-UID peer reaches dispatch");
-        assert_eq!(error.code, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE);
+        assert_eq!(error.code, DAEMON_CONTEXT_PARAMS_INVALID_CODE);
 
         handle.shutdown().expect("shutdown");
     }
@@ -2560,7 +2992,7 @@ mod tests {
         let response = client_round_trip(handle.socket_path(), &request).expect("round-trip");
         assert_eq!(response.agent_id, TEST_AGENT_ID);
         let error = response.error.as_ref().expect("fresh socket dispatches");
-        assert_eq!(error.code, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE);
+        assert_eq!(error.code, DAEMON_CONTEXT_PARAMS_INVALID_CODE);
 
         handle.shutdown().expect("shutdown");
     }

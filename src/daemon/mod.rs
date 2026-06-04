@@ -14,11 +14,11 @@
 //! and `docs/schemas/ee.daemon.response.v1.json` for the canonical
 //! field contracts.
 //!
-//! This module ships the skeleton only. The end goal of bd-oja31 is a
-//! RAM-pinned ANN + lexical-index hot-mode RPC; the skeleton lands the
-//! transport, framing, dispatch table, and seed methods so the
-//! ANN warm-load and the `mlock`/`MADV_HUGEPAGE` adapter (bd-17c65.14.9)
-//! can land behind it without re-litigating the protocol shape:
+//! This module ships the local daemon transport and seed methods. The
+//! end goal of bd-oja31 is a RAM-pinned ANN + lexical-index hot-mode
+//! RPC; the transport, framing, dispatch table, and canonical context
+//! method let later ANN warm-load and `mlock`/`MADV_HUGEPAGE` adapters
+//! land behind the same protocol shape:
 //!
 //! - `ee.daemon.capabilities` — protocol discovery method. Clients call this
 //!   before attempting future schemas or non-v1 methods so they can downgrade
@@ -26,10 +26,10 @@
 //! - `ee.daemon.echo` — diagnostic round-trip integrity check. Disabled
 //!   by default unless `EE_DAEMON_ENABLE_ECHO=1` is set, and even then
 //!   returns only the canonical redacted form of request `params`.
-//! - `ee.daemon.context` — same-UID, workspace-bound stub for the future
-//!   warm-loaded `ee context` path. Requires a matching `workspace_id`, then
-//!   returns `error.code = daemon_ann_warmload_not_yet_implemented` until the
-//!   ANN warm-load slice ships.
+//! - `ee.daemon.context` — same-UID, workspace-bound pack path. Requires a
+//!   matching `workspace_id`, then executes the canonical in-process
+//!   `ee pack` request and returns the rendered `ee.response.v2` envelope as
+//!   the daemon response `result`.
 //!
 //! Threading model: the skeleton uses a `std::thread::spawn` accept loop
 //! and a small per-connection worker. A future slice will wrap the
@@ -81,10 +81,10 @@ pub const DAEMON_RESPONSE_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// catches stuck clients that opened a connection and stopped sending.
 pub const DAEMON_DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Degraded code emitted on the `ee.daemon.context` stub path until the
-/// ANN warm-load slice ships. The CLI client maps this onto the
-/// canonical envelope's `degraded[]` array with severity `medium` per
-/// `docs/degraded_code_taxonomy.md`.
+/// Historical degraded code emitted by the original `ee.daemon.context`
+/// stub path before bd-16pwc.1 replaced it with canonical pack
+/// execution. Kept as a stable catalog entry so older daemon clients and
+/// archived evidence remain decodable.
 pub const DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE: &str =
     "daemon_ann_warmload_not_yet_implemented";
 

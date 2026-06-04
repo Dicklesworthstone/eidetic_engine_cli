@@ -3,8 +3,8 @@
 //! Pins the wire-framing contract end-to-end: spin up the daemon
 //! server on a tempdir UDS, send an `ee.daemon.echo` request, assert
 //! default production servers refuse the diagnostic reflector, send an
-//! `ee.daemon.context` request, assert the `daemon_ann_warmload_not_yet_implemented`
-//! stub error fires with the degraded code attached, and shut the
+//! `ee.daemon.context` request, assert the result carries the canonical
+//! `ee.response.v2` / `ee.pack.v2` context-pack payload, and shut the
 //! server down cleanly so the socket file is unlinked.
 //!
 //! Cfg-gated to Unix because the UDS server is Unix-only; non-Unix
@@ -14,6 +14,7 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::fs;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -22,16 +23,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ee::daemon::{
-    DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE, DAEMON_METHOD_UNAUTHORIZED_CODE,
-    DAEMON_REQUEST_MAX_BYTES, DAEMON_REQUEST_SCHEMA_V1, DAEMON_RESPONSE_MAX_BYTES,
-    DAEMON_RESPONSE_SCHEMA_V1, DAEMON_SHUTTING_DOWN_CODE,
+    DAEMON_METHOD_UNAUTHORIZED_CODE, DAEMON_REQUEST_MAX_BYTES, DAEMON_REQUEST_SCHEMA_V1,
+    DAEMON_RESPONSE_MAX_BYTES, DAEMON_RESPONSE_SCHEMA_V1, DAEMON_SHUTTING_DOWN_CODE,
     protocol::{DaemonRequest, DaemonResponse},
     server::{
-        ClientError, DAEMON_ECHO_DISABLED_CODE, DAEMON_REQUEST_DECODE_FAILED_CODE,
+        ClientError, DAEMON_CONTEXT_DEADLINE_EXCEEDED_CODE, DAEMON_CONTEXT_PARAMS_INVALID_CODE,
+        DAEMON_ECHO_DISABLED_CODE, DAEMON_REQUEST_DECODE_FAILED_CODE,
         DAEMON_REQUEST_SCHEMA_MISMATCH_CODE, DAEMON_UNKNOWN_METHOD_CODE, METHOD_CAPABILITIES,
         METHOD_CONTEXT, METHOD_ECHO, client_round_trip, start_server, start_server_for_workspace,
     },
 };
+use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 
 type TestResult = Result<(), String>;
 const TEST_AGENT_ID: &str = "agent-daemon-uds-test";
@@ -64,6 +66,63 @@ fn context_request(
     let mut request = DaemonRequest::new(request_id, agent_id, METHOD_CONTEXT, params);
     request.workspace_id = Some(TEST_WORKSPACE_ID.to_owned());
     request
+}
+
+fn seed_context_workspace(root: &Path) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    let workspace = root.join("workspace");
+    let ee_dir = workspace.join(".ee");
+    fs::create_dir_all(&ee_dir).map_err(|error| format!("create .ee dir: {error}"))?;
+    let database = ee_dir.join("ee.db");
+    let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    connection.migrate().map_err(|error| error.to_string())?;
+    let workspace_id = "wsp_daemonudsrpc000000000001";
+    connection
+        .insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: workspace.to_string_lossy().into_owned(),
+                name: Some("daemon-uds-context".to_string()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_memory(
+            "mem_00000000000000000000005001",
+            &CreateMemoryInput {
+                workspace_id: workspace_id.to_string(),
+                level: "procedural".to_string(),
+                kind: "rule".to_string(),
+                content: "Daemon context canonical pack must preserve release provenance."
+                    .to_string(),
+                workflow_id: None,
+                confidence: 0.95,
+                utility: 0.9,
+                importance: 0.8,
+                provenance_uri: Some("file://AGENTS.md#daemon-context".to_string()),
+                trust_class: "agent_validated".to_string(),
+                trust_subclass: Some("daemon-uds-test".to_string()),
+                tags: vec!["daemon".to_string(), "release".to_string()],
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    Ok((workspace, database))
+}
+
+fn context_pack_params(workspace: &Path, database: &Path, task: &str) -> serde_json::Value {
+    let workspace_path = workspace.to_string_lossy().into_owned();
+    let database_path = database.to_string_lossy().into_owned();
+    serde_json::json!({
+        "task": task,
+        "workspacePath": workspace_path,
+        "databasePath": database_path,
+        "speed": "instant",
+        "sourceMode": "lexical_only",
+        "candidatePool": 20,
+        "maxTokens": 600,
+        "readOnly": true
+    })
 }
 
 fn write_raw_frame(stream: &mut UnixStream, body: &[u8]) -> TestResult {
@@ -532,17 +591,22 @@ fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> Test
 }
 
 #[test]
-fn daemon_context_returns_warmload_not_yet_implemented_with_degraded_code() -> TestResult {
+fn daemon_context_returns_canonical_pack_response_with_provenance() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let socket_path = temp.path().join("ee-daemon-ctx.sock");
+    let (workspace, database) = seed_context_workspace(temp.path())?;
 
-    let mut handle =
-        start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
+    let mut handle = start_server_for_workspace(&socket_path, TEST_WORKSPACE_ID)
+        .map_err(|error| format!("start_server_for_workspace: {error}"))?;
 
     let request = context_request(
-        "req-ctx-stub-001",
+        "req-ctx-pack-001",
         TEST_AGENT_ID,
-        serde_json::json!({"task": "ship daemon skeleton"}),
+        context_pack_params(
+            &workspace,
+            &database,
+            "release provenance daemon context canonical pack",
+        ),
     );
     let response = client_round_trip(handle.socket_path(), &request)
         .map_err(|error| format!("client_round_trip: {error}"))?;
@@ -557,34 +621,71 @@ fn daemon_context_returns_warmload_not_yet_implemented_with_degraded_code() -> T
             response.workspace_id
         ),
     )?;
-
     ensure(
-        response.result.is_none(),
-        format!(
-            "context stub must NOT return result; got {:?}",
-            response.result
-        ),
+        response.error.is_none(),
+        format!("context pack request must not return daemon error; got {response:?}"),
     )?;
-    let error = response
-        .error
+    let result = response
+        .result
         .as_ref()
-        .ok_or_else(|| format!("context stub must return error; got {response:?}"))?;
+        .ok_or_else(|| format!("context pack request must return result; got {response:?}"))?;
     ensure(
-        error.code == DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE,
-        format!(
-            "context stub code must be {DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE}; got {}",
-            error.code
-        ),
+        result.get("schema").and_then(serde_json::Value::as_str) == Some("ee.response.v2"),
+        format!("daemon context result must be canonical response envelope; got {result}"),
     )?;
     ensure(
-        response
-            .degraded_codes
-            .contains(&DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE.to_owned()),
-        format!(
-            "context stub must attach the warmload degraded code; got {:?}",
-            response.degraded_codes
-        ),
+        result.get("success").and_then(serde_json::Value::as_bool) == Some(true),
+        format!("daemon context canonical envelope must be successful; got {result}"),
     )?;
+    ensure(
+        result
+            .pointer("/data/command")
+            .and_then(serde_json::Value::as_str)
+            == Some("pack"),
+        format!("daemon context must execute canonical pack command; got {result}"),
+    )?;
+    ensure(
+        result
+            .pointer("/data/pack/schema")
+            .and_then(serde_json::Value::as_str)
+            == Some("ee.pack.v2"),
+        format!("daemon context result must carry ee.pack.v2; got {result}"),
+    )?;
+    let memory_count = result
+        .pointer("/data/pack/provenanceFooter/memoryCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    ensure(
+        memory_count >= 1,
+        format!("daemon context pack must expose provenance memory count; got {result}"),
+    )?;
+    let rendered = result.to_string();
+    ensure(
+        rendered.contains("mem_00000000000000000000005001"),
+        format!("daemon context pack must include seeded memory id; got {result}"),
+    )?;
+
+    handle
+        .shutdown()
+        .map_err(|error| format!("shutdown: {error}"))?;
+    Ok(())
+}
+
+#[test]
+fn daemon_context_zero_timeout_refuses_before_pack_execution() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-ctx-timeout.sock");
+    let (workspace, database) = seed_context_workspace(temp.path())?;
+
+    let mut handle = start_server_for_workspace(&socket_path, TEST_WORKSPACE_ID)
+        .map_err(|error| format!("start_server_for_workspace: {error}"))?;
+
+    let mut params = context_pack_params(&workspace, &database, "deadline should not run pack");
+    params["timeoutMs"] = serde_json::json!(0);
+    let request = context_request("req-ctx-timeout-001", TEST_AGENT_ID, params);
+    let response = client_round_trip(handle.socket_path(), &request)
+        .map_err(|error| format!("client_round_trip: {error}"))?;
+    ensure_error_code(&response, DAEMON_CONTEXT_DEADLINE_EXCEEDED_CODE)?;
 
     handle
         .shutdown()
@@ -877,8 +978,8 @@ fn daemon_serves_two_clients_concurrently() -> TestResult {
         response_b.agent_id == "agent-daemon-uds-b",
         format!("client b agent_id drifted: {}", response_b.agent_id),
     )?;
-    ensure_error_code(&response_a, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE)?;
-    ensure_error_code(&response_b, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE)?;
+    ensure_error_code(&response_a, DAEMON_CONTEXT_PARAMS_INVALID_CODE)?;
+    ensure_error_code(&response_b, DAEMON_CONTEXT_PARAMS_INVALID_CODE)?;
 
     handle
         .shutdown()
@@ -963,7 +1064,7 @@ fn daemon_restart_on_same_path_after_shutdown_succeeds() -> TestResult {
             response.request_id
         ),
     )?;
-    ensure_error_code(&response, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE)?;
+    ensure_error_code(&response, DAEMON_CONTEXT_PARAMS_INVALID_CODE)?;
 
     second
         .shutdown()
@@ -1043,10 +1144,9 @@ fn daemon_shutdown_during_connected_client_returns_structured_response() -> Test
         .as_ref()
         .ok_or_else(|| format!("shutdown race must return an error envelope; got {response:?}"))?;
     ensure(
-        error.code == DAEMON_SHUTTING_DOWN_CODE
-            || error.code == DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE,
+        error.code == DAEMON_SHUTTING_DOWN_CODE || error.code == DAEMON_CONTEXT_PARAMS_INVALID_CODE,
         format!(
-            "shutdown race must return structured shutdown or normal stub error; got {}",
+            "shutdown race must return structured shutdown or normal context param error; got {}",
             error.code
         ),
     )?;
