@@ -102,9 +102,13 @@ def load_text(relative_path):
     return (REPO_ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def run_consumer_cli(payload):
+def run_consumer_cli(payload, extra_args=None):
     result = subprocess.run(
-        [sys.executable, str(SCRIPT_DIR / "agent_consume_work_packet_gate.py")],
+        [
+            sys.executable,
+            str(SCRIPT_DIR / "agent_consume_work_packet_gate.py"),
+            *(extra_args or []),
+        ],
         input=json.dumps(payload),
         text=True,
         capture_output=True,
@@ -761,6 +765,26 @@ class ErrorHandling(unittest.TestCase):
             claim["argv"],
             ["br", "update", "bd-safe.1", "--status", "in_progress", "--json"],
         )
+
+    def test_cli_from_stdin_flag_keeps_machine_readable_decision(self):
+        result, decision = run_consumer_cli(envelope(safe_gate()), ["--from-stdin"])
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertTrue(decision["safeToClaim"])
+        self.assertEqual(decision["sourceSchema"], "ee.swarm.work_packet.claim_gate.v1")
+
+    def test_cli_pretty_flag_emits_parseable_indented_json(self):
+        result, decision = run_consumer_cli(
+            load_fixture("tests/fixtures/swarm_work_packet/crowded_checkout.json"),
+            ["--pretty"],
+        )
+
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn("{\n", result.stdout)
+        self.assertIn('  "action": "coordinate_before_claim"', result.stdout)
 
     def test_cli_inconsistent_claim_gate_exits_three_and_blocks_claim_action(self):
         gate = safe_gate()
