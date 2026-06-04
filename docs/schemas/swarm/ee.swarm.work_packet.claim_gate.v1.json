@@ -343,10 +343,10 @@
     }
   ],
   "x-ee-status": {
-    "shipped": false,
-    "available_in_build": false,
+    "shipped": true,
+    "available_in_build": true,
     "tracking_bead": "bd-1tlcd.1",
-    "notes": "Schema/contract support for the planned read-only --claim-gate mode; mark shipped only after bd-1tlcd.1 closes with emitted CLI support."
+    "notes": "Read-only --claim-gate mode is emitted by the CLI and covered by bd-1tlcd.1 RCH proof."
   },
   "x-ee-doc": "docs/swarm/work_packet.md"
 }

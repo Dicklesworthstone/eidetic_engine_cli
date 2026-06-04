@@ -157,19 +157,17 @@ fn claim_gate_payload_required_keys_match_schema_required_array() -> TestResult 
 }
 
 #[test]
-fn claim_gate_payload_schema_is_not_marked_shipped_until_bd_1tlcd_1_closes() -> TestResult {
+fn claim_gate_payload_schema_is_marked_shipped_after_bd_1tlcd_1_closes() -> TestResult {
     let schema = payload_schema()?;
-    if bool_at(&schema, "/x-ee-status/shipped", "claim gate status")? {
-        return Err("claim gate schema must remain unshipped until bd-1tlcd.1 closes".into());
+    if !bool_at(&schema, "/x-ee-status/shipped", "claim gate status")? {
+        return Err("claim gate schema must be marked shipped after bd-1tlcd.1 closes".into());
     }
-    if bool_at(
+    if !bool_at(
         &schema,
         "/x-ee-status/available_in_build",
         "claim gate status",
     )? {
-        return Err(
-            "claim gate schema must not be marked available before the CLI emits it".into(),
-        );
+        return Err("claim gate schema must be marked available after the CLI emits it".into());
     }
     if string_at(&schema, "/x-ee-status/tracking_bead", "claim gate status")? != "bd-1tlcd.1" {
         return Err("claim gate schema tracking bead must stay bd-1tlcd.1".into());
