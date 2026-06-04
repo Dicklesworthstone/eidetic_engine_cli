@@ -5,7 +5,7 @@
 //! pack, perf, tracker, git, and support-bundle artifacts into deterministic
 //! rows without copying raw logs or private checkout paths.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ use serde_json::Value as JsonValue;
 pub const REGRESSION_CAUSALITY_SCHEMA_V1: &str = "ee.regression_causality.v1";
 pub const REGRESSION_EVIDENCE_NORMALIZATION_SCHEMA_V1: &str =
     "ee.regression_evidence_normalization.v1";
+pub const REGRESSION_HYPOTHESIS_RANKING_SCHEMA_V1: &str = "ee.regression_hypothesis_ranking.v1";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -324,6 +325,112 @@ pub struct RegressionEvidenceNormalizationReport {
     pub degraded: Vec<RegressionNormalizationDegradation>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegressionCauseHypothesisCode {
+    SourceNotMaterialized,
+    SchemaContractDrift,
+    StaleDerivedAsset,
+    KnownEnvironmentBlocker,
+    OutputBudgetRegression,
+    FixtureGap,
+    PackSelectionChange,
+    PerfBudgetRegression,
+    TrackerStateMismatch,
+    UnknownInsufficientEvidence,
+}
+
+impl RegressionCauseHypothesisCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceNotMaterialized => "source_not_materialized",
+            Self::SchemaContractDrift => "schema_contract_drift",
+            Self::StaleDerivedAsset => "stale_derived_asset",
+            Self::KnownEnvironmentBlocker => "known_environment_blocker",
+            Self::OutputBudgetRegression => "output_budget_regression",
+            Self::FixtureGap => "fixture_gap",
+            Self::PackSelectionChange => "pack_selection_change",
+            Self::PerfBudgetRegression => "perf_budget_regression",
+            Self::TrackerStateMismatch => "tracker_state_mismatch",
+            Self::UnknownInsufficientEvidence => "unknown_insufficient_evidence",
+        }
+    }
+}
+
+impl fmt::Display for RegressionCauseHypothesisCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegressionCounterEvidenceEffect {
+    Supports,
+    Weakens,
+    Neutral,
+    MissingRequiredSource,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegressionCounterEvidence {
+    pub source_id: Option<String>,
+    pub summary: String,
+    pub effect: RegressionCounterEvidenceEffect,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegressionOwnerHintKind {
+    Bead,
+    Agent,
+    Module,
+    Command,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegressionOwnerHint {
+    pub kind: RegressionOwnerHintKind,
+    pub value: String,
+    pub confidence: f64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegressionCausalityCommand {
+    pub command: String,
+    pub rationale: String,
+    pub mutates_workspace: bool,
+    pub requires_rch: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegressionCauseHypothesis {
+    pub rank: usize,
+    pub code: RegressionCauseHypothesisCode,
+    pub confidence: f64,
+    pub severity: RegressionCausalitySeverity,
+    pub summary: String,
+    pub evidence_refs: Vec<String>,
+    pub counter_evidence: Vec<RegressionCounterEvidence>,
+    pub owner_hints: Vec<RegressionOwnerHint>,
+    pub next_commands: Vec<RegressionCausalityCommand>,
+    pub authoritative: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegressionHypothesisRankingReport {
+    pub schema: String,
+    pub hypotheses: Vec<RegressionCauseHypothesis>,
+    pub degraded: Vec<RegressionNormalizationDegradation>,
+}
+
 #[must_use]
 pub fn normalize_regression_evidence_inputs(
     inputs: &[RegressionEvidenceInput],
@@ -354,6 +461,692 @@ pub fn normalize_regression_evidence_inputs(
         schema: REGRESSION_EVIDENCE_NORMALIZATION_SCHEMA_V1.to_owned(),
         rows,
         degraded,
+    }
+}
+
+#[must_use]
+pub fn rank_regression_cause_hypotheses(
+    rows: &[NormalizedRegressionEvidenceRow],
+) -> RegressionHypothesisRankingReport {
+    let mut accumulators = BTreeMap::<RegressionCauseHypothesisCode, HypothesisAccumulator>::new();
+
+    for row in rows {
+        classify_source_materialization(row, &mut accumulators);
+        classify_environment_blocker(row, &mut accumulators);
+        classify_schema_contract(row, &mut accumulators);
+        classify_staleness(row, &mut accumulators);
+        classify_fixture_gap(row, &mut accumulators);
+        classify_pack_selection(row, &mut accumulators);
+        classify_perf_regression(row, &mut accumulators);
+        classify_output_budget(row, &mut accumulators);
+        classify_tracker_state(row, &mut accumulators);
+    }
+
+    if accumulators.is_empty() {
+        let mut accumulator = HypothesisAccumulator::default();
+        accumulator.points = if rows.is_empty() { 42 } else { 34 };
+        for row in rows.iter().take(4) {
+            accumulator.evidence_refs.insert(row.id.clone());
+            accumulator.counter_evidence.push(RegressionCounterEvidence {
+                source_id: Some(row.id.clone()),
+                summary: format!(
+                    "Evidence `{}` was normalized as {}, but did not match a stronger cause category.",
+                    row.id, row.status
+                ),
+                effect: RegressionCounterEvidenceEffect::Neutral,
+            });
+        }
+        accumulator
+            .counter_evidence
+            .push(RegressionCounterEvidence {
+                source_id: None,
+                summary: "No direct failing source category had enough normalized evidence."
+                    .to_owned(),
+                effect: RegressionCounterEvidenceEffect::MissingRequiredSource,
+            });
+        accumulators.insert(
+            RegressionCauseHypothesisCode::UnknownInsufficientEvidence,
+            accumulator,
+        );
+    }
+
+    let missing_required = missing_required_source_degradations(rows);
+    if !missing_required.is_empty()
+        && !accumulators.contains_key(&RegressionCauseHypothesisCode::UnknownInsufficientEvidence)
+    {
+        let mut accumulator = HypothesisAccumulator {
+            points: 28,
+            ..HypothesisAccumulator::default()
+        };
+        accumulator
+            .counter_evidence
+            .extend(
+                missing_required
+                    .iter()
+                    .map(|kind| RegressionCounterEvidence {
+                        source_id: None,
+                        summary: format!(
+                            "No `{kind}` evidence source was present in the normalized rows."
+                        ),
+                        effect: RegressionCounterEvidenceEffect::MissingRequiredSource,
+                    }),
+            );
+        accumulators.insert(
+            RegressionCauseHypothesisCode::UnknownInsufficientEvidence,
+            accumulator,
+        );
+    }
+
+    let mut hypotheses = accumulators
+        .into_iter()
+        .map(|(code, mut accumulator)| {
+            add_counter_evidence(code, rows, &mut accumulator);
+            accumulator.into_hypothesis(code)
+        })
+        .collect::<Vec<_>>();
+
+    hypotheses.sort_by(|left, right| {
+        right
+            .confidence
+            .partial_cmp(&left.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.severity.cmp(&left.severity))
+            .then_with(|| left.code.cmp(&right.code))
+    });
+    for (index, hypothesis) in hypotheses.iter_mut().enumerate() {
+        hypothesis.rank = index + 1;
+    }
+
+    RegressionHypothesisRankingReport {
+        schema: REGRESSION_HYPOTHESIS_RANKING_SCHEMA_V1.to_owned(),
+        hypotheses,
+        degraded: missing_required
+            .into_iter()
+            .map(|kind| {
+                degradation(
+                    "regression_hypothesis_missing_required_source",
+                    RegressionCausalitySeverity::Warning,
+                    format!("No `{kind}` evidence source was available for hypothesis ranking."),
+                    None,
+                    "Provide the missing structured artifact before treating low-confidence hypotheses as actionable.",
+                )
+            })
+            .collect(),
+    }
+}
+
+#[derive(Default)]
+struct HypothesisAccumulator {
+    points: u16,
+    evidence_refs: BTreeSet<String>,
+    counter_evidence: Vec<RegressionCounterEvidence>,
+    owner_hints: Vec<RegressionOwnerHint>,
+    next_commands: Vec<RegressionCausalityCommand>,
+}
+
+impl HypothesisAccumulator {
+    fn add_support(&mut self, row: &NormalizedRegressionEvidenceRow, points: u16) {
+        self.points = self.points.saturating_add(points).min(95);
+        self.evidence_refs.insert(row.id.clone());
+        self.owner_hints.extend(owner_hints_for_row(row));
+    }
+
+    fn into_hypothesis(mut self, code: RegressionCauseHypothesisCode) -> RegressionCauseHypothesis {
+        self.owner_hints.sort_by(|left, right| {
+            left.kind
+                .cmp(&right.kind)
+                .then_with(|| left.value.cmp(&right.value))
+        });
+        self.owner_hints
+            .dedup_by(|left, right| left.kind == right.kind && left.value == right.value);
+        if self.owner_hints.is_empty() {
+            self.owner_hints.push(default_owner_hint(code));
+        }
+
+        self.counter_evidence.sort_by(|left, right| {
+            left.source_id
+                .cmp(&right.source_id)
+                .then_with(|| left.effect.cmp(&right.effect))
+                .then_with(|| left.summary.cmp(&right.summary))
+        });
+        self.counter_evidence.dedup();
+
+        self.next_commands
+            .extend(next_commands_for_hypothesis(code));
+        self.next_commands.sort_by(|left, right| {
+            left.command
+                .cmp(&right.command)
+                .then_with(|| left.rationale.cmp(&right.rationale))
+        });
+        self.next_commands.dedup();
+
+        let confidence = ((self.points.max(20) as f64) / 100.0).min(0.95);
+        RegressionCauseHypothesis {
+            rank: 0,
+            code,
+            confidence,
+            severity: severity_for_hypothesis(code, confidence),
+            summary: summary_for_hypothesis(code),
+            evidence_refs: self.evidence_refs.into_iter().collect(),
+            counter_evidence: self.counter_evidence,
+            owner_hints: self.owner_hints,
+            next_commands: self.next_commands,
+            authoritative: false,
+        }
+    }
+}
+
+fn accumulator_for(
+    accumulators: &mut BTreeMap<RegressionCauseHypothesisCode, HypothesisAccumulator>,
+    code: RegressionCauseHypothesisCode,
+) -> &mut HypothesisAccumulator {
+    accumulators.entry(code).or_default()
+}
+
+fn classify_source_materialization(
+    row: &NormalizedRegressionEvidenceRow,
+    accumulators: &mut BTreeMap<RegressionCauseHypothesisCode, HypothesisAccumulator>,
+) {
+    if matches!(
+        row.source_materialization,
+        RegressionSourceMaterialization::RemoteCheckoutUnverified
+            | RegressionSourceMaterialization::SourceStateRefused
+    ) || row.remote_source_materialized == Some(false)
+        || row
+            .degraded_codes
+            .iter()
+            .any(|code| code == "regression_evidence_source_not_materialized")
+    {
+        accumulator_for(
+            accumulators,
+            RegressionCauseHypothesisCode::SourceNotMaterialized,
+        )
+        .add_support(row, 84);
+    }
+}
+
+fn classify_environment_blocker(
+    row: &NormalizedRegressionEvidenceRow,
+    accumulators: &mut BTreeMap<RegressionCauseHypothesisCode, HypothesisAccumulator>,
+) {
+    let signal = row.status == RegressionEvidenceStatus::Blocked
+        || row
+            .verdict
+            .as_deref()
+            .map(normalized_token)
+            .is_some_and(|token| {
+                matches!(
+                    token.as_str(),
+                    "selection_failed" | "rch_environment_failure" | "fallback_refused" | "blocked"
+                )
+            })
+        || row.degraded_codes.iter().any(|code| {
+            let token = normalized_token(code);
+            token.contains("rch")
+                || token.contains("worker")
+                || token.contains("topology")
+                || token.contains("fallback")
+                || token.contains("environment")
+        });
+    if signal
+        && matches!(
+            row.kind.as_str(),
+            "verification_evidence" | "rch_selector_admission" | "support_bundle"
+        )
+    {
+        accumulator_for(
+            accumulators,
+            RegressionCauseHypothesisCode::KnownEnvironmentBlocker,
+        )
+        .add_support(row, 64);
+    }
+}
+
+fn classify_schema_contract(
+    row: &NormalizedRegressionEvidenceRow,
+    accumulators: &mut BTreeMap<RegressionCauseHypothesisCode, HypothesisAccumulator>,
+) {
+    let schema_required = matches!(
+        row.kind.as_str(),
+        "verification_evidence" | "swarm_replay" | "perf_report" | "support_bundle"
+    );
+    let schema_signal = row.status == RegressionEvidenceStatus::Malformed
+        || (schema_required && row.schema_id.is_none())
+        || row.degraded_codes.iter().any(|code| {
+            let token = normalized_token(code);
+            token.contains("schema") || token.contains("contract") || token.contains("drift")
+        });
+    if schema_signal {
+        accumulator_for(
+            accumulators,
+            RegressionCauseHypothesisCode::SchemaContractDrift,
+        )
+        .add_support(
+            row,
+            if row.status == RegressionEvidenceStatus::Malformed {
+                68
+            } else {
+                50
+            },
+        );
+    }
+}
+
+fn classify_staleness(
+    row: &NormalizedRegressionEvidenceRow,
+    accumulators: &mut BTreeMap<RegressionCauseHypothesisCode, HypothesisAccumulator>,
+) {
+    if row.status == RegressionEvidenceStatus::Stale
+        || row
+            .degraded_codes
+            .iter()
+            .any(|code| normalized_token(code).contains("stale"))
+    {
+        accumulator_for(
+            accumulators,
+            RegressionCauseHypothesisCode::StaleDerivedAsset,
+        )
+        .add_support(row, 58);
+    }
+}
+
+fn classify_fixture_gap(
+    row: &NormalizedRegressionEvidenceRow,
+    accumulators: &mut BTreeMap<RegressionCauseHypothesisCode, HypothesisAccumulator>,
+) {
+    let fixture_signal = row.kind == "degraded_fixture"
+        && matches!(
+            row.status,
+            RegressionEvidenceStatus::Missing
+                | RegressionEvidenceStatus::Malformed
+                | RegressionEvidenceStatus::Unsupported
+        )
+        || row.degraded_codes.iter().any(|code| {
+            let token = normalized_token(code);
+            token.contains("fixture") || token.contains("catalog")
+        });
+    if fixture_signal {
+        accumulator_for(accumulators, RegressionCauseHypothesisCode::FixtureGap)
+            .add_support(row, 56);
+    }
+}
+
+fn classify_pack_selection(
+    row: &NormalizedRegressionEvidenceRow,
+    accumulators: &mut BTreeMap<RegressionCauseHypothesisCode, HypothesisAccumulator>,
+) {
+    let pack_signal = matches!(row.kind.as_str(), "pack_replay" | "pack_diff")
+        && (row.status != RegressionEvidenceStatus::Available
+            || row.degraded_codes.iter().any(|code| {
+                let token = normalized_token(code);
+                token.contains("pack") || token.contains("selection") || token.contains("omission")
+            }));
+    if pack_signal {
+        accumulator_for(
+            accumulators,
+            RegressionCauseHypothesisCode::PackSelectionChange,
+        )
+        .add_support(row, 58);
+    }
+}
+
+fn classify_perf_regression(
+    row: &NormalizedRegressionEvidenceRow,
+    accumulators: &mut BTreeMap<RegressionCauseHypothesisCode, HypothesisAccumulator>,
+) {
+    let perf_signal = row.kind == "perf_report"
+        && (row
+            .verdict
+            .as_deref()
+            .map(normalized_token)
+            .is_some_and(|token| {
+                matches!(token.as_str(), "failed" | "regression" | "budget_exceeded")
+            })
+            || row.degraded_codes.iter().any(|code| {
+                let token = normalized_token(code);
+                token.contains("perf") || token.contains("latency")
+            }));
+    if perf_signal {
+        accumulator_for(
+            accumulators,
+            RegressionCauseHypothesisCode::PerfBudgetRegression,
+        )
+        .add_support(row, 62);
+    }
+}
+
+fn classify_output_budget(
+    row: &NormalizedRegressionEvidenceRow,
+    accumulators: &mut BTreeMap<RegressionCauseHypothesisCode, HypothesisAccumulator>,
+) {
+    if row.degraded_codes.iter().any(|code| {
+        let token = normalized_token(code);
+        token.contains("output_budget")
+            || token.contains("prompt_budget")
+            || token.contains("too_verbose")
+    }) {
+        accumulator_for(
+            accumulators,
+            RegressionCauseHypothesisCode::OutputBudgetRegression,
+        )
+        .add_support(row, 60);
+    }
+}
+
+fn classify_tracker_state(
+    row: &NormalizedRegressionEvidenceRow,
+    accumulators: &mut BTreeMap<RegressionCauseHypothesisCode, HypothesisAccumulator>,
+) {
+    let tracker_signal = matches!(row.kind.as_str(), "beads_history" | "bv_history")
+        && (row.status != RegressionEvidenceStatus::Available
+            || row.degraded_codes.iter().any(|code| {
+                let token = normalized_token(code);
+                token.contains("tracker")
+                    || token.contains("beads")
+                    || token.contains("bv")
+                    || token.contains("mismatch")
+            }));
+    if tracker_signal {
+        accumulator_for(
+            accumulators,
+            RegressionCauseHypothesisCode::TrackerStateMismatch,
+        )
+        .add_support(row, 60);
+    }
+}
+
+fn add_counter_evidence(
+    code: RegressionCauseHypothesisCode,
+    rows: &[NormalizedRegressionEvidenceRow],
+    accumulator: &mut HypothesisAccumulator,
+) {
+    for row in rows {
+        if !row.authoritative || accumulator.evidence_refs.contains(&row.id) {
+            continue;
+        }
+        if weakens_hypothesis(code, row) {
+            accumulator
+                .counter_evidence
+                .push(RegressionCounterEvidence {
+                    source_id: Some(row.id.clone()),
+                    summary: format!("Evidence `{}` was available and weakens `{code}`.", row.id),
+                    effect: RegressionCounterEvidenceEffect::Weakens,
+                });
+        }
+    }
+}
+
+fn weakens_hypothesis(
+    code: RegressionCauseHypothesisCode,
+    row: &NormalizedRegressionEvidenceRow,
+) -> bool {
+    match code {
+        RegressionCauseHypothesisCode::SourceNotMaterialized => {
+            row.source_materialization == RegressionSourceMaterialization::CommittedTree
+                || row.remote_source_materialized == Some(true)
+        }
+        RegressionCauseHypothesisCode::SchemaContractDrift => {
+            row.schema_id.is_some() && row.status == RegressionEvidenceStatus::Available
+        }
+        RegressionCauseHypothesisCode::StaleDerivedAsset => {
+            row.observed_at.is_some() && row.status == RegressionEvidenceStatus::Available
+        }
+        RegressionCauseHypothesisCode::KnownEnvironmentBlocker => {
+            row.status == RegressionEvidenceStatus::Available
+                && matches!(
+                    row.kind.as_str(),
+                    "verification_evidence" | "rch_selector_admission"
+                )
+        }
+        RegressionCauseHypothesisCode::PerfBudgetRegression => {
+            row.kind == "perf_report" && row.status == RegressionEvidenceStatus::Available
+        }
+        RegressionCauseHypothesisCode::TrackerStateMismatch => {
+            matches!(row.kind.as_str(), "beads_history" | "bv_history")
+                && row.status == RegressionEvidenceStatus::Available
+        }
+        RegressionCauseHypothesisCode::FixtureGap => {
+            row.kind == "degraded_fixture" && row.status == RegressionEvidenceStatus::Available
+        }
+        RegressionCauseHypothesisCode::PackSelectionChange => {
+            matches!(row.kind.as_str(), "pack_replay" | "pack_diff")
+                && row.status == RegressionEvidenceStatus::Available
+        }
+        RegressionCauseHypothesisCode::OutputBudgetRegression => {
+            row.kind == "perf_report" && row.status == RegressionEvidenceStatus::Available
+        }
+        RegressionCauseHypothesisCode::UnknownInsufficientEvidence => false,
+    }
+}
+
+fn missing_required_source_degradations(rows: &[NormalizedRegressionEvidenceRow]) -> Vec<String> {
+    let kinds = rows
+        .iter()
+        .map(|row| row.kind.as_str())
+        .collect::<BTreeSet<_>>();
+    ["verification_evidence", "rch_selector_admission"]
+        .into_iter()
+        .filter(|kind| !kinds.contains(kind))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn owner_hints_for_row(row: &NormalizedRegressionEvidenceRow) -> Vec<RegressionOwnerHint> {
+    if let Some(bead_id) = first_bead_id(&row.id) {
+        return vec![RegressionOwnerHint {
+            kind: RegressionOwnerHintKind::Bead,
+            value: bead_id,
+            confidence: 0.72,
+        }];
+    }
+
+    let module = match row.kind.as_str() {
+        "verification_evidence" | "rch_selector_admission" => "rch",
+        "pack_replay" | "pack_diff" => "pack",
+        "perf_report" => "perf",
+        "beads_history" | "bv_history" => "tracker",
+        "degraded_fixture" => "failure-mode-catalog",
+        "git_metadata" => "git",
+        "swarm_replay" => "swarm-replay",
+        "e2e_event_log" => "e2e",
+        "support_bundle" => "support-bundle",
+        _ => "regression-causality",
+    };
+    vec![RegressionOwnerHint {
+        kind: RegressionOwnerHintKind::Module,
+        value: module.to_owned(),
+        confidence: 0.56,
+    }]
+}
+
+fn first_bead_id(text: &str) -> Option<String> {
+    text.split(|character: char| {
+        !(character.is_ascii_alphanumeric() || character == '-' || character == '.')
+    })
+    .find(|token| {
+        token
+            .strip_prefix("bd-")
+            .is_some_and(|suffix| suffix.chars().any(|character| character.is_ascii_digit()))
+    })
+    .map(str::to_owned)
+}
+
+fn default_owner_hint(code: RegressionCauseHypothesisCode) -> RegressionOwnerHint {
+    let value = match code {
+        RegressionCauseHypothesisCode::SourceNotMaterialized
+        | RegressionCauseHypothesisCode::KnownEnvironmentBlocker => "rch",
+        RegressionCauseHypothesisCode::SchemaContractDrift => "schema-contracts",
+        RegressionCauseHypothesisCode::StaleDerivedAsset => "derived-artifacts",
+        RegressionCauseHypothesisCode::OutputBudgetRegression => "output-budget",
+        RegressionCauseHypothesisCode::FixtureGap => "failure-mode-catalog",
+        RegressionCauseHypothesisCode::PackSelectionChange => "pack",
+        RegressionCauseHypothesisCode::PerfBudgetRegression => "perf",
+        RegressionCauseHypothesisCode::TrackerStateMismatch => "tracker",
+        RegressionCauseHypothesisCode::UnknownInsufficientEvidence => "unknown",
+    };
+    RegressionOwnerHint {
+        kind: if value == "unknown" {
+            RegressionOwnerHintKind::Unknown
+        } else {
+            RegressionOwnerHintKind::Module
+        },
+        value: value.to_owned(),
+        confidence: 0.5,
+    }
+}
+
+fn next_commands_for_hypothesis(
+    code: RegressionCauseHypothesisCode,
+) -> Vec<RegressionCausalityCommand> {
+    match code {
+        RegressionCauseHypothesisCode::SourceNotMaterialized => vec![
+            causality_command(
+                "ee verify rch runs --json",
+                "Inspect recorded RCH verifier runs before treating the failure as a source verdict.",
+                false,
+            ),
+            causality_command(
+                "RCH_REQUIRE_REMOTE=1 ./scripts/rch_verify.sh --summary --no-write -- cargo test --all-targets",
+                "Rerun remote-only verification and capture source-materialization evidence.",
+                true,
+            ),
+        ],
+        RegressionCauseHypothesisCode::KnownEnvironmentBlocker => vec![
+            causality_command(
+                "ee verify rch blockers --json",
+                "List known RCH blockers that can explain a failed proof without source changes.",
+                false,
+            ),
+            causality_command(
+                "rch status --workers --jobs",
+                "Inspect remote worker topology and slot pressure without launching Cargo.",
+                false,
+            ),
+        ],
+        RegressionCauseHypothesisCode::SchemaContractDrift => vec![causality_command(
+            "jq empty docs/schemas/ee.regression_causality.v1.json",
+            "Validate the causality schema before changing ranking code.",
+            false,
+        )],
+        RegressionCauseHypothesisCode::StaleDerivedAsset => vec![causality_command(
+            "git status --short --branch",
+            "Refresh source and derived-artifact posture before trusting stale evidence.",
+            false,
+        )],
+        RegressionCauseHypothesisCode::OutputBudgetRegression => vec![causality_command(
+            "ee perf prompt-budget --help",
+            "Inspect the prompt/output budget surface before changing renderers.",
+            false,
+        )],
+        RegressionCauseHypothesisCode::FixtureGap => vec![causality_command(
+            "ls tests/fixtures/failure_modes",
+            "Check whether the degraded-code fixture catalog contains the failing mode.",
+            false,
+        )],
+        RegressionCauseHypothesisCode::PackSelectionChange => vec![causality_command(
+            "ee pack replay <pack-id> --json",
+            "Replay the affected pack before changing retrieval or packing logic.",
+            false,
+        )],
+        RegressionCauseHypothesisCode::PerfBudgetRegression => vec![causality_command(
+            "ee perf explain-latency --report <artifact.json> --json",
+            "Explain the latency or budget report before changing hot paths.",
+            false,
+        )],
+        RegressionCauseHypothesisCode::TrackerStateMismatch => vec![
+            causality_command(
+                "br doctor --json",
+                "Check Beads tracker health before trusting owner or dependency evidence.",
+                false,
+            ),
+            causality_command(
+                "bv --robot-insights",
+                "Inspect graph health and dependency contradictions without opening the TUI.",
+                false,
+            ),
+        ],
+        RegressionCauseHypothesisCode::UnknownInsufficientEvidence => vec![causality_command(
+            "ee verify rch runs --json",
+            "Gather structured verifier evidence before guessing from raw logs.",
+            false,
+        )],
+    }
+}
+
+fn causality_command(
+    command: &str,
+    rationale: &str,
+    requires_rch: bool,
+) -> RegressionCausalityCommand {
+    RegressionCausalityCommand {
+        command: command.to_owned(),
+        rationale: rationale.to_owned(),
+        mutates_workspace: false,
+        requires_rch,
+    }
+}
+
+fn severity_for_hypothesis(
+    code: RegressionCauseHypothesisCode,
+    confidence: f64,
+) -> RegressionCausalitySeverity {
+    match code {
+        RegressionCauseHypothesisCode::SourceNotMaterialized
+        | RegressionCauseHypothesisCode::KnownEnvironmentBlocker => {
+            if confidence >= 0.8 {
+                RegressionCausalitySeverity::High
+            } else {
+                RegressionCausalitySeverity::Medium
+            }
+        }
+        RegressionCauseHypothesisCode::SchemaContractDrift
+        | RegressionCauseHypothesisCode::PerfBudgetRegression
+        | RegressionCauseHypothesisCode::TrackerStateMismatch => {
+            if confidence >= 0.75 {
+                RegressionCausalitySeverity::High
+            } else {
+                RegressionCausalitySeverity::Medium
+            }
+        }
+        RegressionCauseHypothesisCode::UnknownInsufficientEvidence => {
+            RegressionCausalitySeverity::Warning
+        }
+        _ => RegressionCausalitySeverity::Medium,
+    }
+}
+
+fn summary_for_hypothesis(code: RegressionCauseHypothesisCode) -> String {
+    match code {
+        RegressionCauseHypothesisCode::SourceNotMaterialized => {
+            "The failing gate cannot yet be used as a source verdict because source materialization was not proven.".to_owned()
+        }
+        RegressionCauseHypothesisCode::SchemaContractDrift => {
+            "A schema, contract, or malformed-artifact mismatch may explain the failure.".to_owned()
+        }
+        RegressionCauseHypothesisCode::StaleDerivedAsset => {
+            "One or more derived artifacts are stale and should be refreshed before blaming source code.".to_owned()
+        }
+        RegressionCauseHypothesisCode::KnownEnvironmentBlocker => {
+            "A known environment or RCH blocker can explain the failing gate independently of source changes.".to_owned()
+        }
+        RegressionCauseHypothesisCode::OutputBudgetRegression => {
+            "The evidence points at output or prompt-budget growth rather than semantic failure.".to_owned()
+        }
+        RegressionCauseHypothesisCode::FixtureGap => {
+            "The failure-mode fixture catalog appears incomplete for this regression shape.".to_owned()
+        }
+        RegressionCauseHypothesisCode::PackSelectionChange => {
+            "Pack replay or diff evidence indicates that context selection changed.".to_owned()
+        }
+        RegressionCauseHypothesisCode::PerfBudgetRegression => {
+            "Performance evidence indicates a latency or resource-budget regression.".to_owned()
+        }
+        RegressionCauseHypothesisCode::TrackerStateMismatch => {
+            "Tracker or BV evidence disagrees with the expected owner/dependency state.".to_owned()
+        }
+        RegressionCauseHypothesisCode::UnknownInsufficientEvidence => {
+            "The normalized evidence is insufficient for a stronger deterministic hypothesis.".to_owned()
+        }
     }
 }
 
@@ -1390,6 +2183,180 @@ mod tests {
             "../../tests/fixtures/golden/regression_causality/kind_status_matrix.json"
         )
         .trim_end();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn ranks_source_materialization_above_environment_and_perf_signals() {
+        let inputs = vec![
+            RegressionEvidenceInput::new(
+                "bd-ppbue.18:rch",
+                RegressionEvidenceKind::RchSelectorAdmission,
+                json!({
+                    "schema": "ee.rch.verify.v1",
+                    "status": "rch_environment_failure",
+                    "selector_admission_probe": {
+                        "status": "selection_failed",
+                        "local_fallback_refused": true
+                    },
+                    "source_materialization": "remote_checkout_unverified",
+                    "remote_source_materialized": false,
+                    "degradedCodes": ["rch_worker_topology_blocked"],
+                    "redactionStatus": "safe"
+                }),
+            ),
+            RegressionEvidenceInput::new(
+                "perf:latency",
+                RegressionEvidenceKind::PerfReport,
+                json!({
+                    "schema": "ee.perf.v1",
+                    "status": "budget_exceeded",
+                    "degradedCodes": ["perf_latency_budget_exceeded"],
+                    "redactionStatus": "safe"
+                }),
+            ),
+            RegressionEvidenceInput::new(
+                "git:tree",
+                RegressionEvidenceKind::GitMetadata,
+                json!({
+                    "status": "passed",
+                    "sourceMaterialization": "committed_tree",
+                    "remoteSourceMaterialized": true,
+                    "redactionStatus": "safe"
+                }),
+            ),
+        ];
+        let normalized = normalize_regression_evidence_inputs(&inputs);
+        let ranking = rank_regression_cause_hypotheses(&normalized.rows);
+        let top = ranking.hypotheses.first().expect("top hypothesis");
+
+        assert_eq!(
+            top.code,
+            RegressionCauseHypothesisCode::SourceNotMaterialized
+        );
+        assert_eq!(top.rank, 1);
+        assert!((top.confidence - 0.84).abs() < f64::EPSILON);
+        assert_eq!(top.severity, RegressionCausalitySeverity::High);
+        assert!(top.evidence_refs.contains(&"bd-ppbue.18:rch".to_owned()));
+        assert!(
+            top.counter_evidence
+                .iter()
+                .any(|entry| entry.source_id.as_deref() == Some("git:tree")
+                    && entry.effect == RegressionCounterEvidenceEffect::Weakens)
+        );
+        assert!(!top.authoritative);
+        assert!(top.next_commands.iter().any(|command| command.requires_rch));
+    }
+
+    #[test]
+    fn ranking_abstains_when_only_weak_evidence_is_available() {
+        let inputs = vec![RegressionEvidenceInput::new(
+            "git:clean",
+            RegressionEvidenceKind::GitMetadata,
+            json!({
+                "status": "passed",
+                "sourceMaterialization": "committed_tree",
+                "remoteSourceMaterialized": true,
+                "redactionStatus": "safe"
+            }),
+        )];
+        let normalized = normalize_regression_evidence_inputs(&inputs);
+        let ranking = rank_regression_cause_hypotheses(&normalized.rows);
+        let top = ranking.hypotheses.first().expect("top hypothesis");
+
+        assert_eq!(
+            top.code,
+            RegressionCauseHypothesisCode::UnknownInsufficientEvidence
+        );
+        assert_eq!(top.rank, 1);
+        assert!(
+            top.counter_evidence
+                .iter()
+                .any(|entry| entry.effect
+                    == RegressionCounterEvidenceEffect::MissingRequiredSource)
+        );
+        assert!(
+            ranking
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "regression_hypothesis_missing_required_source")
+        );
+    }
+
+    #[test]
+    fn golden_ranked_hypotheses_are_stable() {
+        let inputs = vec![
+            RegressionEvidenceInput::new(
+                "bd-ppbue.18:rch",
+                RegressionEvidenceKind::RchSelectorAdmission,
+                json!({
+                    "schema": "ee.rch.verify.v1",
+                    "status": "rch_environment_failure",
+                    "selector_admission_probe": {
+                        "status": "selection_failed",
+                        "local_fallback_refused": true
+                    },
+                    "source_materialization": "remote_checkout_unverified",
+                    "remote_source_materialized": false,
+                    "degradedCodes": ["rch_worker_topology_blocked"],
+                    "redactionStatus": "safe"
+                }),
+            ),
+            RegressionEvidenceInput::new(
+                "perf:latency",
+                RegressionEvidenceKind::PerfReport,
+                json!({
+                    "schema": "ee.perf.v1",
+                    "status": "budget_exceeded",
+                    "degradedCodes": ["perf_latency_budget_exceeded"],
+                    "redactionStatus": "safe"
+                }),
+            ),
+            RegressionEvidenceInput::new(
+                "pack:diff",
+                RegressionEvidenceKind::PackDiff,
+                json!({
+                    "schema": "ee.pack_diff.v1",
+                    "status": "passed",
+                    "degradedCodes": ["pack_selection_changed"],
+                    "redactionStatus": "safe"
+                }),
+            ),
+            RegressionEvidenceInput::new(
+                "bd-391ze.3:tracker",
+                RegressionEvidenceKind::BeadsHistory,
+                json!({
+                    "status": "available",
+                    "stale": true,
+                    "artifactHash": "blake3:tracker",
+                    "redactionStatus": "hash_only"
+                }),
+            ),
+            RegressionEvidenceInput::new(
+                "fixture:missing",
+                RegressionEvidenceKind::DegradedFixture,
+                None,
+            ),
+            RegressionEvidenceInput::new(
+                "git:tree",
+                RegressionEvidenceKind::GitMetadata,
+                json!({
+                    "status": "passed",
+                    "sourceMaterialization": "committed_tree",
+                    "remoteSourceMaterialized": true,
+                    "redactionStatus": "safe"
+                }),
+            ),
+        ];
+
+        let normalized = normalize_regression_evidence_inputs(&inputs);
+        let ranking = rank_regression_cause_hypotheses(&normalized.rows);
+        let actual = serde_json::to_string_pretty(&ranking)
+            .expect("serialize regression hypothesis ranking");
+        let expected =
+            include_str!("../../tests/fixtures/golden/regression_causality/ranked_hypotheses.json")
+                .trim_end();
 
         assert_eq!(actual, expected);
     }

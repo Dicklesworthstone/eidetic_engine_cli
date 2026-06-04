@@ -1,0 +1,258 @@
+{
+  "schema": "ee.regression_hypothesis_ranking.v1",
+  "hypotheses": [
+    {
+      "rank": 1,
+      "code": "source_not_materialized",
+      "confidence": 0.84,
+      "severity": "high",
+      "summary": "The failing gate cannot yet be used as a source verdict because source materialization was not proven.",
+      "evidenceRefs": [
+        "bd-ppbue.18:rch"
+      ],
+      "counterEvidence": [
+        {
+          "sourceId": "git:tree",
+          "summary": "Evidence `git:tree` was available and weakens `source_not_materialized`.",
+          "effect": "weakens"
+        }
+      ],
+      "ownerHints": [
+        {
+          "kind": "bead",
+          "value": "bd-ppbue.18",
+          "confidence": 0.72
+        }
+      ],
+      "nextCommands": [
+        {
+          "command": "RCH_REQUIRE_REMOTE=1 ./scripts/rch_verify.sh --summary --no-write -- cargo test --all-targets",
+          "rationale": "Rerun remote-only verification and capture source-materialization evidence.",
+          "mutatesWorkspace": false,
+          "requiresRch": true
+        },
+        {
+          "command": "ee verify rch runs --json",
+          "rationale": "Inspect recorded RCH verifier runs before treating the failure as a source verdict.",
+          "mutatesWorkspace": false,
+          "requiresRch": false
+        }
+      ],
+      "authoritative": false
+    },
+    {
+      "rank": 2,
+      "code": "known_environment_blocker",
+      "confidence": 0.64,
+      "severity": "medium",
+      "summary": "A known environment or RCH blocker can explain the failing gate independently of source changes.",
+      "evidenceRefs": [
+        "bd-ppbue.18:rch"
+      ],
+      "counterEvidence": [],
+      "ownerHints": [
+        {
+          "kind": "bead",
+          "value": "bd-ppbue.18",
+          "confidence": 0.72
+        }
+      ],
+      "nextCommands": [
+        {
+          "command": "ee verify rch blockers --json",
+          "rationale": "List known RCH blockers that can explain a failed proof without source changes.",
+          "mutatesWorkspace": false,
+          "requiresRch": false
+        },
+        {
+          "command": "rch status --workers --jobs",
+          "rationale": "Inspect remote worker topology and slot pressure without launching Cargo.",
+          "mutatesWorkspace": false,
+          "requiresRch": false
+        }
+      ],
+      "authoritative": false
+    },
+    {
+      "rank": 3,
+      "code": "perf_budget_regression",
+      "confidence": 0.62,
+      "severity": "medium",
+      "summary": "Performance evidence indicates a latency or resource-budget regression.",
+      "evidenceRefs": [
+        "perf:latency"
+      ],
+      "counterEvidence": [],
+      "ownerHints": [
+        {
+          "kind": "module",
+          "value": "perf",
+          "confidence": 0.56
+        }
+      ],
+      "nextCommands": [
+        {
+          "command": "ee perf explain-latency --report <artifact.json> --json",
+          "rationale": "Explain the latency or budget report before changing hot paths.",
+          "mutatesWorkspace": false,
+          "requiresRch": false
+        }
+      ],
+      "authoritative": false
+    },
+    {
+      "rank": 4,
+      "code": "tracker_state_mismatch",
+      "confidence": 0.6,
+      "severity": "medium",
+      "summary": "Tracker or BV evidence disagrees with the expected owner/dependency state.",
+      "evidenceRefs": [
+        "bd-391ze.3:tracker"
+      ],
+      "counterEvidence": [],
+      "ownerHints": [
+        {
+          "kind": "bead",
+          "value": "bd-391ze.3",
+          "confidence": 0.72
+        }
+      ],
+      "nextCommands": [
+        {
+          "command": "br doctor --json",
+          "rationale": "Check Beads tracker health before trusting owner or dependency evidence.",
+          "mutatesWorkspace": false,
+          "requiresRch": false
+        },
+        {
+          "command": "bv --robot-insights",
+          "rationale": "Inspect graph health and dependency contradictions without opening the TUI.",
+          "mutatesWorkspace": false,
+          "requiresRch": false
+        }
+      ],
+      "authoritative": false
+    },
+    {
+      "rank": 5,
+      "code": "stale_derived_asset",
+      "confidence": 0.58,
+      "severity": "medium",
+      "summary": "One or more derived artifacts are stale and should be refreshed before blaming source code.",
+      "evidenceRefs": [
+        "bd-391ze.3:tracker"
+      ],
+      "counterEvidence": [],
+      "ownerHints": [
+        {
+          "kind": "bead",
+          "value": "bd-391ze.3",
+          "confidence": 0.72
+        }
+      ],
+      "nextCommands": [
+        {
+          "command": "git status --short --branch",
+          "rationale": "Refresh source and derived-artifact posture before trusting stale evidence.",
+          "mutatesWorkspace": false,
+          "requiresRch": false
+        }
+      ],
+      "authoritative": false
+    },
+    {
+      "rank": 6,
+      "code": "pack_selection_change",
+      "confidence": 0.58,
+      "severity": "medium",
+      "summary": "Pack replay or diff evidence indicates that context selection changed.",
+      "evidenceRefs": [
+        "pack:diff"
+      ],
+      "counterEvidence": [],
+      "ownerHints": [
+        {
+          "kind": "module",
+          "value": "pack",
+          "confidence": 0.56
+        }
+      ],
+      "nextCommands": [
+        {
+          "command": "ee pack replay <pack-id> --json",
+          "rationale": "Replay the affected pack before changing retrieval or packing logic.",
+          "mutatesWorkspace": false,
+          "requiresRch": false
+        }
+      ],
+      "authoritative": false
+    },
+    {
+      "rank": 7,
+      "code": "fixture_gap",
+      "confidence": 0.56,
+      "severity": "medium",
+      "summary": "The failure-mode fixture catalog appears incomplete for this regression shape.",
+      "evidenceRefs": [
+        "fixture:missing"
+      ],
+      "counterEvidence": [],
+      "ownerHints": [
+        {
+          "kind": "module",
+          "value": "failure-mode-catalog",
+          "confidence": 0.56
+        }
+      ],
+      "nextCommands": [
+        {
+          "command": "ls tests/fixtures/failure_modes",
+          "rationale": "Check whether the degraded-code fixture catalog contains the failing mode.",
+          "mutatesWorkspace": false,
+          "requiresRch": false
+        }
+      ],
+      "authoritative": false
+    },
+    {
+      "rank": 8,
+      "code": "unknown_insufficient_evidence",
+      "confidence": 0.28,
+      "severity": "warning",
+      "summary": "The normalized evidence is insufficient for a stronger deterministic hypothesis.",
+      "evidenceRefs": [],
+      "counterEvidence": [
+        {
+          "sourceId": null,
+          "summary": "No `verification_evidence` evidence source was present in the normalized rows.",
+          "effect": "missing_required_source"
+        }
+      ],
+      "ownerHints": [
+        {
+          "kind": "unknown",
+          "value": "unknown",
+          "confidence": 0.5
+        }
+      ],
+      "nextCommands": [
+        {
+          "command": "ee verify rch runs --json",
+          "rationale": "Gather structured verifier evidence before guessing from raw logs.",
+          "mutatesWorkspace": false,
+          "requiresRch": false
+        }
+      ],
+      "authoritative": false
+    }
+  ],
+  "degraded": [
+    {
+      "code": "regression_hypothesis_missing_required_source",
+      "severity": "warning",
+      "message": "No `verification_evidence` evidence source was available for hypothesis ranking.",
+      "evidenceSourceId": null,
+      "repair": "Provide the missing structured artifact before treating low-confidence hypotheses as actionable."
+    }
+  ]
+}
