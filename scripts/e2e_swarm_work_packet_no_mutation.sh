@@ -46,13 +46,16 @@ action_summary="$artifact_root/action_summary.json"
 consumer_decision="$artifact_root/consumer_decision.json"
 consumer_stderr="$artifact_root/consumer_decision.stderr"
 consumer_summary="$artifact_root/consumer_summary.json"
+fixture_matrix_dir="${EE_PACKET_NO_MUTATION_FIXTURE_DIR:-$REPO_ROOT/tests/fixtures/swarm_work_packet}"
+fixture_matrix_root="$artifact_root/fixture_matrix"
+fixture_matrix_summary="$artifact_root/fixture_matrix_summary.json"
 git_index_before="$artifact_root/git_index_before.txt"
 git_index_after="$artifact_root/git_index_after.txt"
 forbidden_log_dir="$artifact_root/forbidden_calls"
 cargo_log="$forbidden_log_dir/cargo.log"
 rch_log="$forbidden_log_dir/rch.log"
 
-mkdir -p "$shim_bin" "$sandbox/.beads" "$mail_root" "$forbidden_log_dir"
+mkdir -p "$shim_bin" "$sandbox/.beads" "$mail_root" "$forbidden_log_dir" "$fixture_matrix_root"
 
 # shellcheck source=scripts/lib/e2e_logger.sh
 source "$REPO_ROOT/scripts/lib/e2e_logger.sh"
@@ -551,6 +554,159 @@ if failures:
 PY
 }
 
+run_consumer_fixture_matrix() {
+    python3 - "$fixture_matrix_dir" "$fixture_matrix_root" "$fixture_matrix_summary" \
+        "$REPO_ROOT/scripts/agent_consume_work_packet_gate.py" <<'PY'
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+fixture_dir = pathlib.Path(sys.argv[1])
+matrix_root = pathlib.Path(sys.argv[2])
+summary_path = pathlib.Path(sys.argv[3])
+consumer = pathlib.Path(sys.argv[4])
+
+failures = []
+assertions = []
+
+
+def check(name, passed, detail=""):
+    assertions.append(name)
+    if not passed:
+        failures.append(f"{name}{':' + detail if detail else ''}")
+
+
+check("fixture_matrix_dir_exists", fixture_dir.is_dir(), str(fixture_dir))
+fixtures = sorted(fixture_dir.glob("*.json")) if fixture_dir.is_dir() else []
+check("fixture_matrix_non_empty", bool(fixtures))
+
+env = os.environ.copy()
+env["PYTHONDONTWRITEBYTECODE"] = "1"
+rows = []
+
+for fixture in fixtures:
+    decision_path = matrix_root / f"{fixture.stem}.decision.json"
+    stderr_path = matrix_root / f"{fixture.stem}.stderr"
+    proc = subprocess.run(
+        [sys.executable, "-B", str(consumer)],
+        input=fixture.read_bytes(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+    decision_path.write_bytes(proc.stdout)
+    stderr_path.write_bytes(proc.stderr)
+
+    try:
+        decision = json.loads(proc.stdout.decode("utf-8"))
+        check(f"{fixture.name}:decision_json_parseable", True)
+    except json.JSONDecodeError as error:
+        decision = {}
+        check(
+            f"{fixture.name}:decision_json_parseable",
+            False,
+            f"line_{error.lineno}_column_{error.colno}",
+        )
+
+    expected_safe = fixture.name == "healthy_small.json"
+    expected_exit = 0 if expected_safe else 3
+    safe_to_claim = decision.get("safeToClaim")
+    argv_actions = decision.get("argvActions")
+    why_not_safe = decision.get("whyNotSafe")
+    decision_name = str(decision.get("decision") or "")
+
+    check(
+        f"{fixture.name}:consumer_schema_current",
+        decision.get("schema") == "ee.agent.work_packet_gate_decision.v1",
+    )
+    check(f"{fixture.name}:exit_code_expected", proc.returncode == expected_exit, str(proc.returncode))
+    check(f"{fixture.name}:safe_to_claim_expected", safe_to_claim is expected_safe, str(safe_to_claim))
+    check(f"{fixture.name}:argv_actions_array", isinstance(argv_actions, list))
+    check(f"{fixture.name}:why_not_safe_array", isinstance(why_not_safe, list))
+
+    if expected_safe:
+        check(f"{fixture.name}:safe_has_no_unsafe_reasons", why_not_safe == [])
+    else:
+        check(
+            f"{fixture.name}:unsafe_has_reasons",
+            isinstance(why_not_safe, list) and len(why_not_safe) > 0,
+        )
+
+    runnable_mutating = []
+    runnable_claim = []
+    if isinstance(argv_actions, list):
+        for index, action in enumerate(argv_actions):
+            if not isinstance(action, dict):
+                check(f"{fixture.name}:argv_action_object", False, str(index))
+                continue
+            command_id = str(action.get("commandId") or index)
+            if action.get("runnable") is True and action.get("mutatesState") is True:
+                runnable_mutating.append(command_id)
+            if (
+                not expected_safe
+                and action.get("runnable") is True
+                and action.get("actionKind") == "claim"
+            ):
+                runnable_claim.append(command_id)
+
+    if not expected_safe:
+        check(
+            f"{fixture.name}:unsafe_has_no_runnable_mutation",
+            not runnable_mutating,
+            ",".join(runnable_mutating),
+        )
+        check(
+            f"{fixture.name}:unsafe_has_no_runnable_claim",
+            not runnable_claim,
+            ",".join(runnable_claim),
+        )
+
+    rows.append(
+        {
+            "fixture": fixture.name,
+            "exit_code": proc.returncode,
+            "safe_to_claim": safe_to_claim,
+            "decision": decision_name,
+            "why_not_safe_count": len(why_not_safe)
+            if isinstance(why_not_safe, list)
+            else 0,
+            "argv_action_count": len(argv_actions)
+            if isinstance(argv_actions, list)
+            else 0,
+        }
+    )
+
+safe_count = sum(1 for row in rows if row["safe_to_claim"] is True)
+unsafe_count = sum(1 for row in rows if row["safe_to_claim"] is False)
+check("fixture_matrix_single_safe_fixture", safe_count == 1, str(safe_count))
+check("fixture_matrix_unsafe_remainder", unsafe_count == max(len(rows) - 1, 0), str(unsafe_count))
+
+summary = {
+    "fixture_count": len(rows),
+    "safe_fixture_count": safe_count,
+    "unsafe_fixture_count": unsafe_count,
+    "fixture_names": ",".join(row["fixture"] for row in rows),
+    "decision_summary": ",".join(
+        f"{row['fixture']}:{row['decision']}:{str(row['safe_to_claim']).lower()}:{row['exit_code']}"
+        for row in rows
+    ),
+    "assertion_names": ",".join(assertions),
+    "failures": failures,
+}
+with open(summary_path, "w", encoding="utf-8") as handle:
+    json.dump(summary, handle, sort_keys=True)
+    handle.write("\n")
+
+if failures:
+    for failure in failures:
+        print(f"ASSERTION FAILED: {failure}", file=sys.stderr)
+    sys.exit(25)
+PY
+}
+
 # `br` shim — records the call, allows read-only subcommands, refuses
 # anything that would mutate the tracker. Refuse means non-zero exit so
 # the caller fails loudly.
@@ -708,6 +864,22 @@ else
         "stdout_hash" "$(_e2e_hash_file "$consumer_decision")" \
         "stderr_hash" "$(_e2e_hash_file "$consumer_stderr")" \
         "assertion_names" "consumer_decision_parse_failed"
+fi
+
+if run_consumer_fixture_matrix; then
+    emit_phase "fixture_matrix_consumer" \
+        "summary_hash" "$(_e2e_hash_file "$fixture_matrix_summary")" \
+        "fixture_count" "$(json_field "$fixture_matrix_summary" "/fixture_count")" \
+        "safe_fixture_count" "$(json_field "$fixture_matrix_summary" "/safe_fixture_count")" \
+        "unsafe_fixture_count" "$(json_field "$fixture_matrix_summary" "/unsafe_fixture_count")" \
+        "fixture_names" "$(json_field "$fixture_matrix_summary" "/fixture_names")" \
+        "decision_summary" "$(json_field "$fixture_matrix_summary" "/decision_summary")" \
+        "assertion_names" "$(json_field "$fixture_matrix_summary" "/assertion_names")"
+else
+    fail=1
+    emit_phase "fixture_matrix_consumer" \
+        "summary_hash" "$(_e2e_hash_file "$fixture_matrix_summary")" \
+        "assertion_names" "fixture_matrix_consumer_failed"
 fi
 
 snapshot_dir "$sandbox/.beads" "$beads_after"
