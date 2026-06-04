@@ -52,11 +52,13 @@
     "mutatingActionsRequireHuman": {"type": "boolean"},
     "whyNotSafe": {
       "type": "array",
+      "maxItems": 16,
       "items": {"type": "string", "maxLength": 160}
     },
     "sourceSummary": {"$ref": "#/$defs/sourceSummary"},
     "degradedSummary": {
       "type": "array",
+      "maxItems": 16,
       "items": {"$ref": "#/$defs/degradedSummaryEntry"}
     },
     "legacyCommandStringsRefused": {

@@ -2081,6 +2081,35 @@ class ErrorHandling(unittest.TestCase):
         self.assertIn("rch_verify_build_admission_denied", codes)
         self.assertIn("rch_worker_topology_blocked", codes)
 
+    def test_error_envelope_degraded_summary_is_bounded(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "usage",
+                    "degraded": [
+                        {
+                            "code": f"code_{index}",
+                            "source": "ee",
+                            "severity": "low",
+                        }
+                        for index in range(32)
+                    ],
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(
+            len(decision["degradedSummary"]),
+            consumer.DECISION_DIAGNOSTIC_LIMIT,
+        )
+        self.assertEqual(decision["degradedSummary"][0]["code"], "code_0")
+        self.assertEqual(
+            decision["degradedSummary"][-1]["code"],
+            f"code_{consumer.DECISION_DIAGNOSTIC_LIMIT - 1}",
+        )
+
     def test_cli_error_degraded_summary_redacts_secret_shaped_fields(self):
         token = "ghp_" + "00112233445566778899aabbccddeeff0011"
         fine_grained = "github_" + "pat_" + "00112233445566778899aabbccddeeff"
@@ -2724,6 +2753,14 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
             160,
             schema["properties"]["whyNotSafe"]["items"]["maxLength"],
         )
+        self.assertEqual(
+            consumer.DECISION_DIAGNOSTIC_LIMIT,
+            schema["properties"]["whyNotSafe"]["maxItems"],
+        )
+        self.assertEqual(
+            consumer.DECISION_DIAGNOSTIC_LIMIT,
+            schema["properties"]["degradedSummary"]["maxItems"],
+        )
 
         self.assertEqual(96, action["commandId"]["maxLength"])
         self.assertEqual(120, action["argv"]["items"]["maxLength"])
@@ -2790,6 +2827,10 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
         self.assertIsInstance(decision["argvActions"], list)
         self.assertIsInstance(decision["mutatingActionsRequireHuman"], bool)
         self.assertIsInstance(decision["whyNotSafe"], list)
+        self.assertLessEqual(
+            len(decision["whyNotSafe"]),
+            schema["properties"]["whyNotSafe"]["maxItems"],
+        )
         self.assertTrue(
             all(isinstance(reason, str) for reason in decision["whyNotSafe"])
         )
@@ -2800,6 +2841,10 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
                 f"whyNotSafe[{index}]",
             )
         self.assertIsInstance(decision["degradedSummary"], list)
+        self.assertLessEqual(
+            len(decision["degradedSummary"]),
+            schema["properties"]["degradedSummary"]["maxItems"],
+        )
         self.assertIsInstance(decision["legacyCommandStringsRefused"], int)
         self.assertNotIsInstance(decision["legacyCommandStringsRefused"], bool)
         self.assertGreaterEqual(decision["legacyCommandStringsRefused"], 0)

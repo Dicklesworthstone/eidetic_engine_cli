@@ -17,6 +17,7 @@ OUTPUT_SCHEMA = "ee.agent.work_packet_gate_decision.v1"
 CLAIM_GATE_SCHEMA = "ee.swarm.work_packet.claim_gate.v1"
 WORK_PACKET_SCHEMA = "ee.swarm.work_packet.v1"
 SAFE_COPY = "safe_structured_argv"
+DECISION_DIAGNOSTIC_LIMIT = 16
 COPY_SAFETY_VALUES = {
     "safe_structured_argv",
     "display_only",
@@ -128,7 +129,7 @@ def redact_text(value, limit=160):
     return text
 
 
-def compact_list(values, limit=16):
+def compact_list(values, limit=DECISION_DIAGNOSTIC_LIMIT):
     if not isinstance(values, list):
         return []
     result = []
@@ -613,6 +614,8 @@ def degraded_summary(payload, envelope_degraded=None):
     entries = []
 
     def add(code, source=None, severity=None):
+        if len(entries) >= DECISION_DIAGNOSTIC_LIMIT:
+            return
         code = redact_text(code, 96)
         if not code:
             return
