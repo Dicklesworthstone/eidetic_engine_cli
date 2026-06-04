@@ -8961,6 +8961,20 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: agent_workload_trace_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::lab::SWARM_WORKLOAD_SCHEMA_V1,
+            version: "1",
+            description: "Redaction-safe generated swarm workload consumed by the lab replay runner.",
+            category: "lab",
+            definition: swarm_workload_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::lab::SWARM_REPLAY_RESULT_SCHEMA_V1,
+            version: "1",
+            description: "Admission and execution ledger emitted by the swarm replay runner.",
+            category: "lab",
+            definition: swarm_replay_result_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.swarm_slo.scorecard.v1",
             version: "1",
             description: "Replayable, redaction-safe SLO scorecard for multi-agent ee workflows.",
@@ -10081,6 +10095,14 @@ fn agent_workload_replay_schema_definition() -> String {
 
 fn agent_workload_trace_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.agent_workload_trace.v1.json").to_string()
+}
+
+fn swarm_workload_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.swarm_workload.v1.json").to_string()
+}
+
+fn swarm_replay_result_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.swarm_replay_result.v1.json").to_string()
 }
 
 fn swarm_slo_scorecard_schema_definition() -> String {

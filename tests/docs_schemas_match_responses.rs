@@ -30,6 +30,7 @@ use ee::core::curate::{
     ReflectionRequestLedgerDiagnosticsReport, ReflectionRequestLedgerExportHygieneReport,
     ReflectionRequestLedgerMigrationSafety, ReflectionRequestLedgerRetentionReport,
 };
+use ee::core::lab::{SWARM_REPLAY_RESULT_SCHEMA_V1, SWARM_WORKLOAD_SCHEMA_V1};
 use ee::core::memory::{
     MemoryDetails, MemoryListFilter, MemoryListReport, MemoryShowReport, MemorySummary,
 };
@@ -135,6 +136,11 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     (
         "ee.swarm_slo.scorecard.v1",
         "ee.swarm_slo.scorecard.v1.json",
+    ),
+    (SWARM_WORKLOAD_SCHEMA_V1, "ee.swarm_workload.v1.json"),
+    (
+        SWARM_REPLAY_RESULT_SCHEMA_V1,
+        "ee.swarm_replay_result.v1.json",
     ),
     (
         SWARM_SLO_RESOURCE_USAGE_EVENT_SCHEMA_V1,
