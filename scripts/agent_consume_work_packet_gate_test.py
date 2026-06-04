@@ -386,16 +386,39 @@ class WorkPacketConsumer(unittest.TestCase):
 
     def test_secret_shaped_strings_are_redacted_and_not_runnable(self):
         gate = safe_gate()
+        github_classic = "ghp_" + "0123456789abcdef0123456789abcdef0123"
+        github_fine_grained = (
+            "github_" + "pat_" + "0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+        )
+        openai_key = "sk-" + "proj-" + "abcdefghijklmnopqrstuvwxyz0123456789"
+        aws_access_key = "AKIA" + "0123456789ABCDEF"
+        slack_token = "xox" + "b-" + "123456789012-abcdefghijklmnopqrstuvwxyz"
+        api_key_env = "API_" + "KEY=abcdefghijklmnopqrstuvwxyz0123456789"
         gate["nextCommandActions"] = [
             safe_action(
                 "leaky",
-                ["ee", "show", "ghp_abcdef123456789", "stdout: raw command output"],
+                [
+                    "ee",
+                    "show",
+                    github_classic,
+                    github_fine_grained,
+                    openai_key,
+                    aws_access_key,
+                    slack_token,
+                    api_key_env,
+                    "stdout: raw command output",
+                ],
             )
         ]
 
         decision = consumer.consume(envelope(gate))
         serialized = json.dumps(decision)
         self.assertNotIn("ghp_", serialized)
+        self.assertNotIn("github_" + "pat_", serialized)
+        self.assertNotIn("sk-" + "proj-", serialized)
+        self.assertNotIn(aws_access_key, serialized)
+        self.assertNotIn("xox" + "b-", serialized)
+        self.assertNotIn("API_" + "KEY=", serialized)
         self.assertNotIn("stdout:", serialized)
         action = decision["argvActions"][0]
         self.assertFalse(action["runnable"])

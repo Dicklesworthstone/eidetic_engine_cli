@@ -18,10 +18,14 @@ WORK_PACKET_SCHEMA = "ee.swarm.work_packet.v1"
 SAFE_COPY = "safe_structured_argv"
 
 SECRET_PATTERNS = [
-    re.compile(r"BEGIN (?:OPENSSH )?PRIVATE KEY"),
-    re.compile(r"ghp_[A-Za-z0-9_]+"),
+    re.compile(r"BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY"),
+    re.compile(r"\bgh[opurs]_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b"),
     re.compile(r"Bearer [A-Za-z0-9._-]+"),
-    re.compile(r"DATABASE_URL=[^\s]+"),
+    re.compile(r"\b(?:DATABASE_URL|TOKEN|API_KEY|SECRET|PASSWORD)=[^\s]+"),
     re.compile(r"\b(?:From|Subject|Message-ID):\s*[^\n]+"),
     re.compile(r"\b(?:raw_inbox|stdout|stderr):[^\n]*"),
     re.compile(r"/(?:Users|home)/[^\s]+"),
