@@ -232,7 +232,7 @@ use crate::core::swarm_brief::{
     default_swarm_brief_sources,
 };
 use crate::core::swarm_next_action::{
-    SwarmNextActionSnapshot, SwarmWorkPacket,
+    SwarmNextActionSnapshot, SwarmWorkPacket, SwarmWorkPacketClaimGate,
     collect_swarm_next_action_snapshot_with_verifier_evidence,
     collect_swarm_work_packet_with_verifier_evidence, verifier_evidence_from_json,
 };
@@ -9710,6 +9710,14 @@ pub struct SwarmWorkPacketArgs {
     /// Recent ee.rch.verify.v1 proof JSON to include for compile-health preflight.
     #[arg(long, value_name = "PATH")]
     pub verifier_evidence: Option<PathBuf>,
+
+    /// Emit a compact read-only claim gate instead of the full work packet.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub claim_gate: bool,
+
+    /// Ask the claim gate about a specific Bead ID instead of the recommended candidate.
+    #[arg(long, value_name = "BEAD_ID")]
+    pub candidate: Option<String>,
 
     /// Comma-separated agent connector slugs to inspect when agent-inventory is enabled.
     #[arg(long, value_name = "SLUGS")]
@@ -46463,6 +46471,32 @@ where
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
 
+    if args.claim_gate || args.candidate.is_some() {
+        let gate = packet.claim_gate(args.candidate.as_deref());
+        return match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &render_swarm_work_packet_claim_gate_markdown(&gate))
+            }
+            output::Renderer::Toon => {
+                match render_swarm_work_packet_claim_gate_json(&gate, &packet) {
+                    Ok(json) => {
+                        write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+                    }
+                    Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                }
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                match render_swarm_work_packet_claim_gate_json(&gate, &packet) {
+                    Ok(json) => write_stdout(stdout, &(json + "\n")),
+                    Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                }
+            }
+        };
+    }
+
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &render_swarm_work_packet_markdown(&packet))
@@ -46808,6 +46842,53 @@ fn render_swarm_work_packet_json(
         message: format!("Failed to serialize swarm work-packet response: {error}."),
         repair: Some("Fix the swarm work-packet response serializer.".to_string()),
     })
+}
+
+fn render_swarm_work_packet_claim_gate_json(
+    gate: &SwarmWorkPacketClaimGate,
+    packet: &SwarmWorkPacket,
+) -> Result<String, DomainError> {
+    let data = serde_json::to_value(gate).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize swarm work-packet claim gate: {error}."),
+        repair: Some("Fix the swarm work-packet claim-gate serializer.".to_string()),
+    })?;
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": &packet.degraded,
+    });
+    serde_json::to_string_pretty(&response).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize swarm work-packet claim-gate response: {error}."),
+        repair: Some("Fix the swarm work-packet claim-gate response serializer.".to_string()),
+    })
+}
+
+fn render_swarm_work_packet_claim_gate_markdown(gate: &SwarmWorkPacketClaimGate) -> String {
+    let candidate = gate
+        .selected_candidate
+        .as_ref()
+        .map(|candidate| candidate.id.as_str())
+        .unwrap_or("none");
+    let mut output = String::new();
+    output.push_str("# Swarm Work Packet Claim Gate\n\n");
+    output.push_str(&format!("Workspace: `{}`\n", gate.workspace));
+    output.push_str(&format!("Packet: `{}`\n", gate.packet_id));
+    output.push_str(&format!("Gate: `{}`\n\n", gate.gate_id));
+    output.push_str(&format!(
+        "- Verdict: `{}`\n- Candidate: `{}`\n- Safe to claim: `{}`\n- Inspection commands: {}\n\n",
+        gate.verdict,
+        candidate,
+        gate.safe_to_claim,
+        gate.next_command_actions.len()
+    ));
+    if let Some(action) = &gate.claim_command_action {
+        output.push_str(&format!(
+            "Claim action is available after inspection: `{}`\n",
+            action.display_command
+        ));
+    }
+    output
 }
 
 fn render_swarm_work_packet_markdown(packet: &SwarmWorkPacket) -> String {
@@ -49683,6 +49764,9 @@ mod tests {
             "agent-mail-snapshot.json",
             "--verifier-evidence",
             "rch-proof.json",
+            "--claim-gate",
+            "--candidate",
+            "bd-safe",
             "--agent-inventory-only",
             "codex,claude",
             "--max-recent-commits",
@@ -49699,6 +49783,8 @@ mod tests {
                 include_rch,
                 agent_mail_snapshot,
                 verifier_evidence,
+                claim_gate,
+                candidate,
                 agent_inventory_only,
                 max_recent_commits,
                 command_timeout_ms,
@@ -49715,6 +49801,12 @@ mod tests {
                     &verifier_evidence,
                     &Some(PathBuf::from("rch-proof.json")),
                     "verifier evidence path",
+                )?;
+                ensure_equal(&claim_gate, &true, "claim gate")?;
+                ensure_equal(
+                    &candidate,
+                    &Some("bd-safe".to_string()),
+                    "claim gate candidate",
                 )?;
                 ensure_equal(
                     &agent_inventory_only,

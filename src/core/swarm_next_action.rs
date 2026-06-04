@@ -31,6 +31,7 @@ pub const SWARM_NEXT_ACTION_SCHEMA_V1: &str = "ee.swarm_next_action.v1";
 pub const SWARM_NEXT_ACTION_REDACTION_STATUS: &str =
     "counts_ids_statuses_paths_redacted_no_mail_body_no_file_content";
 pub const SWARM_WORK_PACKET_SCHEMA_V1: &str = "ee.swarm.work_packet.v1";
+pub const SWARM_WORK_PACKET_CLAIM_GATE_SCHEMA_V1: &str = "ee.swarm.work_packet.claim_gate.v1";
 pub const SWARM_WORK_PACKET_REDACTION_STATUS: &str =
     "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content";
 const EXTERNAL_AGENT_SPACE_ROOT: &str = "/Volumes/USBNVME16TB/temp_agent_space";
@@ -686,6 +687,54 @@ pub struct SwarmWorkPacketCandidate {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketClaimGate {
+    pub schema: &'static str,
+    pub gate_id: String,
+    pub packet_id: String,
+    pub workspace: String,
+    pub redaction_status: &'static str,
+    pub requested_candidate_id: Option<String>,
+    pub verdict: &'static str,
+    pub safe_to_claim: bool,
+    pub selected_candidate: Option<SwarmWorkPacketClaimGateCandidate>,
+    pub recommended_action: &'static str,
+    pub recommended_safe_to_claim: Option<bool>,
+    pub source_authority: SwarmWorkPacketClaimGateSourceAuthority,
+    pub unsafe_reasons: Vec<String>,
+    pub stale_reasons: Vec<String>,
+    pub source_refs: Vec<String>,
+    pub degraded_codes: Vec<String>,
+    pub next_command_actions: Vec<SwarmWorkPacketCommandAction>,
+    pub claim_command_action: Option<SwarmWorkPacketCommandAction>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketClaimGateCandidate {
+    pub id: String,
+    pub title: String,
+    pub source: &'static str,
+    pub status: String,
+    pub priority: Option<i64>,
+    pub assignee: Option<String>,
+    pub decision: &'static str,
+    pub collision_risk: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketClaimGateSourceAuthority {
+    pub tracker_authoritative: bool,
+    pub tracker_health: &'static str,
+    pub agent_mail_status: &'static str,
+    pub reservation_authoritative: Option<bool>,
+    pub inbox_authoritative: Option<bool>,
+    pub rch_safe_to_launch_cargo_verification: Option<bool>,
+    pub source_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SwarmWorkPacketCoordination {
     pub active_claim_count: usize,
     pub dirty_path_count: usize,
@@ -1147,6 +1196,112 @@ impl SwarmWorkPacket {
         packet.packet_id = work_packet_id(&packet);
         packet
     }
+
+    #[must_use]
+    pub fn claim_gate(&self, requested_candidate_id: Option<&str>) -> SwarmWorkPacketClaimGate {
+        let candidate = work_packet_claim_gate_candidate(self, requested_candidate_id);
+        let recommended_safe_to_claim = candidate
+            .map(|candidate| work_packet_claim_gate_candidate_safe_to_claim(self, candidate));
+        let verdict = work_packet_claim_gate_verdict(self, requested_candidate_id, candidate);
+        let safe_to_claim = verdict == "safe_to_claim" && recommended_safe_to_claim == Some(true);
+        let actions = work_packet_suggested_command_actions(
+            candidate
+                .map(|candidate| candidate.id.as_str())
+                .or(requested_candidate_id),
+            candidate.map(|candidate| candidate.decision),
+            &self.coordination.agent_mail,
+            &self.rch_proof_posture,
+            &self.tracker_integrity,
+        );
+        let mut next_command_actions = actions
+            .iter()
+            .filter(|action| !action.mutates_state)
+            .cloned()
+            .collect::<Vec<_>>();
+        sort_work_packet_command_actions(&mut next_command_actions);
+        let claim_command_action = safe_to_claim
+            .then(|| {
+                actions
+                    .iter()
+                    .find(|action| action.command_id == "bead_claim_candidate")
+                    .cloned()
+            })
+            .flatten();
+        let mut unsafe_reasons =
+            work_packet_claim_gate_unsafe_reasons(self, requested_candidate_id, candidate, verdict);
+        let mut stale_reasons = candidate
+            .map(|candidate| candidate.stale_reasons.clone())
+            .unwrap_or_default();
+        let mut source_refs = candidate
+            .map(|candidate| candidate.source_refs.clone())
+            .unwrap_or_default();
+        let mut degraded_codes = self
+            .degraded
+            .iter()
+            .map(|degradation| degradation.code.clone())
+            .collect::<Vec<_>>();
+        unsafe_reasons.sort();
+        unsafe_reasons.dedup();
+        stale_reasons.sort();
+        stale_reasons.dedup();
+        source_refs.sort();
+        source_refs.dedup();
+        degraded_codes.sort();
+        degraded_codes.dedup();
+        let selected_candidate = candidate.map(SwarmWorkPacketClaimGateCandidate::from);
+        let gate_id = work_packet_claim_gate_id(
+            &self.packet_id,
+            requested_candidate_id,
+            verdict,
+            safe_to_claim,
+        );
+
+        SwarmWorkPacketClaimGate {
+            schema: SWARM_WORK_PACKET_CLAIM_GATE_SCHEMA_V1,
+            gate_id,
+            packet_id: self.packet_id.clone(),
+            workspace: self.workspace.clone(),
+            redaction_status: SWARM_WORK_PACKET_REDACTION_STATUS,
+            requested_candidate_id: requested_candidate_id.map(str::to_owned),
+            verdict,
+            safe_to_claim,
+            selected_candidate,
+            recommended_action: self.recommended_action.action,
+            recommended_safe_to_claim,
+            source_authority: SwarmWorkPacketClaimGateSourceAuthority {
+                tracker_authoritative: self.tracker_integrity.br_reads_authoritative,
+                tracker_health: beads_integrity_health_label(self.tracker_integrity.health),
+                agent_mail_status: self.coordination.agent_mail.status,
+                reservation_authoritative: self.coordination.agent_mail.reservation_authoritative,
+                inbox_authoritative: self.coordination.agent_mail.inbox_authoritative,
+                rch_safe_to_launch_cargo_verification: self
+                    .rch_proof_posture
+                    .safe_to_launch_cargo_verification,
+                source_count: self.source_provenance.len(),
+            },
+            unsafe_reasons,
+            stale_reasons,
+            source_refs,
+            degraded_codes,
+            next_command_actions,
+            claim_command_action,
+        }
+    }
+}
+
+impl From<&SwarmWorkPacketCandidate> for SwarmWorkPacketClaimGateCandidate {
+    fn from(candidate: &SwarmWorkPacketCandidate) -> Self {
+        Self {
+            id: candidate.id.clone(),
+            title: candidate.title.clone(),
+            source: candidate.source,
+            status: candidate.status.clone(),
+            priority: candidate.priority,
+            assignee: candidate.assignee.clone(),
+            decision: candidate.decision,
+            collision_risk: candidate.collision_risk,
+        }
+    }
 }
 
 impl SwarmWorkPacketMutationPolicy {
@@ -1181,6 +1336,124 @@ fn work_packet_id(packet: &SwarmWorkPacket) -> String {
     let bytes = serde_json::to_vec(&stable).unwrap_or_default();
     let digest = blake3::hash(&bytes).to_hex().to_string();
     format!("swarm_work_packet_{}", &digest[..24])
+}
+
+fn work_packet_claim_gate_id(
+    packet_id: &str,
+    requested_candidate_id: Option<&str>,
+    verdict: &str,
+    safe_to_claim: bool,
+) -> String {
+    let candidate = requested_candidate_id.unwrap_or("recommended");
+    let material = format!("{packet_id}:{candidate}:{verdict}:{safe_to_claim}");
+    let digest = blake3::hash(material.as_bytes()).to_hex().to_string();
+    format!("swarm_work_packet_claim_gate_{}", &digest[..24])
+}
+
+fn work_packet_claim_gate_candidate<'a>(
+    packet: &'a SwarmWorkPacket,
+    requested_candidate_id: Option<&str>,
+) -> Option<&'a SwarmWorkPacketCandidate> {
+    if let Some(candidate_id) = requested_candidate_id {
+        return packet
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == candidate_id);
+    }
+    packet
+        .recommended_action
+        .candidate_id
+        .as_deref()
+        .and_then(|candidate_id| {
+            packet
+                .candidates
+                .iter()
+                .find(|candidate| candidate.id == candidate_id)
+        })
+        .or_else(|| packet.candidates.first())
+}
+
+fn work_packet_claim_gate_candidate_safe_to_claim(
+    packet: &SwarmWorkPacket,
+    candidate: &SwarmWorkPacketCandidate,
+) -> bool {
+    candidate.decision == "safe_to_claim"
+        && packet.tracker_integrity.br_reads_authoritative
+        && !agent_mail_blocks_claim(&packet.coordination.agent_mail)
+        && packet.rch_proof_posture.safe_to_launch_cargo_verification != Some(false)
+}
+
+fn work_packet_claim_gate_verdict(
+    packet: &SwarmWorkPacket,
+    requested_candidate_id: Option<&str>,
+    candidate: Option<&SwarmWorkPacketCandidate>,
+) -> &'static str {
+    let Some(candidate) = candidate else {
+        return if requested_candidate_id.is_some() {
+            "candidate_not_found"
+        } else {
+            "no_candidate"
+        };
+    };
+    if candidate.decision != "safe_to_claim" {
+        return candidate.decision;
+    }
+    if !packet.tracker_integrity.br_reads_authoritative {
+        return "external_state_required";
+    }
+    if agent_mail_blocks_claim(&packet.coordination.agent_mail) {
+        return "external_state_required";
+    }
+    if packet.rch_proof_posture.safe_to_launch_cargo_verification == Some(false) {
+        return "blocked_by_verification";
+    }
+    "safe_to_claim"
+}
+
+fn work_packet_claim_gate_unsafe_reasons(
+    packet: &SwarmWorkPacket,
+    requested_candidate_id: Option<&str>,
+    candidate: Option<&SwarmWorkPacketCandidate>,
+    verdict: &str,
+) -> Vec<String> {
+    let mut reasons = candidate
+        .map(|candidate| candidate.unsafe_reasons.clone())
+        .unwrap_or_default();
+    match candidate {
+        Some(candidate) if candidate.decision != "safe_to_claim" => {
+            reasons.push(format!("candidate_decision:{}", candidate.decision));
+        }
+        None => {
+            if let Some(candidate_id) = requested_candidate_id {
+                reasons.push(format!("candidate_not_found:{candidate_id}"));
+            } else {
+                reasons.push("no_candidate_available".to_owned());
+            }
+        }
+        _ => {}
+    }
+    if !packet.tracker_integrity.br_reads_authoritative {
+        reasons.push(format!(
+            "beads_tracker_not_authoritative:{}",
+            beads_integrity_health_label(packet.tracker_integrity.health)
+        ));
+    }
+    if agent_mail_blocks_claim(&packet.coordination.agent_mail) {
+        reasons.push(AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE.to_owned());
+        if packet.coordination.agent_mail.reservation_authoritative != Some(true) {
+            reasons.push("reservation_evidence_not_authoritative".to_owned());
+        }
+        if packet.coordination.agent_mail.inbox_authoritative != Some(true) {
+            reasons.push("inbox_evidence_not_authoritative".to_owned());
+        }
+    }
+    if packet.rch_proof_posture.safe_to_launch_cargo_verification == Some(false) {
+        reasons.push("rch_remote_verification_blocked".to_owned());
+    }
+    if verdict != "safe_to_claim" && !reasons.iter().any(|reason| reason == verdict) {
+        reasons.push(format!("gate_verdict:{verdict}"));
+    }
+    reasons
 }
 
 fn work_packet_candidates(
@@ -6117,6 +6390,105 @@ mod tests {
             assert!(!command.command_action.shell_required);
             assert!(!command.command_action.argv.is_empty());
         }
+    }
+
+    #[test]
+    fn work_packet_claim_gate_allows_claim_only_for_safe_candidate() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Gate safe work-packet candidate",
+            "beads_ready",
+            Some(2),
+        )]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let gate = packet.claim_gate(None);
+        let second = packet.claim_gate(None);
+
+        assert_eq!(gate.schema, SWARM_WORK_PACKET_CLAIM_GATE_SCHEMA_V1);
+        assert_eq!(gate.gate_id, second.gate_id);
+        assert_eq!(gate.packet_id, packet.packet_id);
+        assert_eq!(gate.verdict, "safe_to_claim");
+        assert!(gate.safe_to_claim);
+        assert_eq!(
+            gate.selected_candidate
+                .as_ref()
+                .map(|candidate| candidate.id.as_str()),
+            Some("bd-safe")
+        );
+        assert!(gate.unsafe_reasons.is_empty());
+        assert_eq!(gate.recommended_safe_to_claim, Some(true));
+        assert!(
+            gate.next_command_actions
+                .iter()
+                .all(|action| !action.mutates_state)
+        );
+        assert!(
+            gate.next_command_actions
+                .iter()
+                .any(|action| action.command_id == "bead_show_candidate")
+        );
+        assert_eq!(
+            gate.claim_command_action
+                .as_ref()
+                .map(|action| action.command_id),
+            Some("bead_claim_candidate")
+        );
+    }
+
+    #[test]
+    fn work_packet_claim_gate_uses_candidate_scoped_recommendation_safety() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut blocked = candidate("bd-blocked", "Blocked candidate", "beads_ready", Some(1));
+        blocked.blocked_by = vec!["bd-parent".to_owned()];
+        let snapshot = snapshot_with_candidates(vec![
+            candidate(
+                "bd-safe",
+                "Gate safe work-packet candidate",
+                "beads_ready",
+                Some(2),
+            ),
+            blocked,
+        ]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let gate = packet.claim_gate(Some("bd-blocked"));
+
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(true));
+        assert_eq!(gate.verdict, "blocked_by_dependency");
+        assert!(!gate.safe_to_claim);
+        assert_eq!(gate.recommended_safe_to_claim, Some(false));
+        assert!(gate.claim_command_action.is_none());
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"candidate_decision:blocked_by_dependency".to_owned())
+        );
+    }
+
+    #[test]
+    fn work_packet_claim_gate_specific_unsafe_candidate_never_emits_claim_action() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut blocked = candidate("bd-blocked", "Blocked candidate", "beads_ready", Some(1));
+        blocked.blocked_by = vec!["bd-parent".to_owned()];
+        let snapshot = snapshot_with_candidates(vec![blocked]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let gate = packet.claim_gate(Some("bd-blocked"));
+
+        assert_eq!(gate.requested_candidate_id.as_deref(), Some("bd-blocked"));
+        assert_eq!(gate.verdict, "blocked_by_dependency");
+        assert!(!gate.safe_to_claim);
+        assert!(gate.claim_command_action.is_none());
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"candidate_decision:blocked_by_dependency".to_owned())
+        );
+        assert!(
+            gate.next_command_actions
+                .iter()
+                .all(|action| !action.mutates_state)
+        );
     }
 
     #[test]
