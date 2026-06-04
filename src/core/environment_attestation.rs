@@ -1548,6 +1548,40 @@ mod tests {
     }
 
     #[test]
+    fn malformed_and_empty_source_states_fail_closed_as_ambiguous() {
+        let empty = SwarmBriefReport::empty(Path::new("."));
+        let empty_attestation = environment_attestation_from_swarm_brief(&empty, fixed_time());
+        assert_eq!(
+            source_kinds(&empty_attestation),
+            vec![EnvironmentAttestationSourceKind::ClaimGate]
+        );
+        assert_eq!(
+            empty_attestation.verdict,
+            EnvironmentAttestationVerdict::SourceAuthorityAmbiguous
+        );
+
+        let malformed = report_with_sources(vec![degraded_source(
+            SwarmBriefSourceKind::AgentMail,
+            "agent_mail_snapshot_malformed",
+            "malformed redacted snapshot",
+        )]);
+        let malformed_attestation =
+            environment_attestation_from_swarm_brief(&malformed, fixed_time());
+        let mail = entry(
+            &malformed_attestation,
+            EnvironmentAttestationSourceKind::AgentMailProbe,
+        );
+        assert_eq!(
+            mail.degraded_codes,
+            vec![EnvironmentAttestationDegradedCode::SourceAuthorityAmbiguous]
+        );
+        assert_eq!(
+            malformed_attestation.verdict,
+            EnvironmentAttestationVerdict::SourceAuthorityAmbiguous
+        );
+    }
+
+    #[test]
     fn file_reservation_entry_blocks_conflicting_claims_deterministically() {
         let mut brief = report_with_sources(vec![ready_source(SwarmBriefSourceKind::AgentMail)]);
         brief.file_reservations.push(SwarmBriefFileReservation {
