@@ -213,6 +213,56 @@ def malformed_claim_gate_authority_reasons(gate):
     return reasons
 
 
+def malformed_claim_gate_reasons(gate):
+    reasons = []
+    reasons.extend(
+        malformed_boolean_field_reasons(
+            gate,
+            [
+                ("safeToClaim", "malformed_claim_gate_safe_to_claim"),
+                (
+                    "recommendedSafeToClaim",
+                    "malformed_claim_gate_recommended_safe_to_claim",
+                ),
+            ],
+        )
+    )
+
+    for field, reason in [
+        ("requestedCandidateId", "malformed_claim_gate_requested_candidate_id"),
+        ("verdict", "malformed_claim_gate_verdict"),
+        ("recommendedAction", "malformed_claim_gate_recommended_action"),
+    ]:
+        value = gate.get(field)
+        if field in gate and value is not None and not isinstance(value, str):
+            reasons.append(reason)
+
+    for field, reason in [
+        ("unsafeReasons", "malformed_claim_gate_unsafe_reasons"),
+        ("staleReasons", "malformed_claim_gate_stale_reasons"),
+        ("sourceRefs", "malformed_claim_gate_source_refs"),
+        ("degradedCodes", "malformed_claim_gate_degraded_codes"),
+        ("nextCommandActions", "malformed_claim_gate_next_command_actions"),
+    ]:
+        value = gate.get(field)
+        if field in gate and value is not None and not isinstance(value, list):
+            reasons.append(reason)
+
+    candidate = gate.get("selectedCandidate")
+    if candidate is not None and not isinstance(candidate, dict):
+        reasons.append("malformed_claim_gate_selected_candidate")
+    elif isinstance(candidate, dict):
+        for field, reason in [
+            ("id", "malformed_claim_gate_candidate_id"),
+            ("decision", "malformed_claim_gate_candidate_decision"),
+        ]:
+            value = candidate.get(field)
+            if field in candidate and value is not None and not isinstance(value, str):
+                reasons.append(reason)
+
+    return reasons
+
+
 def agent_mail_authority_reasons(agent_mail):
     reasons = []
     if agent_mail.get("reservationAuthoritative") is not True:
@@ -612,6 +662,7 @@ def packet_why_not_safe(packet, candidate, safe_to_claim):
 
 def claim_gate_consistency_reasons(gate):
     reasons = []
+    reasons.extend(malformed_claim_gate_reasons(gate))
     if gate.get("safeToClaim") is not True:
         reasons.append("claim_gate_safe_flag_not_true")
 

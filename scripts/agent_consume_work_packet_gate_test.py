@@ -224,6 +224,50 @@ class ClaimGateConsumer(unittest.TestCase):
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
         self.assertFalse(claim["runnable"])
 
+    def test_malformed_claim_gate_scalars_and_arrays_fail_closed(self):
+        gate = safe_gate()
+        gate.update(
+            {
+                "safeToClaim": "true",
+                "recommendedSafeToClaim": 1,
+                "requestedCandidateId": ["bd-safe.1"],
+                "verdict": ["safe_to_claim"],
+                "recommendedAction": {"action": "inspect_and_claim"},
+                "unsafeReasons": "peer_dirty_file",
+                "staleReasons": {"reason": "stale_assignee"},
+                "sourceRefs": "br://bd-safe.1",
+                "degradedCodes": {"code": "tracker_mismatch"},
+                "nextCommandActions": {"commandId": "bead_show_candidate"},
+            }
+        )
+        gate["selectedCandidate"]["id"] = ["bd-safe.1"]
+        gate["selectedCandidate"]["decision"] = 1
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertTrue(decision["mutatingActionsRequireHuman"])
+        for reason in [
+            "malformed_claim_gate_safe_to_claim",
+            "malformed_claim_gate_recommended_safe_to_claim",
+            "malformed_claim_gate_requested_candidate_id",
+            "malformed_claim_gate_verdict",
+            "malformed_claim_gate_recommended_action",
+            "malformed_claim_gate_unsafe_reasons",
+            "malformed_claim_gate_stale_reasons",
+            "malformed_claim_gate_source_refs",
+            "malformed_claim_gate_degraded_codes",
+            "malformed_claim_gate_next_command_actions",
+            "malformed_claim_gate_candidate_id",
+            "malformed_claim_gate_candidate_decision",
+        ]:
+            self.assertIn(reason, decision["whyNotSafe"])
+        self.assertIn("claim_gate_safe_flag_not_true", decision["whyNotSafe"])
+        self.assertIn("claim_gate_recommended_not_safe", decision["whyNotSafe"])
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
     def test_claim_gate_remote_required_without_positive_proof_fails_closed(self):
         gate = safe_gate()
         gate["sourceAuthority"]["rchSafeToLaunchCargoVerification"] = None
