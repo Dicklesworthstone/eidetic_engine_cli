@@ -856,6 +856,39 @@ class ErrorHandling(unittest.TestCase):
         self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
         self.assertNotIn("error:invalid_json", decision["whyNotSafe"])
 
+    def test_cli_line_mode_uses_last_machine_envelope_over_earlier_safe_packet(self):
+        safe_envelope = envelope(safe_gate())
+        noisy_log = {"schema": "log.event.v1", "message": "interleaved diagnostic"}
+        stale_error = {
+            "schema": "ee.error.v2",
+            "error": {
+                "code": "usage",
+                "message": "unexpected argument '--candidate' found",
+            },
+        }
+
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / "agent_consume_work_packet_gate.py")],
+            input="\n".join(
+                [
+                    json.dumps(safe_envelope),
+                    json.dumps(noisy_log),
+                    json.dumps(stale_error),
+                ]
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, "")
+        decision = json.loads(result.stdout)
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
+
     def test_error_envelope_returns_machine_readable_block(self):
         decision = consumer.consume(
             {
