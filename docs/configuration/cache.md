@@ -4,8 +4,9 @@
 source of truth remains FrankenSQLite plus rebuildable search and graph indexes.
 Any cache hit must preserve the same output contract as a fresh command.
 
-This page defines the L2 pack cache configuration contract for `ee context`
-swarm workloads. Runtime lookup, writes, and eviction land in later beads.
+This page defines the L2 pack cache configuration contract for canonical
+`ee pack` swarm workloads and the soft-deprecated `ee context` alias.
+Runtime lookup, writes, and eviction land in later beads.
 
 ## L2 Pack Cache
 
@@ -20,8 +21,9 @@ Default directories:
 - Explicit override: `EE_L2_PACK_CACHE_DIR`
 
 The cache directory must be created with mode `0700`. If the directory cannot
-be created or written, `ee context` must continue through the normal assembly
-path and emit a low-severity degraded signal rather than failing the request.
+be created or written, `ee pack` and the `ee context` compatibility alias must
+continue through the normal assembly path and emit a low-severity degraded
+signal rather than failing the request.
 
 ## Canonical Key
 
@@ -50,7 +52,8 @@ to notice.
 
 ## Cached Value
 
-The cache value is the exact successful `ee context --json` response body. It
+The cache value is the exact successful `ee pack --json` response body, or the
+equivalent `ee context --json` alias response body for compatibility calls. It
 is not wrapped in cache metadata. A cache hit should be byte-for-byte equivalent
 to a fresh assembly result for the same canonical key.
 

@@ -55,7 +55,7 @@ must not expose their current value.
 | `EE_JSON` | output | boolean flag | none | Request JSON output from renderer auto-detection. | Prefer explicit `--json` for scripts when possible. |
 | `EE_L2_PACK_CACHE_BYTES` | tuning | integer bytes | none | Override the L2 pack cache byte cap per workspace. | Maps to `[cache.pack_l2].max_bytes`; default is 1 GiB. |
 | `EE_L2_PACK_CACHE_DIR` | paths | path | none | Override the L2 pack cache root directory. | Maps to `[cache.pack_l2].directory`; entries are stored below a workspace-specific subdirectory. |
-| `EE_L2_PACK_CACHE_DISABLE` | tuning | boolean flag | none | Disable L2 pack cache lookup and writes. | Inverts `[cache.pack_l2].enabled` for `ee context` once L2 runtime wiring lands. |
+| `EE_L2_PACK_CACHE_DISABLE` | tuning | boolean flag | none | Disable L2 pack cache lookup and writes. | Inverts `[cache.pack_l2].enabled` for `ee pack` and the `ee context` alias once L2 runtime wiring lands. |
 | `EE_LEGACY_SELECTION_CERTIFICATE` | output | boolean flag | none | Include the legacy selectionCertificate field in context JSON. | Transitional compatibility switch for consumers migrating from the old field name. |
 | `EE_LEXICAL_INDEX_HUGEPAGES` | tuning | boolean flag | `false` | Request transparent hugepage hints for opt-in lexical index RAM-tier pinning. | Only meaningful when `EE_LEXICAL_INDEX_PIN_RAM=true`; unsupported platforms degrade without changing search results. |
 | `EE_LEXICAL_INDEX_PIN_RAM` | tuning | boolean flag | `false` | Opt in to lexical index RAM-tier page-cache population. | Disabled by default so large indexes do not pressure RAM unexpectedly; future daemon/search wiring reads this through the central env registry. |

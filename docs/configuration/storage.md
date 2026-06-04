@@ -124,7 +124,7 @@ growth repairs.
 
 Idle read handles are reused as a LIFO stack. The most recently released
 connection is usually warm in FrankenSQLite page-cache terms, so reusing it
-first preserves locality for repeated `ee context` and `ee status` lookups.
+first preserves locality for repeated `ee pack` and `ee status` lookups.
 FIFO would distribute reads more evenly, but for this read-heavy workload it
 keeps fewer handles hot and makes low-latency bursts worse.
 
