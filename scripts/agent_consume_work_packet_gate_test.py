@@ -7,6 +7,7 @@ Run:
 
 import importlib.util
 import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -505,6 +506,25 @@ class WorkPacketConsumer(unittest.TestCase):
 
 
 class ErrorHandling(unittest.TestCase):
+    def test_cli_invalid_json_returns_machine_readable_fail_closed_decision(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / "agent_consume_work_packet_gate.py")],
+            input='{"schema": "ee.response.v2", "success": true,',
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, "")
+        decision = json.loads(result.stdout)
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["action"], "blocked_no_action")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertFalse(decision["mutatingActionsRequireHuman"])
+        self.assertIn("error:invalid_json", decision["whyNotSafe"])
+
     def test_error_envelope_returns_machine_readable_block(self):
         decision = consumer.consume(
             {

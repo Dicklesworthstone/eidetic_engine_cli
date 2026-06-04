@@ -602,9 +602,12 @@ def error_decision(code):
 def load_response():
     try:
         return json.load(sys.stdin)
-    except json.JSONDecodeError as error:
-        print(f"Error decoding JSON response: {error}", file=sys.stderr)
-        sys.exit(1)
+    except json.JSONDecodeError:
+        return {
+            "schema": "ee.error.v2",
+            "success": False,
+            "error": {"code": "invalid_json"},
+        }
 
 
 def main():
