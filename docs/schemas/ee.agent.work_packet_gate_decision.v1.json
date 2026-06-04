@@ -40,11 +40,11 @@
     "candidateId": {
       "oneOf": [
         {"type": "null"},
-        {"type": "string"}
+        {"type": "string", "maxLength": 96}
       ]
     },
-    "decision": {"type": "string"},
-    "action": {"type": "string"},
+    "decision": {"type": "string", "maxLength": 64},
+    "action": {"type": "string", "maxLength": 64},
     "argvActions": {
       "type": "array",
       "items": {"$ref": "#/$defs/argvAction"}
@@ -52,7 +52,7 @@
     "mutatingActionsRequireHuman": {"type": "boolean"},
     "whyNotSafe": {
       "type": "array",
-      "items": {"type": "string"}
+      "items": {"type": "string", "maxLength": 160}
     },
     "sourceSummary": {"$ref": "#/$defs/sourceSummary"},
     "degradedSummary": {
@@ -152,7 +152,31 @@
     "nullableString": {
       "oneOf": [
         {"type": "null"},
-        {"type": "string"}
+        {"type": "string", "maxLength": 160}
+      ]
+    },
+    "nullableString32": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "maxLength": 32}
+      ]
+    },
+    "nullableString48": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "maxLength": 48}
+      ]
+    },
+    "nullableString64": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "maxLength": 64}
+      ]
+    },
+    "nullableString96": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "maxLength": 96}
       ]
     },
     "nullableBoolean": {
@@ -177,7 +201,7 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "commandId": {"type": "string"},
+        "commandId": {"type": "string", "maxLength": 96},
         "actionKind": {
           "type": "string",
           "enum": [
@@ -191,15 +215,15 @@
         },
         "argv": {
           "type": "array",
-          "items": {"type": "string"}
+          "items": {"type": "string", "maxLength": 120}
         },
         "runnable": {"type": "boolean"},
         "reviewRequired": {"type": "boolean"},
         "mutatesState": {"type": "boolean"},
-        "requiredSubstrate": {"$ref": "#/$defs/nullableString"},
-        "when": {"$ref": "#/$defs/nullableString"},
-        "copySafety": {"type": "string"},
-        "reason": {"type": "string"}
+        "requiredSubstrate": {"$ref": "#/$defs/nullableString48"},
+        "when": {"$ref": "#/$defs/nullableString96"},
+        "copySafety": {"type": "string", "maxLength": 48},
+        "reason": {"type": "string", "maxLength": 64}
       }
     },
     "sourceSummary": {
@@ -218,13 +242,13 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "trackerHealth": {"$ref": "#/$defs/nullableString"},
+        "trackerHealth": {"$ref": "#/$defs/nullableString64"},
         "trackerAuthoritative": {"$ref": "#/$defs/nullableBoolean"},
         "requiresCandidateDowngrade": {"$ref": "#/$defs/nullableBoolean"},
-        "agentMailStatus": {"$ref": "#/$defs/nullableString"},
+        "agentMailStatus": {"$ref": "#/$defs/nullableString64"},
         "reservationAuthoritative": {"$ref": "#/$defs/nullableBoolean"},
         "inboxAuthoritative": {"$ref": "#/$defs/nullableBoolean"},
-        "rchPosture": {"$ref": "#/$defs/nullableString"},
+        "rchPosture": {"$ref": "#/$defs/nullableString64"},
         "rchRemoteOnlyRequired": {"$ref": "#/$defs/nullableBoolean"},
         "rchSafeToLaunchCargoVerification": {"$ref": "#/$defs/nullableBoolean"},
         "sourceCount": {
@@ -240,9 +264,9 @@
       "required": ["code", "source", "severity"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string"},
-        "source": {"$ref": "#/$defs/nullableString"},
-        "severity": {"$ref": "#/$defs/nullableString"}
+        "code": {"type": "string", "maxLength": 96},
+        "source": {"$ref": "#/$defs/nullableString48"},
+        "severity": {"$ref": "#/$defs/nullableString32"}
       }
     }
   }

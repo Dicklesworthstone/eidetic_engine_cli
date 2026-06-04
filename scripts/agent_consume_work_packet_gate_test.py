@@ -2701,7 +2701,64 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
             command_action["properties"]["rationale"]["maxLength"],
         )
 
+    def test_decision_schema_string_caps_match_consumer_redaction_limits(self):
+        schema = load_fixture(
+            "docs/schemas/ee.agent.work_packet_gate_decision.v1.json"
+        )
+        action = schema["$defs"]["argvAction"]["properties"]
+        source = schema["$defs"]["sourceSummary"]["properties"]
+        degraded = schema["$defs"]["degradedSummaryEntry"]["properties"]
+
+        def nullable_ref_max_length(ref):
+            definition_name = ref.rsplit("/", 1)[1]
+            string_branch = schema["$defs"][definition_name]["oneOf"][1]
+            return string_branch["maxLength"]
+
+        self.assertEqual(
+            96,
+            schema["properties"]["candidateId"]["oneOf"][1]["maxLength"],
+        )
+        self.assertEqual(64, schema["properties"]["decision"]["maxLength"])
+        self.assertEqual(64, schema["properties"]["action"]["maxLength"])
+        self.assertEqual(
+            160,
+            schema["properties"]["whyNotSafe"]["items"]["maxLength"],
+        )
+
+        self.assertEqual(96, action["commandId"]["maxLength"])
+        self.assertEqual(120, action["argv"]["items"]["maxLength"])
+        self.assertEqual(
+            48,
+            nullable_ref_max_length(action["requiredSubstrate"]["$ref"]),
+        )
+        self.assertEqual(96, nullable_ref_max_length(action["when"]["$ref"]))
+        self.assertEqual(48, action["copySafety"]["maxLength"])
+        self.assertEqual(64, action["reason"]["maxLength"])
+
+        for key in ("trackerHealth", "agentMailStatus", "rchPosture"):
+            with self.subTest(source_summary=key):
+                self.assertEqual(
+                    64,
+                    nullable_ref_max_length(source[key]["$ref"]),
+                )
+
+        self.assertEqual(96, degraded["code"]["maxLength"])
+        self.assertEqual(48, nullable_ref_max_length(degraded["source"]["$ref"]))
+        self.assertEqual(32, nullable_ref_max_length(degraded["severity"]["$ref"]))
+
     def assert_decision_matches_schema_constraints(self, decision, schema):
+        def assert_max_length(value, limit, path):
+            if value is not None:
+                self.assertLessEqual(
+                    len(value),
+                    limit,
+                    f"{path} exceeds maxLength {limit}",
+                )
+
+        def nullable_ref_max_length(ref):
+            definition_name = ref.rsplit("/", 1)[1]
+            return schema["$defs"][definition_name]["oneOf"][1]["maxLength"]
+
         source_schema = decision["sourceSchema"]
         self.assertTrue(
             source_schema is None
@@ -2713,14 +2770,35 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
             decision["candidateId"] is None
             or isinstance(decision["candidateId"], str)
         )
+        assert_max_length(
+            decision["candidateId"],
+            schema["properties"]["candidateId"]["oneOf"][1]["maxLength"],
+            "candidateId",
+        )
         self.assertIsInstance(decision["decision"], str)
+        assert_max_length(
+            decision["decision"],
+            schema["properties"]["decision"]["maxLength"],
+            "decision",
+        )
         self.assertIsInstance(decision["action"], str)
+        assert_max_length(
+            decision["action"],
+            schema["properties"]["action"]["maxLength"],
+            "action",
+        )
         self.assertIsInstance(decision["argvActions"], list)
         self.assertIsInstance(decision["mutatingActionsRequireHuman"], bool)
         self.assertIsInstance(decision["whyNotSafe"], list)
         self.assertTrue(
             all(isinstance(reason, str) for reason in decision["whyNotSafe"])
         )
+        for index, reason in enumerate(decision["whyNotSafe"]):
+            assert_max_length(
+                reason,
+                schema["properties"]["whyNotSafe"]["items"]["maxLength"],
+                f"whyNotSafe[{index}]",
+            )
         self.assertIsInstance(decision["degradedSummary"], list)
         self.assertIsInstance(decision["legacyCommandStringsRefused"], int)
         self.assertNotIsInstance(decision["legacyCommandStringsRefused"], bool)
@@ -2745,6 +2823,13 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
                 source_summary[key] is None or isinstance(source_summary[key], str),
                 f"sourceSummary.{key} has invalid type",
             )
+            assert_max_length(
+                source_summary[key],
+                nullable_ref_max_length(
+                    schema["$defs"]["sourceSummary"]["properties"][key]["$ref"]
+                ),
+                f"sourceSummary.{key}",
+            )
         for key in nullable_source_bools:
             self.assertTrue(
                 source_summary[key] is None or isinstance(source_summary[key], bool),
@@ -2760,10 +2845,22 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
             schema["$defs"]["argvAction"]["properties"]["actionKind"]["enum"]
         )
         for action in decision["argvActions"]:
+            action_schema = schema["$defs"]["argvAction"]["properties"]
             self.assertIsInstance(action["commandId"], str)
+            assert_max_length(
+                action["commandId"],
+                action_schema["commandId"]["maxLength"],
+                "argvAction.commandId",
+            )
             self.assertIn(action["actionKind"], action_kind_enum)
             self.assertIsInstance(action["argv"], list)
             self.assertTrue(all(isinstance(part, str) for part in action["argv"]))
+            for index, part in enumerate(action["argv"]):
+                assert_max_length(
+                    part,
+                    action_schema["argv"]["items"]["maxLength"],
+                    f"argvAction.argv[{index}]",
+                )
             self.assertIsInstance(action["runnable"], bool)
             self.assertIsInstance(action["reviewRequired"], bool)
             self.assertIsInstance(action["mutatesState"], bool)
@@ -2771,15 +2868,51 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
                 action["requiredSubstrate"] is None
                 or isinstance(action["requiredSubstrate"], str)
             )
+            assert_max_length(
+                action["requiredSubstrate"],
+                nullable_ref_max_length(action_schema["requiredSubstrate"]["$ref"]),
+                "argvAction.requiredSubstrate",
+            )
             self.assertTrue(action["when"] is None or isinstance(action["when"], str))
+            assert_max_length(
+                action["when"],
+                nullable_ref_max_length(action_schema["when"]["$ref"]),
+                "argvAction.when",
+            )
             self.assertIsInstance(action["copySafety"], str)
+            assert_max_length(
+                action["copySafety"],
+                action_schema["copySafety"]["maxLength"],
+                "argvAction.copySafety",
+            )
             self.assertIsInstance(action["reason"], str)
+            assert_max_length(
+                action["reason"],
+                action_schema["reason"]["maxLength"],
+                "argvAction.reason",
+            )
 
         for entry in decision["degradedSummary"]:
+            degraded_schema = schema["$defs"]["degradedSummaryEntry"]["properties"]
             self.assertIsInstance(entry["code"], str)
+            assert_max_length(
+                entry["code"],
+                degraded_schema["code"]["maxLength"],
+                "degradedSummary.code",
+            )
             self.assertTrue(entry["source"] is None or isinstance(entry["source"], str))
+            assert_max_length(
+                entry["source"],
+                nullable_ref_max_length(degraded_schema["source"]["$ref"]),
+                "degradedSummary.source",
+            )
             self.assertTrue(
                 entry["severity"] is None or isinstance(entry["severity"], str)
+            )
+            assert_max_length(
+                entry["severity"],
+                nullable_ref_max_length(degraded_schema["severity"]["$ref"]),
+                "degradedSummary.severity",
             )
 
     def test_consumer_decisions_match_schema_required_properties(self):
