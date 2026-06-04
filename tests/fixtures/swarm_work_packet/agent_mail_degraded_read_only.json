@@ -5,24 +5,26 @@
   "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
   "observedStateClass": "degraded_mail_rch_topology",
   "recommendedAction": {
-    "action": "prefer_static_docs_work",
+    "action": "coordinate_before_claim",
     "candidateId": "bd-docs.1",
-    "confidence": "medium",
-    "safeToClaim": true,
+    "confidence": "low",
+    "safeToClaim": false,
     "reasons": [
       "agent_mail_degraded_read_only",
       "reservation_evidence_not_authoritative",
       "inbox_evidence_not_authoritative",
-      "candidate_has_no_source_edits"
+      "tracker_not_authoritative",
+      "rch_remote_verification_blocked",
+      "candidate_visible_for_explainability_only"
     ],
     "proofObligations": [
       "do_not_treat_zero_reservation_count_as_no_conflict",
       "do_not_treat_zero_inbox_count_as_no_peer_messages",
-      "record_agent_mail_fallback_in_beads"
+      "do_not_claim_until_authority_recovers",
+      "record_agent_mail_fallback_in_closeout"
     ],
     "suggestedCommands": [
-      "br show bd-docs.1 --json",
-      "br comments add bd-docs.1 --message 'agent_mail degraded_read_only; coordinating via beads'"
+      "br show bd-docs.1 --json"
     ]
   },
   "candidates": [
@@ -33,11 +35,18 @@
       "status": "open",
       "priority": 2,
       "assignee": null,
-      "decision": "safe_to_claim",
+      "decision": "stale_or_advisory",
       "collisionRisk": "low",
-      "unsafeReasons": [],
-      "staleReasons": [],
-      "sourceRefs": ["br://bd-docs.1"]
+      "unsafeReasons": [
+        "reservation_evidence_not_authoritative",
+        "inbox_evidence_not_authoritative",
+        "tracker_not_authoritative",
+        "rch_remote_verification_blocked"
+      ],
+      "staleReasons": [
+        "agent_mail_degraded_read_only"
+      ],
+      "sourceRefs": ["br://bd-docs.1", "agent-mail://degraded_read_only", "rch://topology_blocked"]
     }
   ],
   "coordination": {

@@ -867,12 +867,12 @@
       "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
       "observedStateClass": "degraded_mail_rch_topology",
       "recommendedAction": {
-        "action": "prefer_static_docs_work",
+        "action": "coordinate_before_claim",
         "candidateId": "bd-static.4",
-        "confidence": "medium",
-        "safeToClaim": true,
-        "reasons": ["agent_mail_degraded_read_only", "rch_remote_verification_blocked", "candidate_has_no_source_edits"],
-        "proofObligations": ["record_mail_degradation_in_beads", "do_not_run_local_cargo_fallback", "limit_closeout_to_static_evidence_until_rch_recovers"],
+        "confidence": "low",
+        "safeToClaim": false,
+        "reasons": ["agent_mail_degraded_read_only", "reservation_evidence_not_authoritative", "inbox_evidence_not_authoritative", "rch_remote_verification_blocked", "candidate_visible_for_explainability_only"],
+        "proofObligations": ["do_not_treat_zero_reservation_count_as_no_conflict", "do_not_claim_until_authority_recovers", "do_not_run_local_cargo_fallback", "limit_closeout_to_static_evidence_until_rch_recovers"],
         "suggestedCommands": ["br show bd-static.4 --json", "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json"]
       },
       "candidates": [
@@ -883,11 +883,11 @@
           "status": "open",
           "priority": 2,
           "assignee": null,
-          "decision": "safe_to_claim",
+          "decision": "stale_or_advisory",
           "collisionRisk": "low",
-          "unsafeReasons": [],
-          "staleReasons": [],
-          "sourceRefs": ["br://bd-static.4"]
+          "unsafeReasons": ["reservation_evidence_not_authoritative", "inbox_evidence_not_authoritative", "rch_remote_verification_blocked"],
+          "staleReasons": ["agent_mail_degraded_read_only"],
+          "sourceRefs": ["br://bd-static.4", "agent-mail://degraded_read_only", "rch://topology_blocked"]
         }
       ],
       "coordination": {

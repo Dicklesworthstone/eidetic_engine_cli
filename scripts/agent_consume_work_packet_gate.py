@@ -338,10 +338,13 @@ def selected_candidate(packet):
                 return candidate
     lane = packet.get("candidateLane")
     if isinstance(lane, dict):
+        decision = lane.get("decision")
         return {
             "id": lane.get("beadId"),
-            "decision": lane.get("decision"),
-            "unsafeReasons": lane.get("decisionReasons", []),
+            "decision": decision,
+            "unsafeReasons": []
+            if decision == "safe_to_claim"
+            else lane.get("decisionReasons", []),
             "staleReasons": [],
             "sourceRefs": [],
         }

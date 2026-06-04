@@ -260,6 +260,103 @@ class ClaimGateConsumer(unittest.TestCase):
 
 
 class WorkPacketConsumer(unittest.TestCase):
+    def test_no_safe_claim_fixture_matrix_blocks_claim_fields(self):
+        cases = [
+            (
+                "tests/fixtures/swarm_work_packet/bv_timeout_no_output.json",
+                {"bv", "beads"},
+            ),
+            (
+                "tests/fixtures/swarm_work_packet/rollup_only_no_claimable_child.json",
+                {"beads"},
+            ),
+            (
+                "tests/fixtures/swarm_work_packet/crowded_checkout.json",
+                {"beads", "agent_mail", "git"},
+            ),
+            (
+                "tests/fixtures/swarm_work_packet/agent_mail_degraded_read_only.json",
+                {"agent_mail", "rch"},
+            ),
+            (
+                "tests/fixtures/swarm_work_packet/degraded_mail_rch_topology.json",
+                {"agent_mail", "rch"},
+            ),
+            (
+                "tests/fixtures/swarm_work_packet/tracker_mismatch.json",
+                {"beads"},
+            ),
+        ]
+
+        for relative_path, expected_sources in cases:
+            with self.subTest(relative_path=relative_path):
+                root = load_fixture(relative_path)
+                packet = consumer.get_payload(root)
+                self.assertIsInstance(packet, dict)
+
+                decision = consumer.consume(root)
+                self.assertFalse(decision["safeToClaim"])
+                self.assertTrue(decision["whyNotSafe"])
+                self.assertFalse(
+                    any(
+                        action["runnable"] and action["mutatesState"]
+                        for action in decision["argvActions"]
+                    )
+                )
+                self.assertFalse(
+                    any(
+                        action["runnable"] and action["actionKind"] == "claim"
+                        for action in decision["argvActions"]
+                    )
+                )
+
+                recommended = consumer.dict_or_empty(packet.get("recommendedAction"))
+                safe_fields = []
+                if "safeToClaim" in packet:
+                    safe_fields.append(("packet.safeToClaim", packet.get("safeToClaim")))
+                if "safeToClaim" in recommended:
+                    safe_fields.append(
+                        ("recommendedAction.safeToClaim", recommended.get("safeToClaim"))
+                    )
+                self.assertTrue(safe_fields, f"{relative_path} lacks safeToClaim field")
+                for field, value in safe_fields:
+                    self.assertIs(
+                        value,
+                        False,
+                        f"{relative_path} must not mark {field} claim-safe",
+                    )
+
+                candidate_decisions = []
+                for candidate in consumer.list_items(packet.get("candidates")):
+                    if isinstance(candidate, dict):
+                        candidate_decisions.append(candidate.get("decision"))
+                lane = packet.get("candidateLane")
+                if isinstance(lane, dict):
+                    candidate_decisions.append(lane.get("decision"))
+                self.assertNotIn(
+                    "safe_to_claim",
+                    candidate_decisions,
+                    f"{relative_path} must keep unsafe candidates diagnostic-only",
+                )
+
+                sources = {
+                    str(source.get("source")).replace("-", "_")
+                    for source in consumer.list_items(packet.get("sourceProvenance"))
+                    if isinstance(source, dict)
+                }
+                self.assertTrue(
+                    expected_sources.issubset(sources),
+                    f"{relative_path} missing sources {expected_sources - sources}",
+                )
+
+    def test_healthy_fixture_is_claim_safe_positive_control(self):
+        packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        decision = consumer.consume(packet)
+
+        self.assertTrue(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "safe_to_claim")
+        self.assertEqual(decision["whyNotSafe"], [])
+
     def test_bv_timeout_fixture_blocks_claim_and_refuses_legacy_commands(self):
         packet = load_fixture("tests/fixtures/swarm_work_packet/bv_timeout_no_output.json")
         decision = consumer.consume(packet)
@@ -736,6 +833,44 @@ class ErrorHandling(unittest.TestCase):
 
 
 class WorkPacketDocsContract(unittest.TestCase):
+    def test_schema_examples_do_not_mark_degraded_authority_claim_safe(self):
+        schema = load_fixture("docs/schemas/swarm/ee.swarm.work_packet.v1.json")
+        examples = schema.get("examples")
+        self.assertIsInstance(examples, list)
+
+        checked = 0
+        for index, example in enumerate(examples):
+            coordination = consumer.dict_or_empty(example.get("coordination"))
+            agent_mail = consumer.dict_or_empty(coordination.get("agentMail"))
+            rch = consumer.dict_or_empty(example.get("rchProofPosture"))
+            degraded_authority = (
+                agent_mail.get("reservationAuthoritative") is False
+                or agent_mail.get("inboxAuthoritative") is False
+                or rch.get("safeToLaunchCargoVerification") is False
+            )
+            if not degraded_authority:
+                continue
+
+            checked += 1
+            recommended = consumer.dict_or_empty(example.get("recommendedAction"))
+            self.assertIs(
+                recommended.get("safeToClaim"),
+                False,
+                f"schema example {index} must not recommend safe claim",
+            )
+            candidate_decisions = [
+                candidate.get("decision")
+                for candidate in consumer.list_items(example.get("candidates"))
+                if isinstance(candidate, dict)
+            ]
+            self.assertNotIn(
+                "safe_to_claim",
+                candidate_decisions,
+                f"schema example {index} must keep degraded candidates advisory",
+            )
+
+        self.assertGreater(checked, 0)
+
     def test_work_packet_docs_pin_stale_binary_stop_condition(self):
         required_markers = [
             "rejects `--claim-gate` or `--candidate`",
