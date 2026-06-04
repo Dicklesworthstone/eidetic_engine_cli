@@ -6,7 +6,9 @@
 
 ## Overview
 
-The `ee.query.v1` schema defines how agents and tools submit structured queries to `ee context`, `ee search`, and related commands. JSON is the canonical format; TOON and Markdown are renderers over the same data.
+The `ee.query.v1` schema defines how agents and tools submit structured queries
+to `ee pack build --query-file`, `ee search`, and related commands. JSON is the
+canonical format; TOON and Markdown are renderers over the same data.
 
 **Implementation substrate**: All query execution uses existing modules:
 - **Database filters**: SQLModel + FrankenSQLite for metadata predicates
@@ -431,8 +433,8 @@ expected availability. In `ee.query.v1`, this currently applies to non-hybrid
 }
 ```
 
-Equivalent CLI flags remain available for ad hoc commands:
-`ee context "deployment" --tags production --exclude-tags deprecated`
+Equivalent pack invocation:
+`ee pack build --query-file deployment.eeq.json --json`
 
 ### Metadata Boolean Filters (working)
 
