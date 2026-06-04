@@ -682,6 +682,23 @@ class ClaimGateConsumer(unittest.TestCase):
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
         self.assertTrue(claim["runnable"])
 
+    def test_claim_action_must_emit_machine_readable_json(self):
+        gate = safe_gate()
+        gate["claimCommandAction"] = safe_action(
+            "bead_claim_candidate",
+            ["br", "update", "bd-safe.1", "--status=in_progress"],
+            mutates=True,
+        )
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertTrue(decision["mutatingActionsRequireHuman"])
+        self.assertIn("claim_gate_claim_action_not_json", decision["whyNotSafe"])
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
     def test_missing_claim_action_fails_closed(self):
         gate = safe_gate()
         gate["claimCommandAction"] = None

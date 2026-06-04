@@ -820,6 +820,15 @@ def claim_action_sets_in_progress(action):
     return status_values == ["in_progress"]
 
 
+def claim_action_emits_json(action):
+    if not isinstance(action, dict):
+        return False
+    argv = action.get("argv")
+    if not isinstance(argv, list):
+        return False
+    return any(part == "--json" for part in argv if isinstance(part, str))
+
+
 def claim_action_is_safe_structured_argv(action):
     if not isinstance(action, dict):
         return False
@@ -1094,6 +1103,8 @@ def claim_gate_consistency_reasons(gate):
             reasons.append("claim_gate_claim_action_not_bead_update")
         elif not claim_action_sets_in_progress(claim_action):
             reasons.append("claim_gate_claim_action_not_in_progress")
+        if not claim_action_emits_json(claim_action):
+            reasons.append("claim_gate_claim_action_not_json")
         if not claim_action_is_safe_structured_argv(claim_action):
             reasons.append("claim_gate_claim_action_not_safe_structured_argv")
         expected_candidate_id = (
