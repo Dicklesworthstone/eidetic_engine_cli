@@ -421,6 +421,9 @@ mod swarm_slo_event_schema;
 #[path = "contracts/swarm_slo_scorecard_schema.rs"]
 mod swarm_slo_scorecard_schema;
 
+#[path = "contracts/regression_causality_schema.rs"]
+mod regression_causality_schema;
+
 #[path = "contracts/swarm_replay_malformed_trace_conformance.rs"]
 mod swarm_replay_malformed_trace_conformance;
 
