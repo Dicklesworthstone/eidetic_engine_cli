@@ -28,7 +28,9 @@ SECRET_PATTERNS = [
     (re.compile(r"sk-[A-Za-z0-9]{20,}"), "[REDACTED:secret]"),
     (re.compile(r"(?i)(api[_-]?key|token|secret|password)=\S+"), r"\1=[REDACTED:secret]"),
 ]
-PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_])/(Users|Volumes|data|tmp)/[^\s,;:]+")
+PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])/(Users|Volumes|data|tmp|private/tmp|var/folders|private/var/folders)(?:/[^\s,;:]+)?"
+)
 
 
 def utc_now() -> str:
