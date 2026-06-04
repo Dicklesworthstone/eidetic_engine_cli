@@ -47,6 +47,7 @@ TEST_WORKSPACE=""
 TEST_HOME=""
 ARTIFACTS_DIR=""
 LOG_FILE=""
+EVENT_LOG_FILE=""
 
 # Counters
 TESTS_RUN=0
@@ -60,6 +61,7 @@ SCENARIOS=(
     "health"
     "capabilities"
     "introspect"
+    "lab_swarm_replay"
     "help"
 )
 
@@ -117,6 +119,7 @@ setup_workspace() {
     TEST_HOME="${TEST_WORKSPACE}/home"
     ARTIFACTS_DIR="${TEST_WORKSPACE}/artifacts"
     LOG_FILE="${ARTIFACTS_DIR}/e2e.log"
+    EVENT_LOG_FILE="${ARTIFACTS_DIR}/e2e-events.jsonl"
 
     mkdir -p "${TEST_HOME}" "${ARTIFACTS_DIR}"
 
@@ -134,6 +137,7 @@ setup_workspace() {
         echo "# Workspace: ${TEST_WORKSPACE}"
         echo ""
     } > "${LOG_FILE}"
+    : > "${EVENT_LOG_FILE}"
 }
 
 check_binary() {
@@ -265,6 +269,149 @@ assert_stdout_clean() {
         return 1
     fi
     return 0
+}
+
+emit_test_event() {
+    local scenario="$1"
+    local phase="$2"
+    local kind="$3"
+    local command_label="$4"
+    local schema_validation_status="$5"
+    local redaction_status="$6"
+    local first_failure_diagnosis="$7"
+
+    EVENT_LOG_FILE="${EVENT_LOG_FILE}" \
+    TEST_WORKSPACE="${TEST_WORKSPACE}" \
+    ARTIFACTS_DIR="${ARTIFACTS_DIR}" \
+    SCENARIO="${scenario}" \
+    PHASE="${phase}" \
+    KIND="${kind}" \
+    COMMAND_LABEL="${command_label}" \
+    EXIT_CODE="${LAST_EXIT_CODE:-0}" \
+    ELAPSED_MS="${LAST_ELAPSED:-0}" \
+    STDOUT_FILE="${LAST_STDOUT_FILE:-}" \
+    STDERR_FILE="${LAST_STDERR_FILE:-}" \
+    SCHEMA_VALIDATION_STATUS="${schema_validation_status}" \
+    REDACTION_STATUS="${redaction_status}" \
+    FIRST_FAILURE_DIAGNOSIS="${first_failure_diagnosis}" \
+    python3 - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+
+
+def sha256_text(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def sha256_file(path: str):
+    if not path:
+        return None
+    file_path = Path(path)
+    if not file_path.exists():
+        return None
+    digest = hashlib.sha256()
+    with file_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def artifact_tail(path: str):
+    if not path:
+        return None
+    file_path = Path(path)
+    artifacts = Path(os.environ["ARTIFACTS_DIR"])
+    try:
+        return str(file_path.relative_to(artifacts))
+    except ValueError:
+        return file_path.name
+
+
+workspace = os.environ["TEST_WORKSPACE"]
+event = {
+    "schema": "ee.test_event.v1",
+    "surface": "basic_e2e",
+    "scenario": os.environ["SCENARIO"],
+    "phase": os.environ["PHASE"],
+    "kind": os.environ["KIND"],
+    "command": os.environ["COMMAND_LABEL"],
+    "cwdHash": sha256_text(os.getcwd()),
+    "workspaceHash": sha256_text(workspace),
+    "sanitizedEnv": {
+        "HOME": sha256_text(str(Path(workspace) / "home")),
+        "EE_WORKSPACE": sha256_text(str(Path(workspace) / "ws")),
+        "NO_COLOR": "1",
+    },
+    "elapsedMs": int(os.environ["ELAPSED_MS"]),
+    "exitCode": int(os.environ["EXIT_CODE"]),
+    "stdoutArtifactPath": artifact_tail(os.environ["STDOUT_FILE"]),
+    "stderrArtifactPath": artifact_tail(os.environ["STDERR_FILE"]),
+    "stdoutArtifactHash": sha256_file(os.environ["STDOUT_FILE"]),
+    "stderrArtifactHash": sha256_file(os.environ["STDERR_FILE"]),
+    "schemaValidationStatus": os.environ["SCHEMA_VALIDATION_STATUS"],
+    "redactionStatus": os.environ["REDACTION_STATUS"],
+    "firstFailureDiagnosis": os.environ["FIRST_FAILURE_DIAGNOSIS"] or None,
+}
+with Path(os.environ["EVENT_LOG_FILE"]).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+}
+
+validate_swarm_workload_trace() {
+    local trace_file="$1"
+    python3 - "${trace_file}" <<'PY'
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["schema"] == "ee.swarm_workload.v1"
+assert value["sideEffectFree"] is True
+assert value["fixtureSeed"] == "stable_small_replay_smoke_001"
+assert value["resourceProfileHints"]["profile"] == "ci_smoke"
+assert len(value["commandSequence"]) > 0
+assert value["provenance"]["kind"] == "synthetic"
+PY
+}
+
+validate_swarm_replay_result() {
+    local replay_file="$1"
+    python3 - "${replay_file}" <<'PY'
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["schema"] == "ee.swarm_replay_result.v1"
+assert value["sideEffectFree"] is True
+assert value["status"] in {"degraded", "blocked", "pass"}
+assert value["verification"]["rchRequired"] is True
+assert value["verification"]["rchStatus"] == "blocked_before_cargo"
+aggregate = value["aggregate"]
+command_count = aggregate["commandCount"]
+assert command_count > 0
+slo_total = (
+    aggregate["sloPassCount"]
+    + aggregate["sloWarningCount"]
+    + aggregate["sloFailureCount"]
+    + aggregate["sloExemptCount"]
+)
+assert slo_total == command_count
+redaction = value["redactionStatus"]
+for field in [
+    "rawTaskStringPresent",
+    "rawQueryTextPresent",
+    "rawMemoryBodyPresent",
+    "rawMailBodyPresent",
+    "absoluteHostPathPresent",
+    "secretsPresent",
+    "environmentDumpPresent",
+    "fullFileListingPresent",
+]:
+    assert redaction[field] is False, field
+assert redaction["redactionProbesPassed"] is True
+assert "swarm_replay_rch_proof_missing" in json.dumps(value["warnings"])
+PY
 }
 
 # ============================================================================
@@ -415,6 +562,119 @@ scenario_help() {
     [[ ${failed} -eq 0 ]]
 }
 
+scenario_lab_swarm_replay() {
+    log_step "Running scenario: lab_swarm_replay"
+    local passed=0
+    local failed=0
+    local trace_file="${ARTIFACTS_DIR}/lab_swarm_replay_trace.json"
+
+    run_ee lab_swarm_replay generate_trace \
+        --workspace "${TEST_WORKSPACE}/ws" \
+        --json \
+        lab generate-workload \
+        --fixture-seed stable_small_replay_smoke_001 \
+        --profile small
+    if assert_exit 0 "lab generate-workload exit" && \
+       assert_stdout_json "lab generate-workload JSON" && \
+       validate_swarm_workload_trace "${LAST_STDOUT_FILE}"; then
+        cp "${LAST_STDOUT_FILE}" "${trace_file}"
+        emit_test_event \
+            lab_swarm_replay \
+            generate_trace \
+            command_end \
+            "ee lab generate-workload --fixture-seed <seed> --profile small" \
+            passed \
+            passed \
+            ""
+        ((passed++))
+        log_pass "lab generate-workload smoke trace"
+    else
+        emit_test_event \
+            lab_swarm_replay \
+            generate_trace \
+            command_end \
+            "ee lab generate-workload --fixture-seed <seed> --profile small" \
+            failed \
+            not_checked \
+            "generate_workload_schema_validation_failed"
+        ((failed++))
+    fi
+
+    if [[ -f "${trace_file}" ]]; then
+        run_ee lab_swarm_replay replay_dry_run \
+            --workspace "${TEST_WORKSPACE}/ws" \
+            --json \
+            lab swarm replay \
+            --trace "${trace_file}" \
+            --dry-run
+        if assert_exit 6 "lab swarm replay missing-proof degraded exit" && \
+           assert_stdout_json "lab swarm replay JSON" && \
+           validate_swarm_replay_result "${LAST_STDOUT_FILE}"; then
+            emit_test_event \
+                lab_swarm_replay \
+                replay_dry_run \
+                command_end \
+                "ee lab swarm replay --trace <trace> --dry-run" \
+                passed \
+                passed \
+                ""
+            ((passed++))
+            log_pass "lab swarm replay dry-run ledger"
+        else
+            emit_test_event \
+                lab_swarm_replay \
+                replay_dry_run \
+                command_end \
+                "ee lab swarm replay --trace <trace> --dry-run" \
+                failed \
+                not_checked \
+                "swarm_replay_dry_run_validation_failed"
+            ((failed++))
+        fi
+    else
+        log_fail "lab_swarm_replay: missing generated trace artifact"
+        ((failed++))
+    fi
+
+    if [[ -s "${EVENT_LOG_FILE}" ]] && \
+       python3 - "${EVENT_LOG_FILE}" <<'PY'
+import json
+import sys
+
+events = [
+    json.loads(line)
+    for line in open(sys.argv[1], encoding="utf-8")
+    if line.strip()
+]
+scenario_events = [event for event in events if event.get("scenario") == "lab_swarm_replay"]
+assert len(scenario_events) >= 2
+for event in scenario_events:
+    assert event["schema"] == "ee.test_event.v1"
+    assert event["command"].startswith("ee lab ")
+    assert event["cwdHash"].startswith("sha256:")
+    assert event["workspaceHash"].startswith("sha256:")
+    assert event["sanitizedEnv"]["HOME"].startswith("sha256:")
+    assert event["sanitizedEnv"]["EE_WORKSPACE"].startswith("sha256:")
+    assert event["stdoutArtifactPath"]
+    assert event["stderrArtifactPath"]
+    assert event["schemaValidationStatus"] == "passed"
+    assert event["redactionStatus"] == "passed"
+PY
+    then
+        ((passed++))
+        log_pass "lab swarm replay ee.test_event.v1 log"
+    else
+        log_fail "lab_swarm_replay: event log validation failed"
+        ((failed++))
+    fi
+
+    TESTS_RUN=$((TESTS_RUN + passed + failed))
+    TESTS_PASSED=$((TESTS_PASSED + passed))
+    TESTS_FAILED=$((TESTS_FAILED + failed))
+
+    [[ ${failed} -eq 0 ]]
+}
+
 # ============================================================================
 # Main Entry Point
 # ============================================================================
@@ -458,6 +718,7 @@ run_scenario() {
         health)      scenario_health ;;
         capabilities) scenario_capabilities ;;
         introspect)  scenario_introspect ;;
+        lab_swarm_replay) scenario_lab_swarm_replay ;;
         help)        scenario_help ;;
         *)
             log_error "Unknown scenario: ${name}"
@@ -531,6 +792,7 @@ main() {
     echo "Elapsed:      ${total_elapsed}ms"
     echo "Artifacts:    ${ARTIFACTS_DIR}"
     echo "Log:          ${LOG_FILE}"
+    echo "Event log:    ${EVENT_LOG_FILE}"
 
     if [[ ${#failed_scenarios[@]} -gt 0 ]]; then
         echo ""
