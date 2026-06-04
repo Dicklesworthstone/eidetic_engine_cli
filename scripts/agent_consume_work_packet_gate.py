@@ -211,6 +211,12 @@ def agent_mail_authority_reasons(agent_mail):
     return reasons
 
 
+def tracker_not_authoritative_reason(tracker):
+    if tracker.get("brReadsAuthoritative") is True:
+        return None
+    return f"beads_tracker_not_authoritative:{redact_text(tracker.get('health') or 'unknown', 64)}"
+
+
 def count_legacy_command_strings(value):
     if isinstance(value, str):
         return 1 if redact_text(value) else 0
@@ -505,7 +511,7 @@ def packet_safe_to_claim(packet, candidate):
         and not compact_list(packet.get("doNotProceedBecause"))
         and not malformed_packet_map_reasons(packet)
         and not malformed_packet_scalar_reasons(packet)
-        and tracker_authoritative is not False
+        and tracker_authoritative is True
         and not agent_mail_authority_reasons(agent_mail)
         and agent_mail.get("status") != "semantic_readiness_failed"
         and rch_safe is not False
@@ -552,10 +558,9 @@ def packet_why_not_safe(packet, candidate, safe_to_claim):
     reasons.extend(malformed_packet_scalar_reasons(packet))
 
     tracker = dict_or_empty(packet.get("trackerIntegrity"))
-    if tracker.get("brReadsAuthoritative") is False:
-        reasons.append(
-            f"beads_tracker_not_authoritative:{redact_text(tracker.get('health'), 64)}"
-        )
+    tracker_reason = tracker_not_authoritative_reason(tracker)
+    if tracker_reason:
+        reasons.append(tracker_reason)
     if tracker.get("requiresCandidateDowngrade") is True:
         reasons.append("tracker_requires_candidate_downgrade")
 

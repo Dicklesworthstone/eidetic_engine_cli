@@ -525,6 +525,35 @@ class WorkPacketConsumer(unittest.TestCase):
             all(not action["mutatesState"] for action in decision["argvActions"])
         )
 
+    def test_missing_tracker_authority_downgrades_otherwise_safe_packet(self):
+        packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        packet["data"]["recommendedAction"] = {
+            "candidateId": "bd-safe",
+            "safeToClaim": True,
+            "suggestedCommands": [],
+            "suggestedCommandActions": [
+                safe_action(
+                    "bead_claim_candidate",
+                    ["br", "update", "bd-safe", "--status", "in_progress", "--json"],
+                    mutates=True,
+                )
+            ],
+        }
+        packet["data"]["trackerIntegrity"].pop("brReadsAuthoritative")
+        packet["data"]["trackerIntegrity"].pop("health")
+
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIsNone(decision["sourceSummary"]["trackerAuthoritative"])
+        self.assertIn(
+            "beads_tracker_not_authoritative:unknown",
+            decision["whyNotSafe"],
+        )
+        claim = decision["argvActions"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
     def test_rollup_only_fixture_blocks_claim_without_mutating_actions(self):
         packet = load_fixture(
             "tests/fixtures/swarm_work_packet/rollup_only_no_claimable_child.json"
