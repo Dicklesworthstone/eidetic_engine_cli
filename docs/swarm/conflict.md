@@ -9,7 +9,7 @@ to decide whether to review, promote, tombstone, or ask for clarification.
 Example:
 
 ```bash
-ee context "cargo policy" --json | jq '.data.conflicts'
+ee pack "cargo policy" --json | jq '.data.conflicts'
 ```
 
 Related schemas: `ee.consensus.v1`, `ee.trust_lane.v1`.

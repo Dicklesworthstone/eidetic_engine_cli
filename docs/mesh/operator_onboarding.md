@@ -20,7 +20,7 @@ mesh read-only, dry-running enrollment, and handling revisable packs.
 
 The default remains local-first:
 
-- `ee init`, `ee remember`, `ee search`, `ee context`, `ee why`, and
+- `ee init`, `ee remember`, `ee search`, `ee pack`, `ee why`, and
   `ee status` do not require mesh.
 - Mesh disabled means no listener, no peer probing, and no peer configuration
   requirement for core workflows.
@@ -40,7 +40,7 @@ Use mesh when the operator deliberately wants one of these behaviors:
 | A contractor or untrusted peer | No by default | Reachability is not authorization, and peer material imports as peer evidence. |
 | Emergency incident response | Only after review | Start with metadata-only and audit logs; avoid body or embedding lanes until approved. |
 
-Do not enable mesh just to make `ee context` faster on one host. Use local
+Do not enable mesh just to make `ee pack` faster on one host. Use local
 indexes, graph snapshots, pack caches, and RCH-friendly verification first.
 
 ## Core Model
@@ -78,7 +78,7 @@ For a single machine, keep mesh off and use ordinary commands:
 
 ```bash
 ee status --workspace . --json
-ee context "prepare release" --workspace . --max-tokens 4000 --json
+ee pack "prepare release" --workspace . --max-tokens 4000 --json
 ```
 
 `ee status` should not report mesh as a required capability. If a build emits a
@@ -189,7 +189,7 @@ Use revisable mode when a caller wants an immediate local answer but also wants
 to know whether peer freshness may change the answer later.
 
 ```bash
-ee context "audit release readiness" --workspace . --mesh revisable --json
+ee pack "audit release readiness" --workspace . --mesh revisable --json
 ```
 
 Expected behavior:
@@ -369,7 +369,7 @@ visible.
 
 ## Peer Throttling And Resource Isolation
 
-Mesh should not let a noisy peer make local `ee context`, `ee search`, or
+Mesh should not let a noisy peer make local `ee pack`, `ee search`, or
 `ee why` feel slower or less deterministic. Operators should prefer backpressure
 and quarantine over broad blocking mode.
 

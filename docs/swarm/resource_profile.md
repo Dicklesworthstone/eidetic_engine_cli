@@ -9,7 +9,7 @@ resource envelopes before launching expensive searches or packs.
 Example:
 
 ```bash
-ee context "handoff" --resource-profile swarm_heavy --json | jq '.data.pack.slo.profile'
+ee pack "handoff" --resource-profile swarm_heavy --json | jq '.data.pack.slo.profile'
 ```
 
 Related schemas: `ee.pack.slo.v1`, `ee.trust_lane.v1`.

@@ -9,7 +9,7 @@ failed a resource constraint.
 Example:
 
 ```bash
-ee context "release" --json | jq '.data.pack.slo'
+ee pack "release" --json | jq '.data.pack.slo'
 ```
 
 Related schemas: `ee.resource.profile.v1`, `ee.coordination_snapshot.v1`.

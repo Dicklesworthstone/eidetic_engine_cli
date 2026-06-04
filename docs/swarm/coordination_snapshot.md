@@ -9,7 +9,7 @@ assembly. Agents provide a JSON snapshot path; `ee` reads it side-effect free.
 Example:
 
 ```bash
-ee context "next bead" --coordination-snapshot coordination.json --json | jq '.data.pack.coordination'
+ee pack "next bead" --coordination-snapshot coordination.json --json | jq '.data.pack.coordination'
 ```
 
 Related schemas: `ee.swarm.recommendation.v1`, `ee.trust_lane.v1`.

@@ -8,7 +8,7 @@ The fixture manifest in `tests/fixtures/swarm_scale/workloads.json` covers these
 
 | Family | Pressure Mode | What It Exercises |
 | --- | --- | --- |
-| `read_heavy_context_burst` | Many concurrent `ee context` and `ee search` calls | Search index fanout, pack selection, provenance rendering, cache hit ratios |
+| `read_heavy_context_burst` | Many concurrent `ee pack` and `ee search` calls | Search index fanout, pack selection, provenance rendering, cache hit ratios |
 | `remember_write_burst` | Many agents recording notes/outcomes | Single write-owner behavior, durable queueing, audit rows, backpressure |
 | `cass_import_spike` | Session import bursts | CASS robot/JSON parsing, source provenance, ingestion batch sizing |
 | `index_rebuild` | Derived index rebuilds | Frankensearch rebuild cost and index generation tracking |
