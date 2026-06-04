@@ -95,3 +95,9 @@ Fixtures live in `tests/fixtures/e2e_event_contract_radar/`.
 Any future scanner should validate both fixtures before claiming schema
 conformance. Cargo-backed validation must run through RCH on the Mac dev host;
 do not use local Cargo fallback as evidence.
+
+The no-Cargo golden harness is
+`scripts/e2e_event_contract_radar_golden.sh`. It runs the static scanner over
+the fixture scripts, normalizes `generatedAt`, compares the output to
+`complete_and_gap_report.json`, and checks that the intentionally invalid
+negative fixture still exercises the closed-object contract.

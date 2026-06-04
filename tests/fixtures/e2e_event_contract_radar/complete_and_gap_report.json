@@ -4,14 +4,14 @@
   "mode": "advisory",
   "verdict": "advisory_gap",
   "summary": {
-    "scriptCount": 2,
+    "scriptCount": 5,
     "passCount": 1,
-    "advisoryGapCount": 1,
+    "advisoryGapCount": 3,
     "knownGapCount": 0,
     "failCount": 0,
-    "notApplicableCount": 0,
-    "failurePathCount": 3,
-    "missingFailureVerdictCount": 1,
+    "notApplicableCount": 1,
+    "failurePathCount": 5,
+    "missingFailureVerdictCount": 3,
     "allowlistedGapCount": 0
   },
   "requirements": [
@@ -23,19 +23,63 @@
     {
       "id": "failure_verdicts",
       "level": "must",
-      "description": "Every early failure path emits assert_fail or an equivalent failure-verdict event before exit."
+      "description": "Every early failure path emits assert_fail or an equivalent assert_result row before exit."
+    },
+    {
+      "id": "failure_diagnosis",
+      "level": "must",
+      "description": "Every failure verdict includes first_failure_diagnosis suitable for handoff."
     },
     {
       "id": "support_bundle_paths",
       "level": "should",
-      "description": "Command evidence records redaction-safe stdout and stderr artifact paths or hashes."
+      "description": "Command and failure evidence records redaction-safe stdout and stderr artifact paths or hashes."
     }
   ],
   "matrix": [
     {
-      "scriptPath": "scripts/e2e_overhaul/swarm_replay_lab_smoke.sh",
-      "scriptPathHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-      "declaredEventSchemas": ["ee.test_event.v1"],
+      "scriptPath": "tests/fixtures/e2e_event_contract_radar/scripts/cleanup_trap_only.sh",
+      "scriptPathHash": "sha256:6386fc0c0d90ce293ec372261b8d60001d3bd9afc2de746d245b6c85551b231e",
+      "declaredEventSchemas": [
+        "ee.test_event.v1"
+      ],
+      "status": "advisory_gap",
+      "coverage": {
+        "commandStart": "missing",
+        "commandEnd": "missing",
+        "assertOk": "missing",
+        "assertFailOrResult": "missing",
+        "schemaValidationStatus": "missing",
+        "redactionStatus": "present",
+        "firstFailureDiagnosis": "missing",
+        "stdoutArtifactPath": "missing",
+        "stderrArtifactPath": "missing",
+        "sanitizedEnv": "missing"
+      },
+      "failurePaths": [
+        {
+          "branchId": "exit_line_14",
+          "line": 14,
+          "trigger": "exit 1",
+          "assertFailOrResult": "missing",
+          "firstFailureDiagnosis": "missing",
+          "artifactPaths": "missing"
+        }
+      ],
+      "allowlist": {
+        "status": "none",
+        "reason": "",
+        "owner": "",
+        "expiresAt": null
+      }
+    },
+    {
+      "scriptPath": "tests/fixtures/e2e_event_contract_radar/scripts/complete.sh",
+      "scriptPathHash": "sha256:215df8535c2709731e7a6071bdc8482bee4157f560d6f489afe052f57d670f59",
+      "declaredEventSchemas": [
+        "ee.response.v2",
+        "ee.test_event.v1"
+      ],
       "status": "pass",
       "coverage": {
         "commandStart": "present",
@@ -51,17 +95,17 @@
       },
       "failurePaths": [
         {
-          "branchId": "schema_validation_failed",
-          "line": 297,
-          "trigger": "jq schema/status validation failed",
+          "branchId": "exit_line_24",
+          "line": 24,
+          "trigger": "exit 1",
           "assertFailOrResult": "present",
           "firstFailureDiagnosis": "present",
           "artifactPaths": "present"
         },
         {
-          "branchId": "dry_run_command_failed",
-          "line": 226,
-          "trigger": "ee lab swarm replay --dry-run returned non-zero",
+          "branchId": "exit_line_30",
+          "line": 30,
+          "trigger": "exit 1",
           "assertFailOrResult": "present",
           "firstFailureDiagnosis": "present",
           "artifactPaths": "present"
@@ -75,9 +119,73 @@
       }
     },
     {
-      "scriptPath": "scripts/e2e_test.sh",
-      "scriptPathHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-      "declaredEventSchemas": ["ee.test_event.v1"],
+      "scriptPath": "tests/fixtures/e2e_event_contract_radar/scripts/no_event_logging.sh",
+      "scriptPathHash": "sha256:695a7597015507d81f878f8bcde407d64655e63e0140f4950a11b32cc67807d5",
+      "declaredEventSchemas": [],
+      "status": "not_applicable",
+      "coverage": {
+        "commandStart": "not_applicable",
+        "commandEnd": "not_applicable",
+        "assertOk": "not_applicable",
+        "assertFailOrResult": "not_applicable",
+        "schemaValidationStatus": "not_applicable",
+        "redactionStatus": "not_applicable",
+        "firstFailureDiagnosis": "not_applicable",
+        "stdoutArtifactPath": "not_applicable",
+        "stderrArtifactPath": "not_applicable",
+        "sanitizedEnv": "not_applicable"
+      },
+      "failurePaths": [],
+      "allowlist": {
+        "status": "none",
+        "reason": "",
+        "owner": "",
+        "expiresAt": null
+      }
+    },
+    {
+      "scriptPath": "tests/fixtures/e2e_event_contract_radar/scripts/set_e_implicit_exit.sh",
+      "scriptPathHash": "sha256:3eb674287ab9d797fd816e0b7fdca005dbacde54463101d945372c62f9ce3091",
+      "declaredEventSchemas": [
+        "ee.response.v2",
+        "ee.test_event.v1"
+      ],
+      "status": "advisory_gap",
+      "coverage": {
+        "commandStart": "present",
+        "commandEnd": "present",
+        "assertOk": "present",
+        "assertFailOrResult": "missing",
+        "schemaValidationStatus": "present",
+        "redactionStatus": "present",
+        "firstFailureDiagnosis": "present",
+        "stdoutArtifactPath": "present",
+        "stderrArtifactPath": "present",
+        "sanitizedEnv": "present"
+      },
+      "failurePaths": [
+        {
+          "branchId": "jq_e_line_11",
+          "line": 11,
+          "trigger": "jq -e '.schema == \"ee.response.v2\"' \"$stdout_artifact_path\" >/dev/null",
+          "assertFailOrResult": "missing",
+          "firstFailureDiagnosis": "present",
+          "artifactPaths": "present"
+        }
+      ],
+      "allowlist": {
+        "status": "none",
+        "reason": "",
+        "owner": "",
+        "expiresAt": null
+      }
+    },
+    {
+      "scriptPath": "tests/fixtures/e2e_event_contract_radar/scripts/success_only.sh",
+      "scriptPathHash": "sha256:22af9a7a2732f2794fbd4055045885c137f0de1bca8a2bac0702bf7c1d5d57ac",
+      "declaredEventSchemas": [
+        "ee.test_event.v1"
+      ],
       "status": "advisory_gap",
       "coverage": {
         "commandStart": "present",
@@ -93,9 +201,9 @@
       },
       "failurePaths": [
         {
-          "branchId": "pack_command_failed",
-          "line": 640,
-          "trigger": "pack command returned non-zero before event-log verdict",
+          "branchId": "exit_line_12",
+          "line": 12,
+          "trigger": "exit 1",
           "assertFailOrResult": "missing",
           "firstFailureDiagnosis": "missing",
           "artifactPaths": "present"
