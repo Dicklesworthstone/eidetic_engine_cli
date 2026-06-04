@@ -44,6 +44,7 @@ set -euo pipefail
 #   4.5. Bridge Staleness      - advisory signal when CLOSE_THE_GAP_PLAN needs refresh
 #   4.6. Plan Drift Advisory   - advisory plan_doc_section drift hints for Beads triage
 #   4.65. Contract Drift Radar - advisory schema/docs/taxonomy drift scanner (bd-31nul.5)
+#   4.66. E2E Event Contract Radar - advisory shell evidence coverage scanner (bd-2ljka.4)
 #   4.7. Package Artifact Leak - cargo package list gate for generated artifacts
 #   4.8. Fuzz Target Audit     - static cargo-fuzz target registration/docs check
 #   4.9. Fuzz Smoke            - optional 30s search query parser cargo-fuzz sweep
@@ -519,6 +520,7 @@ run_stage() {
     fi
 }
 
+# shellcheck disable=SC2329
 plan_doc_smoke() {
     if ! command -v python3 >/dev/null 2>&1; then
         echo "error: python3 is required for --plan-doc-smoke" >&2
@@ -652,6 +654,7 @@ print(f"[+] plan-doc-smoke passed {len(commands)} verify commands")
 PY
 }
 
+# shellcheck disable=SC2329
 closure_lint_or_tracked_drift() {
     # The closure-lint audit covers both bead closure discipline and the
     # failure-mode fixture taxonomy (including *_unimplemented honesty-only
@@ -667,6 +670,25 @@ closure_lint_or_tracked_drift() {
     fi
 
     return "$closure_exit"
+}
+
+# shellcheck disable=SC2329
+e2e_event_contract_radar_advisory() {
+    local report="${EE_E2E_EVENT_CONTRACT_RADAR_REPORT:-${REPO_ROOT}/.e2e-event-contract-radar-report.json}"
+    local allowlist="${EE_E2E_EVENT_CONTRACT_RADAR_ALLOWLIST:-}"
+    local args=(--json --quiet --output "$report")
+
+    if [ -n "$allowlist" ]; then
+        args+=(--allowlist "$allowlist")
+    fi
+
+    local json
+    json=$("${REPO_ROOT}/scripts/e2e_event_contract_radar.sh" "${args[@]}")
+
+    printf "%s\n" "$json" | jq -r --arg report "$report" '
+        "e2e event contract radar: verdict=\(.verdict) scripts=\(.summary.scriptCount) pass=\(.summary.passCount) advisory_gap=\(.summary.advisoryGapCount) known_gap=\(.summary.knownGapCount) fail=\(.summary.failCount) missing_failure_verdicts=\(.summary.missingFailureVerdictCount)",
+        "report: \($report)"
+    '
 }
 
 artifact_retention_summary() {
@@ -736,6 +758,12 @@ run_stage "Plan Drift Advisory" "with_beads_read_locks ./scripts/plan-drift.sh -
 # validation against jsonschema files) is the schema_drift contracts test
 # under cargo test -p ee --test contracts and stays an RCH-only surface.
 run_stage "Contract Drift Radar Advisory" "./scripts/contract-drift-radar.sh --quiet"
+
+# Gate 3.85: Advisory e2e event-contract radar (bd-2ljka.4). This is a
+# no-Cargo static scanner for shell E2E evidence logging. It writes
+# .e2e-event-contract-radar-report.json by default and does not fail the
+# readiness gate for advisory or known gaps; scanner/runtime errors still fail.
+run_stage "E2E Event Contract Radar Advisory" "e2e_event_contract_radar_advisory"
 
 # Gate 4.7: Package artifact leakage guard. This is a quick packaging gate:
 # it runs cargo package --list without building and fails if local/generated

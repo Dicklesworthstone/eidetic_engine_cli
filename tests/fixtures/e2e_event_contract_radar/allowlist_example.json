@@ -1,0 +1,8 @@
+[
+  {
+    "scriptPath": "tests/fixtures/e2e_event_contract_radar/scripts/success_only.sh",
+    "reason": "Example known gap for advisory-mode documentation; do not use as a release allowlist.",
+    "owner": "bd-2ljka.4",
+    "expiresAt": "2099-01-01T00:00:00Z"
+  }
+]

@@ -9,23 +9,28 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_PATH="$ROOT/.e2e-event-contract-radar-report.json"
+ALLOWLIST_PATH="${EE_E2E_EVENT_CONTRACT_RADAR_ALLOWLIST:-}"
+ALLOWLIST_JSON="[]"
 MODE="advisory"
 JSON_FLAG=0
 QUIET=0
 STRICT=0
+GENERATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 declare -a INPUTS=()
 declare -a SCRIPT_PATHS=()
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/e2e_event_contract_radar.sh [--json] [--quiet] [--strict] [--mode advisory|blocking] [--output <path>] [--scripts-root <path>] [script ...]
+Usage: scripts/e2e_event_contract_radar.sh [--json] [--quiet] [--strict] [--mode advisory|blocking] [--output <path>] [--allowlist <path>] [--scripts-root <path>] [script ...]
 
   --json                 Emit the JSON report to stdout.
   --quiet                Suppress the human-readable summary.
   --strict               Exit 4 when any advisory/failing gap is detected.
   --mode <mode>          advisory (default) or blocking.
   --output <path>        Override .e2e-event-contract-radar-report.json.
+  --allowlist <path>     Optional JSON array of known gaps with scriptPath,
+                         reason, owner, and expiresAt fields.
   --scripts-root <path>  Recursively scan shell scripts under a directory.
 
 With no script arguments, scans scripts/e2e_test.sh, top-level e2e scripts,
@@ -45,6 +50,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --output)
       OUTPUT_PATH="${2:-}"
+      shift 2
+      ;;
+    --allowlist)
+      ALLOWLIST_PATH="${2:-}"
       shift 2
       ;;
     --scripts-root)
@@ -86,6 +95,37 @@ if ! command -v jq >/dev/null 2>&1; then
   printf 'e2e-event-contract-radar: jq required but not found\n' >&2
   exit 2
 fi
+
+load_allowlist() {
+  local path="$ALLOWLIST_PATH"
+  local abs
+  if [ -z "$path" ]; then
+    printf '[]'
+    return 0
+  fi
+  case "$path" in
+    /*) abs="$path" ;;
+    *) abs="$ROOT/$path" ;;
+  esac
+  if [ ! -f "$abs" ]; then
+    printf 'e2e-event-contract-radar: allowlist not found: %s\n' "$path" >&2
+    return 1
+  fi
+  jq -c '
+    if type == "array" then .
+    elif type == "object" and (.entries | type == "array") then .entries
+    else error("allowlist must be a JSON array or an object with entries[]")
+    end
+    | map({
+        scriptPath: (.scriptPath // error("allowlist entry missing scriptPath")),
+        reason: (.reason // error("allowlist entry missing reason")),
+        owner: (.owner // error("allowlist entry missing owner")),
+        expiresAt: (.expiresAt // error("allowlist entry missing expiresAt"))
+      })
+  ' "$abs"
+}
+
+ALLOWLIST_JSON="$(load_allowlist)"
 
 add_script_path() {
   local path="$1"
@@ -213,6 +253,35 @@ trim_trigger() {
     cut -c 1-180
 }
 
+allowlist_for() {
+  local rel="$1"
+  jq -cn \
+    --argjson entries "$ALLOWLIST_JSON" \
+    --arg scriptPath "$rel" \
+    --arg now "$GENERATED_AT" \
+    'def none: {status: "none", reason: "", owner: "", expiresAt: null};
+     (
+       $entries
+       | map(select(.scriptPath == $scriptPath))
+       | sort_by(.expiresAt)
+       | last
+     ) as $entry
+     | if $entry == null then none
+       elif $entry.expiresAt <= $now then {
+         status: "expired",
+         reason: $entry.reason,
+         owner: $entry.owner,
+         expiresAt: $entry.expiresAt
+       }
+       else {
+         status: "active",
+         reason: $entry.reason,
+         owner: $entry.owner,
+         expiresAt: $entry.expiresAt
+       }
+       end'
+}
+
 failure_path_object() {
   local rel="$1"
   local abs="$2"
@@ -285,7 +354,7 @@ scan_script() {
   local abs="$ROOT/$rel"
   local declared has_event has_set_e failure_paths path_hash
   local command_start command_end assert_ok assert_fail schema_status redaction_status diagnosis_status stdout_status stderr_status env_status
-  local coverage status missing_count branch_missing
+  local coverage status missing_count branch_missing allowlist allowlist_status
 
   declared="$(grep -hoE 'ee\.[A-Za-z0-9_.-]+\.v[0-9]+' "$abs" 2>/dev/null | sort -u | jq -R . | jq -s 'unique')"
   has_event=0
@@ -366,6 +435,14 @@ scan_script() {
     fi
   fi
 
+  allowlist="$(allowlist_for "$rel")"
+  allowlist_status="$(printf '%s' "$allowlist" | jq -r '.status')"
+  if [ "$allowlist_status" = "active" ]; then
+    case "$status" in
+      advisory_gap|fail) status="known_gap" ;;
+    esac
+  fi
+
   path_hash="sha256:$(printf '%s' "$rel" | shasum -a 256 | awk '{print $1}')"
   jq -cn \
     --arg scriptPath "$rel" \
@@ -374,6 +451,7 @@ scan_script() {
     --argjson declared "$declared" \
     --argjson coverage "$coverage" \
     --argjson failurePaths "$failure_paths" \
+    --argjson allowlist "$allowlist" \
     '{
       scriptPath: $scriptPath,
       scriptPathHash: $scriptPathHash,
@@ -381,12 +459,7 @@ scan_script() {
       status: $status,
       coverage: $coverage,
       failurePaths: $failurePaths,
-      allowlist: {
-        status: "none",
-        reason: "",
-        owner: "",
-        expiresAt: null
-      }
+      allowlist: $allowlist
     }'
 }
 
@@ -455,7 +528,7 @@ requirements='[
 ]'
 
 report="$(jq -cn \
-  --arg generatedAt "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+  --arg generatedAt "$GENERATED_AT" \
   --arg mode "$MODE" \
   --arg verdict "$overall" \
   --argjson summary "$summary" \

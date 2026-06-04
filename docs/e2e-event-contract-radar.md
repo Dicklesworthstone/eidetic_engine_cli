@@ -82,15 +82,36 @@ use the counts to pick remediation beads, not to claim a release gate passed.
 - `not_applicable` rows are neutral and must still explain why the script does
   not emit `ee.test_event.v1` evidence.
 
+## Verify Wiring
+
+`scripts/verify.sh` runs the radar as `E2E Event Contract Radar Advisory`
+after the contract-drift radar and before package artifact checks. The stage
+writes `.e2e-event-contract-radar-report.json` by default. Set
+`EE_E2E_EVENT_CONTRACT_RADAR_REPORT=/path/to/report.json` to change that path.
+
+Advisory and known gaps do not fail verify while the radar is being seeded.
+Scanner/runtime errors still fail the stage. Promotion to blocking mode should
+wait until the scanner has fixture-backed coverage, no unknown high-severity
+gaps remain, and at least one remediation pass has landed.
+
+Optional allowlist input is controlled by
+`EE_E2E_EVENT_CONTRACT_RADAR_ALLOWLIST` or `--allowlist <path>`. The file may be
+a JSON array or an object with `entries[]`; each entry must include
+`scriptPath`, `reason`, `owner`, and future `expiresAt`. Active entries convert
+matching advisory/failing rows to `known_gap`; expired entries remain visible
+as advisory/failing gaps.
+
 ## Fixtures
 
 Fixtures live in `tests/fixtures/e2e_event_contract_radar/`.
 
 - `complete_and_gap_report.json` is a positive fixture with one complete row
-  and one row missing failure verdicts.
+  and multiple rows missing failure verdicts.
 - `extra_property_negative_report.json` is intentionally invalid. A schema
   validator must reject it because the top-level object contains an
   `unexpectedField` property.
+
+`allowlist_example.json` documents the optional known-gap input shape.
 
 Any future scanner should validate both fixtures before claiming schema
 conformance. Cargo-backed validation must run through RCH on the Mac dev host;
