@@ -66,6 +66,10 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     ("ee.response.v2", "ee.response.v2.json"),
     ("ee.error.v2", "ee.error.v2.json"),
     ("ee.pack.v2", "ee.pack.v2.json"),
+    (
+        ee::models::REGRESSION_CAUSALITY_SCHEMA_V1,
+        "ee.regression_causality.v1.json",
+    ),
     (QUERY_SCHEMA_V1, "ee.query.v1.json"),
     ("ee.search.v1", "ee.search.v1.json"),
     ("ee.memory.show.v1", "ee.memory.show.v1.json"),
@@ -2229,21 +2233,10 @@ fn eval_report_conformance_sample() -> Result<Value, String> {
 }
 
 fn swarm_brief_conformance_sample() -> Result<Value, String> {
-    // The contract-matrix golden wraps each schema-shaped payload with a
-    // fixture-only `case` label (e.g. "all_sources_available"). That label
-    // isn't part of the ee.swarm.brief.v1 schema and would be rejected by
-    // `additionalProperties: false`, so we strip it before handing the
-    // sample to the validator.
-    let mut sample = read_json(&fixture_path(
-        "golden/swarm/brief_contract_matrix.json.golden",
-    ))?
-    .pointer("/cases/0")
-    .cloned()
-    .ok_or_else(|| "swarm brief contract matrix missing cases[0]".to_string())?;
-    if let Some(map) = sample.as_object_mut() {
-        map.remove("case");
-    }
-    Ok(sample)
+    let mut report = ee::core::swarm_brief::SwarmBriefReport::empty(Path::new("."));
+    report.finalize();
+    serde_json::to_value(report)
+        .map_err(|error| format!("serialize swarm brief conformance sample: {error}"))
 }
 
 fn preflight_guard_conformance_sample() -> Value {
