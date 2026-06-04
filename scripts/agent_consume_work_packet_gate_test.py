@@ -329,6 +329,42 @@ class ClaimGateConsumer(unittest.TestCase):
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
         self.assertFalse(claim["runnable"])
 
+    def test_requested_candidate_mismatch_fails_closed(self):
+        gate = safe_gate()
+        gate["selectedCandidate"]["id"] = "bd-other.1"
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertTrue(decision["mutatingActionsRequireHuman"])
+        self.assertIn(
+            "claim_gate_candidate_id_mismatch:bd-safe.1:bd-other.1",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
+    def test_claim_action_candidate_mismatch_fails_closed(self):
+        gate = safe_gate()
+        gate["claimCommandAction"] = safe_action(
+            "bead_claim_candidate",
+            ["br", "update", "bd-other.1", "--status", "in_progress", "--json"],
+            mutates=True,
+        )
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertTrue(decision["mutatingActionsRequireHuman"])
+        self.assertIn(
+            "claim_gate_claim_action_candidate_mismatch:bd-safe.1:bd-other.1",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
     def test_missing_claim_action_fails_closed(self):
         gate = safe_gate()
         gate["claimCommandAction"] = None

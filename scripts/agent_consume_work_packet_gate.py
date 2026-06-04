@@ -483,6 +483,21 @@ def classify_action(action, safe_to_claim, action_kind):
     }
 
 
+def claim_action_candidate_id(action):
+    if not isinstance(action, dict):
+        return None
+    argv = action.get("argv")
+    if not isinstance(argv, list) or len(argv) < 3:
+        return None
+    if not all(isinstance(part, str) and part.strip() for part in argv[:3]):
+        return None
+    if argv[0] not in ("br", "bd"):
+        return None
+    if argv[1] != "update":
+        return None
+    return argv[2]
+
+
 def command_actions_from_gate(gate, safe_to_claim):
     actions = []
     for action in list_items(gate.get("nextCommandActions")):
@@ -663,6 +678,7 @@ def packet_why_not_safe(packet, candidate, safe_to_claim):
 def claim_gate_consistency_reasons(gate):
     reasons = []
     reasons.extend(malformed_claim_gate_reasons(gate))
+    requested_candidate_id = gate.get("requestedCandidateId")
     if gate.get("safeToClaim") is not True:
         reasons.append("claim_gate_safe_flag_not_true")
 
@@ -681,6 +697,17 @@ def claim_gate_consistency_reasons(gate):
     if not isinstance(candidate, dict):
         reasons.append("claim_gate_candidate_missing")
     else:
+        candidate_id = candidate.get("id")
+        if (
+            isinstance(requested_candidate_id, str)
+            and isinstance(candidate_id, str)
+            and requested_candidate_id != candidate_id
+        ):
+            reasons.append(
+                "claim_gate_candidate_id_mismatch:"
+                f"{redact_text(requested_candidate_id, 64)}:"
+                f"{redact_text(candidate_id, 64)}"
+            )
         candidate_decision = candidate.get("decision")
         if candidate_decision != "safe_to_claim":
             reasons.append(
@@ -690,6 +717,23 @@ def claim_gate_consistency_reasons(gate):
 
     if not isinstance(gate.get("claimCommandAction"), dict):
         reasons.append("claim_gate_missing_claim_action")
+    else:
+        claim_candidate_id = claim_action_candidate_id(gate.get("claimCommandAction"))
+        expected_candidate_id = (
+            candidate.get("id") if isinstance(candidate, dict) else None
+        )
+        if not isinstance(expected_candidate_id, str):
+            expected_candidate_id = requested_candidate_id
+        if (
+            isinstance(expected_candidate_id, str)
+            and isinstance(claim_candidate_id, str)
+            and expected_candidate_id != claim_candidate_id
+        ):
+            reasons.append(
+                "claim_gate_claim_action_candidate_mismatch:"
+                f"{redact_text(expected_candidate_id, 64)}:"
+                f"{redact_text(claim_candidate_id, 64)}"
+            )
 
     authority = gate.get("sourceAuthority")
     if not isinstance(authority, dict):
