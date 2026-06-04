@@ -1383,7 +1383,7 @@ fn work_packet_claim_gate_candidate_recommended_safe_to_claim(
         && packet.recommended_action.candidate_id.as_deref() == Some(candidate.id.as_str())
         && packet.tracker_integrity.br_reads_authoritative
         && !agent_mail_blocks_claim(&packet.coordination.agent_mail)
-        && packet.rch_proof_posture.safe_to_launch_cargo_verification != Some(false)
+        && work_packet_rch_allows_claim(&packet.rch_proof_posture)
 }
 
 fn work_packet_claim_gate_verdict(
@@ -1407,7 +1407,7 @@ fn work_packet_claim_gate_verdict(
     if agent_mail_blocks_claim(&packet.coordination.agent_mail) {
         return "external_state_required";
     }
-    if packet.rch_proof_posture.safe_to_launch_cargo_verification == Some(false) {
+    if work_packet_rch_remote_verification_reason(&packet.rch_proof_posture).is_some() {
         return "blocked_by_verification";
     }
     if !work_packet_claim_gate_candidate_recommended_safe_to_claim(packet, candidate) {
@@ -1453,8 +1453,8 @@ fn work_packet_claim_gate_unsafe_reasons(
             reasons.push("inbox_evidence_not_authoritative".to_owned());
         }
     }
-    if packet.rch_proof_posture.safe_to_launch_cargo_verification == Some(false) {
-        reasons.push("rch_remote_verification_blocked".to_owned());
+    if let Some(reason) = work_packet_rch_remote_verification_reason(&packet.rch_proof_posture) {
+        reasons.push(reason.to_owned());
     }
     if packet.recommended_action.safe_to_claim != Some(true) {
         reasons.push(format!(
@@ -2262,11 +2262,14 @@ fn work_packet_rch_proof_posture(
                 .compile_health
                 .safe_to_launch_rch
                 .and_then(|compile_safe| {
-                    snapshot
-                        .verification
-                        .remote_only_safe
-                        .map(|remote_safe| compile_safe && remote_safe)
-                        .or(Some(compile_safe))
+                    let remote_safe = snapshot.verification.remote_only_safe;
+                    if remote_only_required {
+                        remote_safe.map(|remote_safe| compile_safe && remote_safe)
+                    } else {
+                        remote_safe
+                            .map(|remote_safe| compile_safe && remote_safe)
+                            .or(Some(compile_safe))
+                    }
                 })
         },
         local_fallback_prevented,
@@ -2548,8 +2551,8 @@ fn work_packet_recommended_action(
                 .unwrap_or_else(|| vec!["no_candidate_evidence".to_owned()]),
         );
     }
-    if rch.safe_to_launch_cargo_verification == Some(false) {
-        reasons.push("rch_remote_verification_blocked".to_owned());
+    if let Some(rch_reason) = work_packet_rch_remote_verification_reason(rch) {
+        reasons.push(rch_reason.to_owned());
     }
     if agent_mail_blocks_claim(agent_mail) {
         if agent_mail.status == "semantic_readiness_failed" {
@@ -2576,8 +2579,11 @@ fn work_packet_recommended_action(
         || vec!["repair_degraded_sources_before_claim".to_owned()],
         |card| card.proof_obligations.clone(),
     );
-    if rch.safe_to_launch_cargo_verification == Some(false) {
+    if work_packet_rch_remote_verification_reason(rch).is_some() {
         proof_obligations.push("do_not_run_local_cargo_fallback".to_owned());
+    }
+    if rch.remote_only_required && rch.safe_to_launch_cargo_verification != Some(true) {
+        proof_obligations.push("collect_rch_status_before_claim".to_owned());
     }
     if agent_mail_blocks_claim(agent_mail) {
         proof_obligations.push("do_not_treat_zero_inbox_count_as_no_peer_messages".to_owned());
@@ -2616,7 +2622,7 @@ fn work_packet_recommended_action(
         safe_to_claim: selected_candidate.map(|candidate| {
             candidate.decision == "safe_to_claim"
                 && !agent_mail_blocks_claim(agent_mail)
-                && rch.safe_to_launch_cargo_verification != Some(false)
+                && work_packet_rch_allows_claim(rch)
                 && tracker_integrity.br_reads_authoritative
         }),
         suggested_commands,
@@ -2647,7 +2653,7 @@ fn work_packet_action(
             "coordinate_before_claim"
         };
     }
-    if rch.safe_to_launch_cargo_verification == Some(false) {
+    if work_packet_rch_remote_verification_reason(rch).is_some() {
         return "prefer_static_docs_work";
     }
     match candidate_decision {
@@ -2683,6 +2689,22 @@ fn work_packet_action(
 
 fn agent_mail_blocks_claim(agent_mail: &SwarmWorkPacketAgentMail) -> bool {
     agent_mail.status == "semantic_readiness_failed"
+}
+
+fn work_packet_rch_remote_verification_reason(
+    rch: &SwarmWorkPacketRchProofPosture,
+) -> Option<&'static str> {
+    if rch.safe_to_launch_cargo_verification == Some(false) {
+        Some("rch_remote_verification_blocked")
+    } else if rch.remote_only_required && rch.safe_to_launch_cargo_verification != Some(true) {
+        Some("rch_remote_verification_required")
+    } else {
+        None
+    }
+}
+
+fn work_packet_rch_allows_claim(rch: &SwarmWorkPacketRchProofPosture) -> bool {
+    work_packet_rch_remote_verification_reason(rch).is_none()
 }
 
 fn work_packet_display_commands(actions: &[SwarmWorkPacketCommandAction]) -> Vec<String> {
@@ -2740,7 +2762,7 @@ fn work_packet_suggested_command_actions(
             ));
         }
         if tracker_integrity.br_reads_authoritative
-            && rch.safe_to_launch_cargo_verification != Some(false)
+            && work_packet_rch_allows_claim(rch)
             && !agent_mail_blocks_claim(agent_mail)
             && candidate_decision == Some("safe_to_claim")
         {
@@ -5726,6 +5748,60 @@ mod tests {
         assert!(!packet.mutation_policy.runs_cargo);
         assert!(!packet.mutation_policy.stages_git);
         assert!(!packet.mutation_policy.deletes_files);
+    }
+
+    #[test]
+    fn work_packet_requires_positive_remote_proof_when_remote_only_required() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Implement isolated work packet surface",
+            "beads_ready",
+            Some(2),
+        )]);
+        snapshot.verification.remote_only_required = true;
+        snapshot.verification.remote_only_safe = None;
+        snapshot.compile_health.safe_to_launch_rch = Some(true);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+
+        assert!(packet.rch_proof_posture.remote_only_required);
+        assert_eq!(
+            packet.rch_proof_posture.safe_to_launch_cargo_verification,
+            None
+        );
+        assert_eq!(packet.recommended_action.action, "prefer_static_docs_work");
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+        assert!(
+            packet
+                .recommended_action
+                .reasons
+                .contains(&"rch_remote_verification_required".to_owned())
+        );
+        assert!(
+            packet
+                .recommended_action
+                .proof_obligations
+                .contains(&"collect_rch_status_before_claim".to_owned())
+        );
+        assert!(
+            packet
+                .recommended_action
+                .suggested_command_actions
+                .iter()
+                .all(|action| action.command_id != "bead_claim_candidate")
+        );
+
+        let gate = packet.claim_gate(None);
+
+        assert_eq!(gate.verdict, "blocked_by_verification");
+        assert!(!gate.safe_to_claim);
+        assert_eq!(gate.recommended_safe_to_claim, Some(false));
+        assert!(gate.claim_command_action.is_none());
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"rch_remote_verification_required".to_owned())
+        );
     }
 
     #[test]
