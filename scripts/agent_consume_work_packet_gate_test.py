@@ -908,6 +908,51 @@ class ErrorHandling(unittest.TestCase):
         self.assertIn("rch_verify_build_admission_denied", codes)
         self.assertIn("rch_worker_topology_blocked", codes)
 
+    def test_non_object_input_fails_closed(self):
+        decision = consumer.consume(["not", "a", "response"])
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertIn("error:invalid_json_shape", decision["whyNotSafe"])
+
+    def test_success_envelope_without_object_payload_fails_closed(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.response.v2",
+                "success": True,
+                "data": ["not", "a", "payload"],
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertIn("error:missing_payload", decision["whyNotSafe"])
+
+    def test_unsupported_payload_schema_fails_closed(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.response.v2",
+                "success": True,
+                "data": {
+                    "schema": "ee.swarm.brief.v1",
+                    "recommendedAction": {
+                        "candidateId": "bd-unsafe.1",
+                        "safeToClaim": True,
+                    },
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertIn(
+            "error:unsupported_schema:ee.swarm.brief.v1",
+            decision["whyNotSafe"],
+        )
+
     def test_stale_claim_gate_binary_error_fails_closed(self):
         decision = consumer.consume(
             {

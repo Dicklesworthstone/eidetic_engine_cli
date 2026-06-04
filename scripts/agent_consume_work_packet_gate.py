@@ -107,7 +107,7 @@ def count_legacy_command_strings(value):
 def get_payload(response):
     if isinstance(response, dict) and response.get("success") is False:
         return None
-    if isinstance(response, dict) and isinstance(response.get("data"), dict):
+    if isinstance(response, dict) and "data" in response:
         return response["data"]
     return response if isinstance(response, dict) else None
 
