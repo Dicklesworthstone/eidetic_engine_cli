@@ -26,8 +26,8 @@ field-level shaping is handled by field presets or command-specific omit flags.
 Worked examples:
 
 ```bash
-ee context "prepare release" --workspace . --format json
-ee context "prepare release" --workspace . --json
+ee pack "prepare release" --workspace . --format json
+ee pack "prepare release" --workspace . --json
 ee graph export --workspace . --format mermaid
 ee graph export --workspace . --format mermaid --json
 ee memory history mem_release_rule --workspace . --format mermaid
@@ -94,7 +94,7 @@ ee context "prepare release" --workspace . \
 ee context "ground release evidence" --workspace . \
   --profile grounding --ppr-weight 0.4 --json
 
-ee context "map release dependencies" --workspace . \
+ee pack "map release dependencies" --workspace . \
   --profile orientation --json
 
 ee pack build --workspace . --query-file release.eeq.json \
