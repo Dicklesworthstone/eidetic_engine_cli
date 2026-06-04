@@ -1996,11 +1996,11 @@ fn agent_mail_missing_snapshot_degradation_text(
     match probe {
         AgentMailHealthProbe::Reachable => (
             "No redacted Agent Mail snapshot path was configured; the local Agent Mail health endpoint at 127.0.0.1:8765 is reachable, but ee swarm brief only consumes explicit redacted snapshots.",
-            "Generate a redacted snapshot with scripts/swarm_coordination_health.sh and pass --agent-mail-snapshot <snapshot.json>; live MCP tools remain external to ee.".to_string(),
+            "Generate a read-only redacted Agent Mail snapshot and pass --agent-mail-snapshot <snapshot.json>; live MCP tools remain external to ee.".to_string(),
         ),
         AgentMailHealthProbe::Unreachable => (
             "No redacted Agent Mail snapshot path was configured, and the local Agent Mail health endpoint at 127.0.0.1:8765 was not reachable within the brief probe budget.",
-            "Start or repair Agent Mail, run scripts/swarm_coordination_health.sh, then pass --agent-mail-snapshot <snapshot.json> when collecting the brief.".to_string(),
+            "Start or repair Agent Mail, generate a read-only redacted Agent Mail snapshot, then pass --agent-mail-snapshot <snapshot.json> when collecting the brief.".to_string(),
         ),
     }
 }
@@ -11190,7 +11190,8 @@ mod tests {
         assert!(message.contains("health endpoint"));
         assert!(message.contains("reachable"));
         assert!(message.contains("redacted snapshots"));
-        assert!(repair.contains("scripts/swarm_coordination_health.sh"));
+        assert!(repair.contains("read-only redacted Agent Mail snapshot"));
+        assert!(!repair.contains("scripts/swarm_coordination_health.sh"));
         assert!(repair.contains("--agent-mail-snapshot"));
     }
 
@@ -11201,6 +11202,8 @@ mod tests {
         assert!(message.contains("not reachable"));
         assert!(message.contains("127.0.0.1:8765"));
         assert!(repair.contains("Start or repair Agent Mail"));
+        assert!(repair.contains("read-only redacted Agent Mail snapshot"));
+        assert!(!repair.contains("scripts/swarm_coordination_health.sh"));
         assert!(repair.contains("--agent-mail-snapshot"));
     }
 

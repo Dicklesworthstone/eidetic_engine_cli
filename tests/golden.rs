@@ -744,6 +744,31 @@ mod tests {
         )
     }
 
+    fn agent_mail_snapshot_parser_case(
+        name: &str,
+        input: &str,
+    ) -> Result<serde_json::Value, String> {
+        let snapshot = parse_agent_mail_snapshot_json(input)?;
+        Ok(serde_json::json!({
+            "case": name,
+            "fileReservations": &snapshot.file_reservations,
+            "agents": &snapshot.agents,
+            "inbox": &snapshot.inbox,
+            "threads": &snapshot.threads,
+            "degraded": snapshot
+                .degraded
+                .iter()
+                .map(|degradation| serde_json::json!({
+                    "code": &degradation.code,
+                    "source": degradation.source.as_str(),
+                    "severity": degradation.severity,
+                    "message": &degradation.message,
+                    "repair": &degradation.repair,
+                }))
+                .collect::<Vec<_>>(),
+        }))
+    }
+
     fn swarm_brief_contract_cases() -> Result<Vec<serde_json::Value>, String> {
         let mut all_sources = base_swarm_brief_report();
         all_sources.beads.ready.push(swarm_bead(
@@ -1028,6 +1053,83 @@ mod tests {
             "swarm brief golden must not expose Agent Mail bodies",
         )?;
         assert_golden("swarm", "brief_contract_matrix.json", &pretty)
+    }
+
+    #[test]
+    fn agent_mail_snapshot_parser_matrix_matches_golden() -> TestResult {
+        let cases = vec![
+            agent_mail_snapshot_parser_case(
+                "full_snapshot_aliases",
+                r#"{
+                    "reservations": [
+                        {"pattern":"src/core/swarm_brief.rs","agent":"Agent ghp_abcdefghijklmnopqrstuvwxyz1234567890","exclusive":true,"expires_at":"2026-06-05T00:00:00Z"},
+                        {"path_pattern":"docs/swarm/coordination_snapshot.md","owner":"BeigeHollow","exclusive":false,"expires_ts":"2026-06-05T01:00:00Z"}
+                    ],
+                    "agentInventory": [
+                        {"mailbox":"BlueFortress","lastActiveTs":"2026-06-04T22:00:00Z"},
+                        {"agent_name":"AmberLake","last_active_ts":"2026-06-04T21:00:00Z"}
+                    ],
+                    "mailboxes": [
+                        {"agent":"BlueFortress","unread":2,"ackRequired":1,"body_md":"raw secret body"},
+                        {"mailbox":"AmberLake","unread_count":0,"ack_required_count":0}
+                    ],
+                    "threads": [
+                        {"id":"bd-6qcwh.3","subject":"Pin snapshot ghp_abcdefghijklmnopqrstuvwxyz1234567890","messageCount":4,"lastActivityAt":"2026-06-04T22:30:00Z","body_md":"raw secret body"},
+                        {"thread_id":"bd-6qcwh.2","subject":"Producer lane","message_count":2,"last_activity_at":"2026-06-04T22:15:00Z"}
+                    ]
+                }"#,
+            )?,
+            agent_mail_snapshot_parser_case(
+                "health_only_snapshot",
+                r#"{
+                    "schema": "ee.swarm.coordination_health.v1",
+                    "fallback_active": true,
+                    "mcp_http_reachable": false,
+                    "am_agents_list_ok": true,
+                    "am_send_single_recipient_ok": true,
+                    "am_send_multi_recipient_ok": true
+                }"#,
+            )?,
+            agent_mail_snapshot_parser_case(
+                "semantic_readiness_failed",
+                r#"{
+                    "healthLevel": "green",
+                    "semantic_readiness": {
+                        "status": "fail",
+                        "reason": "database disk image is malformed"
+                    }
+                }"#,
+            )?,
+            agent_mail_snapshot_parser_case("missing_optional_arrays", r#"{}"#)?,
+        ];
+        let matrix = serde_json::json!({
+            "schema": "ee.agent_mail_snapshot.parser_matrix.v1",
+            "redactionStatus": SWARM_BRIEF_REDACTION_STATUS,
+            "cases": cases,
+        });
+        let pretty = serde_json::to_string_pretty(&matrix)
+            .map_err(|error| format!("failed to serialize Agent Mail snapshot matrix: {error}"))?
+            + "\n";
+
+        ensure(
+            !pretty.contains("ghp_"),
+            "Agent Mail snapshot parser golden must not expose GitHub-like tokens",
+        )?;
+        ensure(
+            !pretty.contains("body_md") && !pretty.contains("raw secret body"),
+            "Agent Mail snapshot parser golden must not expose mail bodies",
+        )?;
+        assert_golden("swarm", "agent_mail_snapshot_parser_matrix.json", &pretty)
+    }
+
+    #[test]
+    fn agent_mail_snapshot_parser_rejects_malformed_json() -> TestResult {
+        let error = parse_agent_mail_snapshot_json("{")
+            .expect_err("malformed Agent Mail snapshot JSON should be rejected");
+        ensure(
+            error.contains("Agent Mail snapshot JSON could not be parsed"),
+            format!("unexpected malformed Agent Mail snapshot error: {error}"),
+        )
     }
 
     fn compute_stable_workspace_id(path: &Path) -> String {

@@ -1,0 +1,100 @@
+{
+  "schema": "ee.agent_mail_snapshot.parser_matrix.v1",
+  "redactionStatus": "paths_counts_subjects_only_no_content",
+  "cases": [
+    {
+      "case": "full_snapshot_aliases",
+      "fileReservations": [
+        {
+          "pathPattern": "docs/swarm/coordination_snapshot.md",
+          "holder": "BeigeHollow",
+          "exclusive": false,
+          "expiresAt": "2026-06-05T01:00:00Z"
+        },
+        {
+          "pathPattern": "src/core/swarm_brief.rs",
+          "holder": "Agent [REDACTED:github_token]",
+          "exclusive": true,
+          "expiresAt": "2026-06-05T00:00:00Z"
+        }
+      ],
+      "agents": [
+        {
+          "name": "AmberLake",
+          "lastActiveAt": "2026-06-04T21:00:00Z"
+        },
+        {
+          "name": "BlueFortress",
+          "lastActiveAt": "2026-06-04T22:00:00Z"
+        }
+      ],
+      "inbox": [
+        {
+          "mailbox": "AmberLake",
+          "unreadCount": 0,
+          "ackRequiredCount": 0
+        },
+        {
+          "mailbox": "BlueFortress",
+          "unreadCount": 2,
+          "ackRequiredCount": 1
+        }
+      ],
+      "threads": [
+        {
+          "threadId": "bd-6qcwh.2",
+          "subject": "Producer lane",
+          "messageCount": 2,
+          "lastActivityAt": "2026-06-04T22:15:00Z"
+        },
+        {
+          "threadId": "bd-6qcwh.3",
+          "subject": "Pin snapshot [REDACTED:github_token]",
+          "messageCount": 4,
+          "lastActivityAt": "2026-06-04T22:30:00Z"
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "case": "health_only_snapshot",
+      "fileReservations": [],
+      "agents": [],
+      "inbox": [],
+      "threads": [],
+      "degraded": [
+        {
+          "code": "agent_mail_unavailable",
+          "source": "agent_mail",
+          "severity": "warning",
+          "message": "Agent Mail transport health is degraded; failed checks: mcp_http.",
+          "repair": "Run `am doctor repair` or provide a current redacted Agent Mail snapshot."
+        }
+      ]
+    },
+    {
+      "case": "semantic_readiness_failed",
+      "fileReservations": [],
+      "agents": [],
+      "inbox": [],
+      "threads": [],
+      "degraded": [
+        {
+          "code": "agent_mail_semantic_readiness_failed",
+          "source": "agent_mail",
+          "severity": "warning",
+          "message": "Agent Mail semantic readiness failed with healthLevel=green (malformed_sqlite); reservation and inbox reads are not authoritative.",
+          "repair": "Repair Agent Mail storage and re-run the work-packet collector after semantic readiness passes."
+        }
+      ]
+    },
+    {
+      "case": "missing_optional_arrays",
+      "fileReservations": [],
+      "agents": [],
+      "inbox": [],
+      "threads": [],
+      "degraded": []
+    }
+  ]
+}

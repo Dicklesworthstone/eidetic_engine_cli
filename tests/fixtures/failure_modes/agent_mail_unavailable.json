@@ -26,6 +26,8 @@
     "repair_contains": "Agent Mail",
     "repair_strings": [
       "Provide a redacted Agent Mail snapshot path when collecting the brief.",
+      "Generate a read-only redacted Agent Mail snapshot and pass --agent-mail-snapshot <snapshot.json>; live MCP tools remain external to ee.",
+      "Start or repair Agent Mail, generate a read-only redacted Agent Mail snapshot, then pass --agent-mail-snapshot <snapshot.json> when collecting the brief.",
       "Regenerate the redacted Agent Mail snapshot.",
       "Check the configured Agent Mail snapshot path.",
       "Run `am doctor repair` or provide a current redacted Agent Mail snapshot."
