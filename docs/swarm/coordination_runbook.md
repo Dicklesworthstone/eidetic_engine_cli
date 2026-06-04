@@ -12,6 +12,32 @@ panic output from the `am` CLI.
 4. If `mcp_http_reachable` is false, do not rely on MCP Agent Mail tools,
    resource reads, or file reservations.
 
+The health script is not a full snapshot producer. It can run send smoke checks
+and emits `ee.swarm.coordination_health.v1`, which is useful transport evidence
+but does not include active reservations, agent roster entries, unread counts,
+or thread freshness.
+
+When those fields matter, generate a full read-only snapshot:
+
+```bash
+SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
+scripts/agent_mail_snapshot.sh \
+  --project "$PWD" \
+  --agent "$AGENT_NAME" \
+  --output "$SNAPSHOT_PATH"
+```
+
+Use a canonical, non-symlink `SNAPSHOT_PATH`. On macOS, `/tmp` is a symlink and
+`ee swarm brief --agent-mail-snapshot /tmp/...` refuses the path.
+
+Then consume the snapshot without live Agent Mail mutation:
+
+```bash
+ee swarm brief --workspace . --agent-mail-snapshot "$SNAPSHOT_PATH" --json
+ee workspace hygiene --workspace . --agent-name "$AGENT_NAME" \
+  --agent-mail-snapshot "$SNAPSHOT_PATH" --json
+```
+
 ## Fallback Workflow
 
 For each active task:
@@ -44,6 +70,10 @@ not mean there are no reservations, no messages, or no active owners.
 `ee swarm brief` may report that `127.0.0.1:8765/health` is reachable when no
 snapshot is configured; that only proves the health endpoint answered, not that
 the brief consumed live reservations or inbox state.
+
+Similarly, a green `scripts/swarm_coordination_health.sh` event is not proof of
+zero reservations or zero unread mail. Use `scripts/agent_mail_snapshot.sh`
+when claim decisions need reservation, roster, inbox, or thread evidence.
 
 When a context pack or swarm brief reports `agent_mail_unavailable`, treat the
 coordination confidence as degraded and verify with Beads comments before

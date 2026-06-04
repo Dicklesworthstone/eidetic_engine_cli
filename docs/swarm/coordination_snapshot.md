@@ -21,6 +21,7 @@ Tracking Bead: `bd-1zb7k.4`
 ## Agent Mail Snapshot Producer Contract
 
 Tracking Bead: `bd-6qcwh.1`
+Producer implementation: `scripts/agent_mail_snapshot.sh` (`bd-6qcwh.2`)
 
 `ee swarm brief --agent-mail-snapshot <path>` consumes a side-effect-free,
 redacted Agent Mail snapshot. This is not the same file as the pack-level
@@ -54,7 +55,7 @@ Optional top-level metadata:
 | `generated_at` | RFC 3339 production timestamp. |
 | `project_key` | Redacted or workspace-relative project identifier. |
 | `source_commands` | Redacted list of read-only commands/resources used. |
-| `redaction_status` | Producer redaction posture, for example `complete`. |
+| `redaction_status` | Producer redaction posture, for example `paths_counts_subjects_only_no_content`. |
 | `fallback_active` | Agent Mail fallback state from the health probe. |
 | `semantic_readiness` | Object or string describing semantic-readiness status. |
 | `healthLevel` | Health classification used in semantic-readiness diagnostics. |
@@ -150,6 +151,55 @@ The producer should record the read-only commands or MCP resources it used in
 trust that field for safety; no-mutation tests must prove the producer's
 behavior.
 
+## Shipped Producer
+
+Generate a full snapshot with:
+
+```bash
+SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
+scripts/agent_mail_snapshot.sh \
+  --project "$PWD" \
+  --agent "$AGENT_NAME" \
+  --output "$SNAPSHOT_PATH"
+```
+
+Use a canonical, non-symlink snapshot path. On macOS, `/tmp` is usually a
+symlink to `/private/tmp`, and `ee swarm brief --agent-mail-snapshot /tmp/...`
+refuses that path before reading the file.
+
+Useful producer options:
+
+| Option | Purpose |
+| --- | --- |
+| `--project <path>` | Agent Mail project/workspace path. Defaults to `AGENT_MAIL_PROJECT` or the current directory. |
+| `--agent <name>` | Mailbox used for inbox/thread summaries. Defaults to `AGENT_MAIL_AGENT` or `AGENT_NAME`. |
+| `--am-bin <path>` | Agent Mail CLI binary. Defaults to `AGENT_MAIL_AM_BIN` or `am`. |
+| `--inbox-limit <n>` | Maximum inbox rows to read for count and thread projection. |
+| `--thread-limit <n>` | Maximum thread summaries emitted. |
+| `--timeout-sec <n>` | Per-command timeout; failures are emitted as degraded source entries. |
+| `--output <path>` | Write JSON to this path instead of stdout. |
+
+The producer currently calls only read-only Agent Mail commands:
+
+```bash
+am agents list --project <workspace> --json
+am robot reservations --project <workspace> --all --format json
+am mail inbox --project <workspace> --agent <agent> --limit <n> --json
+```
+
+It intentionally does not call `scripts/swarm_coordination_health.sh`, because
+that script can run send smoke checks. Health events remain useful as degraded
+transport evidence; they are not full reservation, roster, inbox, or thread
+snapshots.
+
+Pass the generated file to consumers:
+
+```bash
+ee swarm brief --workspace . --agent-mail-snapshot "$SNAPSHOT_PATH" --json
+ee workspace hygiene --workspace . --agent-name "$AGENT_NAME" \
+  --agent-mail-snapshot "$SNAPSHOT_PATH" --json
+```
+
 ## Examples
 
 Healthy full snapshot:
@@ -157,13 +207,15 @@ Healthy full snapshot:
 ```json
 {
   "generated_at": "2026-06-04T18:20:00Z",
-  "redaction_status": "complete",
+  "project_key": "<workspace>",
+  "redaction_status": "paths_counts_subjects_only_no_content",
   "source_commands": [
-    "am agents list --project <workspace> --json",
-    "am file_reservations list <workspace> --active-only",
-    "am robot reservations --project <workspace> --all --format json",
-    "am mail inbox --project <workspace> --agent <agent> --limit 20 --json"
+    "am agents list --project '<workspace>' --json",
+    "am robot reservations --project '<workspace>' --all --format json",
+    "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json"
   ],
+  "producer_status": "ok",
+  "fallback_active": false,
   "file_reservations": [
     {
       "path_pattern": "docs/swarm/coordination_snapshot.md",
@@ -219,7 +271,7 @@ Stale snapshot:
 ```json
 {
   "generated_at": "2026-06-04T12:00:00Z",
-  "redaction_status": "complete",
+  "redaction_status": "paths_counts_subjects_only_no_content",
   "file_reservations": [],
   "agents": [],
   "inbox": [],

@@ -57,14 +57,48 @@ transport or semantic-readiness failures, but it does not contain reservations,
 agent inventory, unread counts, or thread freshness. Do not treat it as a full
 Agent Mail snapshot.
 
-When the brief must include reservations, unread counts, or thread freshness,
-pass a redacted Agent Mail snapshot with `--agent-mail-snapshot <path>`. The
-snapshot must follow the producer contract in
-`docs/swarm/coordination_snapshot.md`: it should include the
-`file_reservations`, `agents`, `inbox`, and `threads` arrays, using empty arrays
-only for classes the producer actually checked.
+## Full Snapshot
 
-Useful environment overrides:
+When the brief must include reservations, unread counts, or thread freshness,
+generate a full redacted snapshot first:
+
+```bash
+SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
+scripts/agent_mail_snapshot.sh \
+  --project "$PWD" \
+  --agent "$AGENT_NAME" \
+  --output "$SNAPSHOT_PATH"
+```
+
+Use a canonical, non-symlink path for `SNAPSHOT_PATH`. On macOS,
+`ee swarm brief --agent-mail-snapshot /tmp/...` is refused because `/tmp` is a
+symlink; use `/private/tmp/...` or another resolved path.
+
+Then pass the snapshot to read-only consumers:
+
+```bash
+ee swarm brief --workspace . --agent-mail-snapshot "$SNAPSHOT_PATH" --json
+ee workspace hygiene --workspace . --agent-name "$AGENT_NAME" \
+  --agent-mail-snapshot "$SNAPSHOT_PATH" --json
+```
+
+The snapshot follows the producer contract in
+`docs/swarm/coordination_snapshot.md`: it includes the `file_reservations`,
+`agents`, `inbox`, and `threads` arrays, using empty arrays only for classes the
+producer actually checked. The producer never sends mail, acknowledges
+messages, marks read state, creates or releases reservations, mutates Beads, or
+runs the health smoke-test script.
+
+Useful full-snapshot environment overrides:
+
+```bash
+AGENT_MAIL_PROJECT=/path/to/repo
+AGENT_MAIL_AGENT=AgentName
+AGENT_NAME=AgentName
+AGENT_MAIL_AM_BIN=am
+```
+
+Useful health-check environment overrides:
 
 ```bash
 AGENT_MAIL_PROJECT=/path/to/repo

@@ -731,8 +731,20 @@ looks live, but `ee` still needs an explicit redacted snapshot for deterministic
 briefs.
 
 ```bash
-ee swarm brief --workspace . --agent-mail-snapshot <snapshot.json> --json
+SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
+scripts/agent_mail_snapshot.sh \
+  --project "$PWD" \
+  --agent "$AGENT_NAME" \
+  --output "$SNAPSHOT_PATH"
+
+ee swarm brief --workspace . --agent-mail-snapshot "$SNAPSHOT_PATH" --json
 ```
+
+Use a canonical, non-symlink snapshot path. On macOS, `/tmp` is normally a
+symlink to `/private/tmp`, and `ee swarm brief --agent-mail-snapshot /tmp/...`
+refuses the file before reading it. `scripts/swarm_coordination_health.sh`
+emits health evidence only; it is not a full reservation, roster, inbox, or
+thread snapshot.
 
 Useful JSON checks:
 
