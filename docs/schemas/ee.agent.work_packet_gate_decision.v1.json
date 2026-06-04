@@ -64,6 +64,88 @@
       "minimum": 0
     }
   },
+  "examples": [
+    {
+      "schema": "ee.agent.work_packet_gate_decision.v1",
+      "sourceSchema": "ee.swarm.work_packet.claim_gate.v1",
+      "safeToClaim": true,
+      "candidateId": "bd-safe.1",
+      "decision": "safe_to_claim",
+      "action": "inspect_and_claim",
+      "argvActions": [
+        {
+          "commandId": "bead_show_candidate",
+          "actionKind": "inspection",
+          "argv": ["br", "show", "bd-safe.1", "--json"],
+          "runnable": true,
+          "reviewRequired": false,
+          "mutatesState": false,
+          "requiredSubstrate": "static_local",
+          "when": "after_gate",
+          "copySafety": "safe_structured_argv",
+          "reason": "safe_structured_argv"
+        },
+        {
+          "commandId": "bead_claim_candidate",
+          "actionKind": "claim",
+          "argv": [
+            "br",
+            "update",
+            "bd-safe.1",
+            "--status",
+            "in_progress",
+            "--json"
+          ],
+          "runnable": true,
+          "reviewRequired": false,
+          "mutatesState": true,
+          "requiredSubstrate": "beads",
+          "when": "after_gate",
+          "copySafety": "safe_structured_argv",
+          "reason": "safe_structured_argv"
+        }
+      ],
+      "mutatingActionsRequireHuman": false,
+      "whyNotSafe": [],
+      "sourceSummary": {
+        "trackerHealth": "clean",
+        "trackerAuthoritative": true,
+        "requiresCandidateDowngrade": false,
+        "agentMailStatus": "healthy",
+        "reservationAuthoritative": true,
+        "inboxAuthoritative": true,
+        "rchPosture": "static_only",
+        "rchSafeToLaunchCargoVerification": true,
+        "sourceCount": 5
+      },
+      "degradedSummary": [],
+      "legacyCommandStringsRefused": 0
+    },
+    {
+      "schema": "ee.agent.work_packet_gate_decision.v1",
+      "sourceSchema": null,
+      "safeToClaim": false,
+      "candidateId": null,
+      "decision": "error",
+      "action": "blocked_no_action",
+      "argvActions": [],
+      "mutatingActionsRequireHuman": false,
+      "whyNotSafe": ["error:stale_claim_gate_binary"],
+      "sourceSummary": {
+        "trackerHealth": null,
+        "trackerAuthoritative": null,
+        "requiresCandidateDowngrade": null,
+        "agentMailStatus": null,
+        "reservationAuthoritative": null,
+        "inboxAuthoritative": null,
+        "rchPosture": null,
+        "rchSafeToLaunchCargoVerification": null,
+        "sourceCount": 0
+      },
+      "degradedSummary": [],
+      "legacyCommandStringsRefused": 0
+    }
+  ],
   "$defs": {
     "nullableString": {
       "oneOf": [

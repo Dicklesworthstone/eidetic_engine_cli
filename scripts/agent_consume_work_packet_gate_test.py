@@ -985,6 +985,55 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
                 for entry in decision["degradedSummary"]:
                     self.assertEqual(set(entry), degraded_required)
 
+    def test_schema_examples_match_consumer_decision_shape(self):
+        schema = load_fixture(
+            "docs/schemas/ee.agent.work_packet_gate_decision.v1.json"
+        )
+        required = set(schema["required"])
+        action_required = set(schema["$defs"]["argvAction"]["required"])
+        source_required = set(schema["$defs"]["sourceSummary"]["required"])
+        degraded_required = set(schema["$defs"]["degradedSummaryEntry"]["required"])
+        examples = schema.get("examples")
+
+        self.assertIsInstance(examples, list)
+        self.assertGreaterEqual(len(examples), 2)
+
+        saw_safe = False
+        saw_blocked = False
+        for index, example in enumerate(examples):
+            with self.subTest(example=index):
+                self.assertEqual(set(example), required)
+                self.assertEqual(example["schema"], consumer.OUTPUT_SCHEMA)
+                self.assertEqual(set(example["sourceSummary"]), source_required)
+                for action in example["argvActions"]:
+                    self.assertEqual(set(action), action_required)
+                for entry in example["degradedSummary"]:
+                    self.assertEqual(set(entry), degraded_required)
+
+                if example["safeToClaim"]:
+                    saw_safe = True
+                    self.assertEqual(example["whyNotSafe"], [])
+                    self.assertTrue(
+                        any(
+                            action["actionKind"] == "claim"
+                            and action["runnable"]
+                            and action["mutatesState"]
+                            for action in example["argvActions"]
+                        )
+                    )
+                else:
+                    saw_blocked = True
+                    self.assertTrue(example["whyNotSafe"])
+                    self.assertFalse(
+                        any(
+                            action["runnable"] and action["mutatesState"]
+                            for action in example["argvActions"]
+                        )
+                    )
+
+        self.assertTrue(saw_safe)
+        self.assertTrue(saw_blocked)
+
 
 class WorkPacketDocsContract(unittest.TestCase):
     def test_schema_examples_do_not_mark_degraded_authority_claim_safe(self):
