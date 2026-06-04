@@ -33,6 +33,29 @@ F1-F5 scripts are expected to be present. The wrapper fails on any script
 failure, on non-executable present scripts, or when the suite exceeds
 `AGENT_ERGONOMICS_E2E_TOTAL_BUDGET_SECONDS` (default `300`).
 
+## Failure Evidence Radar
+
+Logged shell E2Es should also pass the E2E event contract radar before they are
+promoted to release gates. The radar is documented in
+`docs/e2e-event-contract-radar.md`; it checks that `ee.test_event.v1` scripts
+record command lifecycle rows, assertion verdicts, schema/redaction status,
+stdout/stderr artifact paths, sanitized environment posture, and first-failure
+diagnosis on failure paths as well as success paths.
+
+Use the focused scan while editing one script:
+
+```bash
+scripts/e2e_event_contract_radar.sh \
+  --json \
+  --quiet \
+  --output /dev/null \
+  scripts/e2e_overhaul/<script>.sh
+```
+
+An `advisory_gap` means the script can still be useful, but it should not be
+claimed as fully logged evidence until the cited `failurePaths[]` branches emit
+`assert_fail` or `assert_result` rows.
+
 ## Rust Tracing
 
 F1-F5 source instrumentation should use stable targets shaped as:

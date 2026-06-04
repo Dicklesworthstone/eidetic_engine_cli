@@ -584,6 +584,9 @@ Code or behavior beads:
 
 - Include unit tests for new local logic.
 - Include public-surface tests for CLI/MCP/hook/export/renderer/eval behavior.
+- For shell E2E scripts that emit `ee.test_event.v1`, run the E2E event
+  contract radar described in `docs/e2e-event-contract-radar.md` and record any
+  `advisory_gap`, `known_gap`, or `fail` posture in the close reason.
 - Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
   relevant tests through RCH when Cargo is involved.
 - Run the forbidden-dependency audit when dependencies or feature flags change.

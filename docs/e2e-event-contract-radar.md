@@ -67,6 +67,96 @@ The required coverage fields are:
 | `stderrArtifactPath` | Redaction-safe stderr artifact path or hash when stderr matters. |
 | `sanitizedEnv` | Evidence that environment variables were scrubbed or recorded without secrets. |
 
+## Agent Workflow
+
+Run the radar before promoting a shell E2E script to a release gate, after
+touching a script that emits `ee.test_event.v1`, and when a failed E2E left too
+little handoff evidence for Beads or Agent Mail.
+
+```bash
+scripts/e2e_event_contract_radar.sh \
+  --json \
+  --quiet \
+  --output .e2e-event-contract-radar-report.json
+```
+
+For a focused remediation pass, scan only the script you plan to fix:
+
+```bash
+scripts/e2e_event_contract_radar.sh \
+  --json \
+  --quiet \
+  --output /dev/null \
+  scripts/e2e_overhaul/swarm_replay_lab_smoke.sh
+```
+
+Read `summary` first, then inspect `matrix[]` rows whose `status` is
+`advisory_gap`, `known_gap`, or `fail`. A good closeout names both the focused
+row result and the full-run summary. Example:
+
+```text
+focused radar: status=pass failurePaths=[]
+full radar: scriptCount=173 passCount=1 advisoryGapCount=55
+```
+
+The radar is static. It proves that a script contains the expected failure
+verdict pattern; it does not prove that the underlying `ee` binary is current or
+that a Cargo-backed workflow passed. If a real smoke fails because the local
+binary is stale, keep the emitted `assert_result` artifact as evidence and state
+the stale-binary error explicitly. Refreshing the binary or running Rust tests
+must go through RCH; local Cargo fallback is not acceptable proof on the Mac dev
+host.
+
+## Reading Verdicts
+
+Use the row status to choose the next action:
+
+| Status | Meaning | Agent action |
+| --- | --- | --- |
+| `pass` | Required fields and every detected failure path have verdict evidence. | Use as closeout evidence alongside shell/static checks. |
+| `advisory_gap` | The script appears relevant but at least one required field or branch is missing. | Pick the smallest high-value failure path and add an `assert_fail` or `assert_result` row before the exit. |
+| `known_gap` | The gap is temporarily accepted by an active allowlist entry. | Do not treat as done; cite owner, reason, and expiry, then prefer fixing it when nearby. |
+| `fail` | The scanner or contract found a hard error. | Fix the scanner input or report before relying on the row. |
+| `not_applicable` | The script does not emit `ee.test_event.v1` evidence. | Leave alone unless the script is being promoted to a logged E2E gate. |
+
+The most useful field for remediation is `failurePaths[]`. Each entry points to
+a direct `exit` or implicit failure such as `jq -e` under `set -e`. Fix the
+branch at that location, not the whole script.
+
+## Remediation Pattern
+
+For shell scripts, each failure branch should emit one compact verdict row
+before exiting. The row may be `assert_fail` when the script already uses a
+shared logger, or `assert_result` when the script records command results and
+assertion outcomes in one object. It must include:
+
+- the sanitized command or validation step that failed;
+- redaction-safe workspace and sanitized environment posture;
+- elapsed time and exit code, using `0` only for checks that did not run a
+  command;
+- stdout and stderr artifact paths, or an explicit not-applicable posture;
+- `schema_validation_status`, `redaction_status`, and
+  `first_failure_diagnosis`.
+
+Prefer a small helper function over copy-pasted JSON fragments when a script has
+multiple exits. Keep diagnostics on stderr and machine data in JSON/JSONL
+artifacts. Do not include raw workspace paths, secrets, mail bodies, memory
+content, query text, or full command output in event rows.
+
+## Examples
+
+Fixture scripts under `tests/fixtures/e2e_event_contract_radar/scripts/` show
+the common cases:
+
+| Fixture | Verdict | Lesson |
+| --- | --- | --- |
+| `complete.sh` | `pass` | Direct exits are acceptable when each branch already emits verdict evidence with diagnosis and artifact paths. |
+| `success_only.sh` | `advisory_gap` | Success events are not enough; early failures need their own verdict row. |
+| `set_e_implicit_exit.sh` | `advisory_gap` | `jq -e` can terminate a `set -e` script before an assertion row is written. Wrap it in `if ! jq -e ...; then emit verdict; fi`. |
+| `cleanup_trap_only.sh` | `advisory_gap` | Cleanup traps do not replace command lifecycle and assertion evidence. |
+| `no_event_logging.sh` | `not_applicable` | Plain shell helpers are neutral until they claim `ee.test_event.v1` evidence. |
+| `allowlist_example.json` | `known_gap` input | Allowlisting is a temporary owner/reason/expiry record, not a pass. |
+
 ## Advisory And Blocking Modes
 
 `mode = "advisory"` is the seeding mode. The radar emits a report and may
@@ -122,3 +212,13 @@ The no-Cargo golden harness is
 the fixture scripts, normalizes `generatedAt`, compares the output to
 `complete_and_gap_report.json`, and checks that the intentionally invalid
 negative fixture still exercises the closed-object contract.
+
+## Related Docs
+
+- `docs/agent-ux/e2e-conventions.md` describes the shared shell logging
+  conventions for agent-facing E2Es.
+- `docs/agent-ux/swarm-replay-contracts.md` and
+  `docs/agent-ux/workload-replay.md` describe the replay smoke that motivated
+  the first remediation pass.
+- `docs/testing-strategy.md` defines closeout expectations for code, behavior,
+  docs-only, and shell E2E work.
