@@ -384,6 +384,50 @@ class WorkPacketConsumer(unittest.TestCase):
         self.assertEqual(decision["decision"], "no_candidate")
         self.assertIn("no_candidate_available", decision["whyNotSafe"])
 
+    def test_malformed_legacy_command_fields_do_not_crash_or_use_string_length(self):
+        packet = {
+            "schema": "ee.swarm.work_packet.v1",
+            "recommendedAction": {
+                "action": "blocked_no_action",
+                "candidateId": "bd-malformed.1",
+                "safeToClaim": False,
+                "suggestedCommands": "br update bd-malformed.1 --status in_progress",
+                "suggestedCommandActions": None,
+            },
+            "candidates": [
+                {
+                    "id": "bd-malformed.1",
+                    "decision": "blocked",
+                    "unsafeReasons": ["malformed_command_surface"],
+                    "staleReasons": [],
+                }
+            ],
+            "coordination": {
+                "agentMail": {"status": "healthy", "fallbackActions": "not-a-list"}
+            },
+            "trackerIntegrity": {"health": "ok", "brReadsAuthoritative": True},
+            "rchProofPosture": {"safeToLaunchCargoVerification": True, "blockerCodes": []},
+            "verification": {
+                "requiredCommands": None,
+                "staticChecks": [{"commandTemplate": "cargo check --all-targets"}, None],
+            },
+            "requiredActions": [
+                "br show bd-malformed.1 --json",
+                {"command": "git status --short --branch"},
+                None,
+            ],
+            "sourceProvenance": None,
+            "degraded": [],
+        }
+
+        decision = consumer.consume(packet)
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["candidateId"], "bd-malformed.1")
+        self.assertEqual(decision["legacyCommandStringsRefused"], 4)
+        self.assertEqual(decision["argvActions"], [])
+        self.assertEqual(decision["sourceSummary"]["sourceCount"], 0)
+        self.assertIn("malformed_command_surface", decision["whyNotSafe"])
+
     def test_secret_shaped_strings_are_redacted_and_not_runnable(self):
         gate = safe_gate()
         github_classic = "ghp_" + "0123456789abcdef0123456789abcdef0123"

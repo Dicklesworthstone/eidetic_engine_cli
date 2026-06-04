@@ -59,6 +59,18 @@ def compact_list(values, limit=16):
     return result
 
 
+def list_items(value):
+    return value if isinstance(value, list) else []
+
+
+def count_legacy_command_strings(value):
+    if isinstance(value, str):
+        return 1 if redact_text(value) else 0
+    if not isinstance(value, list):
+        return 0
+    return sum(1 for item in value if isinstance(item, str) and redact_text(item))
+
+
 def get_payload(response):
     if isinstance(response, dict) and response.get("success") is False:
         return None
@@ -101,7 +113,10 @@ def degraded_summary(payload, envelope_degraded=None):
         rch = payload.get("rchProofPosture", {})
         for code in compact_list(rch.get("blockerCodes")):
             add(code, "rch")
-        for blocker in rch.get("knownBlockers", []) if isinstance(rch, dict) else []:
+        known_blockers = (
+            list_items(rch.get("knownBlockers")) if isinstance(rch, dict) else []
+        )
+        for blocker in known_blockers:
             if not isinstance(blocker, dict):
                 continue
             add(blocker.get("code"), "rch")
@@ -150,7 +165,7 @@ def source_summary_from_packet(packet):
         "rchSafeToLaunchCargoVerification": rch.get("safeToLaunchCargoVerification")
         if "safeToLaunchCargoVerification" in rch
         else legacy_verification.get("remoteOnlySafe"),
-        "sourceCount": len(packet.get("sourceProvenance", [])),
+        "sourceCount": len(list_items(packet.get("sourceProvenance"))),
     }
 
 
@@ -215,7 +230,7 @@ def classify_action(action, safe_to_claim, action_kind):
 
 def command_actions_from_gate(gate, safe_to_claim):
     actions = []
-    for action in gate.get("nextCommandActions", []):
+    for action in list_items(gate.get("nextCommandActions")):
         if isinstance(action, dict):
             actions.append(classify_action(action, safe_to_claim, "inspection"))
     claim_action = gate.get("claimCommandAction")
@@ -228,14 +243,14 @@ def command_actions_from_packet(packet, safe_to_claim):
     actions = []
     legacy_refused = 0
     recommended = packet.get("recommendedAction", {})
-    for action in recommended.get("suggestedCommandActions", []):
+    for action in list_items(recommended.get("suggestedCommandActions")):
         if isinstance(action, dict):
             actions.append(classify_action(action, safe_to_claim, "recommended"))
-    legacy_refused += len(recommended.get("suggestedCommands", []))
+    legacy_refused += count_legacy_command_strings(recommended.get("suggestedCommands"))
 
     verification = packet.get("verification", {})
     for key in ("requiredCommands", "staticChecks"):
-        for command in verification.get(key, []):
+        for command in list_items(verification.get(key)):
             if not isinstance(command, dict):
                 continue
             if isinstance(command.get("commandAction"), dict):
@@ -246,7 +261,7 @@ def command_actions_from_packet(packet, safe_to_claim):
                 legacy_refused += 1
 
     agent_mail = packet.get("coordination", {}).get("agentMail", {})
-    for fallback in agent_mail.get("fallbackActions", []):
+    for fallback in list_items(agent_mail.get("fallbackActions")):
         if not isinstance(fallback, dict):
             continue
         if isinstance(fallback.get("commandAction"), dict):
@@ -256,11 +271,11 @@ def command_actions_from_packet(packet, safe_to_claim):
         elif fallback.get("command"):
             legacy_refused += 1
 
-    legacy_refused += sum(
-        1
-        for action in packet.get("requiredActions", [])
-        if isinstance(action, dict) and action.get("command")
-    )
+    for action in list_items(packet.get("requiredActions")):
+        if isinstance(action, str) and redact_text(action):
+            legacy_refused += 1
+        elif isinstance(action, dict) and action.get("command"):
+            legacy_refused += 1
     return actions, legacy_refused
 
 
