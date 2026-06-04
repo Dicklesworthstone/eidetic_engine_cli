@@ -30,6 +30,10 @@ use crate::core::qos::{
     QosThrottleCheckpoint, decide_background_throttle,
 };
 use crate::db::{DbConnection, StoredAuditEntry, audit_actions};
+use crate::models::regression_causality::{
+    REGRESSION_CAUSALITY_SCHEMA_V1, RegressionEvidenceInput, RegressionEvidenceKind,
+    normalize_regression_evidence_inputs, rank_regression_cause_hypotheses,
+};
 use crate::models::{
     ArtifactDegradationSeverity, ArtifactKind, ArtifactSummary, DomainError, MetricValue,
     ProfileReference, ProvenanceEntry, RedactionLevel, RedactionPosture, SummaryDegradation,
@@ -130,6 +134,9 @@ const SINGLEFLIGHT_POSTURE_FILE: &str = "singleflight_posture.json";
 const QOS_LANE_SUMMARY_FILE: &str = "qos_lane_summary.json";
 const TRIAGE_SUMMARY_FILE: &str = "scale_triage_summary.json";
 const LOCAL_CARGO_TRIPWIRE_FILE: &str = "local_cargo_tripwire.json";
+const REGRESSION_CAUSALITY_SUMMARY_FILE: &str = "regression_causality_summary.json";
+const SUPPORT_BUNDLE_REGRESSION_CAUSALITY_SUMMARY_SCHEMA_V1: &str =
+    "ee.support_bundle.regression_causality_summary.v1";
 const SUPPORT_BUNDLE_REQUIRED_REMOTE_WRAPPER: &str = "scripts/rch_verify.sh -- <cargo command>";
 const TAILSCALE_METADATA_FIELDS: &[&str] = &[
     "selfNodeKey",
@@ -332,6 +339,7 @@ struct CollectedDiagnostics {
     qos_lane_summary_json: String,
     triage_summary_json: String,
     local_cargo_tripwire_json: String,
+    regression_causality_summary_json: String,
 }
 
 /// Plan what would be collected without actually creating the bundle.
@@ -467,6 +475,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (
             LOCAL_CARGO_TRIPWIRE_FILE,
             &diagnostics.local_cargo_tripwire_json,
+        ),
+        (
+            REGRESSION_CAUSALITY_SUMMARY_FILE,
+            &diagnostics.regression_causality_summary_json,
         ),
     ];
 
@@ -956,6 +968,58 @@ fn collect_diagnostics(
     let qos_lane_summary_json = qos_lane_summary_json(workspace);
     let triage_summary_json = triage_summary_json(&status, &swarm_reports);
     let local_cargo_tripwire_json = local_cargo_tripwire_json(workspace);
+    let regression_causality_summary_json = regression_causality_summary_json(&[
+        (
+            "support_bundle:verification_evidence_summary",
+            RegressionEvidenceKind::VerificationEvidence,
+            verification_evidence_summary_json.as_str(),
+        ),
+        (
+            "support_bundle:pack_replay_summary",
+            RegressionEvidenceKind::PackReplay,
+            pack_replay_summary_json.as_str(),
+        ),
+        (
+            "support_bundle:swarm_replay_summary",
+            RegressionEvidenceKind::SwarmReplay,
+            swarm_replay_summary_json.as_str(),
+        ),
+        (
+            "support_bundle:swarm_brief_summary",
+            RegressionEvidenceKind::SwarmReplay,
+            swarm_brief_summary_json.as_str(),
+        ),
+        (
+            "support_bundle:swarm_incident_summary",
+            RegressionEvidenceKind::SwarmReplay,
+            swarm_incident_summary_json.as_str(),
+        ),
+        (
+            "support_bundle:performance_explain_samples",
+            RegressionEvidenceKind::PerfReport,
+            performance_explain_samples_json.as_str(),
+        ),
+        (
+            "support_bundle:scale_benchmark_summary",
+            RegressionEvidenceKind::PerfReport,
+            scale_benchmark_summary_json.as_str(),
+        ),
+        (
+            "support_bundle:triage_summary",
+            RegressionEvidenceKind::SupportBundle,
+            triage_summary_json.as_str(),
+        ),
+        (
+            "support_bundle:coordination_fallback_summary",
+            RegressionEvidenceKind::SupportBundle,
+            coordination_fallback_summary_json.as_str(),
+        ),
+        (
+            "support_bundle:local_cargo_tripwire",
+            RegressionEvidenceKind::VerificationEvidence,
+            local_cargo_tripwire_json.as_str(),
+        ),
+    ]);
 
     Ok(CollectedDiagnostics {
         status_json,
@@ -981,6 +1045,7 @@ fn collect_diagnostics(
         qos_lane_summary_json,
         triage_summary_json,
         local_cargo_tripwire_json,
+        regression_causality_summary_json,
     })
 }
 
@@ -2000,6 +2065,89 @@ fn local_cargo_tripwire_json(workspace: &Path) -> String {
             "Live process evidence comes from the read-only local-Cargo tripwire process scanner."
         ],
     }))
+}
+
+fn regression_causality_summary_json(sections: &[(&str, RegressionEvidenceKind, &str)]) -> String {
+    stable_json(&regression_causality_summary_value(sections))
+}
+
+fn regression_causality_summary_value(sections: &[(&str, RegressionEvidenceKind, &str)]) -> Value {
+    let inputs = sections
+        .iter()
+        .map(|(id, kind, content)| {
+            regression_causality_input_from_support_section(id, *kind, content)
+        })
+        .collect::<Vec<_>>();
+    let normalization = normalize_regression_evidence_inputs(&inputs);
+    let ranking = rank_regression_cause_hypotheses(&normalization.rows);
+    let top_hypotheses = ranking
+        .hypotheses
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>();
+    let suppressed_field_count = normalization
+        .rows
+        .iter()
+        .map(|row| row.provenance.suppressed_fields.len())
+        .sum::<usize>();
+    let status = if ranking.hypotheses.is_empty() {
+        "no_ranked_hypotheses"
+    } else {
+        "ranked"
+    };
+    let provenance = sections
+        .iter()
+        .map(|(id, kind, _)| {
+            json!({
+                "sourceId": id,
+                "kind": kind.as_str(),
+                "redaction": "section_json_not_copied_values_normalized_rows_only",
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "schema": SUPPORT_BUNDLE_REGRESSION_CAUSALITY_SUMMARY_SCHEMA_V1,
+        "sourceSchema": REGRESSION_CAUSALITY_SCHEMA_V1,
+        "status": status,
+        "redactionStatus": "derived_redaction_safe_no_raw_logs",
+        "inputSectionCount": sections.len(),
+        "normalizedRowCount": normalization.rows.len(),
+        "suppressedFieldCount": suppressed_field_count,
+        "topHypotheses": top_hypotheses,
+        "normalization": normalization,
+        "ranking": ranking,
+        "redaction": {
+            "inputArtifactsCopied": false,
+            "rawLogsPresent": false,
+            "rawMailBodiesPresent": false,
+            "rawMemoryBodiesPresent": false,
+            "privatePathsPresent": false,
+            "hashesOnly": true,
+            "secretScanApplied": true,
+            "normalizerSuppressedFieldCount": suppressed_field_count,
+        },
+        "provenance": provenance,
+    })
+}
+
+fn regression_causality_input_from_support_section(
+    id: &str,
+    kind: RegressionEvidenceKind,
+    content: &str,
+) -> RegressionEvidenceInput {
+    let artifact = serde_json::from_str::<Value>(content).unwrap_or_else(|error| {
+        json!({
+            "schema": "ee.support_bundle.section_parse_error.v1",
+            "status": "malformed",
+            "degradedCodes": ["support_bundle_section_parse_error"],
+            "redactionStatus": "safe",
+            "message": error.to_string(),
+        })
+    });
+    RegressionEvidenceInput::new(id.to_owned(), kind, artifact)
+        .with_artifact_hash(format!("blake3:{}", compute_hash(content)))
 }
 
 pub(crate) fn local_cargo_tripwire_process_scan_json(workspace: &Path) -> Value {
@@ -3289,6 +3437,7 @@ fn planned_files() -> Vec<String> {
         QOS_LANE_SUMMARY_FILE.to_owned(),
         TRIAGE_SUMMARY_FILE.to_owned(),
         LOCAL_CARGO_TRIPWIRE_FILE.to_owned(),
+        REGRESSION_CAUSALITY_SUMMARY_FILE.to_owned(),
         MANIFEST_FILE.to_owned(),
     ]
 }
@@ -4880,6 +5029,7 @@ mod tests {
             TRIAGE_SUMMARY_FILE,
             QOS_LANE_SUMMARY_FILE,
             LOCAL_CARGO_TRIPWIRE_FILE,
+            REGRESSION_CAUSALITY_SUMMARY_FILE,
             VERIFICATION_EVIDENCE_SUMMARY_FILE,
             MEMORY_DRIFT_SUMMARY_FILE,
         ] {
@@ -4888,6 +5038,95 @@ mod tests {
                 "planned support-bundle files must include {required}"
             );
         }
+    }
+
+    #[test]
+    fn regression_causality_summary_is_redaction_safe_and_non_authoritative() -> TestResult {
+        let verification = stable_json(&json!({
+            "schema": "ee.rch.verify.v1",
+            "status": "rch_environment_failure",
+            "selector_admission_probe": {
+                "status": "selection_failed",
+                "local_fallback_refused": true
+            },
+            "source_materialization": "remote_checkout_unverified",
+            "remote_source_materialized": false,
+            "degradedCodes": ["rch_worker_topology_blocked"],
+            "redactionStatus": "safe",
+            "stderrTail": "failure in /Users/alice/private/src/lib.rs with sk-test-secret"
+        }));
+        let support_summary = stable_json(&json!({
+            "schema": "ee.support_bundle.v1",
+            "status": "passed",
+            "artifactHash": "blake3:support",
+            "degradedCodes": ["prompt_budget_exceeded"],
+            "redactionStatus": "safe"
+        }));
+
+        let encoded = regression_causality_summary_json(&[
+            (
+                "support_bundle:verification",
+                RegressionEvidenceKind::VerificationEvidence,
+                verification.as_str(),
+            ),
+            (
+                "support_bundle:summary",
+                RegressionEvidenceKind::SupportBundle,
+                support_summary.as_str(),
+            ),
+        ]);
+        let value: Value = serde_json::from_str(&encoded)
+            .map_err(|error| format!("regression causality summary must parse: {error}"))?;
+        let top_codes = value
+            .pointer("/topHypotheses")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "summary must expose top hypotheses".to_owned())?
+            .iter()
+            .filter_map(|hypothesis| hypothesis.pointer("/code").and_then(Value::as_str))
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            value.pointer("/schema"),
+            Some(&json!(
+                SUPPORT_BUNDLE_REGRESSION_CAUSALITY_SUMMARY_SCHEMA_V1
+            ))
+        );
+        assert_eq!(
+            value.pointer("/sourceSchema"),
+            Some(&json!(REGRESSION_CAUSALITY_SCHEMA_V1))
+        );
+        assert_eq!(
+            value.pointer("/redaction/inputArtifactsCopied"),
+            Some(&json!(false))
+        );
+        assert_eq!(value.pointer("/redaction/hashesOnly"), Some(&json!(true)));
+        assert!(top_codes.contains("source_not_materialized"));
+        assert!(top_codes.contains("known_environment_blocker"));
+        assert!(top_codes.contains("output_budget_regression"));
+        assert!(
+            value
+                .pointer("/ranking/hypotheses")
+                .and_then(Value::as_array)
+                .is_some_and(|hypotheses| hypotheses
+                    .iter()
+                    .all(|hypothesis| hypothesis.pointer("/authoritative") == Some(&json!(false)))),
+            "regression hypotheses must remain non-authoritative: {encoded}"
+        );
+        assert!(
+            value
+                .pointer("/normalization/rows/0/artifactHash")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "normalized rows must carry section artifact hashes: {encoded}"
+        );
+        for forbidden in ["/Users/alice", "sk-test-secret", "failure in "] {
+            assert!(
+                !encoded.contains(forbidden),
+                "regression causality summary leaked forbidden text {forbidden:?}: {encoded}"
+            );
+        }
+
+        Ok(())
     }
 
     #[test]
