@@ -15,6 +15,29 @@ const KNOWN_PROJECT_LOCAL_SKILL_PATHS: &[(&str, &str)] = &[
     ),
 ];
 
+fn assert_marker_before(
+    source_name: &str,
+    source: &str,
+    earlier_marker: &str,
+    later_marker: &str,
+    context: &str,
+) -> Result<(), String> {
+    let earlier_pos = source
+        .find(earlier_marker)
+        .ok_or_else(|| format!("{source_name} missing earlier marker `{earlier_marker}`"))?;
+    let later_pos = source
+        .find(later_marker)
+        .ok_or_else(|| format!("{source_name} missing later marker `{later_marker}`"))?;
+
+    if earlier_pos >= later_pos {
+        return Err(format!(
+            "{source_name} must introduce `{earlier_marker}` before `{later_marker}` for {context}"
+        ));
+    }
+
+    Ok(())
+}
+
 const REQUIRED_MATRIX_HEADERS: &[&str] = &[
     "Surface",
     "Classification",
@@ -1107,21 +1130,13 @@ fn readme_pins_swarm_brief_operator_workflow() -> Result<(), String> {
         }
     }
 
-    let gate_marker =
-        "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json";
-    let claim_marker = "br update <id> --status in_progress --json";
-    let gate_pos = README_SOURCE
-        .find(gate_marker)
-        .ok_or_else(|| format!("README missing claim gate marker `{gate_marker}`"))?;
-    let claim_pos = README_SOURCE
-        .find(claim_marker)
-        .ok_or_else(|| format!("README missing claim command marker `{claim_marker}`"))?;
-
-    if gate_pos >= claim_pos {
-        return Err(format!(
-            "README must introduce the work-packet claim gate before the Beads claim command `{claim_marker}`"
-        ));
-    }
+    assert_marker_before(
+        "README.md",
+        README_SOURCE,
+        "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json",
+        "br update <id> --status in_progress --json",
+        "swarm brief claim workflow",
+    )?;
 
     Ok(())
 }
@@ -1153,6 +1168,21 @@ fn agent_integration_pins_work_packet_claim_gate_consumer() -> Result<(), String
         }
     }
 
+    assert_marker_before(
+        "docs/agent_integration.md",
+        AGENT_INTEGRATION_SOURCE,
+        "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json",
+        "do not run a BV claim command or local Cargo install as a\nworkaround",
+        "stale-binary stop guidance",
+    )?;
+    assert_marker_before(
+        "docs/agent_integration.md",
+        AGENT_INTEGRATION_SOURCE,
+        "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json",
+        "must not claim Beads",
+        "read-only consumer guidance",
+    )?;
+
     Ok(())
 }
 
@@ -1171,6 +1201,14 @@ fn agents_md_pins_claim_gate_stale_binary_stop_condition() -> Result<(), String>
             ));
         }
     }
+
+    assert_marker_before(
+        "AGENTS.md",
+        AGENTS_SOURCE,
+        "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json",
+        "br update <id> --status=in_progress --json",
+        "typical agent flow claim guidance",
+    )?;
 
     Ok(())
 }
