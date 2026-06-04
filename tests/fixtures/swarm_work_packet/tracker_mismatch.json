@@ -1,0 +1,170 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "schema": "ee.swarm.work_packet.v1",
+    "workspace": "/repo",
+    "packetId": "swarm_work_packet_tracker_mismatch_0001",
+    "generatedAt": "2026-06-04T08:14:00Z",
+    "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+    "determinismKey": "blake3:tracker-mismatch",
+    "intendedUse": "agent_preclaim_advisory",
+    "nonMutationInvariant": {
+      "claimsBeads": false,
+      "reservesFiles": false,
+      "sendsMail": false,
+      "stagesFiles": false,
+      "runsCargo": false,
+      "runsDestructiveCommands": false
+    },
+    "sourceProvenance": [
+      {
+        "source": "beads",
+        "status": "degraded",
+        "freshness": "current",
+        "degradedCodes": [
+          "beads_db_jsonl_count_mismatch"
+        ],
+        "provenance": "br doctor --json"
+      },
+      {
+        "source": "agent_mail",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "redacted Agent Mail reservation snapshot"
+      },
+      {
+        "source": "rch",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "rch status --json"
+      }
+    ],
+    "recommendedAction": {
+      "action": "inspect_and_claim",
+      "candidateId": "bd-safe.1",
+      "safeToClaim": true,
+      "suggestedCommands": [
+        "br update bd-safe.1 --status in_progress --json"
+      ],
+      "suggestedCommandActions": [
+        {
+          "commandId": "bead_show_candidate",
+          "displayCommand": "br show bd-safe.1 --json",
+          "argv": [
+            "br",
+            "show",
+            "bd-safe.1",
+            "--json"
+          ],
+          "shellRequired": false,
+          "copySafety": "safe_structured_argv",
+          "mutatesState": false,
+          "requiredSubstrate": "beads",
+          "when": "inspect_candidate",
+          "rationale": "Inspect the candidate without mutating tracker state."
+        }
+      ]
+    },
+    "candidates": [
+      {
+        "id": "bd-safe.1",
+        "title": "Document a small schema improvement",
+        "source": "beads_ready",
+        "status": "open",
+        "priority": 2,
+        "assignee": null,
+        "decision": "safe_to_claim",
+        "collisionRisk": "none",
+        "unsafeReasons": [],
+        "staleReasons": [],
+        "sourceRefs": [
+          "br://bd-safe.1"
+        ]
+      }
+    ],
+    "candidateLane": {
+      "beadId": "bd-safe.1",
+      "title": "Document a small schema improvement",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "decision": "safe_to_claim",
+      "decisionReasons": [
+        "ready_unclaimed",
+        "no_dirty_path_overlap"
+      ],
+      "suggestedReservations": [],
+      "proofObligations": [
+        "repair_tracker_authority_before_claim"
+      ],
+      "evidenceCaveats": [
+        "beads_db_jsonl_count_mismatch"
+      ]
+    },
+    "coordination": {
+      "activeReservationCount": 0,
+      "holderAgents": [],
+      "inboxUnavailable": false,
+      "unreadInboxCount": 0,
+      "ackRequiredCount": 0,
+      "agentMailHealth": "healthy",
+      "agentMail": {
+        "status": "healthy",
+        "reservationAuthoritative": true,
+        "inboxAuthoritative": true,
+        "fallbackActions": []
+      }
+    },
+    "trackerIntegrity": {
+      "health": "db_jsonl_count_mismatch",
+      "jsonlPath": ".beads/issues.jsonl",
+      "dbPath": ".beads/beads.db",
+      "jsonlRecordCount": 2708,
+      "dbRecordCount": 2707,
+      "pendingImportCount": 1,
+      "externalChangesPendingImport": true,
+      "dirtyIssueCount": 0,
+      "mergeArtifactPaths": [],
+      "mergeArtifactCount": 0,
+      "jsonlParseError": null,
+      "brReadsAuthoritative": false,
+      "requiresCandidateDowngrade": true,
+      "recoveryHint": "Run br doctor --json and import or resolve pending tracker changes before claiming work."
+    },
+    "checkout": {
+      "dirtyPathCount": 0,
+      "dirtyPathsRedacted": [],
+      "collisionRisk": "none"
+    },
+    "verification": {
+      "remoteOnlyRequired": true,
+      "remoteOnlySafe": true,
+      "rchPosture": "remote_ready",
+      "blockers": [],
+      "requiredCommands": []
+    },
+    "rchProofPosture": {
+      "sourceEnabled": true,
+      "remoteOnlyRequired": true,
+      "posture": "remote_ready",
+      "safeToLaunchCargoVerification": true,
+      "blockerCodes": []
+    },
+    "requiredActions": [],
+    "doNotProceedBecause": [],
+    "safeToClaim": true,
+    "degraded": [
+      {
+        "code": "beads_db_jsonl_count_mismatch",
+        "source": "beads",
+        "severity": "warning",
+        "message": "Beads JSONL and DB counts do not match.",
+        "repair": "Repair tracker authority before mutating Beads."
+      }
+    ]
+  },
+  "degraded": []
+}

@@ -115,6 +115,9 @@ or RCH execution.
   represented in `data.trackerIntegrity`; agents downgrade candidate safety
   when `brReadsAuthoritative` is false and must not auto-claim when
   `requiresCandidateDowngrade` is true.
+- Open epics and parent Beads without a claimable child stay advisory:
+  `rollup_only` and `blocked_rollup` decisions must not emit mutating claim or
+  reopen commands.
 - `data.candidates[].decision` uses the bd-2z5ly.7.5 candidate decision
   vocabulary: `safe_to_claim`, `already_owned`, `unsafe_due_to_conflict`,
   `blocked_by_dependency`, `blocked_by_verification`,
@@ -157,6 +160,8 @@ The contract is seeded by redacted examples:
 - `tests/fixtures/swarm_work_packet/agent_mail_database_contention_timeout.json`
 - `tests/fixtures/swarm_work_packet/beads_command_timeout_no_output.json`
 - `tests/fixtures/swarm_work_packet/bv_timeout_no_output.json`
+- `tests/fixtures/swarm_work_packet/tracker_mismatch.json`
+- `tests/fixtures/swarm_work_packet/rollup_only_no_claimable_child.json`
 - `tests/fixtures/swarm_work_packet/integrity/malformed_jsonl_tail.json`
 
 Implementation work should keep these aligned with the emitted command and add

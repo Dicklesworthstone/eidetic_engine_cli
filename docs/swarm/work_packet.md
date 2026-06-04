@@ -62,6 +62,10 @@ Fixture scenarios:
 - `beads_command_timeout_no_output` and `bv_timeout_no_output`: tracker or
   graph-triage sources timed out or emitted no output; Beads fallback rows are
   advisory until a bounded retry or manual inspection succeeds.
+- `tracker_mismatch`: an otherwise claimable leaf is downgraded because Beads
+  JSONL and DB state are not authoritative.
+- `rollup_only_no_claimable_child`: an open epic or parent has no claimable
+  child and must remain inspection-only.
 
 Shell smoke coverage lives in `scripts/e2e_swarm_work_packet_no_mutation.sh`.
 The harness snapshots `.beads/`, a synthetic Agent Mail store, and the Git

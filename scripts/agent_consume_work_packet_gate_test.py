@@ -258,32 +258,7 @@ class WorkPacketConsumer(unittest.TestCase):
         self.assertFalse(support["mutatesState"])
 
     def test_tracker_mismatch_downgrades_otherwise_safe_packet(self):
-        packet = {
-            "schema": "ee.swarm.work_packet.v1",
-            "recommendedAction": {
-                "action": "inspect_and_claim",
-                "candidateId": "bd-safe.1",
-                "safeToClaim": True,
-                "suggestedCommands": ["br update bd-safe.1 --status in_progress --json"],
-            },
-            "candidates": [
-                {
-                    "id": "bd-safe.1",
-                    "decision": "safe_to_claim",
-                    "unsafeReasons": [],
-                    "staleReasons": [],
-                }
-            ],
-            "coordination": {"agentMail": {"status": "healthy"}},
-            "trackerIntegrity": {
-                "health": "db_jsonl_count_mismatch",
-                "brReadsAuthoritative": False,
-                "requiresCandidateDowngrade": True,
-            },
-            "rchProofPosture": {"safeToLaunchCargoVerification": True, "blockerCodes": []},
-            "sourceProvenance": [],
-            "degraded": [],
-        }
+        packet = load_fixture("tests/fixtures/swarm_work_packet/tracker_mismatch.json")
 
         decision = consumer.consume(packet)
         self.assertFalse(decision["safeToClaim"])
@@ -293,6 +268,29 @@ class WorkPacketConsumer(unittest.TestCase):
         )
         self.assertIn("tracker_requires_candidate_downgrade", decision["whyNotSafe"])
         self.assertEqual(decision["legacyCommandStringsRefused"], 1)
+
+    def test_rollup_only_fixture_blocks_claim_without_mutating_actions(self):
+        packet = load_fixture(
+            "tests/fixtures/swarm_work_packet/rollup_only_no_claimable_child.json"
+        )
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["candidateId"], "bd-rollup")
+        self.assertEqual(decision["decision"], "blocked_rollup")
+        self.assertEqual(decision["action"], "blocked_no_action")
+        self.assertFalse(decision["mutatingActionsRequireHuman"])
+        self.assertIn("candidate_decision:blocked_rollup", decision["whyNotSafe"])
+        self.assertIn("candidate_is_rollup_not_leaf", decision["whyNotSafe"])
+        self.assertIn("rollup_has_no_claimable_child", decision["whyNotSafe"])
+        self.assertIn(
+            "packet_recommendation_not_claim_safe:blocked_no_action",
+            decision["whyNotSafe"],
+        )
+        self.assertTrue(
+            all(not action["mutatesState"] for action in decision["argvActions"])
+        )
+        self.assertGreaterEqual(decision["legacyCommandStringsRefused"], 1)
 
     def test_rch_topology_blocked_case_is_explicit(self):
         packet = load_fixture("tests/fixtures/swarm_work_packet/degraded_mail_rch_topology.json")

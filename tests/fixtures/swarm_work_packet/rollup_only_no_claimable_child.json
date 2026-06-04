@@ -1,0 +1,179 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "schema": "ee.swarm.work_packet.v1",
+    "workspace": "/repo",
+    "packetId": "swarm_work_packet_rollup_only_no_claimable_child_0001",
+    "generatedAt": "2026-06-04T08:15:00Z",
+    "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+    "determinismKey": "blake3:rollup-only-no-claimable-child",
+    "intendedUse": "agent_preclaim_advisory",
+    "nonMutationInvariant": {
+      "claimsBeads": false,
+      "reservesFiles": false,
+      "sendsMail": false,
+      "stagesFiles": false,
+      "runsCargo": false,
+      "runsDestructiveCommands": false
+    },
+    "sourceProvenance": [
+      {
+        "source": "beads",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "br ready --json"
+      },
+      {
+        "source": "bv",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "bv --robot-next"
+      },
+      {
+        "source": "agent_mail",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "redacted Agent Mail reservation snapshot"
+      },
+      {
+        "source": "rch",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "rch status --json"
+      }
+    ],
+    "recommendedAction": {
+      "action": "blocked_no_action",
+      "candidateId": "bd-rollup",
+      "safeToClaim": false,
+      "suggestedCommands": [
+        "br show bd-rollup --json"
+      ],
+      "suggestedCommandActions": [
+        {
+          "commandId": "bead_show_rollup_context",
+          "displayCommand": "br show bd-rollup --json",
+          "argv": [
+            "br",
+            "show",
+            "bd-rollup",
+            "--json"
+          ],
+          "shellRequired": false,
+          "copySafety": "safe_structured_argv",
+          "mutatesState": false,
+          "requiredSubstrate": "beads",
+          "when": "inspect_rollup_context",
+          "rationale": "Inspect parent context without claiming it."
+        }
+      ]
+    },
+    "candidates": [
+      {
+        "id": "bd-rollup",
+        "title": "Epic with only blocked children",
+        "source": "bv",
+        "status": "open",
+        "priority": 2,
+        "assignee": null,
+        "decision": "blocked_rollup",
+        "collisionRisk": "none",
+        "unsafeReasons": [
+          "candidate_is_rollup_not_leaf",
+          "rollup_has_no_claimable_child"
+        ],
+        "staleReasons": [],
+        "sourceRefs": [
+          "br://bd-rollup"
+        ]
+      }
+    ],
+    "candidateLane": {
+      "beadId": "bd-rollup",
+      "title": "Epic with only blocked children",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "decision": "blocked_rollup",
+      "decisionReasons": [
+        "candidate_is_rollup_not_leaf",
+        "rollup_has_no_claimable_child"
+      ],
+      "suggestedReservations": [],
+      "proofObligations": [
+        "inspect_child_dependencies",
+        "wait_for_claimable_leaf"
+      ],
+      "evidenceCaveats": []
+    },
+    "coordination": {
+      "activeReservationCount": 0,
+      "holderAgents": [],
+      "inboxUnavailable": false,
+      "unreadInboxCount": 0,
+      "ackRequiredCount": 0,
+      "agentMailHealth": "healthy",
+      "agentMail": {
+        "status": "healthy",
+        "reservationAuthoritative": true,
+        "inboxAuthoritative": true,
+        "fallbackActions": []
+      }
+    },
+    "trackerIntegrity": {
+      "health": "ok",
+      "jsonlPath": ".beads/issues.jsonl",
+      "dbPath": ".beads/beads.db",
+      "jsonlRecordCount": 2707,
+      "dbRecordCount": 2707,
+      "pendingImportCount": 0,
+      "externalChangesPendingImport": false,
+      "dirtyIssueCount": 0,
+      "mergeArtifactPaths": [],
+      "mergeArtifactCount": 0,
+      "jsonlParseError": null,
+      "brReadsAuthoritative": true,
+      "requiresCandidateDowngrade": false,
+      "recoveryHint": null
+    },
+    "checkout": {
+      "dirtyPathCount": 0,
+      "dirtyPathsRedacted": [],
+      "collisionRisk": "none"
+    },
+    "verification": {
+      "remoteOnlyRequired": false,
+      "remoteOnlySafe": true,
+      "rchPosture": "remote_ready",
+      "blockers": [],
+      "requiredCommands": []
+    },
+    "rchProofPosture": {
+      "sourceEnabled": true,
+      "remoteOnlyRequired": false,
+      "posture": "remote_ready",
+      "safeToLaunchCargoVerification": true,
+      "blockerCodes": []
+    },
+    "requiredActions": [
+      {
+        "order": 1,
+        "kind": "inspect",
+        "command": null,
+        "why": "The packet surfaced a parent item only; no Beads claim is safe."
+      }
+    ],
+    "doNotProceedBecause": [
+      "candidate_is_rollup_not_leaf",
+      "rollup_has_no_claimable_child"
+    ],
+    "safeToClaim": false,
+    "degraded": []
+  },
+  "degraded": []
+}
