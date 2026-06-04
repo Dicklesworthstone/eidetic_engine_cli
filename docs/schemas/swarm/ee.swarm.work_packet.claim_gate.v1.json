@@ -183,7 +183,10 @@
         "mutatesState": {"type": "boolean"},
         "requiredSubstrate": {"$ref": "#/definitions/commandSubstrate"},
         "when": {"$ref": "#/definitions/safeString"},
-        "rationale": {"$ref": "#/definitions/safeString"}
+        "rationale": {
+          "allOf": [{"$ref": "#/definitions/safeString"}],
+          "maxLength": 240
+        }
       },
       "allOf": [
         {

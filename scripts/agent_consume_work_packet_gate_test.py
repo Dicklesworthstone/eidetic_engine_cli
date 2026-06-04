@@ -2639,6 +2639,14 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
             set(command_action["properties"]),
         )
         self.assertFalse(command_action["additionalProperties"])
+        self.assertEqual(
+            [{"$ref": "#/definitions/safeString"}],
+            command_action["properties"]["rationale"]["allOf"],
+        )
+        self.assertEqual(
+            240,
+            command_action["properties"]["rationale"]["maxLength"],
+        )
 
     def test_command_action_consumer_constants_match_work_packet_schema(self):
         schema = load_fixture("docs/schemas/swarm/ee.swarm.work_packet.v1.json")
