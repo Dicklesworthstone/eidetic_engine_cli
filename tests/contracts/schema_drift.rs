@@ -56,6 +56,7 @@ pub enum SchemaCategory {
     Backup,
     Hooks,
     Eval,
+    Verification,
     Daemon,
 }
 
@@ -85,6 +86,7 @@ impl SchemaCategory {
             Self::Backup => "backup",
             Self::Hooks => "hooks",
             Self::Eval => "eval",
+            Self::Verification => "verification",
             Self::Daemon => "daemon",
         }
     }
@@ -512,6 +514,13 @@ pub const EVAL_SCHEMAS: &[SchemaEntry] = &[
     ),
 ];
 
+/// Verification and diagnostic schemas.
+pub const VERIFICATION_SCHEMAS: &[SchemaEntry] = &[SchemaEntry::new(
+    "regression_causality",
+    "ee.regression_causality.v1",
+    SchemaCategory::Verification,
+)];
+
 /// Backup schemas.
 pub const BACKUP_SCHEMAS: &[SchemaEntry] = &[
     SchemaEntry::new(
@@ -570,6 +579,7 @@ pub fn all_schemas() -> Vec<&'static SchemaEntry> {
     schemas.extend(RULE_SCHEMAS.iter());
     schemas.extend(AUDIT_SCHEMAS.iter());
     schemas.extend(EVAL_SCHEMAS.iter());
+    schemas.extend(VERIFICATION_SCHEMAS.iter());
     schemas.extend(BACKUP_SCHEMAS.iter());
     schemas.extend(DAEMON_SCHEMAS.iter());
     schemas

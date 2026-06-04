@@ -8542,6 +8542,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: pack_response_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::REGRESSION_CAUSALITY_SCHEMA_V1,
+            version: "1",
+            description: "Redaction-safe regression causality capsule for failed gates",
+            category: "ops",
+            definition: regression_causality_schema_definition,
+        },
+        SchemaEntry {
             id: crate::models::QUERY_SCHEMA_V1,
             version: "1",
             description: "Structured query-file request document accepted by ee context and ee search",
@@ -9554,6 +9561,10 @@ fn error_schema_definition() -> String {
 
 fn pack_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.pack.v2.json").to_string()
+}
+
+fn regression_causality_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.regression_causality.v1.json").to_string()
 }
 
 fn query_request_schema_definition() -> String {
