@@ -53,7 +53,7 @@
         "commandStart",
         "commandEnd",
         "assertOk",
-        "failureVerdict",
+        "assertFailOrResult",
         "schemaValidationStatus",
         "redactionStatus",
         "firstFailureDiagnosis",
@@ -66,7 +66,7 @@
         "commandStart": { "$ref": "#/$defs/coverageStatus" },
         "commandEnd": { "$ref": "#/$defs/coverageStatus" },
         "assertOk": { "$ref": "#/$defs/coverageStatus" },
-        "failureVerdict": {
+        "assertFailOrResult": {
           "$ref": "#/$defs/coverageStatus",
           "description": "Coverage for an assert_fail row or an equivalent assert_result/failure-verdict row on every early failure branch."
         },
@@ -84,7 +84,7 @@
         "branchId",
         "line",
         "trigger",
-        "failureVerdict",
+        "assertFailOrResult",
         "firstFailureDiagnosis",
         "artifactPaths"
       ],
@@ -102,7 +102,7 @@
           "type": "string",
           "minLength": 1
         },
-        "failureVerdict": { "$ref": "#/$defs/coverageStatus" },
+        "assertFailOrResult": { "$ref": "#/$defs/coverageStatus" },
         "firstFailureDiagnosis": { "$ref": "#/$defs/coverageStatus" },
         "artifactPaths": { "$ref": "#/$defs/coverageStatus" }
       }

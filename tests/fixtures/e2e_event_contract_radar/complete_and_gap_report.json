@@ -41,7 +41,7 @@
         "commandStart": "present",
         "commandEnd": "present",
         "assertOk": "present",
-        "failureVerdict": "present",
+        "assertFailOrResult": "present",
         "schemaValidationStatus": "present",
         "redactionStatus": "present",
         "firstFailureDiagnosis": "present",
@@ -54,7 +54,7 @@
           "branchId": "schema_validation_failed",
           "line": 297,
           "trigger": "jq schema/status validation failed",
-          "failureVerdict": "present",
+          "assertFailOrResult": "present",
           "firstFailureDiagnosis": "present",
           "artifactPaths": "present"
         },
@@ -62,7 +62,7 @@
           "branchId": "dry_run_command_failed",
           "line": 226,
           "trigger": "ee lab swarm replay --dry-run returned non-zero",
-          "failureVerdict": "present",
+          "assertFailOrResult": "present",
           "firstFailureDiagnosis": "present",
           "artifactPaths": "present"
         }
@@ -83,7 +83,7 @@
         "commandStart": "present",
         "commandEnd": "present",
         "assertOk": "present",
-        "failureVerdict": "missing",
+        "assertFailOrResult": "missing",
         "schemaValidationStatus": "present",
         "redactionStatus": "present",
         "firstFailureDiagnosis": "missing",
@@ -96,7 +96,7 @@
           "branchId": "pack_command_failed",
           "line": 640,
           "trigger": "pack command returned non-zero before event-log verdict",
-          "failureVerdict": "missing",
+          "assertFailOrResult": "missing",
           "firstFailureDiagnosis": "missing",
           "artifactPaths": "present"
         }

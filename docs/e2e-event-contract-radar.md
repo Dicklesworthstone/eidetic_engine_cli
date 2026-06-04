@@ -59,7 +59,7 @@ The required coverage fields are:
 | `commandStart` | A `command_start` event or equivalent command-begin marker. |
 | `commandEnd` | A `command_end` event with elapsed time and exit code when a command is run. |
 | `assertOk` | Success verdict rows for assertions that prove the script did useful work. |
-| `failureVerdict` | `assert_fail` or an equivalent failure-verdict row on every early failure path. |
+| `assertFailOrResult` | `assert_fail` or an equivalent `assert_result`/failure-verdict row on every early failure path. |
 | `schemaValidationStatus` | Evidence that emitted JSON or JSONL was schema-checked, skipped with a reason, or not applicable. |
 | `redactionStatus` | Evidence that stdout/stderr/log material was redacted, hashed, or proven non-sensitive. |
 | `firstFailureDiagnosis` | A compact first-failure explanation suitable for Beads and Agent Mail handoff. |
