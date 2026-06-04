@@ -569,10 +569,10 @@ fn serve_status_endpoint_ignores_irrelevant_query_parameters() -> TestResult {
 // bd-2niwj: GET /v1/context exercises the require_single_query_value path on
 // the ?task= parameter — the same shared validator used by /v1/search. This
 // transport-level test pins the positive route: a single non-empty
-// percent-decoded task value flows through to the cli.context dispatch plan
+// percent-decoded task value flows through to the cli.pack dispatch plan
 // with the correct cliArgv shape and surface metadata.
 #[test]
-fn serve_context_endpoint_routes_single_task_to_cli_context_dispatch() -> TestResult {
+fn serve_context_endpoint_routes_single_task_to_cli_pack_dispatch() -> TestResult {
     let token = "01234567890123456789012345678901";
     let raw = format!(
         "GET /v1/context?task=plan%20a%20refactor HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
@@ -593,7 +593,7 @@ fn serve_context_endpoint_routes_single_task_to_cli_context_dispatch() -> TestRe
     assert_eq!(envelope["request"]["path"].as_str(), Some("/v1/context"));
     assert_eq!(
         envelope["request"]["cliEquivalent"].as_str(),
-        Some("ee context \"<task>\" --json"),
+        Some("ee pack \"<task>\" --json"),
     );
     assert_eq!(
         envelope["response"]["payloadSchema"].as_str(),
@@ -608,11 +608,11 @@ fn serve_context_endpoint_routes_single_task_to_cli_context_dispatch() -> TestRe
         Some(false),
     );
     let plan = &payload["data"]["dispatchPlan"];
-    assert_eq!(plan["handlerSurface"].as_str(), Some("cli.context"));
+    assert_eq!(plan["handlerSurface"].as_str(), Some("cli.pack"));
     assert_eq!(plan["mutable"].as_bool(), Some(false));
     assert_eq!(plan["sseStream"].as_bool(), Some(false));
     let argv = json_string_array(&plan["cliArgv"])?;
-    assert_eq!(argv, vec!["ee", "context", "plan a refactor", "--json"]);
+    assert_eq!(argv, vec!["ee", "pack", "plan a refactor", "--json"]);
     Ok(())
 }
 

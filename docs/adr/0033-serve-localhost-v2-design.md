@@ -62,7 +62,7 @@ surfaces:
 | `GET` | `/v1/status` | `ee status --json` |
 | `GET` | `/v1/doctor` | `ee doctor --json` |
 | `GET` | `/v1/search?q=...` | `ee search "<query>" --json` |
-| `GET` | `/v1/context?task=...` | `ee context "<task>" --json` |
+| `GET` | `/v1/context?task=...` | `ee pack "<task>" --json` |
 | `GET` | `/v1/why/{memory_id}` | `ee why <memory-id> --json` |
 | `GET` | `/v1/swarm/brief` | `ee swarm brief --json` |
 | `POST` | `/v1/durable-write` | Durable write envelope for future write APIs |
