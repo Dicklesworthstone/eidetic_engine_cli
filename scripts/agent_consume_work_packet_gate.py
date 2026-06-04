@@ -90,6 +90,9 @@ COMMAND_ACTION_SAFE_STRING_FIELDS = [
     ("when", "when"),
     ("rationale", "rationale"),
 ]
+STALE_CLAIM_GATE_UNEXPECTED_ARG_PATTERN = re.compile(
+    r"unexpected argument [`'\"](--claim-gate|--candidate)[`'\"]"
+)
 MACHINE_RESPONSE_SCHEMAS = {
     "ee.error.v2",
     "ee.response.v2",
@@ -1231,14 +1234,22 @@ def classify_error_code(error):
     if not isinstance(error, dict):
         return "unknown_error"
 
-    rendered = json.dumps(error, sort_keys=True)
-    if "unexpected argument" in rendered and (
-        "--claim-gate" in rendered or "--candidate" in rendered
-    ):
+    if stale_claim_gate_binary_error(error):
         return "stale_claim_gate_binary"
 
     code = error.get("code")
     return code or "unknown_error"
+
+
+def stale_claim_gate_binary_error(error):
+    details = dict_or_empty(error.get("details"))
+    for message in [error.get("message"), details.get("message")]:
+        if (
+            isinstance(message, str)
+            and STALE_CLAIM_GATE_UNEXPECTED_ARG_PATTERN.search(message)
+        ):
+            return True
+    return False
 
 
 def error_decision(code, source=None, envelope_degraded=None):

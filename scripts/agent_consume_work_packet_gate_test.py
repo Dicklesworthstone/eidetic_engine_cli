@@ -2111,6 +2111,48 @@ class ErrorHandling(unittest.TestCase):
         self.assertFalse(decision["mutatingActionsRequireHuman"])
         self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
 
+    def test_stale_claim_gate_binary_detection_requires_exact_rejected_argument(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "usage",
+                    "message": "unexpected argument '--candidate-pool' found",
+                    "details": {
+                        "invocation": [
+                            "ee",
+                            "pack",
+                            "task",
+                            "--candidate-pool",
+                            "250",
+                        ]
+                    },
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertIn("error:usage", decision["whyNotSafe"])
+        self.assertNotIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
+
+    def test_stale_claim_gate_binary_detection_accepts_backtick_quotes(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "usage",
+                    "message": "unexpected argument `--candidate` found",
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
+
     def test_root_error_envelope_stale_claim_gate_binary_fails_closed(self):
         decision = consumer.consume(
             {
