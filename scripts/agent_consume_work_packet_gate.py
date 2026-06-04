@@ -1243,6 +1243,11 @@ def classify_error_code(error):
 
 def stale_claim_gate_binary_error(error):
     details = dict_or_empty(error.get("details"))
+    invocation = details.get("invocation")
+    if isinstance(invocation, list) and not invocation_is_swarm_work_packet(
+        invocation
+    ):
+        return False
     for message in [error.get("message"), details.get("message")]:
         if (
             isinstance(message, str)
@@ -1250,6 +1255,15 @@ def stale_claim_gate_binary_error(error):
         ):
             return True
     return False
+
+
+def invocation_is_swarm_work_packet(invocation):
+    if not isinstance(invocation, list):
+        return False
+    parts = [part for part in invocation if isinstance(part, str) and part]
+    if parts and parts[0].endswith("/ee"):
+        parts[0] = "ee"
+    return len(parts) >= 3 and parts[:3] == ["ee", "swarm", "work-packet"]
 
 
 def error_decision(code, source=None, envelope_degraded=None):

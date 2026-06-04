@@ -2137,6 +2137,57 @@ class ErrorHandling(unittest.TestCase):
         self.assertIn("error:usage", decision["whyNotSafe"])
         self.assertNotIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
 
+    def test_stale_claim_gate_binary_detection_respects_invocation_surface(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "usage",
+                    "message": "unexpected argument '--candidate' found",
+                    "details": {
+                        "invocation": [
+                            "ee",
+                            "perf",
+                            "compare",
+                            "--candidate",
+                            "candidate.json",
+                        ]
+                    },
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertIn("error:usage", decision["whyNotSafe"])
+        self.assertNotIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
+
+    def test_stale_claim_gate_binary_detection_accepts_work_packet_invocation(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "usage",
+                    "message": "unexpected argument '--candidate' found",
+                    "details": {
+                        "invocation": [
+                            "/Users/jemanuel/.cargo/bin/ee",
+                            "swarm",
+                            "work-packet",
+                            "--candidate",
+                            "bd-safe.1",
+                        ]
+                    },
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
+
     def test_stale_claim_gate_binary_detection_accepts_backtick_quotes(self):
         decision = consumer.consume(
             {
