@@ -7,6 +7,11 @@ authoritative.
 
 The budget decision block uses schema `ee.context.budget.v1`.
 
+This is separate from SRR5 adaptive scheduling. Adaptive pack budgets decide
+how many tokens a pack may use; they do not prefetch CASS evidence, delay an
+agent, alter daemon scheduling, emit `adaptive_backoff_applied`, or emit
+`cass_prefetch_budget_exceeded`.
+
 ## Configuration
 
 Opt in with:
@@ -107,6 +112,8 @@ computedTokens = clamp(ceil(baseTokens * multiplier), baseTokens, maxTokens)
 - Expect `adaptive: false` when adaptive budgets are disabled or explicitly
   overridden.
 - Do not compare pack hashes across adaptive and non-adaptive budget modes.
+- Do not interpret SRR5 daemon posture as an adaptive pack-budget decision;
+  scheduler and prefetch signals live on their own daemon/swarm surfaces.
 
 ## Rollout Expectations
 

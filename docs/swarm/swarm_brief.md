@@ -22,6 +22,23 @@ Example:
 ee swarm brief --json | jq '.data.fileSurfaceRisks'
 ```
 
+## Adaptive Posture
+
+SRR5 adaptive scheduling is a daemon/swarm concern, not a pack-budget concern.
+When swarm brief reports adaptive evidence, it must stay read-only and
+redaction-safe: per-agent labels, percentiles, advisory backoff status,
+prefetch counters, and degraded codes are allowed; raw task text, query text,
+CASS evidence, mail bodies, command output, env dumps, and absolute host paths
+are not.
+
+The current `ee.swarm.brief.v1` schema has no required dedicated adaptive
+object. Until an additive field lands, consumers should read SRR5 posture from
+existing `degraded[]`, `sources[]`, and `recommendations[]` entries. The
+canonical degraded codes are `adaptive_backoff_applied` and
+`cass_prefetch_budget_exceeded`; both are advisory signals and must not be
+treated as failed retrieval, failed pack assembly, or proof that local Cargo is
+acceptable.
+
 Fixture catalog: `tests/fixtures/swarm/ownership_posture_cases.json` covers the
 healthy, degraded-source, and unattributed-blocker cases that downstream agents
 should handle.
