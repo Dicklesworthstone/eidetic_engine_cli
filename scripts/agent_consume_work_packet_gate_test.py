@@ -166,6 +166,27 @@ class ClaimGateConsumer(unittest.TestCase):
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
         self.assertFalse(claim["runnable"])
 
+    def test_source_authority_agent_mail_not_authoritative_fails_closed(self):
+        gate = safe_gate()
+        gate["sourceAuthority"]["reservationAuthoritative"] = False
+        gate["sourceAuthority"]["inboxAuthoritative"] = None
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["sourceSummary"]["reservationAuthoritative"], False)
+        self.assertIsNone(decision["sourceSummary"]["inboxAuthoritative"])
+        self.assertIn(
+            "claim_gate_reservation_evidence_not_authoritative",
+            decision["whyNotSafe"],
+        )
+        self.assertIn(
+            "claim_gate_inbox_evidence_not_authoritative",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+
     def test_malformed_source_authority_scalars_fail_closed_and_emit_schema_types(self):
         gate = safe_gate()
         gate["sourceAuthority"].update(
@@ -412,6 +433,22 @@ class WorkPacketConsumer(unittest.TestCase):
         self.assertTrue(decision["safeToClaim"])
         self.assertEqual(decision["decision"], "safe_to_claim")
         self.assertEqual(decision["whyNotSafe"], [])
+        self.assertEqual(decision["sourceSummary"]["reservationAuthoritative"], True)
+        self.assertEqual(decision["sourceSummary"]["inboxAuthoritative"], True)
+
+    def test_agent_mail_authority_flags_downgrade_otherwise_safe_packet(self):
+        packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        agent_mail = packet["data"]["coordination"]["agentMail"]
+        agent_mail["reservationAuthoritative"] = False
+        agent_mail["inboxAuthoritative"] = None
+
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["sourceSummary"]["reservationAuthoritative"], False)
+        self.assertIsNone(decision["sourceSummary"]["inboxAuthoritative"])
+        self.assertIn("reservation_evidence_not_authoritative", decision["whyNotSafe"])
+        self.assertIn("inbox_evidence_not_authoritative", decision["whyNotSafe"])
 
     def test_bv_timeout_fixture_blocks_claim_and_refuses_legacy_commands(self):
         packet = load_fixture("tests/fixtures/swarm_work_packet/bv_timeout_no_output.json")

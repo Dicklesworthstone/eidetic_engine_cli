@@ -72,7 +72,20 @@
       "inboxUnavailable": false,
       "unreadInboxCount": 0,
       "ackRequiredCount": 0,
-      "agentMailHealth": "healthy"
+      "agentMailHealth": "healthy",
+      "agentMail": {
+        "status": "healthy",
+        "healthLevel": "green",
+        "unreadCount": 0,
+        "ackRequiredCount": 0,
+        "degradedCodes": [],
+        "recoveryMode": "none",
+        "archiveIndexParity": "aligned",
+        "reservationAuthoritative": true,
+        "inboxAuthoritative": true,
+        "fallbackActions": [],
+        "semanticReadiness": null
+      }
     },
     "trackerIntegrity": {
       "health": "ok",

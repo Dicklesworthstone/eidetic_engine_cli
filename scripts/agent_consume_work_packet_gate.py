@@ -202,6 +202,15 @@ def malformed_claim_gate_authority_reasons(gate):
     return reasons
 
 
+def agent_mail_authority_reasons(agent_mail):
+    reasons = []
+    if agent_mail.get("reservationAuthoritative") is not True:
+        reasons.append("reservation_evidence_not_authoritative")
+    if agent_mail.get("inboxAuthoritative") is not True:
+        reasons.append("inbox_evidence_not_authoritative")
+    return reasons
+
+
 def count_legacy_command_strings(value):
     if isinstance(value, str):
         return 1 if redact_text(value) else 0
@@ -497,6 +506,7 @@ def packet_safe_to_claim(packet, candidate):
         and not malformed_packet_map_reasons(packet)
         and not malformed_packet_scalar_reasons(packet)
         and tracker_authoritative is not False
+        and not agent_mail_authority_reasons(agent_mail)
         and agent_mail.get("status") != "semantic_readiness_failed"
         and rch_safe is not False
     )
@@ -553,6 +563,7 @@ def packet_why_not_safe(packet, candidate, safe_to_claim):
     agent_mail = dict_or_empty(coordination.get("agentMail"))
     if agent_mail.get("status") == "semantic_readiness_failed":
         reasons.append("agent_mail_semantic_readiness_failed")
+    reasons.extend(agent_mail_authority_reasons(agent_mail))
     if raw_safe is not True:
         reasons.append(f"packet_recommendation_not_claim_safe:{redact_text(action, 64)}")
 
@@ -609,6 +620,10 @@ def claim_gate_consistency_reasons(gate):
     if authority.get("trackerAuthoritative") is not True:
         tracker_health = redact_text(authority.get("trackerHealth") or "unknown", 64)
         reasons.append(f"claim_gate_tracker_not_authoritative:{tracker_health}")
+    if authority.get("reservationAuthoritative") is not True:
+        reasons.append("claim_gate_reservation_evidence_not_authoritative")
+    if authority.get("inboxAuthoritative") is not True:
+        reasons.append("claim_gate_inbox_evidence_not_authoritative")
     if authority.get("agentMailStatus") == "semantic_readiness_failed":
         reasons.append("agent_mail_semantic_readiness_failed")
     if authority.get("rchSafeToLaunchCargoVerification") is False:
