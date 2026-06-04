@@ -590,6 +590,39 @@ class WorkPacketConsumer(unittest.TestCase):
         codes = {entry["code"] for entry in decision["degradedSummary"]}
         self.assertIn("rch_remote_required_fallback_prevented", codes)
 
+    def test_remote_required_without_positive_rch_proof_fails_closed(self):
+        packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        data = packet["data"]
+        data["recommendedAction"] = {
+            "action": "inspect_and_claim",
+            "candidateId": "bd-safe",
+            "safeToClaim": True,
+            "suggestedCommands": [],
+            "suggestedCommandActions": [
+                safe_action(
+                    "bead_claim_candidate",
+                    ["br", "update", "bd-safe", "--status", "in_progress", "--json"],
+                    mutates=True,
+                )
+            ],
+        }
+        data["rchProofPosture"] = {
+            "remoteOnlyRequired": True,
+            "safeToLaunchCargoVerification": None,
+            "blockerCodes": [],
+        }
+
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIsNone(
+            decision["sourceSummary"]["rchSafeToLaunchCargoVerification"]
+        )
+        self.assertIn("rch_remote_verification_required", decision["whyNotSafe"])
+        claim = decision["argvActions"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
     def test_stale_but_reclaimable_is_not_auto_claimable(self):
         packet = {
             "schema": "ee.swarm.work_packet.v1",
@@ -818,8 +851,13 @@ class WorkPacketConsumer(unittest.TestCase):
                 "requiresCandidateDowngrade": "false",
             },
             "rchProofPosture": {
+                "remoteOnlyRequired": "true",
                 "safeToLaunchCargoVerification": "true",
                 "blockerCodes": [],
+            },
+            "verification": {
+                "remoteOnlyRequired": "false",
+                "remoteOnlySafe": "true",
             },
             "sourceProvenance": [{"code": "beads_ready"}],
             "degraded": [],
@@ -842,7 +880,10 @@ class WorkPacketConsumer(unittest.TestCase):
             "malformed_tracker_requires_candidate_downgrade",
             "malformed_agent_mail_reservation_authoritative",
             "malformed_agent_mail_inbox_authoritative",
+            "malformed_rch_remote_only_required",
             "malformed_rch_safe_to_launch_cargo_verification",
+            "malformed_verification_remote_only_required",
+            "malformed_verification_remote_only_safe",
         ]:
             self.assertIn(reason, decision["whyNotSafe"])
         claim = decision["argvActions"][0]

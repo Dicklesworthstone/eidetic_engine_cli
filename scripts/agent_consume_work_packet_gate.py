@@ -156,6 +156,7 @@ def malformed_packet_scalar_reasons(packet):
         malformed_boolean_field_reasons(
             rch,
             [
+                ("remoteOnlyRequired", "malformed_rch_remote_only_required"),
                 (
                     "safeToLaunchCargoVerification",
                     "malformed_rch_safe_to_launch_cargo_verification",
@@ -166,7 +167,13 @@ def malformed_packet_scalar_reasons(packet):
     reasons.extend(
         malformed_boolean_field_reasons(
             legacy_verification,
-            [("remoteOnlySafe", "malformed_verification_remote_only_safe")],
+            [
+                (
+                    "remoteOnlyRequired",
+                    "malformed_verification_remote_only_required",
+                ),
+                ("remoteOnlySafe", "malformed_verification_remote_only_safe"),
+            ],
         )
     )
     return reasons
@@ -215,6 +222,31 @@ def tracker_not_authoritative_reason(tracker):
     if tracker.get("brReadsAuthoritative") is True:
         return None
     return f"beads_tracker_not_authoritative:{redact_text(tracker.get('health') or 'unknown', 64)}"
+
+
+def rch_remote_verification_required(packet):
+    rch = dict_or_empty(packet.get("rchProofPosture"))
+    if "remoteOnlyRequired" in rch:
+        return rch.get("remoteOnlyRequired") is True
+    legacy_verification = dict_or_empty(packet.get("verification"))
+    return legacy_verification.get("remoteOnlyRequired") is True
+
+
+def rch_safe_to_launch_cargo_verification(packet):
+    rch = dict_or_empty(packet.get("rchProofPosture"))
+    if "safeToLaunchCargoVerification" in rch:
+        return rch.get("safeToLaunchCargoVerification")
+    legacy_verification = dict_or_empty(packet.get("verification"))
+    return legacy_verification.get("remoteOnlySafe")
+
+
+def rch_remote_verification_reason(packet):
+    rch_safe = rch_safe_to_launch_cargo_verification(packet)
+    if rch_safe is False:
+        return "rch_remote_verification_blocked"
+    if rch_remote_verification_required(packet) and rch_safe is not True:
+        return "rch_remote_verification_required"
+    return None
 
 
 def count_legacy_command_strings(value):
@@ -328,9 +360,7 @@ def source_summary_from_packet(packet):
             rch.get("posture") or legacy_verification.get("rchPosture"), 64
         ),
         "rchSafeToLaunchCargoVerification": bool_or_none(
-            rch.get("safeToLaunchCargoVerification")
-            if "safeToLaunchCargoVerification" in rch
-            else legacy_verification.get("remoteOnlySafe")
+            rch_safe_to_launch_cargo_verification(packet)
         ),
         "sourceCount": len(list_items(packet.get("sourceProvenance"))),
     }
@@ -495,14 +525,7 @@ def packet_safe_to_claim(packet, candidate):
     tracker = dict_or_empty(packet.get("trackerIntegrity"))
     coordination = dict_or_empty(packet.get("coordination"))
     agent_mail = dict_or_empty(coordination.get("agentMail"))
-    rch = dict_or_empty(packet.get("rchProofPosture"))
-    legacy_verification = dict_or_empty(packet.get("verification"))
     tracker_authoritative = tracker.get("brReadsAuthoritative")
-    rch_safe = (
-        rch.get("safeToLaunchCargoVerification")
-        if "safeToLaunchCargoVerification" in rch
-        else legacy_verification.get("remoteOnlySafe")
-    )
     return (
         raw_safe is True
         and decision == "safe_to_claim"
@@ -514,7 +537,7 @@ def packet_safe_to_claim(packet, candidate):
         and tracker_authoritative is True
         and not agent_mail_authority_reasons(agent_mail)
         and agent_mail.get("status") != "semantic_readiness_failed"
-        and rch_safe is not False
+        and rch_remote_verification_reason(packet) is None
     )
 
 
@@ -572,15 +595,9 @@ def packet_why_not_safe(packet, candidate, safe_to_claim):
     if raw_safe is not True:
         reasons.append(f"packet_recommendation_not_claim_safe:{redact_text(action, 64)}")
 
-    rch = dict_or_empty(packet.get("rchProofPosture"))
-    legacy_verification = dict_or_empty(packet.get("verification"))
-    rch_safe = (
-        rch.get("safeToLaunchCargoVerification")
-        if "safeToLaunchCargoVerification" in rch
-        else legacy_verification.get("remoteOnlySafe")
-    )
-    if rch_safe is False:
-        reasons.append("rch_remote_verification_blocked")
+    rch_reason = rch_remote_verification_reason(packet)
+    if rch_reason:
+        reasons.append(rch_reason)
     reasons.extend(compact_list(packet.get("doNotProceedBecause")))
     return compact_list(reasons)
 
