@@ -807,16 +807,17 @@ def claim_action_sets_in_progress(action):
     argv = action.get("argv")
     if not isinstance(argv, list):
         return False
+    status_values = []
     for index, part in enumerate(argv):
         if part == "--status":
-            return (
-                index + 1 < len(argv)
-                and isinstance(argv[index + 1], str)
-                and argv[index + 1] == "in_progress"
-            )
+            if index + 1 >= len(argv) or not isinstance(argv[index + 1], str):
+                return False
+            status_values.append(argv[index + 1])
         if isinstance(part, str) and part == "--status=in_progress":
-            return True
-    return False
+            status_values.append("in_progress")
+        elif isinstance(part, str) and part.startswith("--status="):
+            status_values.append(part.split("=", 1)[1])
+    return status_values == ["in_progress"]
 
 
 def claim_action_is_safe_structured_argv(action):

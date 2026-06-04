@@ -621,6 +621,52 @@ class ClaimGateConsumer(unittest.TestCase):
         self.assertFalse(claim["runnable"])
         self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
 
+    def test_claim_action_rejects_duplicate_status_flags(self):
+        duplicate_status_argvs = [
+            [
+                "br",
+                "update",
+                "bd-safe.1",
+                "--status",
+                "in_progress",
+                "--status",
+                "open",
+                "--json",
+            ],
+            [
+                "br",
+                "update",
+                "bd-safe.1",
+                "--status=in_progress",
+                "--status=closed",
+                "--json",
+            ],
+        ]
+        for argv in duplicate_status_argvs:
+            with self.subTest(argv=argv):
+                gate = safe_gate()
+                gate["claimCommandAction"] = safe_action(
+                    "bead_claim_candidate",
+                    argv,
+                    mutates=True,
+                )
+
+                decision = consumer.consume(envelope(gate))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertTrue(decision["mutatingActionsRequireHuman"])
+                self.assertIn(
+                    "claim_gate_claim_action_not_in_progress",
+                    decision["whyNotSafe"],
+                )
+                claim = [
+                    action
+                    for action in decision["argvActions"]
+                    if action["actionKind"] == "claim"
+                ][0]
+                self.assertFalse(claim["runnable"])
+                self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
     def test_claim_action_accepts_equals_status_in_progress(self):
         gate = safe_gate()
         gate["claimCommandAction"] = safe_action(
