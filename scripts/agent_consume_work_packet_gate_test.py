@@ -122,6 +122,29 @@ def normalize_whitespace(text):
     return " ".join(text.split())
 
 
+SCHEMA_FORBIDDEN_SAFE_STRING_EXAMPLES = {
+    "BEGIN PRIVATE KEY": "BEGIN PRIVATE KEY",
+    "BEGIN OPENSSH PRIVATE KEY": "BEGIN OPENSSH PRIVATE KEY",
+    "ghp_[A-Za-z0-9_]+": "ghp_a",
+    "Bearer [A-Za-z0-9._-]+": "Bearer x",
+    "DATABASE_URL=": "DATABASE_URL=",
+    "From: ": "From: ",
+    "Subject: ": "Subject: ",
+    "Message-ID:": "Message-ID:",
+    "body:": "body:",
+    "raw_inbox": "raw_inbox",
+    "stdout:": "stdout:",
+    "stderr:": "stderr:",
+    "/Users/[^\\s]+": "/Users/a",
+    "/home/[^\\s]+": "/home/a",
+}
+
+
+def safe_string_forbidden_patterns(schema, definition_name):
+    safe_string = schema["definitions"][definition_name]
+    return [entry["pattern"] for entry in safe_string["not"]["anyOf"]]
+
+
 class ClaimGateConsumer(unittest.TestCase):
     def test_safe_claim_gate_returns_structured_argv_actions(self):
         decision = consumer.consume(envelope(safe_gate()))
@@ -503,6 +526,75 @@ class ClaimGateConsumer(unittest.TestCase):
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
         self.assertFalse(claim["runnable"])
         self.assertEqual(claim["reason"], "malformed_command_action")
+
+    def test_schema_forbidden_safe_string_markers_fail_closed_in_all_claim_slots(self):
+        claim_schema = load_fixture(
+            "docs/schemas/swarm/ee.swarm.work_packet.claim_gate.v1.json"
+        )
+        work_packet_schema = load_fixture(
+            "docs/schemas/swarm/ee.swarm.work_packet.v1.json"
+        )
+        claim_patterns = safe_string_forbidden_patterns(claim_schema, "safeString")
+        work_packet_patterns = safe_string_forbidden_patterns(
+            work_packet_schema,
+            "safeCommandString",
+        )
+
+        self.assertEqual(claim_patterns, work_packet_patterns)
+        self.assertEqual(
+            set(SCHEMA_FORBIDDEN_SAFE_STRING_EXAMPLES),
+            set(claim_patterns),
+        )
+
+        claim_slots = [
+            (
+                "displayCommand",
+                "malformed_claim_gate_claim_command_action_display_command",
+                "malformed_command_action",
+                lambda action, marker: action.__setitem__(
+                    "displayCommand",
+                    f"br update bd-safe.1 --status in_progress --json {marker}",
+                ),
+            ),
+            (
+                "argv",
+                "malformed_claim_gate_claim_command_action_argv",
+                "argv_redacted",
+                lambda action, marker: action["argv"].append(marker),
+            ),
+            (
+                "when",
+                "malformed_claim_gate_claim_command_action_when",
+                "malformed_command_action",
+                lambda action, marker: action.__setitem__("when", marker),
+            ),
+            (
+                "rationale",
+                "malformed_claim_gate_claim_command_action_rationale",
+                "malformed_command_action",
+                lambda action, marker: action.__setitem__("rationale", marker),
+            ),
+        ]
+
+        for pattern in claim_patterns:
+            marker = SCHEMA_FORBIDDEN_SAFE_STRING_EXAMPLES[pattern]
+            for slot, reason, action_reason, mutate_action in claim_slots:
+                with self.subTest(pattern=pattern, slot=slot):
+                    gate = safe_gate()
+                    mutate_action(gate["claimCommandAction"], marker)
+
+                    decision = consumer.consume(envelope(gate))
+
+                    self.assertFalse(decision["safeToClaim"])
+                    self.assertIn(reason, decision["whyNotSafe"])
+                    claim = [
+                        action
+                        for action in decision["argvActions"]
+                        if action["actionKind"] == "claim"
+                    ][0]
+                    self.assertFalse(claim["runnable"])
+                    self.assertTrue(claim["reviewRequired"])
+                    self.assertEqual(claim["reason"], action_reason)
 
     def test_display_only_claim_action_fails_closed_even_when_schema_valid(self):
         gate = safe_gate()
