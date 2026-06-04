@@ -53,6 +53,8 @@ workaround.
 The consumer emits `ee.agent.work_packet_gate_decision.v1` with
 `safeToClaim`, `candidateId`, `decision`, `argvActions`,
 `mutatingActionsRequireHuman`, `whyNotSafe`, and source/degraded summaries.
+The schema is
+[`docs/schemas/ee.agent.work_packet_gate_decision.v1.json`](schemas/ee.agent.work_packet_gate_decision.v1.json).
 Harnesses may only run a mutating claim action when the decision reports
 `safeToClaim=true` and the claim action is `runnable=true`. Every other
 verdict is inspection-only: coordinate through Agent Mail or Beads comments,

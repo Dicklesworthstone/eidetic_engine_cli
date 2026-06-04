@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.agent.work_packet_gate_decision.v1.json",
+  "title": "ee.agent.work_packet_gate_decision.v1",
+  "description": "Harness-facing decision emitted by scripts/agent_consume_work_packet_gate.py after consuming an ee swarm work-packet or claim-gate response. This is not an ee command envelope; it is the local agent consumer output.",
+  "type": "object",
+  "required": [
+    "schema",
+    "sourceSchema",
+    "safeToClaim",
+    "candidateId",
+    "decision",
+    "action",
+    "argvActions",
+    "mutatingActionsRequireHuman",
+    "whyNotSafe",
+    "sourceSummary",
+    "degradedSummary",
+    "legacyCommandStringsRefused"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.agent.work_packet_gate_decision.v1"
+    },
+    "sourceSchema": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "string",
+          "enum": [
+            "ee.swarm.work_packet.claim_gate.v1",
+            "ee.swarm.work_packet.v1"
+          ]
+        }
+      ]
+    },
+    "safeToClaim": {"type": "boolean"},
+    "candidateId": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string"}
+      ]
+    },
+    "decision": {"type": "string"},
+    "action": {"type": "string"},
+    "argvActions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/argvAction"}
+    },
+    "mutatingActionsRequireHuman": {"type": "boolean"},
+    "whyNotSafe": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "sourceSummary": {"$ref": "#/$defs/sourceSummary"},
+    "degradedSummary": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradedSummaryEntry"}
+    },
+    "legacyCommandStringsRefused": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "$defs": {
+    "nullableString": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string"}
+      ]
+    },
+    "nullableBoolean": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"}
+      ]
+    },
+    "argvAction": {
+      "type": "object",
+      "required": [
+        "commandId",
+        "actionKind",
+        "argv",
+        "runnable",
+        "reviewRequired",
+        "mutatesState",
+        "requiredSubstrate",
+        "when",
+        "copySafety",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "commandId": {"type": "string"},
+        "actionKind": {
+          "type": "string",
+          "enum": [
+            "inspection",
+            "claim",
+            "recommended",
+            "requiredCommands",
+            "staticChecks",
+            "fallback"
+          ]
+        },
+        "argv": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "runnable": {"type": "boolean"},
+        "reviewRequired": {"type": "boolean"},
+        "mutatesState": {"type": "boolean"},
+        "requiredSubstrate": {"$ref": "#/$defs/nullableString"},
+        "when": {"$ref": "#/$defs/nullableString"},
+        "copySafety": {"type": "string"},
+        "reason": {"type": "string"}
+      }
+    },
+    "sourceSummary": {
+      "type": "object",
+      "required": [
+        "trackerHealth",
+        "trackerAuthoritative",
+        "requiresCandidateDowngrade",
+        "agentMailStatus",
+        "reservationAuthoritative",
+        "inboxAuthoritative",
+        "rchPosture",
+        "rchSafeToLaunchCargoVerification",
+        "sourceCount"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "trackerHealth": {"$ref": "#/$defs/nullableString"},
+        "trackerAuthoritative": {"$ref": "#/$defs/nullableBoolean"},
+        "requiresCandidateDowngrade": {"$ref": "#/$defs/nullableBoolean"},
+        "agentMailStatus": {"$ref": "#/$defs/nullableString"},
+        "reservationAuthoritative": {"$ref": "#/$defs/nullableBoolean"},
+        "inboxAuthoritative": {"$ref": "#/$defs/nullableBoolean"},
+        "rchPosture": {"$ref": "#/$defs/nullableString"},
+        "rchSafeToLaunchCargoVerification": {"$ref": "#/$defs/nullableBoolean"},
+        "sourceCount": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "integer", "minimum": 0}
+          ]
+        }
+      }
+    },
+    "degradedSummaryEntry": {
+      "type": "object",
+      "required": ["code", "source", "severity"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "source": {"$ref": "#/$defs/nullableString"},
+        "severity": {"$ref": "#/$defs/nullableString"}
+      }
+    }
+  }
+}

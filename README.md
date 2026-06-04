@@ -773,6 +773,8 @@ Operator workflow for crowded repos:
    `br update <id> --status in_progress --json` only when the gate reports
    `safeToClaim=true`, `verdict=safe_to_claim`, and a structured
    `claimCommandAction` for that candidate.
+   The reference consumer output schema is
+   `docs/schemas/ee.agent.work_packet_gate_decision.v1.json`.
 5. Use RCH for Cargo verification, especially when the brief reports `rec.resource_pressure.use_rch_for_cargo`.
 6. Rerun the brief after large edits, after reservation changes, and before handoff.
 

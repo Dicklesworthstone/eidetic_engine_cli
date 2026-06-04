@@ -937,6 +937,55 @@ class ErrorHandling(unittest.TestCase):
         self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
 
 
+class ConsumerDecisionSchemaContract(unittest.TestCase):
+    def test_consumer_decisions_match_schema_required_properties(self):
+        schema = load_fixture(
+            "docs/schemas/ee.agent.work_packet_gate_decision.v1.json"
+        )
+        self.assertEqual(schema["title"], consumer.OUTPUT_SCHEMA)
+        self.assertEqual(
+            schema["properties"]["schema"]["const"],
+            consumer.OUTPUT_SCHEMA,
+        )
+
+        required = set(schema["required"])
+        properties = set(schema["properties"])
+        self.assertEqual(required, properties)
+
+        action_def = schema["$defs"]["argvAction"]
+        action_required = set(action_def["required"])
+        self.assertEqual(action_required, set(action_def["properties"]))
+
+        source_def = schema["$defs"]["sourceSummary"]
+        source_required = set(source_def["required"])
+        self.assertEqual(source_required, set(source_def["properties"]))
+
+        degraded_def = schema["$defs"]["degradedSummaryEntry"]
+        degraded_required = set(degraded_def["required"])
+        self.assertEqual(degraded_required, set(degraded_def["properties"]))
+
+        samples = [
+            consumer.consume(envelope(safe_gate())),
+            consumer.consume(
+                load_fixture("tests/fixtures/swarm_work_packet/crowded_checkout.json")
+            ),
+            consumer.consume(
+                load_fixture("tests/fixtures/swarm_work_packet/bv_timeout_no_output.json")
+            ),
+            consumer.consume({"schema": "ee.error.v2", "error": {"code": "usage"}}),
+        ]
+
+        for index, decision in enumerate(samples):
+            with self.subTest(sample=index):
+                self.assertEqual(set(decision), required)
+                self.assertEqual(decision["schema"], consumer.OUTPUT_SCHEMA)
+                self.assertEqual(set(decision["sourceSummary"]), source_required)
+                for action in decision["argvActions"]:
+                    self.assertEqual(set(action), action_required)
+                for entry in decision["degradedSummary"]:
+                    self.assertEqual(set(entry), degraded_required)
+
+
 class WorkPacketDocsContract(unittest.TestCase):
     def test_schema_examples_do_not_mark_degraded_authority_claim_safe(self):
         schema = load_fixture("docs/schemas/swarm/ee.swarm.work_packet.v1.json")
@@ -1008,6 +1057,7 @@ class WorkPacketDocsContract(unittest.TestCase):
             "does not authorize Beads mutation",
             "work-packet claim gate succeeds",
             "RCH/release-path rebuild",
+            "ee.agent.work_packet_gate_decision.v1.json",
         ]
         docs = [
             "README.md",
