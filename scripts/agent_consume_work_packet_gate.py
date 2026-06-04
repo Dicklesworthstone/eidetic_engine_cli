@@ -271,14 +271,14 @@ def malformed_claim_gate_authority_reasons(gate):
     return reasons
 
 
-def malformed_command_action_reasons(action, reason_prefix):
+def malformed_command_action_reasons(action, reason_prefix, reason_scope="claim_gate"):
     if not isinstance(action, dict):
         return []
 
     reasons = []
     for field, suffix in CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS:
         if field not in action:
-            reasons.append(f"missing_claim_gate_{reason_prefix}_{suffix}")
+            reasons.append(f"missing_{reason_scope}_{reason_prefix}_{suffix}")
 
     for field, suffix in [
         ("commandId", "command_id"),
@@ -290,7 +290,7 @@ def malformed_command_action_reasons(action, reason_prefix):
     ]:
         value = action.get(field)
         if field in action and value is not None and not isinstance(value, str):
-            reasons.append(f"malformed_claim_gate_{reason_prefix}_{suffix}")
+            reasons.append(f"malformed_{reason_scope}_{reason_prefix}_{suffix}")
 
     for field, suffix in [
         ("shellRequired", "shell_required"),
@@ -298,11 +298,87 @@ def malformed_command_action_reasons(action, reason_prefix):
     ]:
         value = action.get(field)
         if field in action and value is not None and not isinstance(value, bool):
-            reasons.append(f"malformed_claim_gate_{reason_prefix}_{suffix}")
+            reasons.append(f"malformed_{reason_scope}_{reason_prefix}_{suffix}")
 
     argv = action.get("argv")
     if "argv" in action and argv is not None and not isinstance(argv, list):
-        reasons.append(f"malformed_claim_gate_{reason_prefix}_argv")
+        reasons.append(f"malformed_{reason_scope}_{reason_prefix}_argv")
+
+    return reasons
+
+
+def malformed_packet_command_action_reasons(packet):
+    reasons = []
+
+    recommended = dict_or_empty(packet.get("recommendedAction"))
+    suggested_actions = recommended.get("suggestedCommandActions")
+    if suggested_actions is not None and not isinstance(suggested_actions, list):
+        reasons.append("malformed_packet_suggested_command_actions")
+    for action in list_items(suggested_actions):
+        if not isinstance(action, dict):
+            reasons.append("malformed_packet_recommended_command_action")
+            continue
+        reasons.extend(
+            malformed_command_action_reasons(
+                action,
+                "recommended_command_action",
+                "packet",
+            )
+        )
+
+    verification = dict_or_empty(packet.get("verification"))
+    for list_key, list_reason, reason_prefix in [
+        (
+            "requiredCommands",
+            "malformed_packet_required_commands",
+            "required_command_action",
+        ),
+        ("staticChecks", "malformed_packet_static_checks", "static_check_action"),
+    ]:
+        commands = verification.get(list_key)
+        if commands is not None and not isinstance(commands, list):
+            reasons.append(list_reason)
+            continue
+        for command in list_items(commands):
+            if not isinstance(command, dict):
+                reasons.append(f"malformed_packet_{reason_prefix}")
+                continue
+            if "commandAction" not in command or command.get("commandAction") is None:
+                continue
+            command_action = command.get("commandAction")
+            if not isinstance(command_action, dict):
+                reasons.append(f"malformed_packet_{reason_prefix}")
+                continue
+            reasons.extend(
+                malformed_command_action_reasons(
+                    command_action,
+                    reason_prefix,
+                    "packet",
+                )
+            )
+
+    coordination = dict_or_empty(packet.get("coordination"))
+    agent_mail = dict_or_empty(coordination.get("agentMail"))
+    fallback_actions = agent_mail.get("fallbackActions")
+    if fallback_actions is not None and not isinstance(fallback_actions, list):
+        reasons.append("malformed_packet_fallback_actions")
+    for fallback in list_items(fallback_actions):
+        if not isinstance(fallback, dict):
+            reasons.append("malformed_packet_fallback_action")
+            continue
+        if "commandAction" not in fallback or fallback.get("commandAction") is None:
+            continue
+        command_action = fallback.get("commandAction")
+        if not isinstance(command_action, dict):
+            reasons.append("malformed_packet_fallback_command_action")
+            continue
+        reasons.extend(
+            malformed_command_action_reasons(
+                command_action,
+                "fallback_command_action",
+                "packet",
+            )
+        )
 
     return reasons
 
@@ -765,6 +841,7 @@ def packet_safe_to_claim(packet, candidate):
         and not compact_list(packet.get("doNotProceedBecause"))
         and not malformed_packet_map_reasons(packet)
         and not malformed_packet_scalar_reasons(packet)
+        and not malformed_packet_command_action_reasons(packet)
         and tracker_authoritative is True
         and not agent_mail_authority_reasons(agent_mail)
         and agent_mail.get("status") != "semantic_readiness_failed"
@@ -810,6 +887,7 @@ def packet_why_not_safe(packet, candidate, safe_to_claim):
 
     reasons.extend(malformed_packet_map_reasons(packet))
     reasons.extend(malformed_packet_scalar_reasons(packet))
+    reasons.extend(malformed_packet_command_action_reasons(packet))
 
     tracker = dict_or_empty(packet.get("trackerIntegrity"))
     tracker_reason = tracker_not_authoritative_reason(tracker)

@@ -788,6 +788,147 @@ class WorkPacketConsumer(unittest.TestCase):
         self.assertEqual(decision["sourceSummary"]["reservationAuthoritative"], True)
         self.assertEqual(decision["sourceSummary"]["inboxAuthoritative"], True)
 
+    def test_missing_required_packet_recommended_command_action_fields_fail_closed(self):
+        for field, suffix in consumer.CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS:
+            with self.subTest(field=field):
+                packet = load_fixture(
+                    "tests/fixtures/swarm_work_packet/healthy_small.json"
+                )
+                action = safe_action(
+                    "bead_claim_candidate",
+                    ["br", "update", "bd-safe", "--status", "in_progress", "--json"],
+                    mutates=True,
+                )
+                action.pop(field)
+                packet["data"]["recommendedAction"] = {
+                    "action": "inspect_and_claim",
+                    "candidateId": "bd-safe",
+                    "safeToClaim": True,
+                    "suggestedCommands": [],
+                    "suggestedCommandActions": [action],
+                }
+                packet["data"]["candidates"] = [
+                    {
+                        "id": "bd-safe",
+                        "decision": "safe_to_claim",
+                        "unsafeReasons": [],
+                        "staleReasons": [],
+                    }
+                ]
+
+                decision = consumer.consume(packet)
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertIn(
+                    f"missing_packet_recommended_command_action_{suffix}",
+                    decision["whyNotSafe"],
+                )
+                self.assertFalse(
+                    any(
+                        action["runnable"] and action["mutatesState"]
+                        for action in decision["argvActions"]
+                    )
+                )
+
+    def test_malformed_packet_command_action_fields_fail_closed(self):
+        packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        packet["data"]["recommendedAction"] = {
+            "action": "inspect_and_claim",
+            "candidateId": "bd-safe",
+            "safeToClaim": True,
+            "suggestedCommands": [],
+            "suggestedCommandActions": [
+                "not-a-command-action",
+                {
+                    **safe_action(
+                        "bead_claim_candidate",
+                        [
+                            "br",
+                            "update",
+                            "bd-safe",
+                            "--status",
+                            "in_progress",
+                            "--json",
+                        ],
+                        mutates=True,
+                    ),
+                    "shellRequired": "false",
+                },
+            ],
+        }
+        packet["data"]["candidates"] = [
+            {
+                "id": "bd-safe",
+                "decision": "safe_to_claim",
+                "unsafeReasons": [],
+                "staleReasons": [],
+            }
+        ]
+        packet["data"]["verification"] = {
+            "requiredCommands": [
+                {
+                    "commandAction": {
+                        **safe_action(
+                            "json_schema_parse",
+                            [
+                                "jq",
+                                "empty",
+                                "docs/schemas/ee.agent.work_packet_gate_decision.v1.json",
+                            ],
+                        ),
+                        "displayCommand": {"cmd": "jq empty schema"},
+                    }
+                }
+            ],
+            "staticChecks": [
+                {
+                    "commandAction": {
+                        **safe_action(
+                            "diff_check",
+                            [
+                                "git",
+                                "diff",
+                                "--check",
+                                "--",
+                                "scripts/agent_consume_work_packet_gate.py",
+                            ],
+                        ),
+                        "argv": "git diff --check",
+                    }
+                }
+            ],
+        }
+        packet["data"]["coordination"]["agentMail"]["fallbackActions"] = [
+            {
+                "kind": "support_bundle",
+                "commandAction": {
+                    **safe_action(
+                        "agent_mail_support_bundle",
+                        ["ee", "support-bundle", "--agent-mail", "--json"],
+                    ),
+                    "mutatesState": "false",
+                },
+            }
+        ]
+
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        for reason in [
+            "malformed_packet_recommended_command_action",
+            "malformed_packet_recommended_command_action_shell_required",
+            "malformed_packet_required_command_action_display_command",
+            "malformed_packet_static_check_action_argv",
+            "malformed_packet_fallback_command_action_mutates_state",
+        ]:
+            self.assertIn(reason, decision["whyNotSafe"])
+        self.assertFalse(
+            any(
+                action["runnable"] and action["mutatesState"]
+                for action in decision["argvActions"]
+            )
+        )
+
     def test_agent_mail_authority_flags_downgrade_otherwise_safe_packet(self):
         packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
         agent_mail = packet["data"]["coordination"]["agentMail"]
