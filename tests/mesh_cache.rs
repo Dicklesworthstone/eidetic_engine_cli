@@ -4,6 +4,7 @@
 //! other swarm lanes.
 
 #[path = "../src/mesh/cache.rs"]
+#[allow(dead_code)]
 mod cache;
 
 use cache::{
