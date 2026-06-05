@@ -51,6 +51,14 @@
           "freshness": "current",
           "degradedCodes": [],
           "recoveryActions": []
+        },
+        {
+          "source": "file_reservations",
+          "authority": "authoritative",
+          "status": "ok",
+          "freshness": "current",
+          "degradedCodes": [],
+          "recoveryActions": []
         }
       ],
       "degradedCodes": [],
@@ -189,6 +197,14 @@
               "requiredSubstrate": "agent_mail"
             }
           ]
+        },
+        {
+          "source": "file_reservations",
+          "authority": "authoritative",
+          "status": "ok",
+          "freshness": "current",
+          "degradedCodes": [],
+          "recoveryActions": []
         }
       ],
       "degradedCodes": [
