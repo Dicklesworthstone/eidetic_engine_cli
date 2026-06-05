@@ -270,7 +270,7 @@ function Get-DetectedAgents {
     if ((Test-Path "$env:USERPROFILE\.cursor") -or (Get-Command cursor -ErrorAction SilentlyContinue)) {
         $agents.Add("Cursor IDE") | Out-Null
     }
-    return $agents
+    return ,$agents
 }
 
 function Show-DetectedAgents {
