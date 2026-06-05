@@ -97,7 +97,8 @@ use crate::core::doctor::{
     IntegrityDiagnosticsReport,
 };
 use crate::core::environment_attestation::{
-    EnvironmentAttestationInputs, EnvironmentAttestationReport, EnvironmentAttestationSourceStatus,
+    EnvironmentAttestationInputs, EnvironmentAttestationLocalCargoScanOrigin,
+    EnvironmentAttestationReport, EnvironmentAttestationSourceStatus,
     collect_environment_attestation, environment_attestation_from_swarm_brief_with_inputs,
 };
 use crate::curate::{REFLECTION_RESULT_MAX_JSON_BYTES, ReflectionSourcePackageLimits};
@@ -22617,6 +22618,11 @@ where
                 } else {
                     let swarm_report = collect_swarm_brief(&options, &runner);
                     let generated_local_cargo_process_scan;
+                    let local_cargo_process_scan_origin = if local_cargo_process_scan.is_some() {
+                        EnvironmentAttestationLocalCargoScanOrigin::Fixture
+                    } else {
+                        EnvironmentAttestationLocalCargoScanOrigin::LiveProbe
+                    };
                     let local_cargo_process_scan =
                         if let Some(value) = local_cargo_process_scan.as_ref() {
                             Some(value)
@@ -22632,6 +22638,7 @@ where
                         EnvironmentAttestationInputs {
                             generated_at: chrono::Utc::now(),
                             local_cargo_process_scan,
+                            local_cargo_process_scan_origin,
                             ci_proof_lane_snapshot: ci_proof_lane_snapshot.as_ref(),
                         },
                     )
@@ -22682,6 +22689,8 @@ where
     }
 }
 
+const ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
 fn read_environment_attestation_fixture_json(
     path: Option<&PathBuf>,
     label: &str,
@@ -22689,9 +22698,17 @@ fn read_environment_attestation_fixture_json(
     let Some(path) = path else {
         return Ok(None);
     };
-    let text = fs::read_to_string(path).map_err(|error| DomainError::Storage {
-        message: format!("Failed to read {label} fixture {}: {error}", path.display()),
-        repair: Some(format!("Pass a readable {label} JSON file.")),
+    let text = read_environment_attestation_fixture_file(path, label).map_err(|error| {
+        let message = format!("Failed to read {label} fixture {}: {error}", path.display());
+        let repair = Some(format!(
+            "Pass a regular non-symlink {label} JSON file no larger than {ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES} bytes."
+        ));
+        match error.kind() {
+            io::ErrorKind::InvalidData
+            | io::ErrorKind::InvalidInput
+            | io::ErrorKind::PermissionDenied => DomainError::Usage { message, repair },
+            _ => DomainError::Storage { message, repair },
+        }
     })?;
     let value =
         serde_json::from_str::<serde_json::Value>(&text).map_err(|error| DomainError::Usage {
@@ -22702,6 +22719,120 @@ fn read_environment_attestation_fixture_json(
             repair: Some(format!("Pass a valid {label} JSON object.")),
         })?;
     Ok(Some(value))
+}
+
+fn read_environment_attestation_fixture_file(path: &Path, label: &str) -> io::Result<String> {
+    if let Some(symlink) = first_existing_environment_attestation_fixture_symlink_component(path)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to read {label} fixture through symlink '{}'",
+                symlink.display()
+            ),
+        ));
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} fixture path '{}' is not a file", path.display()),
+        ));
+    }
+    if metadata.len() > ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{label} fixture '{}' exceeds the {ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES}-byte cap; refusing to read",
+                path.display()
+            ),
+        ));
+    }
+
+    let read_limit = ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES
+        .checked_add(1)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "environment attestation fixture read cap overflowed usize",
+            )
+        })?;
+    let file = open_environment_attestation_fixture_file_for_read_no_follow(path)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{label} fixture path '{}' is not a regular file after open",
+                path.display()
+            ),
+        ));
+    }
+    if opened_metadata.len() > ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{label} fixture '{}' exceeds the {ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES}-byte cap; refusing to read",
+                path.display()
+            ),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(read_limit as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{label} fixture '{}' exceeds the {ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES}-byte cap; refusing to read",
+                path.display()
+            ),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn open_environment_attestation_fixture_file_for_read_no_follow(
+    path: &Path,
+) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_environment_attestation_fixture_file_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_environment_attestation_fixture_file_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_environment_attestation_fixture_file_open_no_follow(_options: &mut fs::OpenOptions) {}
+
+fn first_existing_environment_attestation_fixture_symlink_component(
+    path: &Path,
+) -> io::Result<Option<PathBuf>> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                current.push(component.as_os_str());
+                continue;
+            }
+            Component::CurDir => continue,
+            Component::ParentDir | Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+        }
+
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
 }
 
 fn environment_attestation_unavailable_sources(
@@ -49519,12 +49650,12 @@ mod tests {
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction,
         COORDINATION_FALLBACK_INGEST_SCHEMA_V1, COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command,
         ContextPackProfile, CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand,
-        DomainError, EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand,
-        GraphCommand, GraphSnapshotCommand, HandoffCommand, HookCommand, LabCommand,
-        LabSwarmCommand, LabSwarmWorkloadProfile, LearnCommand, LearnExperimentCommand,
-        MIGRATION_REPAIR_COMMAND, MaintenanceCommand, MaintenanceWalCheckpointArgs,
-        MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat, PackCommand,
-        PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
+        DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES, EconomyCommand,
+        EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand, GraphSnapshotCommand,
+        HandoffCommand, HookCommand, LabCommand, LabSwarmCommand, LabSwarmWorkloadProfile,
+        LearnCommand, LearnExperimentCommand, MIGRATION_REPAIR_COMMAND, MaintenanceCommand,
+        MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat,
+        PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
         ReflectRequestLedgerCommand, RegressCommand, RegressExplainArgs, RegressionSurfaceArg,
         RuleCommand, ShadowMode, SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs,
         SwarmCommand, SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand,
@@ -57768,6 +57899,51 @@ mod tests {
             &serde_json::json!("artifact_stale"),
             "fixture verdict",
         )
+    }
+
+    #[test]
+    fn diag_environment_attestation_fixture_reader_rejects_bad_inputs() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let malformed = dir.path().join("malformed.json");
+        fs::write(&malformed, "{").map_err(|error| error.to_string())?;
+        let empty = dir.path().join("empty.json");
+        fs::write(&empty, "").map_err(|error| error.to_string())?;
+        let oversized = dir.path().join("oversized.json");
+        fs::File::create(&oversized)
+            .and_then(|file| file.set_len((ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES + 1) as u64))
+            .map_err(|error| error.to_string())?;
+
+        assert_fixture_usage_error(&malformed, "parse")?;
+        assert_fixture_usage_error(&empty, "parse")?;
+        assert_fixture_usage_error(&oversized, "exceeds")?;
+        assert_fixture_usage_error(dir.path(), "not a file")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diag_environment_attestation_fixture_reader_rejects_symlink() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real = dir.path().join("real.json");
+        fs::write(&real, r#"{"schema":"ee.ci_proof_lane_snapshot.v1"}"#)
+            .map_err(|error| error.to_string())?;
+        let symlink = dir.path().join("linked.json");
+        std::os::unix::fs::symlink(&real, &symlink).map_err(|error| error.to_string())?;
+
+        assert_fixture_usage_error(&symlink, "symlink")
+    }
+
+    fn assert_fixture_usage_error(path: &Path, expected: &str) -> TestResult {
+        match read_environment_attestation_fixture_json(
+            Some(&path.to_path_buf()),
+            "CI proof-lane snapshot",
+        ) {
+            Err(DomainError::Usage { message, .. }) => ensure(
+                message.contains(expected),
+                format!("expected fixture error to contain {expected:?}, got {message:?}"),
+            ),
+            Err(other) => Err(format!("expected usage error, got {other}")),
+            Ok(_) => Err("expected fixture read to fail".to_owned()),
+        }
     }
 
     #[test]

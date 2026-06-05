@@ -4,8 +4,8 @@ use std::path::Path;
 
 use chrono::{TimeZone, Utc};
 use ee::core::environment_attestation::{
-    EnvironmentAttestationInputs, environment_attestation_from_swarm_brief,
-    environment_attestation_from_swarm_brief_with_inputs,
+    EnvironmentAttestationInputs, EnvironmentAttestationLocalCargoScanOrigin,
+    environment_attestation_from_swarm_brief, environment_attestation_from_swarm_brief_with_inputs,
 };
 use ee::core::swarm_brief::{
     SwarmBriefDegradation, SwarmBriefDirtyFile, SwarmBriefFileReservation, SwarmBriefReport,
@@ -162,6 +162,8 @@ fn attestation_cases() -> Result<
             EnvironmentAttestationInputs {
                 generated_at: fixed_time(),
                 local_cargo_process_scan: Some(&local_cargo_scan),
+                local_cargo_process_scan_origin:
+                    EnvironmentAttestationLocalCargoScanOrigin::LiveProbe,
                 ci_proof_lane_snapshot: None,
             },
         ),
@@ -175,6 +177,8 @@ fn attestation_cases() -> Result<
             EnvironmentAttestationInputs {
                 generated_at: fixed_time(),
                 local_cargo_process_scan: None,
+                local_cargo_process_scan_origin:
+                    EnvironmentAttestationLocalCargoScanOrigin::LiveProbe,
                 ci_proof_lane_snapshot: Some(&ci_stale_snapshot),
             },
         ),

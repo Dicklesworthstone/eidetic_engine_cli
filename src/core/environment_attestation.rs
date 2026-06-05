@@ -301,7 +301,23 @@ pub struct EnvironmentAttestationDegradation {
 pub struct EnvironmentAttestationInputs<'a> {
     pub generated_at: DateTime<Utc>,
     pub local_cargo_process_scan: Option<&'a Value>,
+    pub local_cargo_process_scan_origin: EnvironmentAttestationLocalCargoScanOrigin,
     pub ci_proof_lane_snapshot: Option<&'a Value>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnvironmentAttestationLocalCargoScanOrigin {
+    LiveProbe,
+    Fixture,
+}
+
+impl EnvironmentAttestationLocalCargoScanOrigin {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::LiveProbe => "live_probe",
+            Self::Fixture => "fixture",
+        }
+    }
 }
 
 impl EnvironmentAttestationInputs<'_> {
@@ -310,6 +326,7 @@ impl EnvironmentAttestationInputs<'_> {
         Self {
             generated_at: Utc::now(),
             local_cargo_process_scan: None,
+            local_cargo_process_scan_origin: EnvironmentAttestationLocalCargoScanOrigin::LiveProbe,
             ci_proof_lane_snapshot: None,
         }
     }
@@ -328,6 +345,7 @@ pub fn collect_environment_attestation(
         EnvironmentAttestationInputs {
             generated_at: Utc::now(),
             local_cargo_process_scan: Some(&local_cargo_process_scan),
+            local_cargo_process_scan_origin: EnvironmentAttestationLocalCargoScanOrigin::LiveProbe,
             ci_proof_lane_snapshot: None,
         },
     )
@@ -343,6 +361,7 @@ pub fn environment_attestation_from_swarm_brief(
         EnvironmentAttestationInputs {
             generated_at,
             local_cargo_process_scan: None,
+            local_cargo_process_scan_origin: EnvironmentAttestationLocalCargoScanOrigin::LiveProbe,
             ci_proof_lane_snapshot: None,
         },
     )
@@ -355,7 +374,10 @@ pub fn environment_attestation_from_swarm_brief_with_inputs(
 ) -> EnvironmentAttestationReport {
     let mut entries = source_authority_entries(report);
     if let Some(process_scan) = inputs.local_cargo_process_scan {
-        entries.push(local_cargo_tripwire_entry(process_scan));
+        entries.push(local_cargo_tripwire_entry(
+            process_scan,
+            inputs.local_cargo_process_scan_origin,
+        ));
     }
     if let Some(snapshot) = inputs.ci_proof_lane_snapshot {
         entries.push(ci_proof_lane_entry(snapshot));
@@ -591,7 +613,10 @@ fn source_metrics(
     metrics
 }
 
-fn local_cargo_tripwire_entry(process_scan: &Value) -> EnvironmentAttestationSourceAuthorityEntry {
+fn local_cargo_tripwire_entry(
+    process_scan: &Value,
+    origin: EnvironmentAttestationLocalCargoScanOrigin,
+) -> EnvironmentAttestationSourceAuthorityEntry {
     let status_text = process_scan
         .get("status")
         .and_then(Value::as_str)
@@ -611,24 +636,47 @@ fn local_cargo_tripwire_entry(process_scan: &Value) -> EnvironmentAttestationSou
         (
             EnvironmentAttestationAuthority::Contradicted,
             EnvironmentAttestationSourceStatus::Blocked,
-            format!(
-                "Local Cargo process scan detected {count} disallowed local build process(es)."
-            ),
+            if origin == EnvironmentAttestationLocalCargoScanOrigin::Fixture {
+                format!(
+                    "Fixture-supplied local Cargo process scan reported {count} disallowed local build process(es)."
+                )
+            } else {
+                format!(
+                    "Local Cargo process scan detected {count} disallowed local build process(es)."
+                )
+            },
         )
     } else if status_text == "unavailable" {
         degraded_codes.push(EnvironmentAttestationDegradedCode::SourceAuthorityAmbiguous);
         (
             EnvironmentAttestationAuthority::Unavailable,
             EnvironmentAttestationSourceStatus::Unavailable,
-            "Local Cargo process scan was unavailable.".to_owned(),
+            if origin == EnvironmentAttestationLocalCargoScanOrigin::Fixture {
+                "Fixture-supplied local Cargo process scan reported unavailable status.".to_owned()
+            } else {
+                "Local Cargo process scan was unavailable.".to_owned()
+            },
         )
     } else {
         (
             EnvironmentAttestationAuthority::Authoritative,
             EnvironmentAttestationSourceStatus::Ok,
-            "Local Cargo process scan found no disallowed local build process.".to_owned(),
+            if origin == EnvironmentAttestationLocalCargoScanOrigin::Fixture {
+                "Fixture-supplied local Cargo process scan reported no disallowed local build process.".to_owned()
+            } else {
+                "Local Cargo process scan found no disallowed local build process.".to_owned()
+            },
         )
     };
+    let evidence_refs = if origin == EnvironmentAttestationLocalCargoScanOrigin::Fixture {
+        vec!["fixture://local-cargo-process-scan".to_owned()]
+    } else {
+        vec!["tripwire://local-cargo-process-scan".to_owned()]
+    };
+    let mut metrics = vec![metric("detected_local_build_count", count)];
+    if origin == EnvironmentAttestationLocalCargoScanOrigin::Fixture {
+        metrics.push(metric_string("input_origin", origin.as_str().to_owned()));
+    }
     EnvironmentAttestationSourceAuthorityEntry {
         source: EnvironmentAttestationSourceKind::LocalCargoTripwire,
         authority,
@@ -636,8 +684,8 @@ fn local_cargo_tripwire_entry(process_scan: &Value) -> EnvironmentAttestationSou
         freshness: EnvironmentAttestationFreshness::Current,
         observed_at: None,
         summary,
-        evidence_refs: vec!["tripwire://local-cargo-process-scan".to_owned()],
-        metrics: vec![metric("detected_local_build_count", count)],
+        evidence_refs,
+        metrics,
         degraded_codes,
         recovery_actions: local_cargo_recovery_actions(bypass_detected, status_text),
     }
@@ -1956,6 +2004,8 @@ mod tests {
             EnvironmentAttestationInputs {
                 generated_at: fixed_time(),
                 local_cargo_process_scan: Some(&process_scan),
+                local_cargo_process_scan_origin:
+                    EnvironmentAttestationLocalCargoScanOrigin::LiveProbe,
                 ci_proof_lane_snapshot: None,
             },
         );
@@ -1979,6 +2029,40 @@ mod tests {
     }
 
     #[test]
+    fn fixture_supplied_local_cargo_scan_preserves_input_origin() {
+        let brief = report_with_sources(vec![ready_source(SwarmBriefSourceKind::Git)]);
+        let process_scan = json!({
+            "schema": "ee.rch_local_cargo_tripwire.v1",
+            "mode": "probe_processes",
+            "status": "bypass_detected",
+            "count": 1,
+            "detectedLocalBuilds": [{"kind": "cargo"}],
+            "evidence": [{"kind": "active_process_scan", "result": "bypass_detected"}]
+        });
+        let attestation = environment_attestation_from_swarm_brief_with_inputs(
+            &brief,
+            EnvironmentAttestationInputs {
+                generated_at: fixed_time(),
+                local_cargo_process_scan: Some(&process_scan),
+                local_cargo_process_scan_origin:
+                    EnvironmentAttestationLocalCargoScanOrigin::Fixture,
+                ci_proof_lane_snapshot: None,
+            },
+        );
+        let tripwire = entry(
+            &attestation,
+            EnvironmentAttestationSourceKind::LocalCargoTripwire,
+        );
+
+        assert_eq!(
+            tripwire.evidence_refs,
+            vec!["fixture://local-cargo-process-scan"]
+        );
+        assert_eq!(metric_value(tripwire, "input_origin"), Some("fixture"));
+        assert!(tripwire.summary.contains("Fixture-supplied"));
+    }
+
+    #[test]
     fn ci_proof_lane_fresh_artifact_is_authoritative_source_evidence() {
         let brief = report_with_sources(vec![ready_source(SwarmBriefSourceKind::Git)]);
         let snapshot = ci_proof_lane_fixture("fresh_artifact_available");
@@ -1987,6 +2071,8 @@ mod tests {
             EnvironmentAttestationInputs {
                 generated_at: fixed_time(),
                 local_cargo_process_scan: None,
+                local_cargo_process_scan_origin:
+                    EnvironmentAttestationLocalCargoScanOrigin::LiveProbe,
                 ci_proof_lane_snapshot: Some(&snapshot),
             },
         );
@@ -2024,6 +2110,8 @@ mod tests {
             EnvironmentAttestationInputs {
                 generated_at: fixed_time(),
                 local_cargo_process_scan: None,
+                local_cargo_process_scan_origin:
+                    EnvironmentAttestationLocalCargoScanOrigin::LiveProbe,
                 ci_proof_lane_snapshot: Some(&stale_snapshot),
             },
         );
@@ -2056,6 +2144,8 @@ mod tests {
             EnvironmentAttestationInputs {
                 generated_at: fixed_time(),
                 local_cargo_process_scan: None,
+                local_cargo_process_scan_origin:
+                    EnvironmentAttestationLocalCargoScanOrigin::LiveProbe,
                 ci_proof_lane_snapshot: Some(&cancelled_snapshot),
             },
         );
