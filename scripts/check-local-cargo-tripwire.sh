@@ -117,6 +117,13 @@ classify_command() {
         return
     fi
 
+    # `rch diagnose` is a read-only classifier. It may quote a Cargo
+    # command as data, but it does not execute that command locally.
+    if is_rch_diagnose_command "$cmd"; then
+        printf 'allowed\trch diagnose command classifies Rust verifier payload without executing it\t-\t-\n'
+        return
+    fi
+
     # Whitelist only remote-required `rch exec` cargo forms. Bare
     # `rch exec -- cargo ...` can fall back to local Cargo when topology
     # admission fails, so the tripwire denies it and points callers at
@@ -213,6 +220,12 @@ probe_processes() {
         case "$cmd" in
             *scripts/rch_verify.sh*) continue ;;
         esac
+        # Skip read-only RCH diagnostics. The command line can include
+        # `cargo check ...` as the payload being classified, but no local
+        # Cargo process is spawned by `rch diagnose`.
+        if is_rch_diagnose_command "$cmd"; then
+            continue
+        fi
         local cwd="-"
         cwd=$(process_cwd "$pid")
         # Only flag processes operating on this repo.
@@ -283,6 +296,10 @@ process_cwd() {
 
 command_mentions_rust_tool() {
     printf '%s' "$1" | grep -Eq "(^|[[:space:]/'\"(;])cargo([[:space:]]|$)|(^|[[:space:]/'\"(;])rustc([[:space:]]|$)|(^|[[:space:]/'\"(;])rustdoc([[:space:]]|$)"
+}
+
+is_rch_diagnose_command() {
+    printf '%s' "$1" | grep -Eq '(^|[[:space:]/])rch([[:space:]]+--json)?[[:space:]]+diagnose([[:space:]]|$)'
 }
 
 command_kind_from_command() {
@@ -369,7 +386,7 @@ workspace_path_from_manifest() {
 package_cache_lock_state() {
     local pid="$1"
     if [ -n "$PACKAGE_CACHE_PIDS_FIXTURE" ]; then
-        if printf '%s\n' "$PACKAGE_CACHE_PIDS_FIXTURE" | tr ', ' '\n\n' | grep -Fxq "$pid"; then
+        if printf '%s\n' "$PACKAGE_CACHE_PIDS_FIXTURE" | tr ', ' '\n' | grep -Fxq "$pid"; then
             printf 'held\n'
         else
             printf 'not_observed\n'
@@ -786,6 +803,12 @@ run_self_test() {
         allowed*) ;;
         *) printf 'self-test FAILED: absolute-path remote-required rch exec must be allowed; got %s\n' "$result" >&2; exit 1 ;;
     esac
+    # rch diagnose quotes a Cargo command as read-only data → ALLOWED.
+    result=$(classify_command "/Volumes/USBNVME16TB/temp_agent_space/rch-candidate/extracted/rch diagnose --dry-run 'cargo check --lib --quiet' --json")
+    case "$result" in
+        allowed*) ;;
+        *) printf 'self-test FAILED: rch diagnose dry-run payload must be allowed; got %s\n' "$result" >&2; exit 1 ;;
+    esac
     # Empty command → ALLOWED.
     result=$(classify_command "")
     case "$result" in
@@ -823,7 +846,7 @@ run_self_test() {
             exit 1
         fi
     fi
-    printf 'self-test PASSED: 16 classifier cases, JSON repair action, and process fixture produced expected outcomes\n'
+    printf 'self-test PASSED: 17 classifier cases, JSON repair action, and process fixture produced expected outcomes\n'
     exit 0
 }
 

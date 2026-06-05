@@ -216,6 +216,19 @@ fn rch_exec_with_json_flag_variant_is_allowed() -> TestResult {
 }
 
 #[test]
+fn rch_diagnose_dry_run_payload_is_allowed() -> TestResult {
+    let (code, report) = classify(
+        "/Volumes/USBNVME16TB/temp_agent_space/rch-candidate/extracted/rch diagnose --dry-run \"cargo check --lib --quiet\" --json",
+    )?;
+    if code != 0 || report["allowed"].as_str() != Some("allowed") {
+        return Err(format!(
+            "expected allowed for read-only rch diagnose payload; got {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn rch_require_remote_set_without_wrapper_is_denied_with_specific_detail() -> TestResult {
     // The exact bd-1h8ji.2 failure mode: the caller thought
     // RCH_REQUIRE_REMOTE=1 alone was enough to keep cargo remote, but
@@ -297,6 +310,29 @@ fn process_probe_reports_manifest_workspace_and_package_cache_lock() -> TestResu
         return Err(format!(
             "compile cargo process not classified: {}",
             processes[1]
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn process_probe_ignores_rch_diagnose_dry_run_payloads() -> TestResult {
+    let fixture = "\
+ 55381 613 00:02 /Volumes/USBNVME16TB/temp_agent_space/rch-candidate/extracted/rch diagnose --dry-run cargo check --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml --json
+ 55382 613 00:02 cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+";
+    let (code, report) = probe_with_ps_fixture(fixture, "")?;
+    if code != 1 {
+        return Err(format!(
+            "expected probe exit 1 from the real local cargo process only; got {code}: {report}"
+        ));
+    }
+    let processes = report["processes"]
+        .as_array()
+        .ok_or_else(|| format!("missing processes array: {report}"))?;
+    if processes.len() != 1 || processes[0]["pid"] != "55382" {
+        return Err(format!(
+            "expected only direct cargo to be reported, got {processes:?}"
         ));
     }
     Ok(())

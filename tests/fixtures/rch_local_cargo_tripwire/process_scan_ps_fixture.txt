@@ -3,3 +3,4 @@
  102 1 00:10:00 /bin/zsh -c eval 'cargo metadata --format-version=1 --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml'
  103 1 00:01:00 scripts/rch_verify.sh -- cargo test --lib support_bundle_tripwire_probe
  104 1 00:05:00 /usr/bin/rustc --crate-name ee /Users/jemanuel/projects/eidetic_engine_cli/src/lib.rs
+ 105 1 00:00:02 /Volumes/USBNVME16TB/temp_agent_space/rch-candidate/extracted/rch diagnose --dry-run cargo check --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml --json
