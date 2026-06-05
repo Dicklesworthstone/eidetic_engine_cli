@@ -25,22 +25,22 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
-fn api_key_fixture() -> String {
+fn api_key_fixture() -> Result<String, String> {
     let fixture = include_str!("fixtures/secrets/pre_redaction.jsonl");
     let line = fixture
         .lines()
         .find(|line| !line.trim().is_empty())
-        .expect("pre_redaction fixture should contain at least one JSONL row");
-    let value: JsonValue =
-        serde_json::from_str(line).expect("pre_redaction fixture row should be valid JSON");
-    value
+        .ok_or_else(|| "pre_redaction fixture should contain at least one JSONL row".to_string())?;
+    let value: JsonValue = serde_json::from_str(line)
+        .map_err(|error| format!("pre_redaction fixture row should be valid JSON: {error}"))?;
+    let content = value
         .get("content")
         .and_then(JsonValue::as_str)
-        .expect("pre_redaction fixture row should contain string content")
-        .to_owned()
+        .ok_or_else(|| "pre_redaction fixture row should contain string content".to_string())?;
+    Ok(content.to_owned())
 }
 
-fn memory_record(content: &str) -> ExportMemoryRecord {
+fn memory_record(content: &str) -> Result<ExportMemoryRecord, String> {
     ExportMemoryRecord::builder()
         .memory_id("mem-redaction-matrix-001234567890")
         .workspace_id("ws-redaction-matrix")
@@ -49,22 +49,21 @@ fn memory_record(content: &str) -> ExportMemoryRecord {
         .content(content)
         .created_at("2026-05-16T00:00:00Z")
         .build()
-        .expect("memory fixture has required fields")
+        .map_err(|error| format!("memory fixture has required fields: {error}"))
 }
 
-fn tag_record() -> ExportRecord {
-    ExportRecord::Tag(
-        ExportTagRecord::builder()
-            .memory_id("mem-redaction-matrix-001234567890")
-            .tag("customer-secret-tag")
-            .created_at("2026-05-16T00:00:00Z")
-            .build()
-            .expect("tag fixture has required fields"),
-    )
+fn tag_record() -> Result<ExportRecord, String> {
+    let tag = ExportTagRecord::builder()
+        .memory_id("mem-redaction-matrix-001234567890")
+        .tag("customer-secret-tag")
+        .created_at("2026-05-16T00:00:00Z")
+        .build()
+        .map_err(|error| format!("tag fixture has required fields: {error}"))?;
+    Ok(ExportRecord::Tag(tag))
 }
 
-fn audit_record() -> ExportAuditRecord {
-    let secret = api_key_fixture();
+fn audit_record() -> Result<ExportAuditRecord, String> {
+    let secret = api_key_fixture()?;
     ExportAuditRecord::builder()
         .audit_id("audit-redaction-matrix-001234567890")
         .operation("memory.update")
@@ -77,7 +76,7 @@ fn audit_record() -> ExportAuditRecord {
             "reason": "redaction matrix fixture"
         }))
         .build()
-        .expect("audit fixture has required fields")
+        .map_err(|error| format!("audit fixture has required fields: {error}"))
 }
 
 #[test]
@@ -143,14 +142,14 @@ fn redaction_level_vocabulary_is_canonical_five() -> TestResult {
 
 #[test]
 fn redaction_level_behavior_matrix_matches_docs() -> TestResult {
-    let secret = api_key_fixture();
+    let secret = api_key_fixture()?;
     let long_body = "memory body fixture ".repeat(20);
 
     for level in RedactionLevel::all() {
         let redacted_secret = redact_content(&secret, *level);
-        let redacted_memory = redact_memory_record(memory_record(&long_body), *level);
-        let redacted_tag = redact_record(tag_record(), *level);
-        let redacted_audit = redact_audit_record(audit_record(), *level);
+        let redacted_memory = redact_memory_record(memory_record(&long_body)?, *level);
+        let redacted_tag = redact_record(tag_record()?, *level);
+        let redacted_audit = redact_audit_record(audit_record()?, *level);
 
         match *level {
             RedactionLevel::None => {
@@ -201,7 +200,7 @@ fn redaction_level_behavior_matrix_matches_docs() -> TestResult {
                     redacted_secret == REDACTED_PLACEHOLDER,
                     "strict should redact secret-shaped content",
                 )?;
-                let redacted_long = redact_memory_record(memory_record(&long_body), *level);
+                let redacted_long = redact_memory_record(memory_record(&long_body)?, *level);
                 ensure(
                     redacted_long.content.chars().count() == 200,
                     "strict should truncate non-secret memory bodies to 200 chars",
