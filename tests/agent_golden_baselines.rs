@@ -140,9 +140,9 @@ fn mask_worker_counts(s: &str) -> String {
         if c.is_ascii_digit() {
             let start = i;
             let mut end = i + c.len_utf8();
-            while let Some(&(_, nc)) = chars.peek() {
+            while let Some(&(j, nc)) = chars.peek() {
                 if nc.is_ascii_digit() {
-                    let (j, _) = chars.next().expect("peeked");
+                    chars.next();
                     end = j + nc.len_utf8();
                 } else {
                     break;
