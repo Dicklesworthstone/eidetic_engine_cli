@@ -249,8 +249,10 @@ fn run_ee(
 #[test]
 fn memory_drift_hashing_emits_error_envelope_for_malformed_json_artifact() -> TestResult {
     let malformed = br#"{"schema":"ee.memory_drift.report.v1","data":{"items":[}"#;
-    let error = hash_json_artifact_reader("changedReport", &malformed[..])
-        .expect_err("malformed JSON must fail before hashing");
+    let error = match hash_json_artifact_reader("changedReport", &malformed[..]) {
+        Ok(_) => return Err("malformed JSON unexpectedly hashed successfully".to_string()),
+        Err(error) => error,
+    };
     let envelope_text = error_response_json(&error);
     let envelope: Value = serde_json::from_str(&envelope_text).map_err(|error| {
         format!("malformed JSON error envelope must be JSON: {error}; envelope={envelope_text}")
@@ -299,8 +301,10 @@ fn memory_drift_hashing_emits_error_envelope_for_malformed_json_artifact() -> Te
 
 #[test]
 fn memory_drift_hashing_emits_error_envelope_for_json_hash_serialization_failure() -> TestResult {
-    let error = hash_json_artifact_serializable("changedReport", &SerializationFailure)
-        .expect_err("serialization failure must fail in the hashing stage");
+    let error = match hash_json_artifact_serializable("changedReport", &SerializationFailure) {
+        Ok(_) => return Err("serialization failure unexpectedly hashed successfully".to_string()),
+        Err(error) => error,
+    };
     let envelope_text = error_response_json(&error);
     let envelope: Value = serde_json::from_str(&envelope_text).map_err(|error| {
         format!(

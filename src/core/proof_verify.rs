@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn report_tool_missing_keeps_success_true_with_degraded_code() {
+    fn report_tool_missing_keeps_success_true_with_degraded_code() -> TestResult {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("proofs");
         let report = run_proof_checks(
             &root,
@@ -501,7 +501,7 @@ mod tests {
                 },
             },
         )
-        .expect("committed proof artifacts should be discoverable");
+        .map_err(|error| format!("committed proof artifacts should be discoverable: {error}"))?;
         assert!(report.success);
         assert_eq!(report.schema, PROOF_CHECK_SCHEMA_V1);
         assert_eq!(
@@ -511,6 +511,7 @@ mod tests {
         assert!(report.checks.iter().all(|check| {
             check.status == ProofCheckStatus::ToolMissing && !check.artifact.invariants.is_empty()
         }));
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -526,9 +527,10 @@ mod tests {
             .map_err(|error| error.to_string())?;
         symlink(&outside_proof, lean_dir.join("linked.lean")).map_err(|error| error.to_string())?;
 
-        let error = discover_proof_artifacts(temp.path())
-            .expect_err("symlinked proof artifact should be rejected")
-            .to_string();
+        let error = match discover_proof_artifacts(temp.path()) {
+            Ok(_) => return Err("symlinked proof artifact unexpectedly succeeded".to_string()),
+            Err(error) => error.to_string(),
+        };
         if error.contains("symlinked path component") {
             Ok(())
         } else {
@@ -551,9 +553,10 @@ mod tests {
         .map_err(|error| error.to_string())?;
         symlink(&real_lean_dir, temp.path().join("lean4")).map_err(|error| error.to_string())?;
 
-        let error = discover_proof_artifacts(temp.path())
-            .expect_err("symlinked proof root should be rejected")
-            .to_string();
+        let error = match discover_proof_artifacts(temp.path()) {
+            Ok(_) => return Err("symlinked proof root unexpectedly succeeded".to_string()),
+            Err(error) => error.to_string(),
+        };
         if error.contains("symlinked path component") {
             Ok(())
         } else {
@@ -573,8 +576,14 @@ mod tests {
         let linked_proof = temp.path().join("linked.lean");
         symlink(&outside_proof, &linked_proof).map_err(|error| error.to_string())?;
 
-        let error = open_proof_artifact_file_for_read(&linked_proof)
-            .expect_err("final proof artifact read open must reject symlinks");
+        let error = match open_proof_artifact_file_for_read(&linked_proof) {
+            Ok(_) => {
+                return Err(
+                    "final proof artifact read open unexpectedly followed symlink".to_string(),
+                );
+            }
+            Err(error) => error,
+        };
 
         assert_ne!(
             error.kind(),
@@ -597,9 +606,12 @@ mod tests {
         file.set_len(PROOF_ARTIFACT_MAX_BYTES.saturating_add(1))
             .map_err(|error| error.to_string())?;
 
-        let error = read_proof_artifact_file(&proof_path)
-            .expect_err("oversized proof artifact should reject before reading")
-            .to_string();
+        let error = match read_proof_artifact_file(&proof_path) {
+            Ok(_) => {
+                return Err("oversized proof artifact unexpectedly read successfully".to_string());
+            }
+            Err(error) => error.to_string(),
+        };
 
         if error.contains("exceeds the") {
             Ok(())
@@ -614,9 +626,12 @@ mod tests {
         let artifact_dir = temp.path().join("proof.lean");
         fs::create_dir_all(&artifact_dir).map_err(|error| error.to_string())?;
 
-        let error = extract_invariants(&artifact_dir)
-            .expect_err("non-regular proof artifact path should be rejected")
-            .to_string();
+        let error = match extract_invariants(&artifact_dir) {
+            Ok(_) => {
+                return Err("non-regular proof artifact path unexpectedly succeeded".to_string());
+            }
+            Err(error) => error.to_string(),
+        };
         if error.contains("not a regular file") {
             Ok(())
         } else {

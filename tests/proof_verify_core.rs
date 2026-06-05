@@ -7,6 +7,7 @@ mod models {
 /// Mirrors the implementation in `src/core/mod.rs` so the test crate root
 /// satisfies the `super::` lookup without exposing additional crate-private
 /// symbols. Keep the body in sync if the production helper evolves.
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn duration_millis_saturating(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
@@ -22,6 +23,8 @@ use proof_verify::{
     ProofArtifactKind, ProofCheckStatus, ProofCommandOutcome, ProofCommandRunner,
     discover_proof_artifacts, run_proof_checks,
 };
+
+type TestResult = Result<(), String>;
 
 #[derive(Clone, Debug)]
 struct PassingRunner;
@@ -69,9 +72,10 @@ impl ProofCommandRunner for FailingRunner {
 }
 
 #[test]
-fn discovers_committed_lean_and_tla_artifacts() {
+fn discovers_committed_lean_and_tla_artifacts() -> TestResult {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("proofs");
-    let artifacts = discover_proof_artifacts(&root).expect("proof discovery should succeed");
+    let artifacts =
+        discover_proof_artifacts(&root).map_err(|error| format!("proof discovery: {error}"))?;
 
     assert_eq!(artifacts.len(), 2);
     assert!(
@@ -88,6 +92,7 @@ fn discovers_committed_lean_and_tla_artifacts() {
                 .invariants
                 .contains(&"exclusive_reservations_do_not_overlap".to_owned())
     }));
+    Ok(())
 }
 
 #[test]
@@ -99,9 +104,10 @@ fn artifact_kind_wire_values_match_schema() {
 }
 
 #[test]
-fn passing_runner_maps_kind_specific_success_statuses() {
+fn passing_runner_maps_kind_specific_success_statuses() -> TestResult {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("proofs");
-    let report = run_proof_checks(&root, &PassingRunner).expect("proof checks should run");
+    let report = run_proof_checks(&root, &PassingRunner)
+        .map_err(|error| format!("proof checks: {error}"))?;
 
     assert!(report.success);
     assert_eq!(report.schema, PROOF_CHECK_SCHEMA_V1);
@@ -113,12 +119,14 @@ fn passing_runner_maps_kind_specific_success_statuses() {
         check.artifact.kind == ProofArtifactKind::TlaPlus
             && check.status == ProofCheckStatus::ModelChecked
     }));
+    Ok(())
 }
 
 #[test]
-fn missing_tool_runner_keeps_report_successful_with_degradation() {
+fn missing_tool_runner_keeps_report_successful_with_degradation() -> TestResult {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("proofs");
-    let report = run_proof_checks(&root, &MissingToolRunner).expect("proof checks should run");
+    let report = run_proof_checks(&root, &MissingToolRunner)
+        .map_err(|error| format!("proof checks: {error}"))?;
 
     assert!(report.success);
     assert_eq!(
@@ -130,12 +138,14 @@ fn missing_tool_runner_keeps_report_successful_with_degradation() {
             && check.exit_code.is_none()
             && check.stderr.contains(check.artifact.kind.default_tool())
     }));
+    Ok(())
 }
 
 #[test]
-fn failing_runner_marks_report_failed_with_violation_degradation() {
+fn failing_runner_marks_report_failed_with_violation_degradation() -> TestResult {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("proofs");
-    let report = run_proof_checks(&root, &FailingRunner).expect("proof checks should run");
+    let report = run_proof_checks(&root, &FailingRunner)
+        .map_err(|error| format!("proof checks: {error}"))?;
 
     assert!(!report.success);
     assert_eq!(
@@ -147,4 +157,5 @@ fn failing_runner_marks_report_failed_with_violation_degradation() {
             && check.exit_code == Some(1)
             && check.stderr.contains(check.artifact.kind.as_str())
     }));
+    Ok(())
 }
