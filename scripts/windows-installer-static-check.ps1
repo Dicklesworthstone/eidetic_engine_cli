@@ -12,6 +12,7 @@ $installPath = Join-Path $RepoRoot "install.ps1"
 $readmePath = Join-Path $RepoRoot "README.md"
 $releaseWorkflowPath = Join-Path $RepoRoot ".github/workflows/release.yml"
 $conformancePath = Join-Path $RepoRoot "tests/CONFORMANCE.md"
+$liveSmokePath = Join-Path $RepoRoot "scripts/windows-installer-live-smoke.ps1"
 
 $logDir = Split-Path -Parent $LogPath
 if (-not [string]::IsNullOrWhiteSpace($logDir)) {
@@ -42,7 +43,7 @@ function Write-ConformanceEvent {
         schema = "ee.test_event.v1"
         kind = "windows_installer_static_conformance"
         bead_id = "bd-3tprq.2"
-        related_bead_ids = @("bd-3tprq.2", "bd-3tprq.5")
+        related_bead_ids = @("bd-3tprq.2", "bd-3tprq.4", "bd-3tprq.5")
         surface = "install_ps1_parser_static"
         assertion = $Assertion
         result = $Result
@@ -91,6 +92,52 @@ Assert-True `
     -Assertion "conformance_matrix_exists" `
     -Condition (Test-Path $conformancePath) `
     -Diagnosis "tests/CONFORMANCE.md is missing from the repository"
+Assert-True `
+    -Assertion "windows_live_smoke_script_exists" `
+    -Condition (Test-Path $liveSmokePath) `
+    -Diagnosis "scripts/windows-installer-live-smoke.ps1 is missing from the repository"
+
+if (Test-Path $liveSmokePath) {
+    $liveSmokeTokens = $null
+    $liveSmokeParseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($liveSmokePath, [ref] $liveSmokeTokens, [ref] $liveSmokeParseErrors) | Out-Null
+    $liveSmokeParseErrorMessages = @($liveSmokeParseErrors | ForEach-Object { $_.Message }) -join "; "
+    Assert-True `
+        -Assertion "windows_live_smoke_parser_clean" `
+        -Condition (@($liveSmokeParseErrors).Count -eq 0) `
+        -Diagnosis "PowerShell parser reported errors in windows-installer-live-smoke.ps1: $liveSmokeParseErrorMessages"
+
+    $liveSmokeText = Get-Content -Raw -Path $liveSmokePath
+    Assert-True `
+        -Assertion "windows_live_smoke_downloads_release_installer_to_file" `
+        -Condition (
+            $liveSmokeText -match 'Invoke-WebRequest' -and
+            $liveSmokeText -match '-OutFile' -and
+            $liveSmokeText -match 'releases/download/\$ResolvedTag/install\.ps1'
+        ) `
+        -Diagnosis "windows-installer-live-smoke.ps1 must download the release install.ps1 asset with Invoke-WebRequest -OutFile"
+    Assert-True `
+        -Assertion "windows_live_smoke_uses_isolated_install_dir" `
+        -Condition (
+            $liveSmokeText -match '-InstallDir' -and
+            $liveSmokeText -match '\$InstallRoot'
+        ) `
+        -Diagnosis "windows-installer-live-smoke.ps1 must pass an explicit runner-temp InstallDir to install.ps1"
+    Assert-True `
+        -Assertion "windows_live_smoke_blocks_source_fallback_compile" `
+        -Condition (
+            $liveSmokeText -match 'Remove-RustFromProcessPath' -and
+            $liveSmokeText -match 'cargo_path_suppressed'
+        ) `
+        -Diagnosis "windows-installer-live-smoke.ps1 must suppress cargo/rustup PATH entries so release download failures cannot compile Rust locally"
+    Assert-True `
+        -Assertion "windows_live_smoke_logs_test_events" `
+        -Condition (
+            $liveSmokeText -match 'ee\.test_event\.v1' -and
+            $liveSmokeText -match 'first_failure_diagnosis'
+        ) `
+        -Diagnosis "windows-installer-live-smoke.ps1 must emit ee.test_event.v1 records with first_failure_diagnosis"
+}
 
 if (Test-Path $installPath) {
     $bytes = [System.IO.File]::ReadAllBytes($installPath)

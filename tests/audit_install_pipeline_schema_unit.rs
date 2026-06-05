@@ -710,6 +710,15 @@ fn ci_has_install_pipeline_smoke_gate() -> TestResult {
         "homebrew_smoke_present",
         "cargo_smoke_present",
         "smoke_version_assertions_present",
+        "windows_live_smoke_job_present",
+        "windows_live_smoke_opt_in",
+        "windows_live_smoke_runner_present",
+        "windows_live_smoke_script_present",
+        "windows_live_smoke_uses_outfile",
+        "windows_live_smoke_isolated_install_root",
+        "windows_live_smoke_suppresses_cargo_fallback",
+        "windows_live_smoke_event_log_present",
+        "windows_live_smoke_ready",
         "weekly_smoke_ready",
     ] {
         let value = ci
@@ -732,5 +741,9 @@ fn ci_has_install_pipeline_smoke_gate() -> TestResult {
             .and_then(Value::as_bool)
             == Some(true),
         "audit: CI install-pipeline smoke does not assert installed ee version",
+    )?;
+    ensure(
+        ci.get("windows_live_smoke_ready").and_then(Value::as_bool) == Some(true),
+        "audit: CI does not expose the opt-in Windows live installer smoke gate",
     )
 }

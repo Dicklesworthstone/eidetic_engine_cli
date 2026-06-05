@@ -8,6 +8,15 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      run_windows_installer_live_smoke:
+        description: 'Run the opt-in Windows live installer smoke against the latest release'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
   schedule:
     - cron: '17 9 * * 1'
 
@@ -328,6 +337,40 @@ jobs:
           path: |
             ${{ runner.temp }}/windows-installer-mocked-flow.jsonl
             ${{ runner.temp }}/windows-installer-mocked-flow/**/installer-output.txt
+
+  windows-installer-live-smoke:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_windows_installer_live_smoke == 'true'
+    name: windows-installer-live-smoke
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      EE_TEST_SEED: bd-3tprq.4-windows-installer-live-smoke
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Live GitHub release installer smoke
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          ./scripts/windows-installer-live-smoke.ps1
+          -RepoRoot "$env:GITHUB_WORKSPACE"
+          -ArtifactRoot "$env:RUNNER_TEMP/windows-installer-live-smoke"
+          -InstallRoot "$env:RUNNER_TEMP/ee-windows-installer-live"
+          -LogPath "$env:RUNNER_TEMP/windows-installer-live-smoke.jsonl"
+          -ResetLog
+
+      - name: Upload Windows live installer smoke log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-live-smoke-log
+          path: |
+            ${{ runner.temp }}/windows-installer-live-smoke.jsonl
+            ${{ runner.temp }}/windows-installer-live-smoke/**/installer-output.txt
 
   windows-msvc-cli-smoke:
     if: github.event_name != 'schedule'

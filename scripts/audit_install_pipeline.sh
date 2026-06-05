@@ -775,6 +775,7 @@ ci_workflow_inventory() {
     fi
 
     local schedule_present manual_present verify_not_scheduled job_present linux_present macos_present path_gate_present docker_smoke_present skip_present artifact_upload_present smoke_uses_latest_tag smoke_uses_release_installer_asset homebrew_smoke_present cargo_smoke_present smoke_version_assertions_present
+    local windows_live_smoke_job_present windows_live_smoke_opt_in windows_live_smoke_runner_present windows_live_smoke_script_present windows_live_smoke_uses_outfile windows_live_smoke_isolated_install_root windows_live_smoke_suppresses_cargo_fallback windows_live_smoke_event_log_present
     schedule_present=false
     manual_present=false
     verify_not_scheduled=false
@@ -790,6 +791,14 @@ ci_workflow_inventory() {
     homebrew_smoke_present=false
     cargo_smoke_present=false
     smoke_version_assertions_present=false
+    windows_live_smoke_job_present=false
+    windows_live_smoke_opt_in=false
+    windows_live_smoke_runner_present=false
+    windows_live_smoke_script_present=false
+    windows_live_smoke_uses_outfile=false
+    windows_live_smoke_isolated_install_root=false
+    windows_live_smoke_suppresses_cargo_fallback=false
+    windows_live_smoke_event_log_present=false
 
     if grep -qE '^[[:space:]]*schedule:' "$ci" 2>/dev/null; then
         schedule_present=true
@@ -843,6 +852,40 @@ ci_workflow_inventory() {
         && [ "$(grep -cF 'ee --version | grep -F "$EE_EXPECTED_VERSION"' "$ci" 2>/dev/null || true)" -ge 4 ]; then
         smoke_version_assertions_present=true
     fi
+    if grep -qE '^[[:space:]]*windows-installer-live-smoke:' "$ci" 2>/dev/null; then
+        windows_live_smoke_job_present=true
+    fi
+    if grep -qF 'run_windows_installer_live_smoke' "$ci" 2>/dev/null \
+        && grep -qF "inputs.run_windows_installer_live_smoke == 'true'" "$ci" 2>/dev/null; then
+        windows_live_smoke_opt_in=true
+    fi
+    if grep -qF 'runs-on: windows-latest' "$ci" 2>/dev/null; then
+        windows_live_smoke_runner_present=true
+    fi
+    if grep -qF './scripts/windows-installer-live-smoke.ps1' "$ci" 2>/dev/null \
+        && [ -f "$REPO_ROOT/scripts/windows-installer-live-smoke.ps1" ]; then
+        windows_live_smoke_script_present=true
+    fi
+    if [ -f "$REPO_ROOT/scripts/windows-installer-live-smoke.ps1" ]; then
+        if grep -qF 'Invoke-WebRequest' "$REPO_ROOT/scripts/windows-installer-live-smoke.ps1" 2>/dev/null \
+            && grep -qF -- '-OutFile' "$REPO_ROOT/scripts/windows-installer-live-smoke.ps1" 2>/dev/null \
+            && grep -qF 'releases/download/$ResolvedTag/install.ps1' "$REPO_ROOT/scripts/windows-installer-live-smoke.ps1" 2>/dev/null; then
+            windows_live_smoke_uses_outfile=true
+        fi
+        if grep -qF -- '-InstallDir' "$REPO_ROOT/scripts/windows-installer-live-smoke.ps1" 2>/dev/null \
+            && grep -qF '$env:RUNNER_TEMP/ee-windows-installer-live' "$ci" 2>/dev/null; then
+            windows_live_smoke_isolated_install_root=true
+        fi
+        if grep -qF 'Remove-RustFromProcessPath' "$REPO_ROOT/scripts/windows-installer-live-smoke.ps1" 2>/dev/null \
+            && grep -qF 'cargo_path_suppressed' "$REPO_ROOT/scripts/windows-installer-live-smoke.ps1" 2>/dev/null; then
+            windows_live_smoke_suppresses_cargo_fallback=true
+        fi
+        if grep -qF 'ee.test_event.v1' "$REPO_ROOT/scripts/windows-installer-live-smoke.ps1" 2>/dev/null \
+            && grep -qF 'first_failure_diagnosis' "$REPO_ROOT/scripts/windows-installer-live-smoke.ps1" 2>/dev/null \
+            && grep -qF 'windows-installer-live-smoke.jsonl' "$ci" 2>/dev/null; then
+            windows_live_smoke_event_log_present=true
+        fi
+    fi
 
     jq -n \
         --argjson schedule_present "$schedule_present" \
@@ -860,6 +903,14 @@ ci_workflow_inventory() {
         --argjson homebrew_smoke_present "$homebrew_smoke_present" \
         --argjson cargo_smoke_present "$cargo_smoke_present" \
         --argjson smoke_version_assertions_present "$smoke_version_assertions_present" \
+        --argjson windows_live_smoke_job_present "$windows_live_smoke_job_present" \
+        --argjson windows_live_smoke_opt_in "$windows_live_smoke_opt_in" \
+        --argjson windows_live_smoke_runner_present "$windows_live_smoke_runner_present" \
+        --argjson windows_live_smoke_script_present "$windows_live_smoke_script_present" \
+        --argjson windows_live_smoke_uses_outfile "$windows_live_smoke_uses_outfile" \
+        --argjson windows_live_smoke_isolated_install_root "$windows_live_smoke_isolated_install_root" \
+        --argjson windows_live_smoke_suppresses_cargo_fallback "$windows_live_smoke_suppresses_cargo_fallback" \
+        --argjson windows_live_smoke_event_log_present "$windows_live_smoke_event_log_present" \
         '{
             probe_status: "ok",
             schedule_present: $schedule_present,
@@ -877,6 +928,14 @@ ci_workflow_inventory() {
             homebrew_smoke_present: $homebrew_smoke_present,
             cargo_smoke_present: $cargo_smoke_present,
             smoke_version_assertions_present: $smoke_version_assertions_present,
+            windows_live_smoke_job_present: $windows_live_smoke_job_present,
+            windows_live_smoke_opt_in: $windows_live_smoke_opt_in,
+            windows_live_smoke_runner_present: $windows_live_smoke_runner_present,
+            windows_live_smoke_script_present: $windows_live_smoke_script_present,
+            windows_live_smoke_uses_outfile: $windows_live_smoke_uses_outfile,
+            windows_live_smoke_isolated_install_root: $windows_live_smoke_isolated_install_root,
+            windows_live_smoke_suppresses_cargo_fallback: $windows_live_smoke_suppresses_cargo_fallback,
+            windows_live_smoke_event_log_present: $windows_live_smoke_event_log_present,
             weekly_smoke_ready: (
                 $schedule_present
                 and $manual_present
@@ -893,6 +952,17 @@ ci_workflow_inventory() {
                 and $homebrew_smoke_present
                 and $cargo_smoke_present
                 and $smoke_version_assertions_present
+            ),
+            windows_live_smoke_ready: (
+                $manual_present
+                and $windows_live_smoke_job_present
+                and $windows_live_smoke_opt_in
+                and $windows_live_smoke_runner_present
+                and $windows_live_smoke_script_present
+                and $windows_live_smoke_uses_outfile
+                and $windows_live_smoke_isolated_install_root
+                and $windows_live_smoke_suppresses_cargo_fallback
+                and $windows_live_smoke_event_log_present
             )
         }'
 }
@@ -1140,8 +1210,14 @@ jq -n \
         )
     }' > "$OUTPUT"
 
-# Maintain a stable latest-symlink for CI to read.
-ln -sf "$(basename "$OUTPUT")" "$LATEST_SYMLINK"
+# Maintain a stable latest-symlink for CI to read when the artifact is written
+# inside the repo-local audit artifact directory. External output paths are
+# useful for ad hoc probes and must not leave the in-repo symlink dangling.
+OUTPUT_PARENT="$(cd "$(dirname "$OUTPUT")" && pwd -P)"
+OUTPUT_DIR_REAL="$(cd "$OUTPUT_DIR" && pwd -P)"
+if [ "$OUTPUT_PARENT" = "$OUTPUT_DIR_REAL" ]; then
+    ln -sf "$(basename "$OUTPUT")" "$LATEST_SYMLINK"
+fi
 
 echo "wrote $OUTPUT"
 echo "decided_path: $DECIDE_PATH"

@@ -141,15 +141,17 @@ network access, a live GitHub release, or local Rust compilation.
 | `WIN-PS1-008` | MUST | `-RequireProvenance` fails when `cosign` is absent. Required Sigstore verification cannot proceed without the verifier. | `install.ps1:513-516`, `install.ps1:920-936` | Mocked PATH/environment with no `cosign` in `scripts/windows-installer-mocked-flow-check.ps1`; warning-only behavior remains valid without `-RequireProvenance`. | Mockable offline; final proof on Windows | Covered by the `windows-installer-mocked-flow-conformance` job. |
 | `WIN-PS1-009` | MUST | `EE_REQUIRE_PROVENANCE=1` enables the same fatal behavior as `-RequireProvenance`. Environment-driven policy must match the flag. | `install.ps1:90-94`, `install.ps1:926-936` | Mocked install flow with `EE_REQUIRE_PROVENANCE=1` and missing bundle/cosign in `scripts/windows-installer-mocked-flow-check.ps1`. | Mockable offline; final proof on Windows | Covered by the `windows-installer-mocked-flow-conformance` job. |
 | `WIN-PS1-010` | MUST | `Show-AgentIntegration` cannot throw under `Set-StrictMode -Version Latest` when optional agent detection yields zero, one, or many scalar-like results. The installer must not report a false failure after installing `ee.exe`. | `install.ps1:725-783`, especially `install.ps1:772-777` | Static function-shape check in `scripts/windows-installer-static-check.ps1` proves the optional-agent `Where-Object` result is wrapped in `@()` before `.Count`; mocked runtime coverage in `scripts/windows-installer-mocked-flow-check.ps1` installs with a detected Codex marker and no "other" agents. | Yes | Static regression covered by `bd-3tprq.2`; runtime no-match flow covered by the `windows-installer-mocked-flow-conformance` job. |
-| `WIN-PS1-011` | SHOULD | Live GitHub release smoke is opt-in only. Default conformance stays deterministic, offline, and independent of current release availability. | README Windows snippet, `install.ps1:306-317`, `install.ps1:846-856` | Separate skipped-by-default live job gated by an env var such as `EE_INSTALLER_LIVE_SMOKE=1` in `bd-3tprq.4`. | Yes for live path | Planned by `bd-3tprq.4`. |
+| `WIN-PS1-011` | SHOULD | Live GitHub release smoke is opt-in only. Default conformance stays deterministic, offline, and independent of current release availability. | README Windows snippet, `install.ps1:306-317`, `install.ps1:846-856`, `.github/workflows/ci.yml` `windows-installer-live-smoke` | `scripts/windows-installer-live-smoke.ps1` downloads the release `install.ps1` with `Invoke-WebRequest -OutFile`, installs to a runner-temp `-InstallDir`, logs `ee.test_event.v1`, and is gated by the manual `run_windows_installer_live_smoke` workflow input. | Yes for live path | Covered by the skipped-by-default `windows-installer-live-smoke` workflow job and audited by `ci_workflow.windows_live_smoke_ready`. |
 | `WIN-PS1-012` | MUST | Default installer tests do not compile Rust locally. The `-FromSource` path may be tested only through an approved remote/CI path or a mocked/static check. | `install.ps1:657-718`, AGENTS RCH policy | `scripts/windows-installer-static-check.ps1` is parser/static only; mocked release path remains the default for installer flow tests. | No for default checks | Static harness requires no Rust compilation, network, or live release. |
 
 ### Implementation Notes
 
 - Offline deterministic checks are the default: byte inspection, parser checks,
   static docs/script drift checks, and mocked installer flows.
-- Live GitHub release smoke belongs in a separately gated job and must log why it
-  is skipped when the opt-in environment variable is absent.
+- Live GitHub release smoke belongs in a separately gated job. The current
+  Windows lane is manual-only through the `run_windows_installer_live_smoke`
+  workflow input, emits `ee.test_event.v1` lines, and keeps ordinary schedule /
+  push / pull-request conformance independent of a live release.
 - Windows Sigstore is intentionally opt-in after SHA256 by default, matching the
   current POSIX installer posture. Fatal provenance requires
   `-RequireProvenance` or `EE_REQUIRE_PROVENANCE=1`.

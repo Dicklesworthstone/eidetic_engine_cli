@@ -1,7 +1,7 @@
 {
   "schema": "ee.audit.install_pipeline.v1",
-  "generated_at": "2026-06-05T06:34:16Z",
-  "src_commit": "2756fdedf3609d7ba1a03cc8c06f2ad23ca33488",
+  "generated_at": "2026-06-05T16:20:06Z",
+  "src_commit": "fcc10fad094d72aa890c56c7c0e08a7a3c8326f6",
   "decided_path": "path_b_pre_release",
   "decision_inputs": {
     "crates_package_name": "eidetic-engine",
@@ -543,7 +543,16 @@
     "homebrew_smoke_present": true,
     "cargo_smoke_present": true,
     "smoke_version_assertions_present": true,
-    "weekly_smoke_ready": true
+    "windows_live_smoke_job_present": true,
+    "windows_live_smoke_opt_in": true,
+    "windows_live_smoke_runner_present": true,
+    "windows_live_smoke_script_present": true,
+    "windows_live_smoke_uses_outfile": true,
+    "windows_live_smoke_isolated_install_root": true,
+    "windows_live_smoke_suppresses_cargo_fallback": true,
+    "windows_live_smoke_event_log_present": true,
+    "weekly_smoke_ready": true,
+    "windows_live_smoke_ready": true
   },
   "next_actions": [
     "Track bd-3usjw.11: Resolve dependency_resolution.required_crates before cargo publish",
