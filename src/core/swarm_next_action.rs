@@ -18,6 +18,10 @@ use crate::core::beads_integrity::{
     BeadsIntegrityHealth, BeadsIntegrityInputs, BeadsIntegrityReport, compose_integrity_report,
     compose_integrity_report_from_br_doctor_json,
 };
+use crate::core::environment_attestation::{
+    EnvironmentAttestationSourceTestVerdict, EnvironmentAttestationSummary,
+    EnvironmentAttestationVerdict,
+};
 use crate::core::preflight_guard::classify_repair_command_for_preflight;
 use crate::core::swarm_brief::{
     SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandRunner, SwarmBriefCommit,
@@ -1261,6 +1265,7 @@ impl SwarmWorkPacket {
             verdict,
             safe_to_claim,
         );
+        let source_authority_attestation = work_packet_claim_gate_attestation_summary(self);
 
         SwarmWorkPacketClaimGate {
             schema: SWARM_WORK_PACKET_CLAIM_GATE_SCHEMA_V1,
@@ -1284,11 +1289,14 @@ impl SwarmWorkPacket {
                 rch_safe_to_launch_cargo_verification: self
                     .rch_proof_posture
                     .safe_to_launch_cargo_verification,
-                environment_verdict: work_packet_claim_gate_environment_verdict(self),
-                source_test_verdict: work_packet_claim_gate_source_test_verdict(self),
-                remote_verification_admitted: work_packet_claim_gate_remote_verification_admitted(
-                    self,
+                environment_verdict: environment_attestation_verdict_label(
+                    source_authority_attestation.environment_verdict,
                 ),
+                source_test_verdict: environment_attestation_source_test_verdict_label(
+                    source_authority_attestation.source_test_verdict,
+                ),
+                remote_verification_admitted: source_authority_attestation
+                    .remote_verification_admitted,
                 local_cargo_fallback_observed: None,
                 source_count: self.source_provenance.len(),
             },
@@ -1492,39 +1500,105 @@ fn work_packet_claim_gate_unsafe_reasons(
     reasons
 }
 
-fn work_packet_claim_gate_environment_verdict(packet: &SwarmWorkPacket) -> &'static str {
+fn work_packet_claim_gate_attestation_summary(
+    packet: &SwarmWorkPacket,
+) -> EnvironmentAttestationSummary {
+    let environment_verdict = work_packet_claim_gate_environment_verdict(packet);
+    let remote_verification_admitted = work_packet_claim_gate_remote_verification_admitted(packet);
+    let local_cargo_fallback_observed = packet
+        .degraded
+        .iter()
+        .any(|degradation| degradation.code == "local_cargo_bypass_detected");
+    EnvironmentAttestationSummary {
+        safe_to_claim: matches!(
+            environment_verdict,
+            EnvironmentAttestationVerdict::SafeToClaim
+                | EnvironmentAttestationVerdict::RemoteVerificationAdmitted
+        ),
+        remote_verification_admitted,
+        source_test_verdict: work_packet_claim_gate_source_test_verdict(environment_verdict),
+        environment_verdict,
+        local_cargo_fallback_observed,
+    }
+}
+
+fn work_packet_claim_gate_environment_verdict(
+    packet: &SwarmWorkPacket,
+) -> EnvironmentAttestationVerdict {
+    if packet
+        .degraded
+        .iter()
+        .any(|degradation| degradation.code == "local_cargo_bypass_detected")
+    {
+        return EnvironmentAttestationVerdict::LocalCargoBypassDetected;
+    }
     if packet.rch_proof_posture.local_fallback_prevented
         || packet.rch_proof_posture.safe_to_launch_cargo_verification == Some(false)
     {
-        return "proof_environment_blocked";
+        return EnvironmentAttestationVerdict::ProofEnvironmentBlocked;
     }
     if !packet.tracker_integrity.br_reads_authoritative {
-        return "tracker_stale";
+        return EnvironmentAttestationVerdict::TrackerStale;
     }
     if work_packet_has_active_reservation_conflict(packet) {
-        return "unsafe_due_to_conflict";
+        return EnvironmentAttestationVerdict::UnsafeDueToConflict;
     }
     if agent_mail_blocks_claim(&packet.coordination.agent_mail)
         || work_packet_has_coordination_degradation(packet)
     {
-        return "coordinate_before_claim";
+        return EnvironmentAttestationVerdict::CoordinateBeforeClaim;
     }
     if work_packet_claim_gate_remote_verification_admitted(packet) == Some(true) {
-        return "remote_verification_admitted";
+        return EnvironmentAttestationVerdict::RemoteVerificationAdmitted;
     }
-    "safe_to_claim"
+    EnvironmentAttestationVerdict::SafeToClaim
 }
 
-fn work_packet_claim_gate_source_test_verdict(packet: &SwarmWorkPacket) -> &'static str {
-    if work_packet_claim_gate_environment_verdict(packet) == "proof_environment_blocked" {
-        "environment_blocked_before_source"
+fn work_packet_claim_gate_source_test_verdict(
+    environment_verdict: EnvironmentAttestationVerdict,
+) -> EnvironmentAttestationSourceTestVerdict {
+    if environment_verdict == EnvironmentAttestationVerdict::ProofEnvironmentBlocked {
+        EnvironmentAttestationSourceTestVerdict::EnvironmentBlockedBeforeSource
     } else {
-        "not_evaluated"
+        EnvironmentAttestationSourceTestVerdict::NotEvaluated
     }
 }
 
 fn work_packet_claim_gate_remote_verification_admitted(packet: &SwarmWorkPacket) -> Option<bool> {
     packet.rch_proof_posture.safe_to_launch_cargo_verification
+}
+
+fn environment_attestation_verdict_label(verdict: EnvironmentAttestationVerdict) -> &'static str {
+    match verdict {
+        EnvironmentAttestationVerdict::SafeToClaim => "safe_to_claim",
+        EnvironmentAttestationVerdict::CoordinateBeforeClaim => "coordinate_before_claim",
+        EnvironmentAttestationVerdict::UnsafeDueToConflict => "unsafe_due_to_conflict",
+        EnvironmentAttestationVerdict::RemoteVerificationAdmitted => "remote_verification_admitted",
+        EnvironmentAttestationVerdict::ProofEnvironmentBlocked => "proof_environment_blocked",
+        EnvironmentAttestationVerdict::SourceAuthorityAmbiguous => "source_authority_ambiguous",
+        EnvironmentAttestationVerdict::StaleBinarySuspected => "stale_binary_suspected",
+        EnvironmentAttestationVerdict::TrackerStale => "tracker_stale",
+        EnvironmentAttestationVerdict::LocalCargoBypassDetected => "local_cargo_bypass_detected",
+        EnvironmentAttestationVerdict::UnknownInsufficientEvidence => {
+            "unknown_insufficient_evidence"
+        }
+    }
+}
+
+fn environment_attestation_source_test_verdict_label(
+    verdict: EnvironmentAttestationSourceTestVerdict,
+) -> &'static str {
+    match verdict {
+        EnvironmentAttestationSourceTestVerdict::NotEvaluated => "not_evaluated",
+        EnvironmentAttestationSourceTestVerdict::SourceNotTested => "source_not_tested",
+        EnvironmentAttestationSourceTestVerdict::SourcePassed => "source_passed",
+        EnvironmentAttestationSourceTestVerdict::SourceFailed => "source_failed",
+        EnvironmentAttestationSourceTestVerdict::EnvironmentBlockedBeforeSource => {
+            "environment_blocked_before_source"
+        }
+        EnvironmentAttestationSourceTestVerdict::StaleSource => "stale_source",
+        EnvironmentAttestationSourceTestVerdict::Unknown => "unknown",
+    }
 }
 
 fn work_packet_has_active_reservation_conflict(packet: &SwarmWorkPacket) -> bool {
@@ -6677,6 +6751,81 @@ mod tests {
             gate.source_authority.remote_verification_admitted,
             Some(true)
         );
+        assert_eq!(gate.source_authority.local_cargo_fallback_observed, None);
+    }
+
+    #[test]
+    fn work_packet_claim_gate_source_authority_uses_attestation_summary() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Gate safe work-packet candidate",
+            "beads_ready",
+            Some(2),
+        )]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let summary = work_packet_claim_gate_attestation_summary(&packet);
+        let gate = packet.claim_gate(None);
+
+        assert!(summary.safe_to_claim);
+        assert_eq!(
+            summary.environment_verdict,
+            EnvironmentAttestationVerdict::RemoteVerificationAdmitted
+        );
+        assert_eq!(
+            summary.source_test_verdict,
+            EnvironmentAttestationSourceTestVerdict::NotEvaluated
+        );
+        assert_eq!(summary.remote_verification_admitted, Some(true));
+        assert!(!summary.local_cargo_fallback_observed);
+        assert_eq!(
+            gate.source_authority.environment_verdict,
+            environment_attestation_verdict_label(summary.environment_verdict)
+        );
+        assert_eq!(
+            gate.source_authority.source_test_verdict,
+            environment_attestation_source_test_verdict_label(summary.source_test_verdict)
+        );
+        assert_eq!(
+            gate.source_authority.remote_verification_admitted,
+            summary.remote_verification_admitted
+        );
+        assert_eq!(gate.source_authority.local_cargo_fallback_observed, None);
+    }
+
+    #[test]
+    fn work_packet_claim_gate_attestation_summary_marks_local_cargo_bypass() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Gate safe work-packet candidate",
+            "beads_ready",
+            Some(2),
+        )]);
+        snapshot.degraded = vec![SwarmNextActionDegradation {
+            code: "local_cargo_bypass_detected".to_owned(),
+            source: "local-cargo-tripwire".to_owned(),
+            severity: "high",
+            message: "Local Cargo process observed in a remote-only lane.".to_owned(),
+            repair: Some("Stop local Cargo and rerun through scripts/rch_verify.sh.".to_owned()),
+        }];
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let summary = work_packet_claim_gate_attestation_summary(&packet);
+        let gate = packet.claim_gate(None);
+
+        assert!(!summary.safe_to_claim);
+        assert_eq!(
+            summary.environment_verdict,
+            EnvironmentAttestationVerdict::LocalCargoBypassDetected
+        );
+        assert!(summary.local_cargo_fallback_observed);
+        assert_eq!(
+            gate.source_authority.environment_verdict,
+            "local_cargo_bypass_detected"
+        );
+        assert_eq!(gate.source_authority.source_test_verdict, "not_evaluated");
         assert_eq!(gate.source_authority.local_cargo_fallback_observed, None);
     }
 
