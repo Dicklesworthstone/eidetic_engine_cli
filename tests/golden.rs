@@ -230,9 +230,9 @@ mod tests {
             if c.is_ascii_digit() {
                 let start = i;
                 let mut end = i + c.len_utf8();
-                while let Some(&(_, nc)) = chars.peek() {
+                while let Some(&(j, nc)) = chars.peek() {
                     if nc.is_ascii_digit() {
-                        let (j, _) = chars.next().expect("peeked digit");
+                        chars.next();
                         end = j + nc.len_utf8();
                     } else {
                         break;
@@ -1124,8 +1124,10 @@ mod tests {
 
     #[test]
     fn agent_mail_snapshot_parser_rejects_malformed_json() -> TestResult {
-        let error = parse_agent_mail_snapshot_json("{")
-            .expect_err("malformed Agent Mail snapshot JSON should be rejected");
+        let error = match parse_agent_mail_snapshot_json("{") {
+            Ok(_) => return Err("malformed Agent Mail snapshot JSON should be rejected".into()),
+            Err(error) => error,
+        };
         ensure(
             error.contains("Agent Mail snapshot JSON could not be parsed"),
             format!("unexpected malformed Agent Mail snapshot error: {error}"),
@@ -4086,7 +4088,7 @@ mod tests {
     // Degradation Matrix Contract Tests (EE-311)
     // =========================================================================
 
-    fn degradation_matrix_json() -> String {
+    fn degradation_matrix_json() -> Result<String, String> {
         use ee::models::degradation::ALL_DEGRADATION_CODES;
 
         let codes: Vec<serde_json::Value> = ALL_DEGRADATION_CODES
@@ -4111,14 +4113,14 @@ mod tests {
         });
 
         let mut json = serde_json::to_string_pretty(&matrix)
-            .expect("degradation matrix JSON serialization should not fail");
+            .map_err(|error| format!("degradation matrix JSON serialization failed: {error}"))?;
         json.push('\n');
-        json
+        Ok(json)
     }
 
     #[test]
     fn degradation_matrix_matches_golden() -> TestResult {
-        let json = degradation_matrix_json();
+        let json = degradation_matrix_json()?;
         assert_golden("degradation", "matrix.json", &json)
     }
 
