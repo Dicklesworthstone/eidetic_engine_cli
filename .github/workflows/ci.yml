@@ -234,6 +234,39 @@ jobs:
         if: matrix.runner == 'cross'
         run: cross test --workspace --test cross_platform_determinism --target ${{ matrix.target }} -- --nocapture
 
+  windows-installer-static-conformance:
+    if: github.event_name != 'schedule'
+    name: windows-installer-static-conformance
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Windows PowerShell 5.1 parser/static installer conformance
+        shell: powershell
+        run: >
+          ./scripts/windows-installer-static-check.ps1
+          -RepoRoot "$env:GITHUB_WORKSPACE"
+          -LogPath "$env:RUNNER_TEMP/windows-installer-static-conformance.jsonl"
+          -ResetLog
+
+      - name: PowerShell 7 parser/static installer conformance
+        shell: pwsh
+        run: >
+          ./scripts/windows-installer-static-check.ps1
+          -RepoRoot "$env:GITHUB_WORKSPACE"
+          -LogPath "$env:RUNNER_TEMP/windows-installer-static-conformance.jsonl"
+
+      - name: Upload Windows installer static conformance log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-static-conformance-log
+          path: ${{ runner.temp }}/windows-installer-static-conformance.jsonl
+
   windows-msvc-cli-smoke:
     if: github.event_name != 'schedule'
     name: windows-msvc-cli-smoke
