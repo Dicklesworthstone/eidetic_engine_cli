@@ -65,10 +65,16 @@ require "json"
 require "yaml"
 
 repo_root = File.expand_path(ARGV.fetch(0))
-workflow_paths = [
-  ".github/workflows/ci.yml",
-  ".github/workflows/macos-ee-artifact.yml"
-]
+workflow_dir = File.join(repo_root, ".github/workflows")
+workflow_paths =
+  if File.directory?(workflow_dir)
+    Dir.children(workflow_dir)
+       .select { |entry| entry.end_with?(".yml", ".yaml") }
+       .sort
+       .map { |entry| ".github/workflows/#{entry}" }
+  else
+    [".github/workflows/ci.yml", ".github/workflows/macos-ee-artifact.yml"]
+  end
 
 SEVERITY_RANK = {
   "info" => 0,
@@ -341,6 +347,34 @@ workflow_paths.each do |workflow_path|
         guidance: "Run `ee diag environment-attestation --help` before packaging the artifact."
       )
     end
+  end
+
+  if workflow_path == ".github/workflows/release.yml" && artifact_lanes.any?
+    workflow["policyVerdicts"] << "abstain_manual_review"
+    add_finding(
+      findings,
+      code: "proof_lane_release_artifact_requires_manual_review",
+      severity: "low",
+      workflow_path: workflow_path,
+      job: artifact_lanes.map { |lane| lane["job"] }.join(","),
+      verdict: "abstain_manual_review",
+      message: "release workflow artifacts require release-specific provenance and checksum review",
+      guidance: "Do not substitute release artifacts for a current-head proof lane unless provenance, checksum, source SHA, and surface probes are recorded."
+    )
+  end
+
+  if artifact_lanes.any? && workflow["policyVerdicts"].empty?
+    workflow["policyVerdicts"] << "abstain_manual_review"
+    add_finding(
+      findings,
+      code: "proof_lane_artifact_workflow_unclassified",
+      severity: "low",
+      workflow_path: workflow_path,
+      job: artifact_lanes.map { |lane| lane["job"] }.join(","),
+      verdict: "abstain_manual_review",
+      message: "artifact-producing workflow is not classified by proof-lane hygiene policy",
+      guidance: "Classify this workflow as ci, dedicated artifact, release, or external before relying on its artifacts for proof."
+    )
   end
 
   workflows << workflow
