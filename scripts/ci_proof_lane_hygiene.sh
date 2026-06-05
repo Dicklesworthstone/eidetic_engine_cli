@@ -206,6 +206,7 @@ workflow_paths.each do |workflow_path|
     artifact_lanes << {
       "job" => job_name.to_s,
       "runsOn" => job.fetch("runs-on", nil),
+      "jobCondition" => job.fetch("if", nil),
       "uploads" => uploads
     }
   end
@@ -232,6 +233,38 @@ workflow_paths.each do |workflow_path|
         message: "artifact upload lanes share CI concurrency with cancel-in-progress=true",
         guidance: "Use artifacts from a completed run only. For fresh binary proof during active pushes, prefer a dedicated artifact workflow."
       )
+    end
+
+    artifact_lanes.each do |lane|
+      job_condition = lane["jobCondition"].to_s
+      if !job_condition.empty? && job_condition != "always()"
+        add_finding(
+          findings,
+          code: "proof_lane_artifact_job_conditionally_skipped",
+          severity: "low",
+          workflow_path: workflow_path,
+          job: lane["job"],
+          verdict: "abstain_manual_review",
+          message: "artifact-producing job has a condition and may be skipped for some events",
+          guidance: "If a terminal run lacks the expected artifact, inspect job condition before dispatching a replacement."
+        )
+      end
+
+      lane["uploads"].each do |upload|
+        condition = upload["condition"].to_s
+        next if condition.empty? || condition == "always()"
+
+        add_finding(
+          findings,
+          code: "proof_lane_artifact_upload_conditionally_skipped",
+          severity: "low",
+          workflow_path: workflow_path,
+          job: lane["job"],
+          verdict: "abstain_manual_review",
+          message: "artifact upload step has a condition and may be skipped even when the job runs",
+          guidance: "If a terminal run lacks the expected artifact, inspect upload-step condition before dispatching a replacement."
+        )
+      end
     end
   end
 
