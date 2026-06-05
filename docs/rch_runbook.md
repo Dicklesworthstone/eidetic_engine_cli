@@ -87,7 +87,7 @@ response to an ambiguous proof is coordination, not mutation.
 | `RCH_QUEUE_WHEN_BUSY=1` | Wait when all workers are busy rather than refusing. |
 | `RCH_TEST_SLOTS=2` | Bound concurrent test slots so heavy benches don't starve focused tests. |
 | `RCH_DAEMON_{WAIT_,}RESPONSE_TIMEOUT_SECS=900` | The full project metadata is large; the 30s default times out and triggers the manifest-fallback path that produces `RCH-E327`. 900s avoids the timeout. |
-| `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects` + `RCH_ALIAS_PROJECT_ROOT=/data/projects` | DustyOtter's diagnosis (Agent Mail msg 1576, bd-2vyky): the manifest-fallback rejects `/data/projects/asupersync` because it doesn't see the symlink alias. These two env vars install the alias mapping the policy checker actually accepts. |
+| `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects` + `RCH_ALIAS_PROJECT_ROOT=/data/projects` | Current wrapper default. bd-3opmx evidence shows this is not a complete topology fix when `/data/projects/asupersync` resolves to `/Users/jemanuel/dp/asupersync`, but widening the canonical root to `/Users/jemanuel` is diagnostic only: it collides with worker alias setup or syncs to an unwritable worker path. |
 | `RCH_VISIBILITY=summary` | Less log noise; full transcripts when something goes wrong. |
 | `RCH_COMPRESSION=0` | Compression on the sync pipe occasionally corrupts the manifest header during topology preflight. Disabling has zero throughput cost on the local-network workers. |
 | Absolute RCH binary path | `~/.local/bin/rch` may be stale (missing the `exec` subcommand). The `target-local/release/rch` is always the live build. |
@@ -330,15 +330,27 @@ refusing remote Cargo execution and falling back local (Path dependency
 topology policy failed; move dependencies under /data/projects (or /dp) and retry.)
 ```
 
-**Root cause** (per FrostyMoose's bd-2vyky investigation, msg 1551): the full
-`cargo metadata` for `eidetic_engine_cli` runs longer than RCH's 30s metadata
-timeout. RCH falls back to manifest parsing. The manifest contains raw
-`/data/projects/...` absolute path deps that `validate_absolute_dependency_scope`
-rejects before symlink canonicalization can prove they're under `/Users/jemanuel/...`.
+**Current root cause** (bd-3opmx, 2026-06-05): the dependency planner resolved
+`/data/projects/asupersync` through symlinks to
+`/Users/jemanuel/dp/asupersync`, then rejected it because the wrapper supplied
+`RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects`. That root contains the
+`eidetic_engine_cli` checkout but not the Franken dependency tree under
+`/Users/jemanuel/dp`.
 
-**Fix:**
+**Current negative finding:** do not treat `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel`
+with `RCH_ALIAS_PROJECT_ROOT=/dp` as the eidetic wrapper fix. A focused
+2026-06-05 sidecar run moved past the old dependency-planner detail, then
+failed worker topology setup with `RCH_TOPOLOGY_ERR_ALIAS_UPDATE_FAILED` for
+`/dp`. An isolated alias under `/tmp` avoided that collision but then failed
+project sync with `rsync failed: mkdir: Permission denied`, because RCH tried
+to materialize under `/Users/jemanuel` on the Linux worker.
 
-- Set the canonical+alias env vars from the TL;DR recipe.
+**Fix / disposition:**
+
+- Use `scripts/rch_verify.sh` for fail-closed evidence and preserve the exact
+  first blocker text.
+- Escalate persistent `RCH-E327` to the RCH topology lane rather than changing
+  this repo's wrapper to a `/Users/jemanuel` canonical root.
 - Raise the daemon timeouts to 900s (`RCH_DAEMON_*_TIMEOUT_SECS=900`).
 - Disable compression (`RCH_COMPRESSION=0`).
 - Topology is **flaky** — succeeded slots last 1–2 minutes then re-block. If

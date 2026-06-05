@@ -37,6 +37,13 @@ The wrapper sets these remote-safe defaults:
   `EE_BINARY`, or the current target directory. Automatic target-directory
   discovery skips candidates whose `--version` output is empty.
 
+Do not widen the wrapper default to `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel`
+as an eidetic-side fix for bd-3opmx. A 2026-06-05 probe showed that this can
+move past the original dependency-planner check, but it then either collides
+with the workers' global `/dp` alias setup or tries to rsync into an unwritable
+`/Users/jemanuel` path on the worker. Treat that as RCH topology remediation
+work, not a local verifier-wrapper default.
+
 The JSON proof schema is `ee.rch.verify.v1` and includes the command kind,
 remote-required flag, planned or actual RCH invocation, worker id when observed,
 remote project root, remote target dir, exit code, elapsed time, command hash,
