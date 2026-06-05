@@ -4,7 +4,8 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use serde_json::Value as JsonValue;
 
 use ee::graph::result_cache_keys::{
-    canonical_graph_algorithm_params_json, encode_graph_algorithm_params_bitmap,
+    GraphAlgorithmParamBitmap, canonical_graph_algorithm_params_json,
+    encode_graph_algorithm_params_bitmap,
 };
 
 const BENCH_GROUP_NAME: &str = "bench_roaring_vs_json_cache_key";
@@ -36,13 +37,30 @@ fn fixture_params(seed_count: usize) -> JsonValue {
     })
 }
 
+fn canonical_params_json(params: &JsonValue) -> String {
+    match canonical_graph_algorithm_params_json(params) {
+        Ok(json) => json,
+        Err(error) => panic!("canonical params JSON should serialize: {error}"),
+    }
+}
+
+fn encoded_params_bitmap(params: &JsonValue) -> GraphAlgorithmParamBitmap {
+    match encode_graph_algorithm_params_bitmap(params) {
+        Ok(bitmap) => bitmap,
+        Err(error) => panic!("params bitmap should encode: {error}"),
+    }
+}
+
+fn serialized_bitmap_bytes(bitmap: &GraphAlgorithmParamBitmap) -> Vec<u8> {
+    match bitmap.serialized_bytes() {
+        Ok(bytes) => bytes,
+        Err(error) => panic!("params bitmap should serialize: {error}"),
+    }
+}
+
 fn assert_size_ratio(params: &JsonValue) {
-    let json_len = canonical_graph_algorithm_params_json(params)
-        .expect("canonical params JSON should serialize")
-        .len();
-    let roaring_len = encode_graph_algorithm_params_bitmap(params)
-        .expect("params bitmap should encode")
-        .serialized_len();
+    let json_len = canonical_params_json(params).len();
+    let roaring_len = encoded_params_bitmap(params).serialized_len();
     let ratio = json_len as f64 / roaring_len.max(1) as f64;
     assert!(
         ratio >= MIN_SIZE_REDUCTION_RATIO,
@@ -61,10 +79,7 @@ fn bench_roaring_vs_json_cache_key(c: &mut Criterion) {
             &params,
             |bench, params| {
                 bench.iter(|| {
-                    black_box(
-                        canonical_graph_algorithm_params_json(black_box(params))
-                            .expect("canonical params JSON should serialize"),
-                    );
+                    black_box(canonical_params_json(black_box(params)));
                 });
             },
         );
@@ -73,12 +88,8 @@ fn bench_roaring_vs_json_cache_key(c: &mut Criterion) {
             &params,
             |bench, params| {
                 bench.iter(|| {
-                    black_box(
-                        encode_graph_algorithm_params_bitmap(black_box(params))
-                            .expect("params bitmap should encode")
-                            .serialized_bytes()
-                            .expect("params bitmap should serialize"),
-                    );
+                    let bitmap = encoded_params_bitmap(black_box(params));
+                    black_box(serialized_bitmap_bytes(&bitmap));
                 });
             },
         );
