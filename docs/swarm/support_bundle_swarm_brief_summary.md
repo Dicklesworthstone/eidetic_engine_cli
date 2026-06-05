@@ -47,6 +47,14 @@ collisions, reservation conflicts, or local Cargo bypass. The bundle may explain
 why a previous agent stopped; a future agent still needs a current claim gate
 before mutating Beads or closing work.
 
+When the handoff involves a GitHub Actions artifact or native binary proof lane,
+also include a compact `ee.ci_proof_lane_snapshot.v1` excerpt from
+[`docs/ci-proof-lane-snapshot.md`](../ci-proof-lane-snapshot.md). The support
+bundle may retain the historical run id, head SHA, artifact name, checksum
+posture, surface probe, verdict, and next action, but it must not replace a
+fresh snapshot before a later agent dispatches a workflow or consumes an
+artifact.
+
 Versioning: field renames or incompatible redaction semantics require a new
 schema version and a migration note. Additive counts may remain in
 `ee.support_bundle.swarm_brief_summary.v1` when existing consumers can safely

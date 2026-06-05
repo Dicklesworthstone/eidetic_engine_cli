@@ -71,6 +71,32 @@ git log --oneline --decorate -n 20
 git status --short
 ```
 
+## Proof-Lane Coordination
+
+For GitHub Actions artifact lanes, use the CI proof-lane snapshot runbook:
+[`docs/ci-proof-lane-snapshot.md`](../ci-proof-lane-snapshot.md). It is the
+source for whether agents should reuse an active run, wait, download and verify
+an artifact, dispatch exactly one new run after coordination, abstain, or file a
+follow-up Bead.
+
+When Agent Mail is available, announce the snapshot verdict before any
+`workflow_dispatch`:
+
+```text
+[proof-lane] <verdict> for <bead-or-surface>
+- workflow: <workflow name> (<workflow path>)
+- run_id: <run id or none>
+- head_sha: <40-char source SHA>
+- artifact: <artifact name or none>
+- local_cargo_tripwire: <ok count=0 | bypass_detected count=N | not_checked>
+- next_action: <activeRecommendation.nextAction>
+```
+
+When Agent Mail is degraded, put the same fields in the Bead comment thread and
+avoid dispatching a duplicate run unless the snapshot says `dispatch_new_run`.
+Do not cancel workflows, clean artifacts, create worktrees, switch branches, or
+use local Cargo as substitute proof without explicit human authorization.
+
 ## Interpreting Missing Sources
 
 Missing Agent Mail data means the coordination source is unavailable. It does

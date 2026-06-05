@@ -196,6 +196,22 @@ Stable fields for automation:
   mount facts. This can recommend a repair action, but it must not recommend
   deletion.
 
+## CI artifact proof lanes
+
+When the proof requires a fresh native `ee` binary, start with the CI proof-lane
+snapshot runbook instead of trying to build locally:
+[`docs/ci-proof-lane-snapshot.md`](ci-proof-lane-snapshot.md). It tells agents
+whether to reuse an active run, wait, verify an artifact, dispatch exactly one
+new run after Agent Mail coordination, abstain, or file a follow-up Bead.
+
+Artifact source authority and RCH source/test proof are separate. A verified CI
+artifact can prove workflow/run/head-SHA provenance and a surface probe. It does
+not prove Rust tests passed unless a separate RCH or CI source-test artifact says
+so. If the snapshot reports `wait_for_active_run`,
+`duplicate_dispatch_detected`, `artifact_stale`, `surface_probe_failed`, or
+`abstain_manual_review`, preserve that verdict in Agent Mail and do not use a
+local Cargo build as replacement proof.
+
 ## Beads + Agent Mail workflow
 
 The RCH proof JSON contains enough fields for a Beads comment without needing
