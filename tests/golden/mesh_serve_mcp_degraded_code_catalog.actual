@@ -57,7 +57,6 @@ mesh_workspace_uninitialized                         ·         ·          ·  
 no_ee_peers_on_tailnet                               ✓         ✓          ✓      NO_EE_PEERS_ON_TAILNET_CODE :: src/mesh/tailscale_autodiscovery.rs
 peer_discovery_budget_exhausted                      ✓         ✓          ✓      PEER_DISCOVERY_BUDGET_EXHAUSTED_CODE :: src/mesh/tailscale_autodiscovery.rs
 peer_discovery_workspace_mismatch                    ✓         ✓          ✓      PEER_DISCOVERY_WORKSPACE_MISMATCH_CODE :: src/mesh/tailscale_autodiscovery.rs
-serve_unavailable_v1                                 ✓         ✓          ✓      SERVE_UNAVAILABLE_V1_CODE :: src/serve.rs
 size_limit_exceeded                                  ·         ·          ·      MCP_SIZE_LIMIT_EXCEEDED_CODE :: src/mcp.rs
 steward_auto_enroll_consecutive_failures             ·         ·          ·      STEWARD_AUTO_ENROLL_CONSECUTIVE_FAILURES_CODE :: src/mesh/steward_decision.rs
 steward_auto_enroll_daily_cap_reached                ·         ·          ·      STEWARD_AUTO_ENROLL_DAILY_CAP_REACHED_CODE :: src/mesh/steward_decision.rs

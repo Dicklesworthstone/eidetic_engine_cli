@@ -44628,7 +44628,15 @@ where
     W: Write,
     E: Write,
 {
-    if args.foreground && cli.wants_json() {
+    if !args.foreground {
+        let error = DomainError::Usage {
+            message: "ee serve currently runs only in explicit foreground mode.".to_owned(),
+            repair: Some("Run `ee serve --foreground --json` with EE_SERVE_TOKEN configured before accepting localhost HTTP requests.".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    {
         let token = read(EnvVar::ServeToken);
         let options = serve_startup_options_from_args(args);
         let mut startup_written = false;
@@ -44638,7 +44646,11 @@ where
             "cli-serve-foreground-once",
             0,
             |binding| {
-                let response = serve_bound_startup_response_json(&binding.metadata)?;
+                let response = if cli.wants_json() {
+                    serve_bound_startup_response_json(&binding.metadata)?
+                } else {
+                    serve_bound_startup_response_human(&binding.metadata)
+                };
                 stdout
                     .write_all(response.as_bytes())
                     .map_err(|error| DomainError::Storage {
@@ -44669,12 +44681,9 @@ where
                 let _ = writeln!(stderr, "error: {}", error.message());
                 error.exit_code()
             }
-            Err(error) => write_domain_error(&error, true, stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
     }
-
-    let error = crate::serve::serve_unavailable_v1_error();
-    write_domain_error(&error, cli.wants_json(), stdout, stderr)
 }
 
 fn serve_startup_options_from_args(args: &ServeArgs) -> crate::serve::ServeStartupOptions {
@@ -44727,6 +44736,28 @@ fn serve_bound_startup_response_json(
         message: format!("Failed to serialize serve bound startup response: {error}"),
         repair: Some("Fix the serve foreground startup response serializer.".to_owned()),
     })
+}
+
+fn serve_bound_startup_response_human(listener_metadata: &serde_json::Value) -> String {
+    let host = listener_metadata
+        .pointer("/listener/boundHost")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("127.0.0.1");
+    let port = listener_metadata
+        .pointer("/listener/boundPort")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(u64::from(crate::serve::DEFAULT_SERVE_PORT));
+    let readiness = listener_metadata
+        .pointer("/startup/readiness/state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let token = listener_metadata
+        .pointer("/startup/tokenPosture/state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    format!(
+        "ee serve\n========\n\nListening: http://{host}:{port}\nReadiness: {readiness}\nToken: {token}\nMode: foreground one-shot\n\n"
+    )
 }
 
 fn write_daemon_status<W, E>(

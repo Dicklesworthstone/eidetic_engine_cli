@@ -1,33 +1,32 @@
 ---
 source: src/cli/mod.rs, src/serve.rs, Cargo.toml
-assertion: serve localhost is an honest defer-to-v2 command surface in v1
+assertion: serve localhost foreground mode is a real one-shot adapter
 schema:
   command: ee serve --foreground --json
-  envelope: ee.error.v2
-  code: serve_unavailable_v1
-  status: documented_stubbed
+  envelope: ee.response.v2
+  payload: ee.serve.startup.v1
+  status: foreground_one_shot
 contracts:
   - ee serve --help is visible in default builds
-  - ee serve --foreground --json emits ee.error.v2 with code serve_unavailable_v1
-  - severity is low because direct CLI commands remain the supported v1 path
-  - repair text tracks bd-3usjw.4 and docs/adr/0033-serve-localhost-v2-design.md
-  - recovery actions point to direct CLI commands: ee context, ee search, ee status, and ee doctor
-  - human output says the localhost HTTP adapter is planned for v2
-  - no HTTP listener starts in v1 and no forbidden HTTP stack is introduced
+  - ee serve --foreground --json binds a loopback listener when EE_SERVE_TOKEN is configured
+  - startup output uses ee.response.v2 with data.schema ee.serve.startup.v1
+  - one real TcpStream request is accepted and answered before foreground mode exits
+  - ee serve without --foreground returns a usage error instead of implying background mode exists
+  - no forbidden HTTP stack is introduced
   - serve adapter remains a wrapper boundary and must not add business logic
 feature_requirements:
   - serve = [] feature flag in Cargo.toml
   - BuildFeature::new("serve", cfg!(feature = "serve")) in capabilities
   - FeatureEntry::new("serve", cfg!(feature = "serve"), "HTTP serve adapter")
   - forbidden dependencies not pulled: tokio, hyper, axum, tower, reqwest
-  - top-level CLI command exists as an honest v1 unavailable surface
+  - top-level CLI command exists as an explicit foreground one-shot surface
 evidence:
   - Cargo.toml: serve = []
-  - src/cli/mod.rs: Command::Serve and SERVE_UNAVAILABLE_CODE
-  - src/serve.rs: SERVE_UNAVAILABLE_V1_CODE and serve_unavailable_v1_error
-  - tests/fixtures/failure_modes/serve_unavailable_v1.json
-  - scripts/vision-coverage.sh reports serve under documented_stubbed_surfaces
+  - src/cli/mod.rs: Command::Serve and handle_serve
+  - src/serve.rs: serve_foreground_once, bind_serve_listener, render_serve_transport_exchange
+  - tests/e2e_serve_localhost.rs: serve_foreground_cli_accepts_one_real_status_request
+  - tests/fixtures/failure_modes/serve_unavailable_v1.json is retired
 degraded_contract:
-  - serve surface returns a deterministic unavailable error in v1
+  - missing or weak EE_SERVE_TOKEN returns policy errors before binding
   - capabilities.features may still report the optional serve feature disabled
-  - no HTTP server starts until the v2 ADR is implemented
+  - background serve mode is not claimed by the foreground one-shot adapter

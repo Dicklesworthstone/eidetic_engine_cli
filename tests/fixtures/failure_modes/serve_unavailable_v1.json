@@ -11,6 +11,11 @@
   ],
   "severity": "low",
   "repair_present": true,
+  "retired": true,
+  "retired_by": {
+    "bead": "bd-knu7t",
+    "reason": "The foreground localhost adapter now binds and serves one real request; missing foreground mode is a usage error rather than a v1 defer-to-v2 degraded code."
+  },
   "trigger": {
     "description": "The v1 binary exposes `ee serve --foreground` as an honest defer-to-v2 surface instead of starting a localhost HTTP/SSE adapter.",
     "setup_commands": [

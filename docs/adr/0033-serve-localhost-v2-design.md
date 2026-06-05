@@ -8,12 +8,12 @@ Date: 2026-05-15
 `ee` is CLI-first. ADR 0001 keeps daemon, MCP, HTTP, hook, and library surfaces
 as optional adapters over the same core services, not independent products.
 
-The v1 release still needs an honest `ee serve` surface because the feature flag
-and README already mention a future localhost HTTP/SSE adapter. The path
-selection memo in `docs/spikes/2026-05-serve-path-selection.md` recommends a v1
-honesty stub and moves the real HTTP/SSE adapter to v2. That means the v2 shape
-must be recorded now, before the v1 stub becomes an accidental permanent
-answer.
+The v1 release needed an honest `ee serve` surface because the feature flag
+and README already mentioned a future localhost HTTP/SSE adapter. The path
+selection memo in `docs/spikes/2026-05-serve-path-selection.md` recommended a
+temporary honesty stub. That stub is now retired: the foreground one-shot
+adapter is real, while background service mode remains explicitly out of
+scope.
 
 Project constraints rule out the usual Rust HTTP server stack. `hyper`, `axum`,
 `tower`, and `reqwest` are forbidden in the `ee` dependency tree. The adapter
@@ -23,10 +23,12 @@ semantics, provenance, redaction, and degradation behavior.
 
 ## Decision
 
-The real localhost adapter is deferred to v2 and will be implemented as an
-in-tree loopback HTTP/1.1 and SSE adapter over existing core command services.
-The v1 `ee serve --foreground` surface should return a deterministic
-`serve_unavailable_v1` error that points to this ADR.
+The localhost adapter is implemented as an in-tree loopback HTTP/1.1 adapter
+over existing core command services. The shipped slice is foreground one-shot:
+`ee serve --foreground` binds, emits startup metadata, accepts one request,
+writes one response, and exits. Background serve mode remains outside this
+first slice and returns a normal usage error until a supervised lifecycle is
+designed.
 
 The v2 adapter must obey these rules:
 
@@ -128,8 +130,9 @@ The real adapter is not done until all of these hold:
 
 ## Consequences
 
-The v1 release can stay honest without pretending to ship a partial HTTP
-server. Users get a stable unavailable response and a concrete v2 target.
+The shipped foreground adapter stays honest without pretending to be a
+long-running service. Users get a real loopback request path, and background
+serve mode remains unavailable until a supervised lifecycle lands.
 
 The v2 implementation is more work than wiring an off-the-shelf framework, but
 it preserves the forbidden-dependency boundary and keeps the CLI as the source
@@ -137,8 +140,9 @@ of truth. The adapter must prove parity instead of inventing separate semantics.
 
 ## Rejected Alternatives
 
-- **Ship real HTTP/SSE in v1**: Too much protocol, security, and compatibility
-  surface for the current release-readiness phase.
+- **Ship long-running HTTP/SSE service mode in the first slice**: Too much
+  protocol, security, and lifecycle surface for the current release-readiness
+  phase.
 - **Use `hyper`, `axum`, `tower`, or `reqwest`**: These are forbidden by the
   project rules and ADR 0015's audit posture.
 - **Expose non-loopback by default**: Local memory contents are sensitive, and
@@ -156,5 +160,6 @@ of truth. The adapter must prove parity instead of inventing separate semantics.
   behavior, and timeout behavior.
 - `tests/forbidden_deps.rs` continues to fail if an HTTP framework enters the
   dependency tree.
-- The v1 `serve_unavailable_v1` failure-mode fixture links to this ADR until
-  the real v2 adapter lands.
+- `tests/e2e_serve_localhost.rs` verifies the foreground CLI starts a real
+  listener, accepts a `TcpStream` request, returns an `ee.response.v2`
+  envelope, and exits cleanly.

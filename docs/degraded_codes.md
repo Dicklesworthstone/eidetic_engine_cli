@@ -10979,36 +10979,6 @@ ee model status --workspace . --json
 
 ---
 
-## `serve_unavailable_v1`
-
-**Severity:** low
-
-**Surfaces:** serve, serve_localhost
-
-**Introduced by:** bd-3usjw.4 (epic S)
-
-**Trigger.** The v1 binary exposes `ee serve --foreground` as an honest defer-to-v2 surface instead of starting a localhost HTTP/SSE adapter.
-
-**Setup.**
-
-```bash
-ee init --workspace .
-```
-
-**Invocation.**
-
-```bash
-ee serve --foreground --json
-```
-
-**Expected emission.** Message contains: `localhost HTTP adapter ... planned for v2`
-
-**Repair hint.** `docs/adr/0033-serve-localhost-v2-design.md`
-
-**Fixture.** [`tests/fixtures/failure_modes/serve_unavailable_v1.json`](../tests/fixtures/failure_modes/serve_unavailable_v1.json)
-
----
-
 ## `shard_attach_failed`
 
 **Severity:** warning

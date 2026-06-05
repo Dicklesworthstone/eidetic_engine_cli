@@ -550,7 +550,6 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 |------|----------|------|
 | `graph_feature_disabled` | medium | bd-17c65.5.3 (E3) — different from build-time `graph_unavailable`; this is a per-call disable |
 | `insights_section_unavailable` | info | bd-113r0 — registered `ee insights` section still has a metadata-only evidence builder |
-| `serve_unavailable_v1` | low | bd-3usjw.4 |
 | `singleflight_follower_timeout` | medium | bd-gni47.3 (SF3) |
 | `singleflight_leader_failed` | medium | bd-gni47.3 (SF3) |
 | `singleflight_state_poisoned` | high | bd-gni47.3 (SF3) |
