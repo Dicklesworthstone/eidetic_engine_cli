@@ -10,9 +10,11 @@ use ee::models::{DecisionPlane, DecisionRecord};
 use ee::output::{ShadowRunReport, render_shadow_run_json};
 use ee::shadow::pack::{PackShadowOutput, compare_outputs};
 use ee::shadow::{
-    PolicyDomain, PolicyInventoryStatus, PolicyMaturity, ShadowGateConfig, ShadowPromotionGuards,
-    ShadowVerdict, candidate_promotion_allowed, find_shadow_policy_inventory_entry,
-    shadow_policy_inventory,
+    PolicyDomain, PolicyInventoryStatus, PolicyMaturity, ShadowEvidenceKind, ShadowEvidencePosture,
+    ShadowGateConfig, ShadowPolicyEvidencePoint, ShadowPolicyScoreVerdict,
+    ShadowPolicyScoringConfig, ShadowPromotionGuards, ShadowVerdict, candidate_promotion_allowed,
+    find_shadow_policy_inventory_entry, render_shadow_policy_score_json,
+    score_shadow_policy_cohort, shadow_policy_inventory,
 };
 use serde_json::Value;
 
@@ -134,6 +136,35 @@ fn assert_golden(name: &str, actual: &str) -> TestResult {
     ensure(actual == expected, format!("golden mismatch for {name}"))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn evidence_point(
+    artifact_id: &str,
+    kind: ShadowEvidenceKind,
+    posture: ShadowEvidencePosture,
+    incumbent_utility: f64,
+    candidate_utility: f64,
+    incumbent_output_bytes: u64,
+    candidate_output_bytes: u64,
+    candidate_latency_ms: u64,
+) -> ShadowPolicyEvidencePoint {
+    ShadowPolicyEvidencePoint {
+        artifact_id: artifact_id.to_string(),
+        kind,
+        cohort: "ci_smoke".to_string(),
+        posture,
+        incumbent_utility,
+        candidate_utility,
+        incumbent_output_bytes,
+        candidate_output_bytes,
+        candidate_latency_ms,
+        incumbent_degraded_count: 0,
+        candidate_degraded_count: 0,
+        dropped_required_evidence_count: 0,
+        resource_bytes_delta: 0,
+        redaction_safe: true,
+    }
+}
+
 #[test]
 fn gate14_policy_domain_includes_verification_admission() -> TestResult {
     ensure(
@@ -243,6 +274,172 @@ fn gate14_shadow_policy_inventory_abstains_for_unsupported_resource_budget_domai
     ensure(
         unsupported.abstention_reason == Some("unsupported_policy_domain"),
         "unsupported domain abstains instead of promoting or rejecting",
+    )
+}
+
+#[test]
+fn gate14_shadow_policy_score_improving_fixture_cohort_matches_golden() -> TestResult {
+    let mut replay = evidence_point(
+        "replay.swarm.pack.ci",
+        ShadowEvidenceKind::ReplayTrace,
+        ShadowEvidencePosture::Present,
+        0.70,
+        0.82,
+        1000,
+        920,
+        100,
+    );
+    replay.resource_bytes_delta = -512;
+    let mut golden = evidence_point(
+        "golden.shadow.pack",
+        ShadowEvidenceKind::GoldenFixture,
+        ShadowEvidencePosture::Present,
+        0.80,
+        0.88,
+        800,
+        760,
+        80,
+    );
+    golden.resource_bytes_delta = -256;
+
+    let report = score_shadow_policy_cohort(
+        PolicyDomain::PackSelection.as_str(),
+        "incumbent.pack.mmr_redundancy",
+        "candidate.pack.facility_location",
+        "ci_smoke",
+        vec![replay, golden],
+        ShadowPolicyScoringConfig::default(),
+    );
+
+    ensure(
+        report.verdict == ShadowPolicyScoreVerdict::Improves,
+        "candidate should improve over replay/golden cohort",
+    )?;
+    ensure(
+        (report.summary.utility_delta - 0.10).abs() < 0.0001,
+        "utility delta is averaged across usable evidence",
+    )?;
+    ensure(
+        report.summary.output_bytes_delta == -120,
+        "output byte delta is summed",
+    )?;
+    ensure(
+        report.summary.p50_latency_ms == 80
+            && report.summary.p95_latency_ms == 100
+            && report.summary.p99_latency_ms == 100,
+        "latency percentiles are deterministic",
+    )?;
+
+    let json = render_shadow_policy_score_json(&report);
+    serde_json::from_str::<Value>(&json)
+        .map_err(|error| format!("policy score JSON should parse: {error}"))?;
+    assert_golden("policy_replay_score", &(json + "\n"))
+}
+
+#[test]
+fn gate14_shadow_policy_score_regresses_on_required_evidence_or_degraded_delta() -> TestResult {
+    let mut point = evidence_point(
+        "golden.shadow.cache.regression",
+        ShadowEvidenceKind::GoldenFixture,
+        ShadowEvidencePosture::Present,
+        0.90,
+        0.84,
+        700,
+        760,
+        140,
+    );
+    point.incumbent_degraded_count = 1;
+    point.candidate_degraded_count = 2;
+    point.dropped_required_evidence_count = 1;
+
+    let report = score_shadow_policy_cohort(
+        PolicyDomain::CacheAdmission.as_str(),
+        "incumbent.cache.no_cache",
+        "candidate.cache.s3_fifo",
+        "small",
+        vec![point],
+        ShadowPolicyScoringConfig::default(),
+    );
+
+    ensure(
+        report.verdict == ShadowPolicyScoreVerdict::Regresses,
+        "required evidence drops or degraded deltas force regression",
+    )?;
+    ensure(
+        report.summary.dropped_required_evidence_count == 1,
+        "dropped required evidence is counted",
+    )?;
+    ensure(
+        report.summary.degraded_delta == 1,
+        "degraded delta is counted",
+    )
+}
+
+#[test]
+fn gate14_shadow_policy_score_flat_when_candidate_matches_incumbent() -> TestResult {
+    let point = evidence_point(
+        "manual.fixture.verification.flat",
+        ShadowEvidenceKind::ManualFixture,
+        ShadowEvidencePosture::Present,
+        0.75,
+        0.75,
+        600,
+        600,
+        75,
+    );
+
+    let report = score_shadow_policy_cohort(
+        PolicyDomain::VerificationAdmission.as_str(),
+        "incumbent.verification.rch_only",
+        "candidate.verification.environment_attestation",
+        "ci_smoke",
+        vec![point],
+        ShadowPolicyScoringConfig::default(),
+    );
+
+    ensure(
+        report.verdict == ShadowPolicyScoreVerdict::Flat,
+        "identical usable evidence is flat",
+    )?;
+    ensure(
+        report.summary.divergence_rate == 0.0,
+        "flat evidence does not diverge",
+    )
+}
+
+#[test]
+fn gate14_shadow_policy_score_needs_more_evidence_when_replay_is_missing() -> TestResult {
+    let missing = evidence_point(
+        "replay.swarm.pack.missing",
+        ShadowEvidenceKind::ReplayTrace,
+        ShadowEvidencePosture::Missing,
+        0.0,
+        0.0,
+        0,
+        0,
+        0,
+    );
+
+    let report = score_shadow_policy_cohort(
+        PolicyDomain::PackSelection.as_str(),
+        "incumbent.pack.mmr_redundancy",
+        "candidate.pack.facility_location",
+        "swarm_heavy",
+        vec![missing],
+        ShadowPolicyScoringConfig::default(),
+    );
+
+    ensure(
+        report.verdict == ShadowPolicyScoreVerdict::NeedsMoreEvidence,
+        "missing replay evidence must not get a fake score",
+    )?;
+    ensure(
+        report.abstention_reasons == vec!["missing_replay_evidence".to_string()],
+        "missing replay evidence records abstention reason",
+    )?;
+    ensure(
+        report.summary.usable_evidence == 0 && report.summary.missing_evidence == 1,
+        "missing evidence is separated from usable evidence",
     )
 }
 

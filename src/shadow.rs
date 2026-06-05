@@ -15,6 +15,7 @@ use std::fmt;
 pub const SUBSYSTEM: &str = "shadow";
 pub const SHADOW_REPORT_SCHEMA_V1: &str = "ee.shadow_report.v1";
 pub const SHADOW_POLICY_INVENTORY_SCHEMA_V1: &str = "ee.shadow_policy_inventory.v1";
+pub const SHADOW_POLICY_SCORE_SCHEMA_V1: &str = "ee.shadow_policy_score.v1";
 
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
@@ -438,6 +439,456 @@ impl ShadowMetrics {
     pub fn time_delta_us(&self) -> i64 {
         signed_u64_delta(self.candidate_time_us, self.incumbent_time_us)
     }
+}
+
+/// Fixture or replay artifact kind used by a shadow-policy score.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShadowEvidenceKind {
+    /// Deterministic workload replay trace.
+    ReplayTrace,
+    /// Checked-in golden fixture.
+    GoldenFixture,
+    /// Operator-provided manual fixture.
+    ManualFixture,
+}
+
+impl ShadowEvidenceKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReplayTrace => "replay_trace",
+            Self::GoldenFixture => "golden_fixture",
+            Self::ManualFixture => "manual_fixture",
+        }
+    }
+}
+
+/// Evidence availability for one artifact in a shadow-policy score.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShadowEvidencePosture {
+    /// Evidence is current and usable for scoring.
+    Present,
+    /// Required evidence is absent.
+    Missing,
+    /// Evidence exists but is stale relative to the source authority.
+    Stale,
+    /// The policy domain cannot consume this artifact.
+    Unsupported,
+}
+
+impl ShadowEvidencePosture {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Present => "present",
+            Self::Missing => "missing",
+            Self::Stale => "stale",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_usable(self) -> bool {
+        matches!(self, Self::Present)
+    }
+}
+
+/// Aggregate scoring verdict over a deterministic evidence cohort.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShadowPolicyScoreVerdict {
+    /// Candidate improves the utility proxy without safety regressions.
+    Improves,
+    /// Candidate regresses utility, degraded codes, redaction, or required evidence.
+    Regresses,
+    /// Candidate is materially flat against the incumbent.
+    Flat,
+    /// Available evidence is not sufficient to score the candidate.
+    NeedsMoreEvidence,
+}
+
+impl ShadowPolicyScoreVerdict {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Improves => "improves",
+            Self::Regresses => "regresses",
+            Self::Flat => "flat",
+            Self::NeedsMoreEvidence => "needs_more_evidence",
+        }
+    }
+}
+
+/// One deterministic replay/golden artifact scored for a candidate policy.
+#[derive(Clone, Debug)]
+pub struct ShadowPolicyEvidencePoint {
+    pub artifact_id: String,
+    pub kind: ShadowEvidenceKind,
+    pub cohort: String,
+    pub posture: ShadowEvidencePosture,
+    pub incumbent_utility: f64,
+    pub candidate_utility: f64,
+    pub incumbent_output_bytes: u64,
+    pub candidate_output_bytes: u64,
+    pub candidate_latency_ms: u64,
+    pub incumbent_degraded_count: u32,
+    pub candidate_degraded_count: u32,
+    pub dropped_required_evidence_count: u32,
+    pub resource_bytes_delta: i64,
+    pub redaction_safe: bool,
+}
+
+impl ShadowPolicyEvidencePoint {
+    #[must_use]
+    pub fn utility_delta(&self) -> f64 {
+        self.candidate_utility - self.incumbent_utility
+    }
+
+    #[must_use]
+    pub fn output_bytes_delta(&self) -> i64 {
+        signed_u64_delta(self.candidate_output_bytes, self.incumbent_output_bytes)
+    }
+
+    #[must_use]
+    pub fn degraded_delta(&self) -> i64 {
+        i64::from(self.candidate_degraded_count) - i64::from(self.incumbent_degraded_count)
+    }
+
+    #[must_use]
+    pub fn diverged(&self) -> bool {
+        self.utility_delta().abs() >= 0.0001
+            || self.output_bytes_delta() != 0
+            || self.degraded_delta() != 0
+            || self.dropped_required_evidence_count > 0
+            || !self.redaction_safe
+    }
+}
+
+/// Thresholds for deterministic policy scoring.
+#[derive(Clone, Copy, Debug)]
+pub struct ShadowPolicyScoringConfig {
+    pub min_utility_delta_for_improvement: f64,
+    pub max_utility_delta_for_flat: f64,
+}
+
+impl Default for ShadowPolicyScoringConfig {
+    fn default() -> Self {
+        Self {
+            min_utility_delta_for_improvement: 0.05,
+            max_utility_delta_for_flat: 0.01,
+        }
+    }
+}
+
+/// Stable summary for a scored policy cohort.
+#[derive(Clone, Debug, Default)]
+pub struct ShadowPolicyScoreSummary {
+    pub total_evidence: u32,
+    pub usable_evidence: u32,
+    pub missing_evidence: u32,
+    pub stale_evidence: u32,
+    pub unsupported_evidence: u32,
+    pub diverged_evidence: u32,
+    pub divergence_rate: f64,
+    pub utility_delta: f64,
+    pub dropped_required_evidence_count: u32,
+    pub output_bytes_delta: i64,
+    pub p50_latency_ms: u64,
+    pub p95_latency_ms: u64,
+    pub p99_latency_ms: u64,
+    pub degraded_delta: i64,
+    pub resource_bytes_delta: i64,
+    pub redaction_safe: bool,
+}
+
+/// Read-only deterministic score for one candidate policy over one cohort.
+#[derive(Clone, Debug)]
+pub struct ShadowPolicyScoreReport {
+    pub schema: &'static str,
+    pub policy_domain: String,
+    pub incumbent_policy_id: String,
+    pub candidate_policy_id: String,
+    pub cohort_profile: String,
+    pub side_effect_free: bool,
+    pub summary: ShadowPolicyScoreSummary,
+    pub verdict: ShadowPolicyScoreVerdict,
+    pub abstention_reasons: Vec<String>,
+    pub evidence: Vec<ShadowPolicyEvidencePoint>,
+}
+
+#[must_use]
+pub fn score_shadow_policy_cohort(
+    policy_domain: &str,
+    incumbent_policy_id: &str,
+    candidate_policy_id: &str,
+    cohort_profile: &str,
+    evidence: Vec<ShadowPolicyEvidencePoint>,
+    config: ShadowPolicyScoringConfig,
+) -> ShadowPolicyScoreReport {
+    let mut summary = ShadowPolicyScoreSummary {
+        total_evidence: saturating_u32(evidence.len()),
+        redaction_safe: true,
+        ..ShadowPolicyScoreSummary::default()
+    };
+
+    let mut utility_delta_sum = 0.0;
+    let mut latencies = Vec::new();
+
+    for point in &evidence {
+        match point.posture {
+            ShadowEvidencePosture::Present => {
+                summary.usable_evidence = summary.usable_evidence.saturating_add(1);
+                if point.diverged() {
+                    summary.diverged_evidence = summary.diverged_evidence.saturating_add(1);
+                }
+                utility_delta_sum += point.utility_delta();
+                summary.dropped_required_evidence_count = summary
+                    .dropped_required_evidence_count
+                    .saturating_add(point.dropped_required_evidence_count);
+                summary.output_bytes_delta = summary
+                    .output_bytes_delta
+                    .saturating_add(point.output_bytes_delta());
+                summary.degraded_delta = summary
+                    .degraded_delta
+                    .saturating_add(point.degraded_delta());
+                summary.resource_bytes_delta = summary
+                    .resource_bytes_delta
+                    .saturating_add(point.resource_bytes_delta);
+                summary.redaction_safe &= point.redaction_safe;
+                latencies.push(point.candidate_latency_ms);
+            }
+            ShadowEvidencePosture::Missing => {
+                summary.missing_evidence = summary.missing_evidence.saturating_add(1);
+            }
+            ShadowEvidencePosture::Stale => {
+                summary.stale_evidence = summary.stale_evidence.saturating_add(1);
+            }
+            ShadowEvidencePosture::Unsupported => {
+                summary.unsupported_evidence = summary.unsupported_evidence.saturating_add(1);
+            }
+        }
+    }
+
+    if summary.usable_evidence > 0 {
+        let usable = f64::from(summary.usable_evidence);
+        summary.utility_delta = utility_delta_sum / usable;
+        summary.divergence_rate = f64::from(summary.diverged_evidence) / usable;
+        latencies.sort_unstable();
+        summary.p50_latency_ms = percentile_nearest_rank(&latencies, 50);
+        summary.p95_latency_ms = percentile_nearest_rank(&latencies, 95);
+        summary.p99_latency_ms = percentile_nearest_rank(&latencies, 99);
+    }
+
+    let mut abstention_reasons = Vec::new();
+    let verdict = if summary.usable_evidence == 0 {
+        if summary.missing_evidence > 0 {
+            abstention_reasons.push("missing_replay_evidence".to_string());
+        }
+        if summary.stale_evidence > 0 {
+            abstention_reasons.push("stale_source_authority".to_string());
+        }
+        if summary.unsupported_evidence > 0 {
+            abstention_reasons.push("unsupported_policy_domain".to_string());
+        }
+        ShadowPolicyScoreVerdict::NeedsMoreEvidence
+    } else if summary.dropped_required_evidence_count > 0
+        || summary.degraded_delta > 0
+        || !summary.redaction_safe
+        || summary.utility_delta < -config.max_utility_delta_for_flat
+    {
+        ShadowPolicyScoreVerdict::Regresses
+    } else if summary.utility_delta >= config.min_utility_delta_for_improvement {
+        ShadowPolicyScoreVerdict::Improves
+    } else {
+        ShadowPolicyScoreVerdict::Flat
+    };
+
+    ShadowPolicyScoreReport {
+        schema: SHADOW_POLICY_SCORE_SCHEMA_V1,
+        policy_domain: policy_domain.to_string(),
+        incumbent_policy_id: incumbent_policy_id.to_string(),
+        candidate_policy_id: candidate_policy_id.to_string(),
+        cohort_profile: cohort_profile.to_string(),
+        side_effect_free: true,
+        summary,
+        verdict,
+        abstention_reasons,
+        evidence,
+    }
+}
+
+fn saturating_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn percentile_nearest_rank(sorted_values: &[u64], percentile: u32) -> u64 {
+    if sorted_values.is_empty() {
+        return 0;
+    }
+    let len = sorted_values.len();
+    let numerator = (len * percentile as usize).saturating_add(99);
+    let mut index = numerator / 100;
+    index = index.saturating_sub(1);
+    sorted_values[index.min(len - 1)]
+}
+
+#[must_use]
+pub fn render_shadow_policy_score_json(report: &ShadowPolicyScoreReport) -> String {
+    let mut out = String::new();
+    out.push('{');
+    json_str_field(&mut out, "schema", report.schema);
+    out.push(',');
+    json_str_field(&mut out, "policyDomain", &report.policy_domain);
+    out.push(',');
+    json_str_field(&mut out, "incumbentPolicyId", &report.incumbent_policy_id);
+    out.push(',');
+    json_str_field(&mut out, "candidatePolicyId", &report.candidate_policy_id);
+    out.push(',');
+    json_str_field(&mut out, "cohortProfile", &report.cohort_profile);
+    out.push_str(",\"sideEffectFree\":true,");
+    out.push_str("\"verdict\":");
+    push_json_string(&mut out, report.verdict.as_str());
+    out.push_str(",\"abstentionReasons\":[");
+    for (idx, reason) in report.abstention_reasons.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        push_json_string(&mut out, reason);
+    }
+    out.push_str("],\"summary\":{");
+    push_summary_json(&mut out, &report.summary);
+    out.push_str("},\"redactionPosture\":{");
+    out.push_str("\"rawMemoryBodyPresent\":false,");
+    out.push_str("\"rawMailBodyPresent\":false,");
+    out.push_str("\"rawPolicyPayloadPresent\":false,");
+    out.push_str("\"absoluteHostPathPresent\":false,");
+    out.push_str("\"secretsPresent\":false");
+    out.push_str("},\"evidence\":[");
+    for (idx, point) in report.evidence.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        push_evidence_point_json(&mut out, point);
+    }
+    out.push_str("]}");
+    out
+}
+
+fn push_summary_json(out: &mut String, summary: &ShadowPolicyScoreSummary) {
+    push_u32_field(out, "totalEvidence", summary.total_evidence);
+    out.push(',');
+    push_u32_field(out, "usableEvidence", summary.usable_evidence);
+    out.push(',');
+    push_u32_field(out, "missingEvidence", summary.missing_evidence);
+    out.push(',');
+    push_u32_field(out, "staleEvidence", summary.stale_evidence);
+    out.push(',');
+    push_u32_field(out, "unsupportedEvidence", summary.unsupported_evidence);
+    out.push(',');
+    push_u32_field(out, "divergedEvidence", summary.diverged_evidence);
+    out.push(',');
+    push_f64_field(out, "divergenceRate", summary.divergence_rate);
+    out.push(',');
+    push_f64_field(out, "utilityDelta", summary.utility_delta);
+    out.push(',');
+    push_u32_field(
+        out,
+        "droppedRequiredEvidenceCount",
+        summary.dropped_required_evidence_count,
+    );
+    out.push(',');
+    push_i64_field(out, "outputBytesDelta", summary.output_bytes_delta);
+    out.push(',');
+    push_u64_field(out, "p50LatencyMs", summary.p50_latency_ms);
+    out.push(',');
+    push_u64_field(out, "p95LatencyMs", summary.p95_latency_ms);
+    out.push(',');
+    push_u64_field(out, "p99LatencyMs", summary.p99_latency_ms);
+    out.push(',');
+    push_i64_field(out, "degradedDelta", summary.degraded_delta);
+    out.push(',');
+    push_i64_field(out, "resourceBytesDelta", summary.resource_bytes_delta);
+    out.push_str(",\"redactionSafe\":");
+    out.push_str(if summary.redaction_safe {
+        "true"
+    } else {
+        "false"
+    });
+}
+
+fn push_evidence_point_json(out: &mut String, point: &ShadowPolicyEvidencePoint) {
+    out.push('{');
+    json_str_field(out, "artifactId", &point.artifact_id);
+    out.push(',');
+    json_str_field(out, "kind", point.kind.as_str());
+    out.push(',');
+    json_str_field(out, "cohort", &point.cohort);
+    out.push(',');
+    json_str_field(out, "posture", point.posture.as_str());
+    out.push(',');
+    push_f64_field(out, "utilityDelta", point.utility_delta());
+    out.push(',');
+    push_i64_field(out, "outputBytesDelta", point.output_bytes_delta());
+    out.push(',');
+    push_u64_field(out, "candidateLatencyMs", point.candidate_latency_ms);
+    out.push(',');
+    push_i64_field(out, "degradedDelta", point.degraded_delta());
+    out.push(',');
+    push_u32_field(
+        out,
+        "droppedRequiredEvidenceCount",
+        point.dropped_required_evidence_count,
+    );
+    out.push(',');
+    push_i64_field(out, "resourceBytesDelta", point.resource_bytes_delta);
+    out.push_str(",\"redactionSafe\":");
+    out.push_str(if point.redaction_safe {
+        "true"
+    } else {
+        "false"
+    });
+    out.push('}');
+}
+
+fn json_str_field(out: &mut String, field: &str, value: &str) {
+    out.push('"');
+    out.push_str(field);
+    out.push_str("\":");
+    push_json_string(out, value);
+}
+
+fn push_json_string(out: &mut String, value: &str) {
+    match serde_json::to_string(value) {
+        Ok(encoded) => out.push_str(&encoded),
+        Err(_) => out.push_str("\"<invalid>\""),
+    }
+}
+
+fn push_u32_field(out: &mut String, field: &str, value: u32) {
+    out.push('"');
+    out.push_str(field);
+    out.push_str("\":");
+    out.push_str(&value.to_string());
+}
+
+fn push_u64_field(out: &mut String, field: &str, value: u64) {
+    out.push('"');
+    out.push_str(field);
+    out.push_str("\":");
+    out.push_str(&value.to_string());
+}
+
+fn push_i64_field(out: &mut String, field: &str, value: i64) {
+    out.push('"');
+    out.push_str(field);
+    out.push_str("\":");
+    out.push_str(&value.to_string());
+}
+
+fn push_f64_field(out: &mut String, field: &str, value: f64) {
+    out.push('"');
+    out.push_str(field);
+    out.push_str("\":");
+    out.push_str(&format!("{value:.4}"));
 }
 
 fn signed_u64_delta(candidate: u64, incumbent: u64) -> i64 {
