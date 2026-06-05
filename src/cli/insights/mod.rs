@@ -721,11 +721,13 @@ fn load_knowledge_skyline(
     }
 
     let ppr_scores = pagerank_scores_for_skyline(&data.links)?;
-    let as_of = skyline_memories
+    let Some(as_of) = skyline_memories
         .iter()
         .map(|memory| memory.created_at)
         .max()
-        .expect("non-empty skyline memories");
+    else {
+        return Ok(None);
+    };
     Ok(Some(compute_knowledge_skyline(&KnowledgeSkylineInput {
         graph: skyline_graph,
         memories: skyline_memories,

@@ -5433,29 +5433,37 @@ pub fn run_curate_auto_promote(
             eligible_count = eligible_count.saturating_add(1);
             emitted_eligible = emitted_eligible.saturating_add(1);
             if apply_mode {
-                match apply_threshold_promotion(
-                    &prepared,
-                    &memory.id,
-                    &memory.level,
-                    proposed_level
-                        .as_deref()
-                        .expect("eligible proposal always has a target level"),
-                    memory.confidence,
-                    access_count,
-                    actor.as_deref(),
-                ) {
-                    Ok(audit_id) => {
-                        proposal.apply_status = "applied".to_owned();
-                        proposal.audit_id = Some(audit_id);
-                        applied_count = applied_count.saturating_add(1);
+                if let Some(target_level) = proposed_level.as_deref() {
+                    match apply_threshold_promotion(
+                        &prepared,
+                        &memory.id,
+                        &memory.level,
+                        target_level,
+                        memory.confidence,
+                        access_count,
+                        actor.as_deref(),
+                    ) {
+                        Ok(audit_id) => {
+                            proposal.apply_status = "applied".to_owned();
+                            proposal.audit_id = Some(audit_id);
+                            applied_count = applied_count.saturating_add(1);
+                        }
+                        Err(error) => {
+                            let (code, message) = describe_domain_error(&error);
+                            proposal.apply_status = "apply_failed".to_owned();
+                            proposal.apply_error_code = Some(code);
+                            proposal.apply_error_message = Some(message);
+                            apply_failed_count = apply_failed_count.saturating_add(1);
+                        }
                     }
-                    Err(error) => {
-                        let (code, message) = describe_domain_error(&error);
-                        proposal.apply_status = "apply_failed".to_owned();
-                        proposal.apply_error_code = Some(code);
-                        proposal.apply_error_message = Some(message);
-                        apply_failed_count = apply_failed_count.saturating_add(1);
-                    }
+                } else {
+                    proposal.apply_status = "apply_failed".to_owned();
+                    proposal.apply_error_code =
+                        Some("missing_threshold_promotion_target".to_owned());
+                    proposal.apply_error_message = Some(
+                        "Eligible threshold-promotion proposal had no target level.".to_owned(),
+                    );
+                    apply_failed_count = apply_failed_count.saturating_add(1);
                 }
             }
         } else {

@@ -1803,8 +1803,7 @@ fn finish_prewarm_token(token: &mut String, tokens: &mut Vec<String>) {
 fn prewarm_signal_score(signal: &PrewarmSignal, token_count: usize) -> u64 {
     let priority = signal.priority.min(9);
     let priority_weight = u64::from(10_u8.saturating_sub(priority)).saturating_mul(8);
-    let token_weight =
-        u64::from(u8::try_from(token_count.min(12)).expect("capped token count always fits in u8"));
+    let token_weight = token_count.min(12) as u64;
     signal
         .source
         .weight()

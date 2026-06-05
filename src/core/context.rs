@@ -1474,6 +1474,7 @@ enum PackRecordPersistence<'a> {
     Seeded(&'a Deterministic<Seed>),
 }
 
+#[allow(clippy::expect_used)]
 fn run_context_pack_with_performance_inner(
     options: &ContextPackOptions,
     command: &'static str,

@@ -165,6 +165,7 @@ struct InflightPermit {
     pool: Arc<InflightPool>,
 }
 
+#[allow(clippy::expect_used)]
 impl Drop for InflightPermit {
     fn drop(&mut self) {
         let mut current = self
@@ -190,6 +191,7 @@ struct InflightPool {
     idle: Condvar,
 }
 
+#[allow(clippy::expect_used)]
 impl InflightPool {
     fn new(capacity: usize) -> Arc<Self> {
         // A capacity of zero would refuse every connection and is never
@@ -1918,6 +1920,7 @@ fn method_unauthorized_response(request: &DaemonRequest, message: &'static str) 
     .with_degraded(DAEMON_METHOD_UNAUTHORIZED_CODE)
 }
 
+#[allow(clippy::expect_used)]
 fn daemon_capabilities_result() -> serde_json::Value {
     serde_json::json!({
         "protocol": "ee.daemon",

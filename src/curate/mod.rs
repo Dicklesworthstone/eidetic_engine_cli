@@ -1599,6 +1599,7 @@ impl ReflectionRequestLifecycleConfig {
 }
 
 impl Default for ReflectionRequestLifecycleConfig {
+    #[allow(clippy::expect_used)]
     fn default() -> Self {
         Self::from_raw_values(None, None).expect("reflection lifecycle defaults must be valid")
     }

@@ -150,6 +150,14 @@ fi
 VIOLATIONS=""
 VIOLATION_COUNT=0
 BASELINED_VIOLATION_COUNT=0
+CURRENT_BEAD_ID=""
+CURRENT_BEAD_JSON=""
+CURRENT_BEAD_LABELS=""
+CURRENT_BEAD_DESCRIPTION=""
+CURRENT_BEAD_NOTES=""
+CURRENT_BEAD_CLOSE_REASON=""
+CURRENT_BEAD_CLOSED_DATE=""
+CURRENT_BEAD_PARENT=""
 
 add_violation() {
     local bead_id="$1"
@@ -212,6 +220,46 @@ add_failure_mode_fixture_violation() {
     else
         echo "  x $bead_id [implements-surface] surface=$surface: $reason"
     fi
+}
+
+load_current_bead() {
+    local bead_id="$1"
+
+    CURRENT_BEAD_ID="$bead_id"
+    CURRENT_BEAD_JSON=$(
+        jq -c --arg bead_id "$bead_id" '
+            select(.id == $bead_id)
+        ' "$BEADS_FILE" 2>/dev/null | head -n 1
+    )
+
+    if [ -z "$CURRENT_BEAD_JSON" ]; then
+        CURRENT_BEAD_LABELS=""
+        CURRENT_BEAD_DESCRIPTION=""
+        CURRENT_BEAD_NOTES=""
+        CURRENT_BEAD_CLOSE_REASON=""
+        CURRENT_BEAD_CLOSED_DATE=""
+        CURRENT_BEAD_PARENT=""
+        return 1
+    fi
+
+    CURRENT_BEAD_LABELS=$(printf "%s" "$CURRENT_BEAD_JSON" | jq -r '(.labels // []) | join(",")')
+    CURRENT_BEAD_DESCRIPTION=$(printf "%s" "$CURRENT_BEAD_JSON" | jq -r '.description // ""')
+    CURRENT_BEAD_NOTES=$(printf "%s" "$CURRENT_BEAD_JSON" | jq -r '.notes // ""')
+    CURRENT_BEAD_CLOSE_REASON=$(printf "%s" "$CURRENT_BEAD_JSON" | jq -r '.close_reason // ""')
+    CURRENT_BEAD_CLOSED_DATE=$(
+        printf "%s" "$CURRENT_BEAD_JSON" |
+            jq -r '(.closed_at // .updated_at // .created_at // "") | sub("T.*$"; "")'
+    )
+    CURRENT_BEAD_PARENT=$(
+        printf "%s" "$CURRENT_BEAD_JSON" |
+            jq -r '
+                if ((.parent // "") != "") then
+                    .parent
+                else
+                    ([.dependencies[]? | select((.issue_id // "") == (.id // "") and (.type // "") == "parent-child") | .depends_on_id][0] // "")
+                end
+            '
+    )
 }
 
 write_report() {
@@ -550,10 +598,7 @@ bead_declared_rust_file_surfaces() {
 
 bead_declared_file_surfaces() {
     local bead_id="$1"
-    jq -r --arg bead_id "$bead_id" '
-        select(.id == $bead_id)
-        | (.description // "")
-    ' "$BEADS_FILE" 2>/dev/null |
+    bead_description_text "$bead_id" |
         sed -n 's/^FILE SURFACE:[[:space:]]*//p' |
         tr ',' '\n' |
         sed -E 's/^[[:space:]]*//; s/[[:space:]].*$//; s/^`//; s/`$//' |
@@ -632,10 +677,7 @@ check_inferred_implementation_surface_labels() {
 bead_referenced_test_paths() {
     local bead_id="$1"
 
-    jq -r --arg bead_id "$bead_id" '
-        select(.id == $bead_id)
-        | [(.description // ""), (.notes // "")] | join("\n")
-    ' "$BEADS_FILE" 2>/dev/null |
+    bead_description_and_notes_text "$bead_id" |
         tr '`"'"'"'[]{}<>' '\n' |
         grep -Eo 'tests/[A-Za-z0-9_./*?+-]+' |
         sed -E 's/[).,:;]+$//; s#/$##' |
@@ -784,10 +826,7 @@ check_implementation_unit_test_obligation() {
 # leniently with leading whitespace allowed.
 bead_declares_audit_emission_block() {
     local bead_id="$1"
-    jq -r --arg bead_id "$bead_id" '
-        select(.id == $bead_id)
-        | (.description // "")
-    ' "$BEADS_FILE" 2>/dev/null |
+    bead_description_text "$bead_id" |
         grep -qE '^[[:space:]]*AUDIT EMISSION:'
 }
 
@@ -796,9 +835,43 @@ bead_declares_audit_emission_block() {
 # re-shelling per token.
 bead_description_text() {
     local bead_id="$1"
+
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        printf "%s\n" "$CURRENT_BEAD_DESCRIPTION"
+        return 0
+    fi
+
     jq -r --arg bead_id "$bead_id" '
         select(.id == $bead_id)
         | (.description // "")
+    ' "$BEADS_FILE" 2>/dev/null
+}
+
+bead_description_and_notes_text() {
+    local bead_id="$1"
+
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        printf "%s\n%s\n" "$CURRENT_BEAD_DESCRIPTION" "$CURRENT_BEAD_NOTES"
+        return 0
+    fi
+
+    jq -r --arg bead_id "$bead_id" '
+        select(.id == $bead_id)
+        | [(.description // ""), (.notes // "")] | join("\n")
+    ' "$BEADS_FILE" 2>/dev/null
+}
+
+bead_description_notes_close_reason_text() {
+    local bead_id="$1"
+
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        printf "%s\n%s\n%s\n" "$CURRENT_BEAD_DESCRIPTION" "$CURRENT_BEAD_NOTES" "$CURRENT_BEAD_CLOSE_REASON"
+        return 0
+    fi
+
+    jq -r --arg bead_id "$bead_id" '
+        select(.id == $bead_id)
+        | [(.description // ""), (.notes // ""), (.close_reason // "")] | join("\n")
     ' "$BEADS_FILE" 2>/dev/null
 }
 
@@ -976,11 +1049,7 @@ check_bd3usjw_e2e_test_tracing() {
 bead_degradation_requirement_codes() {
     local bead_id="$1"
 
-    jq -r --arg bead_id "$bead_id" '
-        select(.id == $bead_id)
-        | [(.description // ""), (.notes // ""), (.close_reason // "")]
-        | join("\n")
-    ' "$BEADS_FILE" 2>/dev/null |
+    bead_description_notes_close_reason_text "$bead_id" |
         awk '
             /DEGRADATION REQUIREMENT/ {
                 in_section = 1
@@ -1095,6 +1164,12 @@ close_reason_contains_defer_v2() {
 
 bead_parent() {
     local bead_id="$1"
+
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        printf "%s\n" "$CURRENT_BEAD_PARENT"
+        return 0
+    fi
+
     jq -r --arg bead_id "$bead_id" '
         select(.id == $bead_id)
         | if ((.parent // "") != "") then
@@ -1107,6 +1182,12 @@ bead_parent() {
 
 bead_closed_date() {
     local bead_id="$1"
+
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        printf "%s\n" "$CURRENT_BEAD_CLOSED_DATE"
+        return 0
+    fi
+
     jq -r --arg bead_id "$bead_id" '
         select(.id == $bead_id)
         | (.closed_at // .updated_at // .created_at // "")
@@ -1417,8 +1498,9 @@ fi
 # Process each bead by ID
 for bead_id in $BEAD_IDS; do
     # Get bead data
-    labels=$(jq -r --arg bead_id "$bead_id" 'select(.id == $bead_id) | (.labels // []) | join(",")' "$BEADS_FILE" 2>/dev/null || echo "")
-    close_reason=$(jq -r "select(.id == \"$bead_id\") | .close_reason // \"\"" "$BEADS_FILE" 2>/dev/null || echo "")
+    load_current_bead "$bead_id" || continue
+    labels="$CURRENT_BEAD_LABELS"
+    close_reason="$CURRENT_BEAD_CLOSE_REASON"
 
     if echo "$labels" | grep -qE '\bmath-ambition\b'; then
         check_math_ambition_closure "$bead_id" "$close_reason"

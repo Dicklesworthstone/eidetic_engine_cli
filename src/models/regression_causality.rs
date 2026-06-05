@@ -1441,11 +1441,7 @@ fn normalize_one(
         remote_source_materialized,
         redaction_status,
         authoritative: status != RegressionEvidenceStatus::Unsupported,
-        summary: evidence_summary(
-            status,
-            accepted_kind.expect("accepted kind checked"),
-            &input.id,
-        ),
+        summary: evidence_summary(status, accepted_kind.unwrap_or(kind), &input.id),
         degraded_codes,
         provenance: RegressionEvidenceProvenance {
             source_fields: present_source_fields(artifact),

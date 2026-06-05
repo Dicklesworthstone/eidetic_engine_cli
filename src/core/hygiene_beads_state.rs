@@ -376,8 +376,7 @@ fn scan_jsonl_content(content: Option<&[u8]>) -> (bool, Option<usize>, Vec<&'sta
     let text = match std::str::from_utf8(bytes) {
         Ok(text) => text,
         Err(error) if truncated && error.error_len().is_none() => {
-            std::str::from_utf8(&bytes[..error.valid_up_to()])
-                .expect("valid_up_to must split at a UTF-8 boundary")
+            std::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or_default()
         }
         Err(_) => {
             // Non-UTF-8 content in a JSONL export is itself a parse
