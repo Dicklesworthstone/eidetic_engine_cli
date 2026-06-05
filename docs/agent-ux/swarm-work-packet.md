@@ -25,7 +25,12 @@ packet recommendation.
 The gate exposes `sourceAuthority.rchRemoteOnlyRequired` separately from
 `sourceAuthority.rchSafeToLaunchCargoVerification`. Harnesses must fail closed
 when remote-only verification is required and the positive RCH proof is missing
-or false; a green local compile posture is not enough to claim Rust work.
+or false; a green local compile posture is not enough to claim Rust work. It
+also mirrors the compact environment-attestation verdict fields on
+`sourceAuthority.environmentVerdict`, `sourceAuthority.sourceTestVerdict`,
+`sourceAuthority.remoteVerificationAdmitted`, and
+`sourceAuthority.localCargoFallbackObserved` so stale binary, tracker, RCH, and
+local fallback evidence remains visible at the claim decision.
 
 When the claim gate, support-bundle summary, or handoff evidence disagrees about
 which readiness source is authoritative, inspect

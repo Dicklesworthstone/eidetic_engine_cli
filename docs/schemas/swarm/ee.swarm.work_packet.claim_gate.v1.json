@@ -276,6 +276,35 @@
         "inboxAuthoritative": {"type": ["boolean", "null"]},
         "rchRemoteOnlyRequired": {"type": "boolean"},
         "rchSafeToLaunchCargoVerification": {"type": ["boolean", "null"]},
+        "environmentVerdict": {
+          "type": "string",
+          "enum": [
+            "safe_to_claim",
+            "coordinate_before_claim",
+            "unsafe_due_to_conflict",
+            "remote_verification_admitted",
+            "proof_environment_blocked",
+            "source_authority_ambiguous",
+            "stale_binary_suspected",
+            "tracker_stale",
+            "local_cargo_bypass_detected",
+            "unknown_insufficient_evidence"
+          ]
+        },
+        "sourceTestVerdict": {
+          "type": "string",
+          "enum": [
+            "not_evaluated",
+            "source_not_tested",
+            "source_passed",
+            "source_failed",
+            "environment_blocked_before_source",
+            "stale_source",
+            "unknown"
+          ]
+        },
+        "remoteVerificationAdmitted": {"type": ["boolean", "null"]},
+        "localCargoFallbackObserved": {"type": ["boolean", "null"]},
         "sourceCount": {"type": "integer", "minimum": 0}
       }
     }
@@ -310,6 +339,10 @@
         "inboxAuthoritative": true,
         "rchRemoteOnlyRequired": true,
         "rchSafeToLaunchCargoVerification": true,
+        "environmentVerdict": "remote_verification_admitted",
+        "sourceTestVerdict": "not_evaluated",
+        "remoteVerificationAdmitted": true,
+        "localCargoFallbackObserved": null,
         "sourceCount": 4
       },
       "unsafeReasons": [],

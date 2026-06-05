@@ -183,7 +183,12 @@ reason arrays, and the verdict.
 `sourceAuthority.rchSafeToLaunchCargoVerification` are separate so harnesses can
 fail closed when remote-only verification is required but the positive RCH proof
 is missing or false; a green local compile posture is not enough to claim Rust
-work. `candidate_not_found` and `no_candidate` are explicit gate verdicts so
+work. The same block also carries compact environment-attestation fields:
+`environmentVerdict`, `sourceTestVerdict`, `remoteVerificationAdmitted`, and
+`localCargoFallbackObserved`. They summarize the source-authority posture
+without replacing the gate verdict, candidate decision, unsafe reasons, or the
+full `ee diag environment-attestation` surface. `candidate_not_found` and
+`no_candidate` are explicit gate verdicts so
 harnesses do not infer safety from missing candidate data.
 
 For explicit `--candidate <bead-id>` queries, `recommendedSafeToClaim` must be

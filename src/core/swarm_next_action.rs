@@ -731,6 +731,10 @@ pub struct SwarmWorkPacketClaimGateSourceAuthority {
     pub inbox_authoritative: Option<bool>,
     pub rch_remote_only_required: bool,
     pub rch_safe_to_launch_cargo_verification: Option<bool>,
+    pub environment_verdict: &'static str,
+    pub source_test_verdict: &'static str,
+    pub remote_verification_admitted: Option<bool>,
+    pub local_cargo_fallback_observed: Option<bool>,
     pub source_count: usize,
 }
 
@@ -1280,6 +1284,12 @@ impl SwarmWorkPacket {
                 rch_safe_to_launch_cargo_verification: self
                     .rch_proof_posture
                     .safe_to_launch_cargo_verification,
+                environment_verdict: work_packet_claim_gate_environment_verdict(self),
+                source_test_verdict: work_packet_claim_gate_source_test_verdict(self),
+                remote_verification_admitted: work_packet_claim_gate_remote_verification_admitted(
+                    self,
+                ),
+                local_cargo_fallback_observed: None,
                 source_count: self.source_provenance.len(),
             },
             unsafe_reasons,
@@ -1480,6 +1490,65 @@ fn work_packet_claim_gate_unsafe_reasons(
         reasons.push(format!("gate_verdict:{verdict}"));
     }
     reasons
+}
+
+fn work_packet_claim_gate_environment_verdict(packet: &SwarmWorkPacket) -> &'static str {
+    if packet.rch_proof_posture.local_fallback_prevented
+        || packet.rch_proof_posture.safe_to_launch_cargo_verification == Some(false)
+    {
+        return "proof_environment_blocked";
+    }
+    if !packet.tracker_integrity.br_reads_authoritative {
+        return "tracker_stale";
+    }
+    if work_packet_has_active_reservation_conflict(packet) {
+        return "unsafe_due_to_conflict";
+    }
+    if agent_mail_blocks_claim(&packet.coordination.agent_mail)
+        || work_packet_has_coordination_degradation(packet)
+    {
+        return "coordinate_before_claim";
+    }
+    if work_packet_claim_gate_remote_verification_admitted(packet) == Some(true) {
+        return "remote_verification_admitted";
+    }
+    "safe_to_claim"
+}
+
+fn work_packet_claim_gate_source_test_verdict(packet: &SwarmWorkPacket) -> &'static str {
+    if work_packet_claim_gate_environment_verdict(packet) == "proof_environment_blocked" {
+        "environment_blocked_before_source"
+    } else {
+        "not_evaluated"
+    }
+}
+
+fn work_packet_claim_gate_remote_verification_admitted(packet: &SwarmWorkPacket) -> Option<bool> {
+    packet.rch_proof_posture.safe_to_launch_cargo_verification
+}
+
+fn work_packet_has_active_reservation_conflict(packet: &SwarmWorkPacket) -> bool {
+    packet
+        .coordination
+        .file_collisions
+        .iter()
+        .any(|collision| !collision.owners.is_empty())
+}
+
+fn work_packet_has_coordination_degradation(packet: &SwarmWorkPacket) -> bool {
+    packet.degraded.iter().any(|degradation| {
+        matches!(
+            degradation.code.as_str(),
+            "agent_mail_unavailable"
+                | "agent_mail_semantic_readiness_failed"
+                | "agent_mail_probe_mismatch"
+                | "bv_command_timeout"
+                | "bv_no_output"
+                | "bv_unavailable"
+                | "bv_recommendation_stale"
+                | "memory_drift_source_unverifiable"
+        )
+    })
 }
 
 fn work_packet_candidates(
@@ -6244,6 +6313,20 @@ mod tests {
                 .proof_obligations
                 .contains(&"do_not_run_local_cargo_fallback".to_owned())
         );
+        let gate = packet.claim_gate(None);
+        assert_eq!(
+            gate.source_authority.environment_verdict,
+            "proof_environment_blocked"
+        );
+        assert_eq!(
+            gate.source_authority.source_test_verdict,
+            "environment_blocked_before_source"
+        );
+        assert_eq!(
+            gate.source_authority.remote_verification_admitted,
+            Some(false)
+        );
+        assert_eq!(gate.source_authority.local_cargo_fallback_observed, None);
     }
 
     #[test]
@@ -6585,6 +6668,16 @@ mod tests {
                 .map(|action| action.command_id),
             Some("bead_claim_candidate")
         );
+        assert_eq!(
+            gate.source_authority.environment_verdict,
+            "remote_verification_admitted"
+        );
+        assert_eq!(gate.source_authority.source_test_verdict, "not_evaluated");
+        assert_eq!(
+            gate.source_authority.remote_verification_admitted,
+            Some(true)
+        );
+        assert_eq!(gate.source_authority.local_cargo_fallback_observed, None);
     }
 
     #[test]

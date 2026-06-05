@@ -254,7 +254,12 @@ fn claim_gate_sample_payloads_are_redacted_and_safe() -> TestResult {
             "agentMailStatus": "healthy",
             "reservationAuthoritative": true,
             "inboxAuthoritative": true,
+            "rchRemoteOnlyRequired": true,
             "rchSafeToLaunchCargoVerification": false,
+            "environmentVerdict": "proof_environment_blocked",
+            "sourceTestVerdict": "environment_blocked_before_source",
+            "remoteVerificationAdmitted": false,
+            "localCargoFallbackObserved": null,
             "sourceCount": 4
         },
         "unsafeReasons": ["active_claim", "reserved_file_overlap"],

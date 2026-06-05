@@ -986,7 +986,12 @@
         "agentMailStatus": "healthy",
         "reservationAuthoritative": true,
         "inboxAuthoritative": true,
+        "rchRemoteOnlyRequired": true,
         "rchSafeToLaunchCargoVerification": true,
+        "environmentVerdict": "remote_verification_admitted",
+        "sourceTestVerdict": "not_evaluated",
+        "remoteVerificationAdmitted": true,
+        "localCargoFallbackObserved": null,
         "sourceCount": 4
       },
       "unsafeReasons": [],
