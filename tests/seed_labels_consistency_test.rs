@@ -202,7 +202,7 @@ fn unregistered_seed_labels_in_content(path: &Path, content: &str) -> Vec<String
 fn update_brace_depth(current: usize, line: &str) -> usize {
     let delta = brace_delta(line);
     if delta.is_negative() {
-        current.saturating_sub(delta.unsigned_abs() as usize)
+        current.saturating_sub(delta.unsigned_abs())
     } else {
         current + delta as usize
     }
