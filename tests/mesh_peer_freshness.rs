@@ -1,6 +1,7 @@
 //! Executable SRR6.14 checks for async peer freshness probes.
 
 #[path = "../src/mesh/anti_entropy_protocol.rs"]
+#[allow(dead_code)]
 mod anti_entropy_protocol;
 
 use anti_entropy_protocol::{

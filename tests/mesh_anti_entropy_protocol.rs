@@ -3,6 +3,7 @@
 //! Imported by path while `src/mesh/mod.rs` is owned by adjacent mesh CLI work.
 
 #[path = "../src/mesh/anti_entropy_protocol.rs"]
+#[allow(dead_code)]
 mod anti_entropy_protocol;
 
 use std::collections::BTreeMap;
