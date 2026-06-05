@@ -14,6 +14,7 @@ use std::fmt;
 
 pub const SUBSYSTEM: &str = "shadow";
 pub const SHADOW_REPORT_SCHEMA_V1: &str = "ee.shadow_report.v1";
+pub const SHADOW_POLICY_INVENTORY_SCHEMA_V1: &str = "ee.shadow_policy_inventory.v1";
 
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
@@ -92,6 +93,224 @@ impl fmt::Display for PolicyDomain {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// Whether an inventoried policy is the default, a candidate, or not yet supported.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PolicyInventoryStatus {
+    /// The currently selected/default policy for the decision surface.
+    Incumbent,
+    /// A policy that can be compared against the incumbent without mutation.
+    Candidate,
+    /// A known decision surface with no supported shadow policy yet.
+    Unsupported,
+}
+
+impl PolicyInventoryStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Incumbent => "incumbent",
+            Self::Candidate => "candidate",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+impl fmt::Display for PolicyInventoryStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Maturity of an inventoried shadow policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PolicyMaturity {
+    /// Stable enough to act as a deterministic incumbent.
+    Stable,
+    /// Experimental and only eligible for side-effect-free comparison.
+    Experimental,
+    /// Available only through fixtures/goldens until live wiring lands.
+    FixtureOnly,
+    /// The surface is known but not yet shadowable.
+    Unsupported,
+}
+
+impl PolicyMaturity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Experimental => "experimental",
+            Self::FixtureOnly => "fixture_only",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+impl fmt::Display for PolicyMaturity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Static entry in the shadow policy inventory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShadowPolicyInventoryEntry {
+    /// Stable policy identifier used by `--policy`, reports, and schemas.
+    pub policy_id: &'static str,
+    /// Domain string. Unsupported domains are listed here even before an enum variant lands.
+    pub policy_domain: &'static str,
+    /// Whether this is the incumbent/default, a candidate, or unsupported.
+    pub status: PolicyInventoryStatus,
+    /// Current maturity of the policy surface.
+    pub maturity: PolicyMaturity,
+    /// Inputs required before this policy can be evaluated.
+    pub required_inputs: &'static [&'static str],
+    /// Cohorts where this policy can be shadowed.
+    pub supported_cohorts: &'static [&'static str],
+    /// Degraded/admission codes a caller should expect while evaluating this policy.
+    pub known_degraded_modes: &'static [&'static str],
+    /// Inventory entries never mutate state while being inspected.
+    pub side_effect_free: bool,
+    /// Whether the policy can run beside the incumbent without changing user-visible output.
+    pub shadowable_without_mutation: bool,
+    /// Why a known surface must abstain instead of running.
+    pub abstention_reason: Option<&'static str>,
+}
+
+const PACK_SELECTION_INPUTS: &[&str] = &["memory_candidates", "task_query", "token_budget"];
+const CACHE_ADMISSION_INPUTS: &[&str] = &["cache_workload", "capacity", "key_trace"];
+const CURATION_FILTER_INPUTS: &[&str] = &["candidate_memories", "risk_scores"];
+const VERIFICATION_ADMISSION_INPUTS: &[&str] =
+    &["source_authority", "rch_posture", "local_cargo_tripwire"];
+const RESOURCE_BUDGET_INPUTS: &[&str] = &["host_profile", "resource_budget"];
+
+const ALL_COHORTS: &[&str] = &["ci_smoke", "small", "standard", "swarm_heavy"];
+const FIXTURE_COHORTS: &[&str] = &["ci_smoke", "small"];
+const NO_COHORTS: &[&str] = &[];
+
+const PACK_DEGRADED_MODES: &[&str] = &["no_relevant_results", "weak_query_recall"];
+const CACHE_DEGRADED_MODES: &[&str] = &["cache_admission_unavailable"];
+const CURATION_DEGRADED_MODES: &[&str] = &["insufficient_evidence"];
+const VERIFICATION_DEGRADED_MODES: &[&str] = &[
+    "rch_blocked",
+    "unsafe_local_cargo_posture",
+    "stale_source_authority",
+];
+const UNSUPPORTED_DEGRADED_MODES: &[&str] = &["unsupported_policy_domain"];
+
+pub const SHADOW_POLICY_INVENTORY: &[ShadowPolicyInventoryEntry] = &[
+    ShadowPolicyInventoryEntry {
+        policy_id: "incumbent.pack.mmr_redundancy",
+        policy_domain: "pack_selection",
+        status: PolicyInventoryStatus::Incumbent,
+        maturity: PolicyMaturity::Stable,
+        required_inputs: PACK_SELECTION_INPUTS,
+        supported_cohorts: ALL_COHORTS,
+        known_degraded_modes: PACK_DEGRADED_MODES,
+        side_effect_free: true,
+        shadowable_without_mutation: true,
+        abstention_reason: None,
+    },
+    ShadowPolicyInventoryEntry {
+        policy_id: "candidate.pack.facility_location",
+        policy_domain: "pack_selection",
+        status: PolicyInventoryStatus::Candidate,
+        maturity: PolicyMaturity::Experimental,
+        required_inputs: PACK_SELECTION_INPUTS,
+        supported_cohorts: ALL_COHORTS,
+        known_degraded_modes: PACK_DEGRADED_MODES,
+        side_effect_free: true,
+        shadowable_without_mutation: true,
+        abstention_reason: None,
+    },
+    ShadowPolicyInventoryEntry {
+        policy_id: "incumbent.cache.no_cache",
+        policy_domain: "cache_admission",
+        status: PolicyInventoryStatus::Incumbent,
+        maturity: PolicyMaturity::Stable,
+        required_inputs: CACHE_ADMISSION_INPUTS,
+        supported_cohorts: ALL_COHORTS,
+        known_degraded_modes: CACHE_DEGRADED_MODES,
+        side_effect_free: true,
+        shadowable_without_mutation: true,
+        abstention_reason: None,
+    },
+    ShadowPolicyInventoryEntry {
+        policy_id: "candidate.cache.s3_fifo",
+        policy_domain: "cache_admission",
+        status: PolicyInventoryStatus::Candidate,
+        maturity: PolicyMaturity::Experimental,
+        required_inputs: CACHE_ADMISSION_INPUTS,
+        supported_cohorts: ALL_COHORTS,
+        known_degraded_modes: CACHE_DEGRADED_MODES,
+        side_effect_free: true,
+        shadowable_without_mutation: true,
+        abstention_reason: None,
+    },
+    ShadowPolicyInventoryEntry {
+        policy_id: "candidate.curation.risk_filter",
+        policy_domain: "curation_filter",
+        status: PolicyInventoryStatus::Candidate,
+        maturity: PolicyMaturity::FixtureOnly,
+        required_inputs: CURATION_FILTER_INPUTS,
+        supported_cohorts: FIXTURE_COHORTS,
+        known_degraded_modes: CURATION_DEGRADED_MODES,
+        side_effect_free: true,
+        shadowable_without_mutation: true,
+        abstention_reason: None,
+    },
+    ShadowPolicyInventoryEntry {
+        policy_id: "incumbent.verification.rch_only",
+        policy_domain: "verification_admission",
+        status: PolicyInventoryStatus::Incumbent,
+        maturity: PolicyMaturity::Stable,
+        required_inputs: VERIFICATION_ADMISSION_INPUTS,
+        supported_cohorts: ALL_COHORTS,
+        known_degraded_modes: VERIFICATION_DEGRADED_MODES,
+        side_effect_free: true,
+        shadowable_without_mutation: true,
+        abstention_reason: None,
+    },
+    ShadowPolicyInventoryEntry {
+        policy_id: "candidate.verification.environment_attestation",
+        policy_domain: "verification_admission",
+        status: PolicyInventoryStatus::Candidate,
+        maturity: PolicyMaturity::Experimental,
+        required_inputs: VERIFICATION_ADMISSION_INPUTS,
+        supported_cohorts: FIXTURE_COHORTS,
+        known_degraded_modes: VERIFICATION_DEGRADED_MODES,
+        side_effect_free: true,
+        shadowable_without_mutation: true,
+        abstention_reason: None,
+    },
+    ShadowPolicyInventoryEntry {
+        policy_id: "unsupported.resource_profile_budget_admission",
+        policy_domain: "resource_profile_budget_admission",
+        status: PolicyInventoryStatus::Unsupported,
+        maturity: PolicyMaturity::Unsupported,
+        required_inputs: RESOURCE_BUDGET_INPUTS,
+        supported_cohorts: NO_COHORTS,
+        known_degraded_modes: UNSUPPORTED_DEGRADED_MODES,
+        side_effect_free: true,
+        shadowable_without_mutation: false,
+        abstention_reason: Some("unsupported_policy_domain"),
+    },
+];
+
+#[must_use]
+pub const fn shadow_policy_inventory() -> &'static [ShadowPolicyInventoryEntry] {
+    SHADOW_POLICY_INVENTORY
+}
+
+#[must_use]
+pub fn find_shadow_policy_inventory_entry(
+    policy_id: &str,
+) -> Option<&'static ShadowPolicyInventoryEntry> {
+    SHADOW_POLICY_INVENTORY
+        .iter()
+        .find(|entry| entry.policy_id == policy_id)
 }
 
 /// Verdict from comparing incumbent and candidate outputs.

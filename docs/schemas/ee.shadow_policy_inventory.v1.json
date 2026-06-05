@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.shadow_policy_inventory.v1.json",
+  "title": "ee.shadow_policy_inventory.v1",
+  "description": "Deterministic, side-effect-free inventory of decision policies that can be shadowed or must abstain. The inventory names incumbent, candidate, fixture-only, and unsupported policy surfaces without enabling live rollout.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "inventoryId",
+    "sideEffectFree",
+    "policies",
+    "redactionPosture",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.shadow_policy_inventory.v1"
+    },
+    "inventoryId": {
+      "type": "string",
+      "const": "shadow_policy_inventory.default"
+    },
+    "sideEffectFree": {
+      "type": "boolean",
+      "const": true
+    },
+    "policies": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/policyEntry"
+      }
+    },
+    "redactionPosture": {
+      "$ref": "#/$defs/redactionPosture"
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degradedEntry"
+      }
+    }
+  },
+  "$defs": {
+    "policyEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policyId",
+        "policyDomain",
+        "status",
+        "maturity",
+        "requiredInputs",
+        "supportedCohorts",
+        "knownDegradedModes",
+        "sideEffectFree",
+        "shadowableWithoutMutation",
+        "abstentionReason"
+      ],
+      "properties": {
+        "policyId": {
+          "$ref": "#/$defs/policyId"
+        },
+        "policyDomain": {
+          "$ref": "#/$defs/policyDomain"
+        },
+        "status": {
+          "$ref": "#/$defs/policyStatus"
+        },
+        "maturity": {
+          "$ref": "#/$defs/policyMaturity"
+        },
+        "requiredInputs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "cache_workload",
+              "candidate_memories",
+              "capacity",
+              "host_profile",
+              "key_trace",
+              "local_cargo_tripwire",
+              "memory_candidates",
+              "rch_posture",
+              "resource_budget",
+              "risk_scores",
+              "source_authority",
+              "task_query",
+              "token_budget"
+            ]
+          }
+        },
+        "supportedCohorts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/cohort"
+          }
+        },
+        "knownDegradedModes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "cache_admission_unavailable",
+              "insufficient_evidence",
+              "no_relevant_results",
+              "rch_blocked",
+              "stale_source_authority",
+              "unsupported_policy_domain",
+              "unsafe_local_cargo_posture",
+              "weak_query_recall"
+            ]
+          }
+        },
+        "sideEffectFree": {
+          "type": "boolean",
+          "const": true
+        },
+        "shadowableWithoutMutation": {
+          "type": "boolean"
+        },
+        "abstentionReason": {
+          "type": ["string", "null"],
+          "enum": [
+            "missing_replay_evidence",
+            "stale_source_authority",
+            "unsafe_local_cargo_posture",
+            "unsupported_policy_domain",
+            "rch_blocked",
+            "redaction_posture_unknown",
+            null
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": { "const": "unsupported" }
+            },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "shadowableWithoutMutation": {
+                "const": false
+              },
+              "abstentionReason": {
+                "const": "unsupported_policy_domain"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "policyId": {
+      "type": "string",
+      "enum": [
+        "candidate.cache.s3_fifo",
+        "candidate.curation.risk_filter",
+        "candidate.pack.facility_location",
+        "candidate.verification.environment_attestation",
+        "incumbent.cache.no_cache",
+        "incumbent.pack.mmr_redundancy",
+        "incumbent.verification.rch_only",
+        "unsupported.resource_profile_budget_admission"
+      ]
+    },
+    "policyDomain": {
+      "type": "string",
+      "enum": [
+        "cache_admission",
+        "curation_filter",
+        "pack_selection",
+        "resource_profile_budget_admission",
+        "verification_admission"
+      ]
+    },
+    "policyStatus": {
+      "type": "string",
+      "enum": ["candidate", "incumbent", "unsupported"]
+    },
+    "policyMaturity": {
+      "type": "string",
+      "enum": ["experimental", "fixture_only", "stable", "unsupported"]
+    },
+    "cohort": {
+      "type": "string",
+      "enum": ["ci_smoke", "small", "standard", "swarm_heavy"]
+    },
+    "redactionPosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rawMemoryBodyPresent",
+        "rawMailBodyPresent",
+        "rawPolicyPayloadPresent",
+        "absoluteHostPathPresent",
+        "secretsPresent"
+      ],
+      "properties": {
+        "rawMemoryBodyPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawMailBodyPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawPolicyPayloadPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "absoluteHostPathPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "secretsPresent": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    },
+    "degradedEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        }
+      }
+    }
+  }
+}

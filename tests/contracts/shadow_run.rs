@@ -10,8 +10,9 @@ use ee::models::{DecisionPlane, DecisionRecord};
 use ee::output::{ShadowRunReport, render_shadow_run_json};
 use ee::shadow::pack::{PackShadowOutput, compare_outputs};
 use ee::shadow::{
-    PolicyDomain, ShadowGateConfig, ShadowPromotionGuards, ShadowVerdict,
-    candidate_promotion_allowed,
+    PolicyDomain, PolicyInventoryStatus, PolicyMaturity, ShadowGateConfig, ShadowPromotionGuards,
+    ShadowVerdict, candidate_promotion_allowed, find_shadow_policy_inventory_entry,
+    shadow_policy_inventory,
 };
 use serde_json::Value;
 
@@ -144,6 +145,104 @@ fn gate14_policy_domain_includes_verification_admission() -> TestResult {
     ensure(
         PolicyDomain::VerificationAdmission.as_str() == "verification_admission",
         "verification admission domain string is stable",
+    )
+}
+
+#[test]
+fn gate14_shadow_policy_inventory_lists_pack_and_cache_incumbents_and_candidates() -> TestResult {
+    ensure(
+        shadow_policy_inventory().len() >= 8,
+        "inventory includes all currently documented shadow surfaces",
+    )?;
+
+    let pack_incumbent = find_shadow_policy_inventory_entry("incumbent.pack.mmr_redundancy")
+        .ok_or_else(|| "missing pack incumbent".to_string())?;
+    ensure(
+        pack_incumbent.policy_domain == PolicyDomain::PackSelection.as_str(),
+        "pack incumbent domain is stable",
+    )?;
+    ensure(
+        pack_incumbent.status == PolicyInventoryStatus::Incumbent,
+        "pack incumbent status is stable",
+    )?;
+    ensure(
+        pack_incumbent.maturity == PolicyMaturity::Stable,
+        "pack incumbent maturity is stable",
+    )?;
+    ensure(
+        pack_incumbent.required_inputs.contains(&"token_budget"),
+        "pack incumbent records token budget input",
+    )?;
+    ensure(
+        pack_incumbent.shadowable_without_mutation,
+        "pack incumbent is shadowable without mutation",
+    )?;
+
+    let pack_candidate = find_shadow_policy_inventory_entry("candidate.pack.facility_location")
+        .ok_or_else(|| "missing pack candidate".to_string())?;
+    ensure(
+        pack_candidate.status == PolicyInventoryStatus::Candidate,
+        "pack candidate status is stable",
+    )?;
+    ensure(
+        pack_candidate.maturity == PolicyMaturity::Experimental,
+        "pack candidate maturity is stable",
+    )?;
+    ensure(
+        pack_candidate.supported_cohorts.contains(&"swarm_heavy"),
+        "pack candidate is available for swarm-heavy replay",
+    )?;
+
+    let cache_incumbent = find_shadow_policy_inventory_entry("incumbent.cache.no_cache")
+        .ok_or_else(|| "missing cache incumbent".to_string())?;
+    ensure(
+        cache_incumbent.policy_domain == PolicyDomain::CacheAdmission.as_str(),
+        "cache incumbent domain is stable",
+    )?;
+    ensure(
+        cache_incumbent.status == PolicyInventoryStatus::Incumbent,
+        "cache incumbent status is stable",
+    )?;
+
+    let cache_candidate = find_shadow_policy_inventory_entry("candidate.cache.s3_fifo")
+        .ok_or_else(|| "missing cache candidate".to_string())?;
+    ensure(
+        cache_candidate.status == PolicyInventoryStatus::Candidate,
+        "cache candidate status is stable",
+    )?;
+    ensure(
+        cache_candidate
+            .known_degraded_modes
+            .contains(&"cache_admission_unavailable"),
+        "cache candidate records known degraded mode",
+    )
+}
+
+#[test]
+fn gate14_shadow_policy_inventory_abstains_for_unsupported_resource_budget_domain() -> TestResult {
+    let unsupported =
+        find_shadow_policy_inventory_entry("unsupported.resource_profile_budget_admission")
+            .ok_or_else(|| "missing unsupported resource-budget policy".to_string())?;
+
+    ensure(
+        unsupported.policy_domain == "resource_profile_budget_admission",
+        "unsupported domain is still inventoried",
+    )?;
+    ensure(
+        unsupported.status == PolicyInventoryStatus::Unsupported,
+        "unsupported status is stable",
+    )?;
+    ensure(
+        unsupported.maturity == PolicyMaturity::Unsupported,
+        "unsupported maturity is stable",
+    )?;
+    ensure(
+        !unsupported.shadowable_without_mutation,
+        "unsupported domain cannot be shadowed",
+    )?;
+    ensure(
+        unsupported.abstention_reason == Some("unsupported_policy_domain"),
+        "unsupported domain abstains instead of promoting or rejecting",
     )
 }
 
@@ -315,6 +414,80 @@ fn gate14_shadow_policy_experiment_schema_pins_admission_contract() -> TestResul
         "admission abstention reasons",
     )?;
     redaction_fields_are_default_deny(&schema, "shadow policy experiment schema")
+}
+
+#[test]
+fn gate14_shadow_policy_inventory_schema_pins_policy_ids_and_abstention_contract() -> TestResult {
+    let schema = read_schema("ee.shadow_policy_inventory.v1.json")?;
+    for field in [
+        "schema",
+        "inventoryId",
+        "sideEffectFree",
+        "policies",
+        "redactionPosture",
+        "degraded",
+    ] {
+        required_contains(&schema, field, "shadow policy inventory schema")?;
+    }
+
+    let policy_entry = nested_object_field(
+        &schema,
+        &["$defs", "policyEntry"],
+        "shadow policy inventory entry",
+    )?;
+    for field in [
+        "policyId",
+        "policyDomain",
+        "status",
+        "maturity",
+        "requiredInputs",
+        "supportedCohorts",
+        "knownDegradedModes",
+        "sideEffectFree",
+        "shadowableWithoutMutation",
+        "abstentionReason",
+    ] {
+        required_contains(policy_entry, field, "shadow policy inventory entry")?;
+    }
+
+    let policy_id = nested_object_field(&schema, &["$defs", "policyId"], "policy id")?;
+    enum_contains(
+        policy_id,
+        &[
+            "incumbent.pack.mmr_redundancy",
+            "candidate.pack.facility_location",
+            "incumbent.cache.no_cache",
+            "candidate.cache.s3_fifo",
+            "candidate.verification.environment_attestation",
+            "unsupported.resource_profile_budget_admission",
+        ],
+        "policy id",
+    )?;
+
+    let policy_domain = nested_object_field(&schema, &["$defs", "policyDomain"], "policy domain")?;
+    enum_contains(
+        policy_domain,
+        &[
+            "pack_selection",
+            "cache_admission",
+            "verification_admission",
+            "curation_filter",
+            "resource_profile_budget_admission",
+        ],
+        "policy domain",
+    )?;
+
+    let status = nested_object_field(&schema, &["$defs", "policyStatus"], "policy status")?;
+    enum_contains(status, &["incumbent", "candidate", "unsupported"], "status")?;
+
+    let maturity = nested_object_field(&schema, &["$defs", "policyMaturity"], "maturity")?;
+    enum_contains(
+        maturity,
+        &["stable", "experimental", "fixture_only", "unsupported"],
+        "maturity",
+    )?;
+
+    redaction_fields_are_default_deny(&schema, "shadow policy inventory schema")
 }
 
 #[test]

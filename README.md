@@ -1505,6 +1505,32 @@ Useful tag prefixes:
 
 ---
 
+## Shadow Policy Inventory
+
+Shadow policy surfaces are side-effect-free by default. The public inventory
+contract is `ee.shadow_policy_inventory.v1`; it lists stable policy IDs,
+domains, maturity, required inputs, supported cohorts, known degraded modes, and
+whether the policy can be shadowed without changing user-visible output.
+
+Initial inventoried policies include:
+
+| Domain | Incumbent | Candidate |
+|---|---|---|
+| Pack selection | `incumbent.pack.mmr_redundancy` | `candidate.pack.facility_location` |
+| Cache admission | `incumbent.cache.no_cache` | `candidate.cache.s3_fifo` |
+| Verification admission | `incumbent.verification.rch_only` | `candidate.verification.environment_attestation` |
+
+Unsupported decision surfaces must abstain instead of promote or reject. The
+current inventory records `unsupported.resource_profile_budget_admission` with
+`abstentionReason=unsupported_policy_domain` until that decision plane has a
+safe shadow implementation.
+
+Use `--shadow compare --policy <policy-id>` only to collect comparison evidence.
+Shadow mode does not promote candidates, mutate live policy, or replace the
+incumbent result without an explicit future apply step.
+
+---
+
 ## Agent Harness Integration
 
 ### Claude Code
