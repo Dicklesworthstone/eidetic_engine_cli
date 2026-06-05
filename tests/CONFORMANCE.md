@@ -112,6 +112,48 @@ When an `ERR_UNSUPPORTED_FEATURE` test transitions to working:
 
 ---
 
+## Windows Installer Conformance: `install.ps1`
+
+- **Script:** `install.ps1`
+- **README Anchor:** `README.md` Windows PowerShell install snippet
+- **Tracking Bead:** `bd-3tprq.1`
+
+This matrix is the source of truth for Windows installer behavior before adding
+parser, mocked-flow, or live-smoke tests. Rows distinguish deterministic offline
+checks from tests that must run on Windows. Default conformance must not require
+network access, a live GitHub release, or local Rust compilation.
+
+### Coverage Matrix
+
+| ID | Level | Requirement and rationale | Source anchors | Intended check and first planned artifact | Windows required | Current coverage / deviation |
+|----|-------|---------------------------|----------------|-------------------------------------------|------------------|------------------------------|
+| `WIN-PS1-001` | MUST | `install.ps1` remains PowerShell 5.1 parseable as UTF-8 and keeps the leading UTF-8 BOM. Windows PowerShell 5.1 handles non-ASCII script bytes differently from PowerShell 7, so the encoding contract is part of the installer surface. | `install.ps1:1`, `install.ps1:65-67`, `install.ps1:87` | Static bytes check for UTF-8 BOM plus Windows parser check in `bd-3tprq.2`. | Yes, PowerShell 5.1 | Planned by `bd-3tprq.2`. |
+| `WIN-PS1-002` | MUST | The same script remains parseable on PowerShell 7+. The installer supports current cross-platform PowerShell while preserving Windows PowerShell 5.1 compatibility. | `install.ps1:65-67`, `install.ps1:87` | Windows parser check using `pwsh -NoProfile` in `bd-3tprq.2`. | Yes, PowerShell 7+ | Planned by `bd-3tprq.2`. |
+| `WIN-PS1-003` | MUST | README and script examples download the release asset to a file with `Invoke-WebRequest -OutFile`; they must not document `iwr ... .Content \| iex`. GitHub serves release assets as octet streams, so `.Content` is a byte array on Windows. | `install.ps1:56-60`, `README.md` Windows install snippet | Offline docs/script grep in `bd-3tprq.5` requiring `-OutFile` and forbidding the byte-array pipe form for release assets. | No | Planned by `bd-3tprq.5`. |
+| `WIN-PS1-004` | MUST | Default release installs verify SHA256 unless `-NoVerify` or `EE_SKIP_VERIFY=1` is set. SHA256 is the mandatory integrity gate for normal Windows installs. | `install.ps1:7-8`, `install.ps1:42-48`, `install.ps1:90-94`, `install.ps1:901-915` | Mocked download/install flow in `bd-3tprq.3` asserting the checksum path runs by default. | Mockable offline; final proof on Windows | Planned by `bd-3tprq.3`. |
+| `WIN-PS1-005` | MUST | `-NoVerify` skips both SHA256 and Sigstore checks. This escape hatch must be explicit and testable because it weakens integrity verification. | `install.ps1:42-48`, `install.ps1:901-938` | Mocked install flow in `bd-3tprq.3` asserting no checksum fetch, no `Test-Sha256`, and no Sigstore fetch. | Mockable offline; final proof on Windows | Planned by `bd-3tprq.3`. |
+| `WIN-PS1-006` | SHOULD | Sigstore/SLSA verification is opt-in by default, after SHA256 succeeds. A missing bundle or missing `cosign` warns by default rather than failing the install. | `install.ps1:8-11`, `install.ps1:45-48`, `install.ps1:916-936` | Mocked missing-bundle and missing-cosign flows in `bd-3tprq.3`. | Mockable offline; final proof on Windows | Intentional POSIX parity: fatal provenance is only `-RequireProvenance` or `EE_REQUIRE_PROVENANCE=1`. |
+| `WIN-PS1-007` | MUST | `-RequireProvenance` fails when the Sigstore bundle is unavailable. Required provenance cannot silently degrade. | `install.ps1:45-48`, `install.ps1:923-930` | Mocked bundle download failure with `-RequireProvenance` in `bd-3tprq.3`. | Mockable offline; final proof on Windows | Planned by `bd-3tprq.3`. |
+| `WIN-PS1-008` | MUST | `-RequireProvenance` fails when `cosign` is absent. Required Sigstore verification cannot proceed without the verifier. | `install.ps1:513-516`, `install.ps1:920-936` | Mocked PATH/environment with no `cosign` in `bd-3tprq.3`; warning-only behavior remains valid without `-RequireProvenance`. | Mockable offline; final proof on Windows | Planned by `bd-3tprq.3`. |
+| `WIN-PS1-009` | MUST | `EE_REQUIRE_PROVENANCE=1` enables the same fatal behavior as `-RequireProvenance`. Environment-driven policy must match the flag. | `install.ps1:90-94`, `install.ps1:926-936` | Mocked install flow with `EE_REQUIRE_PROVENANCE=1` and missing bundle/cosign in `bd-3tprq.3`. | Mockable offline; final proof on Windows | Planned by `bd-3tprq.3`. |
+| `WIN-PS1-010` | MUST | `Show-AgentIntegration` cannot throw under `Set-StrictMode -Version Latest` when optional agent detection yields zero, one, or many scalar-like results. The installer must not report a false failure after installing `ee.exe`. | `install.ps1:725-783`, especially `install.ps1:772-777` | Runtime parser/function check in `bd-3tprq.2` or `bd-3tprq.3` exercising zero, one, and many optional-agent cases. | Yes | Planned by `bd-3tprq.2` or `bd-3tprq.3`. |
+| `WIN-PS1-011` | SHOULD | Live GitHub release smoke is opt-in only. Default conformance stays deterministic, offline, and independent of current release availability. | README Windows snippet, `install.ps1:306-317`, `install.ps1:846-856` | Separate skipped-by-default live job gated by an env var such as `EE_INSTALLER_LIVE_SMOKE=1` in `bd-3tprq.4`. | Yes for live path | Planned by `bd-3tprq.4`. |
+| `WIN-PS1-012` | MUST | Default installer tests do not compile Rust locally. The `-FromSource` path may be tested only through an approved remote/CI path or a mocked/static check. | `install.ps1:657-718`, AGENTS RCH policy | Harness guard and docs note in `bd-3tprq.2` / `bd-3tprq.3`; mocked release path by default. | No for default checks | Matrix row records the constraint; no local Cargo is required. |
+
+### Implementation Notes
+
+- Offline deterministic checks are the default: byte inspection, parser checks,
+  static docs/script drift checks, and mocked installer flows.
+- Live GitHub release smoke belongs in a separately gated job and must log why it
+  is skipped when the opt-in environment variable is absent.
+- Windows Sigstore is intentionally opt-in after SHA256 by default, matching the
+  current POSIX installer posture. Fatal provenance requires
+  `-RequireProvenance` or `EE_REQUIRE_PROVENANCE=1`.
+- Source-install coverage must not run local Rust compilation from ordinary
+  agent verification. Use an approved remote/CI lane or a mock/static harness.
+
+---
+
 ## CASS Contracts Conformance
 
 **Test File:** `conformance/cass_contracts.rs`  
