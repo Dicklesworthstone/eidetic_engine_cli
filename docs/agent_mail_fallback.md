@@ -63,6 +63,17 @@ When the brief must include reservations, unread counts, or thread freshness,
 generate a full redacted snapshot first:
 
 ```bash
+scripts/agent_mail_snapshot.sh \
+  --project "$PWD" \
+  --agent "$AGENT_NAME" \
+  --json | jq .
+```
+
+The `--json` flag writes the full snapshot to stdout. To keep a durable file
+for consumers, use `--output`; plain `--output` writes only the file, while
+`--json --output` writes the same snapshot to both stdout and the file.
+
+```bash
 SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
 COORDINATION_PATH=/private/tmp/ee-coordination-snapshot.json
 scripts/agent_mail_snapshot.sh \

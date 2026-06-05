@@ -19,6 +19,11 @@ PROJECT="$TMP_ROOT/workspace"
 COMMAND_LOG="$TMP_ROOT/am-commands.log"
 SNAPSHOT_OK="$TMP_ROOT/snapshot-ok.json"
 SNAPSHOT_DEGRADED="$TMP_ROOT/snapshot-degraded.json"
+SNAPSHOT_STDOUT_OK="$TMP_ROOT/snapshot-stdout-ok.json"
+SNAPSHOT_STDOUT_STDERR="$TMP_ROOT/snapshot-stdout.stderr"
+SNAPSHOT_DUAL_FILE="$TMP_ROOT/snapshot-dual-file.json"
+SNAPSHOT_DUAL_STDOUT="$TMP_ROOT/snapshot-dual-stdout.json"
+SNAPSHOT_OUTPUT_ONLY_STDOUT="$TMP_ROOT/snapshot-output-only.stdout"
 COORDINATION_OK="$TMP_ROOT/coordination-ok.json"
 COORDINATION_DEGRADED="$TMP_ROOT/coordination-degraded.json"
 SYMLINK_PARENT="$TMP_ROOT/symlink-parent"
@@ -348,8 +353,52 @@ AM_FAKE_PROJECT="$PROJECT" \
   --inbox-limit 5 \
   --thread-limit 5 \
   --timeout-sec 3 \
+  --json \
+  >"$SNAPSHOT_STDOUT_OK" \
+  2>"$SNAPSHOT_STDOUT_STDERR"
+if [ -s "$SNAPSHOT_STDOUT_STDERR" ]; then
+    printf 'agent_mail_snapshot: --json wrote diagnostics to stderr\n' >&2
+    exit 1
+fi
+jq -e '
+  .producer_status == "ok"
+  and .fallback_active == false
+  and any(.threads[]; .thread_id == "bd-6qcwh.2" and .message_count == 2)
+' "$SNAPSHOT_STDOUT_OK" >/dev/null
+
+PATH="$FAKE_BIN:$PATH" \
+AM_FAKE_COMMAND_LOG="$COMMAND_LOG" \
+AM_FAKE_PROJECT="$PROJECT" \
+"$PRODUCER" \
+  --project "$PROJECT" \
+  --agent BeigeHollow \
+  --inbox-limit 5 \
+  --thread-limit 5 \
+  --timeout-sec 3 \
+  --json \
+  --output "$SNAPSHOT_DUAL_FILE" \
+  >"$SNAPSHOT_DUAL_STDOUT"
+if ! cmp -s "$SNAPSHOT_DUAL_FILE" "$SNAPSHOT_DUAL_STDOUT"; then
+    printf 'agent_mail_snapshot: --json --output wrote different stdout and file snapshots\n' >&2
+    exit 1
+fi
+
+PATH="$FAKE_BIN:$PATH" \
+AM_FAKE_COMMAND_LOG="$COMMAND_LOG" \
+AM_FAKE_PROJECT="$PROJECT" \
+"$PRODUCER" \
+  --project "$PROJECT" \
+  --agent BeigeHollow \
+  --inbox-limit 5 \
+  --thread-limit 5 \
+  --timeout-sec 3 \
   --coordination-output "$COORDINATION_OK" \
-  --output "$SNAPSHOT_OK"
+  --output "$SNAPSHOT_OK" \
+  >"$SNAPSHOT_OUTPUT_ONLY_STDOUT"
+if [ -s "$SNAPSHOT_OUTPUT_ONLY_STDOUT" ]; then
+    printf 'agent_mail_snapshot: --output without --json wrote stdout\n' >&2
+    exit 1
+fi
 
 jq -e '
   .redaction_status == "paths_counts_subjects_only_no_content"
@@ -441,7 +490,7 @@ jq -e '
   )
 ' "$COORDINATION_DEGRADED" >/dev/null
 
-for snapshot in "$SNAPSHOT_OK" "$SNAPSHOT_DEGRADED" "$COORDINATION_OK" "$COORDINATION_DEGRADED"; do
+for snapshot in "$SNAPSHOT_OK" "$SNAPSHOT_DEGRADED" "$SNAPSHOT_STDOUT_OK" "$SNAPSHOT_DUAL_FILE" "$SNAPSHOT_DUAL_STDOUT" "$COORDINATION_OK" "$COORDINATION_DEGRADED"; do
     if grep -E 'ghp_|raw body|body_md|SECRET_TOKEN|agent list unavailable|/Users/|/Volumes/|/data/|/tmp/|/private/|/var/folders/' "$snapshot" >/dev/null; then
         printf 'agent_mail_snapshot: redaction leak in %s\n' "$snapshot" >&2
         exit 1

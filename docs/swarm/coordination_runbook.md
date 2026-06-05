@@ -20,6 +20,17 @@ or thread freshness.
 When those fields matter, generate a full read-only snapshot:
 
 ```bash
+scripts/agent_mail_snapshot.sh \
+  --project "$PWD" \
+  --agent "$AGENT_NAME" \
+  --json | jq .
+```
+
+Use `--json` for stdout. Use `--output` to write a snapshot file; plain
+`--output` is quiet, and `--json --output` writes the same snapshot to stdout
+and to the file.
+
+```bash
 SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
 COORDINATION_PATH=/private/tmp/ee-coordination-snapshot.json
 scripts/agent_mail_snapshot.sh \

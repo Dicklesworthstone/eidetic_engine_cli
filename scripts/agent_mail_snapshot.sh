@@ -534,6 +534,13 @@ def coordination_snapshot(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Emit a redacted read-only Agent Mail snapshot for ee swarm brief.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  scripts/agent_mail_snapshot.sh --project \"$PWD\" --agent \"$AGENT_NAME\" --json\n"
+            "  scripts/agent_mail_snapshot.sh --project \"$PWD\" --agent \"$AGENT_NAME\" --output /private/tmp/ee-agent-mail-snapshot.json\n"
+            "  scripts/agent_mail_snapshot.sh --project \"$PWD\" --agent \"$AGENT_NAME\" --json --output /private/tmp/ee-agent-mail-snapshot.json"
+        ),
     )
     parser.add_argument("--project", default=os.environ.get("AGENT_MAIL_PROJECT") or os.getcwd())
     parser.add_argument("--agent", default=os.environ.get("AGENT_MAIL_AGENT") or os.environ.get("AGENT_NAME"))
@@ -541,7 +548,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--inbox-limit", type=int, default=DEFAULT_INBOX_LIMIT)
     parser.add_argument("--thread-limit", type=int, default=DEFAULT_THREAD_LIMIT)
     parser.add_argument("--timeout-sec", type=float, default=DEFAULT_TIMEOUT_SEC)
-    parser.add_argument("--output", help="Write snapshot JSON to this path instead of stdout.")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit snapshot JSON to stdout. With --output, also write the same snapshot JSON file.",
+    )
+    parser.add_argument(
+        "--stdout",
+        action="store_true",
+        help="Alias for --json; useful when --output is also set.",
+    )
+    parser.add_argument(
+        "--output",
+        help="Write snapshot JSON to this path. Without --json/--stdout, suppress stdout.",
+    )
     parser.add_argument(
         "--coordination-output",
         help="Also write a pack-compatible ee.coordination_snapshot.v1 companion JSON file.",
@@ -612,9 +632,10 @@ def main() -> int:
     }
 
     rendered = json.dumps(output, sort_keys=True, separators=(",", ":")) + "\n"
+    write_stdout = args.json or args.stdout or not args.output
     if args.output:
         Path(args.output).write_text(rendered, encoding="utf-8")
-    else:
+    if write_stdout:
         sys.stdout.write(rendered)
     if args.coordination_output:
         coordination = coordination_snapshot(
