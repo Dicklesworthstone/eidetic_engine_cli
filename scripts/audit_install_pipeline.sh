@@ -532,12 +532,13 @@ installer_asset_contract() {
     local homebrew_template="$REPO_ROOT/scripts/homebrew/ee.rb.template"
     local homebrew_update="$REPO_ROOT/scripts/homebrew/update-formula.sh"
 
-    local installer_examples_use_release_assets unix_musl unix_version_normalized unix_sigstore_hard_fail unix_sigstore_bundle_required unix_sha256_tool_required unix_sigstore_identity_bound unix_requires_provenance windows_x64 windows_i686_rejected windows_arm64_rejected windows_version_normalized windows_sigstore_hard_fail windows_sigstore_bundle_required windows_sigstore_identity_bound homebrew_formula_tests_doctor homebrew_formula_fetches_sha_strictly homebrew_formula_normalizes_version_tag
+    local installer_examples_use_release_assets unix_musl unix_version_normalized unix_sigstore_hard_fail unix_sigstore_bundle_required unix_sigstore_warns_by_default unix_sha256_tool_required unix_sigstore_identity_bound unix_requires_provenance windows_x64 windows_i686_rejected windows_arm64_rejected windows_version_normalized windows_sha256_default windows_noverify_skips_verification windows_sigstore_hard_fail windows_sigstore_bundle_required windows_sigstore_warns_by_default windows_require_provenance_flag windows_require_provenance_env windows_sigstore_identity_bound homebrew_formula_tests_doctor homebrew_formula_fetches_sha_strictly homebrew_formula_normalizes_version_tag
     installer_examples_use_release_assets=false
     unix_musl=false
     unix_version_normalized=false
     unix_sigstore_hard_fail=false
     unix_sigstore_bundle_required=false
+    unix_sigstore_warns_by_default=false
     unix_sha256_tool_required=false
     unix_sigstore_identity_bound=false
     unix_requires_provenance=false
@@ -545,8 +546,13 @@ installer_asset_contract() {
     windows_i686_rejected=false
     windows_arm64_rejected=false
     windows_version_normalized=false
+    windows_sha256_default=false
+    windows_noverify_skips_verification=false
     windows_sigstore_hard_fail=false
     windows_sigstore_bundle_required=false
+    windows_sigstore_warns_by_default=false
+    windows_require_provenance_flag=false
+    windows_require_provenance_env=false
     windows_sigstore_identity_bound=false
     homebrew_formula_tests_doctor=false
     homebrew_formula_fetches_sha_strictly=false
@@ -556,9 +562,9 @@ installer_asset_contract() {
         unix_musl=true
     fi
     if [ -f "$unix_installer" ] && [ -f "$windows_installer" ] \
-        && grep -qF 'releases/download/v0.1.0/install.sh | EE_VERSION=v0.1.0 sh' "$unix_installer" 2>/dev/null \
-        && grep -qF 'releases/download/v0.1.0/install.ps1' "$windows_installer" 2>/dev/null \
-        && grep -qF -- '-Version "0.1.0"' "$windows_installer" 2>/dev/null; then
+        && grep -qF 'releases/download/v0.1.0/install.sh | EE_VERSION=v0.1.0 bash' "$unix_installer" 2>/dev/null \
+        && grep -qF 'releases/latest/download/install.ps1' "$windows_installer" 2>/dev/null \
+        && grep -qF -- '-OutFile $f; & $f' "$windows_installer" 2>/dev/null; then
         installer_examples_use_release_assets=true
     fi
     if [ -f "$unix_installer" ] \
@@ -571,10 +577,15 @@ installer_asset_contract() {
         unix_sigstore_hard_fail=true
     fi
     if [ -f "$unix_installer" ] \
-        && grep -qF 'err "Sigstore bundle not available at $bundle_url."' "$unix_installer" 2>/dev/null \
-        && grep -qF 'Cannot verify signature. To skip cryptographic verification, use --no-verify or set EE_SKIP_VERIFY=1.' "$unix_installer" 2>/dev/null \
-        && ! grep -qF 'http_download "${SIGSTORE_URL}" "${TMPDIR}/sigstore.json" 2>/dev/null; then' "$unix_installer" 2>/dev/null; then
+        && grep -qF 'Strict verification was requested; cannot continue without a signed bundle.' "$unix_installer" 2>/dev/null \
+        && grep -qF 'if [ "$REQUIRE_PROVENANCE" = "1" ] || [ "$REQUIRE_KEYLESS" = "1" ]; then' "$unix_installer" 2>/dev/null; then
         unix_sigstore_bundle_required=true
+    fi
+    if [ -f "$unix_installer" ] \
+        && grep -qF 'warn "Sigstore bundle not available at $bundle_url; skipping signature verification (sha256 already verified)."' "$unix_installer" 2>/dev/null \
+        && grep -qF 'warn "Pass --require-provenance to fail the install when a signed bundle is missing."' "$unix_installer" 2>/dev/null \
+        && grep -qF 'warn "cosign not found; skipping Sigstore signature verification for $file (sha256 already verified)."' "$unix_installer" 2>/dev/null; then
+        unix_sigstore_warns_by_default=true
     fi
     if [ -f "$unix_installer" ] \
         && grep -qF 'No SHA256 tool found. Install sha256sum or shasum, or set EE_SKIP_VERIFY=1 to bypass verification.' "$unix_installer" 2>/dev/null \
@@ -582,8 +593,8 @@ installer_asset_contract() {
         unix_sha256_tool_required=true
     fi
     if [ -f "$unix_installer" ] \
-        && grep -qF -- '--certificate-identity-regexp "$CERT_IDENTITY_REGEXP"' "$unix_installer" 2>/dev/null \
-        && grep -qF -- '--certificate-oidc-issuer "$CERT_OIDC_ISSUER"' "$unix_installer" 2>/dev/null \
+        && grep -qF -- '--certificate-identity-regexp "${CERT_IDENTITY_REGEXPS[$i]}"' "$unix_installer" 2>/dev/null \
+        && grep -qF -- '--certificate-oidc-issuer "${CERT_OIDC_ISSUERS[$i]}"' "$unix_installer" 2>/dev/null \
         && grep -qF 'https://token.actions.githubusercontent.com' "$unix_installer" 2>/dev/null; then
         unix_sigstore_identity_bound=true
     fi
@@ -595,7 +606,7 @@ installer_asset_contract() {
         && grep -qF 'Cargo.lock blake3 dependency' "$unix_installer" 2>/dev/null; then
         unix_requires_provenance=true
     fi
-    if [ -f "$windows_installer" ] && grep -qF '"AMD64" { return "x86_64" }' "$windows_installer" 2>/dev/null; then
+    if [ -f "$windows_installer" ] && grep -qF '"AMD64" { return "x86_64-pc-windows-msvc" }' "$windows_installer" 2>/dev/null; then
         windows_x64=true
     fi
     if [ -f "$windows_installer" ] \
@@ -610,21 +621,49 @@ installer_asset_contract() {
     fi
     if [ -f "$windows_installer" ] \
         && grep -qF '$Version.StartsWith("v")' "$windows_installer" 2>/dev/null \
-        && grep -qF '$tag = $Version' "$windows_installer" 2>/dev/null \
-        && grep -qF '$tag = "v$Version"' "$windows_installer" 2>/dev/null; then
+        && grep -qF 'return $Version' "$windows_installer" 2>/dev/null \
+        && grep -qF 'return "v$Version"' "$windows_installer" 2>/dev/null; then
         windows_version_normalized=true
     fi
     if [ -f "$windows_installer" ] \
-        && grep -qF 'Write-ErrorExit "Sigstore signature verification failed: $output"' "$windows_installer" 2>/dev/null \
-        && grep -qF 'Write-ErrorExit "cosign not found. Cannot verify Sigstore signature. Install cosign or use -NoVerify to skip."' "$windows_installer" 2>/dev/null; then
+        && grep -qF 'Test-Sha256 -FilePath $tarballPath -ExpectedHash $Checksum' "$windows_installer" 2>/dev/null \
+        && grep -qF 'Write-ErrorExit "Could not fetch checksum: $($_.Exception.Message)"' "$windows_installer" 2>/dev/null; then
+        windows_sha256_default=true
+    fi
+    if [ -f "$windows_installer" ] \
+        && grep -qF 'if ($NoVerify) {' "$windows_installer" 2>/dev/null \
+        && grep -qF 'Write-Warning2 "Verification skipped (-NoVerify / EE_SKIP_VERIFY=1)"' "$windows_installer" 2>/dev/null \
+        && grep -qF '} else {' "$windows_installer" 2>/dev/null; then
+        windows_noverify_skips_verification=true
+    fi
+    if [ -f "$windows_installer" ] \
+        && grep -qF 'Write-ErrorExit "Sigstore signature verification failed: $output"' "$windows_installer" 2>/dev/null; then
         windows_sigstore_hard_fail=true
     fi
     if [ -f "$windows_installer" ] \
         && grep -qF 'if ($cosign) {' "$windows_installer" 2>/dev/null \
         && grep -qF 'Invoke-DownloadFile -Url "$effectiveUrl.sigstore.json" -OutFile $sigstorePath' "$windows_installer" 2>/dev/null \
-        && grep -qF 'Sigstore bundle unavailable: $($_.Exception.Message). Cannot verify signature. Use -NoVerify to skip.' "$windows_installer" 2>/dev/null \
-        && ! grep -qF 'Sigstore bundle not available for this release.' "$windows_installer" 2>/dev/null; then
+        && grep -qF 'Write-ErrorExit "Sigstore bundle unavailable: $($_.Exception.Message). Cannot verify signature (required by -RequireProvenance)."' "$windows_installer" 2>/dev/null \
+        && grep -qF 'if ($RequireProvenance) {' "$windows_installer" 2>/dev/null; then
         windows_sigstore_bundle_required=true
+    fi
+    if [ -f "$windows_installer" ] \
+        && grep -qF 'Write-Warning2 "Sigstore bundle unavailable: $($_.Exception.Message); skipping signature verification (SHA256 already verified)."' "$windows_installer" 2>/dev/null \
+        && grep -qF 'Write-Warning2 "Pass -RequireProvenance to fail the install when a signed bundle is missing."' "$windows_installer" 2>/dev/null \
+        && grep -qF 'Write-Warning2 "cosign not found; skipping Sigstore signature verification (SHA256 already verified)."' "$windows_installer" 2>/dev/null \
+        && grep -qF 'Write-Warning2 "Install cosign and pass -RequireProvenance to enforce signature verification."' "$windows_installer" 2>/dev/null; then
+        windows_sigstore_warns_by_default=true
+    fi
+    if [ -f "$windows_installer" ] \
+        && grep -qF '[switch]$RequireProvenance' "$windows_installer" 2>/dev/null \
+        && grep -qF 'cosign not found but -RequireProvenance was set' "$windows_installer" 2>/dev/null \
+        && grep -qF 'required by -RequireProvenance' "$windows_installer" 2>/dev/null; then
+        windows_require_provenance_flag=true
+    fi
+    if [ -f "$windows_installer" ] \
+        && grep -qF '$env:EE_REQUIRE_PROVENANCE -eq "1"' "$windows_installer" 2>/dev/null \
+        && grep -qF '$RequireProvenance = [switch]::Present' "$windows_installer" 2>/dev/null; then
+        windows_require_provenance_env=true
     fi
     if [ -f "$windows_installer" ] \
         && grep -qF -- '--certificate-identity-regexp", $Script:CosignIdentityRegexp' "$windows_installer" 2>/dev/null \
@@ -654,6 +693,7 @@ installer_asset_contract() {
         --argjson unix_version_normalized "$unix_version_normalized" \
         --argjson unix_sigstore_hard_fail "$unix_sigstore_hard_fail" \
         --argjson unix_sigstore_bundle_required "$unix_sigstore_bundle_required" \
+        --argjson unix_sigstore_warns_by_default "$unix_sigstore_warns_by_default" \
         --argjson unix_sha256_tool_required "$unix_sha256_tool_required" \
         --argjson unix_sigstore_identity_bound "$unix_sigstore_identity_bound" \
         --argjson unix_requires_provenance "$unix_requires_provenance" \
@@ -661,8 +701,13 @@ installer_asset_contract() {
         --argjson windows_i686_rejected "$windows_i686_rejected" \
         --argjson windows_arm64_rejected "$windows_arm64_rejected" \
         --argjson windows_version_normalized "$windows_version_normalized" \
+        --argjson windows_sha256_default "$windows_sha256_default" \
+        --argjson windows_noverify_skips_verification "$windows_noverify_skips_verification" \
         --argjson windows_sigstore_hard_fail "$windows_sigstore_hard_fail" \
         --argjson windows_sigstore_bundle_required "$windows_sigstore_bundle_required" \
+        --argjson windows_sigstore_warns_by_default "$windows_sigstore_warns_by_default" \
+        --argjson windows_require_provenance_flag "$windows_require_provenance_flag" \
+        --argjson windows_require_provenance_env "$windows_require_provenance_env" \
         --argjson windows_sigstore_identity_bound "$windows_sigstore_identity_bound" \
         --argjson homebrew_formula_tests_doctor "$homebrew_formula_tests_doctor" \
         --argjson homebrew_formula_fetches_sha_strictly "$homebrew_formula_fetches_sha_strictly" \
@@ -674,6 +719,7 @@ installer_asset_contract() {
             unix_installer_normalizes_version_tag: $unix_version_normalized,
             unix_installer_fails_on_bad_sigstore: $unix_sigstore_hard_fail,
             unix_installer_requires_sigstore_bundle_with_cosign: $unix_sigstore_bundle_required,
+            unix_installer_warns_on_missing_sigstore_by_default: $unix_sigstore_warns_by_default,
             unix_installer_requires_sha256_tool: $unix_sha256_tool_required,
             unix_installer_binds_sigstore_identity: $unix_sigstore_identity_bound,
             unix_installer_supports_required_provenance: $unix_requires_provenance,
@@ -681,8 +727,13 @@ installer_asset_contract() {
             windows_installer_rejects_unbuilt_i686: $windows_i686_rejected,
             windows_installer_rejects_unbuilt_arm64: $windows_arm64_rejected,
             windows_installer_normalizes_version_tag: $windows_version_normalized,
+            windows_installer_requires_sha256_by_default: $windows_sha256_default,
+            windows_installer_noverify_skips_verification: $windows_noverify_skips_verification,
             windows_installer_fails_on_bad_sigstore: $windows_sigstore_hard_fail,
             windows_installer_requires_sigstore_bundle_with_cosign: $windows_sigstore_bundle_required,
+            windows_installer_warns_on_missing_sigstore_by_default: $windows_sigstore_warns_by_default,
+            windows_installer_supports_required_provenance: $windows_require_provenance_flag,
+            windows_installer_honors_required_provenance_env: $windows_require_provenance_env,
             windows_installer_binds_sigstore_identity: $windows_sigstore_identity_bound,
             homebrew_formula_tests_doctor_json: $homebrew_formula_tests_doctor,
             homebrew_formula_fetches_sha_strictly: $homebrew_formula_fetches_sha_strictly,
@@ -693,6 +744,7 @@ installer_asset_contract() {
                 and $unix_version_normalized
                 and $unix_sigstore_hard_fail
                 and $unix_sigstore_bundle_required
+                and $unix_sigstore_warns_by_default
                 and $unix_sha256_tool_required
                 and $unix_sigstore_identity_bound
                 and $unix_requires_provenance
@@ -700,8 +752,13 @@ installer_asset_contract() {
                 and $windows_i686_rejected
                 and $windows_arm64_rejected
                 and $windows_version_normalized
+                and $windows_sha256_default
+                and $windows_noverify_skips_verification
                 and $windows_sigstore_hard_fail
                 and $windows_sigstore_bundle_required
+                and $windows_sigstore_warns_by_default
+                and $windows_require_provenance_flag
+                and $windows_require_provenance_env
                 and $windows_sigstore_identity_bound
                 and $homebrew_formula_tests_doctor
                 and $homebrew_formula_fetches_sha_strictly
