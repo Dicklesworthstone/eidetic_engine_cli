@@ -118,6 +118,66 @@ normalizes them into redaction-safe evidence rows. It does not open the ee
 database, write audit rows, mutate Beads, run shell commands, or copy raw logs
 into the capsule.
 
+## Outcome Recording
+
+A causality run is only useful if the next agent can see whether it helped.
+After following the capsule's read-only `nextCommands`, record one of these
+outcomes in the relevant Beads thread, support-bundle summary, handoff, or
+review note:
+
+- `confirmed`: later evidence proved the hypothesis named the right owner.
+- `misled`: later evidence contradicted the hypothesis or showed a stronger
+  cause.
+- `abstained`: the capsule reported `unknown_insufficient_evidence` or emitted
+  a degraded code for a missing required input.
+- `environment_blocked`: the next command stopped before source verification,
+  such as RCH topology/source-materialization failure or local fallback refusal.
+
+The record should name the capsule artifact hash, top hypothesis code, evidence
+refs inspected, command hashes for follow-up probes, and the next owner. Do not
+paste raw stdout, stderr, mail bodies, memory bodies, private paths, or secret
+scan hits into the note.
+
+## Abstention and Follow-Up Beads
+
+When the capsule abstains, create or recommend a follow-up bead for the missing
+artifact class rather than editing the suspected owner blindly. Use the live
+tracker only when Beads state is authoritative; if JSONL/DB state is stale,
+reserved, or merge-artifact contaminated, send Agent Mail with the proposed bead
+instead of mutating `.beads/`.
+
+Follow-up titles should be concrete and evidence-shaped:
+
+- `Add RCH source-materialization proof for <surface>` when the capsule lacks a
+  committed-tree or remote-source proof.
+- `Add schema/fixture drift coverage for <schema>` when the only signal is a
+  contract mismatch without a fixture owner.
+- `Add pack replay artifact for <task>` when a pack-quality omission cannot be
+  attributed without a replay or diff ledger.
+- `Add perf compare evidence for <workload>` when latency suspicion lacks a
+  stable `ee.perf.v1` or replay scorecard.
+- `Add redaction-safe support-bundle summary for <surface>` when the useful
+  evidence exists only in raw logs or private paths.
+
+The bead description should include the capsule hash, missing `KIND=PATH`
+input, expected schema, redaction requirement, and the RCH-only verification
+command if Rust execution is needed. Never close a source bead from an
+abstaining capsule.
+
+## Anti-Patterns
+
+- Do not treat a ranked hypothesis as proof. It is a deterministic lead until
+  a later artifact confirms it.
+- Do not rerun local Cargo to "settle" an RCH-only blocker. Preserve the exact
+  remote blocker string and repair the proof environment first.
+- Do not paste raw proof logs into memories, Beads comments, support bundles, or
+  handoffs. Convert them into schema-versioned evidence or cite an artifact
+  hash.
+- Do not close a source bead when the source state is `remote_checkout_unverified`,
+  `source_state_refused`, or `unknown`.
+- Do not mutate Beads from a capsule recommendation when Beads/BV disagree,
+  tracker export is stale, or file reservations point at another active owner.
+
 ## Redacted Examples
 
 ### RCH Source-State Mismatch
