@@ -196,6 +196,13 @@ candidate-scoped before `safeToClaim` can become `true`. A packet-level
 recommendation for a different Bead must not satisfy this condition or unlock
 `claimCommandAction`.
 
+If BV names a Bead that is blocked in Beads, or the explicit candidate returns
+`candidate_not_found`, consumers must stop at inspection and run the Beads
+show/read path for that ID. Do not reinterpret the BV recommendation as a
+claimable lane. When the reason is unclear, run
+`ee diag environment-attestation --workspace . --include-rch --json` and inspect
+the Beads/BV source-authority entries before choosing a static/docs fallback.
+
 `nextCommandActions[]` is restricted to non-mutating inspection commands:
 `mutatesState` must be `false`. The mutating Beads claim command, when one is
 safe to show, lives only in `claimCommandAction`. When `safeToClaim` is `false`,

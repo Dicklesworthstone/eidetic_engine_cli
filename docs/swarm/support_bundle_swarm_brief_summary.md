@@ -40,6 +40,13 @@ authority was confusing, include a fresh redacted
 separate evidence. The bundle summary remains non-mutating and does not replace
 the live claim gate.
 
+For handoffs, include the attestation excerpt next to the bundle summary when
+the incident involved stale binaries, Agent Mail probe mismatch, Beads/BV
+disagreement, RCH topology or source-materialization blockers, dirty checkout
+collisions, reservation conflicts, or local Cargo bypass. The bundle may explain
+why a previous agent stopped; a future agent still needs a current claim gate
+before mutating Beads or closing work.
+
 Versioning: field renames or incompatible redaction semantics require a new
 schema version and a migration note. Additive counts may remain in
 `ee.support_bundle.swarm_brief_summary.v1` when existing consumers can safely

@@ -179,6 +179,27 @@ support-bundle summary, or handoff evidence looks contradictory and you need the
 per-source reason. Support bundles are for redacted handoff and debugging
 artifacts; they do not replace a fresh live claim gate or a fresh attestation.
 
+## Agent Routing Checklist
+
+Use this order when a crowded checkout has contradictory readiness evidence:
+
+1. Run the live claim gate for the exact Bead you intend to claim.
+2. If `safeToClaim=true`, inspect `claimCommandAction`, reserve the relevant
+   files through Agent Mail, then mutate Beads through the structured command.
+3. If `safeToClaim=false`, inspect this attestation report before acting on a
+   fallback. `summary.environmentVerdict` tells you why the gate is blocked;
+   `sourceAuthority[]` tells you which substrate produced that blocker.
+4. If BV recommends a Bead that Beads reports as blocked, assigned, or missing
+   from ready work, Beads plus the claim gate wins. Treat the BV command as
+   stale advisory text and do not paste its claim command.
+5. If a support bundle or handoff says a lane was safe earlier, treat it as
+   historical evidence only. Re-run the live claim gate and this attestation
+   before claiming, closing, or reopening work.
+6. If the only available progress is a human-directed static/docs slice while
+   the claim gate is closed, keep the slice non-overlapping: reserve exact files,
+   announce the exception, avoid Beads mutation while tracker files are
+   reserved, and record that no Cargo/source proof was produced.
+
 ## Agent Onboarding Examples
 
 These are redacted excerpts. Fields not relevant to the decision are omitted.

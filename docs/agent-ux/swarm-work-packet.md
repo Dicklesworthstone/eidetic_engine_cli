@@ -68,6 +68,14 @@ After inspecting the packet:
    a human approves it.
 5. If RCH is blocked, record the exact blocker and do not use local Cargo as substitute proof.
 
+When a human explicitly directs progress while the gate is not claim-safe, the
+safe fallback is narrower than a Beads claim: pick only static/docs work that
+does not overlap dirty files or active reservations, reserve those exact paths,
+announce the exception in Agent Mail, and leave Beads mutation for the holder of
+`.beads/issues.jsonl` or for a later clean claim gate. That kind of slice can
+unblock documentation or triage, but it is not source/test proof and must not be
+reported as a successful claim.
+
 ## Copy-Pastable Runs
 
 Healthy checkout:
