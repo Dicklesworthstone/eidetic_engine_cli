@@ -19,6 +19,8 @@ PROJECT="$TMP_ROOT/workspace"
 COMMAND_LOG="$TMP_ROOT/am-commands.log"
 SNAPSHOT_OK="$TMP_ROOT/snapshot-ok.json"
 SNAPSHOT_DEGRADED="$TMP_ROOT/snapshot-degraded.json"
+COORDINATION_OK="$TMP_ROOT/coordination-ok.json"
+COORDINATION_DEGRADED="$TMP_ROOT/coordination-degraded.json"
 LIVE_MODE="${EE_AGENT_MAIL_SNAPSHOT_LIVE_E2E:-0}"
 LIVE_PROJECT="${EE_AGENT_MAIL_SNAPSHOT_LIVE_PROJECT:-$REPO_ROOT}"
 LIVE_AGENT="${EE_AGENT_MAIL_SNAPSHOT_LIVE_AGENT:-${AGENT_NAME:-${AGENT_MAIL_AGENT:-}}}"
@@ -318,6 +320,7 @@ AM_FAKE_PROJECT="$PROJECT" \
   --inbox-limit 5 \
   --thread-limit 5 \
   --timeout-sec 3 \
+  --coordination-output "$COORDINATION_OK" \
   --output "$SNAPSHOT_OK"
 
 jq -e '
@@ -335,6 +338,41 @@ jq -e '
   and (.source_commands | all(contains("--include-bodies") | not))
 ' "$SNAPSHOT_OK" >/dev/null
 
+jq -e '
+  .schema == "ee.coordination_snapshot.v1"
+  and .scope == "workspace"
+  and (.sources | length) == 5
+  and any(.sources[];
+    .source_id == "agent_mail_reservations"
+    and .status == "fresh"
+    and any(.entries[];
+      .kind == "file_reservation"
+      and .path_pattern == "scripts/agent_mail_snapshot.sh"
+      and .conflict == true
+      and .severity == "warning"
+    )
+  )
+  and any(.sources[];
+    .source_id == "agent_mail_inbox"
+    and any(.entries[];
+      .kind == "agent_mail_inbox"
+      and .id == "BeigeHollow"
+      and .status == "ack_required"
+    )
+  )
+  and any(.sources[];
+    .source_id == "agent_mail_threads"
+    and any(.entries[];
+      .kind == "agent_mail_thread"
+      and .id == "bd-6qcwh.2"
+    )
+  )
+  and any(.sources[];
+    .source_id == "agent_mail_snapshot_health"
+    and .status == "fresh"
+  )
+' "$COORDINATION_OK" >/dev/null
+
 if grep -E 'mail send|mail ack|mail read|file_reservations reserve|file_reservations release|doctor repair' "$COMMAND_LOG" >/dev/null; then
     printf 'agent_mail_snapshot: producer invoked a forbidden mutating Agent Mail command\n' >&2
     exit 1
@@ -347,6 +385,7 @@ AM_FAKE_MODE=fail_agents \
 "$PRODUCER" \
   --project "$PROJECT" \
   --agent BeigeHollow \
+  --coordination-output "$COORDINATION_DEGRADED" \
   --output "$SNAPSHOT_DEGRADED"
 
 jq -e '
@@ -360,7 +399,21 @@ jq -e '
   and .threads != null
 ' "$SNAPSHOT_DEGRADED" >/dev/null
 
-for snapshot in "$SNAPSHOT_OK" "$SNAPSHOT_DEGRADED"; do
+jq -e '
+  .schema == "ee.coordination_snapshot.v1"
+  and any(.sources[];
+    .source_id == "agent_mail_agents"
+    and .status == "unavailable"
+    and any(.degraded[]; .code == "agent_mail_snapshot_source_unavailable")
+  )
+  and any(.sources[];
+    .source_id == "agent_mail_snapshot_health"
+    and .status == "degraded"
+    and any(.degraded[]; .code == "agent_mail_snapshot_source_unavailable")
+  )
+' "$COORDINATION_DEGRADED" >/dev/null
+
+for snapshot in "$SNAPSHOT_OK" "$SNAPSHOT_DEGRADED" "$COORDINATION_OK" "$COORDINATION_DEGRADED"; do
     if grep -E 'ghp_|raw body|body_md|SECRET_TOKEN|agent list unavailable|/Users/|/Volumes/|/data/|/tmp/|/private/|/var/folders/' "$snapshot" >/dev/null; then
         printf 'agent_mail_snapshot: redaction leak in %s\n' "$snapshot" >&2
         exit 1
@@ -385,6 +438,8 @@ jq -cn \
   --arg kind "note" \
   --arg healthy "$(shasum -a 256 "$SNAPSHOT_OK" | awk '{print "sha256:" $1}')" \
   --arg degraded "$(shasum -a 256 "$SNAPSHOT_DEGRADED" | awk '{print "sha256:" $1}')" \
+  --arg coordination_healthy "$(shasum -a 256 "$COORDINATION_OK" | awk '{print "sha256:" $1}')" \
+  --arg coordination_degraded "$(shasum -a 256 "$COORDINATION_DEGRADED" | awk '{print "sha256:" $1}')" \
   --arg live_mode "$LIVE_MODE" \
   --arg live_verdict "$LIVE_VERDICT" \
   --arg live_reason "$LIVE_REASON" \
@@ -401,6 +456,8 @@ jq -cn \
     mutationExecuted: false,
     healthySnapshotHash: $healthy,
     degradedSnapshotHash: $degraded,
+    healthyCoordinationSnapshotHash: $coordination_healthy,
+    degradedCoordinationSnapshotHash: $coordination_degraded,
     liveNoMock: {
       enabled: ($live_mode == "1"),
       verdict: $live_verdict,

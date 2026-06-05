@@ -318,6 +318,188 @@ def degraded_entries(commands: list[dict[str, Any]], project: Path) -> list[dict
     return entries
 
 
+def source_degradations(command: dict[str, Any], project: Path) -> list[dict[str, Any]]:
+    if command["ok"]:
+        return []
+    display = command_display(command["argv"], project)
+    error_class = command["error_class"] or "unknown"
+    return [
+        {
+            "code": "agent_mail_snapshot_source_unavailable",
+            "severity": "warning",
+            "message": f"Agent Mail snapshot source unavailable: {display} ({error_class}).",
+            "repair": "Regenerate the redacted Agent Mail snapshot after the source is available.",
+        }
+    ]
+
+
+def coordination_source(
+    kind: str,
+    status: str,
+    entries: list[dict[str, Any]],
+    degraded: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "source_id": kind,
+        "status": status,
+        "freshness_ms": 0,
+        "entries": entries,
+        "degraded": degraded or [],
+    }
+
+
+def reservation_coordination_entries(reservations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entries = []
+    for index, row in enumerate(reservations):
+        path_pattern = row.get("path_pattern") or f"reservation:{index}"
+        holder = row.get("holder")
+        exclusive = bool(row.get("exclusive"))
+        entry: dict[str, Any] = {
+            "kind": "file_reservation",
+            "id": path_pattern,
+            "path_pattern": path_pattern,
+            "status": "active",
+            "severity": "warning" if exclusive else "info",
+            "conflict": exclusive,
+            "summary": (
+                f"{'exclusive ' if exclusive else ''}reservation on {path_pattern}"
+                + (f" held by {holder}" if holder else "")
+            ),
+            "provenance": ["agent-mail://file-reservations"],
+        }
+        if holder:
+            entry["holder"] = holder
+        entries.append(entry)
+    return entries
+
+
+def agent_coordination_entries(agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entries = []
+    for row in agents:
+        name = row.get("name")
+        if not name:
+            continue
+        entry: dict[str, Any] = {
+            "kind": "agent",
+            "id": name,
+            "status": "known",
+            "severity": "info",
+            "conflict": False,
+            "summary": f"Agent Mail identity {name}",
+            "provenance": ["agent-mail://agents"],
+        }
+        if row.get("last_active_ts"):
+            entry["summary"] = f"Agent Mail identity {name} last active {row['last_active_ts']}"
+        entries.append(entry)
+    return entries
+
+
+def inbox_coordination_entries(inbox: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entries = []
+    for row in inbox:
+        mailbox = row.get("mailbox")
+        if not mailbox:
+            continue
+        unread = int(row.get("unread_count") or 0)
+        ack_required = int(row.get("ack_required_count") or 0)
+        entries.append(
+            {
+                "kind": "agent_mail_inbox",
+                "id": mailbox,
+                "status": "ack_required" if ack_required else "ready",
+                "severity": "warning" if ack_required else "info",
+                "conflict": False,
+                "summary": (
+                    f"{mailbox} inbox has {unread} unread message(s), "
+                    f"{ack_required} requiring acknowledgement"
+                ),
+                "provenance": ["agent-mail://inbox"],
+            }
+        )
+    return entries
+
+
+def thread_coordination_entries(threads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entries = []
+    for row in threads:
+        thread_id = row.get("thread_id")
+        if not thread_id:
+            continue
+        message_count = int(row.get("message_count") or 0)
+        summary = row.get("subject") or f"Agent Mail thread {thread_id}"
+        entries.append(
+            {
+                "kind": "agent_mail_thread",
+                "id": thread_id,
+                "status": "recent" if row.get("last_activity_at") else "known",
+                "severity": "info",
+                "conflict": False,
+                "summary": f"{summary} ({message_count} message(s))",
+                "provenance": ["agent-mail://threads"],
+            }
+        )
+    return entries
+
+
+def coordination_snapshot(
+    output: dict[str, Any],
+    agents_cmd: dict[str, Any],
+    reservations_cmd: dict[str, Any],
+    inbox_cmd: dict[str, Any],
+    project: Path,
+) -> dict[str, Any]:
+    degraded = output["degraded"]
+    health_status = "degraded" if degraded else "fresh"
+    return {
+        "schema": "ee.coordination_snapshot.v1",
+        "captured_at": output["generated_at"],
+        "scope": "workspace",
+        "sources": [
+            coordination_source(
+                "agent_mail_reservations",
+                "fresh" if reservations_cmd["ok"] else "unavailable",
+                reservation_coordination_entries(output["file_reservations"]),
+                source_degradations(reservations_cmd, project),
+            ),
+            coordination_source(
+                "agent_mail_agents",
+                "fresh" if agents_cmd["ok"] else "unavailable",
+                agent_coordination_entries(output["agents"]),
+                source_degradations(agents_cmd, project),
+            ),
+            coordination_source(
+                "agent_mail_inbox",
+                "fresh" if inbox_cmd["ok"] else "unavailable",
+                inbox_coordination_entries(output["inbox"]),
+                source_degradations(inbox_cmd, project),
+            ),
+            coordination_source(
+                "agent_mail_threads",
+                "fresh" if inbox_cmd["ok"] else "unavailable",
+                thread_coordination_entries(output["threads"]),
+                source_degradations(inbox_cmd, project),
+            ),
+            coordination_source(
+                "agent_mail_snapshot_health",
+                health_status,
+                [
+                    {
+                        "kind": "agent_mail_snapshot_health",
+                        "id": "producer",
+                        "status": output["producer_status"],
+                        "severity": "warning" if degraded else "info",
+                        "conflict": False,
+                        "summary": f"Agent Mail snapshot producer {output['producer_status']}",
+                        "provenance": ["agent-mail://snapshot-producer"],
+                    }
+                ],
+                degraded,
+            ),
+        ],
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Emit a redacted read-only Agent Mail snapshot for ee swarm brief.",
@@ -329,6 +511,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--thread-limit", type=int, default=DEFAULT_THREAD_LIMIT)
     parser.add_argument("--timeout-sec", type=float, default=DEFAULT_TIMEOUT_SEC)
     parser.add_argument("--output", help="Write snapshot JSON to this path instead of stdout.")
+    parser.add_argument(
+        "--coordination-output",
+        help="Also write a pack-compatible ee.coordination_snapshot.v1 companion JSON file.",
+    )
     return parser.parse_args()
 
 
@@ -345,6 +531,13 @@ def main() -> int:
     if args.timeout_sec <= 0:
         print("agent_mail_snapshot: --timeout-sec must be positive", file=sys.stderr)
         return 2
+    if args.output and args.coordination_output:
+        if Path(args.output).resolve() == Path(args.coordination_output).resolve():
+            print(
+                "agent_mail_snapshot: --output and --coordination-output must differ",
+                file=sys.stderr,
+            )
+            return 2
 
     am_bin = args.am_bin
     commands = [
@@ -386,6 +579,18 @@ def main() -> int:
         Path(args.output).write_text(rendered, encoding="utf-8")
     else:
         sys.stdout.write(rendered)
+    if args.coordination_output:
+        coordination = coordination_snapshot(
+            output,
+            agents_cmd,
+            reservations_cmd,
+            inbox_cmd,
+            project,
+        )
+        rendered_coordination = (
+            json.dumps(coordination, sort_keys=True, separators=(",", ":")) + "\n"
+        )
+        Path(args.coordination_output).write_text(rendered_coordination, encoding="utf-8")
     return 0
 
 
