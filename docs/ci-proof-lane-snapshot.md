@@ -185,7 +185,7 @@ source/test proof.
 - local_cargo_tripwire: <ok count=0 | bypass_detected count=N | not_checked>
 - snapshot_verdict: <summary.verdict>
 - degraded_codes: <codes or none>
-- source_test_verdict: <not_evaluated | remote_pass | remote_fail | environment_blocked_before_source>
+- source_test_verdict: <not_evaluated | artifact_authority_only | source_not_tested | source_passed_elsewhere | source_failed_elsewhere | unknown>
 - next_action: <activeRecommendation.nextAction>
 - recommendation_rationale: <activeRecommendation.rationale>
 - first_failure: <workflows[].runs[].firstFailureDiagnosis or degraded code, if any>
