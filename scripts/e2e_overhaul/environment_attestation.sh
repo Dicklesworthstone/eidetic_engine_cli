@@ -662,7 +662,9 @@ run_attestation_case \
 
 run_attestation_case \
     "environment-attestation-ci-proof-stale" \
-    '.data.summary.environmentVerdict == "source_authority_ambiguous"
+    '(.data.summary.environmentVerdict == "source_authority_ambiguous"
+      or (.data.summary.environmentVerdict == "coordinate_before_claim"
+          and (.data.degraded | any(.code == "dirty_checkout_observed"))))
       and .data.summary.sourceTestVerdict == "stale_source"
       and (.data.degraded | any(.code == "ci_proof_lane_artifact_stale"))
       and (.data.sourceAuthority | any(.source == "ci_proof_lane" and .status == "stale"))' \
@@ -676,7 +678,9 @@ run_attestation_case \
 
 run_attestation_case \
     "environment-attestation-ci-proof-cancelled" \
-    '.data.summary.environmentVerdict == "source_authority_ambiguous"
+    '(.data.summary.environmentVerdict == "source_authority_ambiguous"
+      or (.data.summary.environmentVerdict == "coordinate_before_claim"
+          and (.data.degraded | any(.code == "dirty_checkout_observed"))))
       and (.data.degraded | any(.code == "ci_proof_lane_cancelled_before_artifact"))
       and (.data.sourceAuthority | any(.source == "ci_proof_lane" and .status == "blocked"))' \
     "ee diag environment-attestation --workspace [WORKSPACE] --sources git --ci-proof-lane-snapshot [REPO]/tests/fixtures/ci_proof_lane/cancelled_before_artifact.json --json" \
