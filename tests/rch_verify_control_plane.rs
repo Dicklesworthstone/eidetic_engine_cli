@@ -230,7 +230,7 @@ fn assert_no_secret_or_private_temp_material(context: &str, value: &Value) -> Te
 }
 
 fn expected_degraded_codes(expected: &Value) -> Result<Vec<String>, String> {
-    Ok(expected
+    expected
         .pointer("/degraded_codes")
         .and_then(Value::as_array)
         .cloned()
@@ -241,11 +241,11 @@ fn expected_degraded_codes(expected: &Value) -> Result<Vec<String>, String> {
                 .map(str::to_owned)
                 .ok_or_else(|| "expected degraded_codes entries must be strings".to_owned())
         })
-        .collect::<Result<Vec<_>, _>>()?)
+        .collect::<Result<Vec<_>, _>>()
 }
 
 fn actual_string_array(value: &Value, pointer: &str) -> Result<Vec<String>, String> {
-    Ok(value
+    value
         .pointer(pointer)
         .and_then(Value::as_array)
         .ok_or_else(|| format!("missing string array {pointer}"))?
@@ -255,7 +255,7 @@ fn actual_string_array(value: &Value, pointer: &str) -> Result<Vec<String>, Stri
                 .map(str::to_owned)
                 .ok_or_else(|| format!("{pointer} entries must be strings"))
         })
-        .collect::<Result<Vec<_>, _>>()?)
+        .collect::<Result<Vec<_>, _>>()
 }
 
 fn tripwire_summary(command_text: &str, report: &Value, status_class: &str) -> String {
