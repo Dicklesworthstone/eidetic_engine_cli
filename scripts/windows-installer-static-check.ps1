@@ -11,6 +11,7 @@ $ErrorActionPreference = "Stop"
 $installPath = Join-Path $RepoRoot "install.ps1"
 $readmePath = Join-Path $RepoRoot "README.md"
 $releaseWorkflowPath = Join-Path $RepoRoot ".github/workflows/release.yml"
+$conformancePath = Join-Path $RepoRoot "tests/CONFORMANCE.md"
 
 $logDir = Split-Path -Parent $LogPath
 if (-not [string]::IsNullOrWhiteSpace($logDir)) {
@@ -41,6 +42,7 @@ function Write-ConformanceEvent {
         schema = "ee.test_event.v1"
         kind = "windows_installer_static_conformance"
         bead_id = "bd-3tprq.2"
+        related_bead_ids = @("bd-3tprq.2", "bd-3tprq.5")
         surface = "install_ps1_parser_static"
         assertion = $Assertion
         result = $Result
@@ -85,6 +87,10 @@ Assert-True `
     -Assertion "release_workflow_exists" `
     -Condition (Test-Path $releaseWorkflowPath) `
     -Diagnosis ".github/workflows/release.yml is missing from the repository"
+Assert-True `
+    -Assertion "conformance_matrix_exists" `
+    -Condition (Test-Path $conformancePath) `
+    -Diagnosis "tests/CONFORMANCE.md is missing from the repository"
 
 if (Test-Path $installPath) {
     $bytes = [System.IO.File]::ReadAllBytes($installPath)
@@ -114,9 +120,31 @@ if (Test-Path $installPath) {
         -Condition ($paramNames -contains "RequireProvenance") `
         -Diagnosis "install.ps1 param block must declare a RequireProvenance switch"
     Assert-True `
+        -Assertion "no_verify_parameter_declared" `
+        -Condition ($paramNames -contains "NoVerify") `
+        -Diagnosis "install.ps1 param block must declare a NoVerify switch"
+    Assert-True `
         -Assertion "ee_require_provenance_env_bridge" `
         -Condition ($installText -match '\$env:EE_REQUIRE_PROVENANCE\s+-eq\s+"1"') `
         -Diagnosis "install.ps1 must honor EE_REQUIRE_PROVENANCE=1 as the RequireProvenance policy bridge"
+    Assert-True `
+        -Assertion "ee_skip_verify_env_bridge" `
+        -Condition ($installText -match '\$env:EE_SKIP_VERIFY\s+-eq\s+"1"') `
+        -Diagnosis "install.ps1 must honor EE_SKIP_VERIFY=1 as the NoVerify policy bridge"
+    Assert-True `
+        -Assertion "install_help_pins_noverify_scope" `
+        -Condition (
+            $installText -match 'Skip SHA256 \+ Sigstore verification' -and
+            $installText -match '-NoVerify / EE_SKIP_VERIFY=1'
+        ) `
+        -Diagnosis "install.ps1 help must state that -NoVerify / EE_SKIP_VERIFY=1 skips both SHA256 and Sigstore verification"
+    Assert-True `
+        -Assertion "install_help_pins_provenance_default" `
+        -Condition (
+            $installText -match 'Sigstore\s+signature verification is opt-in via -RequireProvenance\s+/\s+EE_REQUIRE_PROVENANCE=1' -and
+            $installText -match 'missing bundle or cosign is a warning'
+        ) `
+        -Diagnosis "install.ps1 help must state that Sigstore is opt-in by default and missing bundle/cosign only warns unless provenance is required"
 
     $badInstallExampleLines = @($installLines | Where-Object {
         $_ -match '(?i)\b(Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b' -and
@@ -183,6 +211,14 @@ if (Test-Path $readmePath) {
         -Assertion "readme_examples_use_outfile" `
         -Condition ($readmeOutFileExamples.Count -gt 0) `
         -Diagnosis "README Windows installer example must download install.ps1 to a file with -OutFile"
+    Assert-True `
+        -Assertion "readme_pins_provenance_enforcement_paths" `
+        -Condition (
+            $readmeText -match '-RequireProvenance' -and
+            $readmeText -match 'EE_REQUIRE_PROVENANCE=1' -and
+            $readmeText -match 'enforce Sigstore signature verification'
+        ) `
+        -Diagnosis "README Windows installer text must document both -RequireProvenance and EE_REQUIRE_PROVENANCE=1 as Sigstore enforcement paths"
 }
 
 if (Test-Path $releaseWorkflowPath) {
@@ -208,6 +244,32 @@ if (Test-Path $releaseWorkflowPath) {
         -Assertion "release_notes_windows_examples_use_outfile" `
         -Condition ($releaseWorkflowOutFileExamples.Count -gt 0) `
         -Diagnosis "release-note Windows installer example must download install.ps1 to a file with -OutFile"
+}
+
+if (Test-Path $conformancePath) {
+    $conformanceText = Get-Content -Raw -Path $conformancePath
+    foreach ($rowId in @("WIN-PS1-003", "WIN-PS1-004", "WIN-PS1-005", "WIN-PS1-006", "WIN-PS1-007", "WIN-PS1-008", "WIN-PS1-009", "WIN-PS1-010", "WIN-PS1-012")) {
+        Assert-True `
+            -Assertion "conformance_matrix_includes_$rowId" `
+            -Condition ($conformanceText -match [regex]::Escape($rowId)) `
+            -Diagnosis "tests/CONFORMANCE.md must include matrix row $rowId for Windows installer drift accounting"
+    }
+    Assert-True `
+        -Assertion "conformance_matrix_links_static_drift_guard" `
+        -Condition (
+            $conformanceText -match 'scripts/windows-installer-static-check\.ps1' -and
+            $conformanceText -match 'bd-3tprq\.5'
+        ) `
+        -Diagnosis "tests/CONFORMANCE.md must link bd-3tprq.5 to scripts/windows-installer-static-check.ps1 so docs/help drift coverage is visible"
+    Assert-True `
+        -Assertion "conformance_matrix_pins_verification_vocabulary" `
+        -Condition (
+            $conformanceText -match '-NoVerify' -and
+            $conformanceText -match 'EE_SKIP_VERIFY=1' -and
+            $conformanceText -match '-RequireProvenance' -and
+            $conformanceText -match 'EE_REQUIRE_PROVENANCE=1'
+        ) `
+        -Diagnosis "tests/CONFORMANCE.md must name -NoVerify, EE_SKIP_VERIFY=1, -RequireProvenance, and EE_REQUIRE_PROVENANCE=1"
 }
 
 if ($failures.Count -gt 0) {

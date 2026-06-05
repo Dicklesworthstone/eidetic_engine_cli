@@ -313,7 +313,8 @@ Downloads `install.ps1` to a file and runs it (GitHub serves release assets as
 `application/octet-stream`, so the `iwr ... | iex` form does not work — its
 `.Content` is a byte array). The script SHA-256-verifies and installs `ee.exe`
 into `%LOCALAPPDATA%\ee\bin`, and updates your user `PATH`. Add
-`-RequireProvenance` to also enforce Sigstore signature verification.
+`-RequireProvenance`, or set `EE_REQUIRE_PROVENANCE=1`, to also
+enforce Sigstore signature verification.
 The Windows installer conformance contract is tracked in
 [`tests/CONFORMANCE.md`](tests/CONFORMANCE.md#windows-installer-conformance-installps1).
 
