@@ -15841,6 +15841,9 @@ pub fn render_handoff_preview_json(report: &HandoffPreviewReport) -> String {
         "task_frame": report.task_frame,
         "swarm_brief_summary": report.swarm_brief_summary,
         "swarm_incident_summary": report.swarm_incident_summary,
+        "swarm_replay_summary": report.swarm_replay_summary,
+        "environment_attestation_summary": report.environment_attestation_summary,
+        "regression_causality_summary": report.regression_causality_summary,
         "token_estimate": report.token_estimate,
         "byte_estimate": report.byte_estimate,
         "redaction_posture": report.redaction_posture,
@@ -15924,6 +15927,9 @@ pub fn render_handoff_create_json(report: &HandoffCreateReport) -> String {
         "task_frame": report.task_frame,
         "swarm_brief_summary": report.swarm_brief_summary,
         "swarm_incident_summary": report.swarm_incident_summary,
+        "swarm_replay_summary": report.swarm_replay_summary,
+        "environment_attestation_summary": report.environment_attestation_summary,
+        "regression_causality_summary": report.regression_causality_summary,
         "token_count": report.token_count,
         "byte_count": report.byte_count,
         "content_hash": report.content_hash,
@@ -16100,6 +16106,9 @@ pub fn render_handoff_resume_json(report: &HandoffResumeReport) -> String {
         "task_frame": report.task_frame,
         "swarm_brief_summary": report.swarm_brief_summary,
         "swarm_incident_summary": report.swarm_incident_summary,
+        "swarm_replay_summary": report.swarm_replay_summary,
+        "environment_attestation_summary": report.environment_attestation_summary,
+        "regression_causality_summary": report.regression_causality_summary,
         "artifact_pointers": report.artifact_pointers,
         "degradations": report.degradations,
         "resumed_at": report.resumed_at,
@@ -20372,6 +20381,15 @@ mod tests {
         preview.swarm_incident_summary = Some(serde_json::json!({
             "schema": "ee.support_bundle.swarm_incident_summary.v1",
         }));
+        preview.swarm_replay_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.swarm_replay_summary.v1",
+        }));
+        preview.environment_attestation_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.environment_attestation_summary.v1",
+        }));
+        preview.regression_causality_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.regression_causality_summary.v1",
+        }));
 
         let mut create = HandoffCreateReport::new(
             "hcap_toon_fixture".to_string(),
@@ -20395,6 +20413,15 @@ mod tests {
         create.swarm_incident_summary = Some(serde_json::json!({
             "schema": "ee.support_bundle.swarm_incident_summary.v1",
         }));
+        create.swarm_replay_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.swarm_replay_summary.v1",
+        }));
+        create.environment_attestation_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.environment_attestation_summary.v1",
+        }));
+        create.regression_causality_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.regression_causality_summary.v1",
+        }));
         create.dry_run = true;
 
         let preview_json =
@@ -20414,6 +20441,27 @@ mod tests {
             &Some("ee.support_bundle.swarm_incident_summary.v1"),
             "handoff preview JSON includes swarm incident summary",
         )?;
+        ensure_equal(
+            &preview_json
+                .pointer("/swarm_replay_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.swarm_replay_summary.v1"),
+            "handoff preview JSON includes swarm replay summary",
+        )?;
+        ensure_equal(
+            &preview_json
+                .pointer("/environment_attestation_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.environment_attestation_summary.v1"),
+            "handoff preview JSON includes environment attestation summary",
+        )?;
+        ensure_equal(
+            &preview_json
+                .pointer("/regression_causality_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.regression_causality_summary.v1"),
+            "handoff preview JSON includes regression causality summary",
+        )?;
 
         let create_json =
             serde_json::from_str::<serde_json::Value>(&render_handoff_create_json(&create))
@@ -20431,6 +20479,27 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             &Some("ee.support_bundle.swarm_incident_summary.v1"),
             "handoff create JSON includes swarm incident summary",
+        )?;
+        ensure_equal(
+            &create_json
+                .pointer("/swarm_replay_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.swarm_replay_summary.v1"),
+            "handoff create JSON includes swarm replay summary",
+        )?;
+        ensure_equal(
+            &create_json
+                .pointer("/environment_attestation_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.environment_attestation_summary.v1"),
+            "handoff create JSON includes environment attestation summary",
+        )?;
+        ensure_equal(
+            &create_json
+                .pointer("/regression_causality_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.regression_causality_summary.v1"),
+            "handoff create JSON includes regression causality summary",
         )?;
         ensure_equal(
             &create_json
@@ -20456,6 +20525,15 @@ mod tests {
         resume.swarm_incident_summary = Some(serde_json::json!({
             "schema": "ee.support_bundle.swarm_incident_summary.v1",
         }));
+        resume.swarm_replay_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.swarm_replay_summary.v1",
+        }));
+        resume.environment_attestation_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.environment_attestation_summary.v1",
+        }));
+        resume.regression_causality_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.regression_causality_summary.v1",
+        }));
         let resume_json =
             serde_json::from_str::<serde_json::Value>(&render_handoff_resume_json(&resume))
                 .map_err(|error| format!("handoff resume JSON should parse: {error}"))?;
@@ -20465,6 +20543,27 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             &Some("ee.support_bundle.swarm_incident_summary.v1"),
             "handoff resume JSON includes swarm incident summary",
+        )?;
+        ensure_equal(
+            &resume_json
+                .pointer("/swarm_replay_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.swarm_replay_summary.v1"),
+            "handoff resume JSON includes swarm replay summary",
+        )?;
+        ensure_equal(
+            &resume_json
+                .pointer("/environment_attestation_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.environment_attestation_summary.v1"),
+            "handoff resume JSON includes environment attestation summary",
+        )?;
+        ensure_equal(
+            &resume_json
+                .pointer("/regression_causality_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.regression_causality_summary.v1"),
+            "handoff resume JSON includes regression causality summary",
         )?;
 
         let pairs = [
