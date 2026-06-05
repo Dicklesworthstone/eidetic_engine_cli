@@ -27,9 +27,9 @@ The wrapper sets these remote-safe defaults:
 - `RCH_REQUIRE_REMOTE=1`
 - `RCH_QUEUE_WHEN_BUSY=1`
 - `RCH_COMPRESSION=0`
-- RCH binary `/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch` when present, falling back to `rch`
-- `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects`
-- `RCH_ALIAS_PROJECT_ROOT=/data/projects`
+- RCH binary `/Users/jemanuel/.local/bin/rch-33720a8` when present, then `/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch`, then `rch`
+- `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel`
+- `RCH_ALIAS_PROJECT_ROOT=/data`
 - remote command `TMPDIR=/tmp`
 - remote command `CARGO_TARGET_DIR=/tmp/ee-rch-verify-target`
 - local build-admission preflight enabled when a host-runnable `ee` binary is
@@ -37,12 +37,21 @@ The wrapper sets these remote-safe defaults:
   `EE_BINARY`, or the current target directory. Automatic target-directory
   discovery skips candidates whose `--version` output is empty.
 
-Do not widen the wrapper default to `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel`
-as an eidetic-side fix for bd-3opmx. A 2026-06-05 probe showed that this can
-move past the original dependency-planner check, but it then either collides
-with the workers' global `/dp` alias setup or tries to rsync into an unwritable
-`/Users/jemanuel` path on the worker. Treat that as RCH topology remediation
-work, not a local verifier-wrapper default.
+bd-3opmx E327 unblock, proven 2026-06-05: release RCH binaries still fail the
+Mac dependency topology in this checkout, but the current-source sidecar
+`/Users/jemanuel/.local/bin/rch-33720a8` gets past `RCH-E327` when paired with
+the widened local topology above. The worker preflight remains fixed to
+`/dp -> /data/projects`, so `/data` is only the local alias root used by the
+dependency planner. The focused proof reached remote Cargo on `vmi1264463`:
+`remote dependency preflight verified 35 roots`, then
+`exec start: env 'TMPDIR=/tmp' cargo check --lib --quiet`.
+
+This is not a full clean Cargo pass. The next observed remote failure was a
+manifest rewrite miss: Cargo looked for
+`/tmp/rch-sync/.../projects/projects/frankensearch/frankensearch/Cargo.toml`
+while RCH had synced that dependency under `.../projects/dp/frankensearch/...`.
+Treat that as the next RCH path-rewrite blocker, not as a recurrence of
+`RCH-E327` or as permission to use local Cargo fallback.
 
 The JSON proof schema is `ee.rch.verify.v1` and includes the command kind,
 remote-required flag, planned or actual RCH invocation, worker id when observed,

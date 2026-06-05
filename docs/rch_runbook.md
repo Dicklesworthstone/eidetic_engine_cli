@@ -24,11 +24,11 @@ RCH_QUEUE_WHEN_BUSY=1 \
 RCH_TEST_SLOTS=2 \
 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900 \
 RCH_DAEMON_RESPONSE_TIMEOUT_SECS=900 \
-RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects \
-RCH_ALIAS_PROJECT_ROOT=/data/projects \
+RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel \
+RCH_ALIAS_PROJECT_ROOT=/data \
 RCH_VISIBILITY=summary \
 RCH_COMPRESSION=0 \
-/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec --json -- \
+/Users/jemanuel/.local/bin/rch-33720a8 exec --json -- \
   env TMPDIR=/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target \
   cargo <your-cargo-subcommand-here> -- --nocapture
 ```
@@ -87,7 +87,7 @@ response to an ambiguous proof is coordination, not mutation.
 | `RCH_QUEUE_WHEN_BUSY=1` | Wait when all workers are busy rather than refusing. |
 | `RCH_TEST_SLOTS=2` | Bound concurrent test slots so heavy benches don't starve focused tests. |
 | `RCH_DAEMON_{WAIT_,}RESPONSE_TIMEOUT_SECS=900` | The full project metadata is large; the 30s default times out and triggers the manifest-fallback path that produces `RCH-E327`. 900s avoids the timeout. |
-| `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects` + `RCH_ALIAS_PROJECT_ROOT=/data/projects` | Current wrapper default. bd-3opmx evidence shows this is not a complete topology fix when `/data/projects/asupersync` resolves to `/Users/jemanuel/dp/asupersync`, but widening the canonical root to `/Users/jemanuel` is diagnostic only: it collides with worker alias setup or syncs to an unwritable worker path. |
+| `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel` + `RCH_ALIAS_PROJECT_ROOT=/data` | Current Mac wrapper default for the bd-3opmx E327 unblock. Requires `/Users/jemanuel/.local/bin/rch-33720a8` or a newer RCH with the fixed worker preflight; older release binaries apply the local `/data` alias on workers and fail before Cargo. |
 | `RCH_VISIBILITY=summary` | Less log noise; full transcripts when something goes wrong. |
 | `RCH_COMPRESSION=0` | Compression on the sync pipe occasionally corrupts the manifest header during topology preflight. Disabling has zero throughput cost on the local-network workers. |
 | Absolute RCH binary path | `~/.local/bin/rch` may be stale (missing the `exec` subcommand). The `target-local/release/rch` is always the live build. |
@@ -337,20 +337,58 @@ topology policy failed; move dependencies under /data/projects (or /dp) and retr
 `eidetic_engine_cli` checkout but not the Franken dependency tree under
 `/Users/jemanuel/dp`.
 
-**Current negative finding:** do not treat `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel`
-with `RCH_ALIAS_PROJECT_ROOT=/dp` as the eidetic wrapper fix. A focused
-2026-06-05 sidecar run moved past the old dependency-planner detail, then
-failed worker topology setup with `RCH_TOPOLOGY_ERR_ALIAS_UPDATE_FAILED` for
-`/dp`. An isolated alias under `/tmp` avoided that collision but then failed
-project sync with `rsync failed: mkdir: Permission denied`, because RCH tried
-to materialize under `/Users/jemanuel` on the Linux worker.
+**Current fix** (bd-3opmx, 2026-06-05): use the current-source sidecar
+`/Users/jemanuel/.local/bin/rch-33720a8` and the widened local topology:
+
+```toml
+# .rch/config.toml is gitignored local machine config.
+[path_topology]
+canonical_root = "/Users/jemanuel"
+alias_root = "/data"
+
+[transfer]
+max_transfer_time_ms = 300000
+exclude_patterns = [
+  "target/",
+  ".git/objects/",
+  "node_modules/",
+  "*.rlib",
+  "*.rmeta",
+  ".beads/",
+  ".beads/**",
+  ".beads_recovery/",
+  ".beads_recovery/**",
+  ".repo_janitor_workspace/",
+  ".repo_janitor_workspace/**",
+  ".ee/",
+  ".ee/**",
+  ".ruff_cache/",
+  ".ruff_cache/**",
+]
+```
+
+Proof signal from the unblock run:
+
+```text
+[RCH] topology preflight ok on vmi1264463 (/dp -> /data/projects enforced)
+[RCH] sync done: 25954 files, 418336382 bytes in 166623ms
+[RCH] remote dependency preflight verified 35 roots on vmi1264463
+[RCH] exec start: env 'TMPDIR=/tmp' cargo check --lib --quiet
+```
+
+The next blocker is no longer `RCH-E327`: remote Cargo then failed with a
+manifest rewrite miss for `frankensearch`, looking under
+`.../projects/projects/frankensearch/frankensearch/Cargo.toml` while the synced
+root exists under `.../projects/dp/frankensearch/frankensearch/Cargo.toml`.
+Track that as a path-rewrite blocker, not as topology preflight failure.
 
 **Fix / disposition:**
 
 - Use `scripts/rch_verify.sh` for fail-closed evidence and preserve the exact
   first blocker text.
-- Escalate persistent `RCH-E327` to the RCH topology lane rather than changing
-  this repo's wrapper to a `/Users/jemanuel` canonical root.
+- If `RCH-E327` recurs, first check that the wrapper selected
+  `/Users/jemanuel/.local/bin/rch-33720a8` or newer and that `.rch/config.toml`
+  still contains the local topology above.
 - Raise the daemon timeouts to 900s (`RCH_DAEMON_*_TIMEOUT_SECS=900`).
 - Disable compression (`RCH_COMPRESSION=0`).
 - Topology is **flaky** — succeeded slots last 1–2 minutes then re-block. If
