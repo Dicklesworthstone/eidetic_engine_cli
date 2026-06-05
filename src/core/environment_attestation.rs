@@ -1829,10 +1829,10 @@ mod tests {
         serde_json::from_str(text).unwrap_or_else(|error| panic!("{name} fixture parses: {error}"))
     }
 
-    fn metric_value(
-        entry: &EnvironmentAttestationSourceAuthorityEntry,
+    fn metric_value<'a>(
+        entry: &'a EnvironmentAttestationSourceAuthorityEntry,
         name: &str,
-    ) -> Option<&str> {
+    ) -> Option<&'a str> {
         entry
             .metrics
             .iter()
