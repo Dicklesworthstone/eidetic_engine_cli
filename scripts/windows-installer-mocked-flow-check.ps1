@@ -30,7 +30,7 @@ if (Test-Path $installPath) {
 
 $failures = New-Object "System.Collections.Generic.List[string]"
 $originalProcessEnv = @{}
-foreach ($name in @("APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "USERPROFILE", "PATH", "EE_REQUIRE_PROVENANCE", "EE_SKIP_VERIFY", "EE_MOCK_COSIGN_LOG", "NO_COLOR")) {
+foreach ($name in @("APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "USERPROFILE", "PATH", "PSModulePath", "EE_REQUIRE_PROVENANCE", "EE_SKIP_VERIFY", "EE_MOCK_COSIGN_LOG", "NO_COLOR")) {
     $originalProcessEnv[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
 $originalUserPath = [Environment]::GetEnvironmentVariable("PATH", "User")
@@ -175,16 +175,41 @@ function New-BaseArtifact {
 }
 
 function New-FakeCosign {
-    param([Parameter(Mandatory = $true)][string] $BinDir)
+    param([Parameter(Mandatory = $true)][string] $ModuleRoot)
 
-    New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
-    $cosignPath = Join-Path $BinDir "cosign.cmd"
-    $content = @"
-@echo off
-echo %*>>"%EE_MOCK_COSIGN_LOG%"
-exit /b 0
+    $moduleDir = Join-Path $ModuleRoot "cosign"
+    New-Item -ItemType Directory -Force -Path $moduleDir | Out-Null
+    $modulePath = Join-Path $moduleDir "cosign.psm1"
+    $manifestPath = Join-Path $moduleDir "cosign.psd1"
+    $moduleContent = @'
+function cosign {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]] $CosignArgs
+    )
+
+    $logPath = [Environment]::GetEnvironmentVariable("EE_MOCK_COSIGN_LOG", "Process")
+    if (-not [string]::IsNullOrWhiteSpace($logPath)) {
+        [System.IO.File]::AppendAllText($logPath, (($CosignArgs -join " ") + [Environment]::NewLine), [System.Text.Encoding]::UTF8)
+    }
+    $global:LASTEXITCODE = 0
+}
+
+Export-ModuleMember -Function cosign
+'@
+    $manifestContent = @"
+@{
+    RootModule = 'cosign.psm1'
+    ModuleVersion = '0.0.0'
+    GUID = '63d89d52-94e8-474a-9c0f-cdce597c2f23'
+    FunctionsToExport = @('cosign')
+    CmdletsToExport = @()
+    VariablesToExport = @()
+    AliasesToExport = @()
+}
 "@
-    [System.IO.File]::WriteAllText($cosignPath, $content, [System.Text.Encoding]::ASCII)
+    [System.IO.File]::WriteAllText($modulePath, $moduleContent, [System.Text.Encoding]::UTF8)
+    [System.IO.File]::WriteAllText($manifestPath, $manifestContent, [System.Text.Encoding]::UTF8)
 }
 
 function New-ScenarioFiles {
@@ -226,7 +251,7 @@ function Invoke-MockedScenario {
         $mockBin = Join-Path $scenarioRoot "mock-bin"
         $cosignLog = Join-Path $scenarioRoot "cosign-invocations.txt"
         if ($Scenario.FakeCosign) {
-            New-FakeCosign -BinDir $mockBin
+            New-FakeCosign -ModuleRoot $mockBin
         } else {
             New-Item -ItemType Directory -Force -Path $mockBin | Out-Null
         }
@@ -245,6 +270,16 @@ function Invoke-MockedScenario {
         Set-ProcessEnv -Name "TMP" -Value $tempRoot
         Set-ProcessEnv -Name "USERPROFILE" -Value $userProfile
         Set-ProcessEnv -Name "PATH" -Value $effectivePath
+        if ($Scenario.FakeCosign) {
+            $baseModulePath = [Environment]::GetEnvironmentVariable("PSModulePath", "Process")
+            if ([string]::IsNullOrWhiteSpace($baseModulePath)) {
+                Set-ProcessEnv -Name "PSModulePath" -Value $mockBin
+            } else {
+                Set-ProcessEnv -Name "PSModulePath" -Value "$mockBin;$baseModulePath"
+            }
+        } else {
+            Set-ProcessEnv -Name "PSModulePath" -Value $null
+        }
         Set-ProcessEnv -Name "NO_COLOR" -Value "1"
         Set-ProcessEnv -Name "EE_MOCK_COSIGN_LOG" -Value $cosignLog
         if ($Scenario.EnvRequireProvenance) {
