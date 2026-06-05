@@ -20,7 +20,8 @@ use crate::core::beads_integrity::{
 };
 use crate::core::environment_attestation::{
     EnvironmentAttestationSourceTestVerdict, EnvironmentAttestationSummary,
-    EnvironmentAttestationVerdict,
+    EnvironmentAttestationSummaryInputs, EnvironmentAttestationVerdict,
+    environment_attestation_summary_from_inputs,
 };
 use crate::core::preflight_guard::classify_repair_command_for_preflight;
 use crate::core::swarm_brief::{
@@ -1505,71 +1506,38 @@ fn work_packet_claim_gate_unsafe_reasons(
 fn work_packet_claim_gate_attestation_summary(
     packet: &SwarmWorkPacket,
 ) -> EnvironmentAttestationSummary {
-    let environment_verdict = work_packet_claim_gate_environment_verdict(packet);
     let remote_verification_admitted = work_packet_claim_gate_remote_verification_admitted(packet);
     let local_cargo_fallback_observed = packet
         .degraded
         .iter()
         .any(|degradation| degradation.code == "local_cargo_bypass_detected");
-    EnvironmentAttestationSummary {
-        safe_to_claim: matches!(
-            environment_verdict,
-            EnvironmentAttestationVerdict::SafeToClaim
-                | EnvironmentAttestationVerdict::RemoteVerificationAdmitted
-        ),
-        remote_verification_admitted,
-        source_test_verdict: work_packet_claim_gate_source_test_verdict(environment_verdict),
-        environment_verdict,
-        local_cargo_fallback_observed,
-    }
-}
-
-fn work_packet_claim_gate_environment_verdict(
-    packet: &SwarmWorkPacket,
-) -> EnvironmentAttestationVerdict {
-    if packet
-        .degraded
-        .iter()
-        .any(|degradation| degradation.code == "local_cargo_bypass_detected")
-    {
-        return EnvironmentAttestationVerdict::LocalCargoBypassDetected;
-    }
-    if packet.rch_proof_posture.safe_to_launch_cargo_verification == Some(false)
+    let remote_environment_blocked = packet.rch_proof_posture.safe_to_launch_cargo_verification
+        == Some(false)
         || packet.rch_proof_posture.blocker_codes.iter().any(|code| {
             code == "rch_worker_topology_blocked"
+                || code == "rch_source_materialization_blocked"
                 || code == "rch_remote_required_fallback_prevented"
-        })
-    {
-        return EnvironmentAttestationVerdict::ProofEnvironmentBlocked;
-    }
-    if !packet.tracker_integrity.br_reads_authoritative {
-        return EnvironmentAttestationVerdict::TrackerStale;
-    }
-    if work_packet_has_active_reservation_conflict(packet) {
-        return EnvironmentAttestationVerdict::UnsafeDueToConflict;
-    }
-    if agent_mail_blocks_claim(&packet.coordination.agent_mail)
-        || work_packet_has_coordination_degradation(packet)
-    {
-        return EnvironmentAttestationVerdict::CoordinateBeforeClaim;
-    }
-    if work_packet_claim_gate_remote_verification_admitted(packet) == Some(true) {
-        return EnvironmentAttestationVerdict::RemoteVerificationAdmitted;
-    }
-    if packet.rch_proof_posture.remote_only_required {
-        return EnvironmentAttestationVerdict::SourceAuthorityAmbiguous;
-    }
-    EnvironmentAttestationVerdict::SafeToClaim
-}
+                || code == "build_admission_blocked"
+        });
+    let stale_binary_suspected = packet
+        .degraded
+        .iter()
+        .any(|degradation| degradation.code == "stale_binary_suspected");
+    let source_authority_ambiguous =
+        packet.rch_proof_posture.remote_only_required && remote_verification_admitted != Some(true);
 
-fn work_packet_claim_gate_source_test_verdict(
-    environment_verdict: EnvironmentAttestationVerdict,
-) -> EnvironmentAttestationSourceTestVerdict {
-    if environment_verdict == EnvironmentAttestationVerdict::ProofEnvironmentBlocked {
-        EnvironmentAttestationSourceTestVerdict::EnvironmentBlockedBeforeSource
-    } else {
-        EnvironmentAttestationSourceTestVerdict::NotEvaluated
-    }
+    environment_attestation_summary_from_inputs(EnvironmentAttestationSummaryInputs {
+        local_cargo_fallback_observed,
+        remote_environment_blocked,
+        tracker_stale: !packet.tracker_integrity.br_reads_authoritative,
+        reservation_conflict: work_packet_has_active_reservation_conflict(packet),
+        stale_binary_suspected,
+        coordination_blocked: agent_mail_blocks_claim(&packet.coordination.agent_mail)
+            || work_packet_has_coordination_degradation(packet),
+        source_authority_ambiguous,
+        remote_verification_admitted,
+        evidence_available: true,
+    })
 }
 
 fn work_packet_claim_gate_remote_verification_admitted(packet: &SwarmWorkPacket) -> Option<bool> {

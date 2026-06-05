@@ -782,7 +782,10 @@ fn write_registry_temp_document(path: &Path, json: &str) -> Result<(), DomainErr
 fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainError> {
     super::path_safety::first_existing_symlink_component(path).map_err(|error| {
         DomainError::Storage {
-            message: format!("failed to inspect QoS registry path '{}': {error}", path.display()),
+            message: format!(
+                "failed to inspect QoS registry path '{}': {error}",
+                path.display()
+            ),
             repair: Some("check workspace .ee/qos permissions".to_owned()),
         }
     })

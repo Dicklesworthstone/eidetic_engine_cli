@@ -583,9 +583,15 @@ fn validate_existing_repro_path(
 
 fn reject_existing_symlink_components(path: &Path) -> Result<(), String> {
     match crate::core::path_safety::first_existing_symlink_component(path) {
-        Ok(Some(component)) => Err(format!("repro_path_symlink_refused: {}", component.display())),
+        Ok(Some(component)) => Err(format!(
+            "repro_path_symlink_refused: {}",
+            component.display()
+        )),
         Ok(None) => Ok(()),
-        Err(error) => Err(format!("repro_path_unavailable: {}: {error}", path.display())),
+        Err(error) => Err(format!(
+            "repro_path_unavailable: {}: {error}",
+            path.display()
+        )),
     }
 }
 

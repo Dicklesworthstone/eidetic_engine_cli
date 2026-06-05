@@ -45,6 +45,58 @@ pub struct EnvironmentAttestationSummary {
     pub local_cargo_fallback_observed: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EnvironmentAttestationSummaryInputs {
+    pub local_cargo_fallback_observed: bool,
+    pub remote_environment_blocked: bool,
+    pub tracker_stale: bool,
+    pub reservation_conflict: bool,
+    pub stale_binary_suspected: bool,
+    pub coordination_blocked: bool,
+    pub source_authority_ambiguous: bool,
+    pub remote_verification_admitted: Option<bool>,
+    pub evidence_available: bool,
+}
+
+#[must_use]
+pub fn environment_attestation_summary_from_inputs(
+    inputs: EnvironmentAttestationSummaryInputs,
+) -> EnvironmentAttestationSummary {
+    let environment_verdict = if inputs.local_cargo_fallback_observed {
+        EnvironmentAttestationVerdict::LocalCargoBypassDetected
+    } else if inputs.remote_environment_blocked {
+        EnvironmentAttestationVerdict::ProofEnvironmentBlocked
+    } else if inputs.tracker_stale {
+        EnvironmentAttestationVerdict::TrackerStale
+    } else if inputs.reservation_conflict {
+        EnvironmentAttestationVerdict::UnsafeDueToConflict
+    } else if inputs.stale_binary_suspected {
+        EnvironmentAttestationVerdict::StaleBinarySuspected
+    } else if inputs.coordination_blocked {
+        EnvironmentAttestationVerdict::CoordinateBeforeClaim
+    } else if inputs.source_authority_ambiguous {
+        EnvironmentAttestationVerdict::SourceAuthorityAmbiguous
+    } else if inputs.remote_verification_admitted == Some(true) {
+        EnvironmentAttestationVerdict::RemoteVerificationAdmitted
+    } else if !inputs.evidence_available {
+        EnvironmentAttestationVerdict::UnknownInsufficientEvidence
+    } else {
+        EnvironmentAttestationVerdict::SafeToClaim
+    };
+    EnvironmentAttestationSummary {
+        safe_to_claim: environment_verdict == EnvironmentAttestationVerdict::SafeToClaim
+            || environment_verdict == EnvironmentAttestationVerdict::RemoteVerificationAdmitted,
+        remote_verification_admitted: inputs.remote_verification_admitted,
+        source_test_verdict: if inputs.remote_environment_blocked {
+            EnvironmentAttestationSourceTestVerdict::EnvironmentBlockedBeforeSource
+        } else {
+            EnvironmentAttestationSourceTestVerdict::NotEvaluated
+        },
+        environment_verdict,
+        local_cargo_fallback_observed: inputs.local_cargo_fallback_observed,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvironmentAttestationVerdict {
@@ -966,44 +1018,25 @@ fn attestation_summary(
         || codes.contains(&EnvironmentAttestationDegradedCode::RchRemoteRequiredFallbackPrevented)
         || codes.contains(&EnvironmentAttestationDegradedCode::BuildAdmissionBlocked);
     let remote_verification_admitted = remote_verification_admitted(entries);
-    let environment_verdict = if local_cargo_fallback_observed {
-        EnvironmentAttestationVerdict::LocalCargoBypassDetected
-    } else if remote_environment_blocked {
-        EnvironmentAttestationVerdict::ProofEnvironmentBlocked
-    } else if codes.contains(&EnvironmentAttestationDegradedCode::BeadsTrackerStale) {
-        EnvironmentAttestationVerdict::TrackerStale
-    } else if codes.contains(&EnvironmentAttestationDegradedCode::ReservationEvidenceStale) {
-        EnvironmentAttestationVerdict::UnsafeDueToConflict
-    } else if codes.contains(&EnvironmentAttestationDegradedCode::StaleBinarySuspected) {
-        EnvironmentAttestationVerdict::StaleBinarySuspected
-    } else if codes.contains(&EnvironmentAttestationDegradedCode::DirtyCheckoutObserved)
-        || codes.contains(&EnvironmentAttestationDegradedCode::BeadsMetadataOnlyStale)
-        || codes.contains(&EnvironmentAttestationDegradedCode::BvRecommendationStale)
-        || codes.contains(&EnvironmentAttestationDegradedCode::AgentMailUnavailable)
-        || codes.contains(&EnvironmentAttestationDegradedCode::AgentMailProbeMismatch)
-    {
-        EnvironmentAttestationVerdict::CoordinateBeforeClaim
-    } else if codes.contains(&EnvironmentAttestationDegradedCode::SourceAuthorityAmbiguous) {
-        EnvironmentAttestationVerdict::SourceAuthorityAmbiguous
-    } else if remote_verification_admitted == Some(true) {
-        EnvironmentAttestationVerdict::RemoteVerificationAdmitted
-    } else if entries.is_empty() {
-        EnvironmentAttestationVerdict::UnknownInsufficientEvidence
-    } else {
-        EnvironmentAttestationVerdict::SafeToClaim
-    };
-    EnvironmentAttestationSummary {
-        safe_to_claim: environment_verdict == EnvironmentAttestationVerdict::SafeToClaim
-            || environment_verdict == EnvironmentAttestationVerdict::RemoteVerificationAdmitted,
-        remote_verification_admitted,
-        source_test_verdict: if remote_environment_blocked {
-            EnvironmentAttestationSourceTestVerdict::EnvironmentBlockedBeforeSource
-        } else {
-            EnvironmentAttestationSourceTestVerdict::NotEvaluated
-        },
-        environment_verdict,
+    environment_attestation_summary_from_inputs(EnvironmentAttestationSummaryInputs {
         local_cargo_fallback_observed,
-    }
+        remote_environment_blocked,
+        tracker_stale: codes.contains(&EnvironmentAttestationDegradedCode::BeadsTrackerStale),
+        reservation_conflict: codes
+            .contains(&EnvironmentAttestationDegradedCode::ReservationEvidenceStale),
+        stale_binary_suspected: codes
+            .contains(&EnvironmentAttestationDegradedCode::StaleBinarySuspected),
+        coordination_blocked: codes
+            .contains(&EnvironmentAttestationDegradedCode::DirtyCheckoutObserved)
+            || codes.contains(&EnvironmentAttestationDegradedCode::BeadsMetadataOnlyStale)
+            || codes.contains(&EnvironmentAttestationDegradedCode::BvRecommendationStale)
+            || codes.contains(&EnvironmentAttestationDegradedCode::AgentMailUnavailable)
+            || codes.contains(&EnvironmentAttestationDegradedCode::AgentMailProbeMismatch),
+        source_authority_ambiguous: codes
+            .contains(&EnvironmentAttestationDegradedCode::SourceAuthorityAmbiguous),
+        remote_verification_admitted,
+        evidence_available: !entries.is_empty(),
+    })
 }
 
 fn all_degraded_codes(
