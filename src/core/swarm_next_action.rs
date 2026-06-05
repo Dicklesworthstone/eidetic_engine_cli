@@ -2148,16 +2148,25 @@ fn agent_mail_unavailable_reason(snapshot: &SwarmNextActionSnapshot) -> &'static
         })
         .map_or("agent_mail_unavailable", |degradation| {
             let message = degradation.message.as_str();
-            if message.contains("No redacted Agent Mail snapshot path was configured") {
+            if message.contains("health endpoint") && message.contains("not reachable") {
+                "health_probe_unreachable"
+            } else if message.contains("No redacted Agent Mail snapshot path was configured") {
                 "snapshot_missing"
             } else if message.contains("refusing to read Agent Mail snapshot")
                 || message.contains("not a file")
+                || message.contains("not a regular file")
                 || message.contains("No such file")
                 || message.contains("permission denied")
+                || message.contains("exceeds the")
             {
                 "snapshot_unreadable"
             } else if message.contains("stale") {
                 "snapshot_stale"
+            } else if message.contains("Agent Mail snapshot JSON could not be parsed")
+                || message.contains("parsed snapshot")
+                || (message.contains("snapshot") && message.contains("degraded"))
+            {
+                "parsed_snapshot_degraded"
             } else if message.contains("snapshot") {
                 "snapshot_malformed"
             } else {
@@ -2277,19 +2286,27 @@ fn agent_mail_fallback_actions(
     let mut actions = Vec::new();
     if status == "unavailable" {
         let generate = agent_mail_snapshot_generate_command_action();
-        let retry = agent_mail_snapshot_retry_brief_command_action();
+        let retry_brief = agent_mail_snapshot_retry_brief_command_action();
+        let retry_work_packet = agent_mail_snapshot_retry_work_packet_command_action(None);
         actions.push(agent_mail_fallback_action(
             unavailable_reason,
-            "Generate a read-only redacted Agent Mail snapshot with an explicit agent placeholder.",
+            "Generate a read-only redacted Agent Mail snapshot; replace <AGENT_NAME> with this session's Agent Mail identity before running.",
             Some(generate.display_command.clone()),
             Some(generate),
             None,
         ));
         actions.push(agent_mail_fallback_action(
-            "retry_with_snapshot",
+            "retry_brief_with_snapshot",
             "Retry swarm brief with the generated redacted Agent Mail snapshot.",
-            Some(retry.display_command.clone()),
-            Some(retry),
+            Some(retry_brief.display_command.clone()),
+            Some(retry_brief),
+            None,
+        ));
+        actions.push(agent_mail_fallback_action(
+            "retry_claim_gate_with_snapshot",
+            "Retry the work-packet claim gate with the generated redacted Agent Mail snapshot; this only refreshes coordination evidence and does not make unsafe claims safe.",
+            Some(retry_work_packet.display_command.clone()),
+            Some(retry_work_packet),
             None,
         ));
     }
@@ -7185,10 +7202,21 @@ mod tests {
                     .is_some_and(|command| command.command_id == "agent_mail_snapshot_generate")
         }));
         assert!(agent_mail.fallback_actions.iter().any(|action| {
-            action.kind == "retry_with_snapshot"
+            action.kind == "retry_brief_with_snapshot"
                 && action.command.as_deref().is_some_and(|command| {
                     command.contains("ee swarm brief --workspace . --agent-mail-snapshot")
                 })
+        }));
+        assert!(agent_mail.fallback_actions.iter().any(|action| {
+            action.kind == "retry_claim_gate_with_snapshot"
+                && action.command_action.as_ref().is_some_and(|command| {
+                    command.command_id == "swarm_work_packet_retry_with_agent_mail_snapshot"
+                        && command.display_command.contains("ee swarm work-packet")
+                        && command.display_command.contains("--claim-gate")
+                        && command.display_command.contains("--agent-mail-snapshot")
+                        && !command.mutates_state
+                })
+                && action.summary.contains("does not make unsafe claims safe")
         }));
 
         let gate = packet.claim_gate(Some("bd-mail"));
@@ -7206,6 +7234,45 @@ mod tests {
                 && action.display_command.contains("--agent-mail-snapshot")
                 && !action.mutates_state
         }));
+    }
+
+    #[test]
+    fn agent_mail_unavailable_reason_distinguishes_snapshot_bridge_cases() {
+        let cases = [
+            (
+                "No redacted Agent Mail snapshot path was configured; the local Agent Mail health endpoint at 127.0.0.1:8765 is reachable.",
+                "snapshot_missing",
+            ),
+            (
+                "No redacted Agent Mail snapshot path was configured, and the local Agent Mail health endpoint at 127.0.0.1:8765 was not reachable within the brief probe budget.",
+                "health_probe_unreachable",
+            ),
+            (
+                "refusing to read Agent Mail snapshot through symlink '/tmp/ee-agent-mail-snapshot.json'",
+                "snapshot_unreadable",
+            ),
+            (
+                "Agent Mail snapshot is stale relative to the configured freshness budget.",
+                "snapshot_stale",
+            ),
+            (
+                "Agent Mail snapshot JSON could not be parsed: EOF while parsing an object",
+                "parsed_snapshot_degraded",
+            ),
+        ];
+
+        for (message, expected_reason) in cases {
+            let mut snapshot = snapshot_with_candidates(Vec::new());
+            snapshot.degraded.push(SwarmNextActionDegradation {
+                code: AGENT_MAIL_UNAVAILABLE_CODE.to_owned(),
+                source: "agent_mail".to_owned(),
+                severity: "warning",
+                message: message.to_owned(),
+                repair: None,
+            });
+
+            assert_eq!(agent_mail_unavailable_reason(&snapshot), expected_reason);
+        }
     }
 
     #[test]
