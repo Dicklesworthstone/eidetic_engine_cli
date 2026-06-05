@@ -781,6 +781,14 @@ Operator workflow for crowded repos:
    source/docs contract. Stop at inspection, coordinate for an approved
    RCH/release-path rebuild, run no BV claim command, and do not use local
    Cargo install as a workaround.
+   When the gate, support-bundle summary, or handoff evidence disagrees about
+   source authority, run the read-only environment attestation for the
+   per-source explanation:
+   ```bash
+   ee diag environment-attestation --workspace . --include-rch --json
+   ```
+   See [`docs/environment_attestation.md`](docs/environment_attestation.md) for
+   `sourceAuthority`, verdict, severity, and recovery-action interpretation.
 4. Reserve edit surfaces through Agent Mail and mark the bead with
    `br update <id> --status in_progress --json` only when the gate reports
    `safeToClaim=true`, `verdict=safe_to_claim`, and a structured
@@ -1064,7 +1072,7 @@ base retrieval signal dominant.
 | `ee preflight check --cmd "<command>" --json` | Command-facing policy guard for shell hooks; use `--stdin` or `--cmd-base64` when an outer harness may block risky argv text before `ee` can inspect it |
 | `ee tripwire list` / `check` | Inspect and check preflight tripwires |
 | `ee diag plan-cache` | EQL query plan-cache counters and integration posture |
-| `ee diag environment-attestation` / `disk-pressure` / `build-admission` / `artifacts` | Read-only environment, storage, artifact, and build-admission diagnostics |
+| `ee diag environment-attestation --workspace . --include-rch --json` / `disk-pressure` / `build-admission` / `artifacts` | Read-only environment source-authority, storage, artifact, and build-admission diagnostics |
 | `ee diag graph` / `graph-snapshot` / `search` | Graph, snapshot, and retrieval diagnostics |
 | `ee diag integrity` / `dependencies` / `streams` | Integrity, dependency, and stdout/stderr stream checks |
 | `ee verify ingest` / `ee verify rch ingest` / `ee verify rch blockers` / `ee verify rch runs` / `proofs` / `broker lookup` / `closure-guidance` | Verification evidence, durable RCH proof ledger queries, proof checks, reusable RCH evidence, and closeout guidance |

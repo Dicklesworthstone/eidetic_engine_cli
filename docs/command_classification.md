@@ -62,6 +62,14 @@ Bead: eidetic_engine_cli-i6vu
 | `workspace *` | `core::workspace` | Mechanical | DB, filesystem | Workspace management |
 | `why` | `core::why` | Mechanical | DB | Explain storage/retrieval |
 
+Diagnostic sub-surface note: `diag environment-attestation` is classified as
+Mechanical. It is read-only and daemon-optional; it reads explicit workspace
+diagnostic state, Beads/BV readiness, Agent Mail probe or redacted snapshot
+state, RCH/build-admission posture, source-tree status, and file-reservation
+metadata. It must not claim Beads, reserve files, send Agent Mail, run Cargo,
+rebuild binaries, mutate git, or mutate the EE store. Qualitative interpretation
+belongs to an agent skill that consumes the JSON report.
+
 ## Commands Requiring Careful Boundary Review
 
 These commands have names or descriptions suggesting agent-skill work but may be implementable mechanically:

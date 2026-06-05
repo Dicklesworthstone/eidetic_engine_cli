@@ -58,6 +58,27 @@ Safety metadata must be redaction-safe: no raw mail bodies, full dirty-file
 listings, stack traces, secrets, or unbounded local database errors. Use bounded
 evidence codes and preconditions instead.
 
+## Environment Attestation Degraded Codes
+
+`ee diag environment-attestation --workspace . --include-rch --json` reports
+readiness blockers as source-authority evidence, not as proof that source
+compile/tests passed or failed. Its `degraded[]` entries follow the same
+severity vocabulary as other response-time degraded codes. Current attestation
+policy assigns `high` to RCH/build-admission proof-environment blockers and
+`local_cargo_bypass_detected`; the remaining attestation degraded codes are
+`warning`.
+
+The command's recovery actions use the repair-action risk classes above:
+
+| Attestation case | Typical codes | Risk class / handling |
+| --- | --- | --- |
+| Read-only inspection | `dirty_checkout_observed`, `source_authority_ambiguous`, `stale_binary_suspected` | `read_only_probe`; structured `argv` such as `git status --short --branch --untracked-files=all`, `ee --version`, or `ee swarm brief --workspace . --include-rch --json` may be run by a harness. |
+| Coordination required | `agent_mail_unavailable`, `agent_mail_probe_mismatch`, `reservation_evidence_stale` | `mutating_external_coordination_repair` if the next step sends mail, changes reservations, or touches Beads; the attestation itself is read-only. |
+| Beads/BV disagreement | `beads_tracker_stale`, `beads_metadata_only_stale`, `bv_recommendation_stale` | Beads remains authoritative for tracker state; BV is advisory. Mutating Beads repair commands require coordination. |
+| Remote proof environment blocked | `rch_worker_topology_blocked`, `rch_source_materialization_blocked`, `rch_remote_required_fallback_prevented`, `build_admission_blocked` | `read_only_probe` for inspection commands such as `rch status --json`; do not reclassify as `source_failed` and do not substitute local Cargo proof. |
+| Local Cargo bypass | `local_cargo_bypass_detected` | `approval_required_repair`; requires human decision because it contradicts remote-only verification policy. |
+| Support-bundle redaction unknown | `support_bundle_redaction_unverified` | Verify redaction before attaching bundle evidence; support bundles do not replace a fresh claim gate. |
+
 ## Categorization rules (canonical)
 
 1. Suffix `_unimplemented` always means `build_time` (the feature
@@ -147,6 +168,7 @@ Current conventions:
 | `build` | Binary version and build-provenance degradation. |
 | `build_admission` | `ee diag build-admission` disk-pressure and external-build-root admission degradation. |
 | `bv` | Swarm brief BV source degradation. |
+| `environment_attestation` | `ee diag environment-attestation` source-authority and proof-admission degradation. |
 | `cluster_coherence` | `ee learn cluster` deterministic cluster-coherence degradation. |
 | `curate_apply` | `ee curate apply` candidate-application degradation. |
 | `curate_candidates` | `ee curate candidates` queue listing degradation. |
