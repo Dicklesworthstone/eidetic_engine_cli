@@ -172,11 +172,11 @@ fn remember(workspace_arg: &str, content: &str) -> Result<String, String> {
         .or_else(|| parsed["data"]["id"].as_str())
         .map(str::to_owned)
         .ok_or_else(|| {
-            format!(
-                "remember response missing memory id: {}",
-                serde_json::to_string(&parsed)
-                    .expect("remember response JSON serialization should not fail")
-            )
+            let response_json = match serde_json::to_string(&parsed) {
+                Ok(json) => json,
+                Err(error) => format!("<failed to serialize response JSON: {error}>"),
+            };
+            format!("remember response missing memory id: {}", response_json)
         })
 }
 
