@@ -293,6 +293,35 @@ jobs:
           name: windows-installer-static-conformance-log
           path: ${{ runner.temp }}/windows-installer-static-conformance.jsonl
 
+  windows-installer-mocked-flow-conformance:
+    if: github.event_name != 'schedule'
+    name: windows-installer-mocked-flow-conformance
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Mocked installer verification flow conformance
+        shell: pwsh
+        run: >
+          ./scripts/windows-installer-mocked-flow-check.ps1
+          -RepoRoot "$env:GITHUB_WORKSPACE"
+          -ArtifactRoot "$env:RUNNER_TEMP/windows-installer-mocked-flow"
+          -LogPath "$env:RUNNER_TEMP/windows-installer-mocked-flow.jsonl"
+          -ResetLog
+
+      - name: Upload Windows installer mocked flow log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-mocked-flow-log
+          path: |
+            ${{ runner.temp }}/windows-installer-mocked-flow.jsonl
+            ${{ runner.temp }}/windows-installer-mocked-flow/**/installer-output.txt
+
   windows-msvc-cli-smoke:
     if: github.event_name != 'schedule'
     name: windows-msvc-cli-smoke
