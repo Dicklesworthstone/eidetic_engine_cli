@@ -1855,8 +1855,8 @@ pub(crate) fn environment_attestation_summary_from_report(
     let mut status_counts = BTreeMap::new();
     let mut authority_counts = BTreeMap::new();
     for entry in &report.source_authority {
-        increment_json_count(&mut status_counts, serialized_token(&entry.status));
-        increment_json_count(&mut authority_counts, serialized_token(&entry.authority));
+        increment_attestation_count(&mut status_counts, serialized_token(&entry.status));
+        increment_attestation_count(&mut authority_counts, serialized_token(&entry.authority));
     }
 
     let mut summary = json!({
@@ -2010,7 +2010,7 @@ pub(crate) fn render_environment_attestation_summary_for_handoff(summary: &Value
     lines.join("\n")
 }
 
-fn increment_json_count(counts: &mut BTreeMap<String, u64>, key: String) {
+fn increment_attestation_count(counts: &mut BTreeMap<String, u64>, key: String) {
     let count = counts.entry(key).or_insert(0);
     *count = count.saturating_add(1);
 }
@@ -4209,9 +4209,40 @@ pub fn support_bundle_qos_throttle_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::environment_attestation::{
+        ENVIRONMENT_ATTESTATION_REDACTION_STATUS, ENVIRONMENT_ATTESTATION_SCHEMA_V1,
+        EnvironmentAttestationAuthority, EnvironmentAttestationCommandAction,
+        EnvironmentAttestationCommandCopySafety, EnvironmentAttestationDegradation,
+        EnvironmentAttestationDegradedCode, EnvironmentAttestationFreshness,
+        EnvironmentAttestationMetric, EnvironmentAttestationRecoveryAction,
+        EnvironmentAttestationRecoveryKind, EnvironmentAttestationReport,
+        EnvironmentAttestationSourceAuthorityEntry, EnvironmentAttestationSourceKind,
+        EnvironmentAttestationSourceStatus, EnvironmentAttestationSourceTestVerdict,
+        EnvironmentAttestationSubstrate, EnvironmentAttestationSummary,
+        EnvironmentAttestationVerdict,
+    };
     use crate::core::qos::QosBackgroundThrottleAction;
 
     type TestResult = Result<(), String>;
+    const SUPPORT_BUNDLE_ATTESTATION_SUMMARY_SCHEMA_TEXT: &str = include_str!(
+        "../../docs/schemas/ee.support_bundle.environment_attestation_summary.v1.json"
+    );
+    const SUPPORT_BUNDLE_ATTESTATION_SUMMARY_MATRIX_GOLDEN: &str = include_str!(
+        "../../tests/fixtures/golden/environment_attestation/support_bundle_summary_matrix.json.golden"
+    );
+    const ATTESTATION_SUMMARY_DENIED_SUBSTRINGS: &[&str] = &[
+        "body_md",
+        "raw mail body",
+        "raw-body",
+        "raw source snippet",
+        "BEGIN PRIVATE KEY",
+        "ghp_",
+        "Bearer ",
+        "DATABASE_URL=",
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+    ];
 
     fn empty_qos_summary() -> QosLaneSummary {
         QosLaneSummary {
@@ -4229,19 +4260,6 @@ mod tests {
 
     #[test]
     fn environment_attestation_summary_redacts_paths_and_separates_proof_admission() {
-        use crate::core::environment_attestation::{
-            ENVIRONMENT_ATTESTATION_REDACTION_STATUS, ENVIRONMENT_ATTESTATION_SCHEMA_V1,
-            EnvironmentAttestationAuthority, EnvironmentAttestationCommandAction,
-            EnvironmentAttestationCommandCopySafety, EnvironmentAttestationDegradation,
-            EnvironmentAttestationDegradedCode, EnvironmentAttestationFreshness,
-            EnvironmentAttestationMetric, EnvironmentAttestationRecoveryAction,
-            EnvironmentAttestationRecoveryKind, EnvironmentAttestationReport,
-            EnvironmentAttestationSourceAuthorityEntry, EnvironmentAttestationSourceKind,
-            EnvironmentAttestationSourceStatus, EnvironmentAttestationSourceTestVerdict,
-            EnvironmentAttestationSubstrate, EnvironmentAttestationSummary,
-            EnvironmentAttestationVerdict,
-        };
-
         let recovery = EnvironmentAttestationRecoveryAction {
             priority: 0,
             kind: EnvironmentAttestationRecoveryKind::RepairEnvironment,
@@ -4365,6 +4383,602 @@ mod tests {
         );
         assert!(!rendered.contains("/Users/jemanuel"));
         assert!(!rendered.contains("raw-body"));
+    }
+
+    #[test]
+    fn environment_attestation_summary_matrix_matches_schema_and_golden() -> TestResult {
+        let schema: Value = serde_json::from_str(SUPPORT_BUNDLE_ATTESTATION_SUMMARY_SCHEMA_TEXT)
+            .map_err(|error| error.to_string())?;
+        let mut cases = Vec::new();
+
+        for (name, report) in support_bundle_attestation_summary_cases() {
+            let summary = environment_attestation_summary_from_report(&report);
+            validate_support_bundle_attestation_summary_schema(&summary, &schema, name)?;
+            assert_no_attestation_summary_denied_substrings(name, &summary)?;
+            cases.push(compact_support_bundle_attestation_summary_case(
+                name, &summary,
+            )?);
+        }
+
+        let matrix = json!({
+            "schema": "ee.support_bundle.environment_attestation_summary.fixture_matrix.v1",
+            "cases": cases,
+        });
+        let rendered =
+            serde_json::to_string_pretty(&matrix).map_err(|error| error.to_string())? + "\n";
+        if rendered != SUPPORT_BUNDLE_ATTESTATION_SUMMARY_MATRIX_GOLDEN {
+            return Err(format!(
+                "support-bundle environment attestation summary golden drifted\n--- expected\n{}--- actual\n{}",
+                SUPPORT_BUNDLE_ATTESTATION_SUMMARY_MATRIX_GOLDEN, rendered
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn support_bundle_attestation_summary_cases()
+    -> Vec<(&'static str, EnvironmentAttestationReport)> {
+        vec![
+            (
+                "clean_remote_ready",
+                attestation_report(
+                    "clean_remote_ready",
+                    EnvironmentAttestationSummary {
+                        safe_to_claim: true,
+                        remote_verification_admitted: Some(true),
+                        source_test_verdict: EnvironmentAttestationSourceTestVerdict::NotEvaluated,
+                        environment_verdict:
+                            EnvironmentAttestationVerdict::RemoteVerificationAdmitted,
+                        local_cargo_fallback_observed: false,
+                    },
+                    EnvironmentAttestationVerdict::RemoteVerificationAdmitted,
+                    vec![
+                        attestation_source_entry(
+                            EnvironmentAttestationSourceKind::SourceTree,
+                            EnvironmentAttestationAuthority::Authoritative,
+                            EnvironmentAttestationSourceStatus::Ok,
+                            EnvironmentAttestationFreshness::Current,
+                            "Source tree is clean for claim-gate evaluation.",
+                            vec![],
+                            vec![],
+                        ),
+                        attestation_source_entry(
+                            EnvironmentAttestationSourceKind::BeadsTracker,
+                            EnvironmentAttestationAuthority::Authoritative,
+                            EnvironmentAttestationSourceStatus::Ok,
+                            EnvironmentAttestationFreshness::Current,
+                            "Beads tracker is current.",
+                            vec![],
+                            vec![],
+                        ),
+                        attestation_source_entry(
+                            EnvironmentAttestationSourceKind::AgentMailProbe,
+                            EnvironmentAttestationAuthority::Authoritative,
+                            EnvironmentAttestationSourceStatus::Ok,
+                            EnvironmentAttestationFreshness::Current,
+                            "Agent Mail probe and MCP state agree.",
+                            vec![],
+                            vec![],
+                        ),
+                        attestation_source_entry(
+                            EnvironmentAttestationSourceKind::Rch,
+                            EnvironmentAttestationAuthority::Authoritative,
+                            EnvironmentAttestationSourceStatus::RemoteReady,
+                            EnvironmentAttestationFreshness::Current,
+                            "RCH remote-only verification is admitted.",
+                            vec![],
+                            vec![],
+                        ),
+                    ],
+                    vec![],
+                ),
+            ),
+            (
+                "unsafe_reservation_conflict",
+                attestation_report(
+                    "unsafe_reservation_conflict",
+                    EnvironmentAttestationSummary {
+                        safe_to_claim: false,
+                        remote_verification_admitted: None,
+                        source_test_verdict: EnvironmentAttestationSourceTestVerdict::NotEvaluated,
+                        environment_verdict: EnvironmentAttestationVerdict::UnsafeDueToConflict,
+                        local_cargo_fallback_observed: false,
+                    },
+                    EnvironmentAttestationVerdict::UnsafeDueToConflict,
+                    vec![attestation_source_entry(
+                        EnvironmentAttestationSourceKind::FileReservations,
+                        EnvironmentAttestationAuthority::Advisory,
+                        EnvironmentAttestationSourceStatus::Blocked,
+                        EnvironmentAttestationFreshness::Current,
+                        "An active exclusive reservation overlaps the candidate file surface.",
+                        vec![EnvironmentAttestationDegradedCode::ReservationEvidenceStale],
+                        vec![attestation_recovery(
+                            0,
+                            EnvironmentAttestationRecoveryKind::Coordinate,
+                            EnvironmentAttestationSubstrate::AgentMail,
+                            None,
+                            "Coordinate with the reservation holder before claiming overlapping work.",
+                        )],
+                    )],
+                    vec![attestation_degradation(
+                        EnvironmentAttestationDegradedCode::ReservationEvidenceStale,
+                        "medium",
+                        "Reservation evidence requires coordination before claim.",
+                        None,
+                    )],
+                ),
+            ),
+            (
+                "stale_tracker_and_bv",
+                attestation_report(
+                    "stale_tracker_and_bv",
+                    EnvironmentAttestationSummary {
+                        safe_to_claim: false,
+                        remote_verification_admitted: None,
+                        source_test_verdict: EnvironmentAttestationSourceTestVerdict::NotEvaluated,
+                        environment_verdict: EnvironmentAttestationVerdict::TrackerStale,
+                        local_cargo_fallback_observed: false,
+                    },
+                    EnvironmentAttestationVerdict::TrackerStale,
+                    vec![
+                        attestation_source_entry(
+                            EnvironmentAttestationSourceKind::BeadsTracker,
+                            EnvironmentAttestationAuthority::Stale,
+                            EnvironmentAttestationSourceStatus::Stale,
+                            EnvironmentAttestationFreshness::Stale,
+                            "Beads JSONL is newer than the local DB.",
+                            vec![EnvironmentAttestationDegradedCode::BeadsTrackerStale],
+                            vec![attestation_recovery(
+                                0,
+                                EnvironmentAttestationRecoveryKind::Sync,
+                                EnvironmentAttestationSubstrate::Beads,
+                                Some("br sync --import-only"),
+                                "Import committed tracker state before making claim decisions.",
+                            )],
+                        ),
+                        attestation_source_entry(
+                            EnvironmentAttestationSourceKind::BvRecommendation,
+                            EnvironmentAttestationAuthority::Degraded,
+                            EnvironmentAttestationSourceStatus::Degraded,
+                            EnvironmentAttestationFreshness::Current,
+                            "BV recommended a Beads-blocked candidate.",
+                            vec![EnvironmentAttestationDegradedCode::BvRecommendationStale],
+                            vec![attestation_recovery(
+                                1,
+                                EnvironmentAttestationRecoveryKind::Inspect,
+                                EnvironmentAttestationSubstrate::Beads,
+                                Some("br show bd-37ugy --json"),
+                                "Cross-check BV robot output with Beads status.",
+                            )],
+                        ),
+                    ],
+                    vec![
+                        attestation_degradation(
+                            EnvironmentAttestationDegradedCode::BeadsTrackerStale,
+                            "high",
+                            "Beads JSONL is newer than the local DB.",
+                            Some("br sync --import-only"),
+                        ),
+                        attestation_degradation(
+                            EnvironmentAttestationDegradedCode::BvRecommendationStale,
+                            "warning",
+                            "BV recommended work that Beads reports blocked.",
+                            Some("br show bd-37ugy --json"),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "agent_mail_probe_mismatch",
+                attestation_report(
+                    "agent_mail_probe_mismatch",
+                    EnvironmentAttestationSummary {
+                        safe_to_claim: false,
+                        remote_verification_admitted: None,
+                        source_test_verdict: EnvironmentAttestationSourceTestVerdict::NotEvaluated,
+                        environment_verdict: EnvironmentAttestationVerdict::CoordinateBeforeClaim,
+                        local_cargo_fallback_observed: false,
+                    },
+                    EnvironmentAttestationVerdict::CoordinateBeforeClaim,
+                    vec![attestation_source_entry(
+                        EnvironmentAttestationSourceKind::AgentMailProbe,
+                        EnvironmentAttestationAuthority::Contradicted,
+                        EnvironmentAttestationSourceStatus::Contradicted,
+                        EnvironmentAttestationFreshness::Current,
+                        "Agent Mail CLI probe reported unavailable while MCP coordination worked.",
+                        vec![EnvironmentAttestationDegradedCode::AgentMailProbeMismatch],
+                        vec![attestation_recovery(
+                            0,
+                            EnvironmentAttestationRecoveryKind::Coordinate,
+                            EnvironmentAttestationSubstrate::AgentMail,
+                            None,
+                            "Use MCP Agent Mail as the live authority and refresh the redacted probe.",
+                        )],
+                    )],
+                    vec![attestation_degradation(
+                        EnvironmentAttestationDegradedCode::AgentMailProbeMismatch,
+                        "medium",
+                        "Agent Mail probe authority disagrees with live MCP coordination.",
+                        None,
+                    )],
+                ),
+            ),
+            (
+                "rch_environment_blocked",
+                attestation_report(
+                    "rch_environment_blocked",
+                    EnvironmentAttestationSummary {
+                        safe_to_claim: false,
+                        remote_verification_admitted: Some(false),
+                        source_test_verdict:
+                            EnvironmentAttestationSourceTestVerdict::EnvironmentBlockedBeforeSource,
+                        environment_verdict: EnvironmentAttestationVerdict::ProofEnvironmentBlocked,
+                        local_cargo_fallback_observed: false,
+                    },
+                    EnvironmentAttestationVerdict::ProofEnvironmentBlocked,
+                    vec![attestation_source_entry(
+                        EnvironmentAttestationSourceKind::Rch,
+                        EnvironmentAttestationAuthority::Degraded,
+                        EnvironmentAttestationSourceStatus::RemoteBlocked,
+                        EnvironmentAttestationFreshness::Current,
+                        "RCH-E327 blocked before Cargo under /Users/jemanuel/projects.",
+                        vec![
+                            EnvironmentAttestationDegradedCode::RchWorkerTopologyBlocked,
+                            EnvironmentAttestationDegradedCode::RchRemoteRequiredFallbackPrevented,
+                        ],
+                        vec![attestation_recovery(
+                            0,
+                            EnvironmentAttestationRecoveryKind::RepairEnvironment,
+                            EnvironmentAttestationSubstrate::Rch,
+                            Some(
+                                "rch status --config /Users/jemanuel/projects/eidetic_engine_cli/rch.toml",
+                            ),
+                            "Repair worker topology before treating proof as source evidence.",
+                        )],
+                    )],
+                    vec![
+                        attestation_degradation(
+                            EnvironmentAttestationDegradedCode::RchWorkerTopologyBlocked,
+                            "high",
+                            "Remote verification was blocked before Cargo by RCH topology.",
+                            Some("rch status --json"),
+                        ),
+                        attestation_degradation(
+                            EnvironmentAttestationDegradedCode::RchRemoteRequiredFallbackPrevented,
+                            "high",
+                            "Remote-required verification refused local fallback before source tests.",
+                            None,
+                        ),
+                    ],
+                ),
+            ),
+        ]
+    }
+
+    fn attestation_report(
+        name: &str,
+        summary: EnvironmentAttestationSummary,
+        verdict: EnvironmentAttestationVerdict,
+        source_authority: Vec<EnvironmentAttestationSourceAuthorityEntry>,
+        degraded: Vec<EnvironmentAttestationDegradation>,
+    ) -> EnvironmentAttestationReport {
+        let mut evidence_refs = source_authority
+            .iter()
+            .flat_map(|entry| entry.evidence_refs.clone())
+            .collect::<Vec<_>>();
+        evidence_refs.sort();
+        evidence_refs.dedup();
+
+        let mut recovery_actions = source_authority
+            .iter()
+            .flat_map(|entry| entry.recovery_actions.clone())
+            .collect::<Vec<_>>();
+        recovery_actions.sort();
+        recovery_actions.dedup();
+
+        EnvironmentAttestationReport {
+            schema: ENVIRONMENT_ATTESTATION_SCHEMA_V1,
+            attestation_id: format!("environment_attestation_summary_{name}"),
+            workspace: "/Users/jemanuel/projects/eidetic_engine_cli".to_owned(),
+            generated_at: Utc::now(),
+            redaction_status: ENVIRONMENT_ATTESTATION_REDACTION_STATUS,
+            summary,
+            source_authority,
+            verdict,
+            evidence_refs,
+            recovery_actions,
+            degraded,
+        }
+    }
+
+    fn attestation_source_entry(
+        source: EnvironmentAttestationSourceKind,
+        authority: EnvironmentAttestationAuthority,
+        status: EnvironmentAttestationSourceStatus,
+        freshness: EnvironmentAttestationFreshness,
+        summary: &str,
+        degraded_codes: Vec<EnvironmentAttestationDegradedCode>,
+        recovery_actions: Vec<EnvironmentAttestationRecoveryAction>,
+    ) -> EnvironmentAttestationSourceAuthorityEntry {
+        EnvironmentAttestationSourceAuthorityEntry {
+            source,
+            authority,
+            status,
+            freshness,
+            observed_at: Some("2026-06-05T02:00:00Z".to_owned()),
+            summary: summary.to_owned(),
+            evidence_refs: vec![format!(
+                "attestation://{}?workspace=/Users/jemanuel/projects/eidetic_engine_cli",
+                serialized_token(&source)
+            )],
+            metrics: vec![EnvironmentAttestationMetric {
+                name: "item_count".to_owned(),
+                value: "1".to_owned(),
+            }],
+            degraded_codes,
+            recovery_actions,
+        }
+    }
+
+    fn attestation_recovery(
+        priority: u8,
+        kind: EnvironmentAttestationRecoveryKind,
+        required_substrate: EnvironmentAttestationSubstrate,
+        command: Option<&str>,
+        rationale: &str,
+    ) -> EnvironmentAttestationRecoveryAction {
+        EnvironmentAttestationRecoveryAction {
+            priority,
+            kind,
+            command: command.map(|display_command| EnvironmentAttestationCommandAction {
+                display_command: display_command.to_owned(),
+                argv: display_command
+                    .split_whitespace()
+                    .map(ToOwned::to_owned)
+                    .collect(),
+                shell_required: false,
+                copy_safety: EnvironmentAttestationCommandCopySafety::DisplayOnly,
+            }),
+            mutates_state: false,
+            required_substrate,
+            rationale: rationale.to_owned(),
+        }
+    }
+
+    fn attestation_degradation(
+        code: EnvironmentAttestationDegradedCode,
+        severity: &'static str,
+        message: &str,
+        repair: Option<&str>,
+    ) -> EnvironmentAttestationDegradation {
+        EnvironmentAttestationDegradation {
+            code,
+            severity,
+            message: message.to_owned(),
+            repair: repair.map(ToOwned::to_owned),
+        }
+    }
+
+    fn validate_support_bundle_attestation_summary_schema(
+        summary: &Value,
+        schema: &Value,
+        case_name: &str,
+    ) -> TestResult {
+        let object = summary
+            .as_object()
+            .ok_or_else(|| format!("{case_name}: summary is not an object"))?;
+        let required = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "schema missing required list".to_owned())?;
+        for field in required.iter().filter_map(Value::as_str) {
+            if !object.contains_key(field) {
+                return Err(format!(
+                    "{case_name}: missing schema-required field {field}"
+                ));
+            }
+        }
+        let properties = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "schema missing properties".to_owned())?;
+        for field in object.keys() {
+            if !properties.contains_key(field) {
+                return Err(format!("{case_name}: unexpected field {field}"));
+            }
+        }
+        if summary.get("schema").and_then(Value::as_str)
+            != Some(SUPPORT_BUNDLE_ENVIRONMENT_ATTESTATION_SUMMARY_SCHEMA_V1)
+        {
+            return Err(format!("{case_name}: wrong schema token"));
+        }
+        if summary.get("sourceSchema").and_then(Value::as_str)
+            != Some(ENVIRONMENT_ATTESTATION_SCHEMA_V1)
+        {
+            return Err(format!("{case_name}: wrong source schema token"));
+        }
+        for pointer in ["/workspaceHash", "/summaryHash"] {
+            require_blake3_hash(summary.pointer(pointer), case_name, pointer)?;
+        }
+        if summary
+            .pointer("/proofAdmission/separateFromSourceTestVerdict")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            return Err(format!(
+                "{case_name}: proof admission did not mark source-test separation"
+            ));
+        }
+        for pointer in [
+            "/redaction/rawWorkspacePathIncluded",
+            "/redaction/rawMailBodiesIncluded",
+            "/redaction/rawSourceSnippetsIncluded",
+            "/redaction/rawCommandArgvIncluded",
+            "/redaction/rawEvidenceRefsIncluded",
+        ] {
+            if summary.pointer(pointer).and_then(Value::as_bool) != Some(false) {
+                return Err(format!(
+                    "{case_name}: redaction flag {pointer} was not false"
+                ));
+            }
+        }
+        if summary
+            .pointer("/redaction/hostPrivatePathsRedacted")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            return Err(format!(
+                "{case_name}: hostPrivatePathsRedacted was not true"
+            ));
+        }
+        let sources = summary
+            .get("sourceAuthority")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{case_name}: sourceAuthority missing"))?;
+        let total = summary
+            .pointer("/sourceAuthorityCounts/total")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("{case_name}: sourceAuthorityCounts.total missing"))?;
+        if total != sources.len() as u64 {
+            return Err(format!(
+                "{case_name}: sourceAuthorityCounts.total did not match sourceAuthority length"
+            ));
+        }
+        for (index, source) in sources.iter().enumerate() {
+            let prefix = format!("{case_name}: sourceAuthority[{index}]");
+            let evidence_hashes = source
+                .get("evidenceRefHashes")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{prefix}: evidenceRefHashes missing"))?;
+            for hash in evidence_hashes {
+                require_blake3_hash(Some(hash), &prefix, "evidenceRefHashes")?;
+            }
+            let recovery_actions = source
+                .get("recoveryActions")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{prefix}: recoveryActions missing"))?;
+            let recovery_count = source
+                .get("recoveryActionCount")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| format!("{prefix}: recoveryActionCount missing"))?;
+            if recovery_count != recovery_actions.len() as u64 {
+                return Err(format!("{prefix}: recoveryActionCount mismatch"));
+            }
+            for action in recovery_actions {
+                validate_redacted_attestation_recovery_action(action, &prefix)?;
+            }
+        }
+        for action in summary
+            .get("recoveryActions")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{case_name}: recoveryActions missing"))?
+        {
+            validate_redacted_attestation_recovery_action(action, case_name)?;
+        }
+        Ok(())
+    }
+
+    fn validate_redacted_attestation_recovery_action(action: &Value, context: &str) -> TestResult {
+        let Some(command) = action.get("command") else {
+            return Err(format!("{context}: recovery action missing command field"));
+        };
+        if command.is_null() {
+            return Ok(());
+        }
+        if command.get("argv").is_some() {
+            return Err(format!("{context}: redacted command leaked argv array"));
+        }
+        require_blake3_hash(command.get("argvHash"), context, "argvHash")
+    }
+
+    fn require_blake3_hash(value: Option<&Value>, context: &str, field: &str) -> TestResult {
+        if value
+            .and_then(Value::as_str)
+            .is_some_and(|hash| hash.starts_with("blake3:"))
+        {
+            Ok(())
+        } else {
+            Err(format!("{context}: {field} was not a blake3 hash"))
+        }
+    }
+
+    fn assert_no_attestation_summary_denied_substrings(
+        case_name: &str,
+        summary: &Value,
+    ) -> TestResult {
+        let rendered = stable_json(summary);
+        for denied in ATTESTATION_SUMMARY_DENIED_SUBSTRINGS {
+            if rendered.contains(denied) {
+                return Err(format!(
+                    "{case_name}: support-bundle attestation summary leaked denied substring {denied:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn compact_support_bundle_attestation_summary_case(
+        case_name: &str,
+        summary: &Value,
+    ) -> Result<Value, String> {
+        Ok(json!({
+            "case": case_name,
+            "verdict": summary
+                .get("verdict")
+                .cloned()
+                .ok_or_else(|| format!("{case_name}: verdict missing"))?,
+            "summary": summary
+                .get("summary")
+                .cloned()
+                .ok_or_else(|| format!("{case_name}: summary missing"))?,
+            "proofAdmission": summary
+                .get("proofAdmission")
+                .cloned()
+                .ok_or_else(|| format!("{case_name}: proofAdmission missing"))?,
+            "sourceAuthorityCounts": summary
+                .get("sourceAuthorityCounts")
+                .cloned()
+                .ok_or_else(|| format!("{case_name}: sourceAuthorityCounts missing"))?,
+            "sourceAuthority": compact_support_bundle_attestation_sources(
+                summary
+                    .get("sourceAuthority")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| format!("{case_name}: sourceAuthority missing"))?,
+            ),
+            "degradedCodes": summary
+                .get("degradedCodes")
+                .cloned()
+                .ok_or_else(|| format!("{case_name}: degradedCodes missing"))?,
+            "firstFailureCode": summary
+                .pointer("/firstFailure/code")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "disagreementEvidence": summary
+                .get("disagreementEvidence")
+                .cloned()
+                .ok_or_else(|| format!("{case_name}: disagreementEvidence missing"))?,
+            "redaction": summary
+                .get("redaction")
+                .cloned()
+                .ok_or_else(|| format!("{case_name}: redaction missing"))?,
+        }))
+    }
+
+    fn compact_support_bundle_attestation_sources(sources: &[Value]) -> Vec<Value> {
+        sources
+            .iter()
+            .map(|source| {
+                json!({
+                    "source": source["source"].clone(),
+                    "authority": source["authority"].clone(),
+                    "status": source["status"].clone(),
+                    "freshness": source["freshness"].clone(),
+                    "degradedCodes": source["degradedCodes"].clone(),
+                    "recoveryActionCount": source["recoveryActionCount"].clone(),
+                    "metricCount": source["metricCount"].clone(),
+                })
+            })
+            .collect()
     }
 
     #[test]

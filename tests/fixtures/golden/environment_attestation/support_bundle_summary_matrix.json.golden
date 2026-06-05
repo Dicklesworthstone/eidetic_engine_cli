@@ -1,0 +1,340 @@
+{
+  "schema": "ee.support_bundle.environment_attestation_summary.fixture_matrix.v1",
+  "cases": [
+    {
+      "case": "clean_remote_ready",
+      "verdict": "remote_verification_admitted",
+      "summary": {
+        "safeToClaim": true,
+        "remoteVerificationAdmitted": true,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "remote_verification_admitted",
+        "localCargoFallbackObserved": false
+      },
+      "proofAdmission": {
+        "remoteVerificationAdmitted": true,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "remote_verification_admitted",
+        "localCargoFallbackObserved": false,
+        "separateFromSourceTestVerdict": true
+      },
+      "sourceAuthorityCounts": {
+        "total": 4,
+        "byStatus": {
+          "ok": 3,
+          "remote_ready": 1
+        },
+        "byAuthority": {
+          "authoritative": 4
+        }
+      },
+      "sourceAuthority": [
+        {
+          "source": "source_tree",
+          "authority": "authoritative",
+          "status": "ok",
+          "freshness": "current",
+          "degradedCodes": [],
+          "recoveryActionCount": 0,
+          "metricCount": 1
+        },
+        {
+          "source": "beads_tracker",
+          "authority": "authoritative",
+          "status": "ok",
+          "freshness": "current",
+          "degradedCodes": [],
+          "recoveryActionCount": 0,
+          "metricCount": 1
+        },
+        {
+          "source": "agent_mail_probe",
+          "authority": "authoritative",
+          "status": "ok",
+          "freshness": "current",
+          "degradedCodes": [],
+          "recoveryActionCount": 0,
+          "metricCount": 1
+        },
+        {
+          "source": "rch",
+          "authority": "authoritative",
+          "status": "remote_ready",
+          "freshness": "current",
+          "degradedCodes": [],
+          "recoveryActionCount": 0,
+          "metricCount": 1
+        }
+      ],
+      "degradedCodes": [],
+      "firstFailureCode": null,
+      "disagreementEvidence": {
+        "beadsTrackerStale": false,
+        "bvRecommendationStale": false,
+        "agentMailProbeMismatch": false,
+        "sourceAuthorityAmbiguous": false,
+        "claimGateNeedsFreshRun": false
+      },
+      "redaction": {
+        "rawWorkspacePathIncluded": false,
+        "rawMailBodiesIncluded": false,
+        "rawSourceSnippetsIncluded": false,
+        "rawCommandArgvIncluded": false,
+        "rawEvidenceRefsIncluded": false,
+        "hostPrivatePathsRedacted": true
+      }
+    },
+    {
+      "case": "unsafe_reservation_conflict",
+      "verdict": "unsafe_due_to_conflict",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "unsafe_due_to_conflict",
+        "localCargoFallbackObserved": false
+      },
+      "proofAdmission": {
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "unsafe_due_to_conflict",
+        "localCargoFallbackObserved": false,
+        "separateFromSourceTestVerdict": true
+      },
+      "sourceAuthorityCounts": {
+        "total": 1,
+        "byStatus": {
+          "blocked": 1
+        },
+        "byAuthority": {
+          "advisory": 1
+        }
+      },
+      "sourceAuthority": [
+        {
+          "source": "file_reservations",
+          "authority": "advisory",
+          "status": "blocked",
+          "freshness": "current",
+          "degradedCodes": [
+            "reservation_evidence_stale"
+          ],
+          "recoveryActionCount": 1,
+          "metricCount": 1
+        }
+      ],
+      "degradedCodes": [
+        "reservation_evidence_stale"
+      ],
+      "firstFailureCode": "reservation_evidence_stale",
+      "disagreementEvidence": {
+        "beadsTrackerStale": false,
+        "bvRecommendationStale": false,
+        "agentMailProbeMismatch": false,
+        "sourceAuthorityAmbiguous": false,
+        "claimGateNeedsFreshRun": true
+      },
+      "redaction": {
+        "rawWorkspacePathIncluded": false,
+        "rawMailBodiesIncluded": false,
+        "rawSourceSnippetsIncluded": false,
+        "rawCommandArgvIncluded": false,
+        "rawEvidenceRefsIncluded": false,
+        "hostPrivatePathsRedacted": true
+      }
+    },
+    {
+      "case": "stale_tracker_and_bv",
+      "verdict": "tracker_stale",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "tracker_stale",
+        "localCargoFallbackObserved": false
+      },
+      "proofAdmission": {
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "tracker_stale",
+        "localCargoFallbackObserved": false,
+        "separateFromSourceTestVerdict": true
+      },
+      "sourceAuthorityCounts": {
+        "total": 2,
+        "byStatus": {
+          "degraded": 1,
+          "stale": 1
+        },
+        "byAuthority": {
+          "degraded": 1,
+          "stale": 1
+        }
+      },
+      "sourceAuthority": [
+        {
+          "source": "beads_tracker",
+          "authority": "stale",
+          "status": "stale",
+          "freshness": "stale",
+          "degradedCodes": [
+            "beads_tracker_stale"
+          ],
+          "recoveryActionCount": 1,
+          "metricCount": 1
+        },
+        {
+          "source": "bv_recommendation",
+          "authority": "degraded",
+          "status": "degraded",
+          "freshness": "current",
+          "degradedCodes": [
+            "bv_recommendation_stale"
+          ],
+          "recoveryActionCount": 1,
+          "metricCount": 1
+        }
+      ],
+      "degradedCodes": [
+        "beads_tracker_stale",
+        "bv_recommendation_stale"
+      ],
+      "firstFailureCode": "beads_tracker_stale",
+      "disagreementEvidence": {
+        "beadsTrackerStale": true,
+        "bvRecommendationStale": true,
+        "agentMailProbeMismatch": false,
+        "sourceAuthorityAmbiguous": false,
+        "claimGateNeedsFreshRun": false
+      },
+      "redaction": {
+        "rawWorkspacePathIncluded": false,
+        "rawMailBodiesIncluded": false,
+        "rawSourceSnippetsIncluded": false,
+        "rawCommandArgvIncluded": false,
+        "rawEvidenceRefsIncluded": false,
+        "hostPrivatePathsRedacted": true
+      }
+    },
+    {
+      "case": "agent_mail_probe_mismatch",
+      "verdict": "coordinate_before_claim",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "coordinate_before_claim",
+        "localCargoFallbackObserved": false
+      },
+      "proofAdmission": {
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "not_evaluated",
+        "environmentVerdict": "coordinate_before_claim",
+        "localCargoFallbackObserved": false,
+        "separateFromSourceTestVerdict": true
+      },
+      "sourceAuthorityCounts": {
+        "total": 1,
+        "byStatus": {
+          "contradicted": 1
+        },
+        "byAuthority": {
+          "contradicted": 1
+        }
+      },
+      "sourceAuthority": [
+        {
+          "source": "agent_mail_probe",
+          "authority": "contradicted",
+          "status": "contradicted",
+          "freshness": "current",
+          "degradedCodes": [
+            "agent_mail_probe_mismatch"
+          ],
+          "recoveryActionCount": 1,
+          "metricCount": 1
+        }
+      ],
+      "degradedCodes": [
+        "agent_mail_probe_mismatch"
+      ],
+      "firstFailureCode": "agent_mail_probe_mismatch",
+      "disagreementEvidence": {
+        "beadsTrackerStale": false,
+        "bvRecommendationStale": false,
+        "agentMailProbeMismatch": true,
+        "sourceAuthorityAmbiguous": false,
+        "claimGateNeedsFreshRun": false
+      },
+      "redaction": {
+        "rawWorkspacePathIncluded": false,
+        "rawMailBodiesIncluded": false,
+        "rawSourceSnippetsIncluded": false,
+        "rawCommandArgvIncluded": false,
+        "rawEvidenceRefsIncluded": false,
+        "hostPrivatePathsRedacted": true
+      }
+    },
+    {
+      "case": "rch_environment_blocked",
+      "verdict": "proof_environment_blocked",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": false,
+        "sourceTestVerdict": "environment_blocked_before_source",
+        "environmentVerdict": "proof_environment_blocked",
+        "localCargoFallbackObserved": false
+      },
+      "proofAdmission": {
+        "remoteVerificationAdmitted": false,
+        "sourceTestVerdict": "environment_blocked_before_source",
+        "environmentVerdict": "proof_environment_blocked",
+        "localCargoFallbackObserved": false,
+        "separateFromSourceTestVerdict": true
+      },
+      "sourceAuthorityCounts": {
+        "total": 1,
+        "byStatus": {
+          "remote_blocked": 1
+        },
+        "byAuthority": {
+          "degraded": 1
+        }
+      },
+      "sourceAuthority": [
+        {
+          "source": "rch",
+          "authority": "degraded",
+          "status": "remote_blocked",
+          "freshness": "current",
+          "degradedCodes": [
+            "rch_worker_topology_blocked",
+            "rch_remote_required_fallback_prevented"
+          ],
+          "recoveryActionCount": 1,
+          "metricCount": 1
+        }
+      ],
+      "degradedCodes": [
+        "rch_remote_required_fallback_prevented",
+        "rch_worker_topology_blocked"
+      ],
+      "firstFailureCode": "rch_worker_topology_blocked",
+      "disagreementEvidence": {
+        "beadsTrackerStale": false,
+        "bvRecommendationStale": false,
+        "agentMailProbeMismatch": false,
+        "sourceAuthorityAmbiguous": false,
+        "claimGateNeedsFreshRun": false
+      },
+      "redaction": {
+        "rawWorkspacePathIncluded": false,
+        "rawMailBodiesIncluded": false,
+        "rawSourceSnippetsIncluded": false,
+        "rawCommandArgvIncluded": false,
+        "rawEvidenceRefsIncluded": false,
+        "hostPrivatePathsRedacted": true
+      }
+    }
+  ]
+}

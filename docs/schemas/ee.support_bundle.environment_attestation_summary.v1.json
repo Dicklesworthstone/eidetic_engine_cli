@@ -1,0 +1,347 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.support_bundle.environment_attestation_summary.v1.json",
+  "title": "ee.support_bundle.environment_attestation_summary.v1",
+  "description": "Redaction-safe support-bundle summary derived from ee.environment_attestation.v1. It preserves source-authority counts, proof-admission posture, degraded codes, and recovery metadata without raw mail bodies, source snippets, command argv, evidence refs, or host-private paths.",
+  "type": "object",
+  "required": [
+    "schema",
+    "sourceSchema",
+    "status",
+    "attestationId",
+    "workspaceIncluded",
+    "workspaceHash",
+    "redactionStatus",
+    "summary",
+    "verdict",
+    "proofAdmission",
+    "sourceAuthorityCounts",
+    "sourceAuthority",
+    "degradedCodes",
+    "recoveryActions",
+    "firstFailure",
+    "disagreementEvidence",
+    "evidenceRefHashes",
+    "redaction",
+    "summaryHash"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "ee.support_bundle.environment_attestation_summary.v1"},
+    "sourceSchema": {"const": "ee.environment_attestation.v1"},
+    "status": {"const": "available"},
+    "attestationId": {"type": "string", "minLength": 1, "maxLength": 160},
+    "workspaceIncluded": {"const": false},
+    "workspaceHash": {"$ref": "#/$defs/hash"},
+    "redactionStatus": {
+      "const": "counts_ids_statuses_codes_hashes_redacted_text_no_raw_paths_no_mail_bodies_no_source_text"
+    },
+    "summary": {"$ref": "#/$defs/summary"},
+    "verdict": {"$ref": "#/$defs/attestationVerdict"},
+    "proofAdmission": {"$ref": "#/$defs/proofAdmission"},
+    "sourceAuthorityCounts": {"$ref": "#/$defs/sourceAuthorityCounts"},
+    "sourceAuthority": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/sourceAuthorityEntry"}
+    },
+    "degradedCodes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradedCode"},
+      "uniqueItems": true
+    },
+    "recoveryActions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/recoveryAction"}
+    },
+    "firstFailure": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/firstFailure"}
+      ]
+    },
+    "disagreementEvidence": {"$ref": "#/$defs/disagreementEvidence"},
+    "evidenceRefHashes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/hash"}
+    },
+    "redaction": {"$ref": "#/$defs/redaction"},
+    "summaryHash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^blake3:"
+    },
+    "safeString": {
+      "type": "string",
+      "maxLength": 512,
+      "not": {
+        "anyOf": [
+          {"pattern": "BEGIN PRIVATE KEY"},
+          {"pattern": "BEGIN OPENSSH PRIVATE KEY"},
+          {"pattern": "ghp_[A-Za-z0-9_]+"},
+          {"pattern": "Bearer [A-Za-z0-9._-]+"},
+          {"pattern": "DATABASE_URL="},
+          {"pattern": "body_md"},
+          {"pattern": "raw mail body"},
+          {"pattern": "/Users/[^\\s]+"},
+          {"pattern": "/home/[^\\s]+"},
+          {"pattern": "/Volumes/[^\\s]+"},
+          {"pattern": "/private/[^\\s]+"}
+        ]
+      }
+    },
+    "attestationVerdict": {
+      "type": "string",
+      "enum": [
+        "safe_to_claim",
+        "coordinate_before_claim",
+        "unsafe_due_to_conflict",
+        "remote_verification_admitted",
+        "proof_environment_blocked",
+        "source_authority_ambiguous",
+        "stale_binary_suspected",
+        "tracker_stale",
+        "local_cargo_bypass_detected",
+        "unknown_insufficient_evidence"
+      ]
+    },
+    "sourceTestVerdict": {
+      "type": "string",
+      "enum": [
+        "not_evaluated",
+        "source_not_tested",
+        "source_passed",
+        "source_failed",
+        "environment_blocked_before_source",
+        "stale_source",
+        "unknown"
+      ]
+    },
+    "degradedCode": {
+      "type": "string",
+      "enum": [
+        "agent_mail_unavailable",
+        "agent_mail_probe_mismatch",
+        "beads_tracker_stale",
+        "beads_metadata_only_stale",
+        "bv_recommendation_stale",
+        "rch_unavailable",
+        "rch_worker_topology_blocked",
+        "rch_source_materialization_blocked",
+        "rch_remote_required_fallback_prevented",
+        "stale_binary_suspected",
+        "source_authority_ambiguous",
+        "local_cargo_bypass_detected",
+        "dirty_checkout_observed",
+        "build_admission_blocked",
+        "support_bundle_redaction_unverified",
+        "reservation_evidence_stale"
+      ]
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "safeToClaim",
+        "remoteVerificationAdmitted",
+        "sourceTestVerdict",
+        "environmentVerdict",
+        "localCargoFallbackObserved"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "safeToClaim": {"type": "boolean"},
+        "remoteVerificationAdmitted": {"type": ["boolean", "null"]},
+        "sourceTestVerdict": {"$ref": "#/$defs/sourceTestVerdict"},
+        "environmentVerdict": {"$ref": "#/$defs/attestationVerdict"},
+        "localCargoFallbackObserved": {"type": "boolean"}
+      }
+    },
+    "proofAdmission": {
+      "type": "object",
+      "required": [
+        "remoteVerificationAdmitted",
+        "sourceTestVerdict",
+        "environmentVerdict",
+        "localCargoFallbackObserved",
+        "separateFromSourceTestVerdict"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "remoteVerificationAdmitted": {"type": ["boolean", "null"]},
+        "sourceTestVerdict": {"$ref": "#/$defs/sourceTestVerdict"},
+        "environmentVerdict": {"$ref": "#/$defs/attestationVerdict"},
+        "localCargoFallbackObserved": {"type": "boolean"},
+        "separateFromSourceTestVerdict": {"const": true}
+      }
+    },
+    "sourceAuthorityCounts": {
+      "type": "object",
+      "required": ["total", "byStatus", "byAuthority"],
+      "additionalProperties": false,
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "byStatus": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "byAuthority": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "sourceAuthorityEntry": {
+      "type": "object",
+      "required": [
+        "source",
+        "authority",
+        "status",
+        "freshness",
+        "observedAt",
+        "summary",
+        "metricCount",
+        "metrics",
+        "degradedCodes",
+        "recoveryActionCount",
+        "recoveryActions",
+        "evidenceRefHashes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source": {"type": "string"},
+        "authority": {"type": "string"},
+        "status": {"type": "string"},
+        "freshness": {"type": "string"},
+        "observedAt": {"type": ["string", "null"]},
+        "summary": {"$ref": "#/$defs/safeString"},
+        "metricCount": {"type": "integer", "minimum": 0},
+        "metrics": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/metric"}
+        },
+        "degradedCodes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/degradedCode"}
+        },
+        "recoveryActionCount": {"type": "integer", "minimum": 0},
+        "recoveryActions": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/recoveryAction"}
+        },
+        "evidenceRefHashes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/hash"}
+        }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "required": ["name", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "value": {"$ref": "#/$defs/safeString"}
+      }
+    },
+    "recoveryAction": {
+      "type": "object",
+      "required": [
+        "priority",
+        "kind",
+        "mutatesState",
+        "requiredSubstrate",
+        "rationale",
+        "command"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "priority": {"type": "integer", "minimum": 0},
+        "kind": {"type": "string"},
+        "mutatesState": {"type": "boolean"},
+        "requiredSubstrate": {"type": "string"},
+        "rationale": {"$ref": "#/$defs/safeString"},
+        "command": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/redactedCommand"}
+          ]
+        }
+      }
+    },
+    "redactedCommand": {
+      "type": "object",
+      "required": [
+        "displayCommand",
+        "argvHash",
+        "shellRequired",
+        "copySafety"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "displayCommand": {"$ref": "#/$defs/safeString"},
+        "argvHash": {"$ref": "#/$defs/hash"},
+        "shellRequired": {"type": "boolean"},
+        "copySafety": {"type": "string"}
+      }
+    },
+    "firstFailure": {
+      "type": "object",
+      "required": ["code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"$ref": "#/$defs/degradedCode"},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"$ref": "#/$defs/safeString"},
+        "repair": {"type": ["string", "null"], "maxLength": 512}
+      }
+    },
+    "disagreementEvidence": {
+      "type": "object",
+      "required": [
+        "beadsTrackerStale",
+        "bvRecommendationStale",
+        "agentMailProbeMismatch",
+        "sourceAuthorityAmbiguous",
+        "claimGateNeedsFreshRun"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "beadsTrackerStale": {"type": "boolean"},
+        "bvRecommendationStale": {"type": "boolean"},
+        "agentMailProbeMismatch": {"type": "boolean"},
+        "sourceAuthorityAmbiguous": {"type": "boolean"},
+        "claimGateNeedsFreshRun": {"type": "boolean"}
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "required": [
+        "rawWorkspacePathIncluded",
+        "rawMailBodiesIncluded",
+        "rawSourceSnippetsIncluded",
+        "rawCommandArgvIncluded",
+        "rawEvidenceRefsIncluded",
+        "hostPrivatePathsRedacted"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "rawWorkspacePathIncluded": {"const": false},
+        "rawMailBodiesIncluded": {"const": false},
+        "rawSourceSnippetsIncluded": {"const": false},
+        "rawCommandArgvIncluded": {"const": false},
+        "rawEvidenceRefsIncluded": {"const": false},
+        "hostPrivatePathsRedacted": {"const": true}
+      }
+    }
+  },
+  "x-ee-status": {
+    "shipped": true,
+    "available_in_build": true,
+    "tracking_bead": "bd-20453.5"
+  },
+  "x-ee-doc": "docs/environment_attestation.md"
+}
