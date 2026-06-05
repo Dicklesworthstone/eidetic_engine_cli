@@ -97,8 +97,8 @@ use crate::core::doctor::{
     IntegrityDiagnosticsReport,
 };
 use crate::core::environment_attestation::{
-    EnvironmentAttestationReport, EnvironmentAttestationSourceStatus,
-    collect_environment_attestation,
+    EnvironmentAttestationInputs, EnvironmentAttestationReport, EnvironmentAttestationSourceStatus,
+    collect_environment_attestation, environment_attestation_from_swarm_brief_with_inputs,
 };
 use crate::curate::{REFLECTION_RESULT_MAX_JSON_BYTES, ReflectionSourcePackageLimits};
 // `crate::core::doctor_runtime::CapabilitiesReport` is referenced via its
@@ -3102,6 +3102,14 @@ pub struct DiagEnvironmentAttestationArgs {
     /// Redacted Agent Mail snapshot JSON to include. No live Agent Mail mutation is performed.
     #[arg(long, value_name = "PATH")]
     pub agent_mail_snapshot: Option<PathBuf>,
+
+    /// CI proof-lane snapshot JSON to include as read-only source-authority evidence.
+    #[arg(long, value_name = "PATH")]
+    pub ci_proof_lane_snapshot: Option<PathBuf>,
+
+    /// Local Cargo tripwire process-scan JSON to include instead of running the read-only probe.
+    #[arg(long, value_name = "PATH")]
+    pub local_cargo_process_scan: Option<PathBuf>,
 
     /// Comma-separated agent connector slugs to inspect when agent-inventory is enabled.
     #[arg(long, value_name = "SLUGS")]
@@ -22595,7 +22603,44 @@ where
     options.command_timeout_ms = args.command_timeout_ms;
 
     let runner = SystemSwarmBriefCommandRunner;
-    let report = collect_environment_attestation(&options, &runner);
+    let report = match read_environment_attestation_fixture_json(
+        args.local_cargo_process_scan.as_ref(),
+        "local Cargo process scan",
+    ) {
+        Ok(local_cargo_process_scan) => match read_environment_attestation_fixture_json(
+            args.ci_proof_lane_snapshot.as_ref(),
+            "CI proof-lane snapshot",
+        ) {
+            Ok(ci_proof_lane_snapshot) => {
+                if local_cargo_process_scan.is_none() && ci_proof_lane_snapshot.is_none() {
+                    collect_environment_attestation(&options, &runner)
+                } else {
+                    let swarm_report = collect_swarm_brief(&options, &runner);
+                    let generated_local_cargo_process_scan;
+                    let local_cargo_process_scan =
+                        if let Some(value) = local_cargo_process_scan.as_ref() {
+                            Some(value)
+                        } else {
+                            generated_local_cargo_process_scan =
+                                crate::core::support_bundle::local_cargo_tripwire_process_scan_json(
+                                    &options.workspace,
+                                );
+                            Some(&generated_local_cargo_process_scan)
+                        };
+                    environment_attestation_from_swarm_brief_with_inputs(
+                        &swarm_report,
+                        EnvironmentAttestationInputs {
+                            generated_at: chrono::Utc::now(),
+                            local_cargo_process_scan,
+                            ci_proof_lane_snapshot: ci_proof_lane_snapshot.as_ref(),
+                        },
+                    )
+                }
+            }
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        },
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
     let unavailable_sources = environment_attestation_unavailable_sources(&report);
     if args.require_sources && !unavailable_sources.is_empty() {
         let error = DomainError::UnsatisfiedDegradedMode {
@@ -22635,6 +22680,28 @@ where
             &(diag_environment_attestation_response_json(&report) + "\n"),
         ),
     }
+}
+
+fn read_environment_attestation_fixture_json(
+    path: Option<&PathBuf>,
+    label: &str,
+) -> Result<Option<serde_json::Value>, DomainError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let text = fs::read_to_string(path).map_err(|error| DomainError::Storage {
+        message: format!("Failed to read {label} fixture {}: {error}", path.display()),
+        repair: Some(format!("Pass a readable {label} JSON file.")),
+    })?;
+    let value =
+        serde_json::from_str::<serde_json::Value>(&text).map_err(|error| DomainError::Usage {
+            message: format!(
+                "Failed to parse {label} fixture {} as JSON: {error}",
+                path.display()
+            ),
+            repair: Some(format!("Pass a valid {label} JSON object.")),
+        })?;
+    Ok(Some(value))
 }
 
 fn environment_attestation_unavailable_sources(
@@ -57627,6 +57694,10 @@ mod tests {
             "--include-rch",
             "--agent-mail-snapshot",
             "snapshot.json",
+            "--ci-proof-lane-snapshot",
+            "ci-proof.json",
+            "--local-cargo-process-scan",
+            "local-cargo.json",
             "--agent-inventory-only",
             "codex,claude",
             "--max-recent-commits",
@@ -57653,6 +57724,16 @@ mod tests {
                     "agent mail snapshot",
                 )?;
                 ensure_equal(
+                    &args.ci_proof_lane_snapshot,
+                    &Some(PathBuf::from("ci-proof.json")),
+                    "CI proof-lane snapshot",
+                )?;
+                ensure_equal(
+                    &args.local_cargo_process_scan,
+                    &Some(PathBuf::from("local-cargo.json")),
+                    "local Cargo process scan",
+                )?;
+                ensure_equal(
                     &args.agent_inventory_only,
                     &Some("codex,claude".to_owned()),
                     "agent inventory only",
@@ -57663,6 +57744,29 @@ mod tests {
             }
             _ => Err("expected diag environment-attestation command".to_string()),
         }
+    }
+
+    #[test]
+    fn diag_environment_attestation_reads_fixture_json() -> TestResult {
+        let value = read_environment_attestation_fixture_json(
+            Some(&PathBuf::from(
+                "tests/fixtures/ci_proof_lane/artifact_stale.json",
+            )),
+            "CI proof-lane snapshot",
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "expected fixture JSON".to_owned())?;
+
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.ci_proof_lane_snapshot.v1"),
+            "fixture schema",
+        )?;
+        ensure_equal(
+            &value["summary"]["verdict"],
+            &serde_json::json!("artifact_stale"),
+            "fixture verdict",
+        )
     }
 
     #[test]
