@@ -143,6 +143,37 @@ def command_display(argv: list[str], project: Path) -> str:
     return " ".join(shlex.quote(safe_command_arg(part, project)) for part in argv)
 
 
+def first_symlink_component(path: Path) -> Path | None:
+    path = path if path.is_absolute() else Path.cwd() / path
+    current = Path(path.anchor) if path.is_absolute() else Path.cwd()
+    parts = path.parts[1:] if path.is_absolute() else path.parts
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            return current
+        if not current.exists():
+            return None
+    return None
+
+
+def validate_output_path(label: str, value: str | None) -> int:
+    if not value:
+        return 0
+    path = Path(value)
+    symlink = first_symlink_component(path)
+    if symlink is None:
+        return 0
+    resolved = path.resolve(strict=False)
+    print(
+        (
+            f"agent_mail_snapshot: {label} path traverses symlink component "
+            f"{symlink}; use a resolved non-symlink path such as {resolved}"
+        ),
+        file=sys.stderr,
+    )
+    return 2
+
+
 def run_json_command(argv: list[str], timeout_sec: float) -> dict[str, Any]:
     executable = argv[0]
     if shutil.which(executable) is None:
@@ -538,6 +569,12 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 2
+    output_path_error = validate_output_path("--output", args.output)
+    if output_path_error:
+        return output_path_error
+    coordination_path_error = validate_output_path("--coordination-output", args.coordination_output)
+    if coordination_path_error:
+        return coordination_path_error
 
     am_bin = args.am_bin
     commands = [

@@ -21,6 +21,11 @@ SNAPSHOT_OK="$TMP_ROOT/snapshot-ok.json"
 SNAPSHOT_DEGRADED="$TMP_ROOT/snapshot-degraded.json"
 COORDINATION_OK="$TMP_ROOT/coordination-ok.json"
 COORDINATION_DEGRADED="$TMP_ROOT/coordination-degraded.json"
+SYMLINK_PARENT="$TMP_ROOT/symlink-parent"
+SYMLINK_TARGET="$TMP_ROOT/symlink-target"
+SYMLINK_STDOUT="$TMP_ROOT/symlink-refusal.stdout"
+SYMLINK_STDERR="$TMP_ROOT/symlink-refusal.stderr"
+SYMLINK_OUTPUT="$SYMLINK_PARENT/refused-snapshot.json"
 LIVE_MODE="${EE_AGENT_MAIL_SNAPSHOT_LIVE_E2E:-0}"
 LIVE_PROJECT="${EE_AGENT_MAIL_SNAPSHOT_LIVE_PROJECT:-$REPO_ROOT}"
 LIVE_AGENT="${EE_AGENT_MAIL_SNAPSHOT_LIVE_AGENT:-${AGENT_NAME:-${AGENT_MAIL_AGENT:-}}}"
@@ -310,6 +315,29 @@ printf 'unexpected am command: %s\n' "$*" >&2
 exit 2
 EOF
 chmod 755 "$FAKE_BIN/am"
+
+mkdir -p "$SYMLINK_TARGET"
+ln -s "$SYMLINK_TARGET" "$SYMLINK_PARENT"
+if PATH="$FAKE_BIN:$PATH" \
+    AM_FAKE_COMMAND_LOG="$COMMAND_LOG" \
+    AM_FAKE_PROJECT="$PROJECT" \
+    "$PRODUCER" \
+      --project "$PROJECT" \
+      --agent BeigeHollow \
+      --output "$SYMLINK_OUTPUT" \
+      >"$SYMLINK_STDOUT" \
+      2>"$SYMLINK_STDERR"; then
+    printf 'agent_mail_snapshot: producer accepted symlinked output path\n' >&2
+    exit 1
+fi
+if ! grep -F 'path traverses symlink component' "$SYMLINK_STDERR" >/dev/null; then
+    printf 'agent_mail_snapshot: missing symlink refusal diagnostic\n' >&2
+    exit 1
+fi
+if [ -e "$SYMLINK_OUTPUT" ]; then
+    printf 'agent_mail_snapshot: symlink-refused output was still written\n' >&2
+    exit 1
+fi
 
 PATH="$FAKE_BIN:$PATH" \
 AM_FAKE_COMMAND_LOG="$COMMAND_LOG" \
