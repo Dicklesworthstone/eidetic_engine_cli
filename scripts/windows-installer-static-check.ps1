@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 
 $installPath = Join-Path $RepoRoot "install.ps1"
 $readmePath = Join-Path $RepoRoot "README.md"
+$releaseWorkflowPath = Join-Path $RepoRoot ".github/workflows/release.yml"
 
 $logDir = Split-Path -Parent $LogPath
 if (-not [string]::IsNullOrWhiteSpace($logDir)) {
@@ -80,6 +81,10 @@ Assert-True `
     -Assertion "readme_exists" `
     -Condition (Test-Path $readmePath) `
     -Diagnosis "README.md is missing from the repository root"
+Assert-True `
+    -Assertion "release_workflow_exists" `
+    -Condition (Test-Path $releaseWorkflowPath) `
+    -Diagnosis ".github/workflows/release.yml is missing from the repository"
 
 if (Test-Path $installPath) {
     $bytes = [System.IO.File]::ReadAllBytes($installPath)
@@ -178,6 +183,31 @@ if (Test-Path $readmePath) {
         -Assertion "readme_examples_use_outfile" `
         -Condition ($readmeOutFileExamples.Count -gt 0) `
         -Diagnosis "README Windows installer example must download install.ps1 to a file with -OutFile"
+}
+
+if (Test-Path $releaseWorkflowPath) {
+    $releaseWorkflowText = Get-Content -Raw -Path $releaseWorkflowPath
+    $releaseWorkflowLines = @($releaseWorkflowText -split "`r?`n")
+    $badReleaseWorkflowExampleLines = @($releaseWorkflowLines | Where-Object {
+        $_ -match '(?i)\b(Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b' -and
+        $_ -match '(?i)install\.ps1' -and
+        $_ -match '(?i)(\.Content|\|\s*(iex|Invoke-Expression)\b|\[scriptblock\]::Create)' -and
+        $_ -notmatch '(?i)do not|does not work|not a string'
+    })
+    Assert-True `
+        -Assertion "release_notes_windows_examples_avoid_content_iex" `
+        -Condition ($badReleaseWorkflowExampleLines.Count -eq 0) `
+        -Diagnosis "release-note Windows installer examples must not execute release-asset .Content, scriptblock-created content, or pipe install.ps1 into iex: $($badReleaseWorkflowExampleLines -join ' | ')"
+
+    $releaseWorkflowOutFileExamples = @($releaseWorkflowLines | Where-Object {
+        $_ -match '(?i)\b(Invoke-WebRequest|iwr)\b' -and
+        $_ -match '(?i)install\.ps1' -and
+        $_ -match '(?i)-OutFile\b'
+    })
+    Assert-True `
+        -Assertion "release_notes_windows_examples_use_outfile" `
+        -Condition ($releaseWorkflowOutFileExamples.Count -gt 0) `
+        -Diagnosis "release-note Windows installer example must download install.ps1 to a file with -OutFile"
 }
 
 if ($failures.Count -gt 0) {

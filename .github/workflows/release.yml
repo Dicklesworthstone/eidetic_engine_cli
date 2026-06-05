@@ -645,7 +645,7 @@ jobs:
             printf '%s\n\n' '```'
             printf '%s\n' '### Windows (PowerShell)'
             printf '%s\n' '```powershell'
-            printf '& ([scriptblock]::Create((iwr -useb https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/%s/install.ps1).Content)) -Version "%s"\n' "$TAG" "$VERSION"
+            printf '$f = Join-Path $env:TEMP '\''install-ee.ps1'\''; Invoke-WebRequest -UseBasicParsing https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/%s/install.ps1 -OutFile $f; & $f -Version "%s"\n' "$TAG" "$VERSION"
             printf '%s\n\n' '```'
             printf '%s\n\n' '## Verification'
             printf '%s\n' 'All release artifacts are signed with Sigstore. The official `install.sh` accepts'
