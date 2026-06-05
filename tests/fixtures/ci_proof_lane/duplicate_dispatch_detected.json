@@ -1,0 +1,91 @@
+{
+  "schema": "ee.ci_proof_lane_snapshot.v1",
+  "snapshotId": "ci_proof_lane_333333333333333333333333",
+  "repository": {
+    "owner": "Dicklesworthstone",
+    "name": "eidetic_engine_cli",
+    "defaultBranch": "main",
+    "headSha": "6afe302491b7ff5d869c42eaf57a7c9675fd5ef7"
+  },
+  "generatedAt": "2026-06-05T09:21:00Z",
+  "redactionStatus": "workflow_run_job_artifact_ids_statuses_hashes_no_logs_no_tokens_no_local_paths",
+  "summary": {
+    "verdict": "duplicate_dispatch_detected",
+    "freshArtifactAvailable": false,
+    "duplicateDispatchCount": 2,
+    "activeRunCount": 2,
+    "cancelledBeforeArtifactCount": 0,
+    "staleArtifactCount": 0,
+    "checksumMismatchCount": 0,
+    "localCargoFallbackAllowed": false,
+    "sourceTestVerdict": "not_evaluated"
+  },
+  "workflows": [
+    {
+      "workflowName": "macOS EE Artifact",
+      "workflowPath": ".github/workflows/macos-ee-artifact.yml",
+      "proofLaneKind": "dedicated_artifact",
+      "concurrencyGroup": "macos-ee-artifact-dedicated",
+      "dispatchPolicy": "reuse_active_same_head",
+      "status": "degraded",
+      "runs": [
+        {
+          "runId": "27006448051",
+          "jobIds": ["79699108969"],
+          "event": "workflow_dispatch",
+          "headSha": "6afe302491b7ff5d869c42eaf57a7c9675fd5ef7",
+          "ref": "refs/heads/main",
+          "status": "queued",
+          "conclusion": null,
+          "createdAt": "2026-06-05T09:16:05Z",
+          "updatedAt": "2026-06-05T09:16:05Z",
+          "completedAt": null,
+          "sourceFreshness": "current",
+          "artifactFreshness": "unknown",
+          "artifacts": [],
+          "firstFailureDiagnosis": null
+        },
+        {
+          "runId": "27006430214",
+          "jobIds": ["79699044533"],
+          "event": "workflow_dispatch",
+          "headSha": "6afe302491b7ff5d869c42eaf57a7c9675fd5ef7",
+          "ref": "refs/heads/main",
+          "status": "queued",
+          "conclusion": null,
+          "createdAt": "2026-06-05T09:15:40Z",
+          "updatedAt": "2026-06-05T09:15:40Z",
+          "completedAt": null,
+          "sourceFreshness": "current",
+          "artifactFreshness": "unknown",
+          "artifacts": [],
+          "firstFailureDiagnosis": null
+        }
+      ]
+    }
+  ],
+  "activeRecommendation": {
+    "verdict": "duplicate_dispatch_detected",
+    "workflowName": "macOS EE Artifact",
+    "runId": "27006448051",
+    "nextAction": "wait",
+    "rationale": "Multiple active runs target the same proof lane and head SHA; coordinate before dispatching anything else."
+  },
+  "recoveryActions": [
+    {
+      "priority": 0,
+      "kind": "coordinate",
+      "command": "send Agent Mail with authoritative run id and wait policy",
+      "mutatesState": true,
+      "rationale": "Coordination mail is the only mutation allowed by this recommendation."
+    }
+  ],
+  "degraded": [
+    {
+      "code": "ci_proof_lane_duplicate_dispatch",
+      "severity": "warning",
+      "message": "Two active workflow_dispatch runs target the same artifact proof lane and head SHA.",
+      "repair": "Reuse one active run; do not dispatch another run."
+    }
+  ]
+}

@@ -1,0 +1,471 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.ci_proof_lane_snapshot.v1.json",
+  "title": "ee.ci_proof_lane_snapshot.v1",
+  "description": "Read-only, redaction-safe snapshot of GitHub Actions proof lanes, queued runs, artifact freshness, checksum posture, and source-surface probes. A fresh artifact establishes artifact source authority only; it is not a source compile/test verdict and must not justify local Cargo fallback.",
+  "type": "object",
+  "required": [
+    "schema",
+    "snapshotId",
+    "repository",
+    "generatedAt",
+    "redactionStatus",
+    "summary",
+    "workflows",
+    "activeRecommendation",
+    "recoveryActions",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.ci_proof_lane_snapshot.v1"
+    },
+    "snapshotId": {
+      "type": "string",
+      "pattern": "^ci_proof_lane_[a-f0-9]{24}$"
+    },
+    "repository": {
+      "$ref": "#/$defs/repository"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "redactionStatus": {
+      "type": "string",
+      "const": "workflow_run_job_artifact_ids_statuses_hashes_no_logs_no_tokens_no_local_paths"
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    },
+    "workflows": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/workflow"
+      }
+    },
+    "activeRecommendation": {
+      "$ref": "#/$defs/recommendation"
+    },
+    "recoveryActions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/recoveryAction"
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degradation"
+      }
+    }
+  },
+  "$defs": {
+    "safeString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 320,
+      "not": {
+        "anyOf": [
+          {"pattern": "BEGIN PRIVATE KEY"},
+          {"pattern": "BEGIN OPENSSH PRIVATE KEY"},
+          {"pattern": "ghp_[A-Za-z0-9_]+"},
+          {"pattern": "github_pat_[A-Za-z0-9_]+"},
+          {"pattern": "Bearer [A-Za-z0-9._-]+"},
+          {"pattern": "ACTIONS_RUNTIME_TOKEN"},
+          {"pattern": "DATABASE_URL="},
+          {"pattern": "stdout:"},
+          {"pattern": "stderr:"},
+          {"pattern": "raw_log"},
+          {"pattern": "/Users/[^\\s]+"},
+          {"pattern": "/home/[^\\s]+"},
+          {"pattern": "/Volumes/[^\\s]+"},
+          {"pattern": "/private/[^\\s]+"}
+        ]
+      }
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^(sha256|blake3):[a-f0-9]{32,128}$"
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "repository": {
+      "type": "object",
+      "required": ["owner", "name", "defaultBranch", "headSha"],
+      "additionalProperties": false,
+      "properties": {
+        "owner": {"$ref": "#/$defs/safeString"},
+        "name": {"$ref": "#/$defs/safeString"},
+        "defaultBranch": {"$ref": "#/$defs/safeString"},
+        "headSha": {"$ref": "#/$defs/sha"}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "verdict",
+        "freshArtifactAvailable",
+        "duplicateDispatchCount",
+        "activeRunCount",
+        "cancelledBeforeArtifactCount",
+        "staleArtifactCount",
+        "checksumMismatchCount",
+        "localCargoFallbackAllowed",
+        "sourceTestVerdict"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "verdict": {"$ref": "#/$defs/verdict"},
+        "freshArtifactAvailable": {"type": "boolean"},
+        "duplicateDispatchCount": {"type": "integer", "minimum": 0},
+        "activeRunCount": {"type": "integer", "minimum": 0},
+        "cancelledBeforeArtifactCount": {"type": "integer", "minimum": 0},
+        "staleArtifactCount": {"type": "integer", "minimum": 0},
+        "checksumMismatchCount": {"type": "integer", "minimum": 0},
+        "localCargoFallbackAllowed": {
+          "type": "boolean",
+          "const": false
+        },
+        "sourceTestVerdict": {
+          "type": "string",
+          "enum": [
+            "not_evaluated",
+            "artifact_authority_only",
+            "source_not_tested",
+            "source_passed_elsewhere",
+            "source_failed_elsewhere",
+            "unknown"
+          ],
+          "description": "This field deliberately separates artifact authority from source compile/test evidence."
+        }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "required": [
+        "workflowName",
+        "workflowPath",
+        "proofLaneKind",
+        "concurrencyGroup",
+        "dispatchPolicy",
+        "status",
+        "runs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "workflowName": {"$ref": "#/$defs/safeString"},
+        "workflowPath": {"$ref": "#/$defs/safeString"},
+        "proofLaneKind": {
+          "type": "string",
+          "enum": ["ci", "dedicated_artifact", "release", "external"]
+        },
+        "concurrencyGroup": {
+          "type": ["string", "null"],
+          "maxLength": 160
+        },
+        "dispatchPolicy": {
+          "type": "string",
+          "enum": [
+            "reuse_active_same_head",
+            "dispatch_allowed_when_no_active_same_head",
+            "wait_only",
+            "manual_review_required"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["ok", "degraded", "blocked", "unavailable", "unknown"]
+        },
+        "runs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/run"},
+          "maxItems": 32
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "required": [
+        "runId",
+        "jobIds",
+        "event",
+        "headSha",
+        "ref",
+        "status",
+        "conclusion",
+        "createdAt",
+        "updatedAt",
+        "completedAt",
+        "sourceFreshness",
+        "artifactFreshness",
+        "artifacts",
+        "firstFailureDiagnosis"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "runId": {"type": "string", "pattern": "^[0-9]+$"},
+        "jobIds": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[0-9]+$"},
+          "uniqueItems": true
+        },
+        "event": {"$ref": "#/$defs/safeString"},
+        "headSha": {"$ref": "#/$defs/sha"},
+        "ref": {"$ref": "#/$defs/safeString"},
+        "status": {
+          "type": "string",
+          "enum": ["queued", "in_progress", "completed", "unknown"]
+        },
+        "conclusion": {
+          "type": ["string", "null"],
+          "enum": [
+            "success",
+            "failure",
+            "cancelled",
+            "skipped",
+            "timed_out",
+            "action_required",
+            "neutral",
+            null
+          ]
+        },
+        "createdAt": {"type": "string", "format": "date-time"},
+        "updatedAt": {"type": "string", "format": "date-time"},
+        "completedAt": {"type": ["string", "null"], "format": "date-time"},
+        "sourceFreshness": {"$ref": "#/$defs/freshness"},
+        "artifactFreshness": {"$ref": "#/$defs/freshness"},
+        "artifacts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/artifact"},
+          "maxItems": 16
+        },
+        "firstFailureDiagnosis": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/safeString"}
+          ]
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": [
+        "name",
+        "status",
+        "retentionExpiresAt",
+        "checksumStatus",
+        "sourceSha",
+        "architecture",
+        "surfaceProbes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"$ref": "#/$defs/safeString"},
+        "status": {
+          "type": "string",
+          "enum": ["available", "missing", "expired", "not_checked"]
+        },
+        "retentionExpiresAt": {"type": ["string", "null"], "format": "date-time"},
+        "checksumStatus": {
+          "type": "string",
+          "enum": ["verified", "missing", "mismatch", "not_checked"]
+        },
+        "sourceSha": {"$ref": "#/$defs/sha"},
+        "architecture": {"$ref": "#/$defs/safeString"},
+        "surfaceProbes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/surfaceProbe"},
+          "maxItems": 16
+        }
+      }
+    },
+    "surfaceProbe": {
+      "type": "object",
+      "required": ["commandTemplate", "status", "expectedSurface", "firstFailureDiagnosis"],
+      "additionalProperties": false,
+      "properties": {
+        "commandTemplate": {"$ref": "#/$defs/safeString"},
+        "status": {
+          "type": "string",
+          "enum": ["passed", "failed", "not_run"]
+        },
+        "expectedSurface": {"$ref": "#/$defs/safeString"},
+        "firstFailureDiagnosis": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/safeString"}
+          ]
+        }
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "required": ["verdict", "workflowName", "runId", "nextAction", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "verdict": {"$ref": "#/$defs/verdict"},
+        "workflowName": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/safeString"}
+          ]
+        },
+        "runId": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^[0-9]+$"}
+          ]
+        },
+        "nextAction": {
+          "type": "string",
+          "enum": [
+            "reuse_active_run",
+            "wait",
+            "download_and_verify_artifact",
+            "dispatch_new_run",
+            "abstain_manual_review",
+            "file_followup_bead"
+          ]
+        },
+        "rationale": {"$ref": "#/$defs/safeString"}
+      }
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "fresh_artifact_available",
+        "wait_for_active_run",
+        "duplicate_dispatch_detected",
+        "run_cancelled_before_artifact",
+        "artifact_missing",
+        "artifact_stale",
+        "checksum_mismatch",
+        "surface_probe_failed",
+        "gh_unavailable",
+        "abstain_manual_review",
+        "no_matching_run"
+      ]
+    },
+    "freshness": {
+      "type": "string",
+      "enum": ["current", "stale", "unknown", "not_applicable"]
+    },
+    "recoveryAction": {
+      "type": "object",
+      "required": ["priority", "kind", "command", "mutatesState", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "priority": {"type": "integer", "minimum": 0},
+        "kind": {
+          "type": "string",
+          "enum": ["wait", "download", "dispatch", "coordinate", "file_bead", "manual_review"]
+        },
+        "command": {"$ref": "#/$defs/safeString"},
+        "mutatesState": {"type": "boolean"},
+        "rationale": {"$ref": "#/$defs/safeString"}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "ci_proof_lane_gh_unavailable",
+            "ci_proof_lane_no_matching_run",
+            "ci_proof_lane_duplicate_dispatch",
+            "ci_proof_lane_cancelled_before_artifact",
+            "ci_proof_lane_artifact_missing",
+            "ci_proof_lane_artifact_stale",
+            "ci_proof_lane_checksum_mismatch",
+            "ci_proof_lane_surface_probe_failed"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"$ref": "#/$defs/safeString"},
+        "repair": {"$ref": "#/$defs/safeString"}
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.ci_proof_lane_snapshot.v1",
+      "snapshotId": "ci_proof_lane_0123456789abcdef01234567",
+      "repository": {
+        "owner": "Dicklesworthstone",
+        "name": "eidetic_engine_cli",
+        "defaultBranch": "main",
+        "headSha": "6afe302491b7ff5d869c42eaf57a7c9675fd5ef7"
+      },
+      "generatedAt": "2026-06-05T09:20:00Z",
+      "redactionStatus": "workflow_run_job_artifact_ids_statuses_hashes_no_logs_no_tokens_no_local_paths",
+      "summary": {
+        "verdict": "wait_for_active_run",
+        "freshArtifactAvailable": false,
+        "duplicateDispatchCount": 0,
+        "activeRunCount": 1,
+        "cancelledBeforeArtifactCount": 0,
+        "staleArtifactCount": 0,
+        "checksumMismatchCount": 0,
+        "localCargoFallbackAllowed": false,
+        "sourceTestVerdict": "not_evaluated"
+      },
+      "workflows": [
+        {
+          "workflowName": "macOS EE Artifact",
+          "workflowPath": ".github/workflows/macos-ee-artifact.yml",
+          "proofLaneKind": "dedicated_artifact",
+          "concurrencyGroup": "macos-ee-artifact-27006448051",
+          "dispatchPolicy": "reuse_active_same_head",
+          "status": "ok",
+          "runs": [
+            {
+              "runId": "27006448051",
+              "jobIds": ["79699108969"],
+              "event": "workflow_dispatch",
+              "headSha": "6afe302491b7ff5d869c42eaf57a7c9675fd5ef7",
+              "ref": "refs/heads/main",
+              "status": "queued",
+              "conclusion": null,
+              "createdAt": "2026-06-05T09:16:05Z",
+              "updatedAt": "2026-06-05T09:16:05Z",
+              "completedAt": null,
+              "sourceFreshness": "current",
+              "artifactFreshness": "unknown",
+              "artifacts": [],
+              "firstFailureDiagnosis": null
+            }
+          ]
+        }
+      ],
+      "activeRecommendation": {
+        "verdict": "wait_for_active_run",
+        "workflowName": "macOS EE Artifact",
+        "runId": "27006448051",
+        "nextAction": "wait",
+        "rationale": "Active run for the current head SHA exists; do not dispatch a duplicate run."
+      },
+      "recoveryActions": [
+        {
+          "priority": 0,
+          "kind": "wait",
+          "command": "gh run view 27006448051 --json status,conclusion,jobs",
+          "mutatesState": false,
+          "rationale": "Poll the active artifact run until it reaches a terminal conclusion."
+        }
+      ],
+      "degraded": []
+    }
+  ]
+}

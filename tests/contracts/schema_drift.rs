@@ -520,11 +520,18 @@ pub const EVAL_SCHEMAS: &[SchemaEntry] = &[
 ];
 
 /// Verification and diagnostic schemas.
-pub const VERIFICATION_SCHEMAS: &[SchemaEntry] = &[SchemaEntry::new(
-    "regression_causality",
-    "ee.regression_causality.v1",
-    SchemaCategory::Verification,
-)];
+pub const VERIFICATION_SCHEMAS: &[SchemaEntry] = &[
+    SchemaEntry::new(
+        "regression_causality",
+        "ee.regression_causality.v1",
+        SchemaCategory::Verification,
+    ),
+    SchemaEntry::new(
+        "ci_proof_lane_snapshot",
+        "ee.ci_proof_lane_snapshot.v1",
+        SchemaCategory::Verification,
+    ),
+];
 
 /// Backup schemas.
 pub const BACKUP_SCHEMAS: &[SchemaEntry] = &[
@@ -2632,6 +2639,185 @@ mod tests {
                 && serialized_examples.contains("\"rch_worker_topology_blocked\""),
             "examples must cover contradicted source, stale binary, and RCH topology blocker",
         )
+    }
+
+    #[test]
+    fn ci_proof_lane_schema_is_registered_and_exported() -> TestResult {
+        let versions: Vec<&str> = VERIFICATION_SCHEMAS.iter().map(|s| s.version).collect();
+        ensure(
+            versions.contains(&"ee.ci_proof_lane_snapshot.v1"),
+            "verification schemas must include CI proof-lane snapshot",
+        )?;
+
+        let schema_path = repo_path("docs/schemas/ee.ci_proof_lane_snapshot.v1.json");
+        let documented: JsonValue =
+            serde_json::from_str(&fs::read_to_string(&schema_path).map_err(|error| {
+                format!(
+                    "read CI proof-lane snapshot schema {}: {error}",
+                    schema_path.display()
+                )
+            })?)
+            .map_err(|error| {
+                format!(
+                    "parse CI proof-lane snapshot schema {}: {error}",
+                    schema_path.display()
+                )
+            })?;
+        let exported: JsonValue = serde_json::from_str(&ee::output::render_schema_export_json(
+            Some("ee.ci_proof_lane_snapshot.v1"),
+        ))
+        .map_err(|error| format!("schema export ee.ci_proof_lane_snapshot.v1: {error}"))?;
+
+        ensure_equal(
+            &exported,
+            &documented,
+            "CI proof-lane exported schema must match docs file",
+        )
+    }
+
+    #[test]
+    fn ci_proof_lane_schema_freezes_verdict_and_redaction_contract() -> TestResult {
+        let schema_path = repo_path("docs/schemas/ee.ci_proof_lane_snapshot.v1.json");
+        let schema: JsonValue =
+            serde_json::from_str(&fs::read_to_string(&schema_path).map_err(|error| {
+                format!(
+                    "read CI proof-lane snapshot schema {}: {error}",
+                    schema_path.display()
+                )
+            })?)
+            .map_err(|error| {
+                format!(
+                    "parse CI proof-lane snapshot schema {}: {error}",
+                    schema_path.display()
+                )
+            })?;
+
+        ensure_equal(
+            &schema["properties"]["schema"]["const"],
+            &JsonValue::String("ee.ci_proof_lane_snapshot.v1".to_owned()),
+            "schema const",
+        )?;
+        ensure(
+            schema["description"].as_str().is_some_and(|description| {
+                description.contains("artifact source authority")
+                    && description.contains("not a source compile/test verdict")
+                    && description.contains("local Cargo fallback")
+            }),
+            "schema description must separate artifact authority from source/test verdicts",
+        )?;
+
+        let verdict_enum = schema["$defs"]["verdict"]["enum"]
+            .as_array()
+            .ok_or("verdict enum must be an array")?;
+        for verdict in [
+            "fresh_artifact_available",
+            "wait_for_active_run",
+            "duplicate_dispatch_detected",
+            "run_cancelled_before_artifact",
+            "artifact_missing",
+            "artifact_stale",
+            "checksum_mismatch",
+            "surface_probe_failed",
+            "abstain_manual_review",
+        ] {
+            ensure(
+                verdict_enum.contains(&JsonValue::String(verdict.to_owned())),
+                format!("CI proof-lane verdict enum missing {verdict}"),
+            )?;
+        }
+
+        let degraded_enum = schema["$defs"]["degradation"]["properties"]["code"]["enum"]
+            .as_array()
+            .ok_or("degraded code enum must be an array")?;
+        for code in [
+            "ci_proof_lane_duplicate_dispatch",
+            "ci_proof_lane_cancelled_before_artifact",
+            "ci_proof_lane_artifact_missing",
+            "ci_proof_lane_artifact_stale",
+            "ci_proof_lane_checksum_mismatch",
+            "ci_proof_lane_surface_probe_failed",
+        ] {
+            ensure(
+                degraded_enum.contains(&JsonValue::String(code.to_owned())),
+                format!("CI proof-lane degraded code enum missing {code}"),
+            )?;
+        }
+
+        ensure_equal(
+            &schema["$defs"]["summary"]["properties"]["localCargoFallbackAllowed"]["const"],
+            &JsonValue::Bool(false),
+            "local Cargo fallback must be forbidden by schema",
+        )
+    }
+
+    #[test]
+    fn ci_proof_lane_fixtures_cover_core_verdicts_without_secret_shapes() -> TestResult {
+        let fixture_dir = repo_path("tests/fixtures/ci_proof_lane");
+        let mut entries = fs::read_dir(&fixture_dir)
+            .map_err(|error| format!("read fixture dir {}: {error}", fixture_dir.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("read fixture dir {}: {error}", fixture_dir.display()))?;
+        entries.sort_by_key(|entry| entry.path());
+
+        let mut verdicts = BTreeSet::new();
+        let mut serialized = String::new();
+        for entry in entries {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let text = fs::read_to_string(&path)
+                .map_err(|error| format!("read fixture {}: {error}", path.display()))?;
+            let value: JsonValue = serde_json::from_str(&text)
+                .map_err(|error| format!("parse fixture {}: {error}", path.display()))?;
+            ensure_equal(
+                &value["schema"],
+                &JsonValue::String("ee.ci_proof_lane_snapshot.v1".to_owned()),
+                "fixture schema",
+            )?;
+            ensure_equal(
+                &value["summary"]["localCargoFallbackAllowed"],
+                &JsonValue::Bool(false),
+                "fixture must forbid local Cargo fallback",
+            )?;
+            let verdict = value["summary"]["verdict"]
+                .as_str()
+                .ok_or_else(|| format!("fixture {} missing summary verdict", path.display()))?;
+            verdicts.insert(verdict.to_owned());
+            serialized.push_str(&text);
+        }
+
+        for verdict in [
+            "fresh_artifact_available",
+            "wait_for_active_run",
+            "duplicate_dispatch_detected",
+            "run_cancelled_before_artifact",
+        ] {
+            ensure(
+                verdicts.contains(verdict),
+                format!("CI proof-lane fixtures missing verdict {verdict}"),
+            )?;
+        }
+
+        for forbidden in [
+            "/Users/",
+            "/home/",
+            "/Volumes/",
+            "BEGIN PRIVATE KEY",
+            "ghp_",
+            "github_pat_",
+            "Bearer ",
+            "ACTIONS_RUNTIME_TOKEN",
+            "stdout:",
+            "stderr:",
+        ] {
+            ensure(
+                !serialized.contains(forbidden),
+                format!("fixtures must not contain redaction-forbidden marker {forbidden}"),
+            )?;
+        }
+
+        Ok(())
     }
 
     #[test]

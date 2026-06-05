@@ -1,0 +1,68 @@
+{
+  "schema": "ee.ci_proof_lane_snapshot.v1",
+  "snapshotId": "ci_proof_lane_222222222222222222222222",
+  "repository": {
+    "owner": "Dicklesworthstone",
+    "name": "eidetic_engine_cli",
+    "defaultBranch": "main",
+    "headSha": "6afe302491b7ff5d869c42eaf57a7c9675fd5ef7"
+  },
+  "generatedAt": "2026-06-05T09:20:00Z",
+  "redactionStatus": "workflow_run_job_artifact_ids_statuses_hashes_no_logs_no_tokens_no_local_paths",
+  "summary": {
+    "verdict": "wait_for_active_run",
+    "freshArtifactAvailable": false,
+    "duplicateDispatchCount": 0,
+    "activeRunCount": 1,
+    "cancelledBeforeArtifactCount": 0,
+    "staleArtifactCount": 0,
+    "checksumMismatchCount": 0,
+    "localCargoFallbackAllowed": false,
+    "sourceTestVerdict": "not_evaluated"
+  },
+  "workflows": [
+    {
+      "workflowName": "macOS EE Artifact",
+      "workflowPath": ".github/workflows/macos-ee-artifact.yml",
+      "proofLaneKind": "dedicated_artifact",
+      "concurrencyGroup": "macos-ee-artifact-27006448051",
+      "dispatchPolicy": "reuse_active_same_head",
+      "status": "ok",
+      "runs": [
+        {
+          "runId": "27006448051",
+          "jobIds": ["79699108969"],
+          "event": "workflow_dispatch",
+          "headSha": "6afe302491b7ff5d869c42eaf57a7c9675fd5ef7",
+          "ref": "refs/heads/main",
+          "status": "queued",
+          "conclusion": null,
+          "createdAt": "2026-06-05T09:16:05Z",
+          "updatedAt": "2026-06-05T09:16:05Z",
+          "completedAt": null,
+          "sourceFreshness": "current",
+          "artifactFreshness": "unknown",
+          "artifacts": [],
+          "firstFailureDiagnosis": null
+        }
+      ]
+    }
+  ],
+  "activeRecommendation": {
+    "verdict": "wait_for_active_run",
+    "workflowName": "macOS EE Artifact",
+    "runId": "27006448051",
+    "nextAction": "wait",
+    "rationale": "Active current-head proof run exists; wait rather than dispatching another run."
+  },
+  "recoveryActions": [
+    {
+      "priority": 0,
+      "kind": "wait",
+      "command": "gh run view 27006448051 --json status,conclusion,jobs",
+      "mutatesState": false,
+      "rationale": "Poll the existing run for terminal status."
+    }
+  ],
+  "degraded": []
+}

@@ -1,0 +1,75 @@
+{
+  "schema": "ee.ci_proof_lane_snapshot.v1",
+  "snapshotId": "ci_proof_lane_444444444444444444444444",
+  "repository": {
+    "owner": "Dicklesworthstone",
+    "name": "eidetic_engine_cli",
+    "defaultBranch": "main",
+    "headSha": "9f1d6c2babcdef0123456789abcdef012345678"
+  },
+  "generatedAt": "2026-06-05T09:12:00Z",
+  "redactionStatus": "workflow_run_job_artifact_ids_statuses_hashes_no_logs_no_tokens_no_local_paths",
+  "summary": {
+    "verdict": "run_cancelled_before_artifact",
+    "freshArtifactAvailable": false,
+    "duplicateDispatchCount": 0,
+    "activeRunCount": 0,
+    "cancelledBeforeArtifactCount": 1,
+    "staleArtifactCount": 0,
+    "checksumMismatchCount": 0,
+    "localCargoFallbackAllowed": false,
+    "sourceTestVerdict": "not_evaluated"
+  },
+  "workflows": [
+    {
+      "workflowName": "CI",
+      "workflowPath": ".github/workflows/ci.yml",
+      "proofLaneKind": "ci",
+      "concurrencyGroup": "CI-refs/heads/main",
+      "dispatchPolicy": "manual_review_required",
+      "status": "blocked",
+      "runs": [
+        {
+          "runId": "27005668992",
+          "jobIds": ["79697000000"],
+          "event": "push",
+          "headSha": "9f1d6c2babcdef0123456789abcdef012345678",
+          "ref": "refs/heads/main",
+          "status": "completed",
+          "conclusion": "cancelled",
+          "createdAt": "2026-06-05T08:58:55Z",
+          "updatedAt": "2026-06-05T09:04:38Z",
+          "completedAt": "2026-06-05T09:04:38Z",
+          "sourceFreshness": "stale",
+          "artifactFreshness": "not_applicable",
+          "artifacts": [],
+          "firstFailureDiagnosis": "run cancelled before artifact upload; this is not a source/test verdict"
+        }
+      ]
+    }
+  ],
+  "activeRecommendation": {
+    "verdict": "run_cancelled_before_artifact",
+    "workflowName": "CI",
+    "runId": "27005668992",
+    "nextAction": "file_followup_bead",
+    "rationale": "Cancelled CI did not produce artifact evidence; use a dedicated artifact lane or file a proof-lane follow-up."
+  },
+  "recoveryActions": [
+    {
+      "priority": 0,
+      "kind": "file_bead",
+      "command": "br create \"Proof lane cancelled before artifact upload\"",
+      "mutatesState": true,
+      "rationale": "Record workflow hygiene work instead of calling the cancelled run a source failure."
+    }
+  ],
+  "degraded": [
+    {
+      "code": "ci_proof_lane_cancelled_before_artifact",
+      "severity": "warning",
+      "message": "The CI run was cancelled before the artifact upload step completed.",
+      "repair": "Use a non-cancelling dedicated artifact workflow or wait for an active current-head run."
+    }
+  ]
+}

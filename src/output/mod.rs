@@ -330,6 +330,9 @@ pub const MCP_MANIFEST_SCHEMA_V1: &str = "ee.mcp.manifest.v1";
 /// Schema identifier for the environment attestation payload.
 pub const ENVIRONMENT_ATTESTATION_SCHEMA_V1: &str = "ee.environment_attestation.v1";
 
+/// Schema identifier for CI proof-lane queue and artifact freshness snapshots.
+pub const CI_PROOF_LANE_SNAPSHOT_SCHEMA_V1: &str = "ee.ci_proof_lane_snapshot.v1";
+
 /// A single card in structured output.
 #[derive(Clone, Debug)]
 pub struct Card {
@@ -8818,6 +8821,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: environment_attestation_schema_definition,
         },
         SchemaEntry {
+            id: CI_PROOF_LANE_SNAPSHOT_SCHEMA_V1,
+            version: "1",
+            description: "Read-only CI proof-lane queue, artifact freshness, and source-authority snapshot",
+            category: "ops",
+            definition: ci_proof_lane_snapshot_schema_definition,
+        },
+        SchemaEntry {
             id: MCP_MANIFEST_SCHEMA_V1,
             version: "1",
             description: "MCP adapter manifest generated from ee's public command and schema registries",
@@ -9741,6 +9751,10 @@ fn agent_operating_contract_schema_definition() -> String {
 
 fn environment_attestation_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.environment_attestation.v1.json").to_string()
+}
+
+fn ci_proof_lane_snapshot_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.ci_proof_lane_snapshot.v1.json").to_string()
 }
 
 fn mcp_manifest_schema_definition() -> String {

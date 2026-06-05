@@ -1,0 +1,85 @@
+{
+  "schema": "ee.ci_proof_lane_snapshot.v1",
+  "snapshotId": "ci_proof_lane_111111111111111111111111",
+  "repository": {
+    "owner": "Dicklesworthstone",
+    "name": "eidetic_engine_cli",
+    "defaultBranch": "main",
+    "headSha": "e347c3f789abcdef0123456789abcdef01234567"
+  },
+  "generatedAt": "2026-06-05T09:30:00Z",
+  "redactionStatus": "workflow_run_job_artifact_ids_statuses_hashes_no_logs_no_tokens_no_local_paths",
+  "summary": {
+    "verdict": "fresh_artifact_available",
+    "freshArtifactAvailable": true,
+    "duplicateDispatchCount": 0,
+    "activeRunCount": 0,
+    "cancelledBeforeArtifactCount": 0,
+    "staleArtifactCount": 0,
+    "checksumMismatchCount": 0,
+    "localCargoFallbackAllowed": false,
+    "sourceTestVerdict": "artifact_authority_only"
+  },
+  "workflows": [
+    {
+      "workflowName": "macOS EE Artifact",
+      "workflowPath": ".github/workflows/macos-ee-artifact.yml",
+      "proofLaneKind": "dedicated_artifact",
+      "concurrencyGroup": "macos-ee-artifact-27006448051",
+      "dispatchPolicy": "reuse_active_same_head",
+      "status": "ok",
+      "runs": [
+        {
+          "runId": "27006448051",
+          "jobIds": ["79699108969"],
+          "event": "workflow_dispatch",
+          "headSha": "e347c3f789abcdef0123456789abcdef01234567",
+          "ref": "refs/heads/main",
+          "status": "completed",
+          "conclusion": "success",
+          "createdAt": "2026-06-05T09:16:05Z",
+          "updatedAt": "2026-06-05T09:26:05Z",
+          "completedAt": "2026-06-05T09:26:05Z",
+          "sourceFreshness": "current",
+          "artifactFreshness": "current",
+          "artifacts": [
+            {
+              "name": "ee-aarch64-apple-darwin-debug",
+              "status": "available",
+              "retentionExpiresAt": "2026-06-08T09:26:05Z",
+              "checksumStatus": "verified",
+              "sourceSha": "e347c3f789abcdef0123456789abcdef01234567",
+              "architecture": "aarch64-apple-darwin",
+              "surfaceProbes": [
+                {
+                  "commandTemplate": "ee diag environment-attestation --help",
+                  "status": "passed",
+                  "expectedSurface": "diag environment-attestation",
+                  "firstFailureDiagnosis": null
+                }
+              ]
+            }
+          ],
+          "firstFailureDiagnosis": null
+        }
+      ]
+    }
+  ],
+  "activeRecommendation": {
+    "verdict": "fresh_artifact_available",
+    "workflowName": "macOS EE Artifact",
+    "runId": "27006448051",
+    "nextAction": "download_and_verify_artifact",
+    "rationale": "Current-head artifact is available with verified checksum and required surface probe."
+  },
+  "recoveryActions": [
+    {
+      "priority": 0,
+      "kind": "download",
+      "command": "gh run download 27006448051 --name ee-aarch64-apple-darwin-debug --dir <external-temp>",
+      "mutatesState": false,
+      "rationale": "Download into external temp, verify checksum, then run the no-mock harness with EE_BINARY."
+    }
+  ],
+  "degraded": []
+}
