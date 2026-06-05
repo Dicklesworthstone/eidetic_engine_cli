@@ -12,15 +12,64 @@ fn fixture_items() -> Vec<&'static [u8]> {
     vec![b"alpha", b"bravo", b"charlie", b"delta"]
 }
 
+fn parse_frame<'frame>(frame: &'frame [u8], context: &str) -> PackBinaryView<'frame> {
+    match PackBinaryView::parse(frame) {
+        Ok(view) => view,
+        Err(error) => panic!("{context}: {error}"),
+    }
+}
+
+fn parse_frame_error(frame: &[u8], context: &str) -> PackBinaryError {
+    match PackBinaryView::parse(frame) {
+        Ok(_) => panic!("{context}: frame parsed successfully"),
+        Err(error) => error,
+    }
+}
+
+fn canonical_json<'frame>(view: &PackBinaryView<'frame>, context: &str) -> &'frame str {
+    match view.canonical_json() {
+        Ok(json) => json,
+        Err(error) => panic!("{context}: {error}"),
+    }
+}
+
+fn item_slice<'frame>(view: &PackBinaryView<'frame>, index: usize, context: &str) -> &'frame [u8] {
+    match view.item_slice(index) {
+        Ok(item) => item,
+        Err(error) => panic!("{context}: {error}"),
+    }
+}
+
+fn fixed_bytes<const N: usize>(bytes: &[u8], context: &str) -> [u8; N] {
+    match bytes.try_into() {
+        Ok(value) => value,
+        Err(error) => panic!("{context}: {error:?}"),
+    }
+}
+
+fn canonical_json_error(view: &PackBinaryView<'_>, context: &str) -> PackBinaryError {
+    match view.canonical_json() {
+        Ok(_) => panic!("{context}: canonical_json decoded successfully"),
+        Err(error) => error,
+    }
+}
+
+fn item_slice_error(view: &PackBinaryView<'_>, index: usize, context: &str) -> PackBinaryError {
+    match view.item_slice(index) {
+        Ok(_) => panic!("{context}: item slice succeeded"),
+        Err(error) => error,
+    }
+}
+
 #[test]
 fn binary_round_trip_preserves_canonical_json() {
     let json = fixture_json();
     let items = fixture_items();
     let frame = serialize_pack_binary(json, &items, 0);
-    let view = PackBinaryView::parse(&frame).expect("frame should parse");
+    let view = parse_frame(&frame, "frame should parse");
 
     assert_eq!(view.schema(), PACK_BINARY_SCHEMA_V1);
-    assert_eq!(view.canonical_json().expect("json should be utf8"), json);
+    assert_eq!(canonical_json(&view, "json should be utf8"), json);
     assert_eq!(view.to_json_bytes(), json.as_bytes());
 }
 
@@ -29,7 +78,7 @@ fn content_hash_matches_blake3_over_canonical_json() {
     let json = fixture_json();
     let items = fixture_items();
     let frame = serialize_pack_binary(json, &items, 0);
-    let view = PackBinaryView::parse(&frame).expect("frame should parse");
+    let view = parse_frame(&frame, "frame should parse");
     let expected = format!("blake3:{}", blake3::hash(json.as_bytes()).to_hex());
 
     assert_eq!(view.content_hash_hex(), expected);
@@ -38,30 +87,28 @@ fn content_hash_matches_blake3_over_canonical_json() {
 #[test]
 fn item_offsets_enable_zero_copy_slices() {
     let frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
-    let view = PackBinaryView::parse(&frame).expect("frame should parse");
+    let view = parse_frame(&frame, "frame should parse");
 
     assert_eq!(view.item_count(), 4);
-    assert_eq!(view.item_slice(3).expect("item 3 should exist"), b"delta");
+    assert_eq!(item_slice(&view, 3, "item 3 should exist"), b"delta");
 }
 
 #[test]
 fn frame_uses_little_endian_header_and_offsets() {
     let frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
     let item_table = PACK_BINARY_HEADER_LEN;
-    let first_item_offset = u64::from_le_bytes(
-        frame[item_table..item_table + 8]
-            .try_into()
-            .expect("first offset bytes"),
-    );
-    let first_item_len = u32::from_le_bytes(
-        frame[item_table + 8..item_table + 12]
-            .try_into()
-            .expect("first len bytes"),
-    );
+    let first_item_offset = u64::from_le_bytes(fixed_bytes(
+        &frame[item_table..item_table + 8],
+        "first offset bytes",
+    ));
+    let first_item_len = u32::from_le_bytes(fixed_bytes(
+        &frame[item_table + 8..item_table + 12],
+        "first len bytes",
+    ));
 
     assert_eq!(&frame[0..4], PACK_BINARY_MAGIC);
     assert_eq!(
-        u16::from_le_bytes(frame[4..6].try_into().expect("version bytes")),
+        u16::from_le_bytes(fixed_bytes(&frame[4..6], "version bytes")),
         PACK_BINARY_VERSION_V1
     );
     assert_eq!(
@@ -76,7 +123,7 @@ fn version_two_rejects_with_explicit_code() {
     let mut frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
     frame[4..6].copy_from_slice(&2_u16.to_le_bytes());
 
-    let error = PackBinaryView::parse(&frame).expect_err("v2 should be too new for v1 reader");
+    let error = parse_frame_error(&frame, "v2 should be too new for v1 reader");
     assert!(matches!(error, PackBinaryError::VersionTooNew { .. }));
     assert_eq!(error.code(), "pack_bin_version_too_new");
 }
@@ -97,13 +144,13 @@ fn binary_serialization_is_deterministic() {
 fn magic_mismatch_and_hash_mismatch_have_catalog_codes() {
     let mut bad_magic = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
     bad_magic[0..4].copy_from_slice(b"NOPE");
-    let magic_error = PackBinaryView::parse(&bad_magic).expect_err("bad magic should reject");
+    let magic_error = parse_frame_error(&bad_magic, "bad magic should reject");
     assert_eq!(magic_error.code(), "pack_bin_magic_mismatch");
 
     let mut bad_hash = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
     let trailer = bad_hash.len() - PACK_BINARY_TRAILER_LEN;
     bad_hash[trailer - 1] ^= 0x01;
-    let hash_error = PackBinaryView::parse(&bad_hash).expect_err("bad hash should reject");
+    let hash_error = parse_frame_error(&bad_hash, "bad hash should reject");
     assert_eq!(hash_error.code(), "pack_bin_content_hash_mismatch");
 }
 
@@ -121,8 +168,10 @@ fn item_length_u32_max_surfaces_as_invalid_offset_not_content_hash_mismatch() {
     let first_len_offset = PACK_BINARY_HEADER_LEN + 8; // header (56) + offset (8 bytes)
     frame[first_len_offset..first_len_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
 
-    let error = PackBinaryView::parse(&frame)
-        .expect_err("oversized item length should surface as InvalidOffset");
+    let error = parse_frame_error(
+        &frame,
+        "oversized item length should surface as InvalidOffset",
+    );
     assert!(
         matches!(error, PackBinaryError::InvalidOffset { .. }),
         "expected InvalidOffset, got {error:?}"
@@ -133,7 +182,7 @@ fn item_length_u32_max_surfaces_as_invalid_offset_not_content_hash_mismatch() {
 #[test]
 fn event_log_line_matches_pack_binary_contract() {
     let frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
-    let view = PackBinaryView::parse(&frame).expect("frame should parse");
+    let view = parse_frame(&frame, "frame should parse");
     let line = view.event("deserialize", 17).to_json_line();
 
     assert!(line.contains(r#""schema":"ee.test_event.v1""#));
@@ -153,10 +202,10 @@ fn empty_item_list_round_trips() {
     // reader must not require any item-table entries.
     let json = r#"{"schema":"ee.response.v2","success":true,"data":{"pack":{"items":[]}}}"#;
     let frame = serialize_pack_binary(json, &[], 0);
-    let view = PackBinaryView::parse(&frame).expect("empty-items frame should parse");
+    let view = parse_frame(&frame, "empty-items frame should parse");
 
     assert_eq!(view.item_count(), 0);
-    assert_eq!(view.canonical_json().expect("json should be utf8"), json);
+    assert_eq!(canonical_json(&view, "json should be utf8"), json);
     assert!(view.item_slice(0).is_err());
 }
 
@@ -164,8 +213,7 @@ fn empty_item_list_round_trips() {
 fn frame_below_header_plus_trailer_minimum_is_truncated() {
     let needed_min = PACK_BINARY_HEADER_LEN + PACK_BINARY_TRAILER_LEN;
     let too_short = vec![0_u8; needed_min - 1];
-    let error =
-        PackBinaryView::parse(&too_short).expect_err("undersized buffer should be truncated");
+    let error = parse_frame_error(&too_short, "undersized buffer should be truncated");
 
     assert!(
         matches!(error, PackBinaryError::Truncated { .. }),
@@ -182,7 +230,7 @@ fn item_count_that_overflows_table_arithmetic_is_rejected() {
     let mut frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
     frame[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
 
-    let error = PackBinaryView::parse(&frame).expect_err("u64::MAX item_count should reject");
+    let error = parse_frame_error(&frame, "u64::MAX item_count should reject");
     assert!(
         matches!(error, PackBinaryError::ItemCountTooLarge { .. }),
         "expected ItemCountTooLarge, got {error:?}"
@@ -196,8 +244,7 @@ fn declared_total_bytes_must_match_frame_length() {
     let bogus_total = (frame.len() as u64) + 1;
     frame[16..24].copy_from_slice(&bogus_total.to_le_bytes());
 
-    let error =
-        PackBinaryView::parse(&frame).expect_err("mismatched total_bytes should be rejected");
+    let error = parse_frame_error(&frame, "mismatched total_bytes should be rejected");
     assert!(
         matches!(error, PackBinaryError::TotalBytesMismatch { .. }),
         "expected TotalBytesMismatch, got {error:?}"
@@ -237,10 +284,11 @@ fn non_utf8_canonical_json_surfaces_dedicated_error_code() {
     frame.extend_from_slice(&0_u32.to_le_bytes()); // reserved
     assert_eq!(frame.len(), total_bytes);
 
-    let view = PackBinaryView::parse(&frame).expect("frame structure should parse");
-    let error = view
-        .canonical_json()
-        .expect_err("non-utf8 canonical_json should reject at decode time");
+    let view = parse_frame(&frame, "frame structure should parse");
+    let error = canonical_json_error(
+        &view,
+        "non-utf8 canonical_json should reject at decode time",
+    );
     assert!(
         matches!(error, PackBinaryError::NonUtf8Json),
         "expected NonUtf8Json, got {error:?}"
@@ -264,8 +312,7 @@ fn item_offset_below_blob_start_rejects_as_invalid_offset() {
     let first_offset_field = PACK_BINARY_HEADER_LEN;
     frame[first_offset_field..first_offset_field + 8].copy_from_slice(&0_u64.to_le_bytes());
 
-    let error =
-        PackBinaryView::parse(&frame).expect_err("item offset before blob_start should reject");
+    let error = parse_frame_error(&frame, "item offset before blob_start should reject");
     assert!(
         matches!(error, PackBinaryError::InvalidOffset { .. }),
         "expected InvalidOffset, got {error:?}"
@@ -283,8 +330,10 @@ fn canonical_json_offset_below_blob_start_rejects_as_invalid_offset() {
     let trailer_offset = frame.len() - PACK_BINARY_TRAILER_LEN;
     frame[trailer_offset..trailer_offset + 8].copy_from_slice(&0_u64.to_le_bytes());
 
-    let error = PackBinaryView::parse(&frame)
-        .expect_err("canonical_json offset before blob_start should reject");
+    let error = parse_frame_error(
+        &frame,
+        "canonical_json offset before blob_start should reject",
+    );
     assert!(
         matches!(error, PackBinaryError::InvalidOffset { .. }),
         "expected InvalidOffset, got {error:?}"
@@ -299,16 +348,14 @@ fn canonical_json_extends_into_trailer_rejects_as_invalid_offset() {
     // not the downstream content-hash comparison.
     let mut frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
     let trailer_offset = frame.len() - PACK_BINARY_TRAILER_LEN;
-    let original_len = u64::from_le_bytes(
-        frame[trailer_offset + 8..trailer_offset + 16]
-            .try_into()
-            .expect("canonical_json_len slot"),
-    );
+    let original_len = u64::from_le_bytes(fixed_bytes(
+        &frame[trailer_offset + 8..trailer_offset + 16],
+        "canonical_json_len slot",
+    ));
     let bogus_len = original_len + 10;
     frame[trailer_offset + 8..trailer_offset + 16].copy_from_slice(&bogus_len.to_le_bytes());
 
-    let error = PackBinaryView::parse(&frame)
-        .expect_err("canonical_json overlapping trailer should reject");
+    let error = parse_frame_error(&frame, "canonical_json overlapping trailer should reject");
     assert!(
         matches!(error, PackBinaryError::InvalidOffset { .. }),
         "expected InvalidOffset, got {error:?}"
@@ -323,12 +370,10 @@ fn item_slice_out_of_range_returns_invalid_offset_code() {
     // the same "pack_bin_invalid_offset" code so callers can branch on it
     // without runtime introspection.
     let frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
-    let view = PackBinaryView::parse(&frame).expect("fixture frame should parse");
+    let view = parse_frame(&frame, "fixture frame should parse");
     let out_of_range = view.item_count();
 
-    let error = view
-        .item_slice(out_of_range)
-        .expect_err("index past last item should reject");
+    let error = item_slice_error(&view, out_of_range, "index past last item should reject");
     assert!(
         matches!(error, PackBinaryError::InvalidOffset { .. }),
         "expected InvalidOffset, got {error:?}"
@@ -344,7 +389,7 @@ fn item_slice_out_of_range_returns_invalid_offset_code() {
 #[test]
 fn flags_zero_round_trips_through_header() {
     let frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
-    let view = PackBinaryView::parse(&frame).expect("frame should parse");
+    let view = parse_frame(&frame, "frame should parse");
 
     assert_eq!(view.header().flags, 0);
     assert_eq!(
@@ -361,7 +406,7 @@ fn explain_flag_bit_is_observable_after_round_trip() {
         &fixture_items(),
         PACK_BINARY_FLAG_EXPLAIN_INCLUDED,
     );
-    let view = PackBinaryView::parse(&frame).expect("frame should parse");
+    let view = parse_frame(&frame, "frame should parse");
 
     assert_eq!(view.header().flags, PACK_BINARY_FLAG_EXPLAIN_INCLUDED);
     assert_ne!(
@@ -377,7 +422,7 @@ fn flags_all_ones_round_trip_without_reader_masking() {
     // If a future reader adds a `flags & KNOWN_MASK` step, this test fails
     // and forces the change to be explicit instead of silent.
     let frame = serialize_pack_binary(fixture_json(), &fixture_items(), u16::MAX);
-    let view = PackBinaryView::parse(&frame).expect("frame should parse");
+    let view = parse_frame(&frame, "frame should parse");
 
     assert_eq!(view.header().flags, u16::MAX);
 }
