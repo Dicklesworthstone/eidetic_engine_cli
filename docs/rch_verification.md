@@ -27,7 +27,7 @@ The wrapper sets these remote-safe defaults:
 - `RCH_REQUIRE_REMOTE=1`
 - `RCH_QUEUE_WHEN_BUSY=1`
 - `RCH_COMPRESSION=0`
-- RCH binary `/Users/jemanuel/.local/bin/rch-33720a8` when present, then `/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch`, then `rch`
+- RCH binary `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5` when present, then `/Users/jemanuel/.local/bin/rch-33720a8`, then `/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch`, then `rch`
 - `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel`
 - `RCH_ALIAS_PROJECT_ROOT=/data`
 - remote command `TMPDIR=/tmp`
@@ -37,21 +37,30 @@ The wrapper sets these remote-safe defaults:
   `EE_BINARY`, or the current target directory. Automatic target-directory
   discovery skips candidates whose `--version` output is empty.
 
-bd-3opmx E327 unblock, proven 2026-06-05: release RCH binaries still fail the
-Mac dependency topology in this checkout, but the current-source sidecar
-`/Users/jemanuel/.local/bin/rch-33720a8` gets past `RCH-E327` when paired with
+bd-3opmx and bd-3tmeg unblock, proven 2026-06-05: release RCH binaries still
+fail the Mac dependency topology in this checkout, but the current-source
+sidecar `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5` gets past
+`RCH-E327`, rewrites manifest-declared path dependencies to their synced remote
+roots, and handles dependency roots discovered only from local manifests. Use
 the widened local topology above. The worker preflight remains fixed to
 `/dp -> /data/projects`, so `/data` is only the local alias root used by the
-dependency planner. The focused proof reached remote Cargo on `vmi1264463`:
-`remote dependency preflight verified 35 roots`, then
-`exec start: env 'TMPDIR=/tmp' cargo check --lib --quiet`.
+dependency planner.
 
-This is not a full clean Cargo pass. The next observed remote failure was a
-manifest rewrite miss: Cargo looked for
-`/tmp/rch-sync/.../projects/projects/frankensearch/frankensearch/Cargo.toml`
-while RCH had synced that dependency under `.../projects/dp/frankensearch/...`.
-Treat that as the next RCH path-rewrite blocker, not as a recurrence of
-`RCH-E327` or as permission to use local Cargo fallback.
+Proof:
+
+```text
+cargo test -p rch manifest_rewrite_rules --quiet -- --nocapture
+[RCH] remote vmi1264463 (513.9s)
+
+RCH_BUILD_TIMEOUT_SEC=1200 ... rch-manifestfix-20260605-5 exec -- \
+  env TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/ee-rch-verify-target cargo check --lib --quiet
+[RCH] remote vmi1264463 (839.6s)
+```
+
+The 1200s build timeout is intentional for large `cargo check` proofs. The
+default 300s build timeout reached remote Cargo and then failed closed with
+`RCH-E104` (`SSH command timed out after 300s`), which is a runtime budget
+blocker, not permission to use local Cargo fallback.
 
 The JSON proof schema is `ee.rch.verify.v1` and includes the command kind,
 remote-required flag, planned or actual RCH invocation, worker id when observed,

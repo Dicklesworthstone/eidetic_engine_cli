@@ -95,9 +95,12 @@ RCH_ATTEMPT_STDERR_FILE=""
 RCH_ATTEMPT_META_FILE=""
 RCH_RUNTIME_JSON='{"status":"not_checked","client_path":null,"client_version":null,"client_compat":null,"daemon_version":null,"daemon_compat":null,"daemon_socket_path":null,"message":null}'
 LOCAL_CARGO_PROCESSES_JSON='{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"not_run","count":0,"processes":[],"detectedLocalBuilds":[],"reason":"not requested"}'
+RCH_MANIFEST_FIX_SIDECAR_BIN="/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5"
 RCH_E327_SIDECAR_BIN="/Users/jemanuel/.local/bin/rch-33720a8"
 DEFAULT_RCH_BIN="/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch"
-if [ -z "${RCH_BIN:-}" ] && [ -x "$RCH_E327_SIDECAR_BIN" ]; then
+if [ -z "${RCH_BIN:-}" ] && [ -x "$RCH_MANIFEST_FIX_SIDECAR_BIN" ]; then
+    RCH_BIN="$RCH_MANIFEST_FIX_SIDECAR_BIN"
+elif [ -z "${RCH_BIN:-}" ] && [ -x "$RCH_E327_SIDECAR_BIN" ]; then
     RCH_BIN="$RCH_E327_SIDECAR_BIN"
 elif [ -z "${RCH_BIN:-}" ] && [ -x "$DEFAULT_RCH_BIN" ]; then
     RCH_BIN="$DEFAULT_RCH_BIN"

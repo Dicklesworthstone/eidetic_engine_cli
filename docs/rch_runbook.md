@@ -28,7 +28,8 @@ RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel \
 RCH_ALIAS_PROJECT_ROOT=/data \
 RCH_VISIBILITY=summary \
 RCH_COMPRESSION=0 \
-/Users/jemanuel/.local/bin/rch-33720a8 exec --json -- \
+RCH_BUILD_TIMEOUT_SEC=1200 \
+/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 exec --json -- \
   env TMPDIR=/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target \
   cargo <your-cargo-subcommand-here> -- --nocapture
 ```
@@ -87,7 +88,8 @@ response to an ambiguous proof is coordination, not mutation.
 | `RCH_QUEUE_WHEN_BUSY=1` | Wait when all workers are busy rather than refusing. |
 | `RCH_TEST_SLOTS=2` | Bound concurrent test slots so heavy benches don't starve focused tests. |
 | `RCH_DAEMON_{WAIT_,}RESPONSE_TIMEOUT_SECS=900` | The full project metadata is large; the 30s default times out and triggers the manifest-fallback path that produces `RCH-E327`. 900s avoids the timeout. |
-| `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel` + `RCH_ALIAS_PROJECT_ROOT=/data` | Current Mac wrapper default for the bd-3opmx E327 unblock. Requires `/Users/jemanuel/.local/bin/rch-33720a8` or a newer RCH with the fixed worker preflight; older release binaries apply the local `/data` alias on workers and fail before Cargo. |
+| `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel` + `RCH_ALIAS_PROJECT_ROOT=/data` | Current Mac wrapper default for the bd-3opmx E327 unblock. Requires `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5` or a newer RCH with the fixed worker preflight and manifest path rewrite; older release binaries apply the local `/data` alias on workers and fail before Cargo. |
+| `RCH_BUILD_TIMEOUT_SEC=1200` | Large `cargo check` proofs can exceed the default 300s build timeout after remote Cargo starts. The bd-3tmeg proof passed with 1200s; the 300s run failed closed with `RCH-E104` and no local fallback. |
 | `RCH_VISIBILITY=summary` | Less log noise; full transcripts when something goes wrong. |
 | `RCH_COMPRESSION=0` | Compression on the sync pipe occasionally corrupts the manifest header during topology preflight. Disabling has zero throughput cost on the local-network workers. |
 | Absolute RCH binary path | `~/.local/bin/rch` may be stale (missing the `exec` subcommand). The `target-local/release/rch` is always the live build. |
@@ -337,8 +339,9 @@ topology policy failed; move dependencies under /data/projects (or /dp) and retr
 `eidetic_engine_cli` checkout but not the Franken dependency tree under
 `/Users/jemanuel/dp`.
 
-**Current fix** (bd-3opmx, 2026-06-05): use the current-source sidecar
-`/Users/jemanuel/.local/bin/rch-33720a8` and the widened local topology:
+**Current fix** (bd-3opmx / bd-3tmeg, 2026-06-05): use the current-source
+sidecar `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5` and the
+widened local topology:
 
 ```toml
 # .rch/config.toml is gitignored local machine config.
@@ -371,28 +374,31 @@ Proof signal from the unblock run:
 
 ```text
 [RCH] topology preflight ok on vmi1264463 (/dp -> /data/projects enforced)
-[RCH] sync done: 25954 files, 418336382 bytes in 166623ms
-[RCH] remote dependency preflight verified 35 roots on vmi1264463
-[RCH] exec start: env 'TMPDIR=/tmp' cargo check --lib --quiet
+cargo test -p rch manifest_rewrite_rules --quiet -- --nocapture
+[RCH] remote vmi1264463 (513.9s)
+
+RCH_BUILD_TIMEOUT_SEC=1200 ... rch-manifestfix-20260605-5 exec -- \
+  env TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/ee-rch-verify-target cargo check --lib --quiet
+[RCH] remote vmi1264463 (839.6s)
 ```
 
-The next blocker is no longer `RCH-E327`: remote Cargo then failed with a
-manifest rewrite miss for `frankensearch`, looking under
-`.../projects/projects/frankensearch/frankensearch/Cargo.toml` while the synced
-root exists under `.../projects/dp/frankensearch/frankensearch/Cargo.toml`.
-Track that as a path-rewrite blocker, not as topology preflight failure.
+The former next blocker is also resolved: the sidecar rewrites manifest-declared
+path dependencies such as `frankensearch` to their synced `.../projects/dp/...`
+roots and syncs dependency roots discovered from manifests even when Cargo
+metadata did not include them as used packages.
 
 **Fix / disposition:**
 
 - Use `scripts/rch_verify.sh` for fail-closed evidence and preserve the exact
   first blocker text.
 - If `RCH-E327` recurs, first check that the wrapper selected
-  `/Users/jemanuel/.local/bin/rch-33720a8` or newer and that `.rch/config.toml`
-  still contains the local topology above.
+  `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5` or newer and that
+  `.rch/config.toml` still contains the local topology above.
+- For large `cargo check` proofs, set `RCH_BUILD_TIMEOUT_SEC=1200`; the default
+  300s build timeout fails closed with `RCH-E104` once remote Cargo runs longer
+  than five minutes.
 - Raise the daemon timeouts to 900s (`RCH_DAEMON_*_TIMEOUT_SECS=900`).
 - Disable compression (`RCH_COMPRESSION=0`).
-- Topology is **flaky** — succeeded slots last 1–2 minutes then re-block. If
-  you hit `RCH-E327`, retry every ~30s up to 3 times before reporting blocked.
 - Pin a known-good worker: `RCH_WORKERS=trj` (or css/csd).
 
 ### "All workers busy" (capacity wait)
