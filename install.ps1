@@ -831,6 +831,12 @@ function Main {
     }
     Write-Info "Install directory: $InstallDir"
 
+    # Required provenance has no signed release artifact to verify in a source
+    # build, so the two options are mutually exclusive (parity with install.sh).
+    if ($FromSource -and $RequireProvenance) {
+        Write-ErrorExit "-RequireProvenance cannot be combined with -FromSource: a source build has no Sigstore-signed release artifact to verify."
+    }
+
     # Version.
     if ($FromSource) {
         if (-not $Version) { $Version = "" }
@@ -889,6 +895,9 @@ function Main {
                     Invoke-DownloadFile -Url $effectiveUrl -OutFile $tarballPath
                 } catch {
                     Write-Warning2 "Artifact download failed: $($_.Exception.Message)"
+                    if ($RequireProvenance) {
+                        Write-ErrorExit "Artifact download failed and -RequireProvenance forbids the source fallback (a source build has no Sigstore-signed release artifact to verify)."
+                    }
                     Write-Warning2 "Falling back to -FromSource"
                     Invoke-FromSource -DestDir $InstallDir -BinaryName $Script:BinaryName -VersionTag $Version
                     Install-Completions -BinaryPath $binaryPath
