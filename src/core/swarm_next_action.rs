@@ -1513,7 +1513,9 @@ fn work_packet_candidates(
             let mut unsafe_reasons =
                 card.map_or_else(Vec::new, |card| card.do_not_take_because.clone());
             if decision == "unsafe_due_to_conflict" {
-                unsafe_reasons.extend(work_packet_candidate_conflict_evidence(brief, snapshot));
+                unsafe_reasons.extend(work_packet_candidate_conflict_evidence(
+                    candidate, brief, snapshot,
+                ));
                 unsafe_reasons.sort();
                 unsafe_reasons.dedup();
             }
@@ -1737,7 +1739,7 @@ fn work_packet_candidate_decision(
     if candidate_is_rollup(candidate) {
         return "blocked_rollup";
     }
-    if work_packet_candidate_conflict_present(brief, snapshot) {
+    if work_packet_candidate_conflict_present(candidate, brief, snapshot) {
         return "unsafe_due_to_conflict";
     }
     match card_decision {
@@ -1776,18 +1778,64 @@ fn candidate_release_operator_reasons(candidate: &SwarmNextActionCandidate) -> V
 }
 
 fn work_packet_candidate_conflict_present(
+    candidate: &SwarmNextActionCandidate,
     brief: &SwarmBriefReport,
     snapshot: &SwarmNextActionSnapshot,
 ) -> bool {
-    snapshot.checkout.dirty_path_count > 0
-        || brief.file_surface_risks.iter().any(|risk| {
-            risk.severity == "high"
-                || !risk.reservation_holders.is_empty()
-                || !risk.related_bead_ids.is_empty()
-        })
+    !work_packet_candidate_conflict_evidence(candidate, brief, snapshot).is_empty()
 }
 
 fn work_packet_candidate_conflict_evidence(
+    candidate: &SwarmNextActionCandidate,
+    brief: &SwarmBriefReport,
+    snapshot: &SwarmNextActionSnapshot,
+) -> Vec<String> {
+    let likely_paths = candidate_likely_edit_paths(candidate);
+    if likely_paths.is_empty() {
+        return work_packet_global_conflict_evidence(brief, snapshot);
+    }
+
+    let mut evidence = BTreeSet::new();
+    let dirty_overlaps = snapshot
+        .checkout
+        .dirty_paths
+        .iter()
+        .filter(|dirty_path| {
+            likely_paths
+                .iter()
+                .any(|path| path_patterns_overlap(path, dirty_path))
+        })
+        .collect::<Vec<_>>();
+    if !dirty_overlaps.is_empty() {
+        evidence.insert(format!(
+            "dirty_checkout_path_count:{}",
+            snapshot.checkout.dirty_path_count
+        ));
+        for dirty_path in dirty_overlaps {
+            evidence.insert(format!("dirty_path_overlap:{dirty_path}"));
+        }
+    }
+    for risk in &brief.file_surface_risks {
+        if !likely_paths
+            .iter()
+            .any(|path| path_patterns_overlap(path, &risk.path_pattern))
+        {
+            continue;
+        }
+        if risk.severity == "high" {
+            evidence.insert(format!("high_risk_dirty_surface:{}", risk.path_pattern));
+        }
+        if !risk.reservation_holders.is_empty() {
+            evidence.insert(format!("reservation_collision:{}", risk.path_pattern));
+        }
+        if !risk.related_bead_ids.is_empty() {
+            evidence.insert(format!("related_bead_collision:{}", risk.path_pattern));
+        }
+    }
+    evidence.into_iter().collect()
+}
+
+fn work_packet_global_conflict_evidence(
     brief: &SwarmBriefReport,
     snapshot: &SwarmNextActionSnapshot,
 ) -> Vec<String> {
@@ -6531,6 +6579,67 @@ mod tests {
                 .iter()
                 .any(|action| action.command_id == "bead_show_candidate")
         );
+        assert_eq!(
+            gate.claim_command_action
+                .as_ref()
+                .map(|action| action.command_id),
+            Some("bead_claim_candidate")
+        );
+    }
+
+    #[test]
+    fn work_packet_claim_gate_scopes_conflicts_to_candidate_paths() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.file_surface_risks = vec![crate::core::swarm_brief::SwarmBriefFileSurfaceRisk {
+            path_pattern: "tests/**".to_owned(),
+            git_status_buckets: Vec::new(),
+            reservation_holders: Vec::new(),
+            related_bead_ids: vec!["bd-other-tests".to_owned()],
+            severity: "high".to_owned(),
+            score: 100,
+            risk_factors: vec!["ready_bead_likely_surface".to_owned()],
+            evidence: vec!["bead:bd-other-tests:ready:touch test suite".to_owned()],
+            suggested_commands: vec!["br show bd-other-tests --json".to_owned()],
+        }];
+        let mut snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-pack",
+            "Improve context pack export",
+            "beads_ready",
+            Some(1),
+        )]);
+        snapshot.checkout.dirty_path_count = 1;
+        snapshot.checkout.dirty_paths = vec!["-".to_owned()];
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let candidate = packet
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == "bd-pack")
+            .expect("pack candidate present");
+
+        assert_eq!(packet.coordination.file_collision_count, 1);
+        assert_eq!(
+            packet.coordination.file_collisions[0].path_pattern,
+            "tests/**"
+        );
+        assert_eq!(candidate.decision, "safe_to_claim");
+        assert!(
+            !candidate
+                .unsafe_reasons
+                .contains(&"high_risk_dirty_surface:tests/**".to_owned())
+        );
+        assert!(
+            !candidate
+                .unsafe_reasons
+                .contains(&"dirty_checkout_path_count:1".to_owned())
+        );
+
+        let gate = packet.claim_gate(Some("bd-pack"));
+
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(true));
+        assert_eq!(gate.verdict, "safe_to_claim");
+        assert!(gate.safe_to_claim);
+        assert!(gate.unsafe_reasons.is_empty());
         assert_eq!(
             gate.claim_command_action
                 .as_ref()
