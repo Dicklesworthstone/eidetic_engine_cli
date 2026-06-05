@@ -127,8 +127,7 @@ fn invalid_trace_strategy() -> impl Strategy<Value = InvalidTraceCase> {
             expected_stderr: "exceeds max bytes",
         }),
         (2usize..=8).prop_map(|rows| InvalidTraceCase {
-            trace: std::iter::repeat(json!({"schema": "ee.test_event.v1"}).to_string())
-                .take(rows)
+            trace: std::iter::repeat_n(json!({"schema": "ee.test_event.v1"}).to_string(), rows)
                 .collect::<Vec<_>>()
                 .join("\n")
                 + "\n",
