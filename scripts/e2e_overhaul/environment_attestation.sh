@@ -365,7 +365,7 @@ validate_event_log() {
     fi
     if grep -Fq "$WORKSPACE" "$EVENT_LOG" ||
         grep -Fq "$RUN_ROOT" "$EVENT_LOG" ||
-        grep -Fq "$SNAPSHOT_PATH" "$EVENT_LOG"; then
+        { [ -n "$SNAPSHOT_PATH" ] && grep -Fq "$SNAPSHOT_PATH" "$EVENT_LOG"; }; then
         printf 'error: event log leaked raw workspace, run root, or snapshot path\n' >"$VALIDATION_STDERR"
         cat "$VALIDATION_STDERR" >&2
         fail_with_artifacts \
@@ -606,8 +606,10 @@ run_attestation_case \
 run_attestation_case \
     "environment-attestation-no-sources" \
     '.data.sourceAuthority
-      | any(.source == "claim_gate" and .status == "not_collected")
-      and any(.source == "local_cargo_tripwire")' \
+      | any(.source == "source_tree" and .status == "not_collected")
+      and any(.source == "rch" and .status == "not_collected")
+      and any(.source == "local_cargo_tripwire" and .status == "ok")
+      and any(.source == "file_reservations" and .status == "ok")' \
     "ee diag environment-attestation --workspace [WORKSPACE] --sources none --json" \
     diag environment-attestation \
     --workspace "$WORKSPACE" \
