@@ -322,4 +322,57 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn sieve_zero_limit_considers_candidates_but_selects_none() -> TestResult {
+        let candidates = vec![
+            candidate("0001", "alpha", "procedural", "rule", 8.0),
+            candidate("0002", "beta", "semantic", "fact", 7.0),
+        ];
+
+        let selection = sieve_stream_consolidation_candidates(candidates, 0);
+        if !selection.candidates.is_empty() {
+            return Err(format!(
+                "zero limit must select no candidates, got {:?}",
+                selection.candidates
+            ));
+        }
+        if selection.considered_candidates != 2 {
+            return Err(format!(
+                "zero-limit run must still report two considered candidates, got {}",
+                selection.considered_candidates
+            ));
+        }
+        if selection.objective_value != 0.0 {
+            return Err(format!(
+                "zero-limit objective must be 0.0, got {}",
+                selection.objective_value
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn normalization_and_limit_defaults_are_stable() -> TestResult {
+        let normalized = normalize_memory_content_for_consolidation("  Cargo   fmt\nCHECK  ");
+        if normalized != "cargo fmt check" {
+            return Err(format!("unexpected normalized content: {normalized:?}"));
+        }
+
+        let default_limit = consolidation_sieve_candidate_limit(None);
+        if default_limit != CONSOLIDATION_SIEVE_DEFAULT_MAX_CANDIDATES {
+            return Err(format!(
+                "default limit changed: expected {}, got {default_limit}",
+                CONSOLIDATION_SIEVE_DEFAULT_MAX_CANDIDATES
+            ));
+        }
+
+        let explicit_limit = consolidation_sieve_candidate_limit(Some(3));
+        if explicit_limit != 3 {
+            return Err(format!(
+                "explicit limit should stay 3, got {explicit_limit}"
+            ));
+        }
+        Ok(())
+    }
 }

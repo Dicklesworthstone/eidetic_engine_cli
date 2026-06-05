@@ -575,7 +575,7 @@ test_reference_matches() {
 rust_test_file_has_assertion() {
     local test_file="$1"
 
-    grep -Eq 'assert(!|_eq!|_ne!|_matches!|_json_snapshot!)|prop_assert|proptest!|expect\(|ensure\(|ensure_eq\(' "$test_file"
+    grep -Eq 'assert(!|_eq!|_ne!|_matches!|_json_snapshot!)|prop_assert|proptest!|expect\(|ensure\(|ensure_eq\(|ensure_equal\(|require\(|return[[:space:]]+Err\(' "$test_file"
 }
 
 rust_test_file_has_only_ignored_tests() {
