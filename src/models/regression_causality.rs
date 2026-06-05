@@ -1255,12 +1255,8 @@ fn normalize_one(
     input: &RegressionEvidenceInput,
     degraded: &mut Vec<RegressionNormalizationDegradation>,
 ) -> NormalizedRegressionEvidenceRow {
-    let accepted_kind = RegressionEvidenceKind::parse(&input.kind);
-    let kind = accepted_kind
-        .map(|kind| kind.as_str().to_owned())
-        .unwrap_or_else(|| normalized_token(&input.kind));
-
-    if accepted_kind.is_none() {
+    let Some(accepted_kind) = RegressionEvidenceKind::parse(&input.kind) else {
+        let kind = normalized_token(&input.kind);
         degraded.push(degradation(
             "regression_evidence_unsupported_kind",
             RegressionCausalitySeverity::Medium,
@@ -1275,7 +1271,8 @@ fn normalize_one(
             RegressionRedactionStatus::Unknown,
             "Unsupported evidence kind; no artifact fields were trusted.",
         );
-    }
+    };
+    let kind = accepted_kind.as_str().to_owned();
 
     let Some(artifact) = &input.artifact else {
         degraded.push(degradation(
@@ -1403,12 +1400,10 @@ fn normalize_one(
     if schema_id.is_none()
         && matches!(
             accepted_kind,
-            Some(
-                RegressionEvidenceKind::VerificationEvidence
-                    | RegressionEvidenceKind::SwarmReplay
-                    | RegressionEvidenceKind::PerfReport
-                    | RegressionEvidenceKind::SupportBundle
-            )
+            RegressionEvidenceKind::VerificationEvidence
+                | RegressionEvidenceKind::SwarmReplay
+                | RegressionEvidenceKind::PerfReport
+                | RegressionEvidenceKind::SupportBundle
         )
     {
         degraded_codes.push("regression_evidence_schema_missing".to_owned());
@@ -1441,7 +1436,7 @@ fn normalize_one(
         remote_source_materialized,
         redaction_status,
         authoritative: status != RegressionEvidenceStatus::Unsupported,
-        summary: evidence_summary(status, accepted_kind.unwrap_or(kind), &input.id),
+        summary: evidence_summary(status, accepted_kind, &input.id),
         degraded_codes,
         provenance: RegressionEvidenceProvenance {
             source_fields: present_source_fields(artifact),
