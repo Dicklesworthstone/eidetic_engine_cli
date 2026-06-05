@@ -249,7 +249,8 @@ fn assert_usage_error(parsed: &Value, message_needles: &[&str], repair_needle: &
 
 fn assert_score_array_well_formed(scores: &[Value], label: &str) -> TestResult {
     for (index, score) in scores.iter().enumerate() {
-        let expected_rank = u64::try_from(index + 1).expect("rank fits u64");
+        let expected_rank = u64::try_from(index + 1)
+            .map_err(|error| format!("{label}[{index}].rank conversion failed: {error}"))?;
         ensure(
             score["rank"].as_u64() == Some(expected_rank),
             format!("{label}[{index}].rank must be {expected_rank}; got {score}"),

@@ -1,6 +1,7 @@
 //! Executable SRR6.20 checks for two-tier latency, freshness, and budget proof.
 
 #[path = "../src/mesh/anti_entropy_protocol.rs"]
+#[allow(dead_code)]
 mod anti_entropy_protocol;
 
 use anti_entropy_protocol::{
