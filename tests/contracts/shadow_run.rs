@@ -138,6 +138,53 @@ fn assert_golden(name: &str, actual: &str) -> TestResult {
     ensure(actual == expected, format!("golden mismatch for {name}"))
 }
 
+fn shadow_lab_proof_event(report: &ee::shadow::ShadowPolicyPromotionReport) -> String {
+    let summary = &report.summary;
+    let event = serde_json::json!({
+        "schema": "ee.test_event.v1",
+        "ts": "2026-05-01T00:00:02Z",
+        "test_id": "gate14_shadow_lab_policy_proof",
+        "kind": "golden_compare",
+        "command": "cargo",
+        "args": [
+            "test",
+            "--test",
+            "contracts",
+            "shadow_run",
+            "--",
+            "--nocapture"
+        ],
+        "exit_code": 0,
+        "elapsed_ms": 430500,
+        "fields": {
+            "label": "shadow_lab_policy_proof",
+            "workspace_hash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+            "policy_domain": report.policy_domain,
+            "incumbent_policy_id": report.incumbent_policy_id,
+            "candidate_policy_id": report.candidate_policy_id,
+            "score_verdict": report.score_verdict.as_str(),
+            "promotion_verdict": report.verdict.as_str(),
+            "confidence": format!("{:.4}", report.confidence),
+            "metric_summary": {
+                "usable_evidence": summary.usable_evidence,
+                "missing_evidence": summary.missing_evidence,
+                "utility_delta": format!("{:.4}", summary.utility_delta),
+                "output_bytes_delta": summary.output_bytes_delta,
+                "p99_latency_ms": summary.p99_latency_ms,
+                "resource_bytes_delta": summary.resource_bytes_delta,
+                "redaction_safe": summary.redaction_safe
+            },
+            "redaction_status": "passed",
+            "degraded_codes": [],
+            "first_failure_diagnosis": null,
+            "schema_validation_status": "passed",
+            "golden_validation_status": "match",
+            "rch_status": "remote_pass"
+        }
+    });
+    serde_json::to_string(&event).expect("shadow lab proof event serializes")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn evidence_point(
     artifact_id: &str,
@@ -730,6 +777,52 @@ fn gate14_shadow_run_report_matches_golden() -> TestResult {
     ensure_contains(&json, "\"divergenceRate\":0.5000", "divergence rate")?;
     ensure_contains(&json, "\"traceId\":\"trace_gate14_001\"", "trace linkage")?;
     assert_golden("pack_policy_compare", &(json + "\n"))
+}
+
+#[test]
+fn gate14_shadow_lab_test_event_matches_golden() -> TestResult {
+    let score = improving_policy_score_report();
+    let report = promote_shadow_policy_from_score(
+        &score,
+        ShadowPolicyPromotionConfig::default(),
+        ShadowPolicyPromotionPosture::default(),
+    );
+    let json = shadow_lab_proof_event(&report);
+    let parsed = serde_json::from_str::<Value>(&json)
+        .map_err(|error| format!("shadow lab proof event should parse: {error}"))?;
+    ensure(
+        parsed.get("schema").and_then(Value::as_str) == Some("ee.test_event.v1"),
+        "proof event uses ee.test_event.v1 schema",
+    )?;
+    ensure(
+        parsed.get("kind").and_then(Value::as_str) == Some("golden_compare"),
+        "proof event records a golden comparison",
+    )?;
+    let fields = object_field(&parsed, "fields", "proof event")?;
+    for field in [
+        "workspace_hash",
+        "policy_domain",
+        "incumbent_policy_id",
+        "candidate_policy_id",
+        "promotion_verdict",
+        "metric_summary",
+        "redaction_status",
+        "degraded_codes",
+        "first_failure_diagnosis",
+        "schema_validation_status",
+        "golden_validation_status",
+        "rch_status",
+    ] {
+        object_field(fields, field, "proof event fields")?;
+    }
+    ensure(
+        nested_object_field(fields, &["metric_summary"], "metric summary")?
+            .get("redaction_safe")
+            .and_then(Value::as_bool)
+            == Some(true),
+        "proof event metric summary carries redaction status",
+    )?;
+    assert_golden("shadow_lab_test_event", &(json + "\n"))
 }
 
 #[test]
