@@ -308,11 +308,19 @@ def normalize_run(raw_run, repository, artifact_index)
       "not_applicable"
     end
 
+  expected_artifact = artifacts.find { |artifact| artifact["name"] == EXPECTED_ARTIFACT }
+  failed_surface_probe = expected_artifact &&
+    expected_artifact.fetch("surfaceProbes", []).find { |probe| probe["status"] == "failed" }
   first_failure =
     if conclusion == "cancelled"
       "run cancelled before artifact upload; this is not a source/test verdict"
-    elsif artifacts.any? { |artifact| artifact["status"] == "missing" }
+    elsif expected_artifact && expected_artifact["status"] == "missing"
       "expected artifact was missing after successful proof-lane completion"
+    elsif expected_artifact && expected_artifact["checksumStatus"] == "mismatch"
+      "artifact checksum mismatch; reject artifact before binary proof reuse"
+    elsif failed_surface_probe
+      failed_surface_probe["firstFailureDiagnosis"] ||
+        "artifact surface probe failed required command-surface validation"
     elsif freshness == "stale" && artifacts.any? { |artifact| artifact["status"] == "available" }
       "artifact source SHA is older than the requested repository head SHA"
     else
@@ -375,6 +383,10 @@ def recommendation(verdict, run_id)
     ["macOS EE Artifact", run_id, "file_followup_bead", "Completed proof-lane run did not expose the expected artifact; do not treat it as binary proof."]
   when "artifact_stale"
     ["macOS EE Artifact", run_id, "dispatch_new_run", "Available artifact is stale relative to the requested head SHA; coordinate before dispatching a current-head run."]
+  when "checksum_mismatch"
+    ["macOS EE Artifact", run_id, "file_followup_bead", "Artifact checksum mismatch rejects this binary proof; repair the proof lane before reuse."]
+  when "surface_probe_failed"
+    ["macOS EE Artifact", run_id, "file_followup_bead", "Artifact surface probe failed the required command surface; repair the artifact or probe before reuse."]
   when "gh_unavailable"
     [nil, nil, "abstain_manual_review", "GitHub Actions state could not be read; preserve the first gh error and abstain."]
   else
@@ -392,6 +404,10 @@ def degraded_for(verdict)
     [["ci_proof_lane_artifact_missing", "warning", "The proof-lane run completed but the expected artifact is unavailable.", "Inspect the artifact upload job and file a workflow follow-up before reusing this lane."]]
   when "artifact_stale"
     [["ci_proof_lane_artifact_stale", "warning", "The artifact source SHA is stale relative to the requested repository head SHA.", "Wait for or dispatch a current-head proof-lane run before using the artifact."]]
+  when "checksum_mismatch"
+    [["ci_proof_lane_checksum_mismatch", "high", "The proof-lane artifact checksum did not verify.", "Reject the artifact and repair checksum provenance before reuse."]]
+  when "surface_probe_failed"
+    [["ci_proof_lane_surface_probe_failed", "high", "The proof-lane artifact failed the required command-surface probe.", "Reject the artifact until the expected ee surface is proven."]]
   when "gh_unavailable"
     [["ci_proof_lane_gh_unavailable", "warning", "The producer could not read GitHub Actions state.", "Check gh authentication/network state or rerun with --input fixture JSON."]]
   when "no_matching_run"
@@ -409,7 +425,7 @@ def recovery_for(verdict, run_id)
     [["download", "gh run download #{run_id} --name #{EXPECTED_ARTIFACT} --dir <external-temp>", false, "Download into external temp, verify checksum, then run the no-mock harness with EE_BINARY."]]
   when "wait_for_active_run", "duplicate_dispatch_detected"
     [["wait", "gh run view #{run_id} --json status,conclusion,jobs", false, "Poll the active artifact run until it reaches a terminal conclusion."]]
-  when "run_cancelled_before_artifact", "artifact_missing", "artifact_stale", "gh_unavailable"
+  when "run_cancelled_before_artifact", "artifact_missing", "artifact_stale", "checksum_mismatch", "surface_probe_failed", "gh_unavailable"
     [["manual_review", "preserve first-failure diagnosis", false, "Do not treat this proof-lane state as source/test evidence."]]
   else
     [["coordinate", "send Agent Mail before workflow_dispatch", false, "Avoid duplicate dispatches before creating a new proof-lane run."]]
@@ -438,6 +454,8 @@ def choose_verdict(raw_runs, normalized_runs, head_sha)
   current_success.each do |run|
     artifact = run["artifacts"].find { |item| item["name"] == EXPECTED_ARTIFACT }
     if artifact && artifact["status"] == "available"
+      return ["checksum_mismatch", run["runId"]] if artifact["checksumStatus"] == "mismatch"
+      return ["surface_probe_failed", run["runId"]] if artifact.fetch("surfaceProbes", []).any? { |probe| probe["status"] == "failed" }
       return ["fresh_artifact_available", run["runId"]]
     elsif artifact && artifact["status"] == "missing"
       return ["artifact_missing", run["runId"]]
@@ -481,6 +499,7 @@ def build_snapshot(repository:, generated_at:, raw_runs:, artifact_index: {}, gh
   cancelled_count = normalized_runs.count { |run| run["conclusion"] == "cancelled" && run["headSha"] == repository.fetch("headSha") }
   stale_count = normalized_runs.count { |run| run["sourceFreshness"] == "stale" && run["artifacts"].any? { |artifact| artifact["status"] == "available" } }
   checksum_mismatch_count = normalized_runs.sum { |run| run["artifacts"].count { |artifact| artifact["checksumStatus"] == "mismatch" } }
+  artifact_authority_verdicts = %w[fresh_artifact_available artifact_stale checksum_mismatch surface_probe_failed]
 
   workflow_name, run_id, next_action, rationale = recommendation(verdict, verdict_run_id)
 
@@ -499,7 +518,7 @@ def build_snapshot(repository:, generated_at:, raw_runs:, artifact_index: {}, gh
       "staleArtifactCount" => stale_count,
       "checksumMismatchCount" => checksum_mismatch_count,
       "localCargoFallbackAllowed" => false,
-      "sourceTestVerdict" => verdict == "fresh_artifact_available" || verdict == "artifact_stale" ? "artifact_authority_only" : "not_evaluated"
+      "sourceTestVerdict" => artifact_authority_verdicts.include?(verdict) ? "artifact_authority_only" : "not_evaluated"
     },
     "workflows" => workflows,
     "activeRecommendation" => {

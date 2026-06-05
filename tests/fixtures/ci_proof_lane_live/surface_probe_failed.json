@@ -1,0 +1,48 @@
+{
+  "schema": "ee.ci_proof_lane_input.v1",
+  "repository": {
+    "owner": "Dicklesworthstone",
+    "name": "eidetic_engine_cli",
+    "defaultBranch": "main",
+    "headSha": "33143b85697ef58bbc566aa64f918840f40dc3f0"
+  },
+  "generatedAt": "2026-06-05T10:46:00Z",
+  "runs": [
+    {
+      "databaseId": "27009940002",
+      "workflowName": "macOS EE Artifact",
+      "status": "completed",
+      "conclusion": "success",
+      "headSha": "33143b85697ef58bbc566aa64f918840f40dc3f0",
+      "event": "workflow_dispatch",
+      "headBranch": "main",
+      "createdAt": "2026-06-05T10:34:38Z",
+      "updatedAt": "2026-06-05T10:46:38Z",
+      "completedAt": "2026-06-05T10:46:38Z",
+      "jobs": [
+        {
+          "databaseId": "79710782692",
+          "name": "build aarch64-apple-darwin debug ee"
+        }
+      ],
+      "artifacts": [
+        {
+          "name": "ee-aarch64-apple-darwin-debug",
+          "status": "available",
+          "retentionExpiresAt": "2026-06-08T10:46:38Z",
+          "checksumStatus": "verified",
+          "sourceSha": "33143b85697ef58bbc566aa64f918840f40dc3f0",
+          "architecture": "aarch64-apple-darwin",
+          "surfaceProbes": [
+            {
+              "commandTemplate": "ee diag environment-attestation --help",
+              "status": "failed",
+              "expectedSurface": "diag environment-attestation",
+              "firstFailureDiagnosis": "expected diag environment-attestation surface was not present"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

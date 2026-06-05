@@ -50,6 +50,29 @@ assert_fixture \
       and .summary.localCargoFallbackAllowed == false
       and .activeRecommendation.nextAction == "dispatch_new_run"'
 
+assert_fixture \
+    checksum_mismatch.json \
+    '.schema == "ee.ci_proof_lane_snapshot.v1"
+      and .summary.verdict == "checksum_mismatch"
+      and .summary.checksumMismatchCount == 1
+      and .summary.sourceTestVerdict == "artifact_authority_only"
+      and .summary.localCargoFallbackAllowed == false
+      and .activeRecommendation.nextAction == "file_followup_bead"
+      and .degraded[0].code == "ci_proof_lane_checksum_mismatch"
+      and .degraded[0].severity == "high"
+      and (.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[0].firstFailureDiagnosis | contains("checksum mismatch"))'
+
+assert_fixture \
+    surface_probe_failed.json \
+    '.schema == "ee.ci_proof_lane_snapshot.v1"
+      and .summary.verdict == "surface_probe_failed"
+      and .summary.sourceTestVerdict == "artifact_authority_only"
+      and .summary.localCargoFallbackAllowed == false
+      and .activeRecommendation.nextAction == "file_followup_bead"
+      and .degraded[0].code == "ci_proof_lane_surface_probe_failed"
+      and .degraded[0].severity == "high"
+      and (.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[0].artifacts[0].surfaceProbes[0].status) == "failed"'
+
 EE_CI_PROOF_LANE_GH_BIN=/definitely/not/gh \
     "$SNAPSHOT_SCRIPT" \
     --head-sha 7044bf29b7d11fa76ca4a7af0c4a1abe0ad93939 \

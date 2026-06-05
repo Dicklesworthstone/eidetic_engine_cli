@@ -1,0 +1,105 @@
+{
+  "schema": "ee.ci_proof_lane_snapshot.v1",
+  "snapshotId": "ci_proof_lane_fcf73d5ee369ab9b0e072629",
+  "repository": {
+    "owner": "Dicklesworthstone",
+    "name": "eidetic_engine_cli",
+    "defaultBranch": "main",
+    "headSha": "33143b85697ef58bbc566aa64f918840f40dc3f0"
+  },
+  "generatedAt": "2026-06-05T10:46:00Z",
+  "redactionStatus": "workflow_run_job_artifact_ids_statuses_hashes_no_logs_no_tokens_no_local_paths",
+  "summary": {
+    "verdict": "surface_probe_failed",
+    "freshArtifactAvailable": false,
+    "duplicateDispatchCount": 0,
+    "activeRunCount": 0,
+    "cancelledBeforeArtifactCount": 0,
+    "staleArtifactCount": 0,
+    "checksumMismatchCount": 0,
+    "localCargoFallbackAllowed": false,
+    "sourceTestVerdict": "artifact_authority_only"
+  },
+  "workflows": [
+    {
+      "workflowName": "CI",
+      "workflowPath": ".github/workflows/ci.yml",
+      "proofLaneKind": "ci",
+      "concurrencyGroup": "${{ github.workflow }}-${{ github.ref }}",
+      "dispatchPolicy": "manual_review_required",
+      "status": "unknown",
+      "runs": [
+
+      ]
+    },
+    {
+      "workflowName": "macOS EE Artifact",
+      "workflowPath": ".github/workflows/macos-ee-artifact.yml",
+      "proofLaneKind": "dedicated_artifact",
+      "concurrencyGroup": "macos-ee-artifact-${{ github.workflow }}-${{ github.sha }}",
+      "dispatchPolicy": "reuse_active_same_head",
+      "status": "ok",
+      "runs": [
+        {
+          "runId": "27009940002",
+          "jobIds": [
+            "79710782692"
+          ],
+          "event": "workflow_dispatch",
+          "headSha": "33143b85697ef58bbc566aa64f918840f40dc3f0",
+          "ref": "refs/heads/main",
+          "status": "completed",
+          "conclusion": "success",
+          "createdAt": "2026-06-05T10:34:38Z",
+          "updatedAt": "2026-06-05T10:46:38Z",
+          "completedAt": "2026-06-05T10:46:38Z",
+          "sourceFreshness": "current",
+          "artifactFreshness": "current",
+          "artifacts": [
+            {
+              "name": "ee-aarch64-apple-darwin-debug",
+              "status": "available",
+              "retentionExpiresAt": "2026-06-08T10:46:38Z",
+              "checksumStatus": "verified",
+              "sourceSha": "33143b85697ef58bbc566aa64f918840f40dc3f0",
+              "architecture": "aarch64-apple-darwin",
+              "surfaceProbes": [
+                {
+                  "commandTemplate": "ee diag environment-attestation --help",
+                  "status": "failed",
+                  "expectedSurface": "diag environment-attestation",
+                  "firstFailureDiagnosis": "expected diag environment-attestation surface was not present"
+                }
+              ]
+            }
+          ],
+          "firstFailureDiagnosis": "expected diag environment-attestation surface was not present"
+        }
+      ]
+    }
+  ],
+  "activeRecommendation": {
+    "verdict": "surface_probe_failed",
+    "workflowName": "macOS EE Artifact",
+    "runId": "27009940002",
+    "nextAction": "file_followup_bead",
+    "rationale": "Artifact surface probe failed the required command surface; repair the artifact or probe before reuse."
+  },
+  "recoveryActions": [
+    {
+      "priority": 0,
+      "kind": "manual_review",
+      "command": "preserve first-failure diagnosis",
+      "mutatesState": false,
+      "rationale": "Do not treat this proof-lane state as source/test evidence."
+    }
+  ],
+  "degraded": [
+    {
+      "code": "ci_proof_lane_surface_probe_failed",
+      "severity": "high",
+      "message": "The proof-lane artifact failed the required command-surface probe.",
+      "repair": "Reject the artifact until the expected ee surface is proven."
+    }
+  ]
+}
