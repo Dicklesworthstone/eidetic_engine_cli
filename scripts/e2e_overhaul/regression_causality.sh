@@ -116,20 +116,43 @@ emit_case_event() {
     local stdout_path="${5:?stdout path required}"
     local stderr_path="${6:?stderr path required}"
     local first_failure_diagnosis="${7:-}"
+    local command="${8:-ee regress explain}"
+    local cwd="${9:-$PWD}"
+    local schema_validation="${10:-not_checked}"
+    local redaction_status="${11:-unknown}"
+    local source_authority="${12:-unknown}"
+    local verdict="${13:-$status}"
+    local degraded_codes="${14:-none}"
+    local tmpdir_set cargo_target_dir_set ee_binary_basename sanitized_env
+    tmpdir_set="$([ -n "${TMPDIR:-}" ] && printf true || printf false)"
+    cargo_target_dir_set="$([ -n "${CARGO_TARGET_DIR:-}" ] && printf true || printf false)"
+    ee_binary_basename="$(basename "$EE_BINARY")"
+    sanitized_env="TMPDIR_SET=$tmpdir_set;CARGO_TARGET_DIR_SET=$cargo_target_dir_set;EE_BINARY_BASENAME=$ee_binary_basename"
 
     _e2e_emit_event "regression_causality_case" \
+        "command" "$command" \
         "case" "$case_name" \
         "status" "$status" \
         "exit_code" "$exit_code" \
         "elapsed_ms" "$elapsed_ms" \
+        "cwd" "$cwd" \
+        "sanitized_env" "$sanitized_env" \
         "stdout_path" "$stdout_path" \
         "stderr_path" "$stderr_path" \
+        "schema_validation" "$schema_validation" \
+        "redaction_status" "$redaction_status" \
+        "source_authority" "$source_authority" \
+        "verdict" "$verdict" \
+        "degraded_codes" "$degraded_codes" \
         "first_failure_diagnosis" "$first_failure_diagnosis"
 }
 
 if ! "$EE_BINARY" regress explain --help >"$COMMAND_CHECK_STDOUT" 2>"$COMMAND_CHECK_STDERR"; then
     emit_case_event "command_availability" "blocked" "3" "0" \
         "$COMMAND_CHECK_STDOUT" "$COMMAND_CHECK_STDERR" \
+        "regression_causality_command_unavailable_or_stale_binary" \
+        "ee regress explain --help" "$PWD" "not_applicable" "safe" \
+        "binary_unavailable_or_stale" "blocked" \
         "regression_causality_command_unavailable_or_stale_binary"
     e2e_log_note "regression_causality_command_unavailable_or_stale_binary binary=$EE_BINARY stdout=$COMMAND_CHECK_STDOUT stderr=$COMMAND_CHECK_STDERR"
     exit 3
@@ -142,8 +165,9 @@ run_regress_case() {
 
     local stdout_path="$ARTIFACT_DIR/${case_name}.stdout.json"
     local stderr_path="$ARTIFACT_DIR/${case_name}.stderr.txt"
-    local started ended elapsed_ms exit_code status diagnosis
+    local started ended elapsed_ms exit_code status diagnosis schema_validation redaction_status degraded_codes
     started="$(now_ms)"
+    set +e
     "$EE_BINARY" \
         --workspace "$EPIC_WORKSPACE" \
         --json \
@@ -153,20 +177,29 @@ run_regress_case() {
         --workspace-hash "blake3:bd391ze6workspace" \
         >"$stdout_path" 2>"$stderr_path"
     exit_code=$?
+    set -e
     ended="$(now_ms)"
     elapsed_ms=$((ended - started))
     if [ "$exit_code" -eq 0 ] && jq -e '.schema == "ee.response.v2" and .success == true' "$stdout_path" >/dev/null 2>&1; then
         status="ok"
         diagnosis=""
+        schema_validation="ee.response.v2_success"
+        redaction_status="$(jq -r '.data.redaction.status // .data.redactionStatus // "safe"' "$stdout_path" 2>/dev/null || printf 'safe')"
+        degraded_codes="$(jq -r '[.data.degraded[]?.code, .degraded[]?.code] | map(select(. != null)) | if length == 0 then "none" else join(",") end' "$stdout_path" 2>/dev/null || printf 'unknown')"
     else
         status="failed"
         diagnosis="$(head -c 240 "$stderr_path" | tr '\n' ' ')"
         if [ -z "$diagnosis" ]; then
             diagnosis="regress explain did not emit a successful ee.response.v2 payload"
         fi
+        schema_validation="failed"
+        redaction_status="unknown"
+        degraded_codes="unknown"
     fi
     emit_case_event "$case_name" "$status" "$exit_code" "$elapsed_ms" \
-        "$stdout_path" "$stderr_path" "$diagnosis"
+        "$stdout_path" "$stderr_path" "$diagnosis" \
+        "ee regress explain" "$EPIC_WORKSPACE" "$schema_validation" \
+        "$redaction_status" "real_cli_artifacts" "$status" "$degraded_codes"
     e2e_log_assert_eq "$exit_code" "0" "${case_name}_exit_zero"
     printf '%s\n' "$stdout_path"
 }
