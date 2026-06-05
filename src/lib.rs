@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 #![doc = "Library surface for the `ee` command-line memory substrate."]
 
 pub mod cache;
