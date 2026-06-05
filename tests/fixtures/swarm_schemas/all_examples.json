@@ -57,6 +57,58 @@
       "firstFailureSummaryRef": null,
       "suggestedAction": "cite_existing_run"
     },
+    "ee.proof_broker.v1": {
+      "schema": "ee.proof_broker.v1",
+      "rowId": "proof_row_1f27cee6df89bacb307ecd5766",
+      "fingerprint": {
+        "fingerprintId": "proof_8b5aef673db0720e65cb40bad0",
+        "beadId": "bd-1n3x1.1",
+        "commandClass": "cargo_test",
+        "commandHash": "blake3:rch-command",
+        "normalizedArgvHash": "blake3:rch-command-argv",
+        "sourceTreeFingerprint": "blake3:source",
+        "sourceMaterialization": "git_worktree",
+        "dirtyStatusHash": "blake3:dirty-status-clean",
+        "envFingerprintClass": "class:external_cargo_target",
+        "targetProfile": "debug",
+        "executionSubstrate": "rch",
+        "rchRuntimeClass": "class:rch_client_1_0_37_daemon_0_1_3",
+        "workerRequirement": "required_runtime:rust",
+        "localCargoTripwireClass": "class:tripwire_clean",
+        "buildAdmissionPosture": "remote_required_no_local_fallback"
+      },
+      "state": "completed",
+      "admission": {
+        "verdict": "reuse_existing",
+        "reasonCodes": ["command_match", "env_class_match", "runtime_match", "source_match", "tripwire_clean"],
+        "nextAction": "cite_existing_run",
+        "reuseRunId": "vrun_rch_00000000000000000001",
+        "waitOwner": null
+      },
+      "runId": "vrun_rch_00000000000000000001",
+      "owner": {
+        "agentName": "RubyWolf",
+        "beadId": "bd-1n3x1.1",
+        "mailThreadId": "8198",
+        "buildSlot": "proof:bd-1n3x1.1:broker",
+        "rchJobId": "rch-job-20260605-0001"
+      },
+      "createdAt": "2026-06-05T17:20:00Z",
+      "startedAt": "2026-06-05T17:00:00Z",
+      "completedAt": "2026-06-05T17:08:00Z",
+      "expiresAt": "2026-06-05T19:08:00Z",
+      "sourceStateValidUntil": "2026-06-05T19:08:00Z",
+      "invalidationReasons": [],
+      "evidenceRefs": [
+        {
+          "kind": "verification_run",
+          "id": "vrun_rch_00000000000000000001",
+          "contentHash": "blake3:artifact-manifest",
+          "redacted": true
+        }
+      ],
+      "rawOutputIncluded": false
+    },
     "ee.verification.run.v1": {
       "schema": "ee.verification.run.v1",
       "runId": "vrun_rch_00000000000000000001",

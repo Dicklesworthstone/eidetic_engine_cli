@@ -100,6 +100,23 @@
       "forbiddenCurrentClaims": []
     },
     {
+      "schemaId": "ee.proof_broker.v1",
+      "status": "current",
+      "surface": "proof_broker_ledger",
+      "owner": "src/output/mod.rs::public_schemas",
+      "schemaFile": "docs/schemas/swarm/ee.proof_broker.v1.json",
+      "canonicalDocs": [
+        "docs/swarm/proof_broker.md",
+        "docs/schemas/swarm/ee.proof_broker.v1.json"
+      ],
+      "currentFacingContexts": [
+        "docs/swarm/proof_broker.md",
+        "docs/schemas/swarm/ee.proof_broker.v1.json"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
       "schemaId": "ee.swarm_slo.resource_usage_event.v1",
       "status": "current",
       "surface": "swarm_slo_attribution_event",

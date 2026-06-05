@@ -65,6 +65,13 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         shipped: true,
     },
     SchemaCase {
+        id: "ee.proof_broker.v1",
+        file_name: "ee.proof_broker.v1.json",
+        doc_path: "docs/swarm/proof_broker.md",
+        tracking_bead: "bd-1n3x1.1",
+        shipped: false,
+    },
+    SchemaCase {
         id: "ee.verification.run.v1",
         file_name: "ee.verification.run.v1.json",
         doc_path: "docs/swarm/verification_run.md",
@@ -223,6 +230,12 @@ const DRIFT_CASES: &[DriftCase] = &[
         command: "ee verify broker lookup --json",
         json_path: ".data.broker",
         fixture_manifest_key: "ee.verification.broker_view.v1",
+    },
+    DriftCase {
+        schema_id: "ee.proof_broker.v1",
+        command: "planned ee proof admit --json",
+        json_path: ".data.proofBroker",
+        fixture_manifest_key: "ee.proof_broker.v1",
     },
     DriftCase {
         schema_id: "ee.verification.run.v1",

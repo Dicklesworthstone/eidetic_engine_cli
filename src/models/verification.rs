@@ -17,6 +17,7 @@ pub const VERIFICATION_CLOSURE_GUIDANCE_SCHEMA_V1: &str = "ee.verification.closu
 pub const VERIFICATION_RUN_SCHEMA_V1: &str = "ee.verification.run.v1";
 pub const VERIFICATION_REUSE_ADVISORY_SCHEMA_V1: &str = "ee.verification.reuse_advisory.v1";
 pub const VERIFICATION_BROKER_VIEW_SCHEMA_V1: &str = "ee.verification.broker_view.v1";
+pub const PROOF_BROKER_SCHEMA_V1: &str = "ee.proof_broker.v1";
 pub const VERIFICATION_CLOSEOUT_CAPSULE_SCHEMA_V1: &str = "ee.verification.closeout_capsule.v1";
 pub const VERIFICATION_COMPILE_BLOCKER_CACHE_SCHEMA_V1: &str =
     "ee.verification.compile_blocker_cache.v1";
@@ -421,6 +422,161 @@ pub struct VerificationBrokerView {
     pub stale_reason_codes: Vec<String>,
     pub first_failure_summary_ref: Option<VerificationFirstFailureSummaryRef>,
     pub suggested_action: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofBrokerAdmissionVerdict {
+    ReuseExisting,
+    WaitForInflight,
+    DispatchAllowed,
+    SourceStateMismatch,
+    EnvironmentBlocked,
+    ProofUnusable,
+    UnknownInsufficientEvidence,
+}
+
+impl ProofBrokerAdmissionVerdict {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReuseExisting => "reuse_existing",
+            Self::WaitForInflight => "wait_for_inflight",
+            Self::DispatchAllowed => "dispatch_allowed",
+            Self::SourceStateMismatch => "source_state_mismatch",
+            Self::EnvironmentBlocked => "environment_blocked",
+            Self::ProofUnusable => "proof_unusable",
+            Self::UnknownInsufficientEvidence => "unknown_insufficient_evidence",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofBrokerLedgerState {
+    AdmissionOnly,
+    InFlight,
+    Completed,
+    Rejected,
+}
+
+impl ProofBrokerLedgerState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AdmissionOnly => "admission_only",
+            Self::InFlight => "in_flight",
+            Self::Completed => "completed",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ProofBrokerFingerprintInput<'a> {
+    pub bead_id: Option<&'a str>,
+    pub command_class: &'a str,
+    pub command_hash: &'a str,
+    pub normalized_argv_hash: &'a str,
+    pub source_tree_fingerprint: Option<&'a str>,
+    pub source_materialization: Option<&'a str>,
+    pub dirty_status_hash: Option<&'a str>,
+    pub env_fingerprint_class: Option<&'a str>,
+    pub target_profile: Option<&'a str>,
+    pub execution_substrate: &'a str,
+    pub rch_runtime_class: Option<&'a str>,
+    pub worker_requirement: Option<&'a str>,
+    pub local_cargo_tripwire_class: Option<&'a str>,
+    pub build_admission_posture: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProofBrokerFingerprint {
+    pub fingerprint_id: String,
+    pub bead_id: Option<String>,
+    pub command_class: String,
+    pub command_hash: String,
+    pub normalized_argv_hash: String,
+    pub source_tree_fingerprint: String,
+    pub source_materialization: String,
+    pub dirty_status_hash: String,
+    pub env_fingerprint_class: String,
+    pub target_profile: Option<String>,
+    pub execution_substrate: String,
+    pub rch_runtime_class: String,
+    pub worker_requirement: String,
+    pub local_cargo_tripwire_class: String,
+    pub build_admission_posture: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProofBrokerOwnerRef {
+    pub agent_name: Option<String>,
+    pub bead_id: Option<String>,
+    pub mail_thread_id: Option<String>,
+    pub build_slot: Option<String>,
+    pub rch_job_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProofBrokerEvidenceRef {
+    pub kind: String,
+    pub id: String,
+    pub content_hash: Option<String>,
+    pub redacted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProofBrokerAdmissionDecision {
+    pub verdict: ProofBrokerAdmissionVerdict,
+    pub reason_codes: Vec<String>,
+    pub next_action: String,
+    pub reuse_run_id: Option<String>,
+    pub wait_owner: Option<ProofBrokerOwnerRef>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProofBrokerLedgerRecordInput<'a> {
+    pub fingerprint: ProofBrokerFingerprint,
+    pub state: ProofBrokerLedgerState,
+    pub admission_verdict: ProofBrokerAdmissionVerdict,
+    pub reason_codes: Vec<&'a str>,
+    pub next_action: &'a str,
+    pub reuse_run_id: Option<&'a str>,
+    pub wait_owner: Option<ProofBrokerOwnerRef>,
+    pub run_id: Option<&'a str>,
+    pub owner: Option<ProofBrokerOwnerRef>,
+    pub created_at: &'a str,
+    pub started_at: Option<&'a str>,
+    pub completed_at: Option<&'a str>,
+    pub expires_at: Option<&'a str>,
+    pub source_state_valid_until: Option<&'a str>,
+    pub invalidation_reasons: Vec<&'a str>,
+    pub evidence_refs: Vec<ProofBrokerEvidenceRef>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProofBrokerLedgerRecord {
+    pub schema: String,
+    pub row_id: String,
+    pub fingerprint: ProofBrokerFingerprint,
+    pub state: ProofBrokerLedgerState,
+    pub admission: ProofBrokerAdmissionDecision,
+    pub run_id: Option<String>,
+    pub owner: Option<ProofBrokerOwnerRef>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub expires_at: Option<String>,
+    pub source_state_valid_until: Option<String>,
+    pub invalidation_reasons: Vec<String>,
+    pub evidence_refs: Vec<ProofBrokerEvidenceRef>,
+    pub raw_output_included: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1443,6 +1599,79 @@ pub fn verification_broker_view(
 }
 
 #[must_use]
+pub fn proof_broker_fingerprint(input: ProofBrokerFingerprintInput<'_>) -> ProofBrokerFingerprint {
+    let mut fingerprint = ProofBrokerFingerprint {
+        fingerprint_id: String::new(),
+        bead_id: normalized_non_empty(input.bead_id),
+        command_class: normalized_non_empty(Some(input.command_class))
+            .unwrap_or_else(|| "class:unknown_command".to_owned()),
+        command_hash: normalized_non_empty(Some(input.command_hash))
+            .unwrap_or_else(|| "class:unknown_command_hash".to_owned()),
+        normalized_argv_hash: normalized_non_empty(Some(input.normalized_argv_hash))
+            .unwrap_or_else(|| "class:unknown_argv_hash".to_owned()),
+        source_tree_fingerprint: normalized_non_empty(input.source_tree_fingerprint)
+            .unwrap_or_else(|| "class:unknown_source".to_owned()),
+        source_materialization: normalized_non_empty(input.source_materialization)
+            .unwrap_or_else(|| "class:unknown_materialization".to_owned()),
+        dirty_status_hash: normalized_non_empty(input.dirty_status_hash)
+            .unwrap_or_else(|| "class:clean_or_unknown_dirty_state".to_owned()),
+        env_fingerprint_class: normalized_non_empty(input.env_fingerprint_class)
+            .unwrap_or_else(|| "class:unknown_env".to_owned()),
+        target_profile: normalized_non_empty(input.target_profile),
+        execution_substrate: normalized_non_empty(Some(input.execution_substrate))
+            .unwrap_or_else(|| "unknown".to_owned()),
+        rch_runtime_class: normalized_non_empty(input.rch_runtime_class)
+            .unwrap_or_else(|| "class:unknown_rch_runtime".to_owned()),
+        worker_requirement: normalized_non_empty(input.worker_requirement)
+            .unwrap_or_else(|| "class:any_worker".to_owned()),
+        local_cargo_tripwire_class: normalized_non_empty(input.local_cargo_tripwire_class)
+            .unwrap_or_else(|| "class:tripwire_unknown".to_owned()),
+        build_admission_posture: normalized_non_empty(input.build_admission_posture)
+            .unwrap_or_else(|| "class:admission_unknown".to_owned()),
+    };
+    fingerprint.fingerprint_id = stable_proof_broker_fingerprint_id(&fingerprint);
+    fingerprint
+}
+
+#[must_use]
+pub fn proof_broker_ledger_record(
+    input: ProofBrokerLedgerRecordInput<'_>,
+) -> ProofBrokerLedgerRecord {
+    let created_at = normalized_non_empty(Some(input.created_at))
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned());
+    let run_id = normalized_non_empty(input.run_id);
+    ProofBrokerLedgerRecord {
+        schema: PROOF_BROKER_SCHEMA_V1.to_owned(),
+        row_id: stable_proof_broker_row_id(
+            &input.fingerprint.fingerprint_id,
+            input.state,
+            run_id.as_deref(),
+            &created_at,
+        ),
+        fingerprint: input.fingerprint,
+        state: input.state,
+        admission: ProofBrokerAdmissionDecision {
+            verdict: input.admission_verdict,
+            reason_codes: sorted_flags(&input.reason_codes),
+            next_action: normalized_non_empty(Some(input.next_action))
+                .unwrap_or_else(|| "inspect_broker_record".to_owned()),
+            reuse_run_id: normalized_non_empty(input.reuse_run_id),
+            wait_owner: input.wait_owner,
+        },
+        run_id,
+        owner: input.owner,
+        created_at,
+        started_at: normalized_non_empty(input.started_at),
+        completed_at: normalized_non_empty(input.completed_at),
+        expires_at: normalized_non_empty(input.expires_at),
+        source_state_valid_until: normalized_non_empty(input.source_state_valid_until),
+        invalidation_reasons: sorted_flags(&input.invalidation_reasons),
+        evidence_refs: input.evidence_refs,
+        raw_output_included: false,
+    }
+}
+
+#[must_use]
 pub fn verification_closeout_capsule(
     request: VerificationCloseoutCapsuleRequest<'_>,
     record: &VerificationRunRecord,
@@ -1752,6 +1981,225 @@ pub fn sample_verification_broker_views() -> Vec<VerificationBrokerView> {
             broker_request(Some("blake3:other-source"), "blake3:other-command"),
             &records,
         ),
+    ]
+}
+
+#[must_use]
+pub fn sample_proof_broker_ledger_records() -> Vec<ProofBrokerLedgerRecord> {
+    let owner = ProofBrokerOwnerRef {
+        agent_name: Some("RubyWolf".to_owned()),
+        bead_id: Some("bd-1n3x1.1".to_owned()),
+        mail_thread_id: Some("8198".to_owned()),
+        build_slot: Some("proof:bd-1n3x1.1:broker".to_owned()),
+        rch_job_id: Some("rch-job-20260605-0001".to_owned()),
+    };
+    let evidence = ProofBrokerEvidenceRef {
+        kind: "verification_run".to_owned(),
+        id: "vrun_rch_00000000000000000001".to_owned(),
+        content_hash: Some("blake3:artifact-manifest".to_owned()),
+        redacted: true,
+    };
+
+    let reusable = proof_broker_ledger_record(ProofBrokerLedgerRecordInput {
+        fingerprint: sample_proof_broker_fingerprint(
+            Some("blake3:source"),
+            "blake3:rch-command",
+            "blake3:rch-command-argv",
+            Some("class:external_cargo_target"),
+            Some("class:rch_client_1_0_37_daemon_0_1_3"),
+            Some("class:tripwire_clean"),
+        ),
+        state: ProofBrokerLedgerState::Completed,
+        admission_verdict: ProofBrokerAdmissionVerdict::ReuseExisting,
+        reason_codes: vec![
+            "source_match",
+            "command_match",
+            "env_class_match",
+            "runtime_match",
+            "tripwire_clean",
+        ],
+        next_action: "cite_existing_run",
+        reuse_run_id: Some("vrun_rch_00000000000000000001"),
+        wait_owner: None,
+        run_id: Some("vrun_rch_00000000000000000001"),
+        owner: Some(owner.clone()),
+        created_at: "2026-06-05T17:20:00Z",
+        started_at: Some("2026-06-05T17:00:00Z"),
+        completed_at: Some("2026-06-05T17:08:00Z"),
+        expires_at: Some("2026-06-05T19:08:00Z"),
+        source_state_valid_until: Some("2026-06-05T19:08:00Z"),
+        invalidation_reasons: Vec::new(),
+        evidence_refs: vec![evidence.clone()],
+    });
+
+    let in_flight = proof_broker_ledger_record(ProofBrokerLedgerRecordInput {
+        fingerprint: sample_proof_broker_fingerprint(
+            Some("blake3:source"),
+            "blake3:in-flight-command",
+            "blake3:in-flight-argv",
+            Some("class:external_cargo_target"),
+            Some("class:rch_client_1_0_37_daemon_0_1_3"),
+            Some("class:tripwire_clean"),
+        ),
+        state: ProofBrokerLedgerState::InFlight,
+        admission_verdict: ProofBrokerAdmissionVerdict::WaitForInflight,
+        reason_codes: vec!["equivalent_in_flight", "owner_known"],
+        next_action: "wait_for_owner_or_watch_job",
+        reuse_run_id: None,
+        wait_owner: Some(owner.clone()),
+        run_id: Some("vrun_in_flight_00000000000001"),
+        owner: Some(owner.clone()),
+        created_at: "2026-06-05T17:21:00Z",
+        started_at: Some("2026-06-05T17:21:00Z"),
+        completed_at: None,
+        expires_at: Some("2026-06-05T18:21:00Z"),
+        source_state_valid_until: Some("2026-06-05T18:21:00Z"),
+        invalidation_reasons: Vec::new(),
+        evidence_refs: Vec::new(),
+    });
+
+    let dispatch_allowed = proof_broker_ledger_record(ProofBrokerLedgerRecordInput {
+        fingerprint: sample_proof_broker_fingerprint(
+            Some("blake3:source-v2"),
+            "blake3:new-command",
+            "blake3:new-argv",
+            Some("class:external_cargo_target"),
+            Some("class:rch_client_1_0_37_daemon_0_1_3"),
+            Some("class:tripwire_clean"),
+        ),
+        state: ProofBrokerLedgerState::AdmissionOnly,
+        admission_verdict: ProofBrokerAdmissionVerdict::DispatchAllowed,
+        reason_codes: vec!["no_equivalent_record", "source_current", "remote_required"],
+        next_action: "launch_single_rch_proof",
+        reuse_run_id: None,
+        wait_owner: None,
+        run_id: None,
+        owner: None,
+        created_at: "2026-06-05T17:22:00Z",
+        started_at: None,
+        completed_at: None,
+        expires_at: Some("2026-06-05T17:32:00Z"),
+        source_state_valid_until: Some("2026-06-05T17:32:00Z"),
+        invalidation_reasons: Vec::new(),
+        evidence_refs: Vec::new(),
+    });
+
+    let source_mismatch = proof_broker_ledger_record(ProofBrokerLedgerRecordInput {
+        fingerprint: sample_proof_broker_fingerprint(
+            Some("blake3:dirty-current-tree"),
+            "blake3:rch-command",
+            "blake3:rch-command-argv",
+            Some("class:external_cargo_target"),
+            Some("class:rch_client_1_0_37_daemon_0_1_3"),
+            Some("class:tripwire_clean"),
+        ),
+        state: ProofBrokerLedgerState::Rejected,
+        admission_verdict: ProofBrokerAdmissionVerdict::SourceStateMismatch,
+        reason_codes: vec!["source_tree_mismatch", "dirty_status_changed"],
+        next_action: "rerun_current_source",
+        reuse_run_id: Some("vrun_rch_00000000000000000001"),
+        wait_owner: None,
+        run_id: Some("vrun_rch_00000000000000000001"),
+        owner: None,
+        created_at: "2026-06-05T17:23:00Z",
+        started_at: None,
+        completed_at: None,
+        expires_at: None,
+        source_state_valid_until: None,
+        invalidation_reasons: vec!["source_tree_fingerprint_changed"],
+        evidence_refs: vec![evidence.clone()],
+    });
+
+    let environment_blocked = proof_broker_ledger_record(ProofBrokerLedgerRecordInput {
+        fingerprint: sample_proof_broker_fingerprint(
+            Some("blake3:source"),
+            "blake3:env-blocked-command",
+            "blake3:env-blocked-argv",
+            Some("class:external_cargo_target"),
+            Some("class:rch_runtime_mismatch"),
+            Some("class:tripwire_clean"),
+        ),
+        state: ProofBrokerLedgerState::Rejected,
+        admission_verdict: ProofBrokerAdmissionVerdict::EnvironmentBlocked,
+        reason_codes: vec!["rch_runtime_mismatch", "no_eligible_remote_worker"],
+        next_action: "repair_remote_runtime_before_dispatch",
+        reuse_run_id: None,
+        wait_owner: None,
+        run_id: None,
+        owner: None,
+        created_at: "2026-06-05T17:24:00Z",
+        started_at: None,
+        completed_at: None,
+        expires_at: Some("2026-06-05T17:34:00Z"),
+        source_state_valid_until: Some("2026-06-05T17:34:00Z"),
+        invalidation_reasons: Vec::new(),
+        evidence_refs: Vec::new(),
+    });
+
+    let proof_unusable = proof_broker_ledger_record(ProofBrokerLedgerRecordInput {
+        fingerprint: sample_proof_broker_fingerprint(
+            Some("blake3:source"),
+            "blake3:local-cargo-command",
+            "blake3:local-cargo-argv",
+            Some("class:external_cargo_target"),
+            Some("class:rch_client_1_0_37_daemon_0_1_3"),
+            Some("class:local_cargo_bypass_detected"),
+        ),
+        state: ProofBrokerLedgerState::Rejected,
+        admission_verdict: ProofBrokerAdmissionVerdict::ProofUnusable,
+        reason_codes: vec!["local_cargo_bypass_detected", "remote_required"],
+        next_action: "discard_local_cargo_evidence_and_rerun_remote",
+        reuse_run_id: None,
+        wait_owner: None,
+        run_id: Some("vrun_local_cargo_bypass"),
+        owner: None,
+        created_at: "2026-06-05T17:25:00Z",
+        started_at: None,
+        completed_at: None,
+        expires_at: None,
+        source_state_valid_until: None,
+        invalidation_reasons: vec!["local_cargo_tripwire_blocked"],
+        evidence_refs: Vec::new(),
+    });
+
+    let unknown = proof_broker_ledger_record(ProofBrokerLedgerRecordInput {
+        fingerprint: sample_proof_broker_fingerprint(
+            None,
+            "blake3:ambiguous-command",
+            "blake3:ambiguous-argv",
+            None,
+            None,
+            None,
+        ),
+        state: ProofBrokerLedgerState::AdmissionOnly,
+        admission_verdict: ProofBrokerAdmissionVerdict::UnknownInsufficientEvidence,
+        reason_codes: vec![
+            "source_fingerprint_missing",
+            "env_class_missing",
+            "tripwire_unknown",
+        ],
+        next_action: "collect_source_and_environment_evidence",
+        reuse_run_id: None,
+        wait_owner: None,
+        run_id: None,
+        owner: None,
+        created_at: "2026-06-05T17:26:00Z",
+        started_at: None,
+        completed_at: None,
+        expires_at: Some("2026-06-05T17:36:00Z"),
+        source_state_valid_until: None,
+        invalidation_reasons: Vec::new(),
+        evidence_refs: Vec::new(),
+    });
+
+    vec![
+        reusable,
+        in_flight,
+        dispatch_allowed,
+        source_mismatch,
+        environment_blocked,
+        proof_unusable,
+        unknown,
     ]
 }
 
@@ -2462,6 +2910,32 @@ fn broker_request_for_substrate<'a>(
     }
 }
 
+fn sample_proof_broker_fingerprint(
+    source_tree_fingerprint: Option<&str>,
+    command_hash: &str,
+    normalized_argv_hash: &str,
+    env_fingerprint_class: Option<&str>,
+    rch_runtime_class: Option<&str>,
+    local_cargo_tripwire_class: Option<&str>,
+) -> ProofBrokerFingerprint {
+    proof_broker_fingerprint(ProofBrokerFingerprintInput {
+        bead_id: Some("bd-1n3x1.1"),
+        command_class: "cargo_test",
+        command_hash,
+        normalized_argv_hash,
+        source_tree_fingerprint,
+        source_materialization: Some("git_worktree"),
+        dirty_status_hash: Some("blake3:dirty-status-clean"),
+        env_fingerprint_class,
+        target_profile: Some("debug"),
+        execution_substrate: "rch",
+        rch_runtime_class,
+        worker_requirement: Some("required_runtime:rust"),
+        local_cargo_tripwire_class,
+        build_admission_posture: Some("remote_required_no_local_fallback"),
+    })
+}
+
 fn sample_verification_broker_records() -> Vec<VerificationRunRecord> {
     let mut records = sample_verification_run_records();
     records.push(VerificationRunRecord::from_input(VerificationRunInput {
@@ -2826,6 +3300,45 @@ fn hash_json_array(values: &[&str]) -> String {
         bytes.push(0);
     }
     format!("blake3:{}", blake3::hash(&bytes).to_hex())
+}
+
+fn stable_proof_broker_fingerprint_id(fingerprint: &ProofBrokerFingerprint) -> String {
+    let digest = hash_json_array(&[
+        PROOF_BROKER_SCHEMA_V1,
+        fingerprint.bead_id.as_deref().unwrap_or(""),
+        fingerprint.command_class.as_str(),
+        fingerprint.command_hash.as_str(),
+        fingerprint.normalized_argv_hash.as_str(),
+        fingerprint.source_tree_fingerprint.as_str(),
+        fingerprint.source_materialization.as_str(),
+        fingerprint.dirty_status_hash.as_str(),
+        fingerprint.env_fingerprint_class.as_str(),
+        fingerprint.target_profile.as_deref().unwrap_or(""),
+        fingerprint.execution_substrate.as_str(),
+        fingerprint.rch_runtime_class.as_str(),
+        fingerprint.worker_requirement.as_str(),
+        fingerprint.local_cargo_tripwire_class.as_str(),
+        fingerprint.build_admission_posture.as_str(),
+    ]);
+    let hex = digest.strip_prefix("blake3:").unwrap_or(digest.as_str());
+    format!("proof_{}", &hex[..26])
+}
+
+fn stable_proof_broker_row_id(
+    fingerprint_id: &str,
+    state: ProofBrokerLedgerState,
+    run_id: Option<&str>,
+    created_at: &str,
+) -> String {
+    let digest = hash_json_array(&[
+        PROOF_BROKER_SCHEMA_V1,
+        fingerprint_id,
+        state.as_str(),
+        run_id.unwrap_or(""),
+        created_at,
+    ]);
+    let hex = digest.strip_prefix("blake3:").unwrap_or(digest.as_str());
+    format!("proof_row_{}", &hex[..26])
 }
 
 fn stable_rch_verification_id(

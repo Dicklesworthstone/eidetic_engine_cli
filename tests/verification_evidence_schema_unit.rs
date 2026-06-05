@@ -6,13 +6,15 @@ use std::path::PathBuf;
 
 use ee::models::{
     CompileBlockerCacheInput, CompileBlockerCacheStatus, CompileBlockerLookupRequest,
-    VERIFICATION_BROKER_VIEW_SCHEMA_V1, VERIFICATION_CLOSEOUT_CAPSULE_SCHEMA_V1,
-    VERIFICATION_COMPILE_BLOCKER_CACHE_SCHEMA_V1, VERIFICATION_COMPILE_BLOCKER_LOOKUP_SCHEMA_V1,
-    VERIFICATION_EVIDENCE_SCHEMA_V1, VERIFICATION_REUSE_ADVISORY_SCHEMA_V1,
-    VERIFICATION_RUN_SCHEMA_V1, VerificationBrokerStatus, VerificationBrokerView,
-    VerificationCloseoutCapsule, VerificationCloseoutCapsuleRequest, VerificationEvidenceRecord,
-    VerificationReuseRequest, VerificationReuseStatus, VerificationRunImportError,
-    VerificationStatus, compile_blocker_cache_entry, compile_blocker_lookup,
+    PROOF_BROKER_SCHEMA_V1, ProofBrokerAdmissionVerdict, ProofBrokerFingerprintInput,
+    ProofBrokerLedgerRecord, VERIFICATION_BROKER_VIEW_SCHEMA_V1,
+    VERIFICATION_CLOSEOUT_CAPSULE_SCHEMA_V1, VERIFICATION_COMPILE_BLOCKER_CACHE_SCHEMA_V1,
+    VERIFICATION_COMPILE_BLOCKER_LOOKUP_SCHEMA_V1, VERIFICATION_EVIDENCE_SCHEMA_V1,
+    VERIFICATION_REUSE_ADVISORY_SCHEMA_V1, VERIFICATION_RUN_SCHEMA_V1, VerificationBrokerStatus,
+    VerificationBrokerView, VerificationCloseoutCapsule, VerificationCloseoutCapsuleRequest,
+    VerificationEvidenceRecord, VerificationReuseRequest, VerificationReuseStatus,
+    VerificationRunImportError, VerificationStatus, compile_blocker_cache_entry,
+    compile_blocker_lookup, proof_broker_fingerprint, sample_proof_broker_ledger_records,
     sample_verification_broker_views, sample_verification_closeout_capsules,
     sample_verification_evidence_records, sample_verification_reuse_advisories,
     sample_verification_run_records, verification_closeout_capsule, verification_reuse_advisory,
@@ -227,6 +229,142 @@ fn verification_broker_view_golden_covers_all_operator_states() -> TestResult {
 }
 
 #[test]
+fn proof_broker_ledger_golden_covers_all_admission_verdicts() -> TestResult {
+    let path = golden_dir().join("proof_broker_records.json.golden");
+    let fixture = fs::read_to_string(&path).map_err(|error| format!("read {path:?}: {error}"))?;
+    let expected: Vec<ProofBrokerLedgerRecord> =
+        serde_json::from_str(&fixture).map_err(|error| format!("parse {path:?}: {error}"))?;
+    let actual = sample_proof_broker_ledger_records();
+    assert_eq!(expected, actual);
+
+    let verdicts = actual
+        .iter()
+        .map(|record| record.admission.verdict)
+        .collect::<BTreeSet<_>>();
+    let expected_verdicts = [
+        ProofBrokerAdmissionVerdict::ReuseExisting,
+        ProofBrokerAdmissionVerdict::WaitForInflight,
+        ProofBrokerAdmissionVerdict::DispatchAllowed,
+        ProofBrokerAdmissionVerdict::SourceStateMismatch,
+        ProofBrokerAdmissionVerdict::EnvironmentBlocked,
+        ProofBrokerAdmissionVerdict::ProofUnusable,
+        ProofBrokerAdmissionVerdict::UnknownInsufficientEvidence,
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    assert_eq!(verdicts, expected_verdicts);
+
+    let encoded = serde_json::to_string(&actual).map_err(|error| error.to_string())?;
+    assert!(!encoded.contains("/Volumes/USBNVME16TB"));
+    assert!(!encoded.contains("/tmp/"));
+    assert!(!encoded.contains("stderr bytes"));
+    assert!(!encoded.contains("raw stderr"));
+    assert!(actual.iter().all(|record| !record.raw_output_included));
+    assert!(
+        actual
+            .iter()
+            .flat_map(|record| &record.evidence_refs)
+            .all(|evidence| evidence.redacted)
+    );
+    assert!(
+        actual
+            .iter()
+            .all(|record| record.schema == PROOF_BROKER_SCHEMA_V1)
+    );
+    Ok(())
+}
+
+#[test]
+fn proof_broker_fingerprint_changes_on_admission_boundary_fields() {
+    let base = proof_broker_fingerprint(proof_fingerprint_input(
+        Some("blake3:source"),
+        "blake3:command",
+        "blake3:argv",
+        Some("git_worktree"),
+        Some("blake3:dirty-clean"),
+        Some("class:external_cargo_target"),
+        Some("class:rch_client_1_0_37_daemon_0_1_3"),
+        Some("class:tripwire_clean"),
+    ));
+    let same = proof_broker_fingerprint(proof_fingerprint_input(
+        Some("blake3:source"),
+        "blake3:command",
+        "blake3:argv",
+        Some("git_worktree"),
+        Some("blake3:dirty-clean"),
+        Some("class:external_cargo_target"),
+        Some("class:rch_client_1_0_37_daemon_0_1_3"),
+        Some("class:tripwire_clean"),
+    ));
+    assert_eq!(base.fingerprint_id, same.fingerprint_id);
+
+    for changed in [
+        proof_broker_fingerprint(proof_fingerprint_input(
+            Some("blake3:source"),
+            "blake3:command",
+            "blake3:argv-v2",
+            Some("git_worktree"),
+            Some("blake3:dirty-clean"),
+            Some("class:external_cargo_target"),
+            Some("class:rch_client_1_0_37_daemon_0_1_3"),
+            Some("class:tripwire_clean"),
+        )),
+        proof_broker_fingerprint(proof_fingerprint_input(
+            Some("blake3:source"),
+            "blake3:command",
+            "blake3:argv",
+            Some("ci_artifact"),
+            Some("blake3:dirty-clean"),
+            Some("class:external_cargo_target"),
+            Some("class:rch_client_1_0_37_daemon_0_1_3"),
+            Some("class:tripwire_clean"),
+        )),
+        proof_broker_fingerprint(proof_fingerprint_input(
+            Some("blake3:source"),
+            "blake3:command",
+            "blake3:argv",
+            Some("git_worktree"),
+            Some("blake3:dirty-uncommitted"),
+            Some("class:external_cargo_target"),
+            Some("class:rch_client_1_0_37_daemon_0_1_3"),
+            Some("class:tripwire_clean"),
+        )),
+        proof_broker_fingerprint(proof_fingerprint_input(
+            Some("blake3:source"),
+            "blake3:command",
+            "blake3:argv",
+            Some("git_worktree"),
+            Some("blake3:dirty-clean"),
+            Some("class:internal_target"),
+            Some("class:rch_client_1_0_37_daemon_0_1_3"),
+            Some("class:tripwire_clean"),
+        )),
+        proof_broker_fingerprint(proof_fingerprint_input(
+            Some("blake3:source"),
+            "blake3:command",
+            "blake3:argv",
+            Some("git_worktree"),
+            Some("blake3:dirty-clean"),
+            Some("class:external_cargo_target"),
+            Some("class:rch_client_1_0_36_daemon_0_1_3"),
+            Some("class:tripwire_clean"),
+        )),
+        proof_broker_fingerprint(proof_fingerprint_input(
+            Some("blake3:source"),
+            "blake3:command",
+            "blake3:argv",
+            Some("git_worktree"),
+            Some("blake3:dirty-clean"),
+            Some("class:external_cargo_target"),
+            Some("class:rch_client_1_0_37_daemon_0_1_3"),
+            Some("class:local_cargo_bypass_detected"),
+        )),
+    ] {
+        assert_ne!(base.fingerprint_id, changed.fingerprint_id);
+    }
+}
+
+#[test]
 fn verification_broker_operator_docs_cover_closeout_workflow_and_catalog_mapping() -> TestResult {
     let doc = read_repo_file("docs/swarm/verification_broker_view.md")?;
     let catalog = read_repo_file("tests/fixtures/failure_modes/README.md")?;
@@ -338,6 +476,11 @@ fn verification_evidence_samples_validate_against_declared_schemas() -> TestResu
         "ee.verification.reuse_advisory.v1.json",
         &sample_verification_reuse_advisories(),
         "sample_verification_reuse_advisories",
+    )?;
+    assert_serialized_samples_validate_schema(
+        "ee.proof_broker.v1.json",
+        &sample_proof_broker_ledger_records(),
+        "sample_proof_broker_ledger_records",
     )?;
     assert_serialized_samples_validate_schema(
         "ee.verification.closeout_capsule.v1.json",
@@ -899,6 +1042,34 @@ fn reuse_request<'a>(
         feature_profile_hash: Some("blake3:profile"),
         workspace_generation: Some(42),
         strictness_flags: vec!["RCH_REQUIRE_REMOTE=1"],
+    }
+}
+
+fn proof_fingerprint_input<'a>(
+    source_tree_fingerprint: Option<&'a str>,
+    command_hash: &'a str,
+    normalized_argv_hash: &'a str,
+    source_materialization: Option<&'a str>,
+    dirty_status_hash: Option<&'a str>,
+    env_fingerprint_class: Option<&'a str>,
+    rch_runtime_class: Option<&'a str>,
+    local_cargo_tripwire_class: Option<&'a str>,
+) -> ProofBrokerFingerprintInput<'a> {
+    ProofBrokerFingerprintInput {
+        bead_id: Some("bd-1n3x1.1"),
+        command_class: "cargo_test",
+        command_hash,
+        normalized_argv_hash,
+        source_tree_fingerprint,
+        source_materialization,
+        dirty_status_hash,
+        env_fingerprint_class,
+        target_profile: Some("debug"),
+        execution_substrate: "rch",
+        rch_runtime_class,
+        worker_requirement: Some("required_runtime:rust"),
+        local_cargo_tripwire_class,
+        build_admission_posture: Some("remote_required_no_local_fallback"),
     }
 }
 

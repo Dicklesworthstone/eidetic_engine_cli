@@ -96,6 +96,11 @@ The verification broker view schema is `ee.verification.broker_view.v1`.
 retained verification run records. It is marked shipped because `bd-6boyo.2`
 is closed and the lookup surface is available in current builds.
 
+The proof broker fingerprint and ledger schema is `ee.proof_broker.v1`.
+`bd-1n3x1.1` defines the canonical proof request fingerprint, admission
+verdict vocabulary, and redaction-safe ledger row that future proof admission,
+RCH wrapper, Agent Mail build-slot, and support-bundle surfaces consume.
+
 The work-packet contract is `ee.swarm.work_packet.v1`. It is emitted by
 `ee swarm work-packet --json` as a deterministic read-only onboarding artifact
 composed from existing swarm brief and next-action evidence.
