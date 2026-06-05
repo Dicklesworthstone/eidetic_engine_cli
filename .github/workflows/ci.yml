@@ -234,6 +234,32 @@ jobs:
         if: matrix.runner == 'cross'
         run: cross test --workspace --test cross_platform_determinism --target ${{ matrix.target }} -- --nocapture
 
+      - name: Build macOS ee artifact
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        run: cargo build --workspace --bin ee --target ${{ matrix.target }}
+
+      - name: Package macOS ee artifact
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/${{ matrix.target }}/debug/ee dist/ee
+          chmod 755 dist/ee
+          tar -czf dist/ee-${{ matrix.target }}-debug.tar.gz -C dist ee
+          shasum -a 256 dist/ee-${{ matrix.target }}-debug.tar.gz > dist/ee-${{ matrix.target }}-debug.tar.gz.sha256
+
+      - name: Upload macOS ee artifact
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ee-${{ matrix.target }}-debug
+          path: |
+            dist/ee-${{ matrix.target }}-debug.tar.gz
+            dist/ee-${{ matrix.target }}-debug.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 3
+
   windows-installer-static-conformance:
     if: github.event_name != 'schedule'
     name: windows-installer-static-conformance
