@@ -8,6 +8,22 @@ The snapshot is not a scheduler. It must not dispatch workflows, cancel runs, do
 
 Canonical schema: [`docs/schemas/ee.ci_proof_lane_snapshot.v1.json`](schemas/ee.ci_proof_lane_snapshot.v1.json)
 
+Producer:
+
+```bash
+scripts/ci_proof_lane_snapshot.sh --json
+scripts/ci_proof_lane_snapshot.sh --head-sha <sha> --json
+scripts/ci_proof_lane_snapshot.sh --input tests/fixtures/ci_proof_lane_live/stale_artifact.json --json
+```
+
+The producer has live and offline modes. Live mode reads bounded GitHub Actions
+state through `gh run list`, `gh run view`, and metadata-only artifact API calls.
+It does not dispatch workflows, cancel runs, download artifacts, reserve files,
+mutate Beads, acknowledge Agent Mail, run Cargo, or build binaries. Offline mode
+transforms `ee.ci_proof_lane_input.v1` fixtures under
+`tests/fixtures/ci_proof_lane_live/` into the public snapshot schema so contract
+checks can run without network access.
+
 The snapshot records:
 
 - repository owner/name/default branch/current head SHA
