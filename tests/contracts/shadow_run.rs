@@ -10,8 +10,10 @@ use ee::models::{DecisionPlane, DecisionRecord};
 use ee::output::{ShadowRunReport, render_shadow_run_json};
 use ee::shadow::pack::{PackShadowOutput, compare_outputs};
 use ee::shadow::{
-    ShadowGateConfig, ShadowPromotionGuards, ShadowVerdict, candidate_promotion_allowed,
+    PolicyDomain, ShadowGateConfig, ShadowPromotionGuards, ShadowVerdict,
+    candidate_promotion_allowed,
 };
+use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
@@ -39,6 +41,83 @@ fn golden_path(name: &str) -> PathBuf {
         .join(format!("{name}.json.golden"))
 }
 
+fn schema_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("docs")
+        .join("schemas")
+        .join(name)
+}
+
+fn read_schema(name: &str) -> Result<Value, String> {
+    let path = schema_path(name);
+    let raw = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    serde_json::from_str(&raw)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))
+}
+
+fn object_field<'a>(value: &'a Value, field: &str, context: &str) -> Result<&'a Value, String> {
+    value
+        .get(field)
+        .ok_or_else(|| format!("{context}: missing object field {field}"))
+}
+
+fn nested_object_field<'a>(
+    mut value: &'a Value,
+    path: &[&str],
+    context: &str,
+) -> Result<&'a Value, String> {
+    for field in path {
+        value = object_field(value, field, context)?;
+    }
+    Ok(value)
+}
+
+fn required_contains(schema: &Value, field: &str, context: &str) -> TestResult {
+    let required = object_field(schema, "required", context)?
+        .as_array()
+        .ok_or_else(|| format!("{context}: required is not an array"))?;
+    ensure(
+        required.iter().any(|value| value.as_str() == Some(field)),
+        format!("{context}: required fields do not include {field}"),
+    )
+}
+
+fn enum_contains(value: &Value, expected: &[&str], context: &str) -> TestResult {
+    let values = object_field(value, "enum", context)?
+        .as_array()
+        .ok_or_else(|| format!("{context}: enum is not an array"))?;
+    for expected_value in expected {
+        ensure(
+            values
+                .iter()
+                .any(|value| value.as_str() == Some(*expected_value)),
+            format!("{context}: enum does not include {expected_value}"),
+        )?;
+    }
+    Ok(())
+}
+
+fn redaction_fields_are_default_deny(schema: &Value, context: &str) -> TestResult {
+    let required_fields = [
+        "rawMemoryBodyPresent",
+        "rawMailBodyPresent",
+        "rawPolicyPayloadPresent",
+        "absoluteHostPathPresent",
+        "secretsPresent",
+    ];
+    let redaction = nested_object_field(schema, &["$defs", "redactionPosture"], context)?;
+    for field in required_fields {
+        required_contains(redaction, field, context)?;
+        let const_value = nested_object_field(redaction, &["properties", field, "const"], context)?;
+        ensure(
+            const_value.as_bool() == Some(false),
+            format!("{context}: {field} must be const false"),
+        )?;
+    }
+    Ok(())
+}
+
 fn assert_golden(name: &str, actual: &str) -> TestResult {
     let path = golden_path(name);
     if env::var("UPDATE_GOLDEN").is_ok() {
@@ -52,6 +131,20 @@ fn assert_golden(name: &str, actual: &str) -> TestResult {
     let expected = fs::read_to_string(&path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     ensure(actual == expected, format!("golden mismatch for {name}"))
+}
+
+#[test]
+fn gate14_policy_domain_includes_verification_admission() -> TestResult {
+    ensure(
+        PolicyDomain::all()
+            .iter()
+            .any(|domain| *domain == PolicyDomain::VerificationAdmission),
+        "PolicyDomain::all must include verification_admission",
+    )?;
+    ensure(
+        PolicyDomain::VerificationAdmission.as_str() == "verification_admission",
+        "verification admission domain string is stable",
+    )
 }
 
 #[test]
@@ -158,4 +251,132 @@ fn gate14_shadow_run_report_matches_golden() -> TestResult {
     ensure_contains(&json, "\"divergenceRate\":0.5000", "divergence rate")?;
     ensure_contains(&json, "\"traceId\":\"trace_gate14_001\"", "trace linkage")?;
     assert_golden("pack_policy_compare", &(json + "\n"))
+}
+
+#[test]
+fn gate14_shadow_policy_experiment_schema_pins_admission_contract() -> TestResult {
+    let schema = read_schema("ee.shadow_policy_experiment.v1.json")?;
+    for field in [
+        "schema",
+        "experimentId",
+        "shadowRunId",
+        "sideEffectFree",
+        "decisionPlane",
+        "policyDomain",
+        "incumbentPolicyId",
+        "candidatePolicyId",
+        "traceInput",
+        "admission",
+        "redactionPosture",
+        "evidence",
+        "degraded",
+    ] {
+        required_contains(&schema, field, "shadow policy experiment schema")?;
+    }
+
+    let policy_domain = nested_object_field(&schema, &["$defs", "policyDomain"], "policy domain")?;
+    enum_contains(
+        policy_domain,
+        &[
+            "pack_selection",
+            "cache_admission",
+            "verification_admission",
+            "curation_filter",
+        ],
+        "policy domain",
+    )?;
+
+    let admission = nested_object_field(&schema, &["$defs", "admission"], "admission")?;
+    for field in [
+        "status",
+        "sourceAuthority",
+        "replayEvidencePosture",
+        "localCargoPosture",
+        "rchPosture",
+        "supportedDomain",
+        "abstentionReasons",
+    ] {
+        required_contains(admission, field, "admission")?;
+    }
+    let abstention_reasons = nested_object_field(
+        admission,
+        &["properties", "abstentionReasons", "items"],
+        "admission",
+    )?;
+    enum_contains(
+        abstention_reasons,
+        &[
+            "missing_replay_evidence",
+            "stale_source_authority",
+            "unsafe_local_cargo_posture",
+            "unsupported_policy_domain",
+            "rch_blocked",
+        ],
+        "admission abstention reasons",
+    )?;
+    redaction_fields_are_default_deny(&schema, "shadow policy experiment schema")
+}
+
+#[test]
+fn gate14_shadow_policy_comparison_schema_pins_promotion_contract() -> TestResult {
+    let schema = read_schema("ee.shadow_policy_comparison.v1.json")?;
+    for field in [
+        "schema",
+        "experimentId",
+        "shadowRunId",
+        "sideEffectFree",
+        "decisionPlane",
+        "policyDomain",
+        "summary",
+        "decisions",
+        "verdict",
+        "abstentionReasons",
+        "safetyGuardsTriggered",
+        "confidence",
+        "redactionPosture",
+        "evidence",
+        "counterEvidence",
+        "nextCommands",
+        "degraded",
+    ] {
+        required_contains(&schema, field, "shadow policy comparison schema")?;
+    }
+
+    let verdict = nested_object_field(&schema, &["properties", "verdict"], "verdict")?;
+    enum_contains(
+        verdict,
+        &["promote", "hold", "reject", "abstain"],
+        "verdict",
+    )?;
+
+    let summary = nested_object_field(&schema, &["$defs", "comparisonSummary"], "summary")?;
+    for field in [
+        "totalDecisions",
+        "divergedDecisions",
+        "matchedDecisions",
+        "p50LatencyMs",
+        "p95LatencyMs",
+        "p99LatencyMs",
+        "outputBytesDelta",
+        "memoryBytesDelta",
+        "degradedDelta",
+        "utilityDelta",
+    ] {
+        required_contains(summary, field, "summary")?;
+    }
+
+    let decision = nested_object_field(&schema, &["$defs", "shadowDecision"], "shadow decision")?;
+    for field in [
+        "decisionId",
+        "traceId",
+        "decisionPlane",
+        "incumbentOutcomeHash",
+        "candidateOutcomeHash",
+        "diverged",
+        "confidence",
+        "evidenceRefs",
+    ] {
+        required_contains(decision, field, "shadow decision")?;
+    }
+    redaction_fields_are_default_deny(&schema, "shadow policy comparison schema")
 }

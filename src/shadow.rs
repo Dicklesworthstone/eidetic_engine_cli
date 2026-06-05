@@ -6,6 +6,7 @@
 //! - Safe A/B comparison of pack selection strategies
 //! - Curation policy candidate evaluation
 //! - Cache admission policy benchmarking
+//! - Verification/proof admission policy checks
 //!
 //! All shadow runs are dry-run by default and emit comparison reports.
 
@@ -61,6 +62,8 @@ pub enum PolicyDomain {
     CurationFilter,
     /// Cache admission/eviction policy.
     CacheAdmission,
+    /// Verification/proof admission policy.
+    VerificationAdmission,
 }
 
 impl PolicyDomain {
@@ -70,15 +73,17 @@ impl PolicyDomain {
             Self::PackSelection => "pack_selection",
             Self::CurationFilter => "curation_filter",
             Self::CacheAdmission => "cache_admission",
+            Self::VerificationAdmission => "verification_admission",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 3] {
+    pub const fn all() -> [Self; 4] {
         [
             Self::PackSelection,
             Self::CurationFilter,
             Self::CacheAdmission,
+            Self::VerificationAdmission,
         ]
     }
 }
@@ -561,6 +566,10 @@ mod tests {
         assert_eq!(PolicyDomain::PackSelection.as_str(), "pack_selection");
         assert_eq!(PolicyDomain::CurationFilter.as_str(), "curation_filter");
         assert_eq!(PolicyDomain::CacheAdmission.as_str(), "cache_admission");
+        assert_eq!(
+            PolicyDomain::VerificationAdmission.as_str(),
+            "verification_admission"
+        );
     }
 
     #[test]

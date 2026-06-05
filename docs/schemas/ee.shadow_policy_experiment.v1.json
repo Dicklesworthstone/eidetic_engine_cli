@@ -1,0 +1,319 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.shadow_policy_experiment.v1.json",
+  "title": "ee.shadow_policy_experiment.v1",
+  "description": "Redaction-safe contract for registering a side-effect-free decision-plane shadow policy experiment. It captures the incumbent and candidate policies, replay/golden evidence posture, source authority, local Cargo/RCH admission, and abstention reasons before any comparison can recommend promotion.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "experimentId",
+    "shadowRunId",
+    "sideEffectFree",
+    "createdAt",
+    "decisionPlane",
+    "policyDomain",
+    "incumbentPolicyId",
+    "candidatePolicyId",
+    "cohort",
+    "traceInput",
+    "admission",
+    "redactionPosture",
+    "evidence",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.shadow_policy_experiment.v1"
+    },
+    "experimentId": {
+      "$ref": "#/$defs/experimentId"
+    },
+    "shadowRunId": {
+      "$ref": "#/$defs/shadowRunId"
+    },
+    "sideEffectFree": {
+      "type": "boolean",
+      "const": true
+    },
+    "createdAt": {
+      "$ref": "#/$defs/rfc3339"
+    },
+    "decisionPlane": {
+      "$ref": "#/$defs/decisionPlane"
+    },
+    "policyDomain": {
+      "$ref": "#/$defs/policyDomain"
+    },
+    "incumbentPolicyId": {
+      "$ref": "#/$defs/policyId"
+    },
+    "candidatePolicyId": {
+      "$ref": "#/$defs/policyId"
+    },
+    "cohort": {
+      "$ref": "#/$defs/cohort"
+    },
+    "traceInput": {
+      "$ref": "#/$defs/traceInput"
+    },
+    "admission": {
+      "$ref": "#/$defs/admission"
+    },
+    "redactionPosture": {
+      "$ref": "#/$defs/redactionPosture"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidenceRef"
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degradedEntry"
+      }
+    }
+  },
+  "$defs": {
+    "experimentId": {
+      "type": "string",
+      "pattern": "^spe_[A-Za-z0-9._:-]{8,96}$"
+    },
+    "shadowRunId": {
+      "type": "string",
+      "pattern": "^shadow_[A-Za-z0-9._:-]{8,96}$"
+    },
+    "policyId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "decisionPlane": {
+      "type": "string",
+      "enum": [
+        "packing",
+        "cache_admission",
+        "verification_admission",
+        "curation"
+      ]
+    },
+    "policyDomain": {
+      "type": "string",
+      "enum": [
+        "pack_selection",
+        "cache_admission",
+        "verification_admission",
+        "curation_filter"
+      ]
+    },
+    "cohort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "fixtureCohortId"],
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": ["ci_smoke", "small", "standard", "swarm_heavy"]
+        },
+        "hostClass": {
+          "type": "string",
+          "enum": ["laptop", "standard", "high_memory", "ci", "unknown"]
+        },
+        "fixtureCohortId": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        }
+      }
+    },
+    "traceInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "hash"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["replay_trace", "golden_fixture", "manual_fixture"]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "hash": {
+          "$ref": "#/$defs/hashRef"
+        },
+        "sourceSchema": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120,
+          "pattern": "^ee\\.[A-Za-z0-9_.-]+\\.v[0-9]+$"
+        }
+      }
+    },
+    "admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "sourceAuthority",
+        "replayEvidencePosture",
+        "localCargoPosture",
+        "rchPosture",
+        "supportedDomain",
+        "abstentionReasons"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["admitted", "abstain", "refused"]
+        },
+        "sourceAuthority": {
+          "type": "string",
+          "enum": ["current", "stale", "ambiguous", "missing"]
+        },
+        "replayEvidencePosture": {
+          "type": "string",
+          "enum": ["present", "missing", "stale", "insufficient"]
+        },
+        "localCargoPosture": {
+          "type": "string",
+          "enum": ["clean", "unsafe", "unknown"]
+        },
+        "rchPosture": {
+          "type": "string",
+          "enum": ["remote_ready", "blocked", "not_required", "unknown"]
+        },
+        "supportedDomain": {
+          "type": "boolean"
+        },
+        "abstentionReasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "missing_replay_evidence",
+              "stale_source_authority",
+              "unsafe_local_cargo_posture",
+              "unsupported_policy_domain",
+              "rch_blocked",
+              "redaction_posture_unknown"
+            ]
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": { "const": "abstain" }
+            },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "abstentionReasons": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "redactionPosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rawMemoryBodyPresent",
+        "rawMailBodyPresent",
+        "rawPolicyPayloadPresent",
+        "absoluteHostPathPresent",
+        "secretsPresent"
+      ],
+      "properties": {
+        "rawMemoryBodyPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawMailBodyPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawPolicyPayloadPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "absoluteHostPathPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "secretsPresent": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    },
+    "evidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "hash"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "replay_trace",
+            "golden_fixture",
+            "shadow_run",
+            "source_authority",
+            "rch_proof",
+            "local_cargo_tripwire"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "hash": {
+          "$ref": "#/$defs/hashRef"
+        }
+      }
+    },
+    "degradedEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        }
+      }
+    },
+    "hashRef": {
+      "type": "string",
+      "pattern": "^blake3:[A-Fa-f0-9]{16,128}$"
+    }
+  }
+}

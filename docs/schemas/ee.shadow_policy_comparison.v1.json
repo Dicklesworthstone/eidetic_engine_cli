@@ -1,0 +1,403 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.shadow_policy_comparison.v1.json",
+  "title": "ee.shadow_policy_comparison.v1",
+  "description": "Redaction-safe summary for comparing incumbent and candidate decision-plane policies on replay or golden evidence. The verdict is advisory only: promotion requires an explicit apply step outside this side-effect-free report.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "experimentId",
+    "shadowRunId",
+    "sideEffectFree",
+    "comparedAt",
+    "decisionPlane",
+    "policyDomain",
+    "incumbentPolicyId",
+    "candidatePolicyId",
+    "summary",
+    "decisions",
+    "verdict",
+    "abstentionReasons",
+    "safetyGuardsTriggered",
+    "confidence",
+    "redactionPosture",
+    "evidence",
+    "counterEvidence",
+    "nextCommands",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.shadow_policy_comparison.v1"
+    },
+    "experimentId": {
+      "$ref": "#/$defs/experimentId"
+    },
+    "shadowRunId": {
+      "$ref": "#/$defs/shadowRunId"
+    },
+    "sideEffectFree": {
+      "type": "boolean",
+      "const": true
+    },
+    "comparedAt": {
+      "$ref": "#/$defs/rfc3339"
+    },
+    "decisionPlane": {
+      "$ref": "#/$defs/decisionPlane"
+    },
+    "policyDomain": {
+      "$ref": "#/$defs/policyDomain"
+    },
+    "incumbentPolicyId": {
+      "$ref": "#/$defs/policyId"
+    },
+    "candidatePolicyId": {
+      "$ref": "#/$defs/policyId"
+    },
+    "summary": {
+      "$ref": "#/$defs/comparisonSummary"
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/shadowDecision"
+      }
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["promote", "hold", "reject", "abstain"]
+    },
+    "abstentionReasons": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "missing_replay_evidence",
+          "stale_source_authority",
+          "unsafe_local_cargo_posture",
+          "unsupported_policy_domain",
+          "rch_blocked",
+          "redaction_posture_unknown",
+          "insufficient_decision_count",
+          "conflicting_counter_evidence"
+        ]
+      }
+    },
+    "safetyGuardsTriggered": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "dropped_critical_warnings",
+          "redaction_differences",
+          "p99_regression",
+          "tail_risk_regression",
+          "shadow_mismatch_above_tolerance"
+        ]
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "redactionPosture": {
+      "$ref": "#/$defs/redactionPosture"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidenceRef"
+      }
+    },
+    "counterEvidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidenceRef"
+      }
+    },
+    "nextCommands": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 240,
+        "pattern": "^(ee|scripts/|cargo |RCH_|rch |jq |bash |rustup )[A-Za-z0-9_ ./=:,@+-]*$"
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degradedEntry"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "verdict": { "const": "abstain" }
+        },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "abstentionReasons": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verdict": { "const": "promote" }
+        },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "safetyGuardsTriggered": {
+            "maxItems": 0
+          },
+          "abstentionReasons": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "experimentId": {
+      "type": "string",
+      "pattern": "^spe_[A-Za-z0-9._:-]{8,96}$"
+    },
+    "shadowRunId": {
+      "type": "string",
+      "pattern": "^shadow_[A-Za-z0-9._:-]{8,96}$"
+    },
+    "policyId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "decisionPlane": {
+      "type": "string",
+      "enum": [
+        "packing",
+        "cache_admission",
+        "verification_admission",
+        "curation"
+      ]
+    },
+    "policyDomain": {
+      "type": "string",
+      "enum": [
+        "pack_selection",
+        "cache_admission",
+        "verification_admission",
+        "curation_filter"
+      ]
+    },
+    "comparisonSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "totalDecisions",
+        "divergedDecisions",
+        "matchedDecisions",
+        "p50LatencyMs",
+        "p95LatencyMs",
+        "p99LatencyMs",
+        "outputBytesDelta",
+        "memoryBytesDelta",
+        "degradedDelta",
+        "utilityDelta"
+      ],
+      "properties": {
+        "totalDecisions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "divergedDecisions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "matchedDecisions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p50LatencyMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p95LatencyMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p99LatencyMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputBytesDelta": {
+          "type": "integer"
+        },
+        "memoryBytesDelta": {
+          "type": "integer"
+        },
+        "degradedDelta": {
+          "type": "integer"
+        },
+        "utilityDelta": {
+          "type": "number"
+        }
+      }
+    },
+    "shadowDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decisionId",
+        "traceId",
+        "decisionPlane",
+        "incumbentOutcomeHash",
+        "candidateOutcomeHash",
+        "diverged",
+        "confidence",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "decisionId": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "traceId": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "decisionPlane": {
+          "$ref": "#/$defs/decisionPlane"
+        },
+        "incumbentOutcomeHash": {
+          "$ref": "#/$defs/hashRef"
+        },
+        "candidateOutcomeHash": {
+          "$ref": "#/$defs/hashRef"
+        },
+        "diverged": {
+          "type": "boolean"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidenceRef"
+          }
+        }
+      }
+    },
+    "redactionPosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rawMemoryBodyPresent",
+        "rawMailBodyPresent",
+        "rawPolicyPayloadPresent",
+        "absoluteHostPathPresent",
+        "secretsPresent"
+      ],
+      "properties": {
+        "rawMemoryBodyPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawMailBodyPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawPolicyPayloadPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "absoluteHostPathPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "secretsPresent": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    },
+    "evidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "hash"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "replay_trace",
+            "golden_fixture",
+            "shadow_run",
+            "source_authority",
+            "rch_proof",
+            "local_cargo_tripwire",
+            "counter_evidence"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "hash": {
+          "$ref": "#/$defs/hashRef"
+        }
+      }
+    },
+    "degradedEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        }
+      }
+    },
+    "hashRef": {
+      "type": "string",
+      "pattern": "^blake3:[A-Fa-f0-9]{16,128}$"
+    }
+  }
+}
