@@ -187,6 +187,29 @@ fn context_options(workspace_path: &Path, index_dir: &Path) -> ContextPackOption
     }
 }
 
+fn assert_tiered_recall_benchmark_contract() {
+    assert_eq!(TIERED_RECALL_BENCH_GROUP, "ee_tiered_recall");
+    assert_eq!(TIERED_RECALL_OPERATION, "ee_tiered_recall_context");
+    assert!(
+        (TIERED_RECALL_CANDIDATE_POOL as usize) < TIERED_RECALL_MEMORY_COUNT,
+        "tiered recall proof must not request the whole corpus"
+    );
+    assert!(
+        TIERED_RECALL_CANDIDATE_POOL > 128,
+        "bounded pool should still cross the hot tier budget and exercise warm admission"
+    );
+    assert!(
+        TIERED_RECALL_MEMORY_COUNT > 640,
+        "default hot+warm budgets are 640, so the fixture must force a cold tier"
+    );
+    assert!(
+        TIERED_RECALL_BUDGET_P50_MS > 0.0
+            && TIERED_RECALL_BUDGET_P99_MS >= TIERED_RECALL_BUDGET_P50_MS,
+        "tiered recall benchmark budgets must be positive and monotonic"
+    );
+    black_box((TIERED_RECALL_BUDGET_P50_MS, TIERED_RECALL_BUDGET_P99_MS));
+}
+
 fn tiered_recall_context_summary(workspace_path: &Path, index_dir: &Path) -> (usize, usize, usize) {
     let run =
         run_context_pack_with_performance(&context_options(workspace_path, index_dir), "context")
@@ -222,80 +245,14 @@ fn tiered_recall_context_summary(workspace_path: &Path, index_dir: &Path) -> (us
     (tier_admission_count, cold_recall_count, required_cold_count)
 }
 
-fn bench_tiered_recall(c: &mut Criterion) {
-    let mut group = c.benchmark_group(TIERED_RECALL_BENCH_GROUP);
-    for (label, enabled) in [
-        ("tiering_disabled_baseline", false),
-        ("tiering_enabled_hot_cold", true),
-    ] {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let (workspace_path, index_dir) = seed_tiered_recall_database(temp_dir.path(), enabled);
-        group.bench_function(BenchmarkId::new(TIERED_RECALL_OPERATION, label), |b| {
-            b.iter(|| tiered_recall_context_summary(&workspace_path, &index_dir));
-        });
-    }
-    group.finish();
-}
-
-criterion_group!(benches, bench_tiered_recall);
-criterion_main!(benches);
-
-#[cfg(test)]
-mod tests {
-    use tempfile::TempDir;
-
-    use super::{
-        TIERED_RECALL_BENCH_GROUP, TIERED_RECALL_BUDGET_P50_MS, TIERED_RECALL_BUDGET_P99_MS,
-        TIERED_RECALL_CANDIDATE_POOL, TIERED_RECALL_MEMORY_COUNT, TIERED_RECALL_OPERATION,
-        context_options, seed_tiered_recall_database, tiered_recall_context_summary,
-    };
-
-    #[test]
-    fn tiered_recall_benchmark_contract_matches_swarmx_gate() {
-        assert_eq!(TIERED_RECALL_BENCH_GROUP, "ee_tiered_recall");
-        assert_eq!(TIERED_RECALL_OPERATION, "ee_tiered_recall_context");
-        assert!(
-            (TIERED_RECALL_CANDIDATE_POOL as usize) < TIERED_RECALL_MEMORY_COUNT,
-            "tiered recall proof must not request the whole corpus"
-        );
-        assert!(
-            TIERED_RECALL_CANDIDATE_POOL > 128,
-            "bounded pool should still cross the hot tier budget and exercise warm admission"
-        );
-        assert!(
-            TIERED_RECALL_MEMORY_COUNT > 640,
-            "default hot+warm budgets are 640, so the fixture must force a cold tier"
-        );
-        assert!(
-            TIERED_RECALL_BUDGET_P50_MS > 0.0
-                && TIERED_RECALL_BUDGET_P99_MS >= TIERED_RECALL_BUDGET_P50_MS,
-            "tiered recall benchmark budgets must be positive and monotonic"
-        );
-    }
-
-    #[test]
-    fn disabled_fixture_has_no_tier_admission_annotations() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let (workspace_path, index_dir) = seed_tiered_recall_database(temp_dir.path(), false);
-        let run =
-            ee::core::context::run_context_pack(&context_options(&workspace_path, &index_dir))
-                .expect("disabled tiered recall fixture context");
-        assert!(
-            run.data
-                .pack
-                .items
-                .iter()
-                .all(|item| !item.why.contains("tierAdmission")),
-            "disabled fixture must preserve default context output shape"
-        );
-    }
-
-    #[test]
-    fn enabled_fixture_explains_required_cold_recall() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let (workspace_path, index_dir) = seed_tiered_recall_database(temp_dir.path(), true);
-        let (tiered_count, cold_count, required_cold_count) =
-            tiered_recall_context_summary(&workspace_path, &index_dir);
+fn assert_tiered_recall_fixture_contract(
+    workspace_path: &Path,
+    index_dir: &Path,
+    memory_tier_admission: bool,
+) {
+    let (tiered_count, cold_count, required_cold_count) =
+        tiered_recall_context_summary(workspace_path, index_dir);
+    if memory_tier_admission {
         assert!(
             tiered_count > 0,
             "enabled fixture must exercise tier admission"
@@ -305,5 +262,30 @@ mod tests {
             required_cold_count > 0,
             "enabled fixture must preserve required cold evidence"
         );
+    } else {
+        assert_eq!(
+            tiered_count, 0,
+            "disabled fixture must preserve default context output shape"
+        );
     }
 }
+
+fn bench_tiered_recall(c: &mut Criterion) {
+    assert_tiered_recall_benchmark_contract();
+    let mut group = c.benchmark_group(TIERED_RECALL_BENCH_GROUP);
+    for (label, enabled) in [
+        ("tiering_disabled_baseline", false),
+        ("tiering_enabled_hot_cold", true),
+    ] {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let (workspace_path, index_dir) = seed_tiered_recall_database(temp_dir.path(), enabled);
+        assert_tiered_recall_fixture_contract(&workspace_path, &index_dir, enabled);
+        group.bench_function(BenchmarkId::new(TIERED_RECALL_OPERATION, label), |b| {
+            b.iter(|| tiered_recall_context_summary(&workspace_path, &index_dir));
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_tiered_recall);
+criterion_main!(benches);
