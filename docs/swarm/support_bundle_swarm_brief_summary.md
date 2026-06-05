@@ -32,6 +32,13 @@ redaction-safe `ee.rch.worker_pressure.v1` shape to distinguish
 `healthy_but_pressure_blocked`, `telemetry_stale`, `pressure_policy_denied`,
 `pressure_unknown`, and usable/degraded worker posture without embedding raw
 worker filesystem listings or executing any operator remediation.
+Environment attestation is narrower than this support-bundle summary: it
+explains which readiness sources are authoritative before a claim, closeout, or
+remote-proof admission decision. When a support bundle is created because source
+authority was confusing, include a fresh redacted
+`ee diag environment-attestation --workspace . --include-rch --json` excerpt as
+separate evidence. The bundle summary remains non-mutating and does not replace
+the live claim gate.
 
 Versioning: field renames or incompatible redaction semantics require a new
 schema version and a migration note. Additive counts may remain in

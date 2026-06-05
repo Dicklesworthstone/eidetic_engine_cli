@@ -27,6 +27,13 @@ The gate exposes `sourceAuthority.rchRemoteOnlyRequired` separately from
 when remote-only verification is required and the positive RCH proof is missing
 or false; a green local compile posture is not enough to claim Rust work.
 
+When the claim gate, support-bundle summary, or handoff evidence disagrees about
+which readiness source is authoritative, inspect
+`ee diag environment-attestation --workspace . --include-rch --json`; it is the
+read-only per-source contract for stale binary, Agent Mail probe mismatch,
+Beads/BV disagreement, RCH blocker, dirty source, reservation conflict, and
+local Cargo bypass verdicts.
+
 Version guard: if the installed `ee` rejects `--claim-gate` or `--candidate`
 as an unexpected argument, that binary is stale relative to the current
 source/docs contract. Stop at inspection, run no BV claim command, do not
