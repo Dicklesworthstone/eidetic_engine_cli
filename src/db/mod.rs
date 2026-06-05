@@ -16934,6 +16934,7 @@ pub fn advisory_lock_holder_liveness(holder_id: &str) -> AdvisoryLockHolderLiven
     advisory_lock_process_liveness(pid)
 }
 
+#[cfg(unix)]
 fn advisory_lock_process_liveness(pid: u32) -> AdvisoryLockHolderLiveness {
     let Ok(raw_pid) = i32::try_from(pid) else {
         return AdvisoryLockHolderLiveness::Unknown {
@@ -16953,6 +16954,17 @@ fn advisory_lock_process_liveness(pid: u32) -> AdvisoryLockHolderLiveness {
         Err(error) => AdvisoryLockHolderLiveness::Unknown {
             reason: format!("process probe failed for PID {pid}: {error}"),
         },
+    }
+}
+
+#[cfg(not(unix))]
+fn advisory_lock_process_liveness(pid: u32) -> AdvisoryLockHolderLiveness {
+    // Same-host PID liveness probing relies on Unix `rustix::process` signal-0
+    // semantics, which are configured out on non-Unix targets (e.g. Windows).
+    // Treat the holder as unprobeable rather than risk reclaiming a lock whose
+    // owner may still be alive.
+    AdvisoryLockHolderLiveness::Unknown {
+        reason: format!("process liveness probing for PID {pid} is unsupported on this platform"),
     }
 }
 
