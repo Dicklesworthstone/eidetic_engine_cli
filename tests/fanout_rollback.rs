@@ -68,13 +68,15 @@ fn enabled_mode_fails_closed_when_catalog_or_shard_is_missing() -> TestResult {
     let data_root = temp.path().join("data");
     let shard_root = data_root.join("shards");
 
-    let missing_catalog = DbShardRouter::resolve(ShardFanoutResolverInput {
+    let missing_catalog = match DbShardRouter::resolve(ShardFanoutResolverInput {
         enabled: true,
         workspace_id: Some("wsp_missing_catalog".to_owned()),
         workspace_root: Some(workspace_root.clone()),
         shards_dir_override: Some(shard_root.clone()),
-    })
-    .expect_err("enabled mode must not route without catalog");
+    }) {
+        Ok(_) => return Err("enabled mode must not route without catalog".to_owned()),
+        Err(error) => error,
+    };
 
     match missing_catalog {
         DbShardRouterError::ShardNotAuthoritative {
@@ -97,13 +99,15 @@ fn enabled_mode_fails_closed_when_catalog_or_shard_is_missing() -> TestResult {
     std::fs::write(data_root.join(SHARD_CATALOG_FILE_NAME), b"catalog")
         .map_err(|error| error.to_string())?;
 
-    let missing_shard = DbShardRouter::resolve(ShardFanoutResolverInput {
+    let missing_shard = match DbShardRouter::resolve(ShardFanoutResolverInput {
         enabled: true,
         workspace_id: Some("wsp_missing_shard".to_owned()),
         workspace_root: Some(workspace_root),
         shards_dir_override: Some(shard_root),
-    })
-    .expect_err("enabled mode must not route without required shard");
+    }) {
+        Ok(_) => return Err("enabled mode must not route without required shard".to_owned()),
+        Err(error) => error,
+    };
 
     match missing_shard {
         DbShardRouterError::ShardNotAuthoritative {

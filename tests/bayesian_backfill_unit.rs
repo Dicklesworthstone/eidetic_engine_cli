@@ -5,18 +5,21 @@ use ee::core::bayes::{
 };
 use ee::core::bayes_backfill::BackfillMode;
 
+type TestResult = Result<(), String>;
+
 fn approx_eq(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-12
 }
 
 #[test]
-fn utility_inverse_backfill_derives_documented_alpha_beta_pair() {
+fn utility_inverse_backfill_derives_documented_alpha_beta_pair() -> TestResult {
     let posterior = BetaPosterior::from_utility_inverse(0.8, 2.0)
-        .expect("0.8 confidence with weight 2.0 is valid");
+        .ok_or_else(|| "0.8 confidence with weight 2.0 should be valid".to_owned())?;
 
     assert!(approx_eq(posterior.alpha(), 1.6));
     assert!(approx_eq(posterior.beta(), 0.4));
     assert!(approx_eq(posterior.mean(), 0.8));
+    Ok(())
 }
 
 #[test]
