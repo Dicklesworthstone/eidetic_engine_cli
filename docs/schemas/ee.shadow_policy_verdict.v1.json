@@ -1,0 +1,341 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.shadow_policy_verdict.v1.json",
+  "title": "ee.shadow_policy_verdict.v1",
+  "description": "Side-effect-free promotion verdict derived from a deterministic shadow-policy score. The verdict is advisory only and never mutates active policy configuration.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "scoreSchema",
+    "policyDomain",
+    "incumbentPolicyId",
+    "candidatePolicyId",
+    "cohortProfile",
+    "sideEffectFree",
+    "operatorWarning",
+    "scoreVerdict",
+    "verdict",
+    "confidence",
+    "reasonCodes",
+    "abstentionReasons",
+    "safetyGuardsTriggered",
+    "counterEvidence",
+    "nextCommands",
+    "summary",
+    "redactionPosture"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.shadow_policy_verdict.v1"
+    },
+    "scoreSchema": {
+      "type": "string",
+      "const": "ee.shadow_policy_score.v1"
+    },
+    "policyDomain": {
+      "$ref": "#/$defs/policyDomain"
+    },
+    "incumbentPolicyId": {
+      "$ref": "#/$defs/policyId"
+    },
+    "candidatePolicyId": {
+      "$ref": "#/$defs/policyId"
+    },
+    "cohortProfile": {
+      "$ref": "#/$defs/cohortProfile"
+    },
+    "sideEffectFree": {
+      "type": "boolean",
+      "const": true
+    },
+    "operatorWarning": {
+      "type": "string",
+      "const": "shadow_verdict_is_advisory_only_no_policy_mutation"
+    },
+    "scoreVerdict": {
+      "type": "string",
+      "enum": ["improves", "regresses", "flat", "needs_more_evidence"]
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["promote", "hold", "reject", "abstain"]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "reasonCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/reasonCode"
+      }
+    },
+    "abstentionReasons": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/abstentionReason"
+      }
+    },
+    "safetyGuardsTriggered": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/safetyGuard"
+      }
+    },
+    "counterEvidence": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160,
+        "pattern": "^[A-Za-z0-9._:-]+$"
+      }
+    },
+    "nextCommands": {
+      "type": "array",
+      "items": {
+        "description": "Read-only or proof-oriented command that gathers the next evidence needed before a policy change.",
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 240
+      }
+    },
+    "summary": {
+      "$ref": "#/$defs/scoreSummary"
+    },
+    "redactionPosture": {
+      "$ref": "#/$defs/redactionPosture"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "verdict": { "const": "promote" }
+        },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "abstentionReasons": {
+            "maxItems": 0
+          },
+          "safetyGuardsTriggered": {
+            "maxItems": 0
+          },
+          "nextCommands": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verdict": { "const": "abstain" }
+        },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "abstentionReasons": {
+            "minItems": 1
+          },
+          "nextCommands": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "policyId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "policyDomain": {
+      "type": "string",
+      "enum": [
+        "pack_selection",
+        "cache_admission",
+        "verification_admission",
+        "curation_filter",
+        "resource_profile_budget_admission"
+      ]
+    },
+    "cohortProfile": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "reasonCode": {
+      "type": "string",
+      "enum": [
+        "score_improves",
+        "promotion_thresholds_satisfied",
+        "candidate_flat",
+        "score_needs_more_evidence",
+        "insufficient_evidence_count",
+        "required_evidence_dropped",
+        "degraded_delta_regression",
+        "redaction_regression",
+        "utility_regression",
+        "p99_regression",
+        "resource_regression",
+        "source_authority_not_current",
+        "rch_not_admitted",
+        "local_cargo_tripwire_not_clean",
+        "missing_replay_evidence",
+        "stale_source_authority",
+        "unsafe_local_cargo_posture"
+      ]
+    },
+    "abstentionReason": {
+      "type": "string",
+      "enum": [
+        "missing_replay_evidence",
+        "stale_source_authority",
+        "unsafe_local_cargo_posture",
+        "unsupported_policy_domain",
+        "rch_blocked"
+      ]
+    },
+    "safetyGuard": {
+      "type": "string",
+      "enum": [
+        "dropped_required_evidence",
+        "degraded_delta_regression",
+        "redaction_regression",
+        "p99_regression",
+        "resource_regression"
+      ]
+    },
+    "scoreSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "totalEvidence",
+        "usableEvidence",
+        "missingEvidence",
+        "staleEvidence",
+        "unsupportedEvidence",
+        "divergedEvidence",
+        "divergenceRate",
+        "utilityDelta",
+        "droppedRequiredEvidenceCount",
+        "outputBytesDelta",
+        "p50LatencyMs",
+        "p95LatencyMs",
+        "p99LatencyMs",
+        "degradedDelta",
+        "resourceBytesDelta",
+        "redactionSafe"
+      ],
+      "properties": {
+        "totalEvidence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "usableEvidence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missingEvidence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "staleEvidence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unsupportedEvidence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "divergedEvidence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "divergenceRate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "utilityDelta": {
+          "type": "number"
+        },
+        "droppedRequiredEvidenceCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputBytesDelta": {
+          "type": "integer"
+        },
+        "p50LatencyMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p95LatencyMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p99LatencyMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "degradedDelta": {
+          "type": "integer"
+        },
+        "resourceBytesDelta": {
+          "type": "integer"
+        },
+        "redactionSafe": {
+          "type": "boolean"
+        }
+      }
+    },
+    "redactionPosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rawMemoryBodyPresent",
+        "rawMailBodyPresent",
+        "rawPolicyPayloadPresent",
+        "absoluteHostPathPresent",
+        "secretsPresent"
+      ],
+      "properties": {
+        "rawMemoryBodyPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawMailBodyPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawPolicyPayloadPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "absoluteHostPathPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "secretsPresent": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    }
+  }
+}

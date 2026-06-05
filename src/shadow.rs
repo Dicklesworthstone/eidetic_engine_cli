@@ -16,6 +16,9 @@ pub const SUBSYSTEM: &str = "shadow";
 pub const SHADOW_REPORT_SCHEMA_V1: &str = "ee.shadow_report.v1";
 pub const SHADOW_POLICY_INVENTORY_SCHEMA_V1: &str = "ee.shadow_policy_inventory.v1";
 pub const SHADOW_POLICY_SCORE_SCHEMA_V1: &str = "ee.shadow_policy_score.v1";
+pub const SHADOW_POLICY_VERDICT_SCHEMA_V1: &str = "ee.shadow_policy_verdict.v1";
+pub const SHADOW_POLICY_OPERATOR_WARNING: &str =
+    "shadow_verdict_is_advisory_only_no_policy_mutation";
 
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
@@ -518,6 +521,31 @@ impl ShadowPolicyScoreVerdict {
     }
 }
 
+/// Conservative promotion decision derived from a scored shadow-policy cohort.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShadowPolicyPromotionVerdict {
+    /// Candidate is eligible for a later explicit apply step.
+    Promote,
+    /// Candidate is not worse, but evidence or SLO posture is too weak to promote.
+    Hold,
+    /// Candidate regressed a hard safety or utility requirement.
+    Reject,
+    /// Evidence/source authority is not sufficient to judge the candidate.
+    Abstain,
+}
+
+impl ShadowPolicyPromotionVerdict {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Promote => "promote",
+            Self::Hold => "hold",
+            Self::Reject => "reject",
+            Self::Abstain => "abstain",
+        }
+    }
+}
+
 /// One deterministic replay/golden artifact scored for a candidate policy.
 #[derive(Clone, Debug)]
 pub struct ShadowPolicyEvidencePoint {
@@ -579,6 +607,42 @@ impl Default for ShadowPolicyScoringConfig {
     }
 }
 
+/// Conservative thresholds for converting a shadow score into a promotion verdict.
+#[derive(Clone, Copy, Debug)]
+pub struct ShadowPolicyPromotionConfig {
+    pub min_usable_evidence_for_promotion: u32,
+    pub max_p99_latency_ms_for_promotion: u64,
+    pub max_resource_bytes_regression_for_promotion: i64,
+}
+
+impl Default for ShadowPolicyPromotionConfig {
+    fn default() -> Self {
+        Self {
+            min_usable_evidence_for_promotion: 2,
+            max_p99_latency_ms_for_promotion: 250,
+            max_resource_bytes_regression_for_promotion: 0,
+        }
+    }
+}
+
+/// Source and verification posture required before a shadow score can promote.
+#[derive(Clone, Copy, Debug)]
+pub struct ShadowPolicyPromotionPosture {
+    pub source_authority_current: bool,
+    pub rch_admitted: bool,
+    pub local_cargo_clean: bool,
+}
+
+impl Default for ShadowPolicyPromotionPosture {
+    fn default() -> Self {
+        Self {
+            source_authority_current: true,
+            rch_admitted: true,
+            local_cargo_clean: true,
+        }
+    }
+}
+
 /// Stable summary for a scored policy cohort.
 #[derive(Clone, Debug, Default)]
 pub struct ShadowPolicyScoreSummary {
@@ -613,6 +677,28 @@ pub struct ShadowPolicyScoreReport {
     pub verdict: ShadowPolicyScoreVerdict,
     pub abstention_reasons: Vec<String>,
     pub evidence: Vec<ShadowPolicyEvidencePoint>,
+}
+
+/// Read-only promotion verdict for a scored shadow-policy cohort.
+#[derive(Clone, Debug)]
+pub struct ShadowPolicyPromotionReport {
+    pub schema: &'static str,
+    pub score_schema: &'static str,
+    pub policy_domain: String,
+    pub incumbent_policy_id: String,
+    pub candidate_policy_id: String,
+    pub cohort_profile: String,
+    pub side_effect_free: bool,
+    pub operator_warning: &'static str,
+    pub summary: ShadowPolicyScoreSummary,
+    pub score_verdict: ShadowPolicyScoreVerdict,
+    pub verdict: ShadowPolicyPromotionVerdict,
+    pub confidence: f64,
+    pub reason_codes: Vec<String>,
+    pub abstention_reasons: Vec<String>,
+    pub safety_guards_triggered: Vec<String>,
+    pub counter_evidence: Vec<String>,
+    pub next_commands: Vec<String>,
 }
 
 #[must_use]
@@ -716,6 +802,231 @@ pub fn score_shadow_policy_cohort(
     }
 }
 
+#[must_use]
+pub fn promote_shadow_policy_from_score(
+    score: &ShadowPolicyScoreReport,
+    config: ShadowPolicyPromotionConfig,
+    posture: ShadowPolicyPromotionPosture,
+) -> ShadowPolicyPromotionReport {
+    let mut reason_codes = Vec::new();
+    let mut abstention_reasons = Vec::new();
+    let mut safety_guards_triggered = Vec::new();
+    let mut counter_evidence = Vec::new();
+    let mut next_commands = Vec::new();
+
+    if !posture.source_authority_current {
+        push_unique(&mut reason_codes, "source_authority_not_current");
+        push_unique(&mut abstention_reasons, "stale_source_authority");
+        push_unique(&mut next_commands, "ee diag environment-attestation --json");
+    }
+    if !posture.rch_admitted {
+        push_unique(&mut reason_codes, "rch_not_admitted");
+        push_unique(&mut abstention_reasons, "rch_blocked");
+        push_unique(
+            &mut next_commands,
+            "scripts/rch_verify.sh -- cargo test --test contracts shadow_run -- --nocapture",
+        );
+    }
+    if !posture.local_cargo_clean {
+        push_unique(&mut reason_codes, "local_cargo_tripwire_not_clean");
+        push_unique(&mut abstention_reasons, "unsafe_local_cargo_posture");
+        push_unique(
+            &mut next_commands,
+            "scripts/check-local-cargo-tripwire.sh --probe-processes --json",
+        );
+    }
+
+    if score.verdict == ShadowPolicyScoreVerdict::NeedsMoreEvidence {
+        push_unique(&mut reason_codes, "score_needs_more_evidence");
+        if score.abstention_reasons.is_empty() {
+            push_unique(&mut abstention_reasons, "missing_replay_evidence");
+        } else {
+            for reason in &score.abstention_reasons {
+                push_unique(&mut abstention_reasons, reason);
+            }
+        }
+        push_unique(
+            &mut next_commands,
+            "ee lab swarm replay --trace <workload.json> --dry-run --json",
+        );
+    }
+
+    let verdict = if !abstention_reasons.is_empty() {
+        ShadowPolicyPromotionVerdict::Abstain
+    } else {
+        match score.verdict {
+            ShadowPolicyScoreVerdict::Improves => promotion_verdict_for_improving_score(
+                score,
+                config,
+                &mut reason_codes,
+                &mut safety_guards_triggered,
+                &mut counter_evidence,
+                &mut next_commands,
+            ),
+            ShadowPolicyScoreVerdict::Regresses => {
+                push_regression_reasons(score, &mut reason_codes, &mut safety_guards_triggered);
+                push_regressing_evidence(score, &mut counter_evidence);
+                push_unique(&mut next_commands, "ee why candidate-policy --json");
+                ShadowPolicyPromotionVerdict::Reject
+            }
+            ShadowPolicyScoreVerdict::Flat => {
+                push_unique(&mut reason_codes, "candidate_flat");
+                push_unique(
+                    &mut next_commands,
+                    "ee pack diff <old-pack-id> <new-pack-id> --json",
+                );
+                ShadowPolicyPromotionVerdict::Hold
+            }
+            ShadowPolicyScoreVerdict::NeedsMoreEvidence => ShadowPolicyPromotionVerdict::Abstain,
+        }
+    };
+
+    let confidence = promotion_confidence(score, verdict, config);
+
+    ShadowPolicyPromotionReport {
+        schema: SHADOW_POLICY_VERDICT_SCHEMA_V1,
+        score_schema: score.schema,
+        policy_domain: score.policy_domain.clone(),
+        incumbent_policy_id: score.incumbent_policy_id.clone(),
+        candidate_policy_id: score.candidate_policy_id.clone(),
+        cohort_profile: score.cohort_profile.clone(),
+        side_effect_free: true,
+        operator_warning: SHADOW_POLICY_OPERATOR_WARNING,
+        summary: score.summary.clone(),
+        score_verdict: score.verdict,
+        verdict,
+        confidence,
+        reason_codes,
+        abstention_reasons,
+        safety_guards_triggered,
+        counter_evidence,
+        next_commands,
+    }
+}
+
+fn promotion_verdict_for_improving_score(
+    score: &ShadowPolicyScoreReport,
+    config: ShadowPolicyPromotionConfig,
+    reason_codes: &mut Vec<String>,
+    safety_guards_triggered: &mut Vec<String>,
+    counter_evidence: &mut Vec<String>,
+    next_commands: &mut Vec<String>,
+) -> ShadowPolicyPromotionVerdict {
+    if score.summary.usable_evidence < config.min_usable_evidence_for_promotion {
+        push_unique(reason_codes, "insufficient_evidence_count");
+        push_unique(
+            next_commands,
+            "ee lab swarm replay --trace <workload.json> --dry-run --json",
+        );
+        return ShadowPolicyPromotionVerdict::Hold;
+    }
+    if score.summary.p99_latency_ms > config.max_p99_latency_ms_for_promotion {
+        push_unique(reason_codes, "p99_regression");
+        push_unique(safety_guards_triggered, "p99_regression");
+        push_slow_evidence(score, counter_evidence);
+        push_unique(
+            next_commands,
+            "ee lab swarm replay --trace <workload.json> --dry-run --json",
+        );
+        return ShadowPolicyPromotionVerdict::Hold;
+    }
+    if score.summary.resource_bytes_delta > config.max_resource_bytes_regression_for_promotion {
+        push_unique(reason_codes, "resource_regression");
+        push_unique(safety_guards_triggered, "resource_regression");
+        push_resource_regressing_evidence(score, counter_evidence);
+        push_unique(next_commands, "ee support bundle --out <dir> --json");
+        return ShadowPolicyPromotionVerdict::Hold;
+    }
+
+    push_unique(reason_codes, "score_improves");
+    push_unique(reason_codes, "promotion_thresholds_satisfied");
+    ShadowPolicyPromotionVerdict::Promote
+}
+
+fn push_regression_reasons(
+    score: &ShadowPolicyScoreReport,
+    reason_codes: &mut Vec<String>,
+    safety_guards_triggered: &mut Vec<String>,
+) {
+    if score.summary.dropped_required_evidence_count > 0 {
+        push_unique(reason_codes, "required_evidence_dropped");
+        push_unique(safety_guards_triggered, "dropped_required_evidence");
+    }
+    if score.summary.degraded_delta > 0 {
+        push_unique(reason_codes, "degraded_delta_regression");
+        push_unique(safety_guards_triggered, "degraded_delta_regression");
+    }
+    if !score.summary.redaction_safe {
+        push_unique(reason_codes, "redaction_regression");
+        push_unique(safety_guards_triggered, "redaction_regression");
+    }
+    if score.summary.utility_delta < 0.0 {
+        push_unique(reason_codes, "utility_regression");
+    }
+}
+
+fn push_regressing_evidence(score: &ShadowPolicyScoreReport, counter_evidence: &mut Vec<String>) {
+    for point in &score.evidence {
+        if point.posture.is_usable()
+            && (point.utility_delta() < 0.0
+                || point.degraded_delta() > 0
+                || point.dropped_required_evidence_count > 0
+                || !point.redaction_safe)
+        {
+            push_unique(counter_evidence, &point.artifact_id);
+        }
+    }
+}
+
+fn push_slow_evidence(score: &ShadowPolicyScoreReport, counter_evidence: &mut Vec<String>) {
+    for point in &score.evidence {
+        if point.posture.is_usable()
+            && point.candidate_latency_ms >= score.summary.p99_latency_ms
+            && score.summary.p99_latency_ms > 0
+        {
+            push_unique(counter_evidence, &point.artifact_id);
+        }
+    }
+}
+
+fn push_resource_regressing_evidence(
+    score: &ShadowPolicyScoreReport,
+    counter_evidence: &mut Vec<String>,
+) {
+    for point in &score.evidence {
+        if point.posture.is_usable() && point.resource_bytes_delta > 0 {
+            push_unique(counter_evidence, &point.artifact_id);
+        }
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn promotion_confidence(
+    score: &ShadowPolicyScoreReport,
+    verdict: ShadowPolicyPromotionVerdict,
+    config: ShadowPolicyPromotionConfig,
+) -> f64 {
+    let required = config.min_usable_evidence_for_promotion.max(1);
+    let evidence_confidence =
+        (f64::from(score.summary.usable_evidence) / f64::from(required)).min(1.0);
+    let utility_confidence = score.summary.utility_delta.abs().min(1.0);
+    match verdict {
+        ShadowPolicyPromotionVerdict::Promote => {
+            (0.70 + (0.20 * evidence_confidence) + (0.10 * utility_confidence)).min(1.0)
+        }
+        ShadowPolicyPromotionVerdict::Hold => 0.55 * evidence_confidence,
+        ShadowPolicyPromotionVerdict::Reject => {
+            (0.75 + (0.10 * evidence_confidence) + (0.05 * utility_confidence)).min(1.0)
+        }
+        ShadowPolicyPromotionVerdict::Abstain => 0.0,
+    }
+}
+
 fn saturating_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
@@ -770,6 +1081,51 @@ pub fn render_shadow_policy_score_json(report: &ShadowPolicyScoreReport) -> Stri
         push_evidence_point_json(&mut out, point);
     }
     out.push_str("]}");
+    out
+}
+
+#[must_use]
+pub fn render_shadow_policy_promotion_json(report: &ShadowPolicyPromotionReport) -> String {
+    let mut out = String::new();
+    out.push('{');
+    json_str_field(&mut out, "schema", report.schema);
+    out.push(',');
+    json_str_field(&mut out, "scoreSchema", report.score_schema);
+    out.push(',');
+    json_str_field(&mut out, "policyDomain", &report.policy_domain);
+    out.push(',');
+    json_str_field(&mut out, "incumbentPolicyId", &report.incumbent_policy_id);
+    out.push(',');
+    json_str_field(&mut out, "candidatePolicyId", &report.candidate_policy_id);
+    out.push(',');
+    json_str_field(&mut out, "cohortProfile", &report.cohort_profile);
+    out.push_str(",\"sideEffectFree\":true,");
+    json_str_field(&mut out, "operatorWarning", report.operator_warning);
+    out.push_str(",\"scoreVerdict\":");
+    push_json_string(&mut out, report.score_verdict.as_str());
+    out.push_str(",\"verdict\":");
+    push_json_string(&mut out, report.verdict.as_str());
+    out.push(',');
+    push_f64_field(&mut out, "confidence", report.confidence);
+    out.push_str(",\"reasonCodes\":[");
+    push_string_array(&mut out, &report.reason_codes);
+    out.push_str("],\"abstentionReasons\":[");
+    push_string_array(&mut out, &report.abstention_reasons);
+    out.push_str("],\"safetyGuardsTriggered\":[");
+    push_string_array(&mut out, &report.safety_guards_triggered);
+    out.push_str("],\"counterEvidence\":[");
+    push_string_array(&mut out, &report.counter_evidence);
+    out.push_str("],\"nextCommands\":[");
+    push_string_array(&mut out, &report.next_commands);
+    out.push_str("],\"summary\":{");
+    push_summary_json(&mut out, &report.summary);
+    out.push_str("},\"redactionPosture\":{");
+    out.push_str("\"rawMemoryBodyPresent\":false,");
+    out.push_str("\"rawMailBodyPresent\":false,");
+    out.push_str("\"rawPolicyPayloadPresent\":false,");
+    out.push_str("\"absoluteHostPathPresent\":false,");
+    out.push_str("\"secretsPresent\":false");
+    out.push_str("}}");
     out
 }
 
@@ -860,6 +1216,15 @@ fn push_json_string(out: &mut String, value: &str) {
     match serde_json::to_string(value) {
         Ok(encoded) => out.push_str(&encoded),
         Err(_) => out.push_str("\"<invalid>\""),
+    }
+}
+
+fn push_string_array(out: &mut String, values: &[String]) {
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        push_json_string(out, value);
     }
 }
 

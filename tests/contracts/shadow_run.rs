@@ -11,10 +11,12 @@ use ee::output::{ShadowRunReport, render_shadow_run_json};
 use ee::shadow::pack::{PackShadowOutput, compare_outputs};
 use ee::shadow::{
     PolicyDomain, PolicyInventoryStatus, PolicyMaturity, ShadowEvidenceKind, ShadowEvidencePosture,
-    ShadowGateConfig, ShadowPolicyEvidencePoint, ShadowPolicyScoreVerdict,
-    ShadowPolicyScoringConfig, ShadowPromotionGuards, ShadowVerdict, candidate_promotion_allowed,
-    find_shadow_policy_inventory_entry, render_shadow_policy_score_json,
-    score_shadow_policy_cohort, shadow_policy_inventory,
+    ShadowGateConfig, ShadowPolicyEvidencePoint, ShadowPolicyPromotionConfig,
+    ShadowPolicyPromotionPosture, ShadowPolicyPromotionVerdict, ShadowPolicyScoreReport,
+    ShadowPolicyScoreVerdict, ShadowPolicyScoringConfig, ShadowPromotionGuards, ShadowVerdict,
+    candidate_promotion_allowed, find_shadow_policy_inventory_entry,
+    promote_shadow_policy_from_score, render_shadow_policy_promotion_json,
+    render_shadow_policy_score_json, score_shadow_policy_cohort, shadow_policy_inventory,
 };
 use serde_json::Value;
 
@@ -165,6 +167,40 @@ fn evidence_point(
     }
 }
 
+fn improving_policy_score_report() -> ShadowPolicyScoreReport {
+    let mut replay = evidence_point(
+        "replay.swarm.pack.ci",
+        ShadowEvidenceKind::ReplayTrace,
+        ShadowEvidencePosture::Present,
+        0.70,
+        0.82,
+        1000,
+        920,
+        100,
+    );
+    replay.resource_bytes_delta = -512;
+    let mut golden = evidence_point(
+        "golden.shadow.pack",
+        ShadowEvidenceKind::GoldenFixture,
+        ShadowEvidencePosture::Present,
+        0.80,
+        0.88,
+        800,
+        760,
+        80,
+    );
+    golden.resource_bytes_delta = -256;
+
+    score_shadow_policy_cohort(
+        PolicyDomain::PackSelection.as_str(),
+        "incumbent.pack.mmr_redundancy",
+        "candidate.pack.facility_location",
+        "ci_smoke",
+        vec![replay, golden],
+        ShadowPolicyScoringConfig::default(),
+    )
+}
+
 #[test]
 fn gate14_policy_domain_includes_verification_admission() -> TestResult {
     ensure(
@@ -279,37 +315,7 @@ fn gate14_shadow_policy_inventory_abstains_for_unsupported_resource_budget_domai
 
 #[test]
 fn gate14_shadow_policy_score_improving_fixture_cohort_matches_golden() -> TestResult {
-    let mut replay = evidence_point(
-        "replay.swarm.pack.ci",
-        ShadowEvidenceKind::ReplayTrace,
-        ShadowEvidencePosture::Present,
-        0.70,
-        0.82,
-        1000,
-        920,
-        100,
-    );
-    replay.resource_bytes_delta = -512;
-    let mut golden = evidence_point(
-        "golden.shadow.pack",
-        ShadowEvidenceKind::GoldenFixture,
-        ShadowEvidencePosture::Present,
-        0.80,
-        0.88,
-        800,
-        760,
-        80,
-    );
-    golden.resource_bytes_delta = -256;
-
-    let report = score_shadow_policy_cohort(
-        PolicyDomain::PackSelection.as_str(),
-        "incumbent.pack.mmr_redundancy",
-        "candidate.pack.facility_location",
-        "ci_smoke",
-        vec![replay, golden],
-        ShadowPolicyScoringConfig::default(),
-    );
+    let report = improving_policy_score_report();
 
     ensure(
         report.verdict == ShadowPolicyScoreVerdict::Improves,
@@ -334,6 +340,183 @@ fn gate14_shadow_policy_score_improving_fixture_cohort_matches_golden() -> TestR
     serde_json::from_str::<Value>(&json)
         .map_err(|error| format!("policy score JSON should parse: {error}"))?;
     assert_golden("policy_replay_score", &(json + "\n"))
+}
+
+#[test]
+fn gate14_shadow_policy_promotion_promotes_only_current_rch_clean_evidence() -> TestResult {
+    let score = improving_policy_score_report();
+    let report = promote_shadow_policy_from_score(
+        &score,
+        ShadowPolicyPromotionConfig::default(),
+        ShadowPolicyPromotionPosture::default(),
+    );
+
+    ensure(
+        report.verdict == ShadowPolicyPromotionVerdict::Promote,
+        "improving current evidence should promote",
+    )?;
+    ensure(
+        report.reason_codes
+            == vec![
+                "score_improves".to_string(),
+                "promotion_thresholds_satisfied".to_string(),
+            ],
+        "promotion records deterministic reason codes",
+    )?;
+    ensure(
+        report.operator_warning == "shadow_verdict_is_advisory_only_no_policy_mutation",
+        "promotion report warns that no policy was mutated",
+    )?;
+    ensure(
+        (report.confidence - 0.91).abs() < 0.0001,
+        "promotion confidence is deterministic",
+    )?;
+
+    let json = render_shadow_policy_promotion_json(&report);
+    serde_json::from_str::<Value>(&json)
+        .map_err(|error| format!("policy promotion JSON should parse: {error}"))?;
+    assert_golden("policy_promotion_verdict", &(json + "\n"))
+}
+
+#[test]
+fn gate14_shadow_policy_promotion_holds_flat_or_underpowered_cohorts() -> TestResult {
+    let point = evidence_point(
+        "manual.fixture.verification.flat",
+        ShadowEvidenceKind::ManualFixture,
+        ShadowEvidencePosture::Present,
+        0.75,
+        0.75,
+        600,
+        600,
+        75,
+    );
+    let flat = score_shadow_policy_cohort(
+        PolicyDomain::VerificationAdmission.as_str(),
+        "incumbent.verification.rch_only",
+        "candidate.verification.environment_attestation",
+        "ci_smoke",
+        vec![point],
+        ShadowPolicyScoringConfig::default(),
+    );
+
+    let report = promote_shadow_policy_from_score(
+        &flat,
+        ShadowPolicyPromotionConfig::default(),
+        ShadowPolicyPromotionPosture::default(),
+    );
+
+    ensure(
+        report.verdict == ShadowPolicyPromotionVerdict::Hold,
+        "flat evidence is held instead of promoted",
+    )?;
+    ensure(
+        report.reason_codes == vec!["candidate_flat".to_string()],
+        "flat evidence records hold reason",
+    )?;
+    ensure(
+        !report.next_commands.is_empty(),
+        "hold verdict supplies next evidence command",
+    )
+}
+
+#[test]
+fn gate14_shadow_policy_promotion_rejects_regressions_with_counter_evidence() -> TestResult {
+    let mut point = evidence_point(
+        "golden.shadow.cache.regression",
+        ShadowEvidenceKind::GoldenFixture,
+        ShadowEvidencePosture::Present,
+        0.90,
+        0.84,
+        700,
+        760,
+        140,
+    );
+    point.incumbent_degraded_count = 1;
+    point.candidate_degraded_count = 2;
+    point.dropped_required_evidence_count = 1;
+
+    let score = score_shadow_policy_cohort(
+        PolicyDomain::CacheAdmission.as_str(),
+        "incumbent.cache.no_cache",
+        "candidate.cache.s3_fifo",
+        "small",
+        vec![point],
+        ShadowPolicyScoringConfig::default(),
+    );
+    let report = promote_shadow_policy_from_score(
+        &score,
+        ShadowPolicyPromotionConfig::default(),
+        ShadowPolicyPromotionPosture::default(),
+    );
+
+    ensure(
+        report.verdict == ShadowPolicyPromotionVerdict::Reject,
+        "regressing score is rejected",
+    )?;
+    ensure(
+        report
+            .safety_guards_triggered
+            .contains(&"dropped_required_evidence".to_string()),
+        "dropped required evidence is a hard safety guard",
+    )?;
+    ensure(
+        report
+            .counter_evidence
+            .contains(&"golden.shadow.cache.regression".to_string()),
+        "reject verdict carries counter-evidence artifact id",
+    )
+}
+
+#[test]
+fn gate14_shadow_policy_promotion_abstains_on_missing_or_unsafe_evidence() -> TestResult {
+    let missing = evidence_point(
+        "replay.swarm.pack.missing",
+        ShadowEvidenceKind::ReplayTrace,
+        ShadowEvidencePosture::Missing,
+        0.0,
+        0.0,
+        0,
+        0,
+        0,
+    );
+    let score = score_shadow_policy_cohort(
+        PolicyDomain::PackSelection.as_str(),
+        "incumbent.pack.mmr_redundancy",
+        "candidate.pack.facility_location",
+        "swarm_heavy",
+        vec![missing],
+        ShadowPolicyScoringConfig::default(),
+    );
+    let posture = ShadowPolicyPromotionPosture {
+        source_authority_current: false,
+        rch_admitted: false,
+        local_cargo_clean: false,
+    };
+    let report =
+        promote_shadow_policy_from_score(&score, ShadowPolicyPromotionConfig::default(), posture);
+
+    ensure(
+        report.verdict == ShadowPolicyPromotionVerdict::Abstain,
+        "missing evidence and unsafe posture abstain",
+    )?;
+    for reason in [
+        "missing_replay_evidence",
+        "stale_source_authority",
+        "rch_blocked",
+        "unsafe_local_cargo_posture",
+    ] {
+        ensure(
+            report.abstention_reasons.contains(&reason.to_string()),
+            format!("abstain includes {reason}"),
+        )?;
+    }
+    ensure(
+        report
+            .next_commands
+            .iter()
+            .any(|command| command.contains("check-local-cargo-tripwire")),
+        "abstain includes local cargo tripwire repair command",
+    )
 }
 
 #[test]
@@ -685,6 +868,81 @@ fn gate14_shadow_policy_inventory_schema_pins_policy_ids_and_abstention_contract
     )?;
 
     redaction_fields_are_default_deny(&schema, "shadow policy inventory schema")
+}
+
+#[test]
+fn gate14_shadow_policy_verdict_schema_pins_conservative_promotion_contract() -> TestResult {
+    let schema = read_schema("ee.shadow_policy_verdict.v1.json")?;
+    for field in [
+        "schema",
+        "scoreSchema",
+        "policyDomain",
+        "incumbentPolicyId",
+        "candidatePolicyId",
+        "cohortProfile",
+        "sideEffectFree",
+        "operatorWarning",
+        "scoreVerdict",
+        "verdict",
+        "confidence",
+        "reasonCodes",
+        "abstentionReasons",
+        "safetyGuardsTriggered",
+        "counterEvidence",
+        "nextCommands",
+        "summary",
+        "redactionPosture",
+    ] {
+        required_contains(&schema, field, "shadow policy verdict schema")?;
+    }
+
+    let verdict = nested_object_field(&schema, &["properties", "verdict"], "verdict")?;
+    enum_contains(
+        verdict,
+        &["promote", "hold", "reject", "abstain"],
+        "promotion verdict",
+    )?;
+
+    let score_verdict =
+        nested_object_field(&schema, &["properties", "scoreVerdict"], "score verdict")?;
+    enum_contains(
+        score_verdict,
+        &["improves", "regresses", "flat", "needs_more_evidence"],
+        "score verdict",
+    )?;
+
+    let operator_warning = nested_object_field(
+        &schema,
+        &["properties", "operatorWarning", "const"],
+        "operator warning",
+    )?;
+    ensure(
+        operator_warning.as_str() == Some("shadow_verdict_is_advisory_only_no_policy_mutation"),
+        "operator warning pins no-mutation posture",
+    )?;
+
+    let reason_codes = nested_object_field(&schema, &["$defs", "reasonCode"], "reason codes")?;
+    enum_contains(
+        reason_codes,
+        &[
+            "score_improves",
+            "promotion_thresholds_satisfied",
+            "candidate_flat",
+            "required_evidence_dropped",
+            "missing_replay_evidence",
+            "stale_source_authority",
+            "unsafe_local_cargo_posture",
+        ],
+        "reason codes",
+    )?;
+
+    let next_command = nested_object_field(
+        &schema,
+        &["properties", "nextCommands", "items"],
+        "next command",
+    )?;
+    object_field(next_command, "description", "next command item")?;
+    redaction_fields_are_default_deny(&schema, "shadow policy verdict schema")
 }
 
 #[test]
