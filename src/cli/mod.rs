@@ -16616,31 +16616,30 @@ fn clap_error_message(error: &clap::Error) -> String {
 /// references the bare binary.
 fn extract_usage_subcommand(error: &clap::Error) -> Option<String> {
     let full = error.to_string();
-    for line in full.lines() {
-        let trimmed = line.trim();
-        let rest = trimmed.strip_prefix("Usage:")?.trim();
-        // `rest` looks like `ee remember [OPTIONS] <CONTENT>` or `ee --json`.
-        let rest = rest.strip_prefix("ee").unwrap_or(rest).trim();
-        let mut path: Vec<&str> = Vec::new();
-        for tok in rest.split_whitespace() {
-            if tok.starts_with('[')
-                || tok.starts_with('<')
-                || tok.starts_with('-')
-                || tok == "OPTIONS"
-                || tok == "COMMAND"
-                || tok == "ARGS"
-                || tok == "..."
-            {
-                break;
-            }
-            path.push(tok);
+    let rest = full
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Usage:").map(str::trim))?;
+    // `rest` looks like `ee remember [OPTIONS] <CONTENT>` or `ee --json`.
+    let rest = rest.strip_prefix("ee").unwrap_or(rest).trim();
+    let mut path: Vec<&str> = Vec::new();
+    for tok in rest.split_whitespace() {
+        if tok.starts_with('[')
+            || tok.starts_with('<')
+            || tok.starts_with('-')
+            || tok == "OPTIONS"
+            || tok == "COMMAND"
+            || tok == "ARGS"
+            || tok == "..."
+        {
+            break;
         }
-        if path.is_empty() {
-            return None;
-        }
-        return Some(path.join(" "));
+        path.push(tok);
     }
-    None
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.join(" "))
+    }
 }
 
 fn handle_agent_docs<W, E>(
