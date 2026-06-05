@@ -15,6 +15,7 @@
     "hugepagesGranted",
     "populateRequested",
     "bytesMmapped",
+    "bytesWarmloaded",
     "pageFaultsPre",
     "pageFaultsPost",
     "fallbackPath",
@@ -51,7 +52,7 @@
     },
     "succeeded": {
       "type": "boolean",
-      "description": "True iff the lexical index files are now RAM-pinned with the requested posture. The scaffold never sets this to true; only the syscall slice does."
+      "description": "True iff the lexical index files are now OS-level RAM-pinned with the requested posture. The safe heap warmload path never sets this to true; only the audited syscall slice does."
     },
     "hugepagesRequested": {
       "type": "boolean",
@@ -68,7 +69,12 @@
     "bytesMmapped": {
       "type": "integer",
       "minimum": 0,
-      "description": "Total bytes mapped into RAM across all lexical index files. Always 0 in the scaffold."
+      "description": "Total bytes mapped into RAM across all lexical index files. Remains 0 when the safe heap warmload fallback is used."
+    },
+    "bytesWarmloaded": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total lexical index file bytes retained in the process-local heap warmload cache."
     },
     "pageFaultsPre": {
       "type": "integer",
@@ -85,7 +91,7 @@
       "description": "Coarse strategy the loader took when the optimization could not be fully applied. `none` is reserved for a successful full pin.",
       "enum": [
         "none",
-        "software_not_implemented",
+        "heap_warmload",
         "madvise_willneed",
         "heap_only",
         "disabled_by_operator"

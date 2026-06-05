@@ -1,0 +1,22 @@
+{
+  "schema": "ee.status.search.lexical_ram_tier.v1",
+  "scenario": "linux_heap_warmload",
+  "platform": "linux",
+  "supported": true,
+  "enabled": true,
+  "attempted": true,
+  "succeeded": false,
+  "hugepagesRequested": false,
+  "hugepagesGranted": false,
+  "populateRequested": true,
+  "bytesMmapped": 0,
+  "bytesWarmloaded": 17,
+  "pageFaultsPre": 0,
+  "pageFaultsPost": 0,
+  "fallbackPath": "heap_warmload",
+  "indexPath": "<fixture>/lexical",
+  "indexRevision": "lexical:<opaque>",
+  "degradedCodes": [
+    "lexical_ram_tier_heap_warmload"
+  ]
+}

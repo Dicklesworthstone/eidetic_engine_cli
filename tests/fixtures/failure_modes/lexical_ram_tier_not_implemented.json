@@ -11,6 +11,11 @@
   ],
   "severity": "info",
   "repair_present": true,
+  "retired": true,
+  "retired_by": {
+    "bead": "closure-lint-source-side",
+    "reason": "Replaced by lexical_ram_tier_heap_warmload after the safe process-local heap warmload path landed without claiming OS-level mmap/mlock pinning."
+  },
   "trigger": {
     "description": "Running `ee status --json` or `ee doctor --json` on any platform while the bd-21xbi scaffold ships without the real `mmap` + `MAP_POPULATE` + `mlock` syscall path. The scaffold reports the lexical index was not actually pinned and surfaces this code so an operator knows the optimization is announced but not yet wired. The wiring slice under bd-21xbi retires this code and replaces it with a true success path; until then this is the honest signal.",
     "setup_commands": [

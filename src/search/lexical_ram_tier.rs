@@ -29,6 +29,7 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
     time::UNIX_EPOCH,
 };
 
@@ -49,12 +50,13 @@ pub const LEXICAL_HUGEPAGES_UNAVAILABLE_CODE: &str = "lexical_hugepages_unavaila
 /// `docs/degraded_code_taxonomy.md`.
 pub const LEXICAL_RAM_TIER_DISABLED_CODE: &str = "lexical_ram_tier_disabled";
 
-/// `degraded[]` code emitted while the scaffold ships without the real
-/// `mmap` + `MAP_POPULATE` + `mlock` syscall path. Tracked under follow-up
-/// slices of bd-21xbi; consumers MUST treat this exactly like the
-/// hugepages-unavailable path (degrade gracefully, never panic, never
-/// claim the index was actually pinned).
-pub const LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE: &str = "lexical_ram_tier_not_implemented";
+/// `degraded[]` code emitted when the safe adapter retains lexical index
+/// bytes in process heap memory instead of claiming OS-level
+/// `mmap`/`mlock` pinning. This is a real opt-in warmload path, but
+/// consumers MUST treat it as degraded relative to full RAM pinning:
+/// search results are unchanged, hugepages are not granted, and the
+/// process may still be paged out by the kernel.
+pub const LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE: &str = "lexical_ram_tier_heap_warmload";
 
 /// `degraded[]` code emitted on macOS hosts where the lexical RAM-tier
 /// optimization is intentionally a no-op. macOS exposes
@@ -63,10 +65,10 @@ pub const LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE: &str = "lexical_ram_tier_not_im
 /// optimization remains experimental on the Mac dev path while the
 /// production target stays Linux 256GB+ hosts (bd-21xbi parent).
 ///
-/// Distinguishing this from the generic
-/// [`LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE`] lets agents and operators
+/// Distinguishing this from the Linux
+/// [`LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE`] lets agents and operators
 /// see at a glance that the Mac dev host is not the target host class
-/// rather than "Linux adapter slice has not landed yet" — separate
+/// rather than "Linux fell back to process-local warmload" — separate
 /// remediations for separate root causes. Pairs with the per-platform
 /// taxonomy row in `docs/degraded_code_taxonomy.md` and the fixture at
 /// `tests/fixtures/failure_modes/lexical_ram_unavailable_on_macos.json`.
@@ -312,6 +314,7 @@ pub fn trace_lexical_ram_tier(
         index_path = %index_path,
         index_revision,
         bytes_mmapped = result.bytes_mmapped,
+        bytes_warmloaded = result.bytes_warmloaded,
         hugepages_requested = result.hugepages_requested,
         hugepages_granted = result.hugepages_granted,
         page_faults_pre = result.page_faults_pre,
@@ -345,10 +348,11 @@ pub enum LexicalRamTierFallbackPath {
     /// No fallback was taken — the index is fully RAM-pinned with the
     /// requested hugepage and populate posture.
     None,
-    /// Linux scaffold path that intentionally does not call any of the
-    /// `mmap`/`mlock`/`madvise` syscalls yet; the wiring slice replaces
-    /// this with a real syscall path.
-    SoftwareNotImplemented,
+    /// Safe process-local heap mirror used when the crate-level
+    /// `forbid(unsafe_code)` policy prevents direct `mmap`/`mlock`
+    /// syscalls in this package. This is a real warmload, not a full
+    /// OS pin.
+    HeapWarmload,
     /// macOS / other supports-basic-pinning hosts use
     /// `madvise(MADV_WILLNEED)` + optional `mlock`. The scaffold records
     /// the intended fallback path so the wiring slice can adopt it
@@ -377,6 +381,7 @@ pub struct LexicalRamTierResult {
     pub hugepages_granted: bool,
     pub populate_requested: bool,
     pub bytes_mmapped: u64,
+    pub bytes_warmloaded: u64,
     pub page_faults_pre: u64,
     pub page_faults_post: u64,
     pub fallback_path: LexicalRamTierFallbackPath,
@@ -405,6 +410,7 @@ impl LexicalRamTierResult {
             hugepages_granted: false,
             populate_requested: config.populate_on_open,
             bytes_mmapped: 0,
+            bytes_warmloaded: 0,
             page_faults_pre: 0,
             page_faults_post: 0,
             fallback_path: LexicalRamTierFallbackPath::None,
@@ -421,6 +427,15 @@ impl LexicalRamTierResult {
         }
     }
 }
+
+#[derive(Default)]
+struct LexicalRamTierHeapCache {
+    revision: Option<CorpusRevision>,
+    buffers: Vec<Vec<u8>>,
+    bytes: u64,
+}
+
+static LEXICAL_RAM_TIER_HEAP_CACHE: OnceLock<Mutex<LexicalRamTierHeapCache>> = OnceLock::new();
 
 #[derive(Debug)]
 struct LexicalIndexRevisionEntry {
@@ -549,30 +564,78 @@ pub fn pin_lexical_index_files(
     match platform {
         LexicalRamTierPlatform::Linux => {
             result.attempted = true;
-            result.fallback_path = LexicalRamTierFallbackPath::SoftwareNotImplemented;
-            result.push_unique_code(LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE);
+            result.fallback_path = LexicalRamTierFallbackPath::HeapWarmload;
+            if let Ok(bytes) =
+                warmload_lexical_index_files(index_dir, result.index_revision.as_ref())
+            {
+                result.bytes_warmloaded = bytes;
+            }
+            result.push_unique_code(LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE);
             result
         }
         LexicalRamTierPlatform::MacosLimited => {
             // macOS no-op per bd-21xbi.2: surface the platform-specific
             // `lexical_ram_unavailable_on_macos` degraded code so
             // operators can distinguish "wrong host class for this
-            // optimization" from the Linux scaffold's
-            // `lexical_ram_tier_not_implemented` ("adapter slice has
-            // not landed yet"). The MadviseWillneed fallback name is
-            // preserved because madvise(MADV_WILLNEED) IS what the Mac
-            // path would attempt if the adapter were wired; the code
-            // simply makes the not-attempted reality explicit.
+            // optimization" from the Linux heap-warmload path. The
+            // MadviseWillneed fallback name is preserved because
+            // madvise(MADV_WILLNEED) IS what the Mac path would attempt
+            // if the adapter were wired; the code simply makes the
+            // not-attempted reality explicit.
             result.fallback_path = LexicalRamTierFallbackPath::MadviseWillneed;
             result.push_unique_code(LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE);
             result
         }
         LexicalRamTierPlatform::WindowsLimited | LexicalRamTierPlatform::OtherUnsupported => {
+            result.attempted = true;
             result.fallback_path = LexicalRamTierFallbackPath::HeapOnly;
-            result.push_unique_code(LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE);
+            if let Ok(bytes) =
+                warmload_lexical_index_files(index_dir, result.index_revision.as_ref())
+            {
+                result.bytes_warmloaded = bytes;
+            }
+            result.push_unique_code(LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE);
             result
         }
     }
+}
+
+fn warmload_lexical_index_files(
+    index_dir: &Path,
+    revision: Option<&CorpusRevision>,
+) -> std::io::Result<u64> {
+    let mut buffers = Vec::new();
+    collect_lexical_index_file_bytes(index_dir, &mut buffers)?;
+    let bytes = buffers.iter().map(|buffer| buffer.len() as u64).sum();
+    let cache =
+        LEXICAL_RAM_TIER_HEAP_CACHE.get_or_init(|| Mutex::new(LexicalRamTierHeapCache::default()));
+    let mut guard = match cache.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.revision = revision.cloned();
+    guard.bytes = bytes;
+    guard.buffers = buffers;
+    Ok(bytes)
+}
+
+fn collect_lexical_index_file_bytes(
+    path: &Path,
+    buffers: &mut Vec<Vec<u8>>,
+) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_file() {
+        buffers.push(fs::read(path)?);
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        let mut children = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
+        children.sort_by_key(std::fs::DirEntry::path);
+        for child in children {
+            collect_lexical_index_file_bytes(&child.path(), buffers)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -581,7 +644,7 @@ mod tests {
 
     use super::{
         LEXICAL_HUGEPAGES_UNAVAILABLE_CODE, LEXICAL_RAM_TIER_DISABLED_CODE,
-        LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE, LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE,
+        LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE, LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE,
         LexicalRamTierConfig, LexicalRamTierFallbackPath, LexicalRamTierPlatform,
         LexicalRamTierResult, STATUS_SEARCH_LEXICAL_RAM_TIER_SCHEMA_V1, pin_lexical_index_files,
         platform_support,
@@ -683,7 +746,11 @@ mod tests {
         );
         assert!(!result.supported);
         assert!(result.enabled);
-        assert!(!result.attempted);
+        if cfg!(target_os = "macos") {
+            assert!(!result.attempted);
+        } else {
+            assert!(result.attempted);
+        }
         assert!(!result.succeeded);
         assert_eq!(result.bytes_mmapped, 0);
         assert_eq!(result.page_faults_pre, 0);
@@ -693,15 +760,13 @@ mod tests {
             LexicalRamTierFallbackPath::MadviseWillneed | LexicalRamTierFallbackPath::HeapOnly
         ));
         // macOS gets the platform-specific `lexical_ram_unavailable_on_macos`
-        // (bd-21xbi.2); Windows / other-unsupported keep the generic
-        // `lexical_ram_tier_not_implemented` until their own Mac-style
-        // platform-specific codes land. Either is acceptable so long as
-        // it is surfaced — operators distinguish "wrong host class" from
-        // "Linux adapter not landed" via the specific code.
+        // (bd-21xbi.2); Windows / other-unsupported keep an honest heap-only
+        // degraded code until their own Mac-style platform-specific codes
+        // land.
         let expected_code = if cfg!(target_os = "macos") {
             LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE
         } else {
-            LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE
+            LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE
         };
         assert!(
             result
@@ -716,9 +781,15 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_scaffold_reports_not_implemented_without_claiming_success() {
+    fn linux_heap_warmload_retains_bytes_without_claiming_os_pinning() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("lexical");
+        fs::create_dir(&root).expect("create root");
+        fs::write(root.join("postings.bin"), b"posting-list").expect("write postings");
+        fs::write(root.join("terms.bin"), b"terms").expect("write terms");
+
         let result = pin_lexical_index_files(
-            fake_index_dir(),
+            &root,
             &LexicalRamTierConfig {
                 enabled: true,
                 ..LexicalRamTierConfig::default()
@@ -731,18 +802,19 @@ mod tests {
         assert!(!result.succeeded, "scaffold must not claim success");
         assert!(
             !result.hugepages_granted,
-            "scaffold must not claim THP granted"
+            "heap warmload must not claim THP granted"
         );
         assert_eq!(result.bytes_mmapped, 0);
+        assert_eq!(result.bytes_warmloaded, 17);
         assert_eq!(
             result.fallback_path,
-            LexicalRamTierFallbackPath::SoftwareNotImplemented
+            LexicalRamTierFallbackPath::HeapWarmload
         );
         assert!(
             result
                 .degraded_codes
                 .iter()
-                .any(|code| code == LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE)
+                .any(|code| code == LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE)
         );
         assert_no_duplicate_codes(&result);
     }
@@ -776,15 +848,15 @@ mod tests {
             "macos must emit `lexical_ram_unavailable_on_macos`; got {:?}",
             result.degraded_codes
         );
-        // The generic NOT_IMPLEMENTED code MUST NOT be emitted on Mac:
+        // The heap-warmload code MUST NOT be emitted on Mac:
         // emitting both would defeat the purpose of the platform-
         // specific routing.
         assert!(
             !result
                 .degraded_codes
                 .iter()
-                .any(|code| code == LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE),
-            "macos must NOT emit the generic NOT_IMPLEMENTED code; got {:?}",
+                .any(|code| code == LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE),
+            "macos must NOT emit the heap warmload code; got {:?}",
             result.degraded_codes
         );
         assert_no_duplicate_codes(&result);
@@ -956,6 +1028,7 @@ mod tests {
             "hugepagesGranted",
             "populateRequested",
             "bytesMmapped",
+            "bytesWarmloaded",
             "pageFaultsPre",
             "pageFaultsPost",
             "fallbackPath",

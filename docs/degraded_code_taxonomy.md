@@ -694,18 +694,18 @@ macOS platform fallback emitted by the `NumaPinningAdapter` trait
 | `numa_pin_unsupported_platform` | info | bd-ldstd (swarmx.4 scaffold) |
 | `numa_unavailable_on_macos` | info | bd-1prrl.3 (macOS platform fallback) |
 
-#### Lexical RAM-tier pinning (3 — response_time)
+#### Lexical RAM-tier pinning (4 — response_time)
 
 Surfaced under `data.search.lexicalRamTier`
-(`ee.status.search.lexical_ram_tier.v1`). All three codes are
-scaffolded by bd-1hvzh and consumed by the wiring slices under
-bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
+(`ee.status.search.lexical_ram_tier.v1`). The live codes are consumed
+by the wiring slices under bd-21xbi; see
+`docs/architecture/lexical-ram-tier.md`.
 
 | Code | Severity | Bead |
 |------|----------|------|
 | `lexical_hugepages_unavailable` | info | bd-1hvzh (bd-21xbi scaffold) |
+| `lexical_ram_tier_heap_warmload` | info | bd-21xbi.2 |
 | `lexical_ram_tier_disabled` | info | bd-1hvzh (bd-21xbi scaffold) |
-| `lexical_ram_tier_not_implemented` | info | bd-1hvzh (bd-21xbi scaffold) |
 | `lexical_ram_unavailable_on_macos` | info | bd-21xbi.2 |
 
 #### Daemon UDS RPC (7 — response_time)

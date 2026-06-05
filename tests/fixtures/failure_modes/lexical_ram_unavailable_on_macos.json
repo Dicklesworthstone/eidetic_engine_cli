@@ -12,7 +12,7 @@
   "severity": "info",
   "repair_present": true,
   "trigger": {
-    "description": "Operator enabled `[search.lexical_ram_tier] enabled = true` on a macOS host. macOS exposes `madvise(MADV_WILLNEED)` + `mlock` but no transparent-hugepage API, so the Linux-equivalent pinning shape cannot be reproduced; the optimization remains experimental on the Mac dev path while the production target stays Linux 256GB+ hosts (bd-21xbi parent). The Mac arm emits this code instead of the generic `lexical_ram_tier_not_implemented` so operators can distinguish 'wrong host class for this optimization' from 'Linux adapter slice has not landed yet'.",
+    "description": "Operator enabled `[search.lexical_ram_tier] enabled = true` on a macOS host. macOS exposes `madvise(MADV_WILLNEED)` + `mlock` but no transparent-hugepage API, so the Linux-equivalent pinning shape cannot be reproduced; the optimization remains experimental on the Mac dev path while the production target stays Linux 256GB+ hosts (bd-21xbi parent). The Mac arm emits this code instead of the Linux heap-warmload code so operators can distinguish 'wrong host class' from 'Linux fell back to process-local warmload'.",
     "setup_commands": [
       "ee init --workspace .",
       "printf '%s\\n' '[search.lexical_ram_tier]' 'enabled = true' >> .ee/config.toml"

@@ -46,8 +46,8 @@ use super::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 #[cfg(feature = "lexical-bm25")]
 use crate::search::TantivyIndex;
 use crate::search::lexical_ram_tier::{
-    LEXICAL_HUGEPAGES_UNAVAILABLE_CODE, LEXICAL_RAM_TIER_HUGEPAGES_ENV,
-    LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE, LEXICAL_RAM_TIER_PIN_RAM_ENV,
+    LEXICAL_HUGEPAGES_UNAVAILABLE_CODE, LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE,
+    LEXICAL_RAM_TIER_HUGEPAGES_ENV, LEXICAL_RAM_TIER_PIN_RAM_ENV,
     LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE, LexicalRamTierConfig, LexicalRamTierResult,
     pin_lexical_index_files, trace_lexical_ram_tier,
 };
@@ -1104,12 +1104,12 @@ impl SearchDegradation {
     }
 
     #[must_use]
-    fn lexical_ram_tier_not_implemented() -> Self {
+    fn lexical_ram_tier_heap_warmload() -> Self {
         Self {
-            code: LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE.to_string(),
+            code: LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE.to_string(),
             severity: "info".to_string(),
-            message: "Lexical RAM-tier pinning is enabled, but the safe mmap/mlock adapter is not installed; search results are unchanged.".to_string(),
-            repair: Some("Keep EE_LEXICAL_INDEX_PIN_RAM unset until the lexical RAM-tier syscall adapter lands.".to_string()),
+            message: "Lexical RAM-tier pinning is enabled; ee retained lexical index bytes in process heap memory but did not claim OS-level mmap/mlock pinning.".to_string(),
+            repair: Some("Use the heap warmload path as an advisory optimization, or land the audited mmap/mlock adapter before requiring OS-level pinning.".to_string()),
         }
     }
 
@@ -5303,8 +5303,8 @@ fn lexical_ram_tier_search_degradation_for_code(code: &str) -> Option<SearchDegr
         LEXICAL_HUGEPAGES_UNAVAILABLE_CODE => {
             Some(SearchDegradation::lexical_hugepages_unavailable())
         }
-        LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE => {
-            Some(SearchDegradation::lexical_ram_tier_not_implemented())
+        LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE => {
+            Some(SearchDegradation::lexical_ram_tier_heap_warmload())
         }
         LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE => {
             Some(SearchDegradation::lexical_ram_unavailable_on_macos())

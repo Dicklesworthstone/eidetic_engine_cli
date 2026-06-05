@@ -4440,6 +4440,10 @@ fn render_search_status_json(
             tier.field_bool("populateRequested", lexical_ram_tier.populate_requested);
             tier.field_raw("bytesMmapped", &lexical_ram_tier.bytes_mmapped.to_string());
             tier.field_raw(
+                "bytesWarmloaded",
+                &lexical_ram_tier.bytes_warmloaded.to_string(),
+            );
+            tier.field_raw(
                 "pageFaultsPre",
                 &lexical_ram_tier.page_faults_pre.to_string(),
             );
@@ -4487,8 +4491,8 @@ fn lexical_ram_tier_fallback_name(
 ) -> &'static str {
     match fallback {
         crate::search::lexical_ram_tier::LexicalRamTierFallbackPath::None => "none",
-        crate::search::lexical_ram_tier::LexicalRamTierFallbackPath::SoftwareNotImplemented => {
-            "software_not_implemented"
+        crate::search::lexical_ram_tier::LexicalRamTierFallbackPath::HeapWarmload => {
+            "heap_warmload"
         }
         crate::search::lexical_ram_tier::LexicalRamTierFallbackPath::MadviseWillneed => {
             "madvise_willneed"

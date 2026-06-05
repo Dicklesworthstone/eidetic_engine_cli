@@ -41,8 +41,8 @@ use crate::models::{CapabilityStatus, MemoryId, SingleFlightPostureReport};
 use crate::obs::flight_recorder::{FlightRecorderPosture, classify_flight_recorder_posture};
 use crate::policy::{MEMORY_DECAY_SOURCE, MemoryDecayThresholds, evaluate_memory_decay};
 use crate::search::lexical_ram_tier::{
-    LEXICAL_HUGEPAGES_UNAVAILABLE_CODE, LEXICAL_RAM_TIER_HUGEPAGES_ENV,
-    LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE, LEXICAL_RAM_TIER_PIN_RAM_ENV,
+    LEXICAL_HUGEPAGES_UNAVAILABLE_CODE, LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE,
+    LEXICAL_RAM_TIER_HUGEPAGES_ENV, LEXICAL_RAM_TIER_PIN_RAM_ENV,
     LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE, LexicalRamTierConfig, LexicalRamTierResult,
     pin_lexical_index_files, trace_lexical_ram_tier,
 };
@@ -2224,11 +2224,11 @@ fn lexical_ram_tier_degradation_report_for_code(code: &str) -> Option<Degradatio
             message: "Lexical RAM-tier hugepages were requested but this host cannot grant them.",
             repair: "Disable EE_LEXICAL_INDEX_HUGEPAGES or move the workspace to a Linux host with transparent hugepages available.",
         }),
-        LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE => Some(DegradationReport {
-            code: LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE,
+        LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE => Some(DegradationReport {
+            code: LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE,
             severity: "info",
-            message: "Lexical RAM-tier pinning is enabled, but the safe syscall adapter has not been installed; search results are unchanged.",
-            repair: "Keep EE_LEXICAL_INDEX_PIN_RAM unset until the mmap/mlock adapter slice lands.",
+            message: "Lexical RAM-tier pinning is enabled; ee retained lexical index bytes in process heap memory but did not claim OS-level mmap/mlock pinning.",
+            repair: "Use the heap warmload path as an advisory optimization, or land the audited mmap/mlock adapter before requiring OS-level pinning.",
         }),
         LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE => Some(DegradationReport {
             code: LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE,

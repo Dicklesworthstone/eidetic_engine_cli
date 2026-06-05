@@ -119,10 +119,10 @@ must change for it to land cleanly.
 
 ## Consequences
 
-- The hot-path read in `src/search/lexical_ram_tier.rs` continues to
-  emit `LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE` on Linux and the
-  existing degraded codes on macOS / Windows; N9 will not change that
-  surface until the reopen conditions above flip.
+- The hot-path read in `src/search/lexical_ram_tier.rs` may now retain
+  lexical index bytes in a safe process-local heap warmload cache, but
+  it still does not claim OS-level `mmap`/`mlock` pinning; N9 will not
+  change the syscall posture until the reopen conditions above flip.
 - Future agents auditing N9 against the Bayesian-trust-class-promotion
   evidence in ADR 0032 can cite this ADR as the documented reason the
   optimisation is research-backlog rather than active work, instead of
@@ -175,9 +175,9 @@ How a future reviewer can confirm this decision remains valid:
   closed with ADR 0049 named as the documented decision.
 - `docs/adr/README.md` lists ADR 0049 in the ADR index as deferred to
   the research backlog.
-- `rg -n "LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE" src/search/lexical_ram_tier.rs`
-  still finds the current scaffold emission path for Linux builds where
-  the mmap / pinning adapter has not landed.
+- `rg -n "LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE" src/search/lexical_ram_tier.rs`
+  finds the safe fallback emission path for Linux builds where the
+  mmap / pinning adapter has not landed.
 - `rg -n "MmapFrankensearch|memmap2|zerocopy|mmap_friendly" src/search Cargo.toml`
   returns no matches unless a superseding ADR names the upstream layout
   contract and unsafe-policy decision.

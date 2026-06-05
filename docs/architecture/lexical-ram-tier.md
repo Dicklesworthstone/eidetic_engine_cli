@@ -44,7 +44,7 @@ This bead is intentionally distinct from three other pinning surfaces:
 | Linux without THP | Pinning works at regular page size; `lexical_hugepages_unavailable` emitted iff `request_hugepages=true`. |
 | macOS | No Linux-equivalent THP path. Emits `lexical_ram_unavailable_on_macos`, plus `lexical_hugepages_unavailable` iff hugepages are requested. |
 | Windows | No equivalent syscall; loader falls through to plain page-cache deserialization. |
-| Linux / Windows / other unsupported hosts while scaffold ships without syscalls | Loader records the lexical index was not pinned. Emits `lexical_ram_tier_not_implemented`. |
+| Linux under the crate-level unsafe-code ban | Loader retains lexical index file bytes in process heap memory and emits `lexical_ram_tier_heap_warmload`; it does not claim OS-level pinning. |
 
 ## Configuration
 
@@ -108,7 +108,7 @@ current scaffold vocabulary have landed:
 
 - [`lexical_ram_tier_disabled`](../../tests/fixtures/failure_modes/lexical_ram_tier_disabled.json) — operator turned the optimization off.
 - [`lexical_hugepages_unavailable`](../../tests/fixtures/failure_modes/lexical_hugepages_unavailable.json) — hugepages requested but platform/kernel cannot honor them.
-- [`lexical_ram_tier_not_implemented`](../../tests/fixtures/failure_modes/lexical_ram_tier_not_implemented.json) — scaffold ships ahead of the syscall slice.
+- [`lexical_ram_tier_heap_warmload`](../../tests/fixtures/failure_modes/lexical_ram_tier_heap_warmload.json) — safe process-local heap warmload is active, but OS-level pinning is not claimed.
 - [`lexical_ram_unavailable_on_macos`](../../tests/fixtures/failure_modes/lexical_ram_unavailable_on_macos.json) — macOS host class cannot reproduce the Linux RAM-tier posture.
 
 ## Determinism contract
@@ -149,13 +149,14 @@ lexical index file that was successfully pinned.
   before producing the lexical RAM-tier status block.
 - `tests/fixtures/failure_modes/lexical_ram_tier_disabled.json`,
   `tests/fixtures/failure_modes/lexical_hugepages_unavailable.json`, and
-  `tests/fixtures/failure_modes/lexical_ram_tier_not_implemented.json`
-  document the scaffold degraded vocabulary.
+  `tests/fixtures/failure_modes/lexical_ram_tier_heap_warmload.json`
+  document the live degraded vocabulary.
 
 ## What the scaffold does NOT do (yet)
 
 - Issue any `mmap`, `mlock`, `madvise`, or `munmap` syscalls.
 - Claim `succeeded=true` or non-zero `bytesMmapped`.
+- Retain bytes outside the process-local heap warmload cache.
 - Thread the merged `[search.lexical_ram_tier]` file config into the search
   runtime path; search still reads the registered env vars directly until the
   next runtime-integration slice.

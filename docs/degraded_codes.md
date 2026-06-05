@@ -7104,20 +7104,21 @@ ee status --workspace . --json
 
 ---
 
-## `lexical_ram_tier_not_implemented`
+## `lexical_ram_tier_heap_warmload`
 
 **Severity:** info
 
-**Surfaces:** status, doctor
+**Surfaces:** status, doctor, search
 
-**Introduced by:** bd-1hvzh (epic bd-21xbi)
+**Introduced by:** bd-21xbi.2 (epic bd-21xbi)
 
-**Trigger.** Running `ee status --json` or `ee doctor --json` on any platform while the bd-21xbi scaffold ships without the real `mmap` + `MAP_POPULATE` + `mlock` syscall path. The scaffold reports the lexical index was not actually pinned and surfaces this code so an operator knows the optimization is announced but not yet wired. The wiring slice under bd-21xbi retires this code and replaces it with a true success path; until then this is the honest signal.
+**Trigger.** Operator enabled lexical RAM-tier pinning on a host where ee can safely retain lexical index bytes in process heap memory but must not claim OS-level mmap/mlock pinning under the crate-level unsafe-code ban.
 
 **Setup.**
 
 ```bash
 ee init --workspace .
+printf '%s\n' '[search.lexical_ram_tier]' 'enabled = true' >> .ee/config.toml
 ```
 
 **Invocation.**
@@ -7126,11 +7127,11 @@ ee init --workspace .
 ee status --workspace . --json
 ```
 
-**Expected emission.** Message contains: `lexical ... not implemented`
+**Expected emission.** Message contains: `Lexical RAM-tier`, `heap memory`
 
-**Repair hint.** `bd-21xbi`
+**Repair hint.** `heap warmload`
 
-**Fixture.** [`tests/fixtures/failure_modes/lexical_ram_tier_not_implemented.json`](../tests/fixtures/failure_modes/lexical_ram_tier_not_implemented.json)
+**Fixture.** [`tests/fixtures/failure_modes/lexical_ram_tier_heap_warmload.json`](../tests/fixtures/failure_modes/lexical_ram_tier_heap_warmload.json)
 
 ---
 
@@ -7142,7 +7143,7 @@ ee status --workspace . --json
 
 **Introduced by:** bd-21xbi.2 (epic bd-21xbi)
 
-**Trigger.** Operator enabled `[search.lexical_ram_tier] enabled = true` on a macOS host. macOS exposes `madvise(MADV_WILLNEED)` + `mlock` but no transparent-hugepage API, so the Linux-equivalent pinning shape cannot be reproduced; the optimization remains experimental on the Mac dev path while the production target stays Linux 256GB+ hosts (bd-21xbi parent). The Mac arm emits this code instead of the generic `lexical_ram_tier_not_implemented` so operators can distinguish 'wrong host class for this optimization' from 'Linux adapter slice has not landed yet'.
+**Trigger.** Operator enabled `[search.lexical_ram_tier] enabled = true` on a macOS host. macOS exposes `madvise(MADV_WILLNEED)` + `mlock` but no transparent-hugepage API, so the Linux-equivalent pinning shape cannot be reproduced; the optimization remains experimental on the Mac dev path while the production target stays Linux 256GB+ hosts (bd-21xbi parent). The Mac arm emits this code instead of the Linux heap-warmload code so operators can distinguish 'wrong host class' from 'Linux fell back to process-local warmload'.
 
 **Setup.**
 

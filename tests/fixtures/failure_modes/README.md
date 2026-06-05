@@ -20,6 +20,8 @@ in the same commit, keeping the catalog complete by construction.
 | `no_relevant_results` | search | medium | bd-17c65.2.1 (B1) |
 | `weak_query_recall` | search | low | bd-17c65.2.5 (B5) |
 | `lexical_unavailable` | search | warning | bd-17c65.2.6 (B6) |
+| `lexical_ram_tier_heap_warmload` | status, doctor, search | info | bd-21xbi.2 |
+| `lexical_ram_unavailable_on_macos` | status, doctor | info | bd-21xbi.2 |
 | `embed_model_unavailable` | search, context | warning | bd-3qs2i.4.1 (F4), bd-1273t |
 | `source_mode_fallback` | search | warning | bd-17c65.2.6 (B6) |
 | `low_recall_after_floor` | search | info | bd-17c65.2.1 (B1) |

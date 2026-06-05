@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "lexical_ram_tier_heap_warmload",
+  "introduced_by": {
+    "bead": "bd-21xbi.2",
+    "epic_letter": "bd-21xbi"
+  },
+  "surfaces": [
+    "status",
+    "doctor",
+    "search"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Operator enabled lexical RAM-tier pinning on a host where ee can safely retain lexical index bytes in process heap memory but must not claim OS-level mmap/mlock pinning under the crate-level unsafe-code ban.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "printf '%s\\n' '[search.lexical_ram_tier]' 'enabled = true' >> .ee/config.toml"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "lexical_ram_tier_heap_warmload",
+    "severity": "info",
+    "message_contains": [
+      "Lexical RAM-tier",
+      "heap memory"
+    ],
+    "repair_contains": "heap warmload",
+    "repair_string": "Use the heap warmload path as an advisory optimization, or land the audited mmap/mlock adapter before requiring OS-level pinning."
+  }
+}
