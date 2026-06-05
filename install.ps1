@@ -1,11 +1,14 @@
-<#
+﻿<#
 .SYNOPSIS
     Installs the ee (Eidetic Engine) CLI on Windows.
 
 .DESCRIPTION
     Downloads and verifies a signed release of ee, then installs it to a
-    user-writable directory (default %LOCALAPPDATA%\ee\bin). Verifies SHA256
-    and the Sigstore bundle unless -NoVerify / EE_SKIP_VERIFY=1 is set.
+    user-writable directory (default %LOCALAPPDATA%\ee\bin). Verifies the SHA256
+    checksum by default (skip with -NoVerify / EE_SKIP_VERIFY=1). Sigstore
+    signature verification is opt-in via -RequireProvenance /
+    EE_REQUIRE_PROVENANCE=1; without it a missing bundle or cosign is a warning,
+    matching install.sh.
 
     Mirrors the structure of the POSIX install.sh: branded header, platform
     detection, preflight checks, atomic locking, download + checksum + signature,
@@ -39,6 +42,11 @@
 .PARAMETER NoVerify
     Skip SHA256 + Sigstore verification (NOT recommended).
 
+.PARAMETER RequireProvenance
+    Require SLSA provenance / Sigstore signature verification: fail the install
+    if cosign is missing or the signed bundle is unavailable. Default off — the
+    SHA256 checksum is still verified unless -NoVerify is also set.
+
 .PARAMETER Offline
     Skip network preflight checks.
 
@@ -46,7 +54,10 @@
     Build from source via git + cargo instead of downloading.
 
 .EXAMPLE
-    & ([scriptblock]::Create((iwr -useb https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.ps1).Content)) -Version "0.1.0"
+    # One-liner: download the installer to a file, then run it. (Do NOT pipe an
+    # iwr `.Content` into iex — GitHub serves release assets as
+    # application/octet-stream, so `.Content` is a byte[], not a string.)
+    $f = Join-Path $env:TEMP 'install-ee.ps1'; iwr -useb https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest/download/install.ps1 -OutFile $f; & $f
 
 .EXAMPLE
     .\install.ps1 -Version 0.1.0 -Verify
@@ -68,6 +79,7 @@ param(
     [switch]$Quiet,
     [switch]$NoConfigure,
     [switch]$NoVerify,
+    [switch]$RequireProvenance,
     [switch]$Offline,
     [switch]$FromSource
 )
@@ -79,6 +91,7 @@ $ErrorActionPreference = "Stop"
 if (-not $Version    -and $env:EE_VERSION)     { $Version    = $env:EE_VERSION }
 if (-not $InstallDir -and $env:EE_INSTALL_DIR) { $InstallDir = $env:EE_INSTALL_DIR }
 if (-not $NoVerify   -and $env:EE_SKIP_VERIFY -eq "1") { $NoVerify = [switch]::Present }
+if (-not $RequireProvenance -and $env:EE_REQUIRE_PROVENANCE -eq "1") { $RequireProvenance = [switch]::Present }
 
 $Script:RepoOwner   = "Dicklesworthstone"
 $Script:RepoName    = "eidetic_engine_cli"
@@ -756,7 +769,11 @@ function Show-AgentIntegration {
         Write-Host "        ee preflight check --cmd `"`$COMMAND`" --workspace . --json"
         Write-Host ""
     }
-    $other = @("Aider", "Continue", "GitHub Copilot CLI") | Where-Object { $Agents -contains $_ }
+    # Wrap in @() so a 0- or 1-match Where-Object result is always an array:
+    # under Set-StrictMode -Version Latest, `.Count` on a scalar/$null throws
+    # "property 'Count' cannot be found" — which previously reported a spurious
+    # "Installation failed" after the binary was already installed.
+    $other = @(@("Aider", "Continue", "GitHub Copilot CLI") | Where-Object { $Agents -contains $_ })
     if ($other.Count -gt 0) {
         if ($Script:Color) { Write-Host "  -> Aider / Continue / Copilot CLI" -ForegroundColor Cyan } else { Write-Host "  -> Aider / Continue / Copilot CLI" }
         Write-Host "      No documented PreToolUse surface for ee yet. Call directly from your prompt setup:"
@@ -896,16 +913,27 @@ function Main {
                     }
                     Test-Sha256 -FilePath $tarballPath -ExpectedHash $Checksum
 
+                    # Sigstore verification is opt-in (parity with install.sh).
+                    # The SHA256 checksum above is the mandatory integrity gate;
+                    # a missing bundle or cosign is fatal only under
+                    # -RequireProvenance / EE_REQUIRE_PROVENANCE=1.
                     $cosign = Get-Command cosign -ErrorAction SilentlyContinue
                     if ($cosign) {
                         try {
                             Invoke-DownloadFile -Url "$effectiveUrl.sigstore.json" -OutFile $sigstorePath
                             Test-Sigstore -TarballPath $tarballPath -BundlePath $sigstorePath
                         } catch {
-                            Write-ErrorExit "Sigstore bundle unavailable: $($_.Exception.Message). Cannot verify signature. Use -NoVerify to skip."
+                            if ($RequireProvenance) {
+                                Write-ErrorExit "Sigstore bundle unavailable: $($_.Exception.Message). Cannot verify signature (required by -RequireProvenance)."
+                            }
+                            Write-Warning2 "Sigstore bundle unavailable: $($_.Exception.Message); skipping signature verification (SHA256 already verified)."
+                            Write-Warning2 "Pass -RequireProvenance to fail the install when a signed bundle is missing."
                         }
+                    } elseif ($RequireProvenance) {
+                        Write-ErrorExit "cosign not found but -RequireProvenance was set. Install cosign to verify the Sigstore signature, or drop -RequireProvenance."
                     } else {
-                        Write-ErrorExit "cosign not found. Cannot verify Sigstore signature. Install cosign or use -NoVerify to skip."
+                        Write-Warning2 "cosign not found; skipping Sigstore signature verification (SHA256 already verified)."
+                        Write-Warning2 "Install cosign and pass -RequireProvenance to enforce signature verification."
                     }
                 }
 

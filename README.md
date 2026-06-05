@@ -301,8 +301,19 @@ verify the SLSA provenance attestation.
 
 [Signed binaries](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest)
 are published for every release across macOS (`aarch64`, `x86_64`), Linux
-(`aarch64`, `x86_64` gnu + musl), and Windows (`x86_64`). Windows users can run
-`install.ps1` from the same release.
+(`aarch64`, `x86_64` gnu + musl), and Windows (`x86_64`).
+
+**Windows (PowerShell):**
+
+```powershell
+$f = Join-Path $env:TEMP 'install-ee.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest/download/install.ps1 -OutFile $f; & $f
+```
+
+Downloads `install.ps1` to a file and runs it (GitHub serves release assets as
+`application/octet-stream`, so the `iwr ... | iex` form does not work — its
+`.Content` is a byte array). The script SHA-256-verifies and installs `ee.exe`
+into `%LOCALAPPDATA%\ee\bin`, and updates your user `PATH`. Add
+`-RequireProvenance` to also enforce Sigstore signature verification.
 
 **From source** (nightly Rust toolchain):
 
