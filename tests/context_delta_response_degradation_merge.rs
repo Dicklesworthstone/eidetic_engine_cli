@@ -176,8 +176,11 @@ fn merged_degradations_serialize_as_top_level_degraded_array_per_schema() -> Tes
         .iter()
         .find(|entry| entry["code"].as_str() == Some("pack_assembly_slow"))
         .ok_or_else(|| "pack_assembly_slow missing in serialized output".to_string())?;
+    let slow_object = slow
+        .as_object()
+        .ok_or_else(|| format!("pack_assembly_slow entry must be an object; saw {slow}"))?;
     assert!(
-        !slow.as_object().expect("object").contains_key("repair"),
+        !slow_object.contains_key("repair"),
         "no-repair entry must omit the `repair` key, not serialize a null; saw {slow}"
     );
     Ok(())
