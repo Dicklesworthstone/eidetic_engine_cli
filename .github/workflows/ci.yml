@@ -151,6 +151,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          git config --global core.longpaths true
           $projectRoot = Join-Path $env:GITHUB_WORKSPACE ".ci\franken-stack\projects"
           New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
           git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git (Join-Path $projectRoot "asupersync")
@@ -160,6 +162,11 @@ jobs:
           git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git (Join-Path $projectRoot "frankensqlite")
           git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git (Join-Path $projectRoot "sqlmodel_rust")
           git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git (Join-Path $projectRoot "toon_rust")
+          $fsqliteManifest = Join-Path $projectRoot "frankensqlite\crates\fsqlite\Cargo.toml"
+          if (-not (Test-Path $fsqliteManifest)) {
+            Write-Error "MISSING: $fsqliteManifest"
+            exit 1
+          }
           $cargoPathRoot = $projectRoot -replace "\\", "/"
           $cargoText = Get-Content Cargo.toml -Raw
           foreach ($repo in @("asupersync","franken_agent_detection","franken_networkx","frankensearch","frankensqlite","sqlmodel_rust","toon_rust")) {
@@ -339,6 +346,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          git config --global core.longpaths true
           $projectRoot = Join-Path $env:RUNNER_TEMP "franken-stack\projects"
           New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
           git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git (Join-Path $projectRoot "asupersync")
@@ -348,6 +357,11 @@ jobs:
           git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git (Join-Path $projectRoot "frankensqlite")
           git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git (Join-Path $projectRoot "sqlmodel_rust")
           git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git (Join-Path $projectRoot "toon_rust")
+          $fsqliteManifest = Join-Path $projectRoot "frankensqlite\crates\fsqlite\Cargo.toml"
+          if (-not (Test-Path $fsqliteManifest)) {
+            Write-Error "MISSING: $fsqliteManifest"
+            exit 1
+          }
           $cargoPathRoot = $projectRoot -replace "\\", "/"
           $cargoText = Get-Content Cargo.toml -Raw
           foreach ($repo in @("asupersync","franken_agent_detection","franken_networkx","frankensearch","frankensqlite","sqlmodel_rust","toon_rust")) {
