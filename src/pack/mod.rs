@@ -731,6 +731,7 @@ fn parse_coordination_entry(
             "threadId",
             "path_pattern",
             "pathPattern",
+            "path",
             "mailbox",
         ],
     )
