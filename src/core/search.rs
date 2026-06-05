@@ -36,7 +36,8 @@ use crate::runtime::determinism::{Deterministic, Seed};
 
 use super::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use super::index::{
-    IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport, get_index_status,
+    IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport,
+    get_index_status_with_connection,
 };
 use super::memory_drift::{
     MemoryDriftSelectionHint, memory_drift_selection_hint_from_provenance_status,
@@ -4652,7 +4653,7 @@ fn run_search_inner_with_performance(
     let degradation_start = Instant::now();
     let output_redaction_enabled =
         crate::config::workspace_output_redaction_enabled(&options.workspace_path);
-    let mut degraded = search_degradations(options, &index_dir);
+    let mut degraded = search_degradations_with_connection(options, &index_dir, read_connection);
     let lexical_ram_tier = pin_lexical_ram_tier_for_search(&options.workspace_path, &index_dir);
     push_lexical_ram_tier_search_degradations(&mut degraded, &lexical_ram_tier);
     if !output_redaction_enabled {
@@ -5175,7 +5176,21 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
 }
 
 fn search_degradations(options: &SearchOptions, index_dir: &Path) -> Vec<SearchDegradation> {
-    let Ok(index_status) = cached_index_status_for_search(options, index_dir) else {
+    search_degradations_with_connection(options, index_dir, None)
+}
+
+/// Connection-reusing variant of [`search_degradations`].
+///
+/// Threads the caller's open read connection into the index-status probe so
+/// the staleness/health check does not open a redundant file database
+/// connection. Behavior is identical to [`search_degradations`]; see
+/// [`cached_index_status_for_search_with_connection`].
+fn search_degradations_with_connection(
+    options: &SearchOptions,
+    index_dir: &Path,
+    connection: Option<&DbConnection>,
+) -> Vec<SearchDegradation> {
+    let Ok(index_status) = cached_index_status_for_search(options, index_dir, connection) else {
         return Vec::new();
     };
 
@@ -5505,9 +5520,20 @@ fn lexical_search_available(_index_dir: &Path) -> bool {
     false
 }
 
+/// Index-status probe for the search hot path, with process-local TTL caching.
+///
+/// When `connection` is `Some`, the underlying [`get_index_status_with_connection`]
+/// probe reuses the caller's already-open read connection for its `COUNT(*)`
+/// generation/stat reads instead of opening a fresh file database connection.
+/// On this host a fresh `DbConnection::open_file` is a fixed ~250-300ms cost,
+/// and the search hot path already holds an open read connection, so reusing
+/// it removes a redundant open from the `search::degradationSetup` span. The
+/// cached report and every returned field are identical regardless of
+/// `connection` — only the connection used for the DB-stats read differs.
 fn cached_index_status_for_search(
     options: &SearchOptions,
     index_dir: &Path,
+    connection: Option<&DbConnection>,
 ) -> Result<IndexStatusReport, IndexStatusError> {
     let cache_key = IndexStatusCacheKey::from_search_options(options, index_dir);
     let now = Instant::now();
@@ -5530,7 +5556,7 @@ fn cached_index_status_for_search(
         index_dir: Some(index_dir.to_path_buf()),
     };
 
-    let index_status = get_index_status(&status_options)?;
+    let index_status = get_index_status_with_connection(&status_options, connection)?;
 
     if let Ok(mut guard) = cache.lock() {
         guard.retain(|_, cached| {
