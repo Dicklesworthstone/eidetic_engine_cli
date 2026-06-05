@@ -1918,7 +1918,7 @@ fn build_cli_args_for_resource(uri: &str) -> Result<Vec<OsString>, String> {
         }
         "workspace/status" => push_arg(&mut args, "status"),
         "context-packs/by-query" => {
-            push_arg(&mut args, "context");
+            push_arg(&mut args, "pack");
             push_arg(&mut args, required_query_param(&query, &["query"])?);
             append_resource_query_flag(
                 &mut args,
@@ -2814,7 +2814,7 @@ mod tests {
                     "--json".to_string(),
                     "--workspace".to_string(),
                     workspace,
-                    "context".to_string(),
+                    "pack".to_string(),
                     query,
                     "--profile".to_string(),
                     profile.to_string(),
