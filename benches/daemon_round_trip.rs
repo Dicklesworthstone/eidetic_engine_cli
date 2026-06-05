@@ -43,10 +43,15 @@ struct RunningDaemon {
 #[cfg(target_os = "linux")]
 impl RunningDaemon {
     fn start() -> Self {
-        let tempdir = TempDir::new().expect("daemon benchmark tempdir");
+        let tempdir = match TempDir::new() {
+            Ok(tempdir) => tempdir,
+            Err(error) => panic!("daemon benchmark tempdir: {error}"),
+        };
         let socket_path = tempdir.path().join("ee-daemon-bench.sock");
-        let handle =
-            ee::daemon::server::start_server(&socket_path).expect("start daemon benchmark server");
+        let handle = match ee::daemon::server::start_server(&socket_path) {
+            Ok(handle) => handle,
+            Err(error) => panic!("start daemon benchmark server: {error}"),
+        };
         Self {
             _tempdir: tempdir,
             socket_path,
@@ -140,9 +145,13 @@ fn bench_live_socket_round_trip(
             request,
             |bench, request| {
                 bench.iter(|| {
-                    let response =
-                        client_round_trip(black_box(daemon.socket_path()), black_box(request))
-                            .expect("daemon benchmark round-trip");
+                    let response = match client_round_trip(
+                        black_box(daemon.socket_path()),
+                        black_box(request),
+                    ) {
+                        Ok(response) => response,
+                        Err(error) => panic!("daemon benchmark round-trip: {error}"),
+                    };
                     black_box(response);
                 });
             },
