@@ -47,6 +47,7 @@ use crate::pack::{
 };
 use crate::policy::{redact_secret_like_content, redaction_placeholder};
 use crate::search::{SearchCacheGovernor, SearchHotset, SearchHotsetEntry, prewarm_search_hotset};
+use crate::shadow::{SHADOW_POLICY_SCORE_SCHEMA_V1, SHADOW_POLICY_VERDICT_SCHEMA_V1};
 
 use super::derived_asset::gather_default_derived_asset_store_summary;
 use super::doctor::DoctorReport;
@@ -140,6 +141,11 @@ const SUPPORT_BUNDLE_REGRESSION_CAUSALITY_SUMMARY_SCHEMA_V1: &str =
 const ENVIRONMENT_ATTESTATION_SUMMARY_FILE: &str = "environment_attestation_summary.json";
 pub(crate) const SUPPORT_BUNDLE_ENVIRONMENT_ATTESTATION_SUMMARY_SCHEMA_V1: &str =
     "ee.support_bundle.environment_attestation_summary.v1";
+const SHADOW_POLICY_SUMMARY_FILE: &str = "shadow_policy_summary.json";
+pub(crate) const SUPPORT_BUNDLE_SHADOW_POLICY_SUMMARY_SCHEMA_V1: &str =
+    "ee.support_bundle.shadow_policy_summary.v1";
+const SHADOW_POLICY_ARTIFACT_DIR: &str = "shadow";
+const MAX_SHADOW_POLICY_ARTIFACTS: usize = 16;
 const SUPPORT_BUNDLE_REQUIRED_REMOTE_WRAPPER: &str = "scripts/rch_verify.sh -- <cargo command>";
 const TAILSCALE_METADATA_FIELDS: &[&str] = &[
     "selfNodeKey",
@@ -344,6 +350,7 @@ struct CollectedDiagnostics {
     local_cargo_tripwire_json: String,
     regression_causality_summary_json: String,
     environment_attestation_summary_json: String,
+    shadow_policy_summary_json: String,
 }
 
 /// Plan what would be collected without actually creating the bundle.
@@ -487,6 +494,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (
             ENVIRONMENT_ATTESTATION_SUMMARY_FILE,
             &diagnostics.environment_attestation_summary_json,
+        ),
+        (
+            SHADOW_POLICY_SUMMARY_FILE,
+            &diagnostics.shadow_policy_summary_json,
         ),
     ];
 
@@ -1020,6 +1031,7 @@ fn collect_diagnostics(
     let triage_summary_json = triage_summary_json(&status, &swarm_reports);
     let local_cargo_tripwire_json = local_cargo_tripwire_json(workspace);
     let environment_attestation_summary_json = environment_attestation_summary_json(workspace);
+    let shadow_policy_summary_json = shadow_policy_summary_json(workspace);
     let regression_causality_summary_json =
         regression_causality_summary_json(&regression_causality_support_sections(
             verification_evidence_summary_json.as_str(),
@@ -1033,6 +1045,7 @@ fn collect_diagnostics(
             coordination_fallback_summary_json.as_str(),
             local_cargo_tripwire_json.as_str(),
             environment_attestation_summary_json.as_str(),
+            shadow_policy_summary_json.as_str(),
         ));
 
     Ok(CollectedDiagnostics {
@@ -1061,6 +1074,7 @@ fn collect_diagnostics(
         local_cargo_tripwire_json,
         regression_causality_summary_json,
         environment_attestation_summary_json,
+        shadow_policy_summary_json,
     })
 }
 
@@ -1796,6 +1810,10 @@ fn environment_attestation_summary_json(workspace: &Path) -> String {
     stable_json(&collect_environment_attestation_summary(workspace))
 }
 
+fn shadow_policy_summary_json(workspace: &Path) -> String {
+    stable_json(&collect_shadow_policy_summary(workspace))
+}
+
 pub(crate) fn collect_regression_causality_summary(workspace: &Path) -> Value {
     let status = StatusReport::gather_for_workspace(workspace);
     let swarm_reports = discover_swarm_report_summaries(workspace);
@@ -1810,6 +1828,7 @@ pub(crate) fn collect_regression_causality_summary(workspace: &Path) -> Value {
     let coordination_fallback_summary_json = coordination_fallback_summary_json(workspace);
     let local_cargo_tripwire_json = local_cargo_tripwire_json(workspace);
     let environment_attestation_summary_json = environment_attestation_summary_json(workspace);
+    let shadow_policy_summary_json = shadow_policy_summary_json(workspace);
 
     regression_causality_summary_value(&regression_causality_support_sections(
         verification_evidence_summary_json.as_str(),
@@ -1823,7 +1842,550 @@ pub(crate) fn collect_regression_causality_summary(workspace: &Path) -> Value {
         coordination_fallback_summary_json.as_str(),
         local_cargo_tripwire_json.as_str(),
         environment_attestation_summary_json.as_str(),
+        shadow_policy_summary_json.as_str(),
     ))
+}
+
+#[derive(Clone, Debug)]
+struct ShadowPolicyArtifactSample {
+    source_label: String,
+    content: Option<String>,
+}
+
+pub(crate) fn collect_shadow_policy_summary(workspace: &Path) -> Value {
+    shadow_policy_summary_from_artifacts(discover_shadow_policy_artifacts(workspace))
+}
+
+fn discover_shadow_policy_artifacts(workspace: &Path) -> Vec<ShadowPolicyArtifactSample> {
+    let artifact_dir = workspace.join(".ee").join(SHADOW_POLICY_ARTIFACT_DIR);
+    let Ok(entries) = fs::read_dir(artifact_dir) else {
+        return Vec::new();
+    };
+
+    let mut paths = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            regular_file_no_symlink(path) && path.extension().is_some_and(|ext| ext == "json")
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.truncate(MAX_SHADOW_POLICY_ARTIFACTS);
+
+    paths
+        .into_iter()
+        .map(|path| {
+            let source_label = path
+                .strip_prefix(workspace)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            ShadowPolicyArtifactSample {
+                source_label,
+                content: read_support_bundle_sample_file_bounded(&path),
+            }
+        })
+        .collect()
+}
+
+fn shadow_policy_summary_from_artifacts(artifacts: Vec<ShadowPolicyArtifactSample>) -> Value {
+    let mut degraded_codes = BTreeSet::new();
+    let mut policy_evidence = Vec::new();
+    let mut input_artifact_redaction_observed = false;
+    let mut cross_links: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::from([
+        ("packReplayEvidenceHashes", BTreeSet::new()),
+        ("swarmReplayEvidenceHashes", BTreeSet::new()),
+        ("environmentAttestationEvidenceHashes", BTreeSet::new()),
+        ("regressionCausalityEvidenceHashes", BTreeSet::new()),
+    ]);
+
+    if artifacts.is_empty() {
+        degraded_codes.insert("shadow_policy_evidence_missing".to_owned());
+    }
+
+    for artifact in artifacts {
+        match summarize_shadow_policy_artifact(
+            &artifact,
+            &mut input_artifact_redaction_observed,
+            &mut cross_links,
+        ) {
+            Some(summary) => {
+                for code in summary
+                    .get("degradedCodes")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    degraded_codes.insert(code.to_owned());
+                }
+                policy_evidence.push(summary);
+            }
+            None => {
+                degraded_codes.insert("shadow_policy_evidence_unreadable".to_owned());
+                policy_evidence.push(shadow_policy_unreadable_artifact_summary(&artifact));
+            }
+        }
+    }
+
+    if input_artifact_redaction_observed {
+        degraded_codes.insert("shadow_policy_artifact_redaction_observed".to_owned());
+    }
+
+    let valid_artifact_count = policy_evidence
+        .iter()
+        .filter(|summary| {
+            summary
+                .get("artifactKind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind == "score" || kind == "promotion_verdict")
+        })
+        .count();
+    let status = if policy_evidence.is_empty() {
+        "missing"
+    } else if degraded_codes.is_empty() {
+        "available"
+    } else {
+        "degraded"
+    };
+    let latest_verdict = shadow_policy_latest_verdict(&policy_evidence);
+    let cross_links = shadow_policy_cross_links_json(cross_links);
+    let degraded_codes = degraded_codes.into_iter().collect::<Vec<_>>();
+
+    let mut summary = json!({
+        "schema": SUPPORT_BUNDLE_SHADOW_POLICY_SUMMARY_SCHEMA_V1,
+        "sourceSchemas": [
+            SHADOW_POLICY_SCORE_SCHEMA_V1,
+            SHADOW_POLICY_VERDICT_SCHEMA_V1,
+        ],
+        "status": status,
+        "redactionStatus": "policy_ids_counts_verdicts_metrics_hashes_only_no_raw_memory_mail_paths_secrets",
+        "artifactCount": policy_evidence.len(),
+        "validArtifactCount": valid_artifact_count,
+        "degradedCodes": degraded_codes,
+        "latestVerdict": latest_verdict,
+        "policyEvidence": policy_evidence,
+        "crossLinks": cross_links,
+        "redaction": {
+            "rawMemoryBodiesIncluded": false,
+            "rawMailBodiesIncluded": false,
+            "rawPolicyPayloadsIncluded": false,
+            "rawCommandOutputIncluded": false,
+            "rawArtifactPathsIncluded": false,
+            "hostPrivatePathsIncluded": false,
+            "secretsIncluded": false,
+            "artifactReferencesHashed": true,
+            "sourceArtifactsCopied": false,
+            "inputArtifactRedactionObserved": input_artifact_redaction_observed,
+        },
+    });
+    let summary_hash = support_cache_key(&stable_json(&summary));
+    if let Some(object) = summary.as_object_mut() {
+        object.insert("summaryHash".to_owned(), json!(summary_hash));
+    }
+    summary
+}
+
+fn summarize_shadow_policy_artifact(
+    artifact: &ShadowPolicyArtifactSample,
+    input_artifact_redaction_observed: &mut bool,
+    cross_links: &mut BTreeMap<&'static str, BTreeSet<String>>,
+) -> Option<Value> {
+    let content = artifact.content.as_deref()?;
+    let artifact_hash = blake3_text_hash(content);
+    let source_id_hash = support_cache_key(&artifact.source_label);
+    let redaction = redact_support_diagnostic_content(content);
+    if redaction.redacted {
+        *input_artifact_redaction_observed = true;
+    }
+    let parsed = match serde_json::from_str::<Value>(content) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            return Some(json!({
+                "artifactHash": artifact_hash,
+                "sourceIdHash": source_id_hash,
+                "sourceSchema": "unknown",
+                "artifactKind": "malformed",
+                "policyDomain": "unknown",
+                "incumbentPolicyId": "unknown",
+                "candidatePolicyId": "unknown",
+                "cohortProfile": "unknown",
+                "sideEffectFree": false,
+                "scoreVerdict": Value::Null,
+                "verdict": Value::Null,
+                "confidence": Value::Null,
+                "reasonCodes": [],
+                "abstentionReasons": [],
+                "safetyGuardsTriggered": [],
+                "counterEvidence": [],
+                "nextCommandHashes": [],
+                "metrics": Value::Null,
+                "evidenceRefs": [],
+                "redactionFlags": shadow_policy_empty_redaction_flags(),
+                "degradedCodes": ["shadow_policy_evidence_malformed"],
+            }));
+        }
+    };
+    let source_schema = shadow_policy_safe_string(parsed.get("schema"));
+    let artifact_kind = match source_schema.as_str() {
+        SHADOW_POLICY_SCORE_SCHEMA_V1 => "score",
+        SHADOW_POLICY_VERDICT_SCHEMA_V1 => "promotion_verdict",
+        _ => {
+            return Some(json!({
+                "artifactHash": artifact_hash,
+                "sourceIdHash": source_id_hash,
+                "sourceSchema": source_schema,
+                "artifactKind": "unsupported",
+                "policyDomain": "unknown",
+                "incumbentPolicyId": "unknown",
+                "candidatePolicyId": "unknown",
+                "cohortProfile": "unknown",
+                "sideEffectFree": false,
+                "scoreVerdict": Value::Null,
+                "verdict": Value::Null,
+                "confidence": Value::Null,
+                "reasonCodes": [],
+                "abstentionReasons": [],
+                "safetyGuardsTriggered": [],
+                "counterEvidence": [],
+                "nextCommandHashes": [],
+                "metrics": Value::Null,
+                "evidenceRefs": [],
+                "redactionFlags": shadow_policy_empty_redaction_flags(),
+                "degradedCodes": ["shadow_policy_evidence_unsupported"],
+            }));
+        }
+    };
+
+    let redaction_flags = shadow_policy_redaction_flags(&parsed);
+    let evidence_refs = shadow_policy_evidence_refs(&parsed, cross_links);
+    let degraded_codes = shadow_policy_artifact_degraded_codes(&parsed, &redaction_flags);
+    Some(json!({
+        "artifactHash": artifact_hash,
+        "sourceIdHash": source_id_hash,
+        "sourceSchema": source_schema,
+        "artifactKind": artifact_kind,
+        "policyDomain": shadow_policy_safe_string(parsed.get("policyDomain")),
+        "incumbentPolicyId": shadow_policy_safe_string(parsed.get("incumbentPolicyId")),
+        "candidatePolicyId": shadow_policy_safe_string(parsed.get("candidatePolicyId")),
+        "cohortProfile": shadow_policy_safe_string(parsed.get("cohortProfile")),
+        "sideEffectFree": parsed
+            .get("sideEffectFree")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "scoreVerdict": shadow_policy_optional_safe_string(parsed.get("scoreVerdict").or_else(|| parsed.get("verdict"))),
+        "verdict": shadow_policy_optional_safe_string(parsed.get("verdict").filter(|_| artifact_kind == "promotion_verdict")),
+        "confidence": parsed.get("confidence").cloned().unwrap_or(Value::Null),
+        "reasonCodes": shadow_policy_safe_string_array(parsed.get("reasonCodes"), 12),
+        "abstentionReasons": shadow_policy_safe_string_array(parsed.get("abstentionReasons"), 12),
+        "safetyGuardsTriggered": shadow_policy_safe_string_array(parsed.get("safetyGuardsTriggered"), 12),
+        "counterEvidence": shadow_policy_safe_string_array(parsed.get("counterEvidence"), 12),
+        "nextCommandHashes": shadow_policy_hashed_strings(parsed.get("nextCommands"), 12),
+        "metrics": shadow_policy_metric_summary(&parsed),
+        "evidenceRefs": evidence_refs,
+        "redactionFlags": redaction_flags,
+        "degradedCodes": degraded_codes,
+    }))
+}
+
+fn shadow_policy_unreadable_artifact_summary(artifact: &ShadowPolicyArtifactSample) -> Value {
+    json!({
+        "artifactHash": Value::Null,
+        "sourceIdHash": support_cache_key(&artifact.source_label),
+        "sourceSchema": "unknown",
+        "artifactKind": "unreadable",
+        "policyDomain": "unknown",
+        "incumbentPolicyId": "unknown",
+        "candidatePolicyId": "unknown",
+        "cohortProfile": "unknown",
+        "sideEffectFree": false,
+        "scoreVerdict": Value::Null,
+        "verdict": Value::Null,
+        "confidence": Value::Null,
+        "reasonCodes": [],
+        "abstentionReasons": [],
+        "safetyGuardsTriggered": [],
+        "counterEvidence": [],
+        "nextCommandHashes": [],
+        "metrics": Value::Null,
+        "evidenceRefs": [],
+        "redactionFlags": shadow_policy_empty_redaction_flags(),
+        "degradedCodes": ["shadow_policy_evidence_unreadable"],
+    })
+}
+
+fn shadow_policy_latest_verdict(policy_evidence: &[Value]) -> Value {
+    let selected = policy_evidence
+        .iter()
+        .find(|summary| {
+            summary
+                .get("artifactKind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind == "promotion_verdict")
+        })
+        .or_else(|| {
+            policy_evidence.iter().find(|summary| {
+                summary
+                    .get("artifactKind")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind == "score")
+            })
+        });
+    selected.map_or(Value::Null, |summary| {
+        json!({
+            "artifactHash": summary.get("artifactHash").cloned().unwrap_or(Value::Null),
+            "sourceSchema": summary.get("sourceSchema").cloned().unwrap_or(Value::Null),
+            "artifactKind": summary.get("artifactKind").cloned().unwrap_or(Value::Null),
+            "policyDomain": summary.get("policyDomain").cloned().unwrap_or(Value::Null),
+            "incumbentPolicyId": summary.get("incumbentPolicyId").cloned().unwrap_or(Value::Null),
+            "candidatePolicyId": summary.get("candidatePolicyId").cloned().unwrap_or(Value::Null),
+            "cohortProfile": summary.get("cohortProfile").cloned().unwrap_or(Value::Null),
+            "scoreVerdict": summary.get("scoreVerdict").cloned().unwrap_or(Value::Null),
+            "verdict": summary.get("verdict").cloned().unwrap_or(Value::Null),
+            "confidence": summary.get("confidence").cloned().unwrap_or(Value::Null),
+            "metrics": summary.get("metrics").cloned().unwrap_or(Value::Null),
+        })
+    })
+}
+
+fn shadow_policy_cross_links_json(cross_links: BTreeMap<&'static str, BTreeSet<String>>) -> Value {
+    let mut object = serde_json::Map::new();
+    for (field, hashes) in cross_links {
+        object.insert(
+            field.to_owned(),
+            json!(hashes.into_iter().collect::<Vec<_>>()),
+        );
+    }
+    Value::Object(object)
+}
+
+fn shadow_policy_redaction_flags(artifact: &Value) -> Value {
+    let posture = artifact
+        .get("redactionPosture")
+        .unwrap_or(&serde_json::Value::Null);
+    json!({
+        "rawMemoryBodyPresent": posture
+            .get("rawMemoryBodyPresent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "rawMailBodyPresent": posture
+            .get("rawMailBodyPresent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "rawPolicyPayloadPresent": posture
+            .get("rawPolicyPayloadPresent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "absoluteHostPathPresent": posture
+            .get("absoluteHostPathPresent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "secretsPresent": posture
+            .get("secretsPresent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn shadow_policy_empty_redaction_flags() -> Value {
+    json!({
+        "rawMemoryBodyPresent": false,
+        "rawMailBodyPresent": false,
+        "rawPolicyPayloadPresent": false,
+        "absoluteHostPathPresent": false,
+        "secretsPresent": false,
+    })
+}
+
+fn shadow_policy_metric_summary(artifact: &Value) -> Value {
+    let summary = artifact.get("summary").unwrap_or(&serde_json::Value::Null);
+    json!({
+        "totalEvidence": summary.get("totalEvidence").cloned().unwrap_or(Value::Null),
+        "usableEvidence": summary.get("usableEvidence").cloned().unwrap_or(Value::Null),
+        "missingEvidence": summary.get("missingEvidence").cloned().unwrap_or(Value::Null),
+        "staleEvidence": summary.get("staleEvidence").cloned().unwrap_or(Value::Null),
+        "unsupportedEvidence": summary.get("unsupportedEvidence").cloned().unwrap_or(Value::Null),
+        "divergedEvidence": summary.get("divergedEvidence").cloned().unwrap_or(Value::Null),
+        "divergenceRate": summary.get("divergenceRate").cloned().unwrap_or(Value::Null),
+        "utilityDelta": summary.get("utilityDelta").cloned().unwrap_or(Value::Null),
+        "droppedRequiredEvidenceCount": summary
+            .get("droppedRequiredEvidenceCount")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "outputBytesDelta": summary.get("outputBytesDelta").cloned().unwrap_or(Value::Null),
+        "p50LatencyMs": summary.get("p50LatencyMs").cloned().unwrap_or(Value::Null),
+        "p95LatencyMs": summary.get("p95LatencyMs").cloned().unwrap_or(Value::Null),
+        "p99LatencyMs": summary.get("p99LatencyMs").cloned().unwrap_or(Value::Null),
+        "degradedDelta": summary.get("degradedDelta").cloned().unwrap_or(Value::Null),
+        "resourceBytesDelta": summary.get("resourceBytesDelta").cloned().unwrap_or(Value::Null),
+        "redactionSafe": summary.get("redactionSafe").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn shadow_policy_evidence_refs(
+    artifact: &Value,
+    cross_links: &mut BTreeMap<&'static str, BTreeSet<String>>,
+) -> Vec<Value> {
+    artifact
+        .get("evidence")
+        .and_then(Value::as_array)
+        .map(|evidence| {
+            evidence
+                .iter()
+                .take(16)
+                .map(|entry| {
+                    let artifact_id = entry.get("artifactId").and_then(Value::as_str).unwrap_or("");
+                    let kind = entry.get("kind").and_then(Value::as_str).unwrap_or("unknown");
+                    let artifact_hash = support_cache_key(artifact_id);
+                    shadow_policy_record_cross_link(cross_links, artifact_id, kind, &artifact_hash);
+                    json!({
+                        "artifactIdHash": artifact_hash,
+                        "kind": redact_support_diagnostic_text(kind),
+                        "cohort": shadow_policy_safe_string(entry.get("cohort")),
+                        "posture": shadow_policy_safe_string(entry.get("posture")),
+                        "utilityDelta": entry.get("utilityDelta").cloned().unwrap_or(Value::Null),
+                        "outputBytesDelta": entry.get("outputBytesDelta").cloned().unwrap_or(Value::Null),
+                        "candidateLatencyMs": entry.get("candidateLatencyMs").cloned().unwrap_or(Value::Null),
+                        "degradedDelta": entry.get("degradedDelta").cloned().unwrap_or(Value::Null),
+                        "droppedRequiredEvidenceCount": entry
+                            .get("droppedRequiredEvidenceCount")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                        "resourceBytesDelta": entry.get("resourceBytesDelta").cloned().unwrap_or(Value::Null),
+                        "redactionSafe": entry.get("redactionSafe").cloned().unwrap_or(Value::Null),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn shadow_policy_record_cross_link(
+    cross_links: &mut BTreeMap<&'static str, BTreeSet<String>>,
+    artifact_id: &str,
+    kind: &str,
+    artifact_hash: &str,
+) {
+    let normalized = artifact_id.to_ascii_lowercase();
+    if kind == "replay_trace" || normalized.contains("replay") || normalized.contains("swarm") {
+        if let Some(hashes) = cross_links.get_mut("swarmReplayEvidenceHashes") {
+            hashes.insert(artifact_hash.to_owned());
+        }
+    }
+    if normalized.contains("pack") {
+        if let Some(hashes) = cross_links.get_mut("packReplayEvidenceHashes") {
+            hashes.insert(artifact_hash.to_owned());
+        }
+    }
+    if normalized.contains("environment_attestation") {
+        if let Some(hashes) = cross_links.get_mut("environmentAttestationEvidenceHashes") {
+            hashes.insert(artifact_hash.to_owned());
+        }
+    }
+    if normalized.contains("regression_causality") || normalized.contains("regression") {
+        if let Some(hashes) = cross_links.get_mut("regressionCausalityEvidenceHashes") {
+            hashes.insert(artifact_hash.to_owned());
+        }
+    }
+}
+
+fn shadow_policy_artifact_degraded_codes(artifact: &Value, redaction_flags: &Value) -> Vec<String> {
+    let mut codes = BTreeSet::new();
+    let summary = artifact.get("summary").unwrap_or(&serde_json::Value::Null);
+    if summary
+        .get("missingEvidence")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0
+    {
+        codes.insert("shadow_policy_evidence_missing".to_owned());
+    }
+    if summary
+        .get("staleEvidence")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0
+    {
+        codes.insert("shadow_policy_evidence_stale".to_owned());
+    }
+    if summary
+        .get("unsupportedEvidence")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0
+    {
+        codes.insert("shadow_policy_evidence_unsupported".to_owned());
+    }
+    if summary
+        .get("redactionSafe")
+        .and_then(Value::as_bool)
+        .is_some_and(|safe| !safe)
+        || redaction_flags
+            .as_object()
+            .is_some_and(|object| object.values().any(|value| value.as_bool() == Some(true)))
+    {
+        codes.insert("shadow_policy_redaction_unsafe".to_owned());
+    }
+    if artifact
+        .get("sideEffectFree")
+        .and_then(Value::as_bool)
+        .is_some_and(|side_effect_free| !side_effect_free)
+    {
+        codes.insert("shadow_policy_not_side_effect_free".to_owned());
+    }
+    if artifact
+        .get("verdict")
+        .and_then(Value::as_str)
+        .is_some_and(|verdict| verdict == "needs_more_evidence")
+    {
+        codes.insert("shadow_policy_needs_more_evidence".to_owned());
+    }
+    if artifact
+        .get("verdict")
+        .and_then(Value::as_str)
+        .is_some_and(|verdict| verdict == "abstain")
+    {
+        codes.insert("shadow_policy_promotion_abstained".to_owned());
+    }
+    codes.into_iter().collect()
+}
+
+fn shadow_policy_safe_string(value: Option<&Value>) -> String {
+    shadow_policy_optional_safe_string(value).unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn shadow_policy_optional_safe_string(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(redact_support_diagnostic_text)
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn shadow_policy_safe_string_array(value: Option<&Value>, limit: usize) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| shadow_policy_optional_safe_string(Some(item)))
+                .take(limit)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn shadow_policy_hashed_strings(value: Option<&Value>, limit: usize) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .take(limit)
+                .map(support_cache_key)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn collect_environment_attestation_summary(workspace: &Path) -> Value {
@@ -2004,6 +2566,17 @@ pub(crate) fn regression_causality_summary_evidence_id(summary: &Value) -> Strin
     format!("regression_causality_summary:{short_hash}")
 }
 
+pub(crate) fn shadow_policy_summary_evidence_id(summary: &Value) -> String {
+    let hash = summary
+        .get("summaryHash")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| blake3_text_hash(&stable_json(summary)));
+    let short_hash = hash.trim_start_matches("blake3:");
+    let short_hash = short_hash.get(..12).unwrap_or(short_hash);
+    format!("shadow_policy_summary:{short_hash}")
+}
+
 pub(crate) fn render_regression_causality_summary_for_handoff(summary: &Value) -> String {
     let schema = summary
         .get("schema")
@@ -2059,6 +2632,113 @@ pub(crate) fn render_regression_causality_summary_for_handoff(summary: &Value) -
             .to_owned(),
     ]
     .join("\n")
+}
+
+pub(crate) fn render_shadow_policy_summary_for_handoff(summary: &Value) -> String {
+    let status = summary
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let artifact_count = summary
+        .get("artifactCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let valid_count = summary
+        .get("validArtifactCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let latest = summary
+        .get("latestVerdict")
+        .unwrap_or(&serde_json::Value::Null);
+    let policy_domain = latest
+        .get("policyDomain")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let incumbent = latest
+        .get("incumbentPolicyId")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let candidate = latest
+        .get("candidatePolicyId")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let score_verdict = latest
+        .get("scoreVerdict")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let promotion_verdict = latest
+        .get("verdict")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let confidence = latest
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .map(|value| format!("{value:.4}"))
+        .unwrap_or_else(|| "unknown".to_owned());
+    let metrics = latest.get("metrics").unwrap_or(&serde_json::Value::Null);
+    let usable_evidence = metrics
+        .get("usableEvidence")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let missing_evidence = metrics
+        .get("missingEvidence")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let unsupported_evidence = metrics
+        .get("unsupportedEvidence")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let utility_delta = metrics
+        .get("utilityDelta")
+        .and_then(Value::as_f64)
+        .map(|value| format!("{value:.4}"))
+        .unwrap_or_else(|| "unknown".to_owned());
+    let output_bytes_delta = metrics
+        .get("outputBytesDelta")
+        .and_then(Value::as_i64)
+        .map_or_else(|| "unknown".to_owned(), |value| value.to_string());
+    let p99_latency = metrics
+        .get("p99LatencyMs")
+        .and_then(Value::as_u64)
+        .map_or_else(|| "unknown".to_owned(), |value| value.to_string());
+    let degraded_codes = summary
+        .get("degradedCodes")
+        .and_then(Value::as_array)
+        .map(|codes| {
+            codes
+                .iter()
+                .filter_map(Value::as_str)
+                .take(8)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let summary_hash = summary
+        .get("summaryHash")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+
+    let mut lines = vec![
+        format!(
+            "Shadow policy summary: status={status}, artifacts={artifact_count}, valid_artifacts={valid_count}, policy_domain={policy_domain}, incumbent={incumbent}, candidate={candidate}."
+        ),
+        format!(
+            "Verdict: score_verdict={score_verdict}, promotion_verdict={promotion_verdict}, confidence={confidence}, usable_evidence={usable_evidence}, missing_evidence={missing_evidence}, unsupported_evidence={unsupported_evidence}."
+        ),
+        format!(
+            "Metric deltas: utility_delta={utility_delta}, output_bytes_delta={output_bytes_delta}, p99_latency_ms={p99_latency}, summary_hash={summary_hash}."
+        ),
+        "Redaction: raw_memory_bodies_included=false, raw_mail_bodies_included=false, raw_policy_payloads_included=false, raw_artifact_paths_included=false, secrets_included=false, artifact_refs=hashes_only."
+            .to_owned(),
+        "Diagnostic posture only; rerun ee support bundle or the shadow policy contract tests before treating an embedded verdict as current."
+            .to_owned(),
+    ];
+    if !degraded_codes.is_empty() {
+        lines.push(format!(
+            "Shadow policy degraded codes: {}.",
+            degraded_codes.join(", ")
+        ));
+    }
+    lines.join("\n")
 }
 
 fn increment_attestation_count(counts: &mut BTreeMap<String, u64>, key: String) {
@@ -2517,7 +3197,8 @@ fn regression_causality_support_sections<'a>(
     coordination_fallback_summary_json: &'a str,
     local_cargo_tripwire_json: &'a str,
     environment_attestation_summary_json: &'a str,
-) -> [(&'static str, RegressionEvidenceKind, &'a str); 11] {
+    shadow_policy_summary_json: &'a str,
+) -> [(&'static str, RegressionEvidenceKind, &'a str); 12] {
     [
         (
             "support_bundle:verification_evidence_summary",
@@ -2573,6 +3254,11 @@ fn regression_causality_support_sections<'a>(
             "support_bundle:environment_attestation_summary",
             RegressionEvidenceKind::SupportBundle,
             environment_attestation_summary_json,
+        ),
+        (
+            "support_bundle:shadow_policy_summary",
+            RegressionEvidenceKind::SupportBundle,
+            shadow_policy_summary_json,
         ),
     ]
 }
@@ -3945,6 +4631,7 @@ fn planned_files() -> Vec<String> {
         LOCAL_CARGO_TRIPWIRE_FILE.to_owned(),
         REGRESSION_CAUSALITY_SUMMARY_FILE.to_owned(),
         ENVIRONMENT_ATTESTATION_SUMMARY_FILE.to_owned(),
+        SHADOW_POLICY_SUMMARY_FILE.to_owned(),
         MANIFEST_FILE.to_owned(),
     ]
 }
@@ -4381,6 +5068,8 @@ mod tests {
     const SUPPORT_BUNDLE_ATTESTATION_SUMMARY_MATRIX_GOLDEN: &str = include_str!(
         "../../tests/fixtures/golden/environment_attestation/support_bundle_summary_matrix.json.golden"
     );
+    const SUPPORT_BUNDLE_SHADOW_POLICY_SUMMARY_SCHEMA_TEXT: &str =
+        include_str!("../../docs/schemas/ee.support_bundle.shadow_policy_summary.v1.json");
     const ATTESTATION_SUMMARY_DENIED_SUBSTRINGS: &[&str] = &[
         "body_md",
         "raw mail body",
@@ -4390,6 +5079,20 @@ mod tests {
         "ghp_",
         "Bearer ",
         "DATABASE_URL=",
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+    ];
+    const SHADOW_POLICY_SUMMARY_DENIED_SUBSTRINGS: &[&str] = &[
+        "body_md",
+        "raw memory body",
+        "raw mail body",
+        "raw policy payload",
+        "BEGIN PRIVATE KEY",
+        "ghp_",
+        "Bearer ",
+        "DATABASE_URL=",
+        "sk-test-redaction",
         "/Users/",
         "/Volumes/",
         "/private/",
@@ -4603,6 +5306,229 @@ mod tests {
         assert!(!rendered.contains("stdout:"));
         assert!(!rendered.contains("stderr:"));
         assert!(!rendered.contains("/Users/"));
+    }
+
+    #[test]
+    fn shadow_policy_summary_compacts_redacts_and_degrades_bad_artifacts() -> TestResult {
+        let score_artifact = r#"{
+            "schema":"ee.shadow_policy_score.v1",
+            "policyDomain":"pack_selection",
+            "incumbentPolicyId":"incumbent.pack.mmr_redundancy",
+            "candidatePolicyId":"candidate.pack.facility_location",
+            "cohortProfile":"ci_smoke",
+            "sideEffectFree":true,
+            "verdict":"improves",
+            "abstentionReasons":[],
+            "summary":{
+                "totalEvidence":2,
+                "usableEvidence":2,
+                "missingEvidence":0,
+                "staleEvidence":0,
+                "unsupportedEvidence":0,
+                "divergedEvidence":2,
+                "divergenceRate":1.0,
+                "utilityDelta":0.10,
+                "droppedRequiredEvidenceCount":0,
+                "outputBytesDelta":-120,
+                "p50LatencyMs":80,
+                "p95LatencyMs":100,
+                "p99LatencyMs":100,
+                "degradedDelta":0,
+                "resourceBytesDelta":-768,
+                "redactionSafe":true
+            },
+            "redactionPosture":{
+                "rawMemoryBodyPresent":false,
+                "rawMailBodyPresent":false,
+                "rawPolicyPayloadPresent":false,
+                "absoluteHostPathPresent":false,
+                "secretsPresent":false
+            },
+            "evidence":[{
+                "artifactId":"replay.swarm.pack.ci:/Users/alice/private/sk-test-redaction",
+                "kind":"replay_trace",
+                "cohort":"ci_smoke",
+                "posture":"present",
+                "utilityDelta":0.12,
+                "outputBytesDelta":-80,
+                "candidateLatencyMs":100,
+                "degradedDelta":0,
+                "droppedRequiredEvidenceCount":0,
+                "resourceBytesDelta":-512,
+                "redactionSafe":true
+            }],
+            "body_md":"raw mail body /Users/alice/private sk-test-redaction"
+        }"#;
+        let promotion_artifact = r#"{
+            "schema":"ee.shadow_policy_verdict.v1",
+            "scoreSchema":"ee.shadow_policy_score.v1",
+            "policyDomain":"pack_selection",
+            "incumbentPolicyId":"incumbent.pack.mmr_redundancy",
+            "candidatePolicyId":"candidate.pack.facility_location",
+            "cohortProfile":"ci_smoke",
+            "sideEffectFree":true,
+            "operatorWarning":"shadow_verdict_is_advisory_only_no_policy_mutation",
+            "scoreVerdict":"improves",
+            "verdict":"promote",
+            "confidence":0.91,
+            "reasonCodes":["score_improves","promotion_thresholds_satisfied"],
+            "abstentionReasons":[],
+            "safetyGuardsTriggered":[],
+            "counterEvidence":[],
+            "nextCommands":["ee support bundle --workspace /Users/alice/private --token sk-test-redaction"],
+            "summary":{
+                "totalEvidence":2,
+                "usableEvidence":2,
+                "missingEvidence":0,
+                "staleEvidence":0,
+                "unsupportedEvidence":0,
+                "divergedEvidence":2,
+                "divergenceRate":1.0,
+                "utilityDelta":0.10,
+                "droppedRequiredEvidenceCount":0,
+                "outputBytesDelta":-120,
+                "p50LatencyMs":80,
+                "p95LatencyMs":100,
+                "p99LatencyMs":100,
+                "degradedDelta":0,
+                "resourceBytesDelta":-768,
+                "redactionSafe":true
+            },
+            "redactionPosture":{
+                "rawMemoryBodyPresent":false,
+                "rawMailBodyPresent":false,
+                "rawPolicyPayloadPresent":false,
+                "absoluteHostPathPresent":false,
+                "secretsPresent":false
+            },
+            "rawPolicyPayload":"raw policy payload /Users/alice/private"
+        }"#;
+
+        let summary = shadow_policy_summary_from_artifacts(vec![
+            ShadowPolicyArtifactSample {
+                source_label: ".ee/shadow/policy_score.json".to_owned(),
+                content: Some(score_artifact.to_owned()),
+            },
+            ShadowPolicyArtifactSample {
+                source_label: ".ee/shadow/policy_verdict.json".to_owned(),
+                content: Some(promotion_artifact.to_owned()),
+            },
+            ShadowPolicyArtifactSample {
+                source_label: ".ee/shadow/malformed.json".to_owned(),
+                content: Some("{not-json /Users/alice/private sk-test-redaction".to_owned()),
+            },
+            ShadowPolicyArtifactSample {
+                source_label: ".ee/shadow/unsupported.json".to_owned(),
+                content: Some(
+                    r#"{"schema":"ee.shadow_policy_unknown.v1","body_md":"raw memory body /Users/alice/private"}"#
+                        .to_owned(),
+                ),
+            },
+        ]);
+        let schema: Value = serde_json::from_str(SUPPORT_BUNDLE_SHADOW_POLICY_SUMMARY_SCHEMA_TEXT)
+            .map_err(|error| error.to_string())?;
+
+        validate_support_bundle_shadow_policy_summary_schema(&summary, &schema, "mixed")?;
+        assert_no_shadow_policy_summary_denied_substrings("mixed", &summary)?;
+        assert_eq!(
+            summary.get("status").and_then(Value::as_str),
+            Some("degraded")
+        );
+        assert_eq!(
+            summary.get("artifactCount").and_then(Value::as_u64),
+            Some(4)
+        );
+        assert_eq!(
+            summary.get("validArtifactCount").and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            summary
+                .pointer("/latestVerdict/verdict")
+                .and_then(Value::as_str),
+            Some("promote")
+        );
+        assert_eq!(
+            summary
+                .pointer("/latestVerdict/metrics/usableEvidence")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
+        for code in [
+            "shadow_policy_artifact_redaction_observed",
+            "shadow_policy_evidence_malformed",
+            "shadow_policy_evidence_unsupported",
+        ] {
+            assert!(
+                summary
+                    .get("degradedCodes")
+                    .and_then(Value::as_array)
+                    .is_some_and(|codes| codes.iter().any(|value| value.as_str() == Some(code))),
+                "missing degraded code {code}"
+            );
+        }
+        assert!(
+            summary
+                .pointer("/crossLinks/packReplayEvidenceHashes/0")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "pack replay cross-link should be hashed"
+        );
+        assert!(
+            summary
+                .pointer("/crossLinks/swarmReplayEvidenceHashes/0")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "swarm replay cross-link should be hashed"
+        );
+
+        let rendered = render_shadow_policy_summary_for_handoff(&summary);
+        assert!(rendered.contains("Shadow policy summary: status=degraded"));
+        assert!(rendered.contains("candidate=candidate.pack.facility_location"));
+        assert!(rendered.contains("promotion_verdict=promote"));
+        assert!(rendered.contains("raw_memory_bodies_included=false"));
+        for denied in SHADOW_POLICY_SUMMARY_DENIED_SUBSTRINGS {
+            assert!(
+                !rendered.contains(denied),
+                "shadow policy handoff leaked denied substring {denied:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shadow_policy_summary_degrades_explicitly_when_artifacts_are_missing() -> TestResult {
+        let summary = shadow_policy_summary_from_artifacts(Vec::new());
+        let schema: Value = serde_json::from_str(SUPPORT_BUNDLE_SHADOW_POLICY_SUMMARY_SCHEMA_TEXT)
+            .map_err(|error| error.to_string())?;
+
+        validate_support_bundle_shadow_policy_summary_schema(&summary, &schema, "missing")?;
+        assert_no_shadow_policy_summary_denied_substrings("missing", &summary)?;
+        assert_eq!(
+            summary.get("status").and_then(Value::as_str),
+            Some("missing")
+        );
+        assert_eq!(
+            summary.get("artifactCount").and_then(Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            summary.get("validArtifactCount").and_then(Value::as_u64),
+            Some(0)
+        );
+        assert!(
+            summary
+                .get("degradedCodes")
+                .and_then(Value::as_array)
+                .is_some_and(|codes| {
+                    codes
+                        .iter()
+                        .any(|value| value.as_str() == Some("shadow_policy_evidence_missing"))
+                }),
+            "missing artifacts should degrade explicitly"
+        );
+        assert!(summary.get("latestVerdict").is_some_and(Value::is_null));
+        Ok(())
     }
 
     #[test]
@@ -5199,6 +6125,118 @@ mod tests {
         require_blake3_hash(command.get("argvHash"), context, "argvHash")
     }
 
+    fn validate_support_bundle_shadow_policy_summary_schema(
+        summary: &Value,
+        schema: &Value,
+        case_name: &str,
+    ) -> TestResult {
+        let object = summary
+            .as_object()
+            .ok_or_else(|| format!("{case_name}: summary is not an object"))?;
+        let required = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "shadow schema missing required list".to_owned())?;
+        for field in required.iter().filter_map(Value::as_str) {
+            if !object.contains_key(field) {
+                return Err(format!(
+                    "{case_name}: missing schema-required shadow field {field}"
+                ));
+            }
+        }
+        let properties = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "shadow schema missing properties".to_owned())?;
+        for field in object.keys() {
+            if !properties.contains_key(field) {
+                return Err(format!("{case_name}: unexpected shadow field {field}"));
+            }
+        }
+        if summary.get("schema").and_then(Value::as_str)
+            != Some(SUPPORT_BUNDLE_SHADOW_POLICY_SUMMARY_SCHEMA_V1)
+        {
+            return Err(format!("{case_name}: wrong shadow schema token"));
+        }
+        require_blake3_hash(summary.get("summaryHash"), case_name, "summaryHash")?;
+        let policy_evidence = summary
+            .get("policyEvidence")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{case_name}: policyEvidence missing"))?;
+        let artifact_count = summary
+            .get("artifactCount")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("{case_name}: artifactCount missing"))?;
+        if artifact_count != policy_evidence.len() as u64 {
+            return Err(format!("{case_name}: artifactCount mismatch"));
+        }
+        for (index, evidence) in policy_evidence.iter().enumerate() {
+            let context = format!("{case_name}: policyEvidence[{index}]");
+            require_blake3_hash(evidence.get("sourceIdHash"), &context, "sourceIdHash")?;
+            if !evidence.get("artifactHash").is_some_and(Value::is_null) {
+                require_blake3_hash(evidence.get("artifactHash"), &context, "artifactHash")?;
+            }
+            let next_command_hashes = evidence
+                .get("nextCommandHashes")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{context}: nextCommandHashes missing"))?;
+            for hash in next_command_hashes {
+                require_blake3_hash(Some(hash), &context, "nextCommandHashes")?;
+            }
+            let evidence_refs = evidence
+                .get("evidenceRefs")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{context}: evidenceRefs missing"))?;
+            for reference in evidence_refs {
+                require_blake3_hash(
+                    reference.get("artifactIdHash"),
+                    &context,
+                    "evidence artifactIdHash",
+                )?;
+            }
+        }
+        for pointer in [
+            "/redaction/rawMemoryBodiesIncluded",
+            "/redaction/rawMailBodiesIncluded",
+            "/redaction/rawPolicyPayloadsIncluded",
+            "/redaction/rawCommandOutputIncluded",
+            "/redaction/rawArtifactPathsIncluded",
+            "/redaction/hostPrivatePathsIncluded",
+            "/redaction/secretsIncluded",
+            "/redaction/sourceArtifactsCopied",
+        ] {
+            if summary.pointer(pointer).and_then(Value::as_bool) != Some(false) {
+                return Err(format!(
+                    "{case_name}: redaction flag {pointer} was not false"
+                ));
+            }
+        }
+        if summary
+            .pointer("/redaction/artifactReferencesHashed")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            return Err(format!(
+                "{case_name}: artifactReferencesHashed was not true"
+            ));
+        }
+        for field in [
+            "packReplayEvidenceHashes",
+            "swarmReplayEvidenceHashes",
+            "environmentAttestationEvidenceHashes",
+            "regressionCausalityEvidenceHashes",
+        ] {
+            let hashes = summary
+                .pointer(&format!("/crossLinks/{field}"))
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{case_name}: crossLinks.{field} missing"))?;
+            for hash in hashes {
+                require_blake3_hash(Some(hash), case_name, field)?;
+            }
+        }
+        Ok(())
+    }
+
     fn require_blake3_hash(value: Option<&Value>, context: &str, field: &str) -> TestResult {
         if value
             .and_then(Value::as_str)
@@ -5219,6 +6257,21 @@ mod tests {
             if rendered.contains(denied) {
                 return Err(format!(
                     "{case_name}: support-bundle attestation summary leaked denied substring {denied:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn assert_no_shadow_policy_summary_denied_substrings(
+        case_name: &str,
+        summary: &Value,
+    ) -> TestResult {
+        let rendered = stable_json(summary);
+        for denied in SHADOW_POLICY_SUMMARY_DENIED_SUBSTRINGS {
+            if rendered.contains(denied) {
+                return Err(format!(
+                    "{case_name}: support-bundle shadow policy summary leaked denied substring {denied:?}"
                 ));
             }
         }

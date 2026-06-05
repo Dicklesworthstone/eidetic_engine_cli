@@ -1,0 +1,373 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.support_bundle.shadow_policy_summary.v1.json",
+  "title": "ee.support_bundle.shadow_policy_summary.v1",
+  "description": "Redaction-safe support-bundle summary for shadow-policy score and promotion verdict artifacts. It preserves policy IDs, verdicts, metric deltas, degraded codes, and hashed provenance without raw memory bodies, mail bodies, command output, policy payloads, secrets, or host-private paths.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "sourceSchemas",
+    "status",
+    "redactionStatus",
+    "artifactCount",
+    "validArtifactCount",
+    "degradedCodes",
+    "latestVerdict",
+    "policyEvidence",
+    "crossLinks",
+    "redaction",
+    "summaryHash"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.support_bundle.shadow_policy_summary.v1"
+    },
+    "sourceSchemas": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "enum": [
+          "ee.shadow_policy_score.v1",
+          "ee.shadow_policy_verdict.v1"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "status": {
+      "type": "string",
+      "enum": ["available", "missing", "degraded"]
+    },
+    "redactionStatus": {
+      "const": "policy_ids_counts_verdicts_metrics_hashes_only_no_raw_memory_mail_paths_secrets"
+    },
+    "artifactCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "validArtifactCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "degradedCodes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradedCode"},
+      "uniqueItems": true
+    },
+    "latestVerdict": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/latestVerdict"}
+      ]
+    },
+    "policyEvidence": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/policyEvidence"}
+    },
+    "crossLinks": {"$ref": "#/$defs/crossLinks"},
+    "redaction": {"$ref": "#/$defs/redaction"},
+    "summaryHash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^blake3:"
+    },
+    "safeToken": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "not": {
+        "anyOf": [
+          {"pattern": "BEGIN PRIVATE KEY"},
+          {"pattern": "BEGIN OPENSSH PRIVATE KEY"},
+          {"pattern": "ghp_[A-Za-z0-9_]+"},
+          {"pattern": "Bearer [A-Za-z0-9._-]+"},
+          {"pattern": "sk-[A-Za-z0-9._-]+"},
+          {"pattern": "DATABASE_URL="},
+          {"pattern": "body_md"},
+          {"pattern": "raw mail body"},
+          {"pattern": "/Users/[^\\s]+"},
+          {"pattern": "/home/[^\\s]+"},
+          {"pattern": "/Volumes/[^\\s]+"},
+          {"pattern": "/private/[^\\s]+"}
+        ]
+      }
+    },
+    "nullableSafeToken": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/safeToken"}
+      ]
+    },
+    "degradedCode": {
+      "type": "string",
+      "enum": [
+        "shadow_policy_evidence_missing",
+        "shadow_policy_evidence_unreadable",
+        "shadow_policy_evidence_malformed",
+        "shadow_policy_evidence_unsupported",
+        "shadow_policy_evidence_stale",
+        "shadow_policy_redaction_unsafe",
+        "shadow_policy_not_side_effect_free",
+        "shadow_policy_needs_more_evidence",
+        "shadow_policy_promotion_abstained",
+        "shadow_policy_artifact_redaction_observed"
+      ]
+    },
+    "latestVerdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactHash",
+        "sourceSchema",
+        "artifactKind",
+        "policyDomain",
+        "incumbentPolicyId",
+        "candidatePolicyId",
+        "cohortProfile",
+        "scoreVerdict",
+        "verdict",
+        "confidence",
+        "metrics"
+      ],
+      "properties": {
+        "artifactHash": {"$ref": "#/$defs/hash"},
+        "sourceSchema": {"$ref": "#/$defs/safeToken"},
+        "artifactKind": {"enum": ["score", "promotion_verdict"]},
+        "policyDomain": {"$ref": "#/$defs/safeToken"},
+        "incumbentPolicyId": {"$ref": "#/$defs/safeToken"},
+        "candidatePolicyId": {"$ref": "#/$defs/safeToken"},
+        "cohortProfile": {"$ref": "#/$defs/safeToken"},
+        "scoreVerdict": {"$ref": "#/$defs/nullableSafeToken"},
+        "verdict": {"$ref": "#/$defs/nullableSafeToken"},
+        "confidence": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "number", "minimum": 0, "maximum": 1}
+          ]
+        },
+        "metrics": {"$ref": "#/$defs/metrics"}
+      }
+    },
+    "policyEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactHash",
+        "sourceIdHash",
+        "sourceSchema",
+        "artifactKind",
+        "policyDomain",
+        "incumbentPolicyId",
+        "candidatePolicyId",
+        "cohortProfile",
+        "sideEffectFree",
+        "scoreVerdict",
+        "verdict",
+        "confidence",
+        "reasonCodes",
+        "abstentionReasons",
+        "safetyGuardsTriggered",
+        "counterEvidence",
+        "nextCommandHashes",
+        "metrics",
+        "evidenceRefs",
+        "redactionFlags",
+        "degradedCodes"
+      ],
+      "properties": {
+        "artifactHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
+        "sourceIdHash": {"$ref": "#/$defs/hash"},
+        "sourceSchema": {"$ref": "#/$defs/safeToken"},
+        "artifactKind": {
+          "enum": ["score", "promotion_verdict", "malformed", "unsupported", "unreadable"]
+        },
+        "policyDomain": {"$ref": "#/$defs/safeToken"},
+        "incumbentPolicyId": {"$ref": "#/$defs/safeToken"},
+        "candidatePolicyId": {"$ref": "#/$defs/safeToken"},
+        "cohortProfile": {"$ref": "#/$defs/safeToken"},
+        "sideEffectFree": {"type": "boolean"},
+        "scoreVerdict": {"$ref": "#/$defs/nullableSafeToken"},
+        "verdict": {"$ref": "#/$defs/nullableSafeToken"},
+        "confidence": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "number", "minimum": 0, "maximum": 1}
+          ]
+        },
+        "reasonCodes": {"$ref": "#/$defs/safeTokenArray"},
+        "abstentionReasons": {"$ref": "#/$defs/safeTokenArray"},
+        "safetyGuardsTriggered": {"$ref": "#/$defs/safeTokenArray"},
+        "counterEvidence": {"$ref": "#/$defs/safeTokenArray"},
+        "nextCommandHashes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/hash"}
+        },
+        "metrics": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/metrics"}
+          ]
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/evidenceRef"}
+        },
+        "redactionFlags": {"$ref": "#/$defs/redactionFlags"},
+        "degradedCodes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/degradedCode"},
+          "uniqueItems": true
+        }
+      }
+    },
+    "safeTokenArray": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/safeToken"}
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "totalEvidence",
+        "usableEvidence",
+        "missingEvidence",
+        "staleEvidence",
+        "unsupportedEvidence",
+        "divergedEvidence",
+        "divergenceRate",
+        "utilityDelta",
+        "droppedRequiredEvidenceCount",
+        "outputBytesDelta",
+        "p50LatencyMs",
+        "p95LatencyMs",
+        "p99LatencyMs",
+        "degradedDelta",
+        "resourceBytesDelta",
+        "redactionSafe"
+      ],
+      "properties": {
+        "totalEvidence": {"type": ["integer", "null"], "minimum": 0},
+        "usableEvidence": {"type": ["integer", "null"], "minimum": 0},
+        "missingEvidence": {"type": ["integer", "null"], "minimum": 0},
+        "staleEvidence": {"type": ["integer", "null"], "minimum": 0},
+        "unsupportedEvidence": {"type": ["integer", "null"], "minimum": 0},
+        "divergedEvidence": {"type": ["integer", "null"], "minimum": 0},
+        "divergenceRate": {"type": ["number", "null"]},
+        "utilityDelta": {"type": ["number", "null"]},
+        "droppedRequiredEvidenceCount": {"type": ["integer", "null"], "minimum": 0},
+        "outputBytesDelta": {"type": ["integer", "null"]},
+        "p50LatencyMs": {"type": ["integer", "null"], "minimum": 0},
+        "p95LatencyMs": {"type": ["integer", "null"], "minimum": 0},
+        "p99LatencyMs": {"type": ["integer", "null"], "minimum": 0},
+        "degradedDelta": {"type": ["integer", "null"]},
+        "resourceBytesDelta": {"type": ["integer", "null"]},
+        "redactionSafe": {"type": ["boolean", "null"]}
+      }
+    },
+    "evidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactIdHash",
+        "kind",
+        "cohort",
+        "posture",
+        "utilityDelta",
+        "outputBytesDelta",
+        "candidateLatencyMs",
+        "degradedDelta",
+        "droppedRequiredEvidenceCount",
+        "resourceBytesDelta",
+        "redactionSafe"
+      ],
+      "properties": {
+        "artifactIdHash": {"$ref": "#/$defs/hash"},
+        "kind": {"$ref": "#/$defs/safeToken"},
+        "cohort": {"$ref": "#/$defs/safeToken"},
+        "posture": {"$ref": "#/$defs/safeToken"},
+        "utilityDelta": {"type": ["number", "null"]},
+        "outputBytesDelta": {"type": ["integer", "null"]},
+        "candidateLatencyMs": {"type": ["integer", "null"], "minimum": 0},
+        "degradedDelta": {"type": ["integer", "null"]},
+        "droppedRequiredEvidenceCount": {"type": ["integer", "null"], "minimum": 0},
+        "resourceBytesDelta": {"type": ["integer", "null"]},
+        "redactionSafe": {"type": ["boolean", "null"]}
+      }
+    },
+    "redactionFlags": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rawMemoryBodyPresent",
+        "rawMailBodyPresent",
+        "rawPolicyPayloadPresent",
+        "absoluteHostPathPresent",
+        "secretsPresent"
+      ],
+      "properties": {
+        "rawMemoryBodyPresent": {"type": "boolean"},
+        "rawMailBodyPresent": {"type": "boolean"},
+        "rawPolicyPayloadPresent": {"type": "boolean"},
+        "absoluteHostPathPresent": {"type": "boolean"},
+        "secretsPresent": {"type": "boolean"}
+      }
+    },
+    "crossLinks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "packReplayEvidenceHashes",
+        "swarmReplayEvidenceHashes",
+        "environmentAttestationEvidenceHashes",
+        "regressionCausalityEvidenceHashes"
+      ],
+      "properties": {
+        "packReplayEvidenceHashes": {"type": "array", "items": {"$ref": "#/$defs/hash"}},
+        "swarmReplayEvidenceHashes": {"type": "array", "items": {"$ref": "#/$defs/hash"}},
+        "environmentAttestationEvidenceHashes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/hash"}
+        },
+        "regressionCausalityEvidenceHashes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/hash"}
+        }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rawMemoryBodiesIncluded",
+        "rawMailBodiesIncluded",
+        "rawPolicyPayloadsIncluded",
+        "rawCommandOutputIncluded",
+        "rawArtifactPathsIncluded",
+        "hostPrivatePathsIncluded",
+        "secretsIncluded",
+        "artifactReferencesHashed",
+        "sourceArtifactsCopied",
+        "inputArtifactRedactionObserved"
+      ],
+      "properties": {
+        "rawMemoryBodiesIncluded": {"const": false},
+        "rawMailBodiesIncluded": {"const": false},
+        "rawPolicyPayloadsIncluded": {"const": false},
+        "rawCommandOutputIncluded": {"const": false},
+        "rawArtifactPathsIncluded": {"const": false},
+        "hostPrivatePathsIncluded": {"const": false},
+        "secretsIncluded": {"const": false},
+        "artifactReferencesHashed": {"const": true},
+        "sourceArtifactsCopied": {"const": false},
+        "inputArtifactRedactionObserved": {"type": "boolean"}
+      }
+    }
+  }
+}

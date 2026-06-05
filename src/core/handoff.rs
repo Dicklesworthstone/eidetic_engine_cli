@@ -28,9 +28,11 @@ use crate::core::focus::{focus_state_hash, read_active_focus_state};
 use crate::core::singleflight::singleflight_posture_report;
 use crate::core::support_bundle::{
     collect_environment_attestation_summary, collect_regression_causality_summary,
-    environment_attestation_summary_evidence_id, redact_support_bundle_swarm_brief_summary,
-    regression_causality_summary_evidence_id, render_environment_attestation_summary_for_handoff,
-    render_regression_causality_summary_for_handoff,
+    collect_shadow_policy_summary, environment_attestation_summary_evidence_id,
+    redact_support_bundle_swarm_brief_summary, regression_causality_summary_evidence_id,
+    render_environment_attestation_summary_for_handoff,
+    render_regression_causality_summary_for_handoff, render_shadow_policy_summary_for_handoff,
+    shadow_policy_summary_evidence_id,
 };
 use crate::core::swarm_brief::{
     collect_swarm_brief_summary, collect_swarm_incident_summary, collect_swarm_replay_summary,
@@ -481,6 +483,7 @@ pub struct PreviewReport {
     pub swarm_replay_summary: Option<serde_json::Value>,
     pub environment_attestation_summary: Option<serde_json::Value>,
     pub regression_causality_summary: Option<serde_json::Value>,
+    pub shadow_policy_summary: Option<serde_json::Value>,
     pub token_estimate: usize,
     pub byte_estimate: usize,
     pub redaction_posture: String,
@@ -523,6 +526,7 @@ impl PreviewReport {
             swarm_replay_summary: None,
             environment_attestation_summary: None,
             regression_causality_summary: None,
+            shadow_policy_summary: None,
             token_estimate: 0,
             byte_estimate: 0,
             redaction_posture: "standard".to_owned(),
@@ -708,6 +712,7 @@ pub struct CreateReport {
     pub swarm_replay_summary: Option<serde_json::Value>,
     pub environment_attestation_summary: Option<serde_json::Value>,
     pub regression_causality_summary: Option<serde_json::Value>,
+    pub shadow_policy_summary: Option<serde_json::Value>,
     pub token_count: usize,
     pub byte_count: usize,
     pub content_hash: String,
@@ -741,6 +746,7 @@ impl CreateReport {
             swarm_replay_summary: None,
             environment_attestation_summary: None,
             regression_causality_summary: None,
+            shadow_policy_summary: None,
             token_count: 0,
             byte_count: 0,
             content_hash: String::new(),
@@ -1104,6 +1110,7 @@ pub struct ResumeReport {
     pub swarm_replay_summary: Option<serde_json::Value>,
     pub environment_attestation_summary: Option<serde_json::Value>,
     pub regression_causality_summary: Option<serde_json::Value>,
+    pub shadow_policy_summary: Option<serde_json::Value>,
     pub artifact_pointers: Vec<ArtifactPointer>,
     pub degradations: Vec<DegradationInfo>,
     pub resumed_at: String,
@@ -1292,6 +1299,7 @@ impl ResumeReport {
             swarm_replay_summary: None,
             environment_attestation_summary: None,
             regression_causality_summary: None,
+            shadow_policy_summary: None,
             artifact_pointers: Vec::new(),
             degradations: Vec::new(),
             prompt_fragment: None,
@@ -1394,6 +1402,7 @@ fn strip_swarm_diagnostic_section_content_by_id(value: &mut serde_json::Value) {
                         | "swarm_replay_summary"
                         | "environment_attestation_summary"
                         | "regression_causality_summary"
+                        | "shadow_policy_summary"
                 )
             ) {
                 object.remove("content");
@@ -3164,6 +3173,112 @@ fn add_regression_causality_summary_to_resume(
     );
 }
 
+fn add_shadow_policy_summary_to_resume(report: &mut ResumeReport, summary: &serde_json::Value) {
+    let status = summary
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let artifact_count = summary
+        .get("artifactCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let valid_count = summary
+        .get("validArtifactCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let latest = summary
+        .get("latestVerdict")
+        .unwrap_or(&serde_json::Value::Null);
+    let policy_domain = latest
+        .get("policyDomain")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let incumbent = latest
+        .get("incumbentPolicyId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let candidate = latest
+        .get("candidatePolicyId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let score_verdict = latest
+        .get("scoreVerdict")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let promotion_verdict = latest
+        .get("verdict")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let metrics = latest.get("metrics").unwrap_or(&serde_json::Value::Null);
+    let usable_evidence = metrics
+        .get("usableEvidence")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let utility_delta = metrics
+        .get("utilityDelta")
+        .and_then(serde_json::Value::as_f64)
+        .map(|value| format!("{value:.4}"))
+        .unwrap_or_else(|| "unknown".to_owned());
+    let p99_latency = metrics
+        .get("p99LatencyMs")
+        .and_then(serde_json::Value::as_u64)
+        .map_or_else(|| "unknown".to_owned(), |value| value.to_string());
+    let hash = summary
+        .get("summaryHash")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let posture = format!(
+        "Embedded shadow policy summary: status={status}, artifacts={artifact_count}, valid_artifacts={valid_count}, policy_domain={policy_domain}, incumbent={incumbent}, candidate={candidate}, score_verdict={score_verdict}, promotion_verdict={promotion_verdict}, usable_evidence={usable_evidence}, utility_delta={utility_delta}, p99_latency_ms={p99_latency}, summary_hash={hash}; raw_memory_bodies_included=false; raw_mail_bodies_included=false; raw_policy_payloads_included=false; raw_artifact_paths_included=false; secrets_included=false; diagnostic_not_live=true."
+    );
+    report.status_summary = Some(match report.status_summary.take() {
+        Some(existing) => format!("{existing}\n{posture}"),
+        None => posture,
+    });
+    report.artifact_pointers.push(ArtifactPointer {
+        id: shadow_policy_summary_evidence_id(summary),
+        path: None,
+        description:
+            "Redaction-safe shadow policy summary embedded in the handoff capsule; raw policy evidence artifacts stay local and provenance references are hashes."
+                .to_owned(),
+    });
+    report.next_actions.push(
+        NextAction::new(
+            2,
+            "Refresh shadow policy support-bundle evidence before acting on an embedded verdict.",
+        )
+        .with_reason("Embedded shadow policy summaries are advisory diagnostic context.")
+        .with_command("ee support bundle --workspace . --out <dir> --json"),
+    );
+    report.next_actions.push(
+        NextAction::new(
+            2,
+            "Rerun the focused shadow policy contract proof before promoting or rejecting a policy.",
+        )
+        .with_reason("Shadow policy verdicts are advisory and never mutate active policy.")
+        .with_command("scripts/rch_verify.sh -- cargo test --test contracts shadow_run -- --nocapture"),
+    );
+
+    if let Some(codes) = summary
+        .get("degradedCodes")
+        .and_then(serde_json::Value::as_array)
+    {
+        for code in codes.iter().filter_map(serde_json::Value::as_str).take(8) {
+            let code = if code.starts_with("shadow_policy_") {
+                code.to_owned()
+            } else {
+                format!("shadow_policy_{code}")
+            };
+            report.degradations.push(
+                DegradationInfo::new(
+                    code,
+                    "Embedded shadow policy summary reported degraded policy evidence.",
+                )
+                .with_next_action("ee support bundle --workspace . --out <dir> --json"),
+            );
+        }
+    }
+}
+
 /// Preview a handoff capsule without writing it.
 pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, DomainError> {
     let mut report = PreviewReport::new(options.workspace.clone(), options.profile);
@@ -3305,6 +3420,25 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
         confidence: regression_causality_section.confidence.as_str().to_owned(),
         evidence_count: regression_causality_section.evidence_ids.len(),
         token_estimate: regression_causality_section.token_estimate,
+    });
+
+    let shadow_policy_summary = collect_shadow_policy_summary(&options.workspace);
+    let shadow_policy_evidence = vec![shadow_policy_summary_evidence_id(&shadow_policy_summary)];
+    let shadow_policy_section =
+        CapsuleSection::new("shadow_policy_summary", "Shadow Policy Summary")
+            .with_content(render_shadow_policy_summary_for_handoff(
+                &shadow_policy_summary,
+            ))
+            .with_confidence(EvidenceConfidence::Verified)
+            .with_evidence(shadow_policy_evidence.clone());
+    report.evidence_ids.extend(shadow_policy_evidence);
+    report.shadow_policy_summary = Some(shadow_policy_summary);
+    report.planned_sections.push(PlannedSection {
+        id: shadow_policy_section.id.clone(),
+        title: shadow_policy_section.title.clone(),
+        confidence: shadow_policy_section.confidence.as_str().to_owned(),
+        evidence_count: shadow_policy_section.evidence_ids.len(),
+        token_estimate: shadow_policy_section.token_estimate,
     });
 
     let singleflight_posture = singleflight_posture_report();
@@ -3554,6 +3688,21 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         .saturating_add(regression_causality_evidence.len());
     report.regression_causality_summary = Some(regression_causality_summary.clone());
 
+    let shadow_policy_summary = collect_shadow_policy_summary(&options.workspace);
+    let shadow_policy_evidence = vec![shadow_policy_summary_evidence_id(&shadow_policy_summary)];
+    sections.push(
+        CapsuleSection::new("shadow_policy_summary", "Shadow Policy Summary")
+            .with_content(render_shadow_policy_summary_for_handoff(
+                &shadow_policy_summary,
+            ))
+            .with_confidence(EvidenceConfidence::Verified)
+            .with_evidence(shadow_policy_evidence.clone()),
+    );
+    report.evidence_count = report
+        .evidence_count
+        .saturating_add(shadow_policy_evidence.len());
+    report.shadow_policy_summary = Some(shadow_policy_summary.clone());
+
     let singleflight_posture = singleflight_posture_report();
     sections.push(
         CapsuleSection::new("singleflight_posture", "Single-flight Posture")
@@ -3619,6 +3768,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         "swarm_replay_summary": swarm_replay_summary,
         "environment_attestation_summary": environment_attestation_summary,
         "regression_causality_summary": regression_causality_summary,
+        "shadow_policy_summary": shadow_policy_summary,
         "created_at": created_at,
     });
     let capsule_content = sign_capsule_content(
@@ -3997,6 +4147,14 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         .filter(|value| !value.is_null());
     if let Some(summary) = report.regression_causality_summary.clone() {
         add_regression_causality_summary_to_resume(&mut report, &summary);
+    }
+
+    report.shadow_policy_summary = capsule
+        .get("shadow_policy_summary")
+        .cloned()
+        .filter(|value| !value.is_null());
+    if let Some(summary) = report.shadow_policy_summary.clone() {
+        add_shadow_policy_summary_to_resume(&mut report, &summary);
     }
 
     if let Some(sections) = capsule.get("sections").and_then(|v| v.as_array()) {
@@ -6325,6 +6483,17 @@ memories_revised = 3
         ensure(
             report.regression_causality_summary.is_some(),
             "preview carries regression causality summary JSON",
+        )?;
+        ensure(
+            report
+                .planned_sections
+                .iter()
+                .any(|section| section.id == "shadow_policy_summary"),
+            "preview plans shadow policy summary section",
+        )?;
+        ensure(
+            report.shadow_policy_summary.is_some(),
+            "preview carries shadow policy summary JSON",
         )
     }
 
@@ -6890,6 +7059,195 @@ memories_revised = 3
             ensure(
                 !status.contains(forbidden),
                 format!("regression causality handoff status leaked forbidden text {forbidden:?}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resume_handoff_surfaces_shadow_policy_summary_without_raw_inputs() -> TestResult {
+        let summary = serde_json::json!({
+            "schema": "ee.support_bundle.shadow_policy_summary.v1",
+            "sourceSchemas": ["ee.shadow_policy_score.v1", "ee.shadow_policy_verdict.v1"],
+            "status": "degraded",
+            "redactionStatus": "policy_ids_counts_verdicts_metrics_hashes_only_no_raw_memory_mail_paths_secrets",
+            "artifactCount": 2,
+            "validArtifactCount": 1,
+            "degradedCodes": ["shadow_policy_evidence_missing"],
+            "latestVerdict": {
+                "artifactHash": "blake3:abcdef1234567890",
+                "sourceSchema": "ee.shadow_policy_verdict.v1",
+                "artifactKind": "promotion_verdict",
+                "policyDomain": "pack_selection",
+                "incumbentPolicyId": "incumbent.pack.mmr_redundancy",
+                "candidatePolicyId": "candidate.pack.facility_location",
+                "cohortProfile": "ci_smoke",
+                "scoreVerdict": "needs_more_evidence",
+                "verdict": "abstain",
+                "confidence": 0.0,
+                "metrics": {
+                    "totalEvidence": 2,
+                    "usableEvidence": 1,
+                    "missingEvidence": 1,
+                    "staleEvidence": 0,
+                    "unsupportedEvidence": 0,
+                    "divergedEvidence": 1,
+                    "divergenceRate": 1.0,
+                    "utilityDelta": 0.08,
+                    "droppedRequiredEvidenceCount": 0,
+                    "outputBytesDelta": -40,
+                    "p50LatencyMs": 80,
+                    "p95LatencyMs": 100,
+                    "p99LatencyMs": 100,
+                    "degradedDelta": 0,
+                    "resourceBytesDelta": -256,
+                    "redactionSafe": true
+                }
+            },
+            "policyEvidence": [{
+                "artifactHash": "blake3:abcdef1234567890",
+                "sourceIdHash": "blake3:sourcehash",
+                "sourceSchema": "ee.shadow_policy_verdict.v1",
+                "artifactKind": "promotion_verdict",
+                "policyDomain": "pack_selection",
+                "incumbentPolicyId": "incumbent.pack.mmr_redundancy",
+                "candidatePolicyId": "candidate.pack.facility_location",
+                "cohortProfile": "ci_smoke",
+                "sideEffectFree": true,
+                "scoreVerdict": "needs_more_evidence",
+                "verdict": "abstain",
+                "confidence": 0.0,
+                "reasonCodes": ["score_needs_more_evidence"],
+                "abstentionReasons": ["missing_replay_evidence"],
+                "safetyGuardsTriggered": [],
+                "counterEvidence": [],
+                "nextCommandHashes": ["blake3:cmdhash"],
+                "metrics": {
+                    "totalEvidence": 2,
+                    "usableEvidence": 1,
+                    "missingEvidence": 1,
+                    "staleEvidence": 0,
+                    "unsupportedEvidence": 0,
+                    "divergedEvidence": 1,
+                    "divergenceRate": 1.0,
+                    "utilityDelta": 0.08,
+                    "droppedRequiredEvidenceCount": 0,
+                    "outputBytesDelta": -40,
+                    "p50LatencyMs": 80,
+                    "p95LatencyMs": 100,
+                    "p99LatencyMs": 100,
+                    "degradedDelta": 0,
+                    "resourceBytesDelta": -256,
+                    "redactionSafe": true
+                },
+                "evidenceRefs": [{
+                    "artifactIdHash": "blake3:artifacthash",
+                    "kind": "replay_trace",
+                    "cohort": "ci_smoke",
+                    "posture": "missing",
+                    "utilityDelta": null,
+                    "outputBytesDelta": null,
+                    "candidateLatencyMs": null,
+                    "degradedDelta": null,
+                    "droppedRequiredEvidenceCount": null,
+                    "resourceBytesDelta": null,
+                    "redactionSafe": null
+                }],
+                "redactionFlags": {
+                    "rawMemoryBodyPresent": false,
+                    "rawMailBodyPresent": false,
+                    "rawPolicyPayloadPresent": false,
+                    "absoluteHostPathPresent": false,
+                    "secretsPresent": false
+                },
+                "degradedCodes": ["shadow_policy_evidence_missing"]
+            }],
+            "crossLinks": {
+                "packReplayEvidenceHashes": ["blake3:packhash"],
+                "swarmReplayEvidenceHashes": ["blake3:swarmhash"],
+                "environmentAttestationEvidenceHashes": [],
+                "regressionCausalityEvidenceHashes": []
+            },
+            "redaction": {
+                "rawMemoryBodiesIncluded": false,
+                "rawMailBodiesIncluded": false,
+                "rawPolicyPayloadsIncluded": false,
+                "rawCommandOutputIncluded": false,
+                "rawArtifactPathsIncluded": false,
+                "hostPrivatePathsIncluded": false,
+                "secretsIncluded": false,
+                "artifactReferencesHashed": true,
+                "sourceArtifactsCopied": false,
+                "inputArtifactRedactionObserved": true
+            },
+            "summaryHash": "blake3:shadowabcdef1234567890"
+        });
+        let mut report = ResumeReport::new(
+            "hcap_shadow_policy".to_owned(),
+            PathBuf::from("handoff.json"),
+        );
+
+        add_shadow_policy_summary_to_resume(&mut report, &summary);
+
+        let status = report
+            .status_summary
+            .as_deref()
+            .ok_or_else(|| "resume status summary missing".to_owned())?;
+        ensure(
+            status.contains("Embedded shadow policy summary: status=degraded"),
+            "resume status includes shadow policy posture",
+        )?;
+        ensure(
+            status.contains("candidate=candidate.pack.facility_location")
+                && status.contains("promotion_verdict=abstain")
+                && status.contains("usable_evidence=1")
+                && status.contains("raw_memory_bodies_included=false")
+                && status.contains("raw_policy_payloads_included=false")
+                && status.contains("diagnostic_not_live=true"),
+            "resume status includes compact shadow policy verdict and redaction posture",
+        )?;
+        ensure(
+            report
+                .artifact_pointers
+                .iter()
+                .any(|pointer| pointer.id.starts_with("shadow_policy_summary:")),
+            "resume artifact pointers include shadow policy summary evidence id",
+        )?;
+        ensure(
+            report.next_actions.iter().any(|action| {
+                action.suggested_command.as_deref()
+                    == Some("ee support bundle --workspace . --out <dir> --json")
+            }),
+            "resume next actions include support-bundle refresh command",
+        )?;
+        ensure(
+            report.next_actions.iter().any(|action| {
+                action.suggested_command.as_deref()
+                    == Some(
+                        "scripts/rch_verify.sh -- cargo test --test contracts shadow_run -- --nocapture",
+                    )
+            }),
+            "resume next actions include focused shadow proof command",
+        )?;
+        ensure(
+            report
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "shadow_policy_evidence_missing"),
+            "resume degraded list includes shadow policy degraded code",
+        )?;
+        for forbidden in [
+            "/Users/alice",
+            "raw memory body",
+            "raw mail body",
+            "raw policy payload /",
+            "BEGIN PRIVATE KEY",
+            "sk-",
+            "ghp_",
+        ] {
+            ensure(
+                !status.contains(forbidden),
+                format!("shadow policy handoff status leaked forbidden text {forbidden:?}"),
             )?;
         }
         Ok(())
