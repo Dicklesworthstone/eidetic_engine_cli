@@ -49,12 +49,40 @@ fn response_with_payload(label: &str, payload_bytes: usize) -> DaemonResponse {
 }
 
 fn framed_request(request: &DaemonRequest) -> Vec<u8> {
-    let body = serde_json::to_vec(request).expect("benchmark request must serialize");
-    let length = u32::try_from(body.len()).expect("benchmark request body must fit u32");
+    let body = serialize_request(request);
+    let length = usize_to_u32(body.len(), "benchmark request body must fit u32");
     let mut frame = Vec::with_capacity(4 + body.len());
     frame.extend_from_slice(&length.to_be_bytes());
     frame.extend_from_slice(&body);
     frame
+}
+
+fn serialize_request(request: &DaemonRequest) -> Vec<u8> {
+    match serde_json::to_vec(request) {
+        Ok(body) => body,
+        Err(error) => panic!("benchmark request must serialize: {error}"),
+    }
+}
+
+fn serialize_response(response: &DaemonResponse) -> Vec<u8> {
+    match serde_json::to_vec(response) {
+        Ok(body) => body,
+        Err(error) => panic!("benchmark response must serialize: {error}"),
+    }
+}
+
+fn usize_to_u32(value: usize, context: &str) -> u32 {
+    match u32::try_from(value) {
+        Ok(value) => value,
+        Err(error) => panic!("{context}: {error}"),
+    }
+}
+
+fn usize_to_u64(value: usize, context: &str) -> u64 {
+    match u64::try_from(value) {
+        Ok(value) => value,
+        Err(error) => panic!("{context}: {error}"),
+    }
 }
 
 fn bench_daemon_protocol(criterion: &mut Criterion) {
@@ -92,8 +120,10 @@ fn bench_daemon_protocol(criterion: &mut Criterion) {
     group.measurement_time(Duration::from_secs(2));
 
     for (label, frame) in request_cases {
-        let body_bytes = u64::try_from(frame.len().saturating_sub(4))
-            .expect("benchmark request frame length must fit u64");
+        let body_bytes = usize_to_u64(
+            frame.len().saturating_sub(4),
+            "benchmark request frame length must fit u64",
+        );
         group.throughput(Throughput::Bytes(body_bytes));
         group.bench_with_input(
             BenchmarkId::new("read_request", label),
@@ -101,7 +131,10 @@ fn bench_daemon_protocol(criterion: &mut Criterion) {
             |bench, frame| {
                 bench.iter(|| {
                     let mut cursor = Cursor::new(black_box(frame.as_slice()));
-                    let request = read_request(&mut cursor).expect("benchmark frame must parse");
+                    let request = match read_request(&mut cursor) {
+                        Ok(request) => request,
+                        Err(error) => panic!("benchmark frame must parse: {error}"),
+                    };
                     black_box(request);
                 });
             },
@@ -109,12 +142,10 @@ fn bench_daemon_protocol(criterion: &mut Criterion) {
     }
 
     for (label, response) in response_cases {
-        let body_bytes = u64::try_from(
-            serde_json::to_vec(&response)
-                .expect("benchmark response must serialize")
-                .len(),
-        )
-        .expect("benchmark response length must fit u64");
+        let body_bytes = usize_to_u64(
+            serialize_response(&response).len(),
+            "benchmark response length must fit u64",
+        );
         group.throughput(Throughput::Bytes(body_bytes));
         group.bench_with_input(
             BenchmarkId::new("write_response", label),
@@ -123,8 +154,9 @@ fn bench_daemon_protocol(criterion: &mut Criterion) {
                 bench.iter_batched(
                     Vec::new,
                     |mut writer| {
-                        write_response(&mut writer, black_box(response))
-                            .expect("benchmark response must write");
+                        if let Err(error) = write_response(&mut writer, black_box(response)) {
+                            panic!("benchmark response must write: {error}");
+                        }
                         black_box(writer);
                     },
                     BatchSize::SmallInput,
