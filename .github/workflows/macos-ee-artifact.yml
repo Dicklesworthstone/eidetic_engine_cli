@@ -1,0 +1,74 @@
+name: macOS EE Artifact
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-ee-artifact-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build aarch64-apple-darwin debug ee
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Checkout Franken stack path dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          project_root="$GITHUB_WORKSPACE/.ci/franken-stack/projects"
+          mkdir -p "$project_root"
+          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$project_root/asupersync"
+          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git "$project_root/franken_agent_detection"
+          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git "$project_root/franken_networkx"
+          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git "$project_root/frankensearch"
+          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git "$project_root/frankensqlite"
+          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git "$project_root/sqlmodel_rust"
+          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$project_root/toon_rust"
+          CARGO_PATH_ROOT="$project_root" perl -0pi -e '
+            s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+            s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+          ' Cargo.toml
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Build ee
+        run: cargo build --workspace --bin ee --target aarch64-apple-darwin
+
+      - name: Smoke command surface
+        run: |
+          set -euo pipefail
+          target/aarch64-apple-darwin/debug/ee --version
+          target/aarch64-apple-darwin/debug/ee diag environment-attestation --help
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/aarch64-apple-darwin/debug/ee dist/ee
+          chmod 755 dist/ee
+          tar -czf dist/ee-aarch64-apple-darwin-debug.tar.gz -C dist ee
+          shasum -a 256 dist/ee-aarch64-apple-darwin-debug.tar.gz > dist/ee-aarch64-apple-darwin-debug.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ee-aarch64-apple-darwin-debug
+          path: |
+            dist/ee-aarch64-apple-darwin-debug.tar.gz
+            dist/ee-aarch64-apple-darwin-debug.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 3
