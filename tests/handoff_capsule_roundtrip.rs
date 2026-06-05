@@ -140,6 +140,12 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
             == Some("ee.support_bundle.swarm_replay_summary.v1"),
         "create stdout includes swarm replay summary schema",
     )?;
+    ensure(
+        json.pointer("/regression_causality_summary/schema")
+            .and_then(|v| v.as_str())
+            == Some("ee.support_bundle.regression_causality_summary.v1"),
+        "create stdout includes regression causality summary schema",
+    )?;
 
     ensure(
         PathBuf::from(&cap).exists(),
@@ -167,9 +173,12 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
                     section.get("id").and_then(|v| v.as_str()) == Some("swarm_incident_summary")
                 }) && sections.iter().any(|section| {
                     section.get("id").and_then(|v| v.as_str()) == Some("swarm_replay_summary")
+                }) && sections.iter().any(|section| {
+                    section.get("id").and_then(|v| v.as_str())
+                        == Some("regression_causality_summary")
                 })
             }),
-        "capsule sections include compact swarm, incident, and replay summaries",
+        "capsule sections include compact swarm, incident, replay, and regression causality summaries",
     )?;
     let swarm_summary = capsule_json
         .get("swarm_brief_summary")
@@ -243,6 +252,36 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
             .and_then(|v| v.as_str())
             .is_some_and(|hash| hash.starts_with("blake3:")),
         "capsule swarm replay summary includes summary hash",
+    )?;
+    let regression_summary = capsule_json
+        .get("regression_causality_summary")
+        .ok_or_else(|| "capsule missing regression_causality_summary".to_string())?;
+    ensure(
+        regression_summary.get("schema").and_then(|v| v.as_str())
+            == Some("ee.support_bundle.regression_causality_summary.v1"),
+        "capsule regression causality summary schema",
+    )?;
+    ensure(
+        regression_summary.pointer("/redaction/inputArtifactsCopied")
+            == Some(&serde_json::json!(false))
+            && regression_summary.pointer("/redaction/rawLogsPresent")
+                == Some(&serde_json::json!(false))
+            && regression_summary.pointer("/redaction/rawMailBodiesPresent")
+                == Some(&serde_json::json!(false))
+            && regression_summary.pointer("/redaction/rawMemoryBodiesPresent")
+                == Some(&serde_json::json!(false))
+            && regression_summary.pointer("/redaction/privatePathsPresent")
+                == Some(&serde_json::json!(false))
+            && regression_summary.pointer("/redaction/hashesOnly")
+                == Some(&serde_json::json!(true)),
+        "capsule regression causality summary is redaction-safe",
+    )?;
+    ensure(
+        regression_summary
+            .pointer("/normalization/rows")
+            .and_then(|v| v.as_array())
+            .is_some(),
+        "capsule regression causality summary includes normalized rows",
     )?;
     Ok(())
 }

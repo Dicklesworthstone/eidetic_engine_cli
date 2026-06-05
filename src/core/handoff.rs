@@ -27,8 +27,10 @@ use sha2::{Digest, Sha256};
 use crate::core::focus::{focus_state_hash, read_active_focus_state};
 use crate::core::singleflight::singleflight_posture_report;
 use crate::core::support_bundle::{
-    collect_environment_attestation_summary, environment_attestation_summary_evidence_id,
-    redact_support_bundle_swarm_brief_summary, render_environment_attestation_summary_for_handoff,
+    collect_environment_attestation_summary, collect_regression_causality_summary,
+    environment_attestation_summary_evidence_id, redact_support_bundle_swarm_brief_summary,
+    regression_causality_summary_evidence_id, render_environment_attestation_summary_for_handoff,
+    render_regression_causality_summary_for_handoff,
 };
 use crate::core::swarm_brief::{
     collect_swarm_brief_summary, collect_swarm_incident_summary, collect_swarm_replay_summary,
@@ -478,6 +480,7 @@ pub struct PreviewReport {
     pub swarm_incident_summary: Option<serde_json::Value>,
     pub swarm_replay_summary: Option<serde_json::Value>,
     pub environment_attestation_summary: Option<serde_json::Value>,
+    pub regression_causality_summary: Option<serde_json::Value>,
     pub token_estimate: usize,
     pub byte_estimate: usize,
     pub redaction_posture: String,
@@ -519,6 +522,7 @@ impl PreviewReport {
             swarm_incident_summary: None,
             swarm_replay_summary: None,
             environment_attestation_summary: None,
+            regression_causality_summary: None,
             token_estimate: 0,
             byte_estimate: 0,
             redaction_posture: "standard".to_owned(),
@@ -703,6 +707,7 @@ pub struct CreateReport {
     pub swarm_incident_summary: Option<serde_json::Value>,
     pub swarm_replay_summary: Option<serde_json::Value>,
     pub environment_attestation_summary: Option<serde_json::Value>,
+    pub regression_causality_summary: Option<serde_json::Value>,
     pub token_count: usize,
     pub byte_count: usize,
     pub content_hash: String,
@@ -735,6 +740,7 @@ impl CreateReport {
             swarm_incident_summary: None,
             swarm_replay_summary: None,
             environment_attestation_summary: None,
+            regression_causality_summary: None,
             token_count: 0,
             byte_count: 0,
             content_hash: String::new(),
@@ -1097,6 +1103,7 @@ pub struct ResumeReport {
     pub swarm_incident_summary: Option<serde_json::Value>,
     pub swarm_replay_summary: Option<serde_json::Value>,
     pub environment_attestation_summary: Option<serde_json::Value>,
+    pub regression_causality_summary: Option<serde_json::Value>,
     pub artifact_pointers: Vec<ArtifactPointer>,
     pub degradations: Vec<DegradationInfo>,
     pub resumed_at: String,
@@ -1284,6 +1291,7 @@ impl ResumeReport {
             swarm_incident_summary: None,
             swarm_replay_summary: None,
             environment_attestation_summary: None,
+            regression_causality_summary: None,
             artifact_pointers: Vec::new(),
             degradations: Vec::new(),
             prompt_fragment: None,
@@ -1385,6 +1393,7 @@ fn strip_swarm_diagnostic_section_content_by_id(value: &mut serde_json::Value) {
                         | "swarm_incident_summary"
                         | "swarm_replay_summary"
                         | "environment_attestation_summary"
+                        | "regression_causality_summary"
                 )
             ) {
                 object.remove("content");
@@ -3080,6 +3089,81 @@ fn add_environment_attestation_summary_to_resume(
     }
 }
 
+fn add_regression_causality_summary_to_resume(
+    report: &mut ResumeReport,
+    summary: &serde_json::Value,
+) {
+    let status = summary
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let redaction_status = summary
+        .get("redactionStatus")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let input_count = summary
+        .get("inputSectionCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let row_count = summary
+        .get("normalizedRowCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let suppressed = summary
+        .get("suppressedFieldCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let top_codes = summary
+        .get("topHypotheses")
+        .and_then(serde_json::Value::as_array)
+        .map(|hypotheses| {
+            hypotheses
+                .iter()
+                .filter_map(|hypothesis| hypothesis.get("code").and_then(serde_json::Value::as_str))
+                .take(5)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let top_codes = if top_codes.is_empty() {
+        "none".to_owned()
+    } else {
+        top_codes.join(",")
+    };
+    let evidence_id = regression_causality_summary_evidence_id(summary);
+    let posture = format!(
+        "Embedded regression causality summary: status={status}, input_sections={input_count}, normalized_rows={row_count}, suppressed_fields={suppressed}, top_hypothesis_codes={top_codes}, redaction_status={redaction_status}; input_artifacts_copied=false; raw_logs_present=false; raw_mail_bodies_present=false; raw_memory_bodies_present=false; private_paths_present=false; diagnostic_not_live=true."
+    );
+    report.status_summary = Some(match report.status_summary.take() {
+        Some(existing) => format!("{existing}\n{posture}"),
+        None => posture,
+    });
+    report.artifact_pointers.push(ArtifactPointer {
+        id: evidence_id,
+        path: None,
+        description:
+            "Redaction-safe regression causality summary embedded in the handoff capsule; normalized rows and ranked hypotheses are hash/provenance based and non-authoritative."
+                .to_owned(),
+    });
+    report.next_actions.push(
+        NextAction::new(
+            2,
+            "Refresh regression causality evidence before acting on embedded hypotheses.",
+        )
+        .with_reason(
+            "Embedded causality summaries are compact handoff context, not live diagnosis.",
+        )
+        .with_command("ee support bundle --workspace . --out <dir> --json"),
+    );
+    report.next_actions.push(
+        NextAction::new(
+            2,
+            "Inspect the current artifact set with the regression explanation surface.",
+        )
+        .with_reason("Support-bundle causality hypotheses are non-authoritative.")
+        .with_command("ee regress explain --help"),
+    );
+}
+
 /// Preview a handoff capsule without writing it.
 pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, DomainError> {
     let mut report = PreviewReport::new(options.workspace.clone(), options.profile);
@@ -3198,6 +3282,29 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
             .to_owned(),
         evidence_count: environment_attestation_section.evidence_ids.len(),
         token_estimate: environment_attestation_section.token_estimate,
+    });
+
+    let regression_causality_summary = collect_regression_causality_summary(&options.workspace);
+    let regression_causality_evidence = vec![regression_causality_summary_evidence_id(
+        &regression_causality_summary,
+    )];
+    let regression_causality_section = CapsuleSection::new(
+        "regression_causality_summary",
+        "Regression Causality Summary",
+    )
+    .with_content(render_regression_causality_summary_for_handoff(
+        &regression_causality_summary,
+    ))
+    .with_confidence(EvidenceConfidence::Verified)
+    .with_evidence(regression_causality_evidence.clone());
+    report.evidence_ids.extend(regression_causality_evidence);
+    report.regression_causality_summary = Some(regression_causality_summary);
+    report.planned_sections.push(PlannedSection {
+        id: regression_causality_section.id.clone(),
+        title: regression_causality_section.title.clone(),
+        confidence: regression_causality_section.confidence.as_str().to_owned(),
+        evidence_count: regression_causality_section.evidence_ids.len(),
+        token_estimate: regression_causality_section.token_estimate,
     });
 
     let singleflight_posture = singleflight_posture_report();
@@ -3427,6 +3534,26 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         .saturating_add(environment_attestation_evidence.len());
     report.environment_attestation_summary = Some(environment_attestation_summary.clone());
 
+    let regression_causality_summary = collect_regression_causality_summary(&options.workspace);
+    let regression_causality_evidence = vec![regression_causality_summary_evidence_id(
+        &regression_causality_summary,
+    )];
+    sections.push(
+        CapsuleSection::new(
+            "regression_causality_summary",
+            "Regression Causality Summary",
+        )
+        .with_content(render_regression_causality_summary_for_handoff(
+            &regression_causality_summary,
+        ))
+        .with_confidence(EvidenceConfidence::Verified)
+        .with_evidence(regression_causality_evidence.clone()),
+    );
+    report.evidence_count = report
+        .evidence_count
+        .saturating_add(regression_causality_evidence.len());
+    report.regression_causality_summary = Some(regression_causality_summary.clone());
+
     let singleflight_posture = singleflight_posture_report();
     sections.push(
         CapsuleSection::new("singleflight_posture", "Single-flight Posture")
@@ -3491,6 +3618,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         "swarm_incident_summary": swarm_incident_summary,
         "swarm_replay_summary": swarm_replay_summary,
         "environment_attestation_summary": environment_attestation_summary,
+        "regression_causality_summary": regression_causality_summary,
         "created_at": created_at,
     });
     let capsule_content = sign_capsule_content(
@@ -3861,6 +3989,14 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         .filter(|value| !value.is_null());
     if let Some(summary) = report.environment_attestation_summary.clone() {
         add_environment_attestation_summary_to_resume(&mut report, &summary);
+    }
+
+    report.regression_causality_summary = capsule
+        .get("regression_causality_summary")
+        .cloned()
+        .filter(|value| !value.is_null());
+    if let Some(summary) = report.regression_causality_summary.clone() {
+        add_regression_causality_summary_to_resume(&mut report, &summary);
     }
 
     if let Some(sections) = capsule.get("sections").and_then(|v| v.as_array()) {
@@ -6178,6 +6314,17 @@ memories_revised = 3
         ensure(
             report.environment_attestation_summary.is_some(),
             "preview carries environment attestation summary JSON",
+        )?;
+        ensure(
+            report
+                .planned_sections
+                .iter()
+                .any(|section| section.id == "regression_causality_summary"),
+            "preview plans regression causality summary section",
+        )?;
+        ensure(
+            report.regression_causality_summary.is_some(),
+            "preview carries regression causality summary JSON",
         )
     }
 
@@ -6648,6 +6795,101 @@ memories_revised = 3
             ensure(
                 !status.contains(forbidden),
                 format!("replay handoff status leaked forbidden text {forbidden:?}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resume_handoff_surfaces_regression_causality_without_raw_inputs() -> TestResult {
+        let summary = serde_json::json!({
+            "schema": "ee.support_bundle.regression_causality_summary.v1",
+            "sourceSchema": "ee.regression_causality.v1",
+            "status": "ranked",
+            "redactionStatus": "derived_redaction_safe_no_raw_logs",
+            "inputSectionCount": 2,
+            "normalizedRowCount": 3,
+            "suppressedFieldCount": 4,
+            "topHypotheses": [
+                {"code": "source_not_materialized", "authoritative": false},
+                {"code": "known_environment_blocker", "authoritative": false}
+            ],
+            "normalization": {
+                "rows": [{
+                    "artifactHash": "blake3:rowhash",
+                    "provenance": {
+                        "suppressedFields": ["stderrTail"],
+                        "rawPath": "/Users/alice/private/src/lib.rs",
+                        "rawMailBody": "secret mail body"
+                    }
+                }]
+            },
+            "ranking": {"hypotheses": []},
+            "redaction": {
+                "inputArtifactsCopied": false,
+                "rawLogsPresent": false,
+                "rawMailBodiesPresent": false,
+                "rawMemoryBodiesPresent": false,
+                "privatePathsPresent": false,
+                "hashesOnly": true
+            }
+        });
+        let mut report =
+            ResumeReport::new("hcap_regression".to_owned(), PathBuf::from("handoff.json"));
+
+        add_regression_causality_summary_to_resume(&mut report, &summary);
+
+        let status = report
+            .status_summary
+            .as_deref()
+            .ok_or_else(|| "resume status summary missing".to_owned())?;
+        ensure(
+            status.contains("Embedded regression causality summary: status=ranked"),
+            "resume status includes regression causality posture",
+        )?;
+        ensure(
+            status.contains("input_sections=2")
+                && status.contains("normalized_rows=3")
+                && status.contains("suppressed_fields=4")
+                && status.contains(
+                    "top_hypothesis_codes=source_not_materialized,known_environment_blocker",
+                )
+                && status.contains("raw_logs_present=false")
+                && status.contains("private_paths_present=false")
+                && status.contains("diagnostic_not_live=true"),
+            "resume status includes compact redaction-safe causality counts",
+        )?;
+        ensure(
+            report
+                .artifact_pointers
+                .iter()
+                .any(|pointer| pointer.id.starts_with("regression_causality_summary:")),
+            "resume artifact pointers include regression causality summary evidence id",
+        )?;
+        ensure(
+            report.next_actions.iter().any(|action| {
+                action.suggested_command.as_deref()
+                    == Some("ee support bundle --workspace . --out <dir> --json")
+            }),
+            "resume next actions include support-bundle refresh command",
+        )?;
+        ensure(
+            report.next_actions.iter().any(|action| {
+                action.suggested_command.as_deref() == Some("ee regress explain --help")
+            }),
+            "resume next actions include regress explain command",
+        )?;
+        for forbidden in [
+            "/Users/alice",
+            "secret mail body",
+            "raw stdout",
+            "BEGIN PRIVATE KEY",
+            "sk-",
+            "ghp_",
+        ] {
+            ensure(
+                !status.contains(forbidden),
+                format!("regression causality handoff status leaked forbidden text {forbidden:?}"),
             )?;
         }
         Ok(())

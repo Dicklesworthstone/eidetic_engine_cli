@@ -1020,63 +1020,20 @@ fn collect_diagnostics(
     let triage_summary_json = triage_summary_json(&status, &swarm_reports);
     let local_cargo_tripwire_json = local_cargo_tripwire_json(workspace);
     let environment_attestation_summary_json = environment_attestation_summary_json(workspace);
-    let regression_causality_summary_json = regression_causality_summary_json(&[
-        (
-            "support_bundle:verification_evidence_summary",
-            RegressionEvidenceKind::VerificationEvidence,
+    let regression_causality_summary_json =
+        regression_causality_summary_json(&regression_causality_support_sections(
             verification_evidence_summary_json.as_str(),
-        ),
-        (
-            "support_bundle:pack_replay_summary",
-            RegressionEvidenceKind::PackReplay,
             pack_replay_summary_json.as_str(),
-        ),
-        (
-            "support_bundle:swarm_replay_summary",
-            RegressionEvidenceKind::SwarmReplay,
             swarm_replay_summary_json.as_str(),
-        ),
-        (
-            "support_bundle:swarm_brief_summary",
-            RegressionEvidenceKind::SwarmReplay,
             swarm_brief_summary_json.as_str(),
-        ),
-        (
-            "support_bundle:swarm_incident_summary",
-            RegressionEvidenceKind::SwarmReplay,
             swarm_incident_summary_json.as_str(),
-        ),
-        (
-            "support_bundle:performance_explain_samples",
-            RegressionEvidenceKind::PerfReport,
             performance_explain_samples_json.as_str(),
-        ),
-        (
-            "support_bundle:scale_benchmark_summary",
-            RegressionEvidenceKind::PerfReport,
             scale_benchmark_summary_json.as_str(),
-        ),
-        (
-            "support_bundle:triage_summary",
-            RegressionEvidenceKind::SupportBundle,
             triage_summary_json.as_str(),
-        ),
-        (
-            "support_bundle:coordination_fallback_summary",
-            RegressionEvidenceKind::SupportBundle,
             coordination_fallback_summary_json.as_str(),
-        ),
-        (
-            "support_bundle:local_cargo_tripwire",
-            RegressionEvidenceKind::VerificationEvidence,
             local_cargo_tripwire_json.as_str(),
-        ),
-        (
-            "support_bundle:environment_attestation_summary",
-            RegressionEvidenceKind::SupportBundle,
             environment_attestation_summary_json.as_str(),
-        ),
-    ]);
+        ));
 
     Ok(CollectedDiagnostics {
         status_json,
@@ -1839,6 +1796,36 @@ fn environment_attestation_summary_json(workspace: &Path) -> String {
     stable_json(&collect_environment_attestation_summary(workspace))
 }
 
+pub(crate) fn collect_regression_causality_summary(workspace: &Path) -> Value {
+    let status = StatusReport::gather_for_workspace(workspace);
+    let swarm_reports = discover_swarm_report_summaries(workspace);
+    let verification_evidence_summary_json = verification_evidence_summary_json(workspace, 100);
+    let pack_replay_summary_json = pack_replay_summary_json(workspace);
+    let swarm_replay_summary_json = swarm_replay_summary_json(workspace);
+    let swarm_brief_summary_json = swarm_brief_summary_json(workspace);
+    let swarm_incident_summary_json = swarm_incident_summary_json(workspace);
+    let performance_explain_samples_json = performance_explain_samples_json(workspace);
+    let scale_benchmark_summary_json = scale_benchmark_summary_json(workspace, &swarm_reports);
+    let triage_summary_json = triage_summary_json(&status, &swarm_reports);
+    let coordination_fallback_summary_json = coordination_fallback_summary_json(workspace);
+    let local_cargo_tripwire_json = local_cargo_tripwire_json(workspace);
+    let environment_attestation_summary_json = environment_attestation_summary_json(workspace);
+
+    regression_causality_summary_value(&regression_causality_support_sections(
+        verification_evidence_summary_json.as_str(),
+        pack_replay_summary_json.as_str(),
+        swarm_replay_summary_json.as_str(),
+        swarm_brief_summary_json.as_str(),
+        swarm_incident_summary_json.as_str(),
+        performance_explain_samples_json.as_str(),
+        scale_benchmark_summary_json.as_str(),
+        triage_summary_json.as_str(),
+        coordination_fallback_summary_json.as_str(),
+        local_cargo_tripwire_json.as_str(),
+        environment_attestation_summary_json.as_str(),
+    ))
+}
+
 pub(crate) fn collect_environment_attestation_summary(workspace: &Path) -> Value {
     let mut options = super::swarm_brief::SwarmBriefCollectOptions::for_workspace(workspace);
     options.include_rch = true;
@@ -2008,6 +1995,70 @@ pub(crate) fn render_environment_attestation_summary_for_handoff(summary: &Value
         ));
     }
     lines.join("\n")
+}
+
+pub(crate) fn regression_causality_summary_evidence_id(summary: &Value) -> String {
+    let hash = blake3_text_hash(&stable_json(summary));
+    let short_hash = hash.trim_start_matches("blake3:");
+    let short_hash = short_hash.get(..12).unwrap_or(short_hash);
+    format!("regression_causality_summary:{short_hash}")
+}
+
+pub(crate) fn render_regression_causality_summary_for_handoff(summary: &Value) -> String {
+    let schema = summary
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or(SUPPORT_BUNDLE_REGRESSION_CAUSALITY_SUMMARY_SCHEMA_V1);
+    let source_schema = summary
+        .get("sourceSchema")
+        .and_then(Value::as_str)
+        .unwrap_or(REGRESSION_CAUSALITY_SCHEMA_V1);
+    let status = summary
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let redaction_status = summary
+        .get("redactionStatus")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let input_count = summary
+        .get("inputSectionCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let row_count = summary
+        .get("normalizedRowCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let suppressed = summary
+        .get("suppressedFieldCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let summary_hash = blake3_text_hash(&stable_json(summary));
+    let top_codes = summary
+        .get("topHypotheses")
+        .and_then(Value::as_array)
+        .map(|hypotheses| {
+            hypotheses
+                .iter()
+                .filter_map(|hypothesis| hypothesis.get("code").and_then(Value::as_str))
+                .take(5)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let top_codes = if top_codes.is_empty() {
+        "none".to_owned()
+    } else {
+        top_codes.join(", ")
+    };
+
+    [
+        format!("Regression causality summary: status={status}, source_schema={source_schema}, schema={schema}."),
+        format!("Evidence normalization: input_sections={input_count}, normalized_rows={row_count}, suppressed_fields={suppressed}, top_hypothesis_codes={top_codes}."),
+        format!("Redaction: status={redaction_status}, input_artifacts_copied=false, raw_logs_present=false, raw_mail_bodies_present=false, raw_memory_bodies_present=false, private_paths_present=false, hashes_only=true, summary_hash={summary_hash}."),
+        "Diagnostic posture only; rerun ee support bundle or ee regress explain against current artifacts before treating hypotheses as current."
+            .to_owned(),
+    ]
+    .join("\n")
 }
 
 fn increment_attestation_count(counts: &mut BTreeMap<String, u64>, key: String) {
@@ -2424,6 +2475,78 @@ fn local_cargo_tripwire_json(workspace: &Path) -> String {
 
 fn regression_causality_summary_json(sections: &[(&str, RegressionEvidenceKind, &str)]) -> String {
     stable_json(&regression_causality_summary_value(sections))
+}
+
+fn regression_causality_support_sections<'a>(
+    verification_evidence_summary_json: &'a str,
+    pack_replay_summary_json: &'a str,
+    swarm_replay_summary_json: &'a str,
+    swarm_brief_summary_json: &'a str,
+    swarm_incident_summary_json: &'a str,
+    performance_explain_samples_json: &'a str,
+    scale_benchmark_summary_json: &'a str,
+    triage_summary_json: &'a str,
+    coordination_fallback_summary_json: &'a str,
+    local_cargo_tripwire_json: &'a str,
+    environment_attestation_summary_json: &'a str,
+) -> [(&'static str, RegressionEvidenceKind, &'a str); 11] {
+    [
+        (
+            "support_bundle:verification_evidence_summary",
+            RegressionEvidenceKind::VerificationEvidence,
+            verification_evidence_summary_json,
+        ),
+        (
+            "support_bundle:pack_replay_summary",
+            RegressionEvidenceKind::PackReplay,
+            pack_replay_summary_json,
+        ),
+        (
+            "support_bundle:swarm_replay_summary",
+            RegressionEvidenceKind::SwarmReplay,
+            swarm_replay_summary_json,
+        ),
+        (
+            "support_bundle:swarm_brief_summary",
+            RegressionEvidenceKind::SwarmReplay,
+            swarm_brief_summary_json,
+        ),
+        (
+            "support_bundle:swarm_incident_summary",
+            RegressionEvidenceKind::SwarmReplay,
+            swarm_incident_summary_json,
+        ),
+        (
+            "support_bundle:performance_explain_samples",
+            RegressionEvidenceKind::PerfReport,
+            performance_explain_samples_json,
+        ),
+        (
+            "support_bundle:scale_benchmark_summary",
+            RegressionEvidenceKind::PerfReport,
+            scale_benchmark_summary_json,
+        ),
+        (
+            "support_bundle:triage_summary",
+            RegressionEvidenceKind::SupportBundle,
+            triage_summary_json,
+        ),
+        (
+            "support_bundle:coordination_fallback_summary",
+            RegressionEvidenceKind::SupportBundle,
+            coordination_fallback_summary_json,
+        ),
+        (
+            "support_bundle:local_cargo_tripwire",
+            RegressionEvidenceKind::VerificationEvidence,
+            local_cargo_tripwire_json,
+        ),
+        (
+            "support_bundle:environment_attestation_summary",
+            RegressionEvidenceKind::SupportBundle,
+            environment_attestation_summary_json,
+        ),
+    ]
 }
 
 fn regression_causality_summary_value(sections: &[(&str, RegressionEvidenceKind, &str)]) -> Value {
