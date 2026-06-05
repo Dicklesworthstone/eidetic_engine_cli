@@ -42,6 +42,7 @@ Every entry in `sourceAuthority[]` describes one readiness source:
 - Agent Mail MCP state and probe state
 - RCH availability and source materialization
 - build admission and local Cargo tripwire posture
+- CI proof-lane artifact source authority
 - host profile, claim gate, file reservations, and support-bundle redaction
 
 Each source has an `authority` value of `authoritative`, `advisory`,
@@ -54,7 +55,7 @@ summary verdict:
 
 | Field | Agent interpretation |
 | --- | --- |
-| `source` | Stable substrate label such as `beads_tracker`, `bv_recommendation`, `agent_mail_probe`, `rch`, `local_cargo_tripwire`, or `file_reservations`. |
+| `source` | Stable substrate label such as `beads_tracker`, `bv_recommendation`, `agent_mail_probe`, `rch`, `local_cargo_tripwire`, `ci_proof_lane`, or `file_reservations`. |
 | `authority` | Whether the source may decide readiness, is only advisory, is stale, is unavailable, or contradicts another source. |
 | `status` | The observed state of that source, for example `ok`, `remote_ready`, `remote_blocked`, `stale`, `blocked`, or `contradicted`. |
 | `freshness` | Whether the observation is current enough to use. |
@@ -80,7 +81,10 @@ summary verdict:
 evidence exists and what it proved. RCH-E327, worker topology failures, source
 materialization failures, and remote-required local fallback refusal are
 environment/readiness blockers. They must be reported as
-`environment_blocked_before_source`, not as `source_failed`.
+`environment_blocked_before_source`, not as `source_failed`. CI proof-lane
+artifact evidence is artifact source authority: stale, missing, cancelled,
+checksum-mismatched, or surface-probe-failed artifacts fail closed as source
+authority blockers instead of becoming source test failures.
 
 | Verdict | Meaning | Agent action |
 | --- | --- | --- |
@@ -120,6 +124,13 @@ coordination step, or `null` when the next action requires human judgment.
 | `build_admission_blocked` | high | Disk-pressure or build-admission policy blocked remote-only verification. | Use build-admission/RCH inspection and report as environment blocked. |
 | `support_bundle_redaction_unverified` | warning | Support-bundle redaction posture was not verified. | Verify redaction before attaching bundle evidence. |
 | `reservation_evidence_stale` | warning | File reservation evidence is stale or conflicting. | Coordinate through Agent Mail; do not treat stale reservations as absent. |
+| `ci_proof_lane_artifact_missing` | warning | A CI proof-lane run completed but the expected artifact is unavailable. | Treat the artifact as absent and file or coordinate workflow follow-up before reuse. |
+| `ci_proof_lane_artifact_stale` | warning | A CI proof-lane artifact source SHA does not match the requested repository head SHA. | Do not reuse the artifact; coordinate before dispatching or waiting for a current-head run. |
+| `ci_proof_lane_cancelled_before_artifact` | warning | The CI run was cancelled before artifact upload completed. | Treat as proof-lane abstention and use a non-cancelling artifact lane or follow-up bead. |
+| `ci_proof_lane_checksum_mismatch` | high | The artifact checksum did not verify. | Reject the artifact and repair the proof lane before using binary evidence. |
+| `ci_proof_lane_surface_probe_failed` | high | The artifact failed the required command-surface probe. | Reject the artifact until the expected `ee` surface is proven by the lane. |
+| `ci_proof_lane_unknown_source` | warning | GitHub Actions or matching-run evidence was unavailable or unknown. | Coordinate before dispatching a new lane; missing source authority is not permission to reuse stale binaries. |
+| `ci_proof_lane_duplicate_dispatch` | warning | Multiple active proof-lane dispatches target the same source authority. | Reuse or wait for one active run; do not dispatch another lane blindly. |
 
 ## Support Bundle and Handoff Summary
 
@@ -150,6 +161,14 @@ When the summary reports Beads/BV/Agent Mail or claim-gate disagreement, treat
 the `disagreementEvidence` booleans and `firstFailure` code as routing hints.
 They explain which authority is stale, ambiguous, contradicted, or blocked; they
 do not override Agent Mail reservations or the live claim gate.
+
+CI proof-lane evidence appears in support bundles as a compact
+`ci_proof_lane` source-authority entry. The retained fields are workflow
+path/name, run id, job id, requested head SHA, run head SHA, artifact name,
+checksum status, source/artifact freshness, surface probe status, and first
+failure diagnosis. The bundle stores evidence-reference hashes and redacted
+metric values only; it does not copy artifacts, raw logs, local paths, mail
+bodies, or shell output.
 
 ## Recovery Actions
 

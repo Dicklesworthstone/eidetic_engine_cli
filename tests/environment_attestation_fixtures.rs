@@ -41,7 +41,7 @@ fn environment_attestation_skew_authority_matrix_matches_golden() -> TestResult 
     let schema: Value = serde_json::from_str(SCHEMA_TEXT).map_err(|error| error.to_string())?;
     let mut cases = Vec::new();
 
-    for (name, attestation) in attestation_cases() {
+    for (name, attestation) in attestation_cases()? {
         let mut value = serde_json::to_value(&attestation).map_err(|error| error.to_string())?;
         validate_json_schema(&value, &schema, &schema, "$")?;
         assert_attestation_id_pattern(&value)?;
@@ -65,10 +65,13 @@ fn environment_attestation_skew_authority_matrix_matches_golden() -> TestResult 
     Ok(())
 }
 
-fn attestation_cases() -> Vec<(
-    &'static str,
-    ee::core::environment_attestation::EnvironmentAttestationReport,
-)> {
+fn attestation_cases() -> Result<
+    Vec<(
+        &'static str,
+        ee::core::environment_attestation::EnvironmentAttestationReport,
+    )>,
+    String,
+> {
     let mut cases = Vec::new();
 
     cases.push((
@@ -159,6 +162,20 @@ fn attestation_cases() -> Vec<(
             EnvironmentAttestationInputs {
                 generated_at: fixed_time(),
                 local_cargo_process_scan: Some(&local_cargo_scan),
+                ci_proof_lane_snapshot: None,
+            },
+        ),
+    ));
+
+    let ci_stale_snapshot = ci_proof_lane_fixture("artifact_stale")?;
+    cases.push((
+        "ci_proof_lane_stale_artifact",
+        environment_attestation_from_swarm_brief_with_inputs(
+            &report_with_sources(vec![ready_source(SwarmBriefSourceKind::Git)]),
+            EnvironmentAttestationInputs {
+                generated_at: fixed_time(),
+                local_cargo_process_scan: None,
+                ci_proof_lane_snapshot: Some(&ci_stale_snapshot),
             },
         ),
     ));
@@ -198,7 +215,15 @@ fn attestation_cases() -> Vec<(
         ),
     ));
 
-    cases
+    Ok(cases)
+}
+
+fn ci_proof_lane_fixture(name: &str) -> Result<Value, String> {
+    let text = match name {
+        "artifact_stale" => include_str!("fixtures/ci_proof_lane/artifact_stale.json"),
+        _ => return Err(format!("unknown CI proof lane fixture {name}")),
+    };
+    serde_json::from_str(text).map_err(|error| format!("{name} fixture must parse: {error}"))
 }
 
 fn fixed_time() -> chrono::DateTime<Utc> {

@@ -73,7 +73,14 @@
         "bvRecommendationStale": false,
         "agentMailProbeMismatch": false,
         "sourceAuthorityAmbiguous": false,
-        "claimGateNeedsFreshRun": false
+        "claimGateNeedsFreshRun": false,
+        "ciProofLaneArtifactMissing": false,
+        "ciProofLaneArtifactStale": false,
+        "ciProofLaneCancelledBeforeArtifact": false,
+        "ciProofLaneChecksumMismatch": false,
+        "ciProofLaneSurfaceProbeFailed": false,
+        "ciProofLaneUnknownSource": false,
+        "ciProofLaneDuplicateDispatch": false
       },
       "redaction": {
         "rawWorkspacePathIncluded": false,
@@ -132,7 +139,14 @@
         "bvRecommendationStale": false,
         "agentMailProbeMismatch": false,
         "sourceAuthorityAmbiguous": false,
-        "claimGateNeedsFreshRun": true
+        "claimGateNeedsFreshRun": true,
+        "ciProofLaneArtifactMissing": false,
+        "ciProofLaneArtifactStale": false,
+        "ciProofLaneCancelledBeforeArtifact": false,
+        "ciProofLaneChecksumMismatch": false,
+        "ciProofLaneSurfaceProbeFailed": false,
+        "ciProofLaneUnknownSource": false,
+        "ciProofLaneDuplicateDispatch": false
       },
       "redaction": {
         "rawWorkspacePathIncluded": false,
@@ -205,7 +219,14 @@
         "bvRecommendationStale": true,
         "agentMailProbeMismatch": false,
         "sourceAuthorityAmbiguous": false,
-        "claimGateNeedsFreshRun": false
+        "claimGateNeedsFreshRun": false,
+        "ciProofLaneArtifactMissing": false,
+        "ciProofLaneArtifactStale": false,
+        "ciProofLaneCancelledBeforeArtifact": false,
+        "ciProofLaneChecksumMismatch": false,
+        "ciProofLaneSurfaceProbeFailed": false,
+        "ciProofLaneUnknownSource": false,
+        "ciProofLaneDuplicateDispatch": false
       },
       "redaction": {
         "rawWorkspacePathIncluded": false,
@@ -264,7 +285,80 @@
         "bvRecommendationStale": false,
         "agentMailProbeMismatch": true,
         "sourceAuthorityAmbiguous": false,
-        "claimGateNeedsFreshRun": false
+        "claimGateNeedsFreshRun": false,
+        "ciProofLaneArtifactMissing": false,
+        "ciProofLaneArtifactStale": false,
+        "ciProofLaneCancelledBeforeArtifact": false,
+        "ciProofLaneChecksumMismatch": false,
+        "ciProofLaneSurfaceProbeFailed": false,
+        "ciProofLaneUnknownSource": false,
+        "ciProofLaneDuplicateDispatch": false
+      },
+      "redaction": {
+        "rawWorkspacePathIncluded": false,
+        "rawMailBodiesIncluded": false,
+        "rawSourceSnippetsIncluded": false,
+        "rawCommandArgvIncluded": false,
+        "rawEvidenceRefsIncluded": false,
+        "hostPrivatePathsRedacted": true
+      }
+    },
+    {
+      "case": "ci_proof_lane_stale_artifact",
+      "verdict": "source_authority_ambiguous",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "stale_source",
+        "environmentVerdict": "source_authority_ambiguous",
+        "localCargoFallbackObserved": false
+      },
+      "proofAdmission": {
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "stale_source",
+        "environmentVerdict": "source_authority_ambiguous",
+        "localCargoFallbackObserved": false,
+        "separateFromSourceTestVerdict": true
+      },
+      "sourceAuthorityCounts": {
+        "total": 1,
+        "byStatus": {
+          "stale": 1
+        },
+        "byAuthority": {
+          "stale": 1
+        }
+      },
+      "sourceAuthority": [
+        {
+          "source": "ci_proof_lane",
+          "authority": "stale",
+          "status": "stale",
+          "freshness": "stale",
+          "degradedCodes": [
+            "ci_proof_lane_artifact_stale"
+          ],
+          "recoveryActionCount": 1,
+          "metricCount": 10
+        }
+      ],
+      "degradedCodes": [
+        "ci_proof_lane_artifact_stale"
+      ],
+      "firstFailureCode": "ci_proof_lane_artifact_stale",
+      "disagreementEvidence": {
+        "beadsTrackerStale": false,
+        "bvRecommendationStale": false,
+        "agentMailProbeMismatch": false,
+        "sourceAuthorityAmbiguous": false,
+        "claimGateNeedsFreshRun": true,
+        "ciProofLaneArtifactMissing": false,
+        "ciProofLaneArtifactStale": true,
+        "ciProofLaneCancelledBeforeArtifact": false,
+        "ciProofLaneChecksumMismatch": false,
+        "ciProofLaneSurfaceProbeFailed": false,
+        "ciProofLaneUnknownSource": false,
+        "ciProofLaneDuplicateDispatch": false
       },
       "redaction": {
         "rawWorkspacePathIncluded": false,
@@ -325,7 +419,14 @@
         "bvRecommendationStale": false,
         "agentMailProbeMismatch": false,
         "sourceAuthorityAmbiguous": false,
-        "claimGateNeedsFreshRun": false
+        "claimGateNeedsFreshRun": false,
+        "ciProofLaneArtifactMissing": false,
+        "ciProofLaneArtifactStale": false,
+        "ciProofLaneCancelledBeforeArtifact": false,
+        "ciProofLaneChecksumMismatch": false,
+        "ciProofLaneSurfaceProbeFailed": false,
+        "ciProofLaneUnknownSource": false,
+        "ciProofLaneDuplicateDispatch": false
       },
       "redaction": {
         "rawWorkspacePathIncluded": false,

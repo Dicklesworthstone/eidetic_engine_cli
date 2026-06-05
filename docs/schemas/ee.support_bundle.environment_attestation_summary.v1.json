@@ -136,7 +136,14 @@
         "dirty_checkout_observed",
         "build_admission_blocked",
         "support_bundle_redaction_unverified",
-        "reservation_evidence_stale"
+        "reservation_evidence_stale",
+        "ci_proof_lane_artifact_missing",
+        "ci_proof_lane_artifact_stale",
+        "ci_proof_lane_cancelled_before_artifact",
+        "ci_proof_lane_checksum_mismatch",
+        "ci_proof_lane_surface_probe_failed",
+        "ci_proof_lane_unknown_source",
+        "ci_proof_lane_duplicate_dispatch"
       ]
     },
     "summary": {
@@ -306,7 +313,14 @@
         "bvRecommendationStale",
         "agentMailProbeMismatch",
         "sourceAuthorityAmbiguous",
-        "claimGateNeedsFreshRun"
+        "claimGateNeedsFreshRun",
+        "ciProofLaneArtifactMissing",
+        "ciProofLaneArtifactStale",
+        "ciProofLaneCancelledBeforeArtifact",
+        "ciProofLaneChecksumMismatch",
+        "ciProofLaneSurfaceProbeFailed",
+        "ciProofLaneUnknownSource",
+        "ciProofLaneDuplicateDispatch"
       ],
       "additionalProperties": false,
       "properties": {
@@ -314,7 +328,14 @@
         "bvRecommendationStale": {"type": "boolean"},
         "agentMailProbeMismatch": {"type": "boolean"},
         "sourceAuthorityAmbiguous": {"type": "boolean"},
-        "claimGateNeedsFreshRun": {"type": "boolean"}
+        "claimGateNeedsFreshRun": {"type": "boolean"},
+        "ciProofLaneArtifactMissing": {"type": "boolean"},
+        "ciProofLaneArtifactStale": {"type": "boolean"},
+        "ciProofLaneCancelledBeforeArtifact": {"type": "boolean"},
+        "ciProofLaneChecksumMismatch": {"type": "boolean"},
+        "ciProofLaneSurfaceProbeFailed": {"type": "boolean"},
+        "ciProofLaneUnknownSource": {"type": "boolean"},
+        "ciProofLaneDuplicateDispatch": {"type": "boolean"}
       }
     },
     "redaction": {

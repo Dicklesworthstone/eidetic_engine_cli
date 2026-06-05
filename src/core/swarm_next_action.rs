@@ -1529,6 +1529,7 @@ fn work_packet_claim_gate_attestation_summary(
     environment_attestation_summary_from_inputs(EnvironmentAttestationSummaryInputs {
         local_cargo_fallback_observed,
         remote_environment_blocked,
+        stale_source_observed: false,
         tracker_stale: !packet.tracker_integrity.br_reads_authoritative,
         reservation_conflict: work_packet_has_active_reservation_conflict(packet),
         stale_binary_suspected,

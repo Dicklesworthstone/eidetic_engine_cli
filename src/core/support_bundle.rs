@@ -2170,8 +2170,36 @@ fn attestation_disagreement_evidence(
                     | "reservation_evidence_stale"
                     | "source_authority_ambiguous"
                     | "stale_binary_suspected"
+                    | "ci_proof_lane_artifact_missing"
+                    | "ci_proof_lane_artifact_stale"
+                    | "ci_proof_lane_cancelled_before_artifact"
+                    | "ci_proof_lane_checksum_mismatch"
+                    | "ci_proof_lane_surface_probe_failed"
+                    | "ci_proof_lane_unknown_source"
+                    | "ci_proof_lane_duplicate_dispatch"
             )
         }),
+        "ciProofLaneArtifactMissing": codes
+            .iter()
+            .any(|code| code == "ci_proof_lane_artifact_missing"),
+        "ciProofLaneArtifactStale": codes
+            .iter()
+            .any(|code| code == "ci_proof_lane_artifact_stale"),
+        "ciProofLaneCancelledBeforeArtifact": codes
+            .iter()
+            .any(|code| code == "ci_proof_lane_cancelled_before_artifact"),
+        "ciProofLaneChecksumMismatch": codes
+            .iter()
+            .any(|code| code == "ci_proof_lane_checksum_mismatch"),
+        "ciProofLaneSurfaceProbeFailed": codes
+            .iter()
+            .any(|code| code == "ci_proof_lane_surface_probe_failed"),
+        "ciProofLaneUnknownSource": codes
+            .iter()
+            .any(|code| code == "ci_proof_lane_unknown_source"),
+        "ciProofLaneDuplicateDispatch": codes
+            .iter()
+            .any(|code| code == "ci_proof_lane_duplicate_dispatch"),
     })
 }
 
@@ -4509,6 +4537,75 @@ mod tests {
     }
 
     #[test]
+    fn environment_attestation_summary_projects_ci_proof_lane_artifact_authority() {
+        let report = attestation_report(
+            "ci_proof_lane_stale_artifact",
+            EnvironmentAttestationSummary {
+                safe_to_claim: false,
+                remote_verification_admitted: None,
+                source_test_verdict: EnvironmentAttestationSourceTestVerdict::StaleSource,
+                environment_verdict: EnvironmentAttestationVerdict::SourceAuthorityAmbiguous,
+                local_cargo_fallback_observed: false,
+            },
+            EnvironmentAttestationVerdict::SourceAuthorityAmbiguous,
+            vec![ci_proof_lane_stale_source_entry()],
+            vec![attestation_degradation(
+                EnvironmentAttestationDegradedCode::CiProofLaneArtifactStale,
+                "warning",
+                "CI proof-lane artifact source SHA is stale relative to requested head SHA.",
+                None,
+            )],
+        );
+
+        let summary = environment_attestation_summary_from_report(&report);
+        let source = summary
+            .pointer("/sourceAuthority/0")
+            .and_then(Value::as_object)
+            .expect("source authority summary is present");
+        let metrics = source
+            .get("metrics")
+            .and_then(Value::as_array)
+            .expect("ci proof lane metrics are present");
+        let rendered = stable_json(&summary);
+
+        assert_eq!(
+            summary
+                .pointer("/firstFailure/code")
+                .and_then(Value::as_str),
+            Some("ci_proof_lane_artifact_stale")
+        );
+        assert_eq!(
+            summary
+                .pointer("/disagreementEvidence/ciProofLaneArtifactStale")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            summary
+                .pointer("/disagreementEvidence/claimGateNeedsFreshRun")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(metrics.iter().any(|metric| {
+            metric.pointer("/name").and_then(Value::as_str) == Some("workflow_path")
+                && metric.pointer("/value").and_then(Value::as_str)
+                    == Some(".github/workflows/macos-ee-artifact.yml")
+        }));
+        assert!(metrics.iter().any(|metric| {
+            metric.pointer("/name").and_then(Value::as_str) == Some("first_failure_diagnosis")
+                && metric
+                    .pointer("/value")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| {
+                        value.contains("older than the requested repository head SHA")
+                    })
+        }));
+        assert!(!rendered.contains("stdout:"));
+        assert!(!rendered.contains("stderr:"));
+        assert!(!rendered.contains("/Users/"));
+    }
+
+    #[test]
     fn environment_attestation_summary_matrix_matches_schema_and_golden() -> TestResult {
         let schema: Value = serde_json::from_str(SUPPORT_BUNDLE_ATTESTATION_SUMMARY_SCHEMA_TEXT)
             .map_err(|error| error.to_string())?;
@@ -4727,6 +4824,28 @@ mod tests {
                 ),
             ),
             (
+                "ci_proof_lane_stale_artifact",
+                attestation_report(
+                    "ci_proof_lane_stale_artifact",
+                    EnvironmentAttestationSummary {
+                        safe_to_claim: false,
+                        remote_verification_admitted: None,
+                        source_test_verdict: EnvironmentAttestationSourceTestVerdict::StaleSource,
+                        environment_verdict:
+                            EnvironmentAttestationVerdict::SourceAuthorityAmbiguous,
+                        local_cargo_fallback_observed: false,
+                    },
+                    EnvironmentAttestationVerdict::SourceAuthorityAmbiguous,
+                    vec![ci_proof_lane_stale_source_entry()],
+                    vec![attestation_degradation(
+                        EnvironmentAttestationDegradedCode::CiProofLaneArtifactStale,
+                        "warning",
+                        "CI proof-lane artifact source SHA is stale relative to requested head SHA.",
+                        None,
+                    )],
+                ),
+            ),
+            (
                 "rch_environment_blocked",
                 attestation_report(
                     "rch_environment_blocked",
@@ -4776,6 +4895,72 @@ mod tests {
                 ),
             ),
         ]
+    }
+
+    fn ci_proof_lane_stale_source_entry() -> EnvironmentAttestationSourceAuthorityEntry {
+        EnvironmentAttestationSourceAuthorityEntry {
+            source: EnvironmentAttestationSourceKind::CiProofLane,
+            authority: EnvironmentAttestationAuthority::Stale,
+            status: EnvironmentAttestationSourceStatus::Stale,
+            freshness: EnvironmentAttestationFreshness::Stale,
+            observed_at: Some("2026-06-05T10:15:00Z".to_owned()),
+            summary: "CI proof lane artifact source SHA is stale relative to requested head SHA."
+                .to_owned(),
+            evidence_refs: vec![
+                "ci-proof-lane://snapshot/ci_proof_lane_666666666666666666666666".to_owned(),
+            ],
+            metrics: vec![
+                EnvironmentAttestationMetric {
+                    name: "workflow_path".to_owned(),
+                    value: ".github/workflows/macos-ee-artifact.yml".to_owned(),
+                },
+                EnvironmentAttestationMetric {
+                    name: "workflow_name".to_owned(),
+                    value: "macOS EE Artifact".to_owned(),
+                },
+                EnvironmentAttestationMetric {
+                    name: "run_id".to_owned(),
+                    value: "27006448051".to_owned(),
+                },
+                EnvironmentAttestationMetric {
+                    name: "job_id".to_owned(),
+                    value: "79699108969".to_owned(),
+                },
+                EnvironmentAttestationMetric {
+                    name: "requested_head_sha".to_owned(),
+                    value: "3140dbf1ea21a4d3e3de9b0f1edefd236e1b30c3".to_owned(),
+                },
+                EnvironmentAttestationMetric {
+                    name: "run_head_sha".to_owned(),
+                    value: "6afe302491b7ff5d869c42eaf57a7c9675fd5ef7".to_owned(),
+                },
+                EnvironmentAttestationMetric {
+                    name: "artifact_name".to_owned(),
+                    value: "ee-aarch64-apple-darwin-debug".to_owned(),
+                },
+                EnvironmentAttestationMetric {
+                    name: "checksum_status".to_owned(),
+                    value: "verified".to_owned(),
+                },
+                EnvironmentAttestationMetric {
+                    name: "surface_probe_status".to_owned(),
+                    value: "passed".to_owned(),
+                },
+                EnvironmentAttestationMetric {
+                    name: "first_failure_diagnosis".to_owned(),
+                    value: "artifact source SHA is older than the requested repository head SHA"
+                        .to_owned(),
+                },
+            ],
+            degraded_codes: vec![EnvironmentAttestationDegradedCode::CiProofLaneArtifactStale],
+            recovery_actions: vec![attestation_recovery(
+                0,
+                EnvironmentAttestationRecoveryKind::Coordinate,
+                EnvironmentAttestationSubstrate::AgentMail,
+                None,
+                "Coordinate proof-lane authority before reusing the stale artifact.",
+            )],
+        }
     }
 
     fn attestation_report(

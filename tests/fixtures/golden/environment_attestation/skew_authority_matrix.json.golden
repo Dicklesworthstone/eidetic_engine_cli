@@ -310,6 +310,55 @@
       ]
     },
     {
+      "case": "ci_proof_lane_stale_artifact",
+      "summary": {
+        "safeToClaim": false,
+        "remoteVerificationAdmitted": null,
+        "sourceTestVerdict": "stale_source",
+        "environmentVerdict": "source_authority_ambiguous",
+        "localCargoFallbackObserved": false
+      },
+      "verdict": "source_authority_ambiguous",
+      "sourceAuthority": [
+        {
+          "source": "source_tree",
+          "authority": "authoritative",
+          "status": "ok",
+          "freshness": "current",
+          "degradedCodes": [],
+          "recoveryActions": []
+        },
+        {
+          "source": "ci_proof_lane",
+          "authority": "stale",
+          "status": "stale",
+          "freshness": "stale",
+          "degradedCodes": [
+            "ci_proof_lane_artifact_stale"
+          ],
+          "recoveryActions": [
+            {
+              "kind": "coordinate",
+              "command": null,
+              "mutatesState": false,
+              "requiredSubstrate": "agent_mail"
+            }
+          ]
+        }
+      ],
+      "degradedCodes": [
+        "ci_proof_lane_artifact_stale"
+      ],
+      "recoveryActions": [
+        {
+          "kind": "coordinate",
+          "command": null,
+          "mutatesState": false,
+          "requiredSubstrate": "agent_mail"
+        }
+      ]
+    },
+    {
       "case": "reservation_conflict",
       "summary": {
         "safeToClaim": false,

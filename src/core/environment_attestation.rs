@@ -49,6 +49,7 @@ pub struct EnvironmentAttestationSummary {
 pub struct EnvironmentAttestationSummaryInputs {
     pub local_cargo_fallback_observed: bool,
     pub remote_environment_blocked: bool,
+    pub stale_source_observed: bool,
     pub tracker_stale: bool,
     pub reservation_conflict: bool,
     pub stale_binary_suspected: bool,
@@ -89,6 +90,8 @@ pub fn environment_attestation_summary_from_inputs(
         remote_verification_admitted: inputs.remote_verification_admitted,
         source_test_verdict: if inputs.remote_environment_blocked {
             EnvironmentAttestationSourceTestVerdict::EnvironmentBlockedBeforeSource
+        } else if inputs.stale_source_observed {
+            EnvironmentAttestationSourceTestVerdict::StaleSource
         } else {
             EnvironmentAttestationSourceTestVerdict::NotEvaluated
         },
@@ -137,6 +140,7 @@ pub enum EnvironmentAttestationSourceKind {
     RchSourceMaterialization,
     BuildAdmission,
     LocalCargoTripwire,
+    CiProofLane,
     HostProfile,
     ClaimGate,
     FileReservations,
@@ -198,6 +202,13 @@ pub enum EnvironmentAttestationDegradedCode {
     BuildAdmissionBlocked,
     SupportBundleRedactionUnverified,
     ReservationEvidenceStale,
+    CiProofLaneArtifactMissing,
+    CiProofLaneArtifactStale,
+    CiProofLaneCancelledBeforeArtifact,
+    CiProofLaneChecksumMismatch,
+    CiProofLaneSurfaceProbeFailed,
+    CiProofLaneUnknownSource,
+    CiProofLaneDuplicateDispatch,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -290,6 +301,7 @@ pub struct EnvironmentAttestationDegradation {
 pub struct EnvironmentAttestationInputs<'a> {
     pub generated_at: DateTime<Utc>,
     pub local_cargo_process_scan: Option<&'a Value>,
+    pub ci_proof_lane_snapshot: Option<&'a Value>,
 }
 
 impl EnvironmentAttestationInputs<'_> {
@@ -298,6 +310,7 @@ impl EnvironmentAttestationInputs<'_> {
         Self {
             generated_at: Utc::now(),
             local_cargo_process_scan: None,
+            ci_proof_lane_snapshot: None,
         }
     }
 }
@@ -315,6 +328,7 @@ pub fn collect_environment_attestation(
         EnvironmentAttestationInputs {
             generated_at: Utc::now(),
             local_cargo_process_scan: Some(&local_cargo_process_scan),
+            ci_proof_lane_snapshot: None,
         },
     )
 }
@@ -329,6 +343,7 @@ pub fn environment_attestation_from_swarm_brief(
         EnvironmentAttestationInputs {
             generated_at,
             local_cargo_process_scan: None,
+            ci_proof_lane_snapshot: None,
         },
     )
 }
@@ -341,6 +356,9 @@ pub fn environment_attestation_from_swarm_brief_with_inputs(
     let mut entries = source_authority_entries(report);
     if let Some(process_scan) = inputs.local_cargo_process_scan {
         entries.push(local_cargo_tripwire_entry(process_scan));
+    }
+    if let Some(snapshot) = inputs.ci_proof_lane_snapshot {
+        entries.push(ci_proof_lane_entry(snapshot));
     }
     if let Some(entry) = build_admission_entry(report) {
         entries.push(entry);
@@ -656,6 +674,327 @@ fn local_cargo_recovery_actions(
     }
 }
 
+fn ci_proof_lane_entry(snapshot: &Value) -> EnvironmentAttestationSourceAuthorityEntry {
+    let schema_ok = ci_proof_lane_text(snapshot, "/schema") == Some("ee.ci_proof_lane_snapshot.v1");
+    let verdict = ci_proof_lane_text(snapshot, "/summary/verdict").unwrap_or("unknown");
+    let fresh_artifact_available = snapshot
+        .pointer("/summary/freshArtifactAvailable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut degraded_codes = ci_proof_lane_degraded_codes(snapshot);
+    if !schema_ok {
+        insert_degraded_code(
+            &mut degraded_codes,
+            EnvironmentAttestationDegradedCode::SourceAuthorityAmbiguous,
+        );
+    }
+    if degraded_codes.is_empty() && !fresh_artifact_available {
+        insert_degraded_code(&mut degraded_codes, ci_proof_lane_code_for_verdict(verdict));
+    }
+    degraded_codes.sort();
+    degraded_codes.dedup();
+
+    let (authority, status, freshness, summary) = if !schema_ok {
+        (
+            EnvironmentAttestationAuthority::Unavailable,
+            EnvironmentAttestationSourceStatus::Ambiguous,
+            EnvironmentAttestationFreshness::Unknown,
+            "CI proof lane snapshot schema was not recognized.".to_owned(),
+        )
+    } else if degraded_codes.is_empty() && fresh_artifact_available {
+        (
+            EnvironmentAttestationAuthority::Authoritative,
+            EnvironmentAttestationSourceStatus::Ok,
+            EnvironmentAttestationFreshness::Current,
+            "CI proof lane reports a current-head artifact with verified checksum and surface probe."
+                .to_owned(),
+        )
+    } else if degraded_codes.contains(&EnvironmentAttestationDegradedCode::CiProofLaneArtifactStale)
+    {
+        (
+            EnvironmentAttestationAuthority::Stale,
+            EnvironmentAttestationSourceStatus::Stale,
+            EnvironmentAttestationFreshness::Stale,
+            "CI proof lane artifact source SHA is stale relative to requested head SHA.".to_owned(),
+        )
+    } else if degraded_codes.contains(&EnvironmentAttestationDegradedCode::CiProofLaneUnknownSource)
+        || degraded_codes
+            .contains(&EnvironmentAttestationDegradedCode::CiProofLaneDuplicateDispatch)
+    {
+        (
+            EnvironmentAttestationAuthority::Advisory,
+            EnvironmentAttestationSourceStatus::Ambiguous,
+            EnvironmentAttestationFreshness::Unknown,
+            "CI proof lane source authority is ambiguous; do not reuse or dispatch blindly."
+                .to_owned(),
+        )
+    } else {
+        (
+            EnvironmentAttestationAuthority::Degraded,
+            EnvironmentAttestationSourceStatus::Blocked,
+            EnvironmentAttestationFreshness::Unknown,
+            "CI proof lane did not produce reusable current-head artifact authority.".to_owned(),
+        )
+    };
+
+    EnvironmentAttestationSourceAuthorityEntry {
+        source: EnvironmentAttestationSourceKind::CiProofLane,
+        authority,
+        status,
+        freshness,
+        observed_at: ci_proof_lane_observed_at(snapshot),
+        summary,
+        evidence_refs: vec![format!(
+            "ci-proof-lane://snapshot/{}",
+            ci_proof_lane_safe_text(
+                ci_proof_lane_text(snapshot, "/snapshotId").unwrap_or("unknown")
+            )
+            .unwrap_or_else(|| "unknown".to_owned())
+        )],
+        metrics: ci_proof_lane_metrics(snapshot),
+        degraded_codes: degraded_codes.clone(),
+        recovery_actions: ci_proof_lane_recovery_actions(&degraded_codes),
+    }
+}
+
+fn ci_proof_lane_observed_at(snapshot: &Value) -> Option<String> {
+    let observed_at = ci_proof_lane_text(snapshot, "/generatedAt")?;
+    if chrono::DateTime::parse_from_rfc3339(observed_at).is_ok() {
+        Some(observed_at.to_owned())
+    } else {
+        None
+    }
+}
+
+fn ci_proof_lane_degraded_codes(snapshot: &Value) -> Vec<EnvironmentAttestationDegradedCode> {
+    let mut codes = Vec::new();
+    if let Some(degraded) = snapshot.get("degraded").and_then(Value::as_array) {
+        for item in degraded {
+            if let Some(code) = item.get("code").and_then(Value::as_str) {
+                insert_degraded_code(&mut codes, map_degraded_code(code));
+            }
+        }
+    }
+    codes
+}
+
+fn ci_proof_lane_code_for_verdict(verdict: &str) -> EnvironmentAttestationDegradedCode {
+    match verdict {
+        "artifact_missing" => EnvironmentAttestationDegradedCode::CiProofLaneArtifactMissing,
+        "artifact_stale" => EnvironmentAttestationDegradedCode::CiProofLaneArtifactStale,
+        "run_cancelled_before_artifact" => {
+            EnvironmentAttestationDegradedCode::CiProofLaneCancelledBeforeArtifact
+        }
+        "duplicate_dispatch_detected" => {
+            EnvironmentAttestationDegradedCode::CiProofLaneDuplicateDispatch
+        }
+        "checksum_mismatch" => EnvironmentAttestationDegradedCode::CiProofLaneChecksumMismatch,
+        "surface_probe_failed" => EnvironmentAttestationDegradedCode::CiProofLaneSurfaceProbeFailed,
+        _ => EnvironmentAttestationDegradedCode::CiProofLaneUnknownSource,
+    }
+}
+
+fn ci_proof_lane_metrics(snapshot: &Value) -> Vec<EnvironmentAttestationMetric> {
+    let workflow = snapshot
+        .get("workflows")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first());
+    let run = workflow
+        .and_then(|value| value.get("runs"))
+        .and_then(Value::as_array)
+        .and_then(|items| items.first());
+    let artifact = run
+        .and_then(|value| value.get("artifacts"))
+        .and_then(Value::as_array)
+        .and_then(|items| items.first());
+    let surface_probe = artifact
+        .and_then(|value| value.get("surfaceProbes"))
+        .and_then(Value::as_array)
+        .and_then(|items| items.first());
+    let mut metrics = Vec::new();
+    push_ci_metric(
+        &mut metrics,
+        "verdict",
+        ci_proof_lane_text(snapshot, "/summary/verdict"),
+    );
+    push_ci_metric(
+        &mut metrics,
+        "source_test_verdict",
+        ci_proof_lane_text(snapshot, "/summary/sourceTestVerdict"),
+    );
+    push_ci_metric(
+        &mut metrics,
+        "requested_head_sha",
+        ci_proof_lane_text(snapshot, "/repository/headSha"),
+    );
+    if let Some(workflow) = workflow {
+        push_ci_metric(
+            &mut metrics,
+            "workflow_name",
+            workflow.get("workflowName").and_then(Value::as_str),
+        );
+        push_ci_metric(
+            &mut metrics,
+            "workflow_path",
+            workflow.get("workflowPath").and_then(Value::as_str),
+        );
+    }
+    if let Some(run) = run {
+        push_ci_metric(
+            &mut metrics,
+            "run_id",
+            run.get("runId").and_then(Value::as_str),
+        );
+        push_ci_metric(
+            &mut metrics,
+            "job_id",
+            run.get("jobIds")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(Value::as_str),
+        );
+        push_ci_metric(
+            &mut metrics,
+            "run_head_sha",
+            run.get("headSha").and_then(Value::as_str),
+        );
+        push_ci_metric(
+            &mut metrics,
+            "source_freshness",
+            run.get("sourceFreshness").and_then(Value::as_str),
+        );
+        push_ci_metric(
+            &mut metrics,
+            "artifact_freshness",
+            run.get("artifactFreshness").and_then(Value::as_str),
+        );
+        push_ci_metric(
+            &mut metrics,
+            "first_failure_diagnosis",
+            run.get("firstFailureDiagnosis").and_then(Value::as_str),
+        );
+    }
+    if let Some(artifact) = artifact {
+        push_ci_metric(
+            &mut metrics,
+            "artifact_name",
+            artifact.get("name").and_then(Value::as_str),
+        );
+        push_ci_metric(
+            &mut metrics,
+            "checksum_status",
+            artifact.get("checksumStatus").and_then(Value::as_str),
+        );
+        push_ci_metric(
+            &mut metrics,
+            "artifact_source_sha",
+            artifact.get("sourceSha").and_then(Value::as_str),
+        );
+    }
+    if let Some(surface_probe) = surface_probe {
+        push_ci_metric(
+            &mut metrics,
+            "surface_probe_status",
+            surface_probe.get("status").and_then(Value::as_str),
+        );
+        push_ci_metric(
+            &mut metrics,
+            "surface_expected",
+            surface_probe.get("expectedSurface").and_then(Value::as_str),
+        );
+        push_ci_metric(
+            &mut metrics,
+            "surface_first_failure_diagnosis",
+            surface_probe
+                .get("firstFailureDiagnosis")
+                .and_then(Value::as_str),
+        );
+    }
+    metrics.sort();
+    metrics.dedup();
+    metrics
+}
+
+fn push_ci_metric(
+    metrics: &mut Vec<EnvironmentAttestationMetric>,
+    name: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value.and_then(ci_proof_lane_safe_text) {
+        metrics.push(metric_string(name, value));
+    }
+}
+
+fn ci_proof_lane_text<'a>(value: &'a Value, pointer: &str) -> Option<&'a str> {
+    value.pointer(pointer).and_then(Value::as_str)
+}
+
+fn ci_proof_lane_safe_text(value: &str) -> Option<String> {
+    let text = value
+        .trim()
+        .replace('\n', " ")
+        .replace('\r', " ")
+        .replace('\t', " ");
+    if text.is_empty() {
+        return None;
+    }
+    let denied = [
+        "BEGIN PRIVATE KEY",
+        "BEGIN OPENSSH PRIVATE KEY",
+        "ghp_",
+        "Bearer ",
+        "DATABASE_URL=",
+        "From: ",
+        "Subject: ",
+        "Message-ID:",
+        "body:",
+        "raw_inbox",
+        "stdout:",
+        "stderr:",
+        "/Users/",
+        "/home/",
+        "/private/",
+        "/Volumes/",
+    ];
+    if denied.iter().any(|pattern| text.contains(pattern)) {
+        return Some("redacted_ci_proof_lane_value".to_owned());
+    }
+    Some(text.chars().take(240).collect())
+}
+
+fn ci_proof_lane_recovery_actions(
+    codes: &[EnvironmentAttestationDegradedCode],
+) -> Vec<EnvironmentAttestationRecoveryAction> {
+    if codes.is_empty() {
+        return Vec::new();
+    }
+    let (kind, required_substrate, rationale) = if codes
+        .contains(&EnvironmentAttestationDegradedCode::CiProofLaneArtifactStale)
+        || codes.contains(&EnvironmentAttestationDegradedCode::CiProofLaneUnknownSource)
+        || codes.contains(&EnvironmentAttestationDegradedCode::CiProofLaneDuplicateDispatch)
+    {
+        (
+            EnvironmentAttestationRecoveryKind::Coordinate,
+            EnvironmentAttestationSubstrate::AgentMail,
+            "Coordinate proof-lane authority before dispatching, downloading, or reusing an artifact.",
+        )
+    } else {
+        (
+            EnvironmentAttestationRecoveryKind::HumanDecision,
+            EnvironmentAttestationSubstrate::Human,
+            "Treat the proof-lane artifact as unavailable until workflow evidence is repaired.",
+        )
+    };
+    vec![EnvironmentAttestationRecoveryAction {
+        priority: 0,
+        kind,
+        command: None,
+        mutates_state: false,
+        required_substrate,
+        rationale: rationale.to_owned(),
+    }]
+}
+
 fn build_admission_entry(
     report: &SwarmBriefReport,
 ) -> Option<EnvironmentAttestationSourceAuthorityEntry> {
@@ -822,6 +1161,27 @@ fn map_degraded_code(code: &str) -> EnvironmentAttestationDegradedCode {
         }
         "reservation_evidence_stale" => {
             EnvironmentAttestationDegradedCode::ReservationEvidenceStale
+        }
+        "ci_proof_lane_artifact_missing" => {
+            EnvironmentAttestationDegradedCode::CiProofLaneArtifactMissing
+        }
+        "ci_proof_lane_artifact_stale" => {
+            EnvironmentAttestationDegradedCode::CiProofLaneArtifactStale
+        }
+        "ci_proof_lane_cancelled_before_artifact" => {
+            EnvironmentAttestationDegradedCode::CiProofLaneCancelledBeforeArtifact
+        }
+        "ci_proof_lane_checksum_mismatch" => {
+            EnvironmentAttestationDegradedCode::CiProofLaneChecksumMismatch
+        }
+        "ci_proof_lane_surface_probe_failed" => {
+            EnvironmentAttestationDegradedCode::CiProofLaneSurfaceProbeFailed
+        }
+        "ci_proof_lane_duplicate_dispatch" => {
+            EnvironmentAttestationDegradedCode::CiProofLaneDuplicateDispatch
+        }
+        "ci_proof_lane_gh_unavailable" | "ci_proof_lane_no_matching_run" => {
+            EnvironmentAttestationDegradedCode::CiProofLaneUnknownSource
         }
         _ => EnvironmentAttestationDegradedCode::SourceAuthorityAmbiguous,
     }
@@ -991,6 +1351,13 @@ fn recovery_action_for_degradation(
         | EnvironmentAttestationDegradedCode::ReservationEvidenceStale
         | EnvironmentAttestationDegradedCode::SourceAuthorityAmbiguous
         | EnvironmentAttestationDegradedCode::StaleBinarySuspected
+        | EnvironmentAttestationDegradedCode::CiProofLaneArtifactMissing
+        | EnvironmentAttestationDegradedCode::CiProofLaneArtifactStale
+        | EnvironmentAttestationDegradedCode::CiProofLaneCancelledBeforeArtifact
+        | EnvironmentAttestationDegradedCode::CiProofLaneChecksumMismatch
+        | EnvironmentAttestationDegradedCode::CiProofLaneSurfaceProbeFailed
+        | EnvironmentAttestationDegradedCode::CiProofLaneUnknownSource
+        | EnvironmentAttestationDegradedCode::CiProofLaneDuplicateDispatch
         | EnvironmentAttestationDegradedCode::BuildAdmissionBlocked
         | EnvironmentAttestationDegradedCode::SupportBundleRedactionUnverified
         | EnvironmentAttestationDegradedCode::LocalCargoBypassDetected => {
@@ -1021,6 +1388,8 @@ fn attestation_summary(
     environment_attestation_summary_from_inputs(EnvironmentAttestationSummaryInputs {
         local_cargo_fallback_observed,
         remote_environment_blocked,
+        stale_source_observed: codes
+            .contains(&EnvironmentAttestationDegradedCode::CiProofLaneArtifactStale),
         tracker_stale: codes.contains(&EnvironmentAttestationDegradedCode::BeadsTrackerStale),
         reservation_conflict: codes
             .contains(&EnvironmentAttestationDegradedCode::ReservationEvidenceStale),
@@ -1033,7 +1402,15 @@ fn attestation_summary(
             || codes.contains(&EnvironmentAttestationDegradedCode::AgentMailUnavailable)
             || codes.contains(&EnvironmentAttestationDegradedCode::AgentMailProbeMismatch),
         source_authority_ambiguous: codes
-            .contains(&EnvironmentAttestationDegradedCode::SourceAuthorityAmbiguous),
+            .contains(&EnvironmentAttestationDegradedCode::SourceAuthorityAmbiguous)
+            || codes.contains(&EnvironmentAttestationDegradedCode::CiProofLaneArtifactMissing)
+            || codes.contains(&EnvironmentAttestationDegradedCode::CiProofLaneArtifactStale)
+            || codes
+                .contains(&EnvironmentAttestationDegradedCode::CiProofLaneCancelledBeforeArtifact)
+            || codes.contains(&EnvironmentAttestationDegradedCode::CiProofLaneChecksumMismatch)
+            || codes.contains(&EnvironmentAttestationDegradedCode::CiProofLaneSurfaceProbeFailed)
+            || codes.contains(&EnvironmentAttestationDegradedCode::CiProofLaneUnknownSource)
+            || codes.contains(&EnvironmentAttestationDegradedCode::CiProofLaneDuplicateDispatch),
         remote_verification_admitted,
         evidence_available: !entries.is_empty(),
     })
@@ -1116,7 +1493,9 @@ fn severity_for_degraded_code(code: EnvironmentAttestationDegradedCode) -> &'sta
         | EnvironmentAttestationDegradedCode::RchWorkerTopologyBlocked
         | EnvironmentAttestationDegradedCode::RchSourceMaterializationBlocked
         | EnvironmentAttestationDegradedCode::RchRemoteRequiredFallbackPrevented
-        | EnvironmentAttestationDegradedCode::BuildAdmissionBlocked => "high",
+        | EnvironmentAttestationDegradedCode::BuildAdmissionBlocked
+        | EnvironmentAttestationDegradedCode::CiProofLaneChecksumMismatch
+        | EnvironmentAttestationDegradedCode::CiProofLaneSurfaceProbeFailed => "high",
         _ => "warning",
     }
 }
@@ -1171,6 +1550,27 @@ fn degradation_message(code: EnvironmentAttestationDegradedCode) -> String {
         EnvironmentAttestationDegradedCode::ReservationEvidenceStale => {
             "Active file reservation evidence requires coordination."
         }
+        EnvironmentAttestationDegradedCode::CiProofLaneArtifactMissing => {
+            "CI proof-lane run completed without the expected artifact."
+        }
+        EnvironmentAttestationDegradedCode::CiProofLaneArtifactStale => {
+            "CI proof-lane artifact source SHA is stale relative to requested head SHA."
+        }
+        EnvironmentAttestationDegradedCode::CiProofLaneCancelledBeforeArtifact => {
+            "CI proof-lane run was cancelled before artifact upload completed."
+        }
+        EnvironmentAttestationDegradedCode::CiProofLaneChecksumMismatch => {
+            "CI proof-lane artifact checksum did not verify."
+        }
+        EnvironmentAttestationDegradedCode::CiProofLaneSurfaceProbeFailed => {
+            "CI proof-lane artifact failed the required command-surface probe."
+        }
+        EnvironmentAttestationDegradedCode::CiProofLaneUnknownSource => {
+            "CI proof-lane source authority was unavailable or unknown."
+        }
+        EnvironmentAttestationDegradedCode::CiProofLaneDuplicateDispatch => {
+            "Multiple active CI proof-lane dispatches target the same source authority."
+        }
     }
     .to_owned()
 }
@@ -1202,7 +1602,14 @@ fn repair_for_degraded_code(code: EnvironmentAttestationDegradedCode) -> Option<
         | EnvironmentAttestationDegradedCode::SourceAuthorityAmbiguous
         | EnvironmentAttestationDegradedCode::LocalCargoBypassDetected
         | EnvironmentAttestationDegradedCode::SupportBundleRedactionUnverified
-        | EnvironmentAttestationDegradedCode::ReservationEvidenceStale => None,
+        | EnvironmentAttestationDegradedCode::ReservationEvidenceStale
+        | EnvironmentAttestationDegradedCode::CiProofLaneArtifactMissing
+        | EnvironmentAttestationDegradedCode::CiProofLaneArtifactStale
+        | EnvironmentAttestationDegradedCode::CiProofLaneCancelledBeforeArtifact
+        | EnvironmentAttestationDegradedCode::CiProofLaneChecksumMismatch
+        | EnvironmentAttestationDegradedCode::CiProofLaneSurfaceProbeFailed
+        | EnvironmentAttestationDegradedCode::CiProofLaneUnknownSource
+        | EnvironmentAttestationDegradedCode::CiProofLaneDuplicateDispatch => None,
     }
 }
 
@@ -1294,6 +1701,7 @@ impl EnvironmentAttestationSourceKind {
             Self::RchSourceMaterialization => "rch_source_materialization",
             Self::BuildAdmission => "build_admission",
             Self::LocalCargoTripwire => "local_cargo_tripwire",
+            Self::CiProofLane => "ci_proof_lane",
             Self::HostProfile => "host_profile",
             Self::ClaimGate => "claim_gate",
             Self::FileReservations => "file_reservations",
@@ -1403,6 +1811,33 @@ mod tests {
             Some(entry) => entry,
             None => panic!("missing source entry {source:?}"),
         }
+    }
+
+    fn ci_proof_lane_fixture(name: &str) -> Value {
+        let text = match name {
+            "fresh_artifact_available" => {
+                include_str!("../../tests/fixtures/ci_proof_lane/fresh_artifact_available.json")
+            }
+            "artifact_stale" => {
+                include_str!("../../tests/fixtures/ci_proof_lane/artifact_stale.json")
+            }
+            "cancelled_before_artifact" => {
+                include_str!("../../tests/fixtures/ci_proof_lane/cancelled_before_artifact.json")
+            }
+            _ => panic!("unknown CI proof lane fixture {name}"),
+        };
+        serde_json::from_str(text).unwrap_or_else(|error| panic!("{name} fixture parses: {error}"))
+    }
+
+    fn metric_value(
+        entry: &EnvironmentAttestationSourceAuthorityEntry,
+        name: &str,
+    ) -> Option<&str> {
+        entry
+            .metrics
+            .iter()
+            .find(|metric| metric.name == name)
+            .map(|metric| metric.value.as_str())
     }
 
     #[test]
@@ -1521,6 +1956,7 @@ mod tests {
             EnvironmentAttestationInputs {
                 generated_at: fixed_time(),
                 local_cargo_process_scan: Some(&process_scan),
+                ci_proof_lane_snapshot: None,
             },
         );
         let tripwire = entry(
@@ -1540,6 +1976,123 @@ mod tests {
                 .iter()
                 .all(|action| !action.mutates_state)
         );
+    }
+
+    #[test]
+    fn ci_proof_lane_fresh_artifact_is_authoritative_source_evidence() {
+        let brief = report_with_sources(vec![ready_source(SwarmBriefSourceKind::Git)]);
+        let snapshot = ci_proof_lane_fixture("fresh_artifact_available");
+        let attestation = environment_attestation_from_swarm_brief_with_inputs(
+            &brief,
+            EnvironmentAttestationInputs {
+                generated_at: fixed_time(),
+                local_cargo_process_scan: None,
+                ci_proof_lane_snapshot: Some(&snapshot),
+            },
+        );
+        let proof_lane = entry(&attestation, EnvironmentAttestationSourceKind::CiProofLane);
+
+        assert_eq!(
+            proof_lane.authority,
+            EnvironmentAttestationAuthority::Authoritative
+        );
+        assert_eq!(proof_lane.status, EnvironmentAttestationSourceStatus::Ok);
+        assert_eq!(
+            proof_lane.freshness,
+            EnvironmentAttestationFreshness::Current
+        );
+        assert!(proof_lane.degraded_codes.is_empty());
+        assert_eq!(
+            metric_value(proof_lane, "workflow_path"),
+            Some(".github/workflows/macos-ee-artifact.yml")
+        );
+        assert_eq!(
+            metric_value(proof_lane, "surface_probe_status"),
+            Some("passed")
+        );
+        assert_eq!(
+            attestation.verdict,
+            EnvironmentAttestationVerdict::SafeToClaim
+        );
+    }
+
+    #[test]
+    fn ci_proof_lane_stale_and_cancelled_snapshots_fail_closed() {
+        let stale_snapshot = ci_proof_lane_fixture("artifact_stale");
+        let stale_attestation = environment_attestation_from_swarm_brief_with_inputs(
+            &report_with_sources(vec![ready_source(SwarmBriefSourceKind::Git)]),
+            EnvironmentAttestationInputs {
+                generated_at: fixed_time(),
+                local_cargo_process_scan: None,
+                ci_proof_lane_snapshot: Some(&stale_snapshot),
+            },
+        );
+        let stale_lane = entry(
+            &stale_attestation,
+            EnvironmentAttestationSourceKind::CiProofLane,
+        );
+
+        assert_eq!(stale_lane.status, EnvironmentAttestationSourceStatus::Stale);
+        assert_eq!(
+            stale_lane.degraded_codes,
+            vec![EnvironmentAttestationDegradedCode::CiProofLaneArtifactStale]
+        );
+        assert_eq!(
+            stale_attestation.summary.source_test_verdict,
+            EnvironmentAttestationSourceTestVerdict::StaleSource
+        );
+        assert_eq!(
+            stale_attestation.verdict,
+            EnvironmentAttestationVerdict::SourceAuthorityAmbiguous
+        );
+        assert_eq!(
+            metric_value(stale_lane, "first_failure_diagnosis"),
+            Some("artifact source SHA is older than the requested repository head SHA")
+        );
+
+        let cancelled_snapshot = ci_proof_lane_fixture("cancelled_before_artifact");
+        let cancelled_attestation = environment_attestation_from_swarm_brief_with_inputs(
+            &report_with_sources(vec![ready_source(SwarmBriefSourceKind::Git)]),
+            EnvironmentAttestationInputs {
+                generated_at: fixed_time(),
+                local_cargo_process_scan: None,
+                ci_proof_lane_snapshot: Some(&cancelled_snapshot),
+            },
+        );
+        let cancelled_lane = entry(
+            &cancelled_attestation,
+            EnvironmentAttestationSourceKind::CiProofLane,
+        );
+
+        assert_eq!(
+            cancelled_lane.status,
+            EnvironmentAttestationSourceStatus::Blocked
+        );
+        assert_eq!(
+            cancelled_lane.degraded_codes,
+            vec![EnvironmentAttestationDegradedCode::CiProofLaneCancelledBeforeArtifact]
+        );
+        assert_eq!(
+            cancelled_attestation.summary.source_test_verdict,
+            EnvironmentAttestationSourceTestVerdict::NotEvaluated
+        );
+        assert_eq!(
+            cancelled_attestation.verdict,
+            EnvironmentAttestationVerdict::SourceAuthorityAmbiguous
+        );
+    }
+
+    #[test]
+    fn ci_proof_lane_safe_text_redacts_support_bundle_path_prefixes() {
+        for raw in [
+            "artifact extracted under /Volumes/USBNVME16TB/tmp/ee",
+            "surface probe wrote to /private/var/folders/ee/stdout.txt",
+        ] {
+            assert_eq!(
+                ci_proof_lane_safe_text(raw).as_deref(),
+                Some("redacted_ci_proof_lane_value")
+            );
+        }
     }
 
     #[test]
