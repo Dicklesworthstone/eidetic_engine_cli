@@ -25,6 +25,7 @@
 
 use ee::models::query::{EqlSpeedMode, EqlTagsMode, parse_eql_query};
 use proptest::prelude::*;
+use proptest::test_runner::TestCaseError;
 use serde_json::{Map, Value, json};
 
 type TestResult = Result<(), String>;
@@ -134,7 +135,10 @@ proptest! {
     #[test]
     fn parse_eql_query_rejects_zero_limit(text in r"[A-Za-z]{1,16}") {
         let value = json!({"q": text, "limit": 0});
-        let error = parse_eql_query(&value).expect_err("limit=0 must error");
+        let error = parse_eql_query(&value).map_or_else(
+            Ok,
+            |query| Err(TestCaseError::fail(format!("limit=0 unexpectedly parsed: {query:?}"))),
+        )?;
         prop_assert_eq!(error.field, "limit");
     }
 
@@ -168,9 +172,9 @@ proptest! {
         let padded = format!("{pad_left}{text}{pad_right}");
         let trimmed = text.trim().to_string();
         let padded_query = parse_eql_query(&json!({"q": padded.clone()}))
-            .expect("padded query should parse");
+            .map_err(|error| TestCaseError::fail(format!("padded query should parse: {error}")))?;
         let trimmed_query = parse_eql_query(&json!({"q": trimmed.clone()}))
-            .expect("trimmed query should parse");
+            .map_err(|error| TestCaseError::fail(format!("trimmed query should parse: {error}")))?;
         prop_assert_eq!(padded_query.q, trimmed_query.q);
     }
 
@@ -179,7 +183,8 @@ proptest! {
     #[test]
     fn parse_eql_query_defaults_are_stable(text in r"[A-Za-z][A-Za-z0-9 _-]{0,32}") {
         prop_assume!(!text.trim().is_empty());
-        let parsed = parse_eql_query(&json!({"q": text})).expect("minimal q should parse");
+        let parsed = parse_eql_query(&json!({"q": text}))
+            .map_err(|error| TestCaseError::fail(format!("minimal q should parse: {error}")))?;
         prop_assert_eq!(parsed.tags_mode, EqlTagsMode::Any);
         prop_assert_eq!(parsed.speed, EqlSpeedMode::Default);
         prop_assert_eq!(parsed.limit, 10);
