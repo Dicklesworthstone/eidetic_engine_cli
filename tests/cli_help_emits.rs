@@ -1,11 +1,11 @@
 use std::process::Command;
 
 #[test]
-fn root_help_emits_walking_skeleton_prelude() {
+fn root_help_emits_walking_skeleton_prelude() -> Result<(), String> {
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .arg("--help")
         .output()
-        .expect("run ee --help");
+        .map_err(|error| format!("run ee --help: {error}"))?;
 
     assert!(
         output.status.success(),
@@ -14,8 +14,10 @@ fn root_help_emits_walking_skeleton_prelude() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let stdout = String::from_utf8(output.stdout).expect("help stdout is utf-8");
-    let stderr = String::from_utf8(output.stderr).expect("help stderr is utf-8");
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("help stdout is utf-8: {error}"))?;
+    let stderr = String::from_utf8(output.stderr)
+        .map_err(|error| format!("help stderr is utf-8: {error}"))?;
 
     assert!(!stdout.trim().is_empty(), "ee --help stdout is empty");
     assert!(
@@ -37,4 +39,5 @@ fn root_help_emits_walking_skeleton_prelude() {
             "ee --help stdout missing {required:?}:\n{stdout}"
         );
     }
+    Ok(())
 }
