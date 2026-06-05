@@ -15,6 +15,9 @@ use ee::db::{
 };
 use serde_json::Value as JsonValue;
 
+#[path = "support/test_tracing.rs"]
+mod test_tracing;
+
 type TestResult = Result<(), String>;
 const CONTEXT_QUERY: &str = "Always run cargo fmt --check before release";
 const JSONL_GRAPH_FIELDS: &[&str] = &[
@@ -429,6 +432,10 @@ fn memory_with_tags(
 
 #[test]
 fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
+    let _trace = test_tracing::init_test_tracing(
+        "bd-3usjw.53",
+        "backup_then_restore_preserves_every_memory_and_tag",
+    );
     let staging = tempfile::Builder::new()
         .prefix("ee-534m-roundtrip-")
         .tempdir()

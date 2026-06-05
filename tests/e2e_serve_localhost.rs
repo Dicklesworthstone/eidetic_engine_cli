@@ -5,6 +5,9 @@ use std::process::{Command, Stdio};
 use ee::serve::{SERVE_ENDPOINT_SCHEMA_V1, ServeLimits, render_serve_transport_exchange};
 use serde_json::Value as JsonValue;
 
+#[path = "support/test_tracing.rs"]
+mod test_tracing;
+
 type TestResult = Result<(), String>;
 
 // bd-2bw8m: endpoint-level regression coverage for serve query percent decoding.
@@ -72,6 +75,10 @@ fn response_sse_data_json(response: &str) -> Result<JsonValue, String> {
 
 #[test]
 fn serve_foreground_cli_accepts_one_real_status_request() -> TestResult {
+    let _trace = test_tracing::init_test_tracing(
+        "bd-3usjw.4",
+        "serve_foreground_cli_accepts_one_real_status_request",
+    );
     let token = "01234567890123456789012345678901";
     let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
         .args([
