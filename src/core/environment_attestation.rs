@@ -12,7 +12,8 @@ use serde_json::Value;
 
 use crate::core::swarm_brief::{
     SwarmBriefCollectOptions, SwarmBriefCommandRunner, SwarmBriefDegradation, SwarmBriefReport,
-    SwarmBriefSourceKind, SwarmBriefSourceSnapshot, SwarmBriefSourceStatus, collect_swarm_brief,
+    SwarmBriefSourceKind, SwarmBriefSourceSnapshot, SwarmBriefSourceStatus,
+    agent_mail_snapshot_producer_command_template, collect_swarm_brief,
 };
 
 pub const ENVIRONMENT_ATTESTATION_SCHEMA_V1: &str = "ee.environment_attestation.v1";
@@ -1377,10 +1378,10 @@ fn recovery_action_for_degradation(
             EnvironmentAttestationRecoveryAction {
                 priority,
                 kind: EnvironmentAttestationRecoveryKind::Coordinate,
-                command: None,
+                command: command_action(agent_mail_snapshot_producer_command_template()),
                 mutates_state: false,
                 required_substrate: EnvironmentAttestationSubstrate::AgentMail,
-                rationale: "Repair or refresh Agent Mail evidence before treating coordination as empty."
+                rationale: "Generate a redacted Agent Mail snapshot before treating coordination as empty."
                     .to_owned(),
             }
         }
@@ -2217,6 +2218,19 @@ mod tests {
             mail.degraded_codes,
             vec![EnvironmentAttestationDegradedCode::AgentMailUnavailable]
         );
+        let mail_action = mail
+            .recovery_actions
+            .iter()
+            .find(|action| action.required_substrate == EnvironmentAttestationSubstrate::AgentMail)
+            .and_then(|action| action.command.as_ref())
+            .expect("Agent Mail recovery action includes snapshot command");
+        assert!(
+            mail_action
+                .display_command
+                .contains("scripts/agent_mail_snapshot.sh")
+        );
+        assert!(mail_action.display_command.contains("--agent <AGENT_NAME>"));
+        assert!(mail_action.display_command.contains("/private/tmp/"));
         assert_eq!(
             attestation.verdict,
             EnvironmentAttestationVerdict::CoordinateBeforeClaim

@@ -80,6 +80,9 @@ const AGENT_MAIL_UNAVAILABLE_CODE: &str = "agent_mail_unavailable";
 const AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE: &str = "agent_mail_semantic_readiness_failed";
 const AGENT_MAIL_HEALTH_PORT: u16 = 8765;
 const AGENT_MAIL_HEALTH_PROBE_TIMEOUT_MS: u64 = 75;
+pub const AGENT_MAIL_SNAPSHOT_TEMPLATE_AGENT: &str = "<AGENT_NAME>";
+pub const AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH: &str = "/private/tmp/ee-agent-mail-snapshot.json";
+pub const AGENT_MAIL_SNAPSHOT_PRODUCER_COMMAND: &str = "scripts/agent_mail_snapshot.sh --project . --agent <AGENT_NAME> --json --output /private/tmp/ee-agent-mail-snapshot.json";
 const MEMORY_DRIFT_UNAVAILABLE_CODE: &str = "memory_drift_source_unverifiable";
 const RCH_UNAVAILABLE_CODE: &str = "rch_unavailable";
 const RCH_WORKER_TOPOLOGY_BLOCKED_CODE: &str = "rch_worker_topology_blocked";
@@ -1993,16 +1996,34 @@ fn probe_agent_mail_health_endpoint() -> AgentMailHealthProbe {
 fn agent_mail_missing_snapshot_degradation_text(
     probe: AgentMailHealthProbe,
 ) -> (&'static str, String) {
+    let producer = agent_mail_snapshot_producer_command_template();
+    let retry = agent_mail_snapshot_brief_retry_command_template();
     match probe {
         AgentMailHealthProbe::Reachable => (
             "No redacted Agent Mail snapshot path was configured; the local Agent Mail health endpoint at 127.0.0.1:8765 is reachable, but ee swarm brief only consumes explicit redacted snapshots.",
-            "Generate a read-only redacted Agent Mail snapshot and pass --agent-mail-snapshot <snapshot.json>; live MCP tools remain external to ee.".to_string(),
+            format!(
+                "Generate a read-only redacted Agent Mail snapshot with `{producer}`, then retry with `{retry}`; live MCP tools remain external to ee."
+            ),
         ),
         AgentMailHealthProbe::Unreachable => (
             "No redacted Agent Mail snapshot path was configured, and the local Agent Mail health endpoint at 127.0.0.1:8765 was not reachable within the brief probe budget.",
-            "Start or repair Agent Mail, generate a read-only redacted Agent Mail snapshot, then pass --agent-mail-snapshot <snapshot.json> when collecting the brief.".to_string(),
+            format!(
+                "Start or repair Agent Mail, then generate a read-only redacted Agent Mail snapshot with `{producer}` and retry with `{retry}`."
+            ),
         ),
     }
+}
+
+#[must_use]
+pub const fn agent_mail_snapshot_producer_command_template() -> &'static str {
+    AGENT_MAIL_SNAPSHOT_PRODUCER_COMMAND
+}
+
+#[must_use]
+pub fn agent_mail_snapshot_brief_retry_command_template() -> String {
+    format!(
+        "ee swarm brief --workspace . --agent-mail-snapshot {AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH} --json"
+    )
 }
 
 fn read_agent_mail_snapshot_file(path: &Path) -> io::Result<String> {

@@ -27,7 +27,9 @@ use crate::core::preflight_guard::classify_repair_command_for_preflight;
 use crate::core::swarm_brief::{
     SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandRunner, SwarmBriefCommit,
     SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefReport, SwarmBriefSourceKind,
-    SwarmBriefThreadSummary, collect_swarm_brief,
+    SwarmBriefSourceStatus, SwarmBriefThreadSummary,
+    agent_mail_snapshot_brief_retry_command_template,
+    agent_mail_snapshot_producer_command_template, collect_swarm_brief,
 };
 use crate::core::verify_ledger::{RchVerifyRunView, list_rch_verify_blockers};
 use crate::db::DbConnection;
@@ -42,6 +44,8 @@ pub const SWARM_WORK_PACKET_REDACTION_STATUS: &str =
 const EXTERNAL_AGENT_SPACE_ROOT: &str = "/Volumes/USBNVME16TB/temp_agent_space";
 const AGENT_MAIL_UNAVAILABLE_CODE: &str = "agent_mail_unavailable";
 const AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE: &str = "agent_mail_semantic_readiness_failed";
+const AGENT_MAIL_SNAPSHOT_TEMPLATE_AGENT: &str = "<AGENT_NAME>";
+const AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH: &str = "/private/tmp/ee-agent-mail-snapshot.json";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SwarmNextActionSnapshot {
@@ -1468,7 +1472,7 @@ fn work_packet_claim_gate_unsafe_reasons(
         ));
     }
     if agent_mail_blocks_claim(&packet.coordination.agent_mail) {
-        reasons.push(AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE.to_owned());
+        reasons.push(agent_mail_claim_blocker_reason(&packet.coordination.agent_mail).to_owned());
         if packet.coordination.agent_mail.reservation_authoritative != Some(true) {
             reasons.push("reservation_evidence_not_authoritative".to_owned());
         }
@@ -1692,7 +1696,7 @@ fn apply_agent_mail_authority_candidate_downgrade(
         return;
     }
 
-    let unsafe_reason = AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE;
+    let unsafe_reason = agent_mail_claim_blocker_reason(agent_mail);
     for candidate in candidates {
         if candidate.decision == "safe_to_claim" {
             candidate.decision = "external_state_required";
@@ -2082,12 +2086,15 @@ fn work_packet_agent_mail(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let status = source.map_or("skipped", |source| match source.status.as_str() {
-        "ready" => "fresh",
-        "degraded" => "degraded_read_only",
-        "unavailable" => "unavailable",
-        _ => "skipped",
+    let status = source.map_or("skipped", |source| match source.status {
+        SwarmBriefSourceStatus::Ready => "fresh",
+        SwarmBriefSourceStatus::Degraded => "degraded_read_only",
+        SwarmBriefSourceStatus::Unavailable | SwarmBriefSourceStatus::NotConfigured => {
+            "unavailable"
+        }
+        SwarmBriefSourceStatus::Skipped => "skipped",
     });
+    let unavailable_reason = agent_mail_unavailable_reason(snapshot);
     let semantic_failure_reason = agent_mail_semantic_failure_reason(snapshot);
     let status = if semantic_failure_reason.is_some() {
         "semantic_readiness_failed"
@@ -2127,9 +2134,36 @@ fn work_packet_agent_mail(
         archive_index_parity: agent_mail_archive_index_parity(status, snapshot),
         reservation_authoritative,
         inbox_authoritative,
-        fallback_actions: agent_mail_fallback_actions(status),
+        fallback_actions: agent_mail_fallback_actions(status, unavailable_reason),
         semantic_readiness,
     }
+}
+
+fn agent_mail_unavailable_reason(snapshot: &SwarmNextActionSnapshot) -> &'static str {
+    snapshot
+        .degraded
+        .iter()
+        .find(|degradation| {
+            degradation.source == "agent_mail" && degradation.code == AGENT_MAIL_UNAVAILABLE_CODE
+        })
+        .map_or("agent_mail_unavailable", |degradation| {
+            let message = degradation.message.as_str();
+            if message.contains("No redacted Agent Mail snapshot path was configured") {
+                "snapshot_missing"
+            } else if message.contains("refusing to read Agent Mail snapshot")
+                || message.contains("not a file")
+                || message.contains("No such file")
+                || message.contains("permission denied")
+            {
+                "snapshot_unreadable"
+            } else if message.contains("stale") {
+                "snapshot_stale"
+            } else if message.contains("snapshot") {
+                "snapshot_malformed"
+            } else {
+                "agent_mail_unavailable"
+            }
+        })
 }
 
 fn agent_mail_semantic_failure_reason(snapshot: &SwarmNextActionSnapshot) -> Option<&'static str> {
@@ -2232,12 +2266,35 @@ fn agent_mail_archive_index_parity(
     }
 }
 
-fn agent_mail_fallback_actions(status: &str) -> Vec<SwarmWorkPacketAgentMailFallbackAction> {
+fn agent_mail_fallback_actions(
+    status: &str,
+    unavailable_reason: &'static str,
+) -> Vec<SwarmWorkPacketAgentMailFallbackAction> {
     if status == "fresh" || status == "healthy" || status == "skipped" {
         return Vec::new();
     }
 
-    let mut actions = vec![
+    let mut actions = Vec::new();
+    if status == "unavailable" {
+        let generate = agent_mail_snapshot_generate_command_action();
+        let retry = agent_mail_snapshot_retry_brief_command_action();
+        actions.push(agent_mail_fallback_action(
+            unavailable_reason,
+            "Generate a read-only redacted Agent Mail snapshot with an explicit agent placeholder.",
+            Some(generate.display_command.clone()),
+            Some(generate),
+            None,
+        ));
+        actions.push(agent_mail_fallback_action(
+            "retry_with_snapshot",
+            "Retry swarm brief with the generated redacted Agent Mail snapshot.",
+            Some(retry.display_command.clone()),
+            Some(retry),
+            None,
+        ));
+    }
+
+    actions.extend([
         agent_mail_fallback_action(
             "manual_coordination",
             "Coordinate file ownership outside Agent Mail while reservation and inbox reads are unavailable.",
@@ -2261,7 +2318,7 @@ fn agent_mail_fallback_actions(status: &str) -> Vec<SwarmWorkPacketAgentMailFall
             None,
             Some("Avoid claiming peer-touched lanes until Agent Mail reads recover."),
         ),
-    ];
+    ]);
     if status == "semantic_readiness_failed" {
         actions.push(agent_mail_fallback_action(
             "beads_comment",
@@ -2301,6 +2358,102 @@ fn agent_mail_fallback_actions(status: &str) -> Vec<SwarmWorkPacketAgentMailFall
     actions.sort();
     actions.dedup();
     actions
+}
+
+fn agent_mail_snapshot_generate_command_action() -> SwarmWorkPacketCommandAction {
+    work_packet_command_action(
+        "agent_mail_snapshot_generate",
+        agent_mail_snapshot_producer_command_template(),
+        &[
+            "scripts/agent_mail_snapshot.sh",
+            "--project",
+            ".",
+            "--agent",
+            AGENT_MAIL_SNAPSHOT_TEMPLATE_AGENT,
+            "--json",
+            "--output",
+            AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH,
+        ],
+        false,
+        "agent_mail",
+        "before_claim",
+        "Generate read-only redacted Agent Mail evidence before treating coordination as empty.",
+    )
+}
+
+fn agent_mail_snapshot_retry_brief_command_action() -> SwarmWorkPacketCommandAction {
+    work_packet_command_action(
+        "swarm_brief_retry_with_agent_mail_snapshot",
+        agent_mail_snapshot_brief_retry_command_template(),
+        &[
+            "ee",
+            "swarm",
+            "brief",
+            "--workspace",
+            ".",
+            "--agent-mail-snapshot",
+            AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH,
+            "--json",
+        ],
+        false,
+        "ee",
+        "after_agent_mail_snapshot",
+        "Retry swarm brief with the generated redacted Agent Mail snapshot.",
+    )
+}
+
+fn agent_mail_snapshot_retry_work_packet_command_action(
+    candidate_id: Option<&str>,
+) -> SwarmWorkPacketCommandAction {
+    if let Some(candidate_id) = candidate_id {
+        work_packet_command_action(
+            "swarm_work_packet_retry_with_agent_mail_snapshot",
+            format!(
+                "ee swarm work-packet --workspace . --include-rch --agent-mail-snapshot {AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH} --candidate {candidate_id} --claim-gate --json"
+            ),
+            &[
+                "ee",
+                "swarm",
+                "work-packet",
+                "--workspace",
+                ".",
+                "--include-rch",
+                "--agent-mail-snapshot",
+                AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH,
+                "--candidate",
+                candidate_id,
+                "--claim-gate",
+                "--json",
+            ],
+            false,
+            "ee",
+            "after_agent_mail_snapshot",
+            "Retry this claim gate with the generated redacted Agent Mail snapshot.",
+        )
+    } else {
+        work_packet_command_action(
+            "swarm_work_packet_retry_with_agent_mail_snapshot",
+            format!(
+                "ee swarm work-packet --workspace . --include-rch --agent-mail-snapshot {AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH} --claim-gate --json"
+            ),
+            &[
+                "ee",
+                "swarm",
+                "work-packet",
+                "--workspace",
+                ".",
+                "--include-rch",
+                "--agent-mail-snapshot",
+                AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH,
+                "--claim-gate",
+                "--json",
+            ],
+            false,
+            "ee",
+            "after_agent_mail_snapshot",
+            "Retry this claim gate with the generated redacted Agent Mail snapshot.",
+        )
+    }
 }
 
 fn agent_mail_fallback_action(
@@ -2725,8 +2878,8 @@ fn work_packet_recommended_action(
         reasons.push(rch_reason.to_owned());
     }
     if agent_mail_blocks_claim(agent_mail) {
+        reasons.push(agent_mail_claim_blocker_reason(agent_mail).to_owned());
         if agent_mail.status == "semantic_readiness_failed" {
-            reasons.push(AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE.to_owned());
             reasons.push("green_transport_does_not_imply_authoritative_reads".to_owned());
         }
         if agent_mail.reservation_authoritative != Some(true) {
@@ -2859,6 +3012,24 @@ fn work_packet_action(
 
 fn agent_mail_blocks_claim(agent_mail: &SwarmWorkPacketAgentMail) -> bool {
     agent_mail.status == "semantic_readiness_failed"
+        || agent_mail.status == "unavailable"
+        || agent_mail.status == "unreachable"
+        || agent_mail.reservation_authoritative == Some(false)
+        || agent_mail.inbox_authoritative == Some(false)
+}
+
+fn agent_mail_claim_blocker_reason(agent_mail: &SwarmWorkPacketAgentMail) -> &'static str {
+    if agent_mail.status == "semantic_readiness_failed" {
+        AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE
+    } else if agent_mail
+        .degraded_codes
+        .iter()
+        .any(|code| code == AGENT_MAIL_UNAVAILABLE_CODE)
+    {
+        AGENT_MAIL_UNAVAILABLE_CODE
+    } else {
+        "agent_mail_not_authoritative"
+    }
 }
 
 fn work_packet_rch_remote_verification_reason(
@@ -2973,6 +3144,17 @@ fn work_packet_suggested_command_actions(
                 "Record that Beads is the coordination fallback while Agent Mail is not authoritative.",
             ));
         }
+    }
+    if agent_mail
+        .degraded_codes
+        .iter()
+        .any(|code| code == AGENT_MAIL_UNAVAILABLE_CODE)
+        && agent_mail.status != "fresh"
+    {
+        actions.push(agent_mail_snapshot_generate_command_action());
+        actions.push(agent_mail_snapshot_retry_work_packet_command_action(
+            candidate_id,
+        ));
     }
     if !tracker_integrity.br_reads_authoritative {
         actions.push(work_packet_command_action(
@@ -4566,7 +4748,8 @@ mod tests {
         RchCodexHookCapability, RchLocalCapabilityReport, RchQueueHealth, RchWorkerPressureReport,
         RchWorkerProbeSummary, SwarmBriefBead, SwarmBriefBvPick, SwarmBriefBvSummary,
         SwarmBriefCommit, SwarmBriefDegradation, SwarmBriefDirtyFile, SwarmBriefFileReservation,
-        SwarmBriefInboxSummary, SwarmBriefSourceKind, SwarmBriefThreadSummary,
+        SwarmBriefInboxSummary, SwarmBriefSourceFreshness, SwarmBriefSourceKind,
+        SwarmBriefSourceProvenance, SwarmBriefSourceSnapshot, SwarmBriefThreadSummary,
     };
 
     fn unknown_worker_pressure() -> RchWorkerPressureReport {
@@ -6962,6 +7145,67 @@ mod tests {
                 .iter()
                 .all(|action| !action.mutates_state)
         );
+    }
+
+    #[test]
+    fn work_packet_missing_agent_mail_snapshot_surfaces_repair_actions() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let agent_mail_degradation = degradation(
+            SwarmBriefSourceKind::AgentMail,
+            AGENT_MAIL_UNAVAILABLE_CODE,
+            "No redacted Agent Mail snapshot path was configured.",
+            Some(
+                "Generate a read-only redacted Agent Mail snapshot with scripts/agent_mail_snapshot.sh."
+                    .to_owned(),
+            ),
+        );
+        brief.sources.push(SwarmBriefSourceSnapshot {
+            source: SwarmBriefSourceKind::AgentMail,
+            status: SwarmBriefSourceStatus::NotConfigured,
+            freshness: SwarmBriefSourceFreshness::unknown(),
+            provenance: SwarmBriefSourceProvenance::local_probe(),
+            item_count: 0,
+            degraded: vec![agent_mail_degradation.clone()],
+        });
+        brief.degraded = vec![agent_mail_degradation];
+        brief.beads.ready = vec![bead("bd-mail", "Repair Agent Mail snapshot bridge", 2)];
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let agent_mail = &packet.coordination.agent_mail;
+
+        assert_eq!(agent_mail.status, "unavailable");
+        assert_eq!(agent_mail.reservation_authoritative, Some(false));
+        assert_eq!(agent_mail.inbox_authoritative, Some(false));
+        assert!(agent_mail.fallback_actions.iter().any(|action| {
+            action.kind == "snapshot_missing"
+                && action
+                    .command_action
+                    .as_ref()
+                    .is_some_and(|command| command.command_id == "agent_mail_snapshot_generate")
+        }));
+        assert!(agent_mail.fallback_actions.iter().any(|action| {
+            action.kind == "retry_with_snapshot"
+                && action.command.as_deref().is_some_and(|command| {
+                    command.contains("ee swarm brief --workspace . --agent-mail-snapshot")
+                })
+        }));
+
+        let gate = packet.claim_gate(Some("bd-mail"));
+        assert!(gate.next_command_actions.iter().any(|action| {
+            action.command_id == "agent_mail_snapshot_generate"
+                && action
+                    .display_command
+                    .contains("scripts/agent_mail_snapshot.sh --project . --agent <AGENT_NAME>")
+                && action.display_command.contains("/private/tmp/")
+                && !action.mutates_state
+        }));
+        assert!(gate.next_command_actions.iter().any(|action| {
+            action.command_id == "swarm_work_packet_retry_with_agent_mail_snapshot"
+                && action.display_command.contains("--candidate bd-mail")
+                && action.display_command.contains("--agent-mail-snapshot")
+                && !action.mutates_state
+        }));
     }
 
     #[test]
