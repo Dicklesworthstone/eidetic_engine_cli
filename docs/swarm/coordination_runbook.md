@@ -21,22 +21,30 @@ When those fields matter, generate a full read-only snapshot:
 
 ```bash
 SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
+COORDINATION_PATH=/private/tmp/ee-coordination-snapshot.json
 scripts/agent_mail_snapshot.sh \
   --project "$PWD" \
   --agent "$AGENT_NAME" \
-  --output "$SNAPSHOT_PATH"
+  --output "$SNAPSHOT_PATH" \
+  --coordination-output "$COORDINATION_PATH"
 ```
 
 Use a canonical, non-symlink `SNAPSHOT_PATH`. On macOS, `/tmp` is a symlink and
 `ee swarm brief --agent-mail-snapshot /tmp/...` refuses the path.
 
-Then consume the snapshot without live Agent Mail mutation:
+Then consume each artifact without live Agent Mail mutation:
 
 ```bash
 ee swarm brief --workspace . --agent-mail-snapshot "$SNAPSHOT_PATH" --json
 ee workspace hygiene --workspace . --agent-name "$AGENT_NAME" \
   --agent-mail-snapshot "$SNAPSHOT_PATH" --json
+ee pack "next bead" --workspace . \
+  --coordination-snapshot "$COORDINATION_PATH" --json
 ```
+
+Use the full Agent Mail snapshot for `--agent-mail-snapshot` consumers and the
+companion `ee.coordination_snapshot.v1` file for `--coordination-snapshot`
+consumers. The shapes are intentionally different.
 
 ## Fallback Workflow
 

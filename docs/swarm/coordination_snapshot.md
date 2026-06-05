@@ -157,15 +157,21 @@ Generate a full snapshot with:
 
 ```bash
 SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
+COORDINATION_PATH=/private/tmp/ee-coordination-snapshot.json
 scripts/agent_mail_snapshot.sh \
   --project "$PWD" \
   --agent "$AGENT_NAME" \
-  --output "$SNAPSHOT_PATH"
+  --output "$SNAPSHOT_PATH" \
+  --coordination-output "$COORDINATION_PATH"
 ```
 
 Use a canonical, non-symlink snapshot path. On macOS, `/tmp` is usually a
 symlink to `/private/tmp`, and `ee swarm brief --agent-mail-snapshot /tmp/...`
 refuses that path before reading the file.
+
+`$SNAPSHOT_PATH` is the full Agent Mail snapshot consumed by swarm brief and
+workspace hygiene. `$COORDINATION_PATH` is the companion
+`ee.coordination_snapshot.v1` artifact consumed by context-pack surfaces.
 
 Useful producer options:
 
@@ -178,6 +184,7 @@ Useful producer options:
 | `--thread-limit <n>` | Maximum thread summaries emitted. |
 | `--timeout-sec <n>` | Per-command timeout; failures are emitted as degraded source entries. |
 | `--output <path>` | Write JSON to this path instead of stdout. |
+| `--coordination-output <path>` | Also write a pack-compatible `ee.coordination_snapshot.v1` companion JSON file. |
 
 The producer currently calls only read-only Agent Mail commands:
 
@@ -198,7 +205,15 @@ Pass the generated file to consumers:
 ee swarm brief --workspace . --agent-mail-snapshot "$SNAPSHOT_PATH" --json
 ee workspace hygiene --workspace . --agent-name "$AGENT_NAME" \
   --agent-mail-snapshot "$SNAPSHOT_PATH" --json
+ee pack "next bead" --workspace . \
+  --coordination-snapshot "$COORDINATION_PATH" --json
 ```
+
+Do not pass the full Agent Mail snapshot to `--coordination-snapshot`: pack
+coordination requires the companion `ee.coordination_snapshot.v1` shape with
+`sources[]`. Conversely, do not pass the companion artifact to
+`--agent-mail-snapshot`: swarm brief and workspace hygiene expect the full
+Agent Mail arrays.
 
 ## Examples
 

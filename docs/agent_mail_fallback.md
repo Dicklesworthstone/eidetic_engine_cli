@@ -64,22 +64,26 @@ generate a full redacted snapshot first:
 
 ```bash
 SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
+COORDINATION_PATH=/private/tmp/ee-coordination-snapshot.json
 scripts/agent_mail_snapshot.sh \
   --project "$PWD" \
   --agent "$AGENT_NAME" \
-  --output "$SNAPSHOT_PATH"
+  --output "$SNAPSHOT_PATH" \
+  --coordination-output "$COORDINATION_PATH"
 ```
 
 Use a canonical, non-symlink path for `SNAPSHOT_PATH`. On macOS,
 `ee swarm brief --agent-mail-snapshot /tmp/...` is refused because `/tmp` is a
 symlink; use `/private/tmp/...` or another resolved path.
 
-Then pass the snapshot to read-only consumers:
+Then pass each artifact to the matching consumer:
 
 ```bash
 ee swarm brief --workspace . --agent-mail-snapshot "$SNAPSHOT_PATH" --json
 ee workspace hygiene --workspace . --agent-name "$AGENT_NAME" \
   --agent-mail-snapshot "$SNAPSHOT_PATH" --json
+ee pack "next bead" --workspace . \
+  --coordination-snapshot "$COORDINATION_PATH" --json
 ```
 
 The snapshot follows the producer contract in
@@ -88,6 +92,11 @@ The snapshot follows the producer contract in
 producer actually checked. The producer never sends mail, acknowledges
 messages, marks read state, creates or releases reservations, mutates Beads, or
 runs the health smoke-test script.
+
+The companion coordination file is the pack-compatible
+`ee.coordination_snapshot.v1` projection over the same redacted Agent Mail
+evidence. Use it only with `--coordination-snapshot`; swarm brief and workspace
+hygiene still consume the full Agent Mail snapshot.
 
 Useful full-snapshot environment overrides:
 
