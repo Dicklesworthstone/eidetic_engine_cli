@@ -43,6 +43,7 @@ SENTINEL_CODE_SUFFIX_REGEX='_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_C
 SENTINEL_SRC_FILES="src/cli/mod.rs src/daemon/mod.rs src/graph/numa_pin.rs src/search/lexical_ram_tier.rs"
 REPORT_FILE=".closure-lint-report.json"
 QUALITY_REPORT_FILE=".closure-quality-report.json"
+AUDIT_BASELINE_FILE="${CLOSURE_LINT_AUDIT_BASELINE_FILE:-tests/fixtures/closure_lint/audit_baseline.json}"
 GOLDEN_DIR="tests/golden"
 SCHEMA_DIR="docs/schemas"
 SNAPSHOT_DIR="tests/snapshots"
@@ -148,6 +149,7 @@ fi
 
 VIOLATIONS=""
 VIOLATION_COUNT=0
+BASELINED_VIOLATION_COUNT=0
 
 add_violation() {
     local bead_id="$1"
@@ -216,9 +218,37 @@ write_report() {
     local status="$1"
     if [ -n "$VIOLATIONS" ]; then
         printf "%s" "$VIOLATIONS" |
-            jq -s --arg status "$status" '{violations:.,count:length,status:$status}' > "$REPORT_FILE"
+            jq -s \
+                --arg status "$status" \
+                --arg baseline_file "$AUDIT_BASELINE_FILE" \
+                --argjson baselined "$BASELINED_VIOLATION_COUNT" \
+                '{
+                    violations: .,
+                    count: length,
+                    status: $status
+                } + (
+                    if $baselined > 0 then
+                        {auditBaseline: {file: $baseline_file, matched: $baselined}}
+                    else
+                        {}
+                    end
+                )' > "$REPORT_FILE"
     else
-        jq -cn --arg status "$status" '{violations:[],count:0,status:$status}' > "$REPORT_FILE"
+        jq -cn \
+            --arg status "$status" \
+            --arg baseline_file "$AUDIT_BASELINE_FILE" \
+            --argjson baselined "$BASELINED_VIOLATION_COUNT" \
+            '{
+                violations: [],
+                count: 0,
+                status: $status
+            } + (
+                if $baselined > 0 then
+                    {auditBaseline: {file: $baseline_file, matched: $baselined}}
+                else
+                    {}
+                end
+            )' > "$REPORT_FILE"
     fi
 }
 
@@ -311,6 +341,63 @@ write_closure_quality_report() {
             signals: $signals
         }
     ' "$BEADS_FILE" > "$QUALITY_REPORT_FILE"
+}
+
+apply_audit_baseline() {
+    [ "$AUDIT_MODE" = true ] || return 0
+    [ -f "$AUDIT_BASELINE_FILE" ] || return 0
+    [ -n "$VIOLATIONS" ] || return 0
+
+    local filtered
+    local remaining_count
+    local before_count
+
+    before_count="$VIOLATION_COUNT"
+    filtered=$(
+        printf "%s" "$VIOLATIONS" |
+            jq -c -s --slurpfile baseline "$AUDIT_BASELINE_FILE" '
+                def closure_key: [
+                    (.bead // ""),
+                    (.label // ""),
+                    (.surface // ""),
+                    (.reason // "")
+                ];
+
+                (($baseline[0].violations // $baseline[0] // []) | map(closure_key) | unique) as $known
+                | map(select((closure_key as $key | any($known[]; . == $key)) | not))
+                | .[]
+            '
+    )
+
+    if [ -n "$filtered" ]; then
+        VIOLATIONS="$(printf "%s\n" "$filtered")"
+        remaining_count=$(printf "%s" "$VIOLATIONS" | jq -s 'length')
+    else
+        VIOLATIONS=""
+        remaining_count=0
+    fi
+
+    VIOLATION_COUNT="$remaining_count"
+    BASELINED_VIOLATION_COUNT=$((before_count - remaining_count))
+
+    if [ -n "$EXPIRED_DEFERRALS" ]; then
+        if [ -n "$VIOLATIONS" ]; then
+            EXPIRED_DEFERRALS=$(
+                printf "%s" "$VIOLATIONS" |
+                    jq -r -s --arg reason "$DEFERRAL_EXPIRED_REASON" '
+                        [
+                            .[]
+                            | select((.label // "") == "defer-to-v2")
+                            | select((.reason // "") == $reason)
+                            | .bead
+                        ]
+                        | unique[]
+                    '
+            )
+        else
+            EXPIRED_DEFERRALS=""
+        fi
+    fi
 }
 
 explicit_implementation_surfaces_for_bead() {
@@ -1417,6 +1504,8 @@ for bead_id in $BEAD_IDS; do
         done
     fi
 done
+
+apply_audit_baseline
 
 reopen_expired_deferrals() {
     [ -n "$EXPIRED_DEFERRALS" ] || return 0

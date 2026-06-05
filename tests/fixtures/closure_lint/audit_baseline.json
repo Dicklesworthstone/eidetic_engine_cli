@@ -1,0 +1,577 @@
+{
+  "generatedFrom": ".closure-lint-report.json",
+  "note": "Known historical closure-lint audit debt. Audit mode fails on violations not listed here.",
+  "schema": "ee.closure_lint.audit_baseline.v1",
+  "violations": [
+    {
+      "bead": "bd-17bob",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/external_derivation_candidates.snap",
+      "surface": "external_derivation_candidates"
+    },
+    {
+      "bead": "bd-1prrl.2",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/agent_context_profile.snap",
+      "surface": "agent_context_profile"
+    },
+    {
+      "bead": "bd-1prrl.2",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/agent_profile_unit.rs",
+      "surface": "agent_context_profile"
+    },
+    {
+      "bead": "bd-1prrl.3",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/graph_numa_pin.snap",
+      "surface": "graph_numa_pin"
+    },
+    {
+      "bead": "bd-1prrl.3",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/numa_pin_unit.rs",
+      "surface": "graph_numa_pin"
+    },
+    {
+      "bead": "bd-1prrl.3",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/snapshots/graph_numa_pin_status.snap",
+      "surface": "graph_numa_pin"
+    },
+    {
+      "bead": "bd-1prrl.4",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/adaptive_pack_budget.snap",
+      "surface": "adaptive_pack_budget"
+    },
+    {
+      "bead": "bd-1prrl.4",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/fixtures/failure_modes/adaptive_budget_classifier_unavailable.json",
+      "surface": "adaptive_pack_budget"
+    },
+    {
+      "bead": "bd-1prrl.4",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/snapshots/adaptive_budget.snap",
+      "surface": "adaptive_pack_budget"
+    },
+    {
+      "bead": "bd-21xbi.2",
+      "label": "implements-surface",
+      "reason": "close_reason contains abstention language",
+      "surface": "lexical_ram_tier"
+    },
+    {
+      "bead": "bd-2dc25",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/external_derivation_candidates.snap",
+      "surface": "external_derivation_candidates"
+    },
+    {
+      "bead": "bd-2g2ze",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/external_derivation_candidates.snap",
+      "surface": "external_derivation_candidates"
+    },
+    {
+      "bead": "bd-2mey5",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/plan_cache.snap",
+      "surface": "plan_cache"
+    },
+    {
+      "bead": "bd-2qvyw",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/external_derivation_candidates.snap",
+      "surface": "external_derivation_candidates"
+    },
+    {
+      "bead": "bd-2t583",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/external_derivation_candidates.snap",
+      "surface": "external_derivation_candidates"
+    },
+    {
+      "bead": "bd-2xdom.2",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/static",
+      "surface": "remember"
+    },
+    {
+      "bead": "bd-2xdom.5",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/memory-show.snap",
+      "surface": "memory-show"
+    },
+    {
+      "bead": "bd-30i43",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/daemon_hot_mode_rpc.snap",
+      "surface": "daemon_hot_mode_rpc"
+    },
+    {
+      "bead": "bd-30i43",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/effect_manifest.snap",
+      "surface": "effect_manifest"
+    },
+    {
+      "bead": "bd-362p8",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/external_derivation_candidates.snap",
+      "surface": "external_derivation_candidates"
+    },
+    {
+      "bead": "bd-36bbk.1",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/zero_touch_tailscale_mesh.snap",
+      "surface": "zero_touch_tailscale_mesh"
+    },
+    {
+      "bead": "bd-36bbk.1.11",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/auto_enroll_real_e2e.snap",
+      "surface": "auto_enroll_real_e2e"
+    },
+    {
+      "bead": "bd-36bbk.1.12",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/hello_responder_lifecycle.snap",
+      "surface": "hello_responder_lifecycle"
+    },
+    {
+      "bead": "bd-36bbk.1.13",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/discovery_cache_drift_grace.snap",
+      "surface": "discovery_cache_drift_grace"
+    },
+    {
+      "bead": "bd-36bbk.1.13",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/fixtures/discovery_cache",
+      "surface": "discovery_cache_drift_grace"
+    },
+    {
+      "bead": "bd-36bbk.1.13",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/fixtures/peer_state",
+      "surface": "discovery_cache_drift_grace"
+    },
+    {
+      "bead": "bd-36bbk.1.14",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/steward_auto_enroll_pass.snap",
+      "surface": "steward_auto_enroll_pass"
+    },
+    {
+      "bead": "bd-36bbk.1.14",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/fixtures/failure_modes/steward_auto_enroll_*.json",
+      "surface": "steward_auto_enroll_pass"
+    },
+    {
+      "bead": "bd-36bbk.1.14",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/mesh_steward_audit.rs",
+      "surface": "steward_auto_enroll_pass"
+    },
+    {
+      "bead": "bd-36bbk.1.15",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/auto_enroll_perf_gate.snap",
+      "surface": "auto_enroll_perf_gate"
+    },
+    {
+      "bead": "bd-36bbk.1.16",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/ee_doctor_auto_enroll_checks.snap",
+      "surface": "ee_doctor_auto_enroll_checks"
+    },
+    {
+      "bead": "bd-36bbk.1.16",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/doctor_mesh_auto_enroll_checks.rs",
+      "surface": "ee_doctor_auto_enroll_checks"
+    },
+    {
+      "bead": "bd-36bbk.1.16",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/repair_action_graph_shared_contract.rs",
+      "surface": "ee_doctor_auto_enroll_checks"
+    },
+    {
+      "bead": "bd-36bbk.1.17",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/lane_grant_preview.snap",
+      "surface": "lane_grant_preview"
+    },
+    {
+      "bead": "bd-36bbk.1.17",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/fixtures/failure_modes/lane_grant_preview_*.json",
+      "surface": "lane_grant_preview"
+    },
+    {
+      "bead": "bd-36bbk.1.17",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/fixtures/lane_grant_preview",
+      "surface": "lane_grant_preview"
+    },
+    {
+      "bead": "bd-36bbk.1.18",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/auto_enroll_docs_and_adr.snap",
+      "surface": "auto_enroll_docs_and_adr"
+    },
+    {
+      "bead": "bd-36bbk.1.18.1",
+      "label": "implements-surface",
+      "reason": "close_reason contains abstention language",
+      "surface": "auto_enroll_migration_guide"
+    },
+    {
+      "bead": "bd-36bbk.1.18.1",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/auto_enroll_migration_guide.snap",
+      "surface": "auto_enroll_migration_guide"
+    },
+    {
+      "bead": "bd-36bbk.1.19",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/auto_enroll_ci_integration.snap",
+      "surface": "auto_enroll_ci_integration"
+    },
+    {
+      "bead": "bd-36bbk.1.19",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/auto_enroll_ci_integration.rs",
+      "surface": "auto_enroll_ci_integration"
+    },
+    {
+      "bead": "bd-36bbk.1.2",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/tailscale_peer_autodiscovery.snap",
+      "surface": "tailscale_peer_autodiscovery"
+    },
+    {
+      "bead": "bd-36bbk.1.20",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/auto_enroll_release_readiness.snap",
+      "surface": "auto_enroll_release_readiness"
+    },
+    {
+      "bead": "bd-36bbk.1.20",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/auto_enroll_release_readiness.rs",
+      "surface": "auto_enroll_release_readiness"
+    },
+    {
+      "bead": "bd-36bbk.1.3",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/tailscale_auto_enrollment_flow.snap",
+      "surface": "tailscale_auto_enrollment_flow"
+    },
+    {
+      "bead": "bd-36bbk.1.3",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/mesh_auto_enrollment_audit.rs",
+      "surface": "tailscale_auto_enrollment_flow"
+    },
+    {
+      "bead": "bd-36bbk.1.4",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/ee_mesh_auto_status_view.snap",
+      "surface": "ee_mesh_auto_status_view"
+    },
+    {
+      "bead": "bd-36bbk.1.6",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/mesh_hello_handshake_protocol.snap",
+      "surface": "mesh_hello_handshake_protocol"
+    },
+    {
+      "bead": "bd-36bbk.1.9",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/mesh_auto_enroll_rollback.snap",
+      "surface": "mesh_auto_enroll_rollback"
+    },
+    {
+      "bead": "bd-36bbk.1.9",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/fixtures/failure_modes/mesh_",
+      "surface": "mesh_auto_enroll_rollback"
+    },
+    {
+      "bead": "bd-36bbk.1.9",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/mesh_auto_enroll_rollback_audit.rs",
+      "surface": "mesh_auto_enroll_rollback"
+    },
+    {
+      "bead": "bd-36bbk.2",
+      "label": "implements-surface",
+      "reason": "close_reason contains abstention language",
+      "surface": "mesh_sync"
+    },
+    {
+      "bead": "bd-36bbk.2",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/mesh_sync.snap",
+      "surface": "mesh_sync"
+    },
+    {
+      "bead": "bd-37o8k",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/daemon_hot_mode_rpc.snap",
+      "surface": "daemon_hot_mode_rpc"
+    },
+    {
+      "bead": "bd-3dfzy",
+      "label": "honesty-only",
+      "reason": "no implements-surface sibling matches this bead's surface labels",
+      "surface": "unknown"
+    },
+    {
+      "bead": "bd-3juno",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/external_derivation_candidates.snap",
+      "surface": "external_derivation_candidates"
+    },
+    {
+      "bead": "bd-3n7ms",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/search_bloom.snap",
+      "surface": "search_bloom"
+    },
+    {
+      "bead": "bd-3rs00",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/external_derivation_candidates.snap",
+      "surface": "external_derivation_candidates"
+    },
+    {
+      "bead": "bd-3usjw.11",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/franken_dep_publishing.snap",
+      "surface": "franken_dep_publishing"
+    },
+    {
+      "bead": "bd-3usjw.12",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/publish_flip.snap",
+      "surface": "publish_flip"
+    },
+    {
+      "bead": "bd-3usjw.13",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/homebrew_tap.snap",
+      "surface": "homebrew_tap"
+    },
+    {
+      "bead": "bd-3usjw.14",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/plan_doc_sweep.snap",
+      "surface": "plan_doc_sweep"
+    },
+    {
+      "bead": "bd-3usjw.15",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/plan_doc_rename.snap",
+      "surface": "plan_doc_rename"
+    },
+    {
+      "bead": "bd-3usjw.17",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/close_the_gap_archive.snap",
+      "surface": "close_the_gap_archive"
+    },
+    {
+      "bead": "bd-3usjw.25",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/cross_platform_determinism.snap",
+      "surface": "cross_platform_determinism"
+    },
+    {
+      "bead": "bd-3usjw.28",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/mcp_parity_test_suite.snap",
+      "surface": "mcp_parity_test_suite"
+    },
+    {
+      "bead": "bd-3usjw.28",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/mcp_parity/*.rs",
+      "surface": "mcp_parity_test_suite"
+    },
+    {
+      "bead": "bd-3usjw.4",
+      "label": "defer-to-v2",
+      "reason": "missing sibling adr:serve_localhost_v2_design ADR and open v2:serve_localhost bead",
+      "surface": "serve_localhost"
+    },
+    {
+      "bead": "bd-3usjw.43",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/plan_drift_warning.snap",
+      "surface": "plan_drift_warning"
+    },
+    {
+      "bead": "bd-3usjw.44",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/conformal_prediction_sets.snap",
+      "surface": "conformal_prediction_sets"
+    },
+    {
+      "bead": "bd-3usjw.44",
+      "label": "math-ambition",
+      "reason": "close_reason must include rejection_threshold_passed, measured_value, expected_value, and decision fields",
+      "surface": "rejection_criteria"
+    },
+    {
+      "bead": "bd-3usjw.45",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/sieve_streaming_consolidator.snap",
+      "surface": "sieve_streaming_consolidator"
+    },
+    {
+      "bead": "bd-3usjw.45",
+      "label": "math-ambition",
+      "reason": "close_reason must include rejection_threshold_passed, measured_value, expected_value, and decision fields",
+      "surface": "rejection_criteria"
+    },
+    {
+      "bead": "bd-3usjw.47",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/sprt_quarantine.snap",
+      "surface": "sprt_quarantine"
+    },
+    {
+      "bead": "bd-3usjw.47",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/sprt_quarantine_audit.rs",
+      "surface": "sprt_quarantine"
+    },
+    {
+      "bead": "bd-3usjw.47",
+      "label": "math-ambition",
+      "reason": "close_reason must include rejection_threshold_passed, measured_value, expected_value, and decision fields",
+      "surface": "rejection_criteria"
+    },
+    {
+      "bead": "bd-3usjw.48",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/influence_function_why.snap",
+      "surface": "influence_function_why"
+    },
+    {
+      "bead": "bd-3usjw.48",
+      "label": "math-ambition",
+      "reason": "close_reason must include rejection_threshold_passed, measured_value, expected_value, and decision fields",
+      "surface": "rejection_criteria"
+    },
+    {
+      "bead": "bd-3usjw.50",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/radix_ulid_sort.snap",
+      "surface": "radix_ulid_sort"
+    },
+    {
+      "bead": "bd-3usjw.50",
+      "label": "math-ambition",
+      "reason": "close_reason must include rejection_threshold_passed, measured_value, expected_value, and decision fields",
+      "surface": "rejection_criteria"
+    },
+    {
+      "bead": "bd-3usjw.51",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/roaring_params_cache.snap",
+      "surface": "roaring_params_cache"
+    },
+    {
+      "bead": "bd-3usjw.51",
+      "label": "math-ambition",
+      "reason": "close_reason must include rejection_threshold_passed, measured_value, expected_value, and decision fields",
+      "surface": "rejection_criteria"
+    },
+    {
+      "bead": "bd-3usjw.53",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/e2e_backup_restore_roundtrip.snap",
+      "surface": "e2e_backup_restore_roundtrip"
+    },
+    {
+      "bead": "bd-3usjw.69",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/mcp_serve_stdio_subcommand.snap",
+      "surface": "mcp_serve_stdio_subcommand"
+    },
+    {
+      "bead": "bd-3usjw.9",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/first_signed_release.snap",
+      "surface": "first_signed_release"
+    },
+    {
+      "bead": "bd-8k9gh",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/external_derivation_candidates.snap",
+      "surface": "external_derivation_candidates"
+    },
+    {
+      "bead": "bd-f6jfs",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/shard_fanout.snap",
+      "surface": "shard_fanout"
+    },
+    {
+      "bead": "bd-fdvt",
+      "label": "implements-surface",
+      "reason": "close_reason contains abstention language",
+      "surface": "context-pack-dna"
+    },
+    {
+      "bead": "bd-oja31",
+      "label": "implements-surface",
+      "reason": "close_reason contains abstention language",
+      "surface": "daemon_hot_mode"
+    },
+    {
+      "bead": "bd-oja31",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/daemon_hot_mode.snap",
+      "surface": "daemon_hot_mode"
+    },
+    {
+      "bead": "bd-oja31",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/daemon_hot_mode_integration.rs",
+      "surface": "daemon_hot_mode"
+    },
+    {
+      "bead": "bd-oja31",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/snapshots/daemon_hot_mode_search_parity.snap",
+      "surface": "daemon_hot_mode"
+    },
+    {
+      "bead": "bd-oja31",
+      "label": "implements-surface",
+      "reason": "referenced test path missing: tests/snapshots/daemon_hot_mode_status.snap",
+      "surface": "daemon_hot_mode"
+    },
+    {
+      "bead": "bd-ov09",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/context-ppr.snap",
+      "surface": "context-ppr"
+    },
+    {
+      "bead": "bd-uxcej",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/external_derivation_candidates.snap",
+      "surface": "external_derivation_candidates"
+    }
+  ]
+}
