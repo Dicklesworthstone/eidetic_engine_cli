@@ -5184,7 +5184,7 @@ fn search_degradations(options: &SearchOptions, index_dir: &Path) -> Vec<SearchD
 /// Threads the caller's open read connection into the index-status probe so
 /// the staleness/health check does not open a redundant file database
 /// connection. Behavior is identical to [`search_degradations`]; see
-/// [`cached_index_status_for_search_with_connection`].
+/// [`cached_index_status_for_search`].
 fn search_degradations_with_connection(
     options: &SearchOptions,
     index_dir: &Path,
