@@ -38,15 +38,17 @@ pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "ee_binary_hash",
     // Handoff capsule determinism (bd-1um33): capsule_id and integrity are
     // freshly generated per create even for identical workspace state.
-    // swarm_brief_summary/swarm_incident_summary/swarm_replay_summary are runtime diagnostic
-    // subtrees; section-level swarm diagnostic redaction is handled
-    // specially in handoff.rs (value-dependent on "id" field), but its
-    // volatile children are covered here.
+    // swarm_brief_summary/swarm_incident_summary/swarm_replay_summary and
+    // environment_attestation_summary are runtime diagnostic subtrees;
+    // section-level diagnostic redaction is handled specially in handoff.rs
+    // (value-dependent on "id" field), but volatile top-level children are
+    // covered here.
     "capsule_id",
     "integrity",
     "swarm_brief_summary",
     "swarm_incident_summary",
     "swarm_replay_summary",
+    "environment_attestation_summary",
     "databasePath",
     "workspacePath",
     "indexDir",

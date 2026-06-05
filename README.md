@@ -686,6 +686,16 @@ omits raw Agent Mail bodies, raw query text, raw provenance text, and full file
 listings. Treat it as diagnostic context. Before claiming work or coordinating
 edits, run a fresh `ee swarm brief`.
 
+Bundles and handoff capsules also carry
+`environment_attestation_summary.json`, a redaction-safe source-authority
+projection. It separates RCH proof admission from source-test verdicts, keeps
+verdicts, degraded codes, recovery-action posture, first-failure diagnosis, and
+hashed evidence references, and omits raw mail bodies, source snippets, command
+argv, and host-private absolute paths. Treat embedded attestation summaries as
+handoff context only; rerun
+`ee diag environment-attestation --workspace . --include-rch --json` before
+claiming, closing, or relying on proof posture.
+
 ### Swarm brief workflow
 
 `ee swarm brief` is the read-only coordination preflight for crowded repos. Run
@@ -810,10 +820,12 @@ engine. `ee swarm work-packet --claim-gate --json` is the claim-safety gate
 that must agree before an agent uses a BV copy-paste claim command or mutates
 Beads in a shared checkout. Agent Mail remains the authority for reservations
 and coordination messages. Handoff capsules and support bundles carry
-diagnostic snapshots such as `swarm_brief_summary.json`, but a live brief and
-claim gate are still the preflight before new claims. Profile reports and
-performance forensics diagnose host behavior in detail; the brief only carries
-enough posture to steer choices such as routing Cargo through RCH.
+diagnostic snapshots such as `swarm_brief_summary.json` and
+`environment_attestation_summary.json`, but a live brief, live attestation when
+source authority is disputed, and claim gate are still the preflight before new
+claims. Profile reports and performance forensics diagnose host behavior in
+detail; the brief only carries enough posture to steer choices such as routing
+Cargo through RCH.
 
 The command never claims work, never reserves files, never releases files,
 never sends mail, never runs builds, never edits files, never mutates Beads,

@@ -137,6 +137,9 @@ const LOCAL_CARGO_TRIPWIRE_FILE: &str = "local_cargo_tripwire.json";
 const REGRESSION_CAUSALITY_SUMMARY_FILE: &str = "regression_causality_summary.json";
 const SUPPORT_BUNDLE_REGRESSION_CAUSALITY_SUMMARY_SCHEMA_V1: &str =
     "ee.support_bundle.regression_causality_summary.v1";
+const ENVIRONMENT_ATTESTATION_SUMMARY_FILE: &str = "environment_attestation_summary.json";
+pub(crate) const SUPPORT_BUNDLE_ENVIRONMENT_ATTESTATION_SUMMARY_SCHEMA_V1: &str =
+    "ee.support_bundle.environment_attestation_summary.v1";
 const SUPPORT_BUNDLE_REQUIRED_REMOTE_WRAPPER: &str = "scripts/rch_verify.sh -- <cargo command>";
 const TAILSCALE_METADATA_FIELDS: &[&str] = &[
     "selfNodeKey",
@@ -340,6 +343,7 @@ struct CollectedDiagnostics {
     triage_summary_json: String,
     local_cargo_tripwire_json: String,
     regression_causality_summary_json: String,
+    environment_attestation_summary_json: String,
 }
 
 /// Plan what would be collected without actually creating the bundle.
@@ -479,6 +483,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (
             REGRESSION_CAUSALITY_SUMMARY_FILE,
             &diagnostics.regression_causality_summary_json,
+        ),
+        (
+            ENVIRONMENT_ATTESTATION_SUMMARY_FILE,
+            &diagnostics.environment_attestation_summary_json,
         ),
     ];
 
@@ -1011,6 +1019,7 @@ fn collect_diagnostics(
     let qos_lane_summary_json = qos_lane_summary_json(workspace);
     let triage_summary_json = triage_summary_json(&status, &swarm_reports);
     let local_cargo_tripwire_json = local_cargo_tripwire_json(workspace);
+    let environment_attestation_summary_json = environment_attestation_summary_json(workspace);
     let regression_causality_summary_json = regression_causality_summary_json(&[
         (
             "support_bundle:verification_evidence_summary",
@@ -1062,6 +1071,11 @@ fn collect_diagnostics(
             RegressionEvidenceKind::VerificationEvidence,
             local_cargo_tripwire_json.as_str(),
         ),
+        (
+            "support_bundle:environment_attestation_summary",
+            RegressionEvidenceKind::SupportBundle,
+            environment_attestation_summary_json.as_str(),
+        ),
     ]);
 
     Ok(CollectedDiagnostics {
@@ -1089,6 +1103,7 @@ fn collect_diagnostics(
         triage_summary_json,
         local_cargo_tripwire_json,
         regression_causality_summary_json,
+        environment_attestation_summary_json,
     })
 }
 
@@ -1818,6 +1833,303 @@ fn swarm_brief_summary_json(workspace: &Path) -> String {
     let mut summary = super::swarm_brief::collect_swarm_brief_summary(workspace);
     redact_support_bundle_swarm_brief_summary(&mut summary);
     stable_json(&summary)
+}
+
+fn environment_attestation_summary_json(workspace: &Path) -> String {
+    stable_json(&collect_environment_attestation_summary(workspace))
+}
+
+pub(crate) fn collect_environment_attestation_summary(workspace: &Path) -> Value {
+    let mut options = super::swarm_brief::SwarmBriefCollectOptions::for_workspace(workspace);
+    options.include_rch = true;
+    options.enabled_sources = super::swarm_brief::all_swarm_brief_sources();
+    let runner = super::swarm_brief::SystemSwarmBriefCommandRunner;
+    let report = super::environment_attestation::collect_environment_attestation(&options, &runner);
+    environment_attestation_summary_from_report(&report)
+}
+
+pub(crate) fn environment_attestation_summary_from_report(
+    report: &super::environment_attestation::EnvironmentAttestationReport,
+) -> Value {
+    let degraded_codes = attestation_degraded_codes(report);
+    let mut status_counts = BTreeMap::new();
+    let mut authority_counts = BTreeMap::new();
+    for entry in &report.source_authority {
+        increment_json_count(&mut status_counts, serialized_token(&entry.status));
+        increment_json_count(&mut authority_counts, serialized_token(&entry.authority));
+    }
+
+    let mut summary = json!({
+        "schema": SUPPORT_BUNDLE_ENVIRONMENT_ATTESTATION_SUMMARY_SCHEMA_V1,
+        "sourceSchema": report.schema,
+        "status": "available",
+        "attestationId": &report.attestation_id,
+        "workspaceIncluded": false,
+        "workspaceHash": support_cache_key(&report.workspace),
+        "redactionStatus": "counts_ids_statuses_codes_hashes_redacted_text_no_raw_paths_no_mail_bodies_no_source_text",
+        "summary": &report.summary,
+        "verdict": serialized_token(&report.verdict),
+        "proofAdmission": {
+            "remoteVerificationAdmitted": report.summary.remote_verification_admitted,
+            "sourceTestVerdict": serialized_token(&report.summary.source_test_verdict),
+            "environmentVerdict": serialized_token(&report.summary.environment_verdict),
+            "localCargoFallbackObserved": report.summary.local_cargo_fallback_observed,
+            "separateFromSourceTestVerdict": true,
+        },
+        "sourceAuthorityCounts": {
+            "total": report.source_authority.len(),
+            "byStatus": status_counts,
+            "byAuthority": authority_counts,
+        },
+        "sourceAuthority": report
+            .source_authority
+            .iter()
+            .map(attestation_source_authority_summary)
+            .collect::<Vec<_>>(),
+        "degradedCodes": degraded_codes,
+        "recoveryActions": report
+            .recovery_actions
+            .iter()
+            .map(attestation_recovery_action_summary)
+            .collect::<Vec<_>>(),
+        "firstFailure": attestation_first_failure(report),
+        "disagreementEvidence": attestation_disagreement_evidence(report),
+        "evidenceRefHashes": report
+            .evidence_refs
+            .iter()
+            .map(|reference| support_cache_key(reference))
+            .collect::<Vec<_>>(),
+        "redaction": {
+            "rawWorkspacePathIncluded": false,
+            "rawMailBodiesIncluded": false,
+            "rawSourceSnippetsIncluded": false,
+            "rawCommandArgvIncluded": false,
+            "rawEvidenceRefsIncluded": false,
+            "hostPrivatePathsRedacted": true,
+        },
+    });
+    let summary_hash = support_cache_key(&stable_json(&summary));
+    if let Some(object) = summary.as_object_mut() {
+        object.insert("summaryHash".to_owned(), json!(summary_hash));
+    }
+    summary
+}
+
+pub(crate) fn environment_attestation_summary_evidence_id(summary: &Value) -> String {
+    let hash = summary
+        .get("summaryHash")
+        .and_then(Value::as_str)
+        .or_else(|| summary.get("attestationId").and_then(Value::as_str))
+        .unwrap_or("unknown")
+        .trim_start_matches("blake3:")
+        .trim_start_matches("environment_attestation_");
+    let short_hash = hash.get(..12).unwrap_or(hash);
+    format!("environment_attestation_summary:{short_hash}")
+}
+
+pub(crate) fn render_environment_attestation_summary_for_handoff(summary: &Value) -> String {
+    let proof = summary
+        .get("proofAdmission")
+        .unwrap_or(&serde_json::Value::Null);
+    let source_counts = summary
+        .get("sourceAuthorityCounts")
+        .unwrap_or(&serde_json::Value::Null);
+    let total_sources = source_counts
+        .get("total")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let by_status = source_counts
+        .get("byStatus")
+        .map(stable_json)
+        .unwrap_or_else(|| "{}".to_owned());
+    let verdict = summary
+        .get("verdict")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let safe_to_claim = summary
+        .pointer("/summary/safeToClaim")
+        .and_then(Value::as_bool)
+        .map_or("unknown".to_owned(), |value| value.to_string());
+    let remote_admitted = proof
+        .get("remoteVerificationAdmitted")
+        .and_then(Value::as_bool)
+        .map_or("unknown".to_owned(), |value| value.to_string());
+    let source_test = proof
+        .get("sourceTestVerdict")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let environment = proof
+        .get("environmentVerdict")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let local_fallback = proof
+        .get("localCargoFallbackObserved")
+        .and_then(Value::as_bool)
+        .map_or("unknown".to_owned(), |value| value.to_string());
+    let summary_hash = summary
+        .get("summaryHash")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let degraded_codes = summary
+        .get("degradedCodes")
+        .and_then(Value::as_array)
+        .map(|codes| {
+            codes
+                .iter()
+                .filter_map(Value::as_str)
+                .take(6)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let first_failure_code = summary
+        .pointer("/firstFailure/code")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+
+    let mut lines = vec![
+        format!(
+            "Environment attestation: verdict={verdict}, safe_to_claim={safe_to_claim}, environment_verdict={environment}, source_test_verdict={source_test}."
+        ),
+        format!(
+            "Proof admission: remote_verification_admitted={remote_admitted}, local_cargo_fallback_observed={local_fallback}; source_result_and_environment_admission_are_separate=true."
+        ),
+        format!(
+            "Source authority: sources={total_sources}, by_status={by_status}, first_failure={first_failure_code}, summary_hash={summary_hash}."
+        ),
+        "Redaction: raw_mail_bodies_included=false, raw_paths_included=false, evidence_refs=hashes_only, command_argv=hashes_only."
+            .to_owned(),
+        "Diagnostic posture only; run ee diag environment-attestation --workspace . --include-rch --json before claiming, closing, or treating proof as current."
+            .to_owned(),
+    ];
+    if !degraded_codes.is_empty() {
+        lines.push(format!(
+            "Attestation degraded codes: {}.",
+            degraded_codes.join(", ")
+        ));
+    }
+    lines.join("\n")
+}
+
+fn increment_json_count(counts: &mut BTreeMap<String, u64>, key: String) {
+    let count = counts.entry(key).or_insert(0);
+    *count = count.saturating_add(1);
+}
+
+fn attestation_source_authority_summary(
+    entry: &super::environment_attestation::EnvironmentAttestationSourceAuthorityEntry,
+) -> Value {
+    json!({
+        "source": serialized_token(&entry.source),
+        "authority": serialized_token(&entry.authority),
+        "status": serialized_token(&entry.status),
+        "freshness": serialized_token(&entry.freshness),
+        "observedAt": entry.observed_at.as_deref(),
+        "summary": redact_support_diagnostic_text(&entry.summary),
+        "metricCount": entry.metrics.len(),
+        "metrics": entry
+            .metrics
+            .iter()
+            .map(|metric| json!({
+                "name": &metric.name,
+                "value": redact_support_diagnostic_text(&metric.value),
+            }))
+            .collect::<Vec<_>>(),
+        "degradedCodes": entry
+            .degraded_codes
+            .iter()
+            .map(serialized_token)
+            .collect::<Vec<_>>(),
+        "recoveryActionCount": entry.recovery_actions.len(),
+        "recoveryActions": entry
+            .recovery_actions
+            .iter()
+            .map(attestation_recovery_action_summary)
+            .collect::<Vec<_>>(),
+        "evidenceRefHashes": entry
+            .evidence_refs
+            .iter()
+            .map(|reference| support_cache_key(reference))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn attestation_recovery_action_summary(
+    action: &super::environment_attestation::EnvironmentAttestationRecoveryAction,
+) -> Value {
+    let command = action.command.as_ref().map(|command| {
+        json!({
+            "displayCommand": redact_support_diagnostic_text(&command.display_command),
+            "argvHash": support_cache_key(&command.argv.join("\x1f")),
+            "shellRequired": command.shell_required,
+            "copySafety": serialized_token(&command.copy_safety),
+        })
+    });
+    json!({
+        "priority": action.priority,
+        "kind": serialized_token(&action.kind),
+        "mutatesState": action.mutates_state,
+        "requiredSubstrate": serialized_token(&action.required_substrate),
+        "rationale": redact_support_diagnostic_text(&action.rationale),
+        "command": command,
+    })
+}
+
+fn attestation_degraded_codes(
+    report: &super::environment_attestation::EnvironmentAttestationReport,
+) -> Vec<String> {
+    let mut codes = report
+        .degraded
+        .iter()
+        .map(|degraded| serialized_token(&degraded.code))
+        .collect::<Vec<_>>();
+    codes.sort();
+    codes.dedup();
+    codes
+}
+
+fn attestation_first_failure(
+    report: &super::environment_attestation::EnvironmentAttestationReport,
+) -> Value {
+    report.degraded.first().map_or(Value::Null, |degraded| {
+        json!({
+            "code": serialized_token(&degraded.code),
+            "severity": degraded.severity,
+            "message": redact_support_diagnostic_text(&degraded.message),
+            "repair": degraded
+                .repair
+                .as_deref()
+                .map(redact_support_diagnostic_text),
+        })
+    })
+}
+
+fn attestation_disagreement_evidence(
+    report: &super::environment_attestation::EnvironmentAttestationReport,
+) -> Value {
+    let codes = attestation_degraded_codes(report);
+    json!({
+        "beadsTrackerStale": codes.iter().any(|code| code == "beads_tracker_stale"),
+        "bvRecommendationStale": codes.iter().any(|code| code == "bv_recommendation_stale"),
+        "agentMailProbeMismatch": codes.iter().any(|code| code == "agent_mail_probe_mismatch"),
+        "sourceAuthorityAmbiguous": codes.iter().any(|code| code == "source_authority_ambiguous"),
+        "claimGateNeedsFreshRun": codes.iter().any(|code| {
+            matches!(
+                code.as_str(),
+                "dirty_checkout_observed"
+                    | "reservation_evidence_stale"
+                    | "source_authority_ambiguous"
+                    | "stale_binary_suspected"
+            )
+        }),
+    })
+}
+
+fn serialized_token<T: Serialize + ?Sized>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(Value::String(token)) => token,
+        Ok(value) => stable_json(&value),
+        Err(_) => "serialization_error".to_owned(),
+    }
 }
 
 pub(crate) fn redact_support_bundle_swarm_brief_summary(summary: &mut Value) {
@@ -3481,6 +3793,7 @@ fn planned_files() -> Vec<String> {
         TRIAGE_SUMMARY_FILE.to_owned(),
         LOCAL_CARGO_TRIPWIRE_FILE.to_owned(),
         REGRESSION_CAUSALITY_SUMMARY_FILE.to_owned(),
+        ENVIRONMENT_ATTESTATION_SUMMARY_FILE.to_owned(),
         MANIFEST_FILE.to_owned(),
     ]
 }
@@ -3912,6 +4225,146 @@ mod tests {
             stale_ignored_count: 0,
             degraded: Vec::new(),
         }
+    }
+
+    #[test]
+    fn environment_attestation_summary_redacts_paths_and_separates_proof_admission() {
+        use crate::core::environment_attestation::{
+            ENVIRONMENT_ATTESTATION_REDACTION_STATUS, ENVIRONMENT_ATTESTATION_SCHEMA_V1,
+            EnvironmentAttestationAuthority, EnvironmentAttestationCommandAction,
+            EnvironmentAttestationCommandCopySafety, EnvironmentAttestationDegradation,
+            EnvironmentAttestationDegradedCode, EnvironmentAttestationFreshness,
+            EnvironmentAttestationMetric, EnvironmentAttestationRecoveryAction,
+            EnvironmentAttestationRecoveryKind, EnvironmentAttestationReport,
+            EnvironmentAttestationSourceAuthorityEntry, EnvironmentAttestationSourceKind,
+            EnvironmentAttestationSourceStatus, EnvironmentAttestationSourceTestVerdict,
+            EnvironmentAttestationSubstrate, EnvironmentAttestationSummary,
+            EnvironmentAttestationVerdict,
+        };
+
+        let recovery = EnvironmentAttestationRecoveryAction {
+            priority: 0,
+            kind: EnvironmentAttestationRecoveryKind::RepairEnvironment,
+            command: Some(EnvironmentAttestationCommandAction {
+                display_command:
+                    "rch status --config /Users/jemanuel/projects/eidetic_engine_cli/rch.toml"
+                        .to_owned(),
+                argv: vec![
+                    "rch".to_owned(),
+                    "status".to_owned(),
+                    "--config".to_owned(),
+                    "/Users/jemanuel/projects/eidetic_engine_cli/rch.toml".to_owned(),
+                ],
+                shell_required: false,
+                copy_safety: EnvironmentAttestationCommandCopySafety::DisplayOnly,
+            }),
+            mutates_state: false,
+            required_substrate: EnvironmentAttestationSubstrate::Rch,
+            rationale: "Inspect /Users/jemanuel/projects/eidetic_engine_cli before retrying RCH."
+                .to_owned(),
+        };
+        let report = EnvironmentAttestationReport {
+            schema: ENVIRONMENT_ATTESTATION_SCHEMA_V1,
+            attestation_id: "environment_attestation_test".to_owned(),
+            workspace: "/Users/jemanuel/projects/eidetic_engine_cli".to_owned(),
+            generated_at: Utc::now(),
+            redaction_status: ENVIRONMENT_ATTESTATION_REDACTION_STATUS,
+            summary: EnvironmentAttestationSummary {
+                safe_to_claim: false,
+                remote_verification_admitted: Some(false),
+                source_test_verdict:
+                    EnvironmentAttestationSourceTestVerdict::EnvironmentBlockedBeforeSource,
+                environment_verdict: EnvironmentAttestationVerdict::ProofEnvironmentBlocked,
+                local_cargo_fallback_observed: false,
+            },
+            source_authority: vec![EnvironmentAttestationSourceAuthorityEntry {
+                source: EnvironmentAttestationSourceKind::Rch,
+                authority: EnvironmentAttestationAuthority::Degraded,
+                status: EnvironmentAttestationSourceStatus::RemoteBlocked,
+                freshness: EnvironmentAttestationFreshness::Current,
+                observed_at: Some("2026-06-05T01:00:00Z".to_owned()),
+                summary: "RCH topology blocked for /Users/jemanuel/projects/eidetic_engine_cli."
+                    .to_owned(),
+                evidence_refs: vec![
+                    "agent-mail://thread/raw-body?workspace=/Users/jemanuel/projects/eidetic_engine_cli"
+                        .to_owned(),
+                ],
+                metrics: vec![EnvironmentAttestationMetric {
+                    name: "blocked_worker_count".to_owned(),
+                    value: "1".to_owned(),
+                }],
+                degraded_codes: vec![EnvironmentAttestationDegradedCode::RchWorkerTopologyBlocked],
+                recovery_actions: vec![recovery.clone()],
+            }],
+            verdict: EnvironmentAttestationVerdict::ProofEnvironmentBlocked,
+            evidence_refs: vec![
+                "rch://proof?workspace=/Users/jemanuel/projects/eidetic_engine_cli".to_owned(),
+            ],
+            recovery_actions: vec![recovery],
+            degraded: vec![EnvironmentAttestationDegradation {
+                code: EnvironmentAttestationDegradedCode::RchWorkerTopologyBlocked,
+                severity: "high",
+                message:
+                    "Remote verification was blocked before Cargo at /Users/jemanuel/projects."
+                        .to_owned(),
+                repair: Some(
+                    "rch status --config /Users/jemanuel/projects/eidetic_engine_cli/rch.toml"
+                        .to_owned(),
+                ),
+            }],
+        };
+
+        let summary = environment_attestation_summary_from_report(&report);
+        let rendered = stable_json(&summary);
+
+        assert_eq!(
+            summary.get("schema").and_then(Value::as_str),
+            Some(SUPPORT_BUNDLE_ENVIRONMENT_ATTESTATION_SUMMARY_SCHEMA_V1)
+        );
+        assert_eq!(
+            summary
+                .pointer("/proofAdmission/remoteVerificationAdmitted")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            summary
+                .pointer("/proofAdmission/sourceTestVerdict")
+                .and_then(Value::as_str),
+            Some("environment_blocked_before_source")
+        );
+        assert_eq!(
+            summary
+                .pointer("/sourceAuthority/0/status")
+                .and_then(Value::as_str),
+            Some("remote_blocked")
+        );
+        assert_eq!(
+            summary
+                .pointer("/firstFailure/code")
+                .and_then(Value::as_str),
+            Some("rch_worker_topology_blocked")
+        );
+        assert_eq!(
+            summary
+                .pointer("/redaction/rawMailBodiesIncluded")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(
+            summary
+                .pointer("/sourceAuthority/0/evidenceRefHashes/0")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:"))
+        );
+        assert!(
+            summary
+                .pointer("/recoveryActions/0/command/argvHash")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:"))
+        );
+        assert!(!rendered.contains("/Users/jemanuel"));
+        assert!(!rendered.contains("raw-body"));
     }
 
     #[test]
@@ -5075,6 +5528,7 @@ mod tests {
             REGRESSION_CAUSALITY_SUMMARY_FILE,
             VERIFICATION_EVIDENCE_SUMMARY_FILE,
             MEMORY_DRIFT_SUMMARY_FILE,
+            ENVIRONMENT_ATTESTATION_SUMMARY_FILE,
         ] {
             assert!(
                 files.contains(&required.to_owned()),

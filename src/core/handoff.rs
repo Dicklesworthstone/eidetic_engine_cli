@@ -26,7 +26,10 @@ use sha2::{Digest, Sha256};
 
 use crate::core::focus::{focus_state_hash, read_active_focus_state};
 use crate::core::singleflight::singleflight_posture_report;
-use crate::core::support_bundle::redact_support_bundle_swarm_brief_summary;
+use crate::core::support_bundle::{
+    collect_environment_attestation_summary, environment_attestation_summary_evidence_id,
+    redact_support_bundle_swarm_brief_summary, render_environment_attestation_summary_for_handoff,
+};
 use crate::core::swarm_brief::{
     collect_swarm_brief_summary, collect_swarm_incident_summary, collect_swarm_replay_summary,
     render_swarm_brief_summary_for_handoff, render_swarm_incident_summary_for_handoff,
@@ -474,6 +477,7 @@ pub struct PreviewReport {
     pub swarm_brief_summary: Option<serde_json::Value>,
     pub swarm_incident_summary: Option<serde_json::Value>,
     pub swarm_replay_summary: Option<serde_json::Value>,
+    pub environment_attestation_summary: Option<serde_json::Value>,
     pub token_estimate: usize,
     pub byte_estimate: usize,
     pub redaction_posture: String,
@@ -514,6 +518,7 @@ impl PreviewReport {
             swarm_brief_summary: None,
             swarm_incident_summary: None,
             swarm_replay_summary: None,
+            environment_attestation_summary: None,
             token_estimate: 0,
             byte_estimate: 0,
             redaction_posture: "standard".to_owned(),
@@ -697,6 +702,7 @@ pub struct CreateReport {
     pub swarm_brief_summary: Option<serde_json::Value>,
     pub swarm_incident_summary: Option<serde_json::Value>,
     pub swarm_replay_summary: Option<serde_json::Value>,
+    pub environment_attestation_summary: Option<serde_json::Value>,
     pub token_count: usize,
     pub byte_count: usize,
     pub content_hash: String,
@@ -728,6 +734,7 @@ impl CreateReport {
             swarm_brief_summary: None,
             swarm_incident_summary: None,
             swarm_replay_summary: None,
+            environment_attestation_summary: None,
             token_count: 0,
             byte_count: 0,
             content_hash: String::new(),
@@ -1089,6 +1096,7 @@ pub struct ResumeReport {
     pub swarm_brief_summary: Option<serde_json::Value>,
     pub swarm_incident_summary: Option<serde_json::Value>,
     pub swarm_replay_summary: Option<serde_json::Value>,
+    pub environment_attestation_summary: Option<serde_json::Value>,
     pub artifact_pointers: Vec<ArtifactPointer>,
     pub degradations: Vec<DegradationInfo>,
     pub resumed_at: String,
@@ -1275,6 +1283,7 @@ impl ResumeReport {
             swarm_brief_summary: None,
             swarm_incident_summary: None,
             swarm_replay_summary: None,
+            environment_attestation_summary: None,
             artifact_pointers: Vec::new(),
             degradations: Vec::new(),
             prompt_fragment: None,
@@ -1371,7 +1380,12 @@ fn strip_swarm_diagnostic_section_content_by_id(value: &mut serde_json::Value) {
             let section_id = object.get("id").and_then(serde_json::Value::as_str);
             if matches!(
                 section_id,
-                Some("swarm_brief_summary" | "swarm_incident_summary" | "swarm_replay_summary")
+                Some(
+                    "swarm_brief_summary"
+                        | "swarm_incident_summary"
+                        | "swarm_replay_summary"
+                        | "environment_attestation_summary"
+                )
             ) {
                 object.remove("content");
                 object.remove("evidence_ids");
@@ -2979,6 +2993,93 @@ fn add_swarm_replay_summary_to_resume(report: &mut ResumeReport, summary: &serde
     }
 }
 
+fn add_environment_attestation_summary_to_resume(
+    report: &mut ResumeReport,
+    summary: &serde_json::Value,
+) {
+    let proof = summary
+        .get("proofAdmission")
+        .unwrap_or(&serde_json::Value::Null);
+    let verdict = summary
+        .get("verdict")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let safe_to_claim = summary
+        .pointer("/summary/safeToClaim")
+        .and_then(serde_json::Value::as_bool)
+        .map_or("unknown".to_owned(), |value| value.to_string());
+    let remote_admitted = proof
+        .get("remoteVerificationAdmitted")
+        .and_then(serde_json::Value::as_bool)
+        .map_or("unknown".to_owned(), |value| value.to_string());
+    let source_test = proof
+        .get("sourceTestVerdict")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let environment = proof
+        .get("environmentVerdict")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let local_fallback = proof
+        .get("localCargoFallbackObserved")
+        .and_then(serde_json::Value::as_bool)
+        .map_or("unknown".to_owned(), |value| value.to_string());
+    let source_total = summary
+        .pointer("/sourceAuthorityCounts/total")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let first_failure = summary
+        .pointer("/firstFailure/code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("none");
+    let hash = summary
+        .get("summaryHash")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let posture = format!(
+        "Embedded environment attestation summary: verdict={verdict}, safe_to_claim={safe_to_claim}, environment_verdict={environment}, source_test_verdict={source_test}, remote_verification_admitted={remote_admitted}, local_cargo_fallback_observed={local_fallback}, source_authority_sources={source_total}, first_failure={first_failure}, summary_hash={hash}; raw_mail_bodies_included=false; raw_paths_included=false; diagnostic_not_live=true."
+    );
+    report.status_summary = Some(match report.status_summary.take() {
+        Some(existing) => format!("{existing}\n{posture}"),
+        None => posture,
+    });
+    let evidence_id = environment_attestation_summary_evidence_id(summary);
+    report.artifact_pointers.push(ArtifactPointer {
+        id: evidence_id,
+        path: None,
+        description:
+            "Redaction-safe environment attestation summary embedded in the handoff capsule; raw coordination and proof artifacts are referenced only by hashes."
+                .to_owned(),
+    });
+    report.next_actions.push(
+        NextAction::new(
+            1,
+            "Refresh live environment attestation before claiming, closing, or relying on proof posture.",
+        )
+        .with_reason(
+            "Embedded attestation summaries are support-bundle context, not current source authority.",
+        )
+        .with_command("ee diag environment-attestation --workspace . --include-rch --json"),
+    );
+
+    if let Some(codes) = summary
+        .get("degradedCodes")
+        .and_then(serde_json::Value::as_array)
+    {
+        for code in codes.iter().filter_map(serde_json::Value::as_str).take(8) {
+            report.degradations.push(
+                DegradationInfo::new(
+                    format!("environment_attestation_{code}"),
+                    "Embedded environment attestation summary reported degraded source authority.",
+                )
+                .with_next_action(
+                    "ee diag environment-attestation --workspace . --include-rch --json",
+                ),
+            );
+        }
+    }
+}
+
 /// Preview a handoff capsule without writing it.
 pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, DomainError> {
     let mut report = PreviewReport::new(options.workspace.clone(), options.profile);
@@ -3070,6 +3171,33 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
         confidence: swarm_replay_section.confidence.as_str().to_owned(),
         evidence_count: swarm_replay_section.evidence_ids.len(),
         token_estimate: swarm_replay_section.token_estimate,
+    });
+
+    let environment_attestation_summary =
+        collect_environment_attestation_summary(&options.workspace);
+    let environment_attestation_evidence = vec![environment_attestation_summary_evidence_id(
+        &environment_attestation_summary,
+    )];
+    let environment_attestation_section = CapsuleSection::new(
+        "environment_attestation_summary",
+        "Environment Attestation Summary",
+    )
+    .with_content(render_environment_attestation_summary_for_handoff(
+        &environment_attestation_summary,
+    ))
+    .with_confidence(EvidenceConfidence::Verified)
+    .with_evidence(environment_attestation_evidence.clone());
+    report.evidence_ids.extend(environment_attestation_evidence);
+    report.environment_attestation_summary = Some(environment_attestation_summary);
+    report.planned_sections.push(PlannedSection {
+        id: environment_attestation_section.id.clone(),
+        title: environment_attestation_section.title.clone(),
+        confidence: environment_attestation_section
+            .confidence
+            .as_str()
+            .to_owned(),
+        evidence_count: environment_attestation_section.evidence_ids.len(),
+        token_estimate: environment_attestation_section.token_estimate,
     });
 
     let singleflight_posture = singleflight_posture_report();
@@ -3278,6 +3406,27 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         .saturating_add(swarm_replay_evidence.len());
     report.swarm_replay_summary = Some(swarm_replay_summary.clone());
 
+    let environment_attestation_summary =
+        collect_environment_attestation_summary(&options.workspace);
+    let environment_attestation_evidence = vec![environment_attestation_summary_evidence_id(
+        &environment_attestation_summary,
+    )];
+    sections.push(
+        CapsuleSection::new(
+            "environment_attestation_summary",
+            "Environment Attestation Summary",
+        )
+        .with_content(render_environment_attestation_summary_for_handoff(
+            &environment_attestation_summary,
+        ))
+        .with_confidence(EvidenceConfidence::Verified)
+        .with_evidence(environment_attestation_evidence.clone()),
+    );
+    report.evidence_count = report
+        .evidence_count
+        .saturating_add(environment_attestation_evidence.len());
+    report.environment_attestation_summary = Some(environment_attestation_summary.clone());
+
     let singleflight_posture = singleflight_posture_report();
     sections.push(
         CapsuleSection::new("singleflight_posture", "Single-flight Posture")
@@ -3341,6 +3490,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         "swarm_brief_summary": swarm_brief_summary,
         "swarm_incident_summary": swarm_incident_summary,
         "swarm_replay_summary": swarm_replay_summary,
+        "environment_attestation_summary": environment_attestation_summary,
         "created_at": created_at,
     });
     let capsule_content = sign_capsule_content(
@@ -3703,6 +3853,14 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         .filter(|value| !value.is_null());
     if let Some(summary) = report.swarm_replay_summary.clone() {
         add_swarm_replay_summary_to_resume(&mut report, &summary);
+    }
+
+    report.environment_attestation_summary = capsule
+        .get("environment_attestation_summary")
+        .cloned()
+        .filter(|value| !value.is_null());
+    if let Some(summary) = report.environment_attestation_summary.clone() {
+        add_environment_attestation_summary_to_resume(&mut report, &summary);
     }
 
     if let Some(sections) = capsule.get("sections").and_then(|v| v.as_array()) {
@@ -4723,6 +4881,7 @@ memories_revised = 3
             "swarm_brief_summary": {"hostname": "agent-host-a", "generatedAt": "now"},
             "swarm_incident_summary": {"summaryHash": "blake3:first", "status": "clean"},
             "swarm_replay_summary": {"summaryHash": "blake3:replay-first", "status": "available"},
+            "environment_attestation_summary": {"summaryHash": "blake3:attestation-first", "verdict": "safe_to_claim"},
             "memory_snapshot": {"captured_at": "2026-05-16T00:00:00Z", "memory_count": 0},
             "sections": [
                 stable_section.clone(),
@@ -4746,6 +4905,13 @@ memories_revised = 3
                     "content": "path-specific replay body A",
                     "evidence_ids": ["replay-a"],
                     "token_estimate": 11,
+                },
+                {
+                    "id": "environment_attestation_summary",
+                    "title": "Environment Attestation Summary",
+                    "content": "host-specific attestation body A",
+                    "evidence_ids": ["attestation-a"],
+                    "token_estimate": 13,
                 }
             ]
         });
@@ -4757,6 +4923,7 @@ memories_revised = 3
             "swarm_brief_summary": {"hostname": "agent-host-b", "generatedAt": "later"},
             "swarm_incident_summary": {"summaryHash": "blake3:second", "status": "degraded"},
             "swarm_replay_summary": {"summaryHash": "blake3:replay-second", "status": "degraded"},
+            "environment_attestation_summary": {"summaryHash": "blake3:attestation-second", "verdict": "proof_environment_blocked"},
             "memory_snapshot": {"captured_at": "2026-05-16T00:01:00Z", "memory_count": 0},
             "sections": [
                 stable_section,
@@ -4780,6 +4947,13 @@ memories_revised = 3
                     "content": "path-specific replay body B",
                     "evidence_ids": ["replay-b"],
                     "token_estimate": 23,
+                },
+                {
+                    "id": "environment_attestation_summary",
+                    "title": "Environment Attestation Summary",
+                    "content": "host-specific attestation body B",
+                    "evidence_ids": ["attestation-b"],
+                    "token_estimate": 29,
                 }
             ]
         });
@@ -5993,6 +6167,17 @@ memories_revised = 3
         ensure(
             !report.planned_sections.is_empty(),
             "should have planned sections",
+        )?;
+        ensure(
+            report
+                .planned_sections
+                .iter()
+                .any(|section| section.id == "environment_attestation_summary"),
+            "preview plans environment attestation summary section",
+        )?;
+        ensure(
+            report.environment_attestation_summary.is_some(),
+            "preview carries environment attestation summary JSON",
         )
     }
 
@@ -6072,6 +6257,106 @@ memories_revised = 3
             ensure(
                 !rendered.contains(forbidden),
                 format!("handoff summary leaked forbidden single-flight text {forbidden:?}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resume_handoff_surfaces_environment_attestation_posture() -> TestResult {
+        let summary = serde_json::json!({
+            "schema": "ee.support_bundle.environment_attestation_summary.v1",
+            "sourceSchema": "ee.environment_attestation.v1",
+            "summaryHash": "blake3:abcdef1234567890",
+            "verdict": "proof_environment_blocked",
+            "summary": {
+                "safeToClaim": false
+            },
+            "proofAdmission": {
+                "remoteVerificationAdmitted": false,
+                "sourceTestVerdict": "environment_blocked_before_source",
+                "environmentVerdict": "proof_environment_blocked",
+                "localCargoFallbackObserved": false,
+                "separateFromSourceTestVerdict": true
+            },
+            "sourceAuthorityCounts": {
+                "total": 3,
+                "byStatus": {
+                    "remote_blocked": 1,
+                    "ok": 2
+                },
+                "byAuthority": {
+                    "degraded": 1,
+                    "authoritative": 2
+                }
+            },
+            "degradedCodes": ["rch_worker_topology_blocked"],
+            "firstFailure": {
+                "code": "rch_worker_topology_blocked",
+                "severity": "high",
+                "message": "Remote verification was blocked before Cargo.",
+                "repair": "rch status --json"
+            },
+            "redaction": {
+                "rawMailBodiesIncluded": false,
+                "rawWorkspacePathIncluded": false,
+                "rawCommandArgvIncluded": false
+            }
+        });
+        let mut report =
+            ResumeReport::new("hcap_attestation".to_owned(), PathBuf::from("handoff.json"));
+
+        add_environment_attestation_summary_to_resume(&mut report, &summary);
+
+        let status = report
+            .status_summary
+            .as_deref()
+            .ok_or_else(|| "resume status summary missing".to_owned())?;
+        ensure(
+            status.contains(
+                "Embedded environment attestation summary: verdict=proof_environment_blocked",
+            ),
+            "resume status includes attestation verdict",
+        )?;
+        ensure(
+            status.contains("remote_verification_admitted=false")
+                && status.contains("source_test_verdict=environment_blocked_before_source")
+                && status.contains("raw_mail_bodies_included=false")
+                && status.contains("diagnostic_not_live=true"),
+            "resume status keeps proof-admission and redaction posture",
+        )?;
+        ensure(
+            report.next_actions.iter().any(|action| {
+                action.suggested_command.as_deref()
+                    == Some("ee diag environment-attestation --workspace . --include-rch --json")
+            }),
+            "resume next actions include fresh attestation command",
+        )?;
+        ensure(
+            report.degradations.iter().any(|degradation| {
+                degradation.code == "environment_attestation_rch_worker_topology_blocked"
+            }),
+            "resume degraded list includes attestation degraded code",
+        )?;
+        ensure(
+            report
+                .artifact_pointers
+                .iter()
+                .any(|pointer| pointer.id.starts_with("environment_attestation_summary:")),
+            "resume artifact pointers include attestation summary evidence id",
+        )?;
+        for forbidden in [
+            "raw mail body",
+            "BEGIN PRIVATE KEY",
+            "sk-",
+            "ghp_",
+            "/private/",
+            "/Users/",
+            "rawCommandArgv",
+        ] {
+            ensure(
+                !status.contains(forbidden),
+                format!("attestation handoff status leaked forbidden text {forbidden:?}"),
             )?;
         }
         Ok(())

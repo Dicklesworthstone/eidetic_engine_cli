@@ -121,6 +121,36 @@ coordination step, or `null` when the next action requires human judgment.
 | `support_bundle_redaction_unverified` | warning | Support-bundle redaction posture was not verified. | Verify redaction before attaching bundle evidence. |
 | `reservation_evidence_stale` | warning | File reservation evidence is stale or conflicting. | Coordinate through Agent Mail; do not treat stale reservations as absent. |
 
+## Support Bundle and Handoff Summary
+
+`ee support bundle` writes `environment_attestation_summary.json` as a
+redaction-safe projection of `ee.environment_attestation.v1`. Handoff preview,
+create, and resume surfaces embed the same projection under
+`environment_attestation_summary`.
+
+The summary keeps only compact source-authority posture: verdicts,
+`sourceAuthority` statuses, status/authority counts, degraded codes, recovery
+action kinds, redacted command display text, command `argv` hashes, first-failure
+diagnosis, evidence-reference hashes, and the proof-admission block. It does not
+include raw Agent Mail bodies, raw source snippets, raw command `argv`, raw
+evidence references, or host-private absolute paths.
+
+Interpret the embedded block as diagnostic context, not as current permission to
+claim or close work. In particular, `proofAdmission.remoteVerificationAdmitted`
+is separate from `proofAdmission.sourceTestVerdict`: an RCH environment can be
+ready while source tests have not run, and an RCH topology/materialization
+failure is an environment blocker rather than a source failure. Before mutating
+Beads, reservations, or closeout state, rerun:
+
+```bash
+ee diag environment-attestation --workspace . --include-rch --json
+```
+
+When the summary reports Beads/BV/Agent Mail or claim-gate disagreement, treat
+the `disagreementEvidence` booleans and `firstFailure` code as routing hints.
+They explain which authority is stale, ambiguous, contradicted, or blocked; they
+do not override Agent Mail reservations or the live claim gate.
+
 ## Recovery Actions
 
 `recoveryActions[]` is structured. Each action has a priority, kind, optional
