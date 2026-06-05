@@ -411,7 +411,176 @@ if [ ! -x "$EE_BIN" ]; then
         "not_run"
 fi
 
-ATTESTATION_ARGS=(
+FULL_AGENT_MAIL_SNAPSHOT="$ARTIFACT_DIR/agent-mail-full-snapshot.json"
+HEALTH_AGENT_MAIL_SNAPSHOT="$ARTIFACT_DIR/agent-mail-health-degraded.json"
+
+cat >"$FULL_AGENT_MAIL_SNAPSHOT" <<'JSON'
+{
+  "schema": "ee.agent_mail.snapshot.v1",
+  "captured_at": "2026-06-05T08:00:00Z",
+  "agents": [
+    {"name": "RubyElk", "last_active_ts": "2026-06-05T08:00:00Z"},
+    {"name": "TurquoiseTern", "last_active_ts": "2026-06-05T08:00:00Z"}
+  ],
+  "file_reservations": [
+    {
+      "path_pattern": "src/core/*.rs",
+      "holder": "TurquoiseTern",
+      "exclusive": true,
+      "expires_ts": "2026-06-05T09:00:00Z"
+    }
+  ],
+  "inbox": [
+    {"mailbox": "RubyElk", "unread_count": 1, "ack_required_count": 0}
+  ],
+  "threads": [
+    {"thread_id": "bd-20453.6", "subject": "Environment attestation proof", "message_count": 2}
+  ]
+}
+JSON
+
+cat >"$HEALTH_AGENT_MAIL_SNAPSHOT" <<'JSON'
+{
+  "schema": "ee.swarm.coordination_health.v1",
+  "healthLevel": "green",
+  "mcp_http_reachable": false,
+  "am_agents_list_ok": true,
+  "am_send_single_recipient_ok": true,
+  "am_send_multi_recipient_ok": false,
+  "observed_panic": "RefCell already borrowed",
+  "fallback_active": true
+}
+JSON
+
+validate_attestation_case() {
+    local label="$1"
+    local case_filter="$2"
+    local command_text="$3"
+
+    if [ "$LAST_EXIT_CODE" -ne 0 ]; then
+        if jq -e '.schema == "ee.error.v2" and (.error.message // "" | contains("unrecognized subcommand"))' "$LAST_STDOUT" >/dev/null 2>&1 ||
+            grep -Fq "unrecognized subcommand 'environment-attestation'" "$LAST_STDOUT" "$LAST_STDERR"; then
+            fail_with_artifacts \
+                "environment_attestation_command_unavailable" \
+                "$command_text" \
+                "environment_attestation_command_unavailable_or_stale_binary" \
+                3 \
+                "$LAST_EXIT_CODE" \
+                "$LAST_ELAPSED_MS" \
+                "$LAST_STDOUT" \
+                "$LAST_STDERR" \
+                "not_run"
+        fi
+        fail_with_artifacts \
+            "${label}_command_failed" \
+            "$command_text" \
+            "environment_attestation_command_failed" \
+            1 \
+            "$LAST_EXIT_CODE" \
+            "$LAST_ELAPSED_MS" \
+            "$LAST_STDOUT" \
+            "$LAST_STDERR" \
+            "failed"
+    fi
+
+    if ! jq -e '
+      .schema == "ee.response.v2"
+      and .success == true
+      and .data.schema == "ee.environment_attestation.v1"
+      and .data.redactionStatus == "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content"
+      and (.data.sourceAuthority | type == "array")
+      and (.data.sourceAuthority | length) > 0
+      and (.data.summary.safeToClaim | type == "boolean")
+      and (.data.summary.environmentVerdict | type == "string")
+      and (.data.summary.sourceTestVerdict | type == "string")
+      and (.data.recoveryActions | type == "array")
+      and (.data.evidenceRefs | type == "array")
+    ' "$LAST_STDOUT" >/dev/null; then
+        fail_with_artifacts \
+            "${label}_schema_validation_failed" \
+            "$command_text" \
+            "environment_attestation_schema_validation_failed" \
+            1 \
+            1 \
+            "$LAST_ELAPSED_MS" \
+            "$LAST_STDOUT" \
+            "$LAST_STDERR" \
+            "failed"
+    fi
+
+    if ! jq -e "$case_filter" "$LAST_STDOUT" >/dev/null; then
+        fail_with_artifacts \
+            "${label}_case_validation_failed" \
+            "$command_text" \
+            "environment_attestation_case_validation_failed" \
+            1 \
+            1 \
+            "$LAST_ELAPSED_MS" \
+            "$LAST_STDOUT" \
+            "$LAST_STDERR" \
+            "failed"
+    fi
+
+    if [ -s "$LAST_STDERR" ]; then
+        fail_with_artifacts \
+            "${label}_stdout_stderr_contract_failed" \
+            "$command_text" \
+            "environment_attestation_stderr_not_empty_in_json_mode" \
+            1 \
+            1 \
+            "$LAST_ELAPSED_MS" \
+            "$LAST_STDOUT" \
+            "$LAST_STDERR" \
+            "passed"
+    fi
+
+    if grep -Eq '/Users/|/Volumes/|/data/projects/|/private/tmp/|SECRET_TOKEN|body_md|mail body|raw source' "$LAST_STDOUT"; then
+        fail_with_artifacts \
+            "${label}_redaction_failed" \
+            "$command_text" \
+            "environment_attestation_redaction_failed" \
+            1 \
+            1 \
+            "$LAST_ELAPSED_MS" \
+            "$LAST_STDOUT" \
+            "$LAST_STDERR" \
+            "passed" \
+            "failed"
+    fi
+
+    local environment_verdict
+    local source_test_verdict
+    local degraded_codes
+    environment_verdict="$(jq -r '.data.summary.environmentVerdict' "$LAST_STDOUT")"
+    source_test_verdict="$(jq -r '.data.summary.sourceTestVerdict' "$LAST_STDOUT")"
+    degraded_codes="$(jq -c '[.data.degraded[]?.code] | sort' "$LAST_STDOUT")"
+
+    emit_assert_result \
+        "assert_ok" \
+        "$label" \
+        "$command_text" \
+        "none" \
+        "passed" \
+        "passed" \
+        "$LAST_EXIT_CODE" \
+        "$LAST_ELAPSED_MS" \
+        "$LAST_STDOUT" \
+        "$LAST_STDERR" \
+        "$environment_verdict" \
+        "$source_test_verdict" \
+        "$degraded_codes" >/dev/null
+}
+
+run_attestation_case() {
+    local label="$1"
+    local case_filter="$2"
+    local command_text="$3"
+    shift 3
+    run_ee "$label" "$@"
+    validate_attestation_case "$label" "$case_filter" "$command_text"
+}
+
+DEFAULT_ARGS=(
     diag
     environment-attestation
     --workspace
@@ -422,107 +591,54 @@ ATTESTATION_ARGS=(
     "$COMMAND_TIMEOUT_MS"
 )
 if [ -n "$SNAPSHOT_PATH" ]; then
-    ATTESTATION_ARGS+=(--agent-mail-snapshot "$SNAPSHOT_PATH")
+    DEFAULT_ARGS+=(--agent-mail-snapshot "$SNAPSHOT_PATH")
 fi
 
-run_ee environment-attestation "${ATTESTATION_ARGS[@]}"
-
-if [ "$LAST_EXIT_CODE" -ne 0 ]; then
-    if jq -e '.schema == "ee.error.v2" and (.error.message // "" | contains("unrecognized subcommand"))' "$LAST_STDOUT" >/dev/null 2>&1 ||
-        grep -Fq "unrecognized subcommand 'environment-attestation'" "$LAST_STDOUT" "$LAST_STDERR"; then
-        fail_with_artifacts \
-            "environment_attestation_command_unavailable" \
-            "ee diag environment-attestation --workspace [WORKSPACE] --include-rch --json" \
-            "environment_attestation_command_unavailable_or_stale_binary" \
-            3 \
-            "$LAST_EXIT_CODE" \
-            "$LAST_ELAPSED_MS" \
-            "$LAST_STDOUT" \
-            "$LAST_STDERR" \
-            "not_run"
-    fi
-    fail_with_artifacts \
-        "environment_attestation_command_failed" \
-        "ee diag environment-attestation --workspace [WORKSPACE] --include-rch --json" \
-        "environment_attestation_command_failed" \
-        1 \
-        "$LAST_EXIT_CODE" \
-        "$LAST_ELAPSED_MS" \
-        "$LAST_STDOUT" \
-        "$LAST_STDERR" \
-        "failed"
-fi
-
-if ! jq -e '
-  .schema == "ee.response.v2"
-  and .success == true
-  and .data.schema == "ee.environment_attestation.v1"
-  and .data.redactionStatus == "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content"
-  and (.data.sourceAuthority | type == "array")
-  and (.data.sourceAuthority | length) > 0
-  and (.data.summary.safeToClaim | type == "boolean")
-  and (.data.summary.environmentVerdict | type == "string")
-  and (.data.summary.sourceTestVerdict | type == "string")
-  and (.data.recoveryActions | type == "array")
-  and (.data.evidenceRefs | type == "array")
-' "$LAST_STDOUT" >/dev/null; then
-    fail_with_artifacts \
-        "environment_attestation_schema_validation_failed" \
-        "ee diag environment-attestation --workspace [WORKSPACE] --include-rch --json" \
-        "environment_attestation_schema_validation_failed" \
-        1 \
-        1 \
-        "$LAST_ELAPSED_MS" \
-        "$LAST_STDOUT" \
-        "$LAST_STDERR" \
-        "failed"
-fi
-
-if [ -s "$LAST_STDERR" ]; then
-    fail_with_artifacts \
-        "environment_attestation_stdout_stderr_contract_failed" \
-        "ee diag environment-attestation --workspace [WORKSPACE] --include-rch --json" \
-        "environment_attestation_stderr_not_empty_in_json_mode" \
-        1 \
-        1 \
-        "$LAST_ELAPSED_MS" \
-        "$LAST_STDOUT" \
-        "$LAST_STDERR" \
-        "passed"
-fi
-
-if grep -Eq '/Users/|/Volumes/|/data/projects/|/private/tmp/|SECRET_TOKEN|body_md|mail body|raw source' "$LAST_STDOUT"; then
-    fail_with_artifacts \
-        "environment_attestation_redaction_failed" \
-        "ee diag environment-attestation --workspace [WORKSPACE] --include-rch --json" \
-        "environment_attestation_redaction_failed" \
-        1 \
-        1 \
-        "$LAST_ELAPSED_MS" \
-        "$LAST_STDOUT" \
-        "$LAST_STDERR" \
-        "passed" \
-        "failed"
-fi
-
-ENVIRONMENT_VERDICT="$(jq -r '.data.summary.environmentVerdict' "$LAST_STDOUT")"
-SOURCE_TEST_VERDICT="$(jq -r '.data.summary.sourceTestVerdict' "$LAST_STDOUT")"
-DEGRADED_CODES="$(jq -c '[.data.degraded[]?.code] | sort' "$LAST_STDOUT")"
-
-emit_assert_result \
-    "assert_ok" \
-    "environment_attestation_logged_evidence" \
+run_attestation_case \
+    "environment-attestation-default" \
+    '.data.sourceAuthority
+      | any(.source == "local_cargo_tripwire" and .status == "ok")
+      and any(.source == "source_tree")
+      and any(.source == "rch" or .source == "build_admission")' \
     "ee diag environment-attestation --workspace [WORKSPACE] --include-rch --json" \
-    "none" \
-    "passed" \
-    "passed" \
-    "$LAST_EXIT_CODE" \
-    "$LAST_ELAPSED_MS" \
-    "$LAST_STDOUT" \
-    "$LAST_STDERR" \
-    "$ENVIRONMENT_VERDICT" \
-    "$SOURCE_TEST_VERDICT" \
-    "$DEGRADED_CODES" >/dev/null
+    "${DEFAULT_ARGS[@]}"
+
+run_attestation_case \
+    "environment-attestation-no-sources" \
+    '.data.sourceAuthority
+      | any(.source == "claim_gate" and .status == "not_collected")
+      and any(.source == "local_cargo_tripwire")' \
+    "ee diag environment-attestation --workspace [WORKSPACE] --sources none --json" \
+    diag environment-attestation \
+    --workspace "$WORKSPACE" \
+    --sources none \
+    --json \
+    --command-timeout-ms "$COMMAND_TIMEOUT_MS"
+
+run_attestation_case \
+    "environment-attestation-agent-mail-conflict" \
+    '.data.sourceAuthority
+      | any(.source == "agent_mail_probe" and (.metrics | any(.name == "reservation_count" and .value == "1")))
+      and any(.source == "file_reservations" and .status == "blocked")' \
+    "ee diag environment-attestation --workspace [WORKSPACE] --sources agent-mail --agent-mail-snapshot [RUN]/artifacts/agent-mail-full-snapshot.json --json" \
+    diag environment-attestation \
+    --workspace "$WORKSPACE" \
+    --sources agent-mail \
+    --agent-mail-snapshot "$FULL_AGENT_MAIL_SNAPSHOT" \
+    --json \
+    --command-timeout-ms "$COMMAND_TIMEOUT_MS"
+
+run_attestation_case \
+    "environment-attestation-agent-mail-health" \
+    '.data.sourceAuthority
+      | any(.source == "agent_mail_probe" and (.degradedCodes | index("agent_mail_unavailable")))' \
+    "ee diag environment-attestation --workspace [WORKSPACE] --sources agent-mail --agent-mail-snapshot [RUN]/artifacts/agent-mail-health-degraded.json --json" \
+    diag environment-attestation \
+    --workspace "$WORKSPACE" \
+    --sources agent-mail \
+    --agent-mail-snapshot "$HEALTH_AGENT_MAIL_SNAPSHOT" \
+    --json \
+    --command-timeout-ms "$COMMAND_TIMEOUT_MS"
 
 validate_event_log
 
