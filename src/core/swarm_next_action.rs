@@ -1297,7 +1297,9 @@ impl SwarmWorkPacket {
                 ),
                 remote_verification_admitted: source_authority_attestation
                     .remote_verification_admitted,
-                local_cargo_fallback_observed: None,
+                local_cargo_fallback_observed: Some(
+                    source_authority_attestation.local_cargo_fallback_observed,
+                ),
                 source_count: self.source_provenance.len(),
             },
             unsafe_reasons,
@@ -1532,8 +1534,11 @@ fn work_packet_claim_gate_environment_verdict(
     {
         return EnvironmentAttestationVerdict::LocalCargoBypassDetected;
     }
-    if packet.rch_proof_posture.local_fallback_prevented
-        || packet.rch_proof_posture.safe_to_launch_cargo_verification == Some(false)
+    if packet.rch_proof_posture.safe_to_launch_cargo_verification == Some(false)
+        || packet.rch_proof_posture.blocker_codes.iter().any(|code| {
+            code == "rch_worker_topology_blocked"
+                || code == "rch_remote_required_fallback_prevented"
+        })
     {
         return EnvironmentAttestationVerdict::ProofEnvironmentBlocked;
     }
@@ -1550,6 +1555,9 @@ fn work_packet_claim_gate_environment_verdict(
     }
     if work_packet_claim_gate_remote_verification_admitted(packet) == Some(true) {
         return EnvironmentAttestationVerdict::RemoteVerificationAdmitted;
+    }
+    if packet.rch_proof_posture.remote_only_required {
+        return EnvironmentAttestationVerdict::SourceAuthorityAmbiguous;
     }
     EnvironmentAttestationVerdict::SafeToClaim
 }
@@ -6400,7 +6408,10 @@ mod tests {
             gate.source_authority.remote_verification_admitted,
             Some(false)
         );
-        assert_eq!(gate.source_authority.local_cargo_fallback_observed, None);
+        assert_eq!(
+            gate.source_authority.local_cargo_fallback_observed,
+            Some(false)
+        );
     }
 
     #[test]
@@ -6751,7 +6762,10 @@ mod tests {
             gate.source_authority.remote_verification_admitted,
             Some(true)
         );
-        assert_eq!(gate.source_authority.local_cargo_fallback_observed, None);
+        assert_eq!(
+            gate.source_authority.local_cargo_fallback_observed,
+            Some(false)
+        );
     }
 
     #[test]
@@ -6791,7 +6805,10 @@ mod tests {
             gate.source_authority.remote_verification_admitted,
             summary.remote_verification_admitted
         );
-        assert_eq!(gate.source_authority.local_cargo_fallback_observed, None);
+        assert_eq!(
+            gate.source_authority.local_cargo_fallback_observed,
+            Some(summary.local_cargo_fallback_observed)
+        );
     }
 
     #[test]
@@ -6826,7 +6843,10 @@ mod tests {
             "local_cargo_bypass_detected"
         );
         assert_eq!(gate.source_authority.source_test_verdict, "not_evaluated");
-        assert_eq!(gate.source_authority.local_cargo_fallback_observed, None);
+        assert_eq!(
+            gate.source_authority.local_cargo_fallback_observed,
+            Some(true)
+        );
     }
 
     #[test]
