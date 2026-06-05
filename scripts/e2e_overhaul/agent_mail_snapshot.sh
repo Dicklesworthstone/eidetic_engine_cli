@@ -24,6 +24,10 @@ SNAPSHOT_STDOUT_STDERR="$TMP_ROOT/snapshot-stdout.stderr"
 SNAPSHOT_DUAL_FILE="$TMP_ROOT/snapshot-dual-file.json"
 SNAPSHOT_DUAL_STDOUT="$TMP_ROOT/snapshot-dual-stdout.json"
 SNAPSHOT_OUTPUT_ONLY_STDOUT="$TMP_ROOT/snapshot-output-only.stdout"
+HELP_STDOUT="$TMP_ROOT/help.stdout"
+HELP_STDERR="$TMP_ROOT/help.stderr"
+UNKNOWN_STDOUT="$TMP_ROOT/unknown.stdout"
+UNKNOWN_STDERR="$TMP_ROOT/unknown.stderr"
 COORDINATION_OK="$TMP_ROOT/coordination-ok.json"
 COORDINATION_DEGRADED="$TMP_ROOT/coordination-degraded.json"
 SYMLINK_PARENT="$TMP_ROOT/symlink-parent"
@@ -60,6 +64,39 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 bash -n "$PRODUCER"
+
+"$PRODUCER" --help >"$HELP_STDOUT" 2>"$HELP_STDERR"
+if [ -s "$HELP_STDERR" ]; then
+    printf 'agent_mail_snapshot: --help wrote diagnostics to stderr\n' >&2
+    exit 1
+fi
+for expected_help in \
+    "--json" \
+    "--stdout" \
+    "--output /private/tmp/ee-agent-mail-snapshot.json" \
+    "--json --output /private/tmp/ee-agent-mail-snapshot.json"; do
+    if ! grep -F -- "$expected_help" "$HELP_STDOUT" >/dev/null; then
+        printf 'agent_mail_snapshot: --help missing expected text: %s\n' "$expected_help" >&2
+        exit 1
+    fi
+done
+
+set +e
+"$PRODUCER" --definitely-not-valid >"$UNKNOWN_STDOUT" 2>"$UNKNOWN_STDERR"
+unknown_status=$?
+set -e
+if [ "$unknown_status" -eq 0 ]; then
+    printf 'agent_mail_snapshot: unknown argument should fail\n' >&2
+    exit 1
+fi
+if [ -s "$UNKNOWN_STDOUT" ]; then
+    printf 'agent_mail_snapshot: unknown argument wrote stdout\n' >&2
+    exit 1
+fi
+if ! grep -F -- "unrecognized arguments: --definitely-not-valid" "$UNKNOWN_STDERR" >/dev/null; then
+    printf 'agent_mail_snapshot: unknown argument diagnostic missing\n' >&2
+    exit 1
+fi
 
 sha256_file() {
     shasum -a 256 "$1" | awk '{print "sha256:" $1}'
