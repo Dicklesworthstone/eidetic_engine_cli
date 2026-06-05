@@ -40,15 +40,18 @@ fn sample_plan(q: &str, limit: u32) -> CompiledPlan {
 }
 
 #[test]
-fn public_api_round_trips_a_plan_under_default_capacity() {
+fn public_api_round_trips_a_plan_under_default_capacity() -> Result<(), String> {
     let mut cache = PlanCache::new(DEFAULT_PLAN_CACHE_ENTRIES);
     let key = PlanCacheKey::new(1, 1, 1);
     let plan = sample_plan("release rules", 10);
     let inserted = cache.insert(key, plan.clone());
-    let hit = cache.get(&key).expect("expected the just-inserted plan");
+    let hit = cache
+        .get(&key)
+        .ok_or_else(|| "expected the just-inserted plan".to_string())?;
     assert_eq!(hit.plan, plan);
     assert_eq!(hit.plan_tree_hash, inserted.plan_tree_hash);
     assert!(hit.plan_tree_hash.starts_with("blake3:"));
+    Ok(())
 }
 
 #[test]
@@ -130,11 +133,12 @@ fn diag_report_public_constants_match_schema_contract() {
 }
 
 #[test]
-fn diag_report_round_trips_through_serde_json_to_envelope_shape() {
+fn diag_report_round_trips_through_serde_json_to_envelope_shape() -> Result<(), String> {
     let mut cache = PlanCache::new(DEFAULT_PLAN_CACHE_ENTRIES);
     cache.insert(PlanCacheKey::new(7, 42, 17), sample_plan("release", 10));
     let report = cache.diag_report(EnvVarValueSource::RegistryDefault, 4);
-    let json = serde_json::to_value(&report).expect("serialize");
+    let json = serde_json::to_value(&report)
+        .map_err(|error| format!("serialize plan cache diag report: {error}"))?;
     let envelope = serde_json::json!({
         "schema": "ee.response.v2",
         "success": true,
@@ -147,8 +151,10 @@ fn diag_report_round_trips_through_serde_json_to_envelope_shape() {
     let data = envelope
         .get("data")
         .and_then(|v| v.as_object())
-        .expect("envelope data is an object");
-    let report_value = data.get("report").expect("envelope.data.report set");
+        .ok_or_else(|| "envelope data is an object".to_string())?;
+    let report_value = data
+        .get("report")
+        .ok_or_else(|| "envelope.data.report set".to_string())?;
     assert_eq!(
         report_value.get("schemaTag").and_then(|v| v.as_str()),
         Some("ee.diag.plan_cache.v1"),
@@ -157,6 +163,7 @@ fn diag_report_round_trips_through_serde_json_to_envelope_shape() {
         report_value.get("envVarName").and_then(|v| v.as_str()),
         Some("EE_QUERY_PLAN_CACHE_ENTRIES"),
     );
+    Ok(())
 }
 
 #[test]
