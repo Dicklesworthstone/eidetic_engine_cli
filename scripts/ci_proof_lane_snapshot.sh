@@ -87,6 +87,10 @@ if [ "$LIMIT" -lt 1 ]; then
     printf 'ci_proof_lane_snapshot: --limit must be a positive integer\n' >&2
     exit 2
 fi
+if [ -n "$HEAD_SHA" ] && [[ ! "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+    printf 'ci_proof_lane_snapshot: --head-sha must be a 40-character lowercase hex Git SHA\n' >&2
+    exit 2
+fi
 
 if [ "$JSON_MODE" != true ]; then
     :

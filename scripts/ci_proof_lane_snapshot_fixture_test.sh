@@ -58,4 +58,22 @@ EE_CI_PROOF_LANE_GH_BIN=/definitely/not/gh \
       and .summary.localCargoFallbackAllowed == false
       and .degraded[0].code == "ci_proof_lane_gh_unavailable"' >/dev/null
 
+set +e
+invalid_sha_stdout="$(
+    "$SNAPSHOT_SCRIPT" \
+        --input "${FIXTURE_DIR}/missing_artifact.json" \
+        --head-sha 123 \
+        --json 2>/dev/null
+)"
+invalid_sha_status=$?
+set -e
+if [ "$invalid_sha_status" -ne 2 ]; then
+    printf 'ci_proof_lane_snapshot_fixture_test: invalid --head-sha should exit 2, got %s\n' "$invalid_sha_status" >&2
+    exit 1
+fi
+if [ -n "$invalid_sha_stdout" ]; then
+    printf 'ci_proof_lane_snapshot_fixture_test: invalid --head-sha wrote stdout\n' >&2
+    exit 1
+fi
+
 printf 'ci proof-lane snapshot fixture tests passed\n'
