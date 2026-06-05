@@ -1,0 +1,94 @@
+{
+  "schema": "ee.ci_proof_lane_snapshot.v1",
+  "snapshotId": "ci_proof_lane_555555555555555555555555",
+  "repository": {
+    "owner": "Dicklesworthstone",
+    "name": "eidetic_engine_cli",
+    "defaultBranch": "main",
+    "headSha": "2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d"
+  },
+  "generatedAt": "2026-06-05T09:32:00Z",
+  "redactionStatus": "workflow_run_job_artifact_ids_statuses_hashes_no_logs_no_tokens_no_local_paths",
+  "summary": {
+    "verdict": "artifact_missing",
+    "freshArtifactAvailable": false,
+    "duplicateDispatchCount": 0,
+    "activeRunCount": 0,
+    "cancelledBeforeArtifactCount": 0,
+    "staleArtifactCount": 0,
+    "checksumMismatchCount": 0,
+    "localCargoFallbackAllowed": false,
+    "sourceTestVerdict": "not_evaluated"
+  },
+  "workflows": [
+    {
+      "workflowName": "macOS EE Artifact",
+      "workflowPath": ".github/workflows/macos-ee-artifact.yml",
+      "proofLaneKind": "dedicated_artifact",
+      "concurrencyGroup": "macos-ee-artifact-27007000001",
+      "dispatchPolicy": "reuse_active_same_head",
+      "status": "blocked",
+      "runs": [
+        {
+          "runId": "27007000001",
+          "jobIds": [
+            "79699200001"
+          ],
+          "event": "workflow_dispatch",
+          "headSha": "2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d",
+          "ref": "refs/heads/main",
+          "status": "completed",
+          "conclusion": "success",
+          "createdAt": "2026-06-05T09:22:00Z",
+          "updatedAt": "2026-06-05T09:32:00Z",
+          "completedAt": "2026-06-05T09:32:00Z",
+          "sourceFreshness": "current",
+          "artifactFreshness": "unknown",
+          "artifacts": [
+            {
+              "name": "ee-aarch64-apple-darwin-debug",
+              "status": "missing",
+              "retentionExpiresAt": null,
+              "checksumStatus": "missing",
+              "sourceSha": "2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d",
+              "architecture": "aarch64-apple-darwin",
+              "surfaceProbes": [
+                {
+                  "commandTemplate": "ee diag environment-attestation --help",
+                  "status": "not_run",
+                  "expectedSurface": "diag environment-attestation",
+                  "firstFailureDiagnosis": "expected artifact was missing after successful proof-lane completion"
+                }
+              ]
+            }
+          ],
+          "firstFailureDiagnosis": "expected artifact was missing after successful proof-lane completion"
+        }
+      ]
+    }
+  ],
+  "activeRecommendation": {
+    "verdict": "artifact_missing",
+    "workflowName": "macOS EE Artifact",
+    "runId": "27007000001",
+    "nextAction": "file_followup_bead",
+    "rationale": "Completed proof-lane run did not expose the expected artifact; do not treat it as binary proof."
+  },
+  "recoveryActions": [
+    {
+      "priority": 0,
+      "kind": "file_bead",
+      "command": "br create \"CI proof lane completed without expected artifact\"",
+      "mutatesState": true,
+      "rationale": "Track the missing artifact as workflow evidence instead of calling the run a source verdict."
+    }
+  ],
+  "degraded": [
+    {
+      "code": "ci_proof_lane_artifact_missing",
+      "severity": "warning",
+      "message": "The proof-lane run completed but the expected artifact is unavailable.",
+      "repair": "Inspect the artifact upload job and file a workflow follow-up before reusing this lane."
+    }
+  ]
+}

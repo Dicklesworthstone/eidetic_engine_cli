@@ -2760,6 +2760,7 @@ mod tests {
         entries.sort_by_key(|entry| entry.path());
 
         let mut verdicts = BTreeSet::new();
+        let mut saw_in_progress_run = false;
         let mut serialized = String::new();
         for entry in entries {
             let path = entry.path();
@@ -2784,6 +2785,19 @@ mod tests {
                 .as_str()
                 .ok_or_else(|| format!("fixture {} missing summary verdict", path.display()))?;
             verdicts.insert(verdict.to_owned());
+
+            let workflows = value["workflows"]
+                .as_array()
+                .ok_or_else(|| format!("fixture {} missing workflows array", path.display()))?;
+            for workflow in workflows {
+                let runs = workflow["runs"].as_array().ok_or_else(|| {
+                    format!("fixture {} missing workflow runs array", path.display())
+                })?;
+                saw_in_progress_run |= runs
+                    .iter()
+                    .any(|run| run["status"].as_str() == Some("in_progress"));
+            }
+
             serialized.push_str(&text);
         }
 
@@ -2792,12 +2806,18 @@ mod tests {
             "wait_for_active_run",
             "duplicate_dispatch_detected",
             "run_cancelled_before_artifact",
+            "artifact_missing",
+            "artifact_stale",
         ] {
             ensure(
                 verdicts.contains(verdict),
                 format!("CI proof-lane fixtures missing verdict {verdict}"),
             )?;
         }
+        ensure(
+            saw_in_progress_run,
+            "CI proof-lane fixtures missing in_progress run status",
+        )?;
 
         for forbidden in [
             "/Users/",
