@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: macos-ee-artifact-${{ github.run_id }}
+  group: macos-ee-artifact-${{ github.workflow }}-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
