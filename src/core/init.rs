@@ -1171,21 +1171,7 @@ fn ensure_boilerplate_path_has_no_symlink_components(
 }
 
 fn init_path_has_symlink_component(path: &Path) -> io::Result<bool> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
-            Ok(_) => {}
-            Err(error)
-                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
-            {
-                return Ok(false);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(false)
+    super::path_safety::path_has_symlink_component(path)
 }
 
 fn is_init_failure_status(status: &str) -> bool {

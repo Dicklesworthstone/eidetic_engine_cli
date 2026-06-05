@@ -1012,35 +1012,18 @@ fn ensure_no_claim_metadata_symlink_components(
     path: &Path,
     operation: &'static str,
 ) -> Result<(), ClaimParseError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(ClaimParseError::new(format!(
-                    "refusing to {operation} `{}` through symlinked path component `{}`",
-                    path.display(),
-                    current.display()
-                )));
-            }
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(());
-            }
-            Err(error) => {
-                return Err(ClaimParseError::new(format!(
-                    "failed to inspect {}: {error}",
-                    current.display()
-                )));
-            }
-        }
+    match crate::core::path_safety::first_existing_symlink_component(path) {
+        Ok(Some(component)) => Err(ClaimParseError::new(format!(
+            "refusing to {operation} `{}` through symlinked path component `{}`",
+            path.display(),
+            component.display()
+        ))),
+        Ok(None) => Ok(()),
+        Err(error) => Err(ClaimParseError::new(format!(
+            "failed to inspect {}: {error}",
+            path.display()
+        ))),
     }
-    Ok(())
 }
 
 fn ensure_claim_metadata_regular_file(

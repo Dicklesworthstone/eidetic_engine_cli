@@ -2103,29 +2103,12 @@ fn daemon_job_table_path_exists_as_non_regular_file(table_path: &Path) -> Result
 }
 
 fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, String> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(None);
-            }
-            Err(error) => {
-                return Err(format!(
-                    "Failed to inspect daemon job table path component '{}': {error}",
-                    current.display()
-                ));
-            }
-        }
-    }
-    Ok(None)
+    crate::core::path_safety::first_existing_symlink_component(path).map_err(|error| {
+        format!(
+            "Failed to inspect daemon job table path '{}': {error}",
+            path.display()
+        )
+    })
 }
 
 fn latest_daemon_rows(rows: &[DaemonJobRow]) -> Vec<DaemonJobRow> {

@@ -602,24 +602,7 @@ fn node_key_list_path_is_regular(path: &Path) -> Result<bool, LoadListError> {
 }
 
 fn node_key_list_symlink_component(path: &Path) -> Result<Option<PathBuf>, LoadListError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(None);
-            }
-            Err(error) => return Err(LoadListError::Read(error)),
-        }
-    }
-    Ok(None)
+    crate::core::path_safety::first_existing_symlink_component(path).map_err(LoadListError::Read)
 }
 
 fn node_key_list_invalid_path_error(message: String) -> LoadListError {

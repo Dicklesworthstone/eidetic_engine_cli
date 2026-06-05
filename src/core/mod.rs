@@ -76,6 +76,7 @@ pub mod memory_scope;
 pub mod model;
 pub mod outcome;
 pub mod ownership_snapshot;
+pub mod path_safety;
 pub mod perf_forensics;
 pub mod perf_live;
 pub mod plan;

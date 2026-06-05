@@ -582,25 +582,11 @@ fn validate_existing_repro_path(
 }
 
 fn reject_existing_symlink_components(path: &Path) -> Result<(), String> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(format!("repro_path_symlink_refused: {}", current.display()));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(format!(
-                    "repro_path_unavailable: {}: {}",
-                    current.display(),
-                    error
-                ));
-            }
-        }
+    match crate::core::path_safety::first_existing_symlink_component(path) {
+        Ok(Some(component)) => Err(format!("repro_path_symlink_refused: {}", component.display())),
+        Ok(None) => Ok(()),
+        Err(error) => Err(format!("repro_path_unavailable: {}: {error}", path.display())),
     }
-    Ok(())
 }
 
 fn repro_symlink_refused_storage_error(error: String) -> DomainError {
