@@ -20,6 +20,7 @@ from typing import Any
 
 
 REDACTION_STATUS = "paths_counts_subjects_only_no_content"
+AGENT_MAIL_SNAPSHOT_SCHEMA = "ee.agent_mail.snapshot.v1"
 DEFAULT_TIMEOUT_SEC = 5.0
 DEFAULT_INBOX_LIMIT = 20
 DEFAULT_THREAD_LIMIT = 20
@@ -616,14 +617,24 @@ def main() -> int:
     degraded = degraded_entries(commands, project)
     fallback_active = bool(degraded)
     output = {
+        "schema": AGENT_MAIL_SNAPSHOT_SCHEMA,
         "generated_at": utc_now(),
         "project_key": "<workspace>",
+        "agent_name": redact_text(agent),
         "redaction_status": REDACTION_STATUS,
         "producer_status": "degraded" if fallback_active else "ok",
         "source_commands": [command_display(command["argv"], project) for command in commands],
         "command_statuses": [command_status(command, project) for command in commands],
         "fallback_active": fallback_active,
         "am_agents_list_ok": agents_cmd["ok"],
+        "summary": {
+            "agent_count": len(agents),
+            "file_reservation_count": len(reservations),
+            "inbox_mailbox_count": len(inbox),
+            "thread_count": len(threads),
+            "source_command_count": len(commands),
+            "degraded_count": len(degraded),
+        },
         "degraded": degraded,
         "file_reservations": reservations,
         "agents": agents,

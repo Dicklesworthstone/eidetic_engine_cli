@@ -1,0 +1,240 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.agent_mail.snapshot.v1.json",
+  "title": "ee.agent_mail.snapshot.v1",
+  "description": "Redaction-safe full Agent Mail snapshot produced outside ee for swarm brief, workspace hygiene, and claim-gate evidence refresh.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "generated_at",
+    "project_key",
+    "agent_name",
+    "redaction_status",
+    "producer_status",
+    "source_commands",
+    "command_statuses",
+    "fallback_active",
+    "am_agents_list_ok",
+    "summary",
+    "degraded",
+    "file_reservations",
+    "agents",
+    "inbox",
+    "threads"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ee.agent_mail.snapshot.v1" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "project_key": { "type": "string" },
+    "agent_name": { "type": "string", "minLength": 1 },
+    "redaction_status": {
+      "type": "string",
+      "const": "paths_counts_subjects_only_no_content"
+    },
+    "producer_status": { "type": "string", "enum": ["ok", "degraded"] },
+    "source_commands": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "command_statuses": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/commandStatus" }
+    },
+    "fallback_active": { "type": "boolean" },
+    "am_agents_list_ok": { "type": "boolean" },
+    "summary": { "$ref": "#/$defs/summary" },
+    "degraded": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/degradation" }
+    },
+    "file_reservations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/fileReservation" }
+    },
+    "agents": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/agent" }
+    },
+    "inbox": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/inbox" }
+    },
+    "threads": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/thread" }
+    }
+  },
+  "$defs": {
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_count",
+        "file_reservation_count",
+        "inbox_mailbox_count",
+        "thread_count",
+        "source_command_count",
+        "degraded_count"
+      ],
+      "properties": {
+        "agent_count": { "type": "integer", "minimum": 0 },
+        "file_reservation_count": { "type": "integer", "minimum": 0 },
+        "inbox_mailbox_count": { "type": "integer", "minimum": 0 },
+        "thread_count": { "type": "integer", "minimum": 0 },
+        "source_command_count": { "type": "integer", "minimum": 0 },
+        "degraded_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "commandStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "ok", "exit_code", "timed_out", "error_class"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1 },
+        "ok": { "type": "boolean" },
+        "exit_code": { "type": ["integer", "null"] },
+        "timed_out": { "type": "boolean" },
+        "error_class": { "type": ["string", "null"] }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "source",
+        "command",
+        "error_class",
+        "exit_code",
+        "timed_out"
+      ],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "source": { "type": "string", "minLength": 1 },
+        "command": { "type": "string", "minLength": 1 },
+        "error_class": { "type": ["string", "null"] },
+        "exit_code": { "type": ["integer", "null"] },
+        "timed_out": { "type": "boolean" }
+      }
+    },
+    "fileReservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path_pattern", "holder", "exclusive"],
+      "properties": {
+        "path_pattern": { "type": "string", "minLength": 1 },
+        "holder": { "type": "string", "minLength": 1 },
+        "exclusive": { "type": "boolean" },
+        "expires_ts": { "type": "string" }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "last_active_ts": { "type": "string" }
+      }
+    },
+    "inbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mailbox", "unread_count", "ack_required_count"],
+      "properties": {
+        "mailbox": { "type": "string", "minLength": 1 },
+        "unread_count": { "type": "integer", "minimum": 0 },
+        "ack_required_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "thread": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["thread_id", "message_count"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 },
+        "message_count": { "type": "integer", "minimum": 0 },
+        "subject": { "type": "string" },
+        "last_activity_at": { "type": "string" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.agent_mail.snapshot.v1",
+      "generated_at": "2026-06-05T18:56:00Z",
+      "project_key": "<workspace>",
+      "agent_name": "BeigeHollow",
+      "redaction_status": "paths_counts_subjects_only_no_content",
+      "producer_status": "ok",
+      "source_commands": [
+        "am agents list --project '<workspace>' --json",
+        "am robot reservations --project '<workspace>' --all --format json",
+        "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json"
+      ],
+      "command_statuses": [
+        {
+          "command": "am agents list --project '<workspace>' --json",
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "error_class": null
+        }
+      ],
+      "fallback_active": false,
+      "am_agents_list_ok": true,
+      "summary": {
+        "agent_count": 1,
+        "file_reservation_count": 1,
+        "inbox_mailbox_count": 1,
+        "thread_count": 1,
+        "source_command_count": 3,
+        "degraded_count": 0
+      },
+      "degraded": [],
+      "file_reservations": [
+        {
+          "path_pattern": "docs/swarm/coordination_snapshot.md",
+          "holder": "BeigeHollow",
+          "exclusive": true,
+          "expires_ts": "2026-06-05T19:56:00Z"
+        }
+      ],
+      "agents": [
+        {
+          "name": "BeigeHollow",
+          "last_active_ts": "2026-06-05T18:55:00Z"
+        }
+      ],
+      "inbox": [
+        {
+          "mailbox": "BeigeHollow",
+          "unread_count": 2,
+          "ack_required_count": 1
+        }
+      ],
+      "threads": [
+        {
+          "thread_id": "bd-1ur7d.1",
+          "subject": "Version Agent Mail snapshot output with a stable schema",
+          "message_count": 3,
+          "last_activity_at": "2026-06-05T18:55:00Z"
+        }
+      ]
+    }
+  ],
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-1ur7d.1",
+    "available_in_build": true,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/coordination_snapshot.md"
+}

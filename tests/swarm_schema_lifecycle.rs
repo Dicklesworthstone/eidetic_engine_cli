@@ -100,6 +100,13 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         shipped: true,
     },
     SchemaCase {
+        id: "ee.agent_mail.snapshot.v1",
+        file_name: "ee.agent_mail.snapshot.v1.json",
+        doc_path: "docs/swarm/coordination_snapshot.md",
+        tracking_bead: "bd-1ur7d.1",
+        shipped: true,
+    },
+    SchemaCase {
         id: "ee.coordination_fallback_evidence.v1",
         file_name: "ee.coordination_fallback_evidence.v1.json",
         doc_path: "docs/swarm/coordination_fallback_evidence.md",
@@ -260,6 +267,12 @@ const DRIFT_CASES: &[DriftCase] = &[
         command: "ee context --coordination-snapshot snapshot.json --json",
         json_path: ".data.pack.coordination",
         fixture_manifest_key: "ee.coordination_snapshot.v1",
+    },
+    DriftCase {
+        schema_id: "ee.agent_mail.snapshot.v1",
+        command: "scripts/agent_mail_snapshot.sh --json",
+        json_path: ".",
+        fixture_manifest_key: "ee.agent_mail.snapshot.v1",
     },
     DriftCase {
         schema_id: "ee.coordination_fallback_evidence.v1",

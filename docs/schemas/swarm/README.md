@@ -12,12 +12,19 @@ constant and emitted JSON.
 
 Tracking Bead: `bd-6qcwh.1`
 
-`ee swarm brief --agent-mail-snapshot <path>` currently consumes a documented
-parser-compatible snapshot shape rather than a separate shipped JSON Schema. The
-producer contract is therefore:
+`ee swarm brief --agent-mail-snapshot <path>` consumes the shipped
+`ee.agent_mail.snapshot.v1` producer schema defined in
+`ee.agent_mail.snapshot.v1.json`. The schema is the lower-level Agent Mail
+snapshot input that feeds swarm brief, workspace hygiene, and claim-gate
+evidence refresh. It remains distinct from the pack-level
+`ee.coordination_snapshot.v1` aggregate. The producer contract is:
 
-- top-level arrays named `agents` or `agent_inventory`, `file_reservations` or
-  `reservations`, `inbox` or `mailboxes`, and `threads`
+- `schema: "ee.agent_mail.snapshot.v1"` plus redacted producer metadata,
+  command statuses, summary counts, and degraded records
+- top-level arrays named `agents`, `file_reservations`, `inbox`, and `threads`
+  in the shipped producer output
+- consumer compatibility with older aliases such as `agent_inventory`,
+  `reservations`, and `mailboxes` where parser surfaces already support them
 - optional Agent Mail health fields such as `fallback_active`,
   `mcp_http_reachable`, `am_agents_list_ok`, `am_send_single_recipient_ok`,
   `am_send_multi_recipient_ok`, `semantic_readiness`, and `healthLevel`
@@ -27,9 +34,7 @@ producer contract is therefore:
 
 This shape is intentionally not `ee.coordination_snapshot.v1`. The coordination
 snapshot schema is the pack-level aggregate over Beads, Agent Mail, and other
-coordination evidence. The Agent Mail snapshot producer is the lower-level
-input that feeds `ee swarm brief`, workspace hygiene, and later pack
-coordination conversion.
+coordination evidence.
 
 `ee.swarm.coordination_health.v1` is health evidence only. It may populate
 Agent Mail degraded entries when passed as `--agent-mail-snapshot`, but it is

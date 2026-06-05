@@ -6,6 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PRODUCER="$REPO_ROOT/scripts/agent_mail_snapshot.sh"
+SNAPSHOT_SCHEMA="$REPO_ROOT/docs/schemas/swarm/ee.agent_mail.snapshot.v1.json"
 TMP_BASE="${TMPDIR:-/tmp}"
 case "$TMP_BASE" in
   /Volumes/*) TMP_BASE="/tmp" ;;
@@ -24,6 +25,10 @@ SNAPSHOT_STDOUT_STDERR="$TMP_ROOT/snapshot-stdout.stderr"
 SNAPSHOT_DUAL_FILE="$TMP_ROOT/snapshot-dual-file.json"
 SNAPSHOT_DUAL_STDOUT="$TMP_ROOT/snapshot-dual-stdout.json"
 SNAPSHOT_OUTPUT_ONLY_STDOUT="$TMP_ROOT/snapshot-output-only.stdout"
+SNAPSHOT_MISSING_SCHEMA="$TMP_ROOT/snapshot-missing-schema.json"
+SNAPSHOT_MALFORMED_DEGRADED="$TMP_ROOT/snapshot-malformed-degraded.json"
+SNAPSHOT_BODY_LEAK="$TMP_ROOT/snapshot-body-leak.json"
+SNAPSHOT_PATH_LEAK="$TMP_ROOT/snapshot-path-leak.json"
 HELP_STDOUT="$TMP_ROOT/help.stdout"
 HELP_STDERR="$TMP_ROOT/help.stderr"
 UNKNOWN_STDOUT="$TMP_ROOT/unknown.stdout"
@@ -65,6 +70,19 @@ fi
 
 bash -n "$PRODUCER"
 
+jq -e '
+  .["$schema"] == "http://json-schema.org/draft-07/schema#"
+  and .["$id"] == "https://eidetic-engine/schemas/swarm/ee.agent_mail.snapshot.v1.json"
+  and .title == "ee.agent_mail.snapshot.v1"
+  and .properties.schema.const == "ee.agent_mail.snapshot.v1"
+  and (.required | index("schema") and index("summary") and index("file_reservations") and index("agents") and index("inbox") and index("threads"))
+  and .["x-ee-status"].tracking_bead == "bd-1ur7d.1"
+  and .["x-ee-status"].shipped == true
+  and .["x-ee-status"].available_in_build == true
+  and .["x-ee-doc"] == "docs/swarm/coordination_snapshot.md"
+  and .examples[0].schema == "ee.agent_mail.snapshot.v1"
+' "$SNAPSHOT_SCHEMA" >/dev/null
+
 "$PRODUCER" --help >"$HELP_STDOUT" 2>"$HELP_STDERR"
 if [ -s "$HELP_STDERR" ]; then
     printf 'agent_mail_snapshot: --help wrote diagnostics to stderr\n' >&2
@@ -97,6 +115,38 @@ if ! grep -F -- "unrecognized arguments: --definitely-not-valid" "$UNKNOWN_STDER
     printf 'agent_mail_snapshot: unknown argument diagnostic missing\n' >&2
     exit 1
 fi
+
+assert_snapshot_contract() {
+    local snapshot="$1"
+
+    jq -e '
+      .schema == "ee.agent_mail.snapshot.v1"
+      and (.generated_at | type == "string")
+      and .project_key == "<workspace>"
+      and (.agent_name | type == "string" and length > 0)
+      and .redaction_status == "paths_counts_subjects_only_no_content"
+      and (.producer_status == "ok" or .producer_status == "degraded")
+      and (.source_commands | type == "array")
+      and (.command_statuses | type == "array")
+      and (.fallback_active | type == "boolean")
+      and (.am_agents_list_ok | type == "boolean")
+      and (.summary.agent_count == (.agents | length))
+      and (.summary.file_reservation_count == (.file_reservations | length))
+      and (.summary.inbox_mailbox_count == (.inbox | length))
+      and (.summary.thread_count == (.threads | length))
+      and (.summary.source_command_count == (.source_commands | length))
+      and (.summary.degraded_count == (.degraded | length))
+      and (.degraded | all(
+        (.code | type == "string" and length > 0)
+        and (.severity | type == "string")
+        and (.source | type == "string" and length > 0)
+        and (.command | type == "string" and length > 0)
+        and (.timed_out | type == "boolean")
+      ))
+      and ([.. | objects | keys[]? | select(. == "body" or . == "body_md" or . == "bodyMd" or . == "raw_stdout" or . == "raw_stderr")] | length == 0)
+      and ((. | tostring) | test("ghp_|sk-[A-Za-z0-9]{20,}|SECRET_TOKEN|raw body|/Users/|/Volumes/|/data/|/tmp/|/private/|/var/folders/") | not)
+    ' "$snapshot" >/dev/null
+}
 
 sha256_file() {
     shasum -a 256 "$1" | awk '{print "sha256:" $1}'
@@ -402,6 +452,7 @@ jq -e '
   and .fallback_active == false
   and any(.threads[]; .thread_id == "bd-6qcwh.2" and .message_count == 2)
 ' "$SNAPSHOT_STDOUT_OK" >/dev/null
+assert_snapshot_contract "$SNAPSHOT_STDOUT_OK"
 
 PATH="$FAKE_BIN:$PATH" \
 AM_FAKE_COMMAND_LOG="$COMMAND_LOG" \
@@ -419,6 +470,7 @@ if ! cmp -s "$SNAPSHOT_DUAL_FILE" "$SNAPSHOT_DUAL_STDOUT"; then
     printf 'agent_mail_snapshot: --json --output wrote different stdout and file snapshots\n' >&2
     exit 1
 fi
+assert_snapshot_contract "$SNAPSHOT_DUAL_FILE"
 
 PATH="$FAKE_BIN:$PATH" \
 AM_FAKE_COMMAND_LOG="$COMMAND_LOG" \
@@ -439,8 +491,12 @@ fi
 
 jq -e '
   .redaction_status == "paths_counts_subjects_only_no_content"
+  and .schema == "ee.agent_mail.snapshot.v1"
+  and .agent_name == "BeigeHollow"
   and .producer_status == "ok"
   and .fallback_active == false
+  and .summary.file_reservation_count == 2
+  and .summary.degraded_count == 0
   and (.file_reservations | length) == 2
   and any(.file_reservations[]; .path_pattern == "scripts/agent_mail_snapshot.sh" and .holder == "BeigeHollow" and .exclusive == true)
   and any(.file_reservations[]; .path_pattern == "[REDACTED:absolute_path]")
@@ -451,6 +507,33 @@ jq -e '
   and any(.threads[]; .thread_id == "bd-6qcwh.2" and .message_count == 2)
   and (.source_commands | all(contains("--include-bodies") | not))
 ' "$SNAPSHOT_OK" >/dev/null
+assert_snapshot_contract "$SNAPSHOT_OK"
+
+jq 'del(.schema)' "$SNAPSHOT_OK" > "$SNAPSHOT_MISSING_SCHEMA"
+if assert_snapshot_contract "$SNAPSHOT_MISSING_SCHEMA"; then
+    printf 'agent_mail_snapshot: contract accepted snapshot missing schema\n' >&2
+    exit 1
+fi
+
+jq '.producer_status = "degraded" | .fallback_active = true | .summary.degraded_count = 1 | .degraded = [{"code":"missing_fields"}]' \
+    "$SNAPSHOT_OK" > "$SNAPSHOT_MALFORMED_DEGRADED"
+if assert_snapshot_contract "$SNAPSHOT_MALFORMED_DEGRADED"; then
+    printf 'agent_mail_snapshot: contract accepted malformed degraded entry\n' >&2
+    exit 1
+fi
+
+jq '.threads[0].body_md = "raw body must not appear"' "$SNAPSHOT_OK" > "$SNAPSHOT_BODY_LEAK"
+if assert_snapshot_contract "$SNAPSHOT_BODY_LEAK"; then
+    printf 'agent_mail_snapshot: contract accepted raw body leak\n' >&2
+    exit 1
+fi
+
+jq '.file_reservations[0].path_pattern = "/Users/example/private/mail/archive.jsonl"' \
+    "$SNAPSHOT_OK" > "$SNAPSHOT_PATH_LEAK"
+if assert_snapshot_contract "$SNAPSHOT_PATH_LEAK"; then
+    printf 'agent_mail_snapshot: contract accepted private path leak\n' >&2
+    exit 1
+fi
 
 jq -e '
   .schema == "ee.coordination_snapshot.v1"
@@ -506,12 +589,14 @@ jq -e '
   .producer_status == "degraded"
   and .fallback_active == true
   and .am_agents_list_ok == false
+  and .summary.degraded_count == 1
   and (.degraded | length) == 1
   and .file_reservations != null
   and .agents != null
   and .inbox != null
   and .threads != null
 ' "$SNAPSHOT_DEGRADED" >/dev/null
+assert_snapshot_contract "$SNAPSHOT_DEGRADED"
 
 jq -e '
   .schema == "ee.coordination_snapshot.v1"

@@ -71,7 +71,8 @@ scripts/agent_mail_snapshot.sh \
 
 The `--json` flag writes the full snapshot to stdout. To keep a durable file
 for consumers, use `--output`; plain `--output` writes only the file, while
-`--json --output` writes the same snapshot to both stdout and the file.
+`--json --output` writes the same `ee.agent_mail.snapshot.v1` snapshot to both
+stdout and the file.
 
 ```bash
 SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
@@ -100,9 +101,9 @@ ee pack "next bead" --workspace . \
 The snapshot follows the producer contract in
 `docs/swarm/coordination_snapshot.md`: it includes the `file_reservations`,
 `agents`, `inbox`, and `threads` arrays, using empty arrays only for classes the
-producer actually checked. The producer never sends mail, acknowledges
-messages, marks read state, creates or releases reservations, mutates Beads, or
-runs the health smoke-test script.
+producer actually checked, and carries schema `ee.agent_mail.snapshot.v1`. The
+producer never sends mail, acknowledges messages, marks read state, creates or
+releases reservations, mutates Beads, or runs the health smoke-test script.
 
 The companion coordination file is the pack-compatible
 `ee.coordination_snapshot.v1` projection over the same redacted Agent Mail

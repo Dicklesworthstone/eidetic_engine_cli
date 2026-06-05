@@ -27,8 +27,8 @@ scripts/agent_mail_snapshot.sh \
 ```
 
 Use `--json` for stdout. Use `--output` to write a snapshot file; plain
-`--output` is quiet, and `--json --output` writes the same snapshot to stdout
-and to the file.
+`--output` is quiet, and `--json --output` writes the same
+`ee.agent_mail.snapshot.v1` snapshot to stdout and to the file.
 
 ```bash
 SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
