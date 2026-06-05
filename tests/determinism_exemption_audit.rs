@@ -17,10 +17,10 @@ struct Exemption {
 }
 
 #[test]
-fn disallowed_methods_exemptions_are_justified_and_counted() {
+fn disallowed_methods_exemptions_are_justified_and_counted() -> Result<(), String> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let exemptions = collect_exemptions(&[manifest_dir.join("src"), manifest_dir.join("tests")]);
-    let baseline = parse_baseline(Baseline::raw());
+    let baseline = parse_baseline(Baseline::raw())?;
 
     let unjustified = exemptions
         .iter()
@@ -36,6 +36,8 @@ fn disallowed_methods_exemptions_are_justified_and_counted() {
         "clippy::disallowed_methods exemption count grew from baseline {baseline} to {}. Review the exemption, add a justification, and update the N4.4 baseline only when accepted.",
         exemptions.len()
     );
+
+    Ok(())
 }
 
 struct Baseline;
@@ -46,13 +48,13 @@ impl Baseline {
     }
 }
 
-fn parse_baseline(raw: &str) -> usize {
+fn parse_baseline(raw: &str) -> Result<usize, String> {
     raw.lines()
         .map(str::trim)
         .find_map(|line| line.strip_prefix("allowed_exemptions = "))
         .unwrap_or("0")
         .parse()
-        .expect("determinism exemption baseline must be a usize")
+        .map_err(|error| format!("determinism exemption baseline must be a usize: {error}"))
 }
 
 fn collect_exemptions(roots: &[PathBuf]) -> Vec<Exemption> {
@@ -140,7 +142,7 @@ mod self_tests {
 
     #[test]
     fn parses_zero_baseline() {
-        assert_eq!(parse_baseline("allowed_exemptions = 0\n"), 0);
+        assert_eq!(parse_baseline("allowed_exemptions = 0\n"), Ok(0));
     }
 
     #[test]
