@@ -49536,7 +49536,8 @@ mod tests {
         parse_completion_audit_evidence_input, parse_context_profile,
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
-        plan_cache_diag_degraded, plan_cache_diag_response_json, run, write_index_rebuild_error,
+        plan_cache_diag_degraded, plan_cache_diag_response_json,
+        read_environment_attestation_fixture_json, run, write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
     use crate::core::index::IndexRebuildError;
