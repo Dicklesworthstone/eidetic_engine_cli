@@ -74,12 +74,14 @@ or treating a CI-built binary as source-authority evidence.
    scripts/ci_proof_lane_snapshot.sh --head-sha "$(git rev-parse HEAD)" --json
    ```
 
-2. Read `summary.verdict`, `activeRecommendation.nextAction`,
-   `activeRecommendation.runId`, `activeRecommendation.workflowPath`, and
-   `activeRecommendation.firstFailure`.
+2. Read `summary.verdict`, `activeRecommendation.workflowName`,
+   `activeRecommendation.runId`, `activeRecommendation.nextAction`, and
+   `activeRecommendation.rationale`.
 3. Act only on the recommendation. Do not dispatch, cancel, download, or run a
    harness because a mail thread or old support bundle said a lane was usable.
-4. Record the snapshot verdict in Agent Mail before mutating Beads or invoking a
+4. When you need first-failure detail, use `degraded[]` and the matching
+   `workflows[].runs[].firstFailureDiagnosis` row.
+5. Record the snapshot verdict in Agent Mail before mutating Beads or invoking a
    no-mock harness.
 
 | Recommendation | Agent action |
@@ -184,8 +186,9 @@ source/test proof.
 - snapshot_verdict: <summary.verdict>
 - degraded_codes: <codes or none>
 - source_test_verdict: <not_evaluated | remote_pass | remote_fail | environment_blocked_before_source>
-- next_action: <activeRecommendation.nextAction and command, if any>
-- first_failure: <compact first-failure diagnosis or none>
+- next_action: <activeRecommendation.nextAction>
+- recommendation_rationale: <activeRecommendation.rationale>
+- first_failure: <workflows[].runs[].firstFailureDiagnosis or degraded code, if any>
 ```
 
 Acceptable closeout language:
