@@ -413,6 +413,9 @@ fi
 
 FULL_AGENT_MAIL_SNAPSHOT="$ARTIFACT_DIR/agent-mail-full-snapshot.json"
 HEALTH_AGENT_MAIL_SNAPSHOT="$ARTIFACT_DIR/agent-mail-health-degraded.json"
+CI_STALE_PROOF_SNAPSHOT="$REPO_ROOT/tests/fixtures/ci_proof_lane/artifact_stale.json"
+CI_CANCELLED_PROOF_SNAPSHOT="$REPO_ROOT/tests/fixtures/ci_proof_lane/cancelled_before_artifact.json"
+LOCAL_CARGO_PROCESS_SCAN="$ARTIFACT_DIR/local-cargo-bypass-scan.json"
 
 cat >"$FULL_AGENT_MAIL_SNAPSHOT" <<'JSON'
 {
@@ -449,6 +452,21 @@ cat >"$HEALTH_AGENT_MAIL_SNAPSHOT" <<'JSON'
   "am_send_multi_recipient_ok": false,
   "observed_panic": "RefCell already borrowed",
   "fallback_active": true
+}
+JSON
+
+cat >"$LOCAL_CARGO_PROCESS_SCAN" <<'JSON'
+{
+  "schema": "ee.rch_local_cargo_tripwire.v1",
+  "mode": "probe_processes",
+  "status": "bypass_detected",
+  "count": 1,
+  "detectedLocalBuilds": [
+    {"kind": "cargo", "pid": 4242, "command": "cargo test"}
+  ],
+  "evidence": [
+    {"kind": "active_process_scan", "result": "bypass_detected"}
+  ]
 }
 JSON
 
@@ -639,6 +657,47 @@ run_attestation_case \
     --workspace "$WORKSPACE" \
     --sources agent-mail \
     --agent-mail-snapshot "$HEALTH_AGENT_MAIL_SNAPSHOT" \
+    --json \
+    --command-timeout-ms "$COMMAND_TIMEOUT_MS"
+
+run_attestation_case \
+    "environment-attestation-ci-proof-stale" \
+    '.data.summary.environmentVerdict == "source_authority_ambiguous"
+      and .data.summary.sourceTestVerdict == "stale_source"
+      and (.data.degraded | any(.code == "ci_proof_lane_artifact_stale"))
+      and (.data.sourceAuthority | any(.source == "ci_proof_lane" and .status == "stale"))' \
+    "ee diag environment-attestation --workspace [WORKSPACE] --sources git --ci-proof-lane-snapshot [REPO]/tests/fixtures/ci_proof_lane/artifact_stale.json --json" \
+    diag environment-attestation \
+    --workspace "$WORKSPACE" \
+    --sources git \
+    --ci-proof-lane-snapshot "$CI_STALE_PROOF_SNAPSHOT" \
+    --json \
+    --command-timeout-ms "$COMMAND_TIMEOUT_MS"
+
+run_attestation_case \
+    "environment-attestation-ci-proof-cancelled" \
+    '.data.summary.environmentVerdict == "source_authority_ambiguous"
+      and (.data.degraded | any(.code == "ci_proof_lane_cancelled_before_artifact"))
+      and (.data.sourceAuthority | any(.source == "ci_proof_lane" and .status == "blocked"))' \
+    "ee diag environment-attestation --workspace [WORKSPACE] --sources git --ci-proof-lane-snapshot [REPO]/tests/fixtures/ci_proof_lane/cancelled_before_artifact.json --json" \
+    diag environment-attestation \
+    --workspace "$WORKSPACE" \
+    --sources git \
+    --ci-proof-lane-snapshot "$CI_CANCELLED_PROOF_SNAPSHOT" \
+    --json \
+    --command-timeout-ms "$COMMAND_TIMEOUT_MS"
+
+run_attestation_case \
+    "environment-attestation-local-cargo-bypass-fixture" \
+    '.data.summary.environmentVerdict == "local_cargo_bypass_detected"
+      and .data.summary.localCargoFallbackObserved == true
+      and (.data.degraded | any(.code == "local_cargo_bypass_detected"))
+      and (.data.sourceAuthority | any(.source == "local_cargo_tripwire" and .status == "blocked"))' \
+    "ee diag environment-attestation --workspace [WORKSPACE] --sources git --local-cargo-process-scan [RUN]/artifacts/local-cargo-bypass-scan.json --json" \
+    diag environment-attestation \
+    --workspace "$WORKSPACE" \
+    --sources git \
+    --local-cargo-process-scan "$LOCAL_CARGO_PROCESS_SCAN" \
     --json \
     --command-timeout-ms "$COMMAND_TIMEOUT_MS"
 
