@@ -37,6 +37,12 @@ Options:
                             Override the known RCH blocker cache path
   --known-blocker-override  Run through RCH despite a matching active known blocker
   --skip-known-blocker      Disable known-blocker cache read/write for this run
+  --proof-broker-ledger <path>
+                            Opt into read-only ee proof admit before RCH dispatch
+  --proof-broker-ee-bin <path>
+                            ee binary to use for proof-broker admission
+  --proof-broker-bypass <reason>
+                            Continue despite a non-dispatch broker verdict, with degraded evidence
   --json                    Accepted for symmetry; output is always JSON
   -h, --help                Show this help
 
@@ -80,6 +86,10 @@ fi
 KNOWN_BLOCKER_TTL_SECONDS="${RCH_VERIFY_KNOWN_BLOCKER_TTL_SECONDS:-21600}"
 KNOWN_BLOCKER_MAX_ENTRIES="${RCH_VERIFY_KNOWN_BLOCKER_MAX_ENTRIES:-128}"
 KNOWN_BLOCKER_JSON="null"
+PROOF_BROKER_LEDGER="${RCH_VERIFY_PROOF_BROKER_LEDGER:-}"
+PROOF_BROKER_EE_BIN="${RCH_VERIFY_PROOF_BROKER_EE_BIN:-}"
+PROOF_BROKER_BYPASS_REASON="${RCH_VERIFY_PROOF_BROKER_BYPASS_REASON:-}"
+PROOF_BROKER_JSON="null"
 RCH_VERIFY_ATTEMPT_TIMEOUT_MS="${RCH_VERIFY_ATTEMPT_TIMEOUT_MS:-900000}"
 RCH_VERIFY_PREFLIGHT_TIMEOUT_MS="${RCH_VERIFY_PREFLIGHT_TIMEOUT_MS:-10000}"
 RCH_VERIFY_TAIL_BYTES="${RCH_VERIFY_TAIL_BYTES:-4000}"
@@ -155,6 +165,9 @@ while [ "$#" -gt 0 ]; do
         --known-blocker-store) KNOWN_BLOCKER_STORE="${2:?--known-blocker-store requires a value}"; KNOWN_BLOCKER_STORE_EXPLICIT=1; shift 2 ;;
         --known-blocker-override) KNOWN_BLOCKER_OVERRIDE=1; shift ;;
         --skip-known-blocker) KNOWN_BLOCKER_ENABLED=0; shift ;;
+        --proof-broker-ledger) PROOF_BROKER_LEDGER="${2:?--proof-broker-ledger requires a value}"; shift 2 ;;
+        --proof-broker-ee-bin) PROOF_BROKER_EE_BIN="${2:?--proof-broker-ee-bin requires a value}"; shift 2 ;;
+        --proof-broker-bypass) PROOF_BROKER_BYPASS_REASON="${2:?--proof-broker-bypass requires a value}"; shift 2 ;;
         --json) shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
@@ -541,7 +554,7 @@ compute_local_cargo_processes_json() {
         local_cargo_processes_not_run_json "disabled by RCH_VERIFY_LOCAL_CARGO_SCAN=0"
         return 0
     fi
-    if [ "$INCLUDE_SUMMARY" -ne 1 ] && [ "${RCH_VERIFY_LOCAL_CARGO_SCAN:-0}" != "1" ]; then
+    if [ "$INCLUDE_SUMMARY" -ne 1 ] && [ "${RCH_VERIFY_LOCAL_CARGO_SCAN:-0}" != "1" ] && [ -z "$PROOF_BROKER_LEDGER" ]; then
         local_cargo_processes_not_run_json "only scanned for --summary unless RCH_VERIFY_LOCAL_CARGO_SCAN=1"
         return 0
     fi
@@ -812,6 +825,395 @@ import os
 payload = json.loads(os.environ["BUILD_ADMISSION_JSON_INPUT"])
 print(payload.get("status") or "")
 PY
+}
+
+proof_broker_request_fields_json() {
+    SOURCE_STATE_JSON_INPUT="${SOURCE_STATE_JSON:-}" \
+    BUILD_ADMISSION_JSON_INPUT="${BUILD_ADMISSION_JSON:-}" \
+    RCH_RUNTIME_JSON_INPUT="${RCH_RUNTIME_JSON:-}" \
+    LOCAL_CARGO_PROCESSES_JSON_INPUT="${LOCAL_CARGO_PROCESSES_JSON:-}" \
+    REQUESTED_WORKERS_VALUE="${REQUESTED_WORKERS_CSV:-}" \
+    CONFIGURED_WORKERS_VALUE="${CONFIGURED_WORKERS_CSV:-}" \
+    COMMAND_KIND_VALUE="$COMMAND_KIND" \
+    COMMAND_JSON="$(json_array "${ENV_OVERRIDES[@]}" "${COMMAND[@]}")" \
+    python3 - <<'PY'
+import hashlib
+import json
+import os
+import re
+
+def load_env_json(name, default):
+    try:
+        return json.loads(os.environ.get(name) or default)
+    except Exception:
+        return json.loads(default)
+
+def class_fragment(value):
+    text = str(value or "").strip()
+    if not text:
+        return "unknown"
+    text = re.sub(r"[^A-Za-z0-9_.:-]+", "_", text)
+    return text.strip("_") or "unknown"
+
+source_state = load_env_json("SOURCE_STATE_JSON_INPUT", "{}")
+build_admission = load_env_json("BUILD_ADMISSION_JSON_INPUT", "{}")
+runtime = load_env_json("RCH_RUNTIME_JSON_INPUT", "{}")
+tripwire = load_env_json("LOCAL_CARGO_PROCESSES_JSON_INPUT", "{}")
+command = load_env_json("COMMAND_JSON", "[]")
+
+source_hash = (
+    source_state.get("source_manifest_hash")
+    or source_state.get("dirty_status_hash")
+    or source_state.get("git_tree")
+    or "class:unknown_source"
+)
+source_materialization = (
+    source_state.get("source_materialization")
+    or "class:unknown_materialization"
+)
+dirty_status_hash = (
+    source_state.get("dirty_status_hash")
+    or "class:clean_or_unknown_dirty_state"
+)
+
+runtime_status = runtime.get("status") or "unknown"
+client_compat = runtime.get("client_compat")
+daemon_compat = runtime.get("daemon_compat")
+client_version = runtime.get("client_version")
+daemon_version = runtime.get("daemon_version")
+if runtime_status == "checked" and client_compat and daemon_compat:
+    if client_compat == daemon_compat:
+        rch_runtime_class = f"class:rch_compat_{class_fragment(client_compat)}"
+    else:
+        rch_runtime_class = (
+            f"class:rch_mismatch_client_{class_fragment(client_compat)}"
+            f"_daemon_{class_fragment(daemon_compat)}"
+        )
+elif runtime_status == "skipped":
+    rch_runtime_class = "class:rch_runtime_skipped_fake_transcript"
+elif client_version or daemon_version:
+    rch_runtime_class = (
+        f"class:rch_partial_client_{class_fragment(client_version)}"
+        f"_daemon_{class_fragment(daemon_version)}"
+    )
+else:
+    rch_runtime_class = "class:unknown_rch_runtime"
+
+requested_workers = [
+    item.strip()
+    for item in os.environ.get("REQUESTED_WORKERS_VALUE", "").split(",")
+    if item.strip()
+]
+configured_workers = [
+    item.strip()
+    for item in os.environ.get("CONFIGURED_WORKERS_VALUE", "").split(",")
+    if item.strip()
+]
+if requested_workers:
+    worker_requirement = "workers:" + ",".join(requested_workers)
+elif configured_workers:
+    worker_requirement = "class:any_configured_worker"
+else:
+    worker_requirement = "class:any_worker"
+
+tripwire_status = str(tripwire.get("status") or "unknown")
+try:
+    tripwire_count = int(tripwire.get("count") or 0)
+except (TypeError, ValueError):
+    tripwire_count = 0
+if tripwire_status == "ok" and tripwire_count == 0:
+    local_cargo_tripwire_class = "class:tripwire_clean"
+elif (
+    tripwire_count > 0
+    or "bypass" in tripwire_status
+    or "blocked" in tripwire_status
+):
+    local_cargo_tripwire_class = "class:local_cargo_bypass_detected"
+else:
+    local_cargo_tripwire_class = "class:tripwire_unknown"
+
+admission_status = str(build_admission.get("status") or "unknown")
+if admission_status == "passed":
+    build_admission_posture = "class:admission_passed"
+elif admission_status == "denied":
+    build_admission_posture = "class:admission_blocked"
+elif admission_status == "skipped":
+    build_admission_posture = "class:admission_skipped"
+else:
+    build_admission_posture = "class:admission_unknown"
+
+normalized_argv_hash = "sha256:" + hashlib.sha256(
+    json.dumps(command, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+
+payload = {
+    "command_class": os.environ.get("COMMAND_KIND_VALUE") or "class:unknown_command",
+    "normalized_argv_hash": normalized_argv_hash,
+    "source_hash": source_hash,
+    "source_materialization": source_materialization,
+    "dirty_status_hash": dirty_status_hash,
+    "env_fingerprint_class": "class:rch_verify_wrapper",
+    "target_profile": "debug",
+    "execution_substrate": "rch",
+    "rch_runtime_class": rch_runtime_class,
+    "worker_requirement": worker_requirement,
+    "local_cargo_tripwire_class": local_cargo_tripwire_class,
+    "build_admission_posture": build_admission_posture,
+}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+proof_broker_error_json() {
+    local status="${1:?proof broker status required}"
+    local message="${2:?proof broker message required}"
+    PROOF_BROKER_STATUS="$status" \
+    PROOF_BROKER_MESSAGE="$message" \
+    PROOF_BROKER_BYPASS_REASON_VALUE="$PROOF_BROKER_BYPASS_REASON" \
+    python3 - <<'PY'
+import hashlib
+import json
+import os
+
+message = os.environ.get("PROOF_BROKER_MESSAGE") or "proof broker unavailable"
+payload = {
+    "enabled": True,
+    "status": os.environ.get("PROOF_BROKER_STATUS") or "unavailable",
+    "verdict": "unknown_insufficient_evidence",
+    "reasonCodes": ["proof_broker_unavailable"],
+    "nextAction": "rerun_without_broker_only_with_explicit_bypass",
+    "nextCommand": None,
+    "remoteCargoLaunched": False,
+    "readOnly": True,
+    "message": message,
+    "rawHash": "sha256:" + hashlib.sha256(message.encode("utf-8")).hexdigest(),
+}
+bypass = os.environ.get("PROOF_BROKER_BYPASS_REASON_VALUE") or None
+if bypass:
+    payload["bypassReason"] = bypass
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+proof_broker_wrap_json() {
+    local raw="${1:-}"
+    local exit_code="${2:-0}"
+    local timed_out="${3:-false}"
+    local elapsed_ms="${4:-0}"
+    PROOF_BROKER_RAW="$raw" \
+    PROOF_BROKER_EXIT_CODE="$exit_code" \
+    PROOF_BROKER_TIMED_OUT="$timed_out" \
+    PROOF_BROKER_ELAPSED_MS="$elapsed_ms" \
+    PROOF_BROKER_BYPASS_REASON_VALUE="$PROOF_BROKER_BYPASS_REASON" \
+    python3 - <<'PY'
+import hashlib
+import json
+import os
+import re
+
+raw = os.environ.get("PROOF_BROKER_RAW") or ""
+try:
+    exit_code = int(os.environ.get("PROOF_BROKER_EXIT_CODE") or "0")
+except ValueError:
+    exit_code = 0
+try:
+    elapsed_ms = int(os.environ.get("PROOF_BROKER_ELAPSED_MS") or "0")
+except ValueError:
+    elapsed_ms = 0
+timed_out = os.environ.get("PROOF_BROKER_TIMED_OUT") == "true"
+
+def redact(text):
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text or "")
+    text = re.sub(r"/Users/[^/\s]+", "/Users/<redacted>", text)
+    text = re.sub(r"(?i)(token|secret|password|api[_-]?key)=\S+", r"\1=<redacted>", text)
+    return text[-1600:]
+
+payload = {
+    "enabled": True,
+    "status": "checked",
+    "exitCode": exit_code,
+    "timedOut": timed_out,
+    "elapsedMs": elapsed_ms,
+    "verdict": None,
+    "reasonCodes": [],
+    "nextAction": None,
+    "nextCommand": None,
+    "reuseRunId": None,
+    "waitOwner": None,
+    "remoteCargoLaunched": False,
+    "readOnly": None,
+    "rawHash": "sha256:" + hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest(),
+}
+bypass = os.environ.get("PROOF_BROKER_BYPASS_REASON_VALUE") or None
+if bypass:
+    payload["bypassReason"] = bypass
+try:
+    response = json.loads(raw)
+except Exception:
+    payload.update({
+        "status": "unavailable",
+        "verdict": "unknown_insufficient_evidence",
+        "reasonCodes": ["proof_broker_invalid_json"],
+        "nextAction": "repair_proof_broker_response",
+        "message": "ee proof admit did not emit valid JSON: " + redact(raw),
+    })
+else:
+    payload["response"] = response
+    if exit_code != 0 or response.get("success") is not True or timed_out:
+        payload["status"] = "unavailable"
+        payload["verdict"] = "unknown_insufficient_evidence"
+        payload["reasonCodes"] = ["proof_broker_command_failed"]
+        payload["nextAction"] = "repair_proof_broker_before_dispatch"
+    data = response.get("data") if isinstance(response, dict) else None
+    if isinstance(data, dict):
+        admission = data.get("admission") if isinstance(data.get("admission"), dict) else {}
+        payload["schema"] = data.get("schema")
+        payload["fingerprint"] = data.get("fingerprint")
+        payload["ledger"] = data.get("ledger")
+        payload["matchedRecord"] = data.get("matchedRecord")
+        payload["freshness"] = data.get("freshness")
+        payload["verdict"] = admission.get("verdict") or payload["verdict"]
+        payload["reasonCodes"] = admission.get("reasonCodes") or admission.get("reason_codes") or payload["reasonCodes"]
+        payload["nextAction"] = admission.get("nextAction") or admission.get("next_action") or payload["nextAction"]
+        payload["reuseRunId"] = admission.get("reuseRunId") or admission.get("reuse_run_id")
+        payload["waitOwner"] = admission.get("waitOwner") or admission.get("wait_owner")
+        payload["nextCommand"] = data.get("nextCommand")
+        payload["readOnly"] = data.get("readOnly")
+    if not payload.get("verdict"):
+        payload["status"] = "unavailable"
+        payload["verdict"] = "unknown_insufficient_evidence"
+        payload["reasonCodes"] = ["proof_broker_verdict_missing"]
+        payload["nextAction"] = "repair_proof_broker_response"
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+proof_broker_json_field() {
+    local field="${1:?proof broker field required}"
+    JSON_INPUT="${PROOF_BROKER_JSON:-null}" JSON_FIELD="$field" python3 - <<'PY'
+import json
+import os
+
+try:
+    payload = json.loads(os.environ.get("JSON_INPUT") or "null")
+except Exception:
+    payload = None
+value = payload.get(os.environ["JSON_FIELD"]) if isinstance(payload, dict) else None
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif value is None:
+    print("")
+else:
+    print(value)
+PY
+}
+
+proof_broker_mark_json() {
+    local remote_launched="${1:?remote launched bool required}"
+    local bypass_reason="${2:-}"
+    JSON_INPUT="${PROOF_BROKER_JSON:-null}" \
+    PROOF_BROKER_REMOTE_LAUNCHED="$remote_launched" \
+    PROOF_BROKER_BYPASS_REASON_MARK="$bypass_reason" \
+    python3 - <<'PY'
+import json
+import os
+
+try:
+    payload = json.loads(os.environ.get("JSON_INPUT") or "null")
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = {"enabled": False}
+payload["remoteCargoLaunched"] = os.environ.get("PROOF_BROKER_REMOTE_LAUNCHED") == "true"
+bypass = os.environ.get("PROOF_BROKER_BYPASS_REASON_MARK") or None
+if bypass:
+    payload["bypassReason"] = bypass
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+proof_broker_degraded_code() {
+    case "${1:-}" in
+        dispatch_allowed) printf '' ;;
+        reuse_existing) printf 'rch_verify_proof_broker_reuse_existing' ;;
+        wait_for_inflight) printf 'rch_verify_proof_broker_wait_for_inflight' ;;
+        source_state_mismatch) printf 'rch_verify_proof_broker_source_state_mismatch' ;;
+        environment_blocked) printf 'rch_verify_proof_broker_environment_blocked' ;;
+        proof_unusable) printf 'rch_verify_proof_broker_proof_unusable' ;;
+        unknown_insufficient_evidence) printf 'rch_verify_proof_broker_unknown_insufficient_evidence' ;;
+        *) printf 'rch_verify_proof_broker_unavailable' ;;
+    esac
+}
+
+run_proof_broker_admission() {
+    if [ -z "$PROOF_BROKER_LEDGER" ]; then
+        PROOF_BROKER_JSON="null"
+        return 0
+    fi
+
+    local ee_bin
+    if [ -n "$PROOF_BROKER_EE_BIN" ]; then
+        ee_bin="$PROOF_BROKER_EE_BIN"
+    elif ! ee_bin="$(candidate_ee_bin)"; then
+        PROOF_BROKER_JSON="$(proof_broker_error_json "unavailable" "no executable ee binary found for proof-broker admission")"
+        return 1
+    fi
+
+    local fields command_class normalized_argv_hash source_hash source_materialization dirty_status_hash env_fingerprint_class target_profile execution_substrate rch_runtime_class worker_requirement local_cargo_tripwire_class build_admission_posture
+    fields="$(proof_broker_request_fields_json)"
+    command_class="$(json_text_field "$fields" command_class)"
+    normalized_argv_hash="$(json_text_field "$fields" normalized_argv_hash)"
+    source_hash="$(json_text_field "$fields" source_hash)"
+    source_materialization="$(json_text_field "$fields" source_materialization)"
+    dirty_status_hash="$(json_text_field "$fields" dirty_status_hash)"
+    env_fingerprint_class="$(json_text_field "$fields" env_fingerprint_class)"
+    target_profile="$(json_text_field "$fields" target_profile)"
+    execution_substrate="$(json_text_field "$fields" execution_substrate)"
+    rch_runtime_class="$(json_text_field "$fields" rch_runtime_class)"
+    worker_requirement="$(json_text_field "$fields" worker_requirement)"
+    local_cargo_tripwire_class="$(json_text_field "$fields" local_cargo_tripwire_class)"
+    build_admission_posture="$(json_text_field "$fields" build_admission_posture)"
+
+    local args=(
+        "$ee_bin" "--workspace" "$PROJECT_ROOT" "--json" "proof" "admit"
+        "--ledger-json" "$PROOF_BROKER_LEDGER"
+        "--command-class" "$command_class"
+        "--normalized-argv-hash" "$normalized_argv_hash"
+        "--source-hash" "$source_hash"
+        "--source-materialization" "$source_materialization"
+        "--dirty-status-hash" "$dirty_status_hash"
+        "--env-fingerprint-class" "$env_fingerprint_class"
+        "--target-profile" "$target_profile"
+        "--execution-substrate" "$execution_substrate"
+        "--rch-runtime-class" "$rch_runtime_class"
+        "--worker-requirement" "$worker_requirement"
+        "--local-cargo-tripwire-class" "$local_cargo_tripwire_class"
+        "--build-admission-posture" "$build_admission_posture"
+    )
+    if [ -n "$BEAD_ID" ]; then
+        args+=("--bead-id" "$BEAD_ID")
+    fi
+    args+=("--" "${ENV_OVERRIDES[@]}" "${COMMAND[@]}")
+
+    local broker_probe broker_output broker_exit broker_timed_out broker_elapsed
+    broker_probe="$(capture_command_with_timeout "$RCH_VERIFY_PREFLIGHT_TIMEOUT_MS" "$PROJECT_ROOT" "${args[@]}")"
+    broker_output="$(json_text_field "$broker_probe" output)"
+    broker_exit="$(json_text_field "$broker_probe" status)"
+    broker_timed_out="$(json_text_field "$broker_probe" timed_out)"
+    broker_elapsed="$(json_text_field "$broker_probe" elapsed_ms)"
+    PROOF_BROKER_JSON="$(proof_broker_wrap_json "$broker_output" "$broker_exit" "$broker_timed_out" "$broker_elapsed")"
+
+    if [ "$broker_timed_out" = "true" ] || [ "$broker_exit" != "0" ]; then
+        return 1
+    fi
+    case "$(proof_broker_json_field verdict)" in
+        dispatch_allowed|reuse_existing|wait_for_inflight|source_state_mismatch|environment_blocked|proof_unusable|unknown_insufficient_evidence)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 csv_contains() {
@@ -1877,7 +2279,7 @@ emit_json() {
     shift 5
     local degraded_codes_json
     degraded_codes_json="$(json_array "$@")"
-    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json requested_workers_json configured_workers_json daemon_workers_json build_admission_json rch_runtime_json known_blocker_json local_cargo_processes_json
+    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json requested_workers_json configured_workers_json daemon_workers_json build_admission_json rch_runtime_json known_blocker_json local_cargo_processes_json proof_broker_json
     command_json="$(json_array "${COMMAND[@]}")"
     rch_invocation_json="$(json_array "${RCH_INVOCATION[@]}")"
     remote_env_json="$(json_array "${ENV_OVERRIDES[@]}")"
@@ -1895,6 +2297,7 @@ emit_json() {
         rch_runtime_json='{"status":"not_checked","client_path":null,"client_version":null,"client_compat":null,"daemon_version":null,"daemon_compat":null,"daemon_socket_path":null,"message":null}'
     fi
     known_blocker_json="${KNOWN_BLOCKER_JSON:-null}"
+    proof_broker_json="${PROOF_BROKER_JSON:-null}"
     local source_state_json
     if [ -n "${SOURCE_STATE_JSON:-}" ]; then
         source_state_json="$SOURCE_STATE_JSON"
@@ -1912,7 +2315,7 @@ emit_json() {
     done
     artifacts_json="$(attempt_artifacts_json "${artifact_args[@]}")"
     json_payload="$(cat <<EOF
-{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"attempt_timeout_ms":$RCH_VERIFY_ATTEMPT_TIMEOUT_MS,"timed_out":$RCH_ATTEMPT_TIMED_OUT,"stdout_bytes":$RCH_STDOUT_BYTES,"stderr_bytes":$RCH_STDERR_BYTES,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"artifacts":$artifacts_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"known_blocker":$known_blocker_json,"local_cargo_processes":$local_cargo_processes_json,"source_state":$source_state_json}
+{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"attempt_timeout_ms":$RCH_VERIFY_ATTEMPT_TIMEOUT_MS,"timed_out":$RCH_ATTEMPT_TIMED_OUT,"stdout_bytes":$RCH_STDOUT_BYTES,"stderr_bytes":$RCH_STDERR_BYTES,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"artifacts":$artifacts_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"known_blocker":$known_blocker_json,"proof_broker":$proof_broker_json,"local_cargo_processes":$local_cargo_processes_json,"source_state":$source_state_json}
 EOF
 )"
     JSON_PAYLOAD="$json_payload" \
@@ -1927,6 +2330,7 @@ EOF
     KNOWN_BLOCKER_TTL_SECONDS="$KNOWN_BLOCKER_TTL_SECONDS" \
     KNOWN_BLOCKER_MAX_ENTRIES="$KNOWN_BLOCKER_MAX_ENTRIES" \
     KNOWN_BLOCKER_FAKE_OUTPUT_PRESENT="${RCH_VERIFY_FAKE_OUTPUT:+1}" \
+    PROOF_BROKER_LEDGER_PATH="$PROOF_BROKER_LEDGER" \
     RUN_STARTED_AT="$RUN_STARTED_AT" \
     python3 - <<'PY'
 import datetime as dt
@@ -2312,6 +2716,112 @@ def persist_known_blocker(entry):
         entry["write_error"] = redact(str(error))
     return entry
 
+def proof_broker_run_id(command_hash, completed_at):
+    payload = f"{command_hash}\0{completed_at or ''}"
+    return "vrun_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+def proof_broker_row_id(fingerprint_id, run_id):
+    payload = f"{fingerprint_id or ''}\0{run_id or ''}"
+    return "prow_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+def persist_proof_broker_ledger(proof, status, command_hash):
+    proof_broker = proof.get("proof_broker")
+    if not isinstance(proof_broker, dict) or proof_broker.get("remoteCargoLaunched") is not True:
+        return
+    ledger_path = os.environ.get("PROOF_BROKER_LEDGER_PATH") or ""
+    if not ledger_path:
+        return
+    if no_write:
+        proof_broker["ledgerWrite"] = {"status": "suppressed", "reason": "--no-write"}
+        return
+    fingerprint = proof_broker.get("fingerprint")
+    if not isinstance(fingerprint, dict) or not fingerprint.get("fingerprintId"):
+        proof_broker["ledgerWrite"] = {
+            "status": "skipped",
+            "reason": "proof broker admission response did not include a fingerprint",
+        }
+        return
+    exit_code = proof.get("exit_code")
+    completed = exit_code == 0
+    run_id = proof_broker_run_id(command_hash, proof.get("generated_at"))
+    row = {
+        "schema": "ee.proof_broker.v1",
+        "rowId": proof_broker_row_id(fingerprint.get("fingerprintId"), run_id),
+        "fingerprint": fingerprint,
+        "state": "completed" if completed else "rejected",
+        "admission": {
+            "verdict": "reuse_existing" if completed else "proof_unusable",
+            "reasonCodes": ["completed_remote_proof"] if completed else ["remote_proof_failed"],
+            "nextAction": "cite_existing_proof" if completed else "inspect_failure_before_rerun",
+            "reuseRunId": run_id if completed else None,
+            "waitOwner": None,
+        },
+        "runId": run_id,
+        "owner": None,
+        "createdAt": proof.get("generated_at"),
+        "startedAt": started_at,
+        "completedAt": proof.get("generated_at"),
+        "expiresAt": None,
+        "sourceStateValidUntil": None,
+        "invalidationReasons": proof.get("source_state_degraded_codes") or [],
+        "evidenceRefs": [
+            {
+                "kind": "rch_verify",
+                "id": proof.get("generated_at") or run_id,
+                "contentHash": "sha256:" + hashlib.sha256(
+                    json.dumps(
+                        {
+                            "command_hash": command_hash,
+                            "status": status,
+                            "exit_code": exit_code,
+                            "worker_id": proof.get("worker_id"),
+                            "completed_at": proof.get("generated_at"),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "redacted": True,
+            }
+        ],
+        "rawOutputIncluded": False,
+    }
+    path = Path(ledger_path)
+    try:
+        if path.exists():
+            existing = json.loads(path.read_text(encoding="utf-8") or "[]")
+        else:
+            existing = []
+        if not isinstance(existing, list):
+            existing = []
+        fingerprint_id = fingerprint.get("fingerprintId")
+        records = [
+            item
+            for item in existing
+            if not (
+                isinstance(item, dict)
+                and isinstance(item.get("fingerprint"), dict)
+                and item["fingerprint"].get("fingerprintId") == fingerprint_id
+            )
+        ]
+        records.append(row)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(records, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as error:
+        proof_broker["ledgerWrite"] = {"status": "failed", "message": redact(str(error))}
+    except Exception as error:
+        proof_broker["ledgerWrite"] = {"status": "failed", "message": redact(str(error))}
+    else:
+        proof_broker["ledgerWrite"] = {
+            "status": "updated",
+            "state": row["state"],
+            "rowId": row["rowId"],
+            "runId": run_id,
+        }
+
 raw_stdout_tail = proof.get("stdout_tail") or ""
 raw_stderr_tail = proof.get("stderr_tail") or ""
 combined_tail = "\n".join(part for part in [raw_stdout_tail, raw_stderr_tail] if part)
@@ -2335,6 +2845,7 @@ if sync_closure_counts:
 
 exit_code = proof.get("exit_code")
 degraded = list(proof.get("degraded_codes") or [])
+proof_broker = proof.get("proof_broker") if isinstance(proof.get("proof_broker"), dict) else {}
 source_state_degraded = list(proof.get("source_state_degraded_codes") or [])
 source_state_code_set = set(source_state_degraded)
 local_cargo_processes = proof.get("local_cargo_processes") or {}
@@ -2369,11 +2880,30 @@ worker_state_degraded = [
     if code in worker_state_code_set and code not in source_state_code_set
 ]
 proof["selector_admission_probe"] = selector_admission_probe(proof, degraded, combined_tail)
+proof_broker_bypassed = "rch_verify_proof_broker_bypassed" in degraded
+proof_broker_refusal_codes = set()
+if not proof_broker_bypassed:
+    proof_broker_refusal_codes = {
+        code
+        for code in degraded
+        if code.startswith("rch_verify_proof_broker_")
+        and code not in {
+            "rch_verify_proof_broker_reuse_existing",
+            "rch_verify_proof_broker_bypassed",
+        }
+    }
+
 if proof.get("success") is not True:
     status = "refused"
 elif "rch_verify_known_blocker_active" in degraded:
     status = "known_blocker_refused"
     proof["verification_attribution"] = "not_run_known_blocker"
+elif "rch_verify_proof_broker_reuse_existing" in degraded:
+    status = "proof_broker_reuse"
+    proof["verification_attribution"] = "not_run_proof_broker_reuse"
+elif proof_broker_refusal_codes:
+    status = "proof_broker_refused"
+    proof["verification_attribution"] = "not_run_proof_broker_refused"
 elif exit_code is None:
     status = "dry_run"
 elif exit_code == 0 and proof.get("worker_id"):
@@ -2429,6 +2959,7 @@ if status == "rch_environment_failure" and not isinstance(known_blocker, dict):
         proof["known_blocker"] = persist_known_blocker(
             known_blocker_entry(blocker_kind, degraded, command_hash)
         )
+persist_proof_broker_ledger(proof, status, command_hash)
 
 summary_lines = [
     f"RCH verifier `{command_text}` => `{status}`.",
@@ -2451,6 +2982,12 @@ if build_admission.get("status") not in (None, "not_run"):
     summary_lines.append(
         f"- build_admission: `{build_admission.get('status')}`"
         f" admitted=`{build_admission.get('admitted')}`"
+    )
+if proof_broker:
+    summary_lines.append(
+        f"- proof_broker: `{proof_broker.get('verdict') or proof_broker.get('status') or 'unknown'}`"
+        f" remote_cargo_launched=`{str(bool(proof_broker.get('remoteCargoLaunched'))).lower()}`"
+        f" next_action=`{proof_broker.get('nextAction') or 'unknown'}`"
     )
 runtime = proof.get("rch_runtime") or {}
 if runtime.get("status") not in (None, "not_checked"):
@@ -2546,6 +3083,7 @@ if ledger_path:
             "source_state_degraded_codes": proof.get("source_state_degraded_codes") or [],
             "worker_state_degraded_codes": proof.get("worker_state_degraded_codes") or [],
             "known_blocker": proof.get("known_blocker"),
+            "proof_broker": proof.get("proof_broker"),
             "error_codes": codes,
             "summary_markdown": summary,
         }
@@ -2604,6 +3142,7 @@ if event_log_path:
             "fake_rch_invocation_count": fake_invocation_count,
             "source_manifest_hash": proof.get("source_manifest_hash"),
             "known_blocker": proof.get("known_blocker"),
+            "proof_broker": proof.get("proof_broker"),
             "stdout_artifact_path": artifact_path("stdout"),
             "stderr_artifact_path": artifact_path("stderr"),
             "schema_validation_status": "not_run",
@@ -2746,6 +3285,48 @@ CONFIGURED_WORKERS_CSV="$(configured_workers)"
 DAEMON_WORKERS_CSV="$(daemon_workers)"
 REQUESTED_WORKERS_CSV="${RCH_WORKERS:-}"
 
+proof_broker_degraded=()
+if [ -n "$PROOF_BROKER_LEDGER" ]; then
+    proof_broker_status=0
+    run_proof_broker_admission || proof_broker_status=$?
+    proof_broker_verdict="$(proof_broker_json_field verdict)"
+    proof_broker_code="$(proof_broker_degraded_code "$proof_broker_verdict")"
+    if [ "$proof_broker_status" -ne 0 ] && [ -z "$proof_broker_code" ]; then
+        proof_broker_code="rch_verify_proof_broker_unavailable"
+    fi
+    case "$proof_broker_verdict" in
+        dispatch_allowed)
+            ;;
+        reuse_existing)
+            RCH_INVOCATION=()
+            PROOF_BROKER_JSON="$(proof_broker_mark_json false "$PROOF_BROKER_BYPASS_REASON")"
+            emit_json true 0 0 "proof broker admission reused existing proof; remote Cargo not launched" "" \
+                "${build_admission_degraded[@]}" \
+                "rch_verify_proof_broker_reuse_existing"
+            exit 0
+            ;;
+        *)
+            if [ -n "$PROOF_BROKER_BYPASS_REASON" ]; then
+                proof_broker_degraded+=("rch_verify_proof_broker_bypassed")
+                if [ -n "$proof_broker_code" ]; then
+                    proof_broker_degraded+=("$proof_broker_code")
+                fi
+                PROOF_BROKER_JSON="$(proof_broker_mark_json false "$PROOF_BROKER_BYPASS_REASON")"
+            else
+                RCH_INVOCATION=()
+                if [ -z "$proof_broker_code" ]; then
+                    proof_broker_code="rch_verify_proof_broker_unavailable"
+                fi
+                PROOF_BROKER_JSON="$(proof_broker_mark_json false "")"
+                emit_json true 1 0 "proof broker admission refused RCH dispatch; remote Cargo not launched" "" \
+                    "${build_admission_degraded[@]}" \
+                    "$proof_broker_code"
+                exit 1
+            fi
+            ;;
+    esac
+fi
+
 if [ "$KNOWN_BLOCKER_ENABLED" = "1" ]; then
     KNOWN_BLOCKER_JSON="$(known_blocker_lookup_json "$SOURCE_STATE_JSON")"
     if [ "$KNOWN_BLOCKER_JSON" != "null" ]; then
@@ -2790,6 +3371,10 @@ if [ "${RCH_VERIFY_FAIL_FAST_STALE_WORKER:-1}" = "1" ]; then
             "rch_verify_worker_filter_ignored"
         exit 1
     fi
+fi
+
+if [ -n "$PROOF_BROKER_LEDGER" ]; then
+    PROOF_BROKER_JSON="$(proof_broker_mark_json true "$PROOF_BROKER_BYPASS_REASON")"
 fi
 
 start_ms="$(now_ms)"
@@ -2900,7 +3485,7 @@ else
     stdout_tail="$(printf '%s' "$combined_output" | tail_text)"
     stderr_tail=""
 fi
-degraded=("${build_admission_degraded[@]}")
+degraded=("${build_admission_degraded[@]}" "${proof_broker_degraded[@]}")
 if [ "$exit_code" -ne 0 ]; then
     degraded+=("rch_verify_remote_command_failed")
 fi

@@ -251,6 +251,91 @@ JSON
     )
 }
 
+fn write_fake_proof_broker_ee(name: &str) -> Result<PathBuf, String> {
+    write_fake_rch(
+        name,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_EE_INVOCATIONS:?}"
+python3 - <<'PY'
+import json
+import os
+
+verdict = os.environ.get("FAKE_PROOF_VERDICT") or "dispatch_allowed"
+next_action_by_verdict = {
+    "dispatch_allowed": "launch_single_rch_proof",
+    "reuse_existing": "cite_existing_proof",
+    "wait_for_inflight": "wait_for_inflight_owner",
+    "source_state_mismatch": "rerun_current_source",
+    "environment_blocked": "repair_remote_runtime_before_dispatch",
+    "proof_unusable": "discard_local_cargo_evidence_and_rerun_remote",
+    "unknown_insufficient_evidence": "collect_source_and_environment_evidence",
+}
+reason_by_verdict = {
+    "dispatch_allowed": ["no_equivalent_record", "read_only_admission"],
+    "reuse_existing": ["fingerprint_match", "completed_remote_proof"],
+    "wait_for_inflight": ["fingerprint_match", "in_flight_owner"],
+    "source_state_mismatch": ["command_match", "fingerprint_mismatch"],
+    "environment_blocked": ["environment_or_worker_blocked"],
+    "proof_unusable": ["local_cargo_tripwire_blocked", "remote_required"],
+    "unknown_insufficient_evidence": ["source_fingerprint_missing"],
+}
+wait_owner = None
+if verdict == "wait_for_inflight":
+    wait_owner = {
+        "agentName": "RubyElk",
+        "beadId": "bd-1n3x1.3",
+        "mailThreadId": "bd-1n3x1.3",
+        "buildSlot": "rch",
+        "rchJobId": "rch-job-fake",
+    }
+payload = {
+    "schema": "ee.response.v2",
+    "success": True,
+    "data": {
+        "command": "proof admit",
+        "schema": "ee.proof_broker.v1",
+        "fingerprint": {
+            "fingerprintId": "pfp_fake",
+            "commandClass": "cargo_test",
+            "commandHash": "blake3:fake-command",
+            "normalizedArgvHash": "sha256:fake-argv",
+            "sourceTreeFingerprint": "sha256:fake-source",
+            "sourceMaterialization": "remote_checkout_unverified",
+            "dirtyStatusHash": "sha256:fake-dirty",
+            "envFingerprintClass": "class:rch_verify_wrapper",
+            "targetProfile": "debug",
+            "executionSubstrate": "rch",
+            "rchRuntimeClass": "class:rch_runtime_skipped_fake_transcript",
+            "workerRequirement": "class:any_worker",
+            "localCargoTripwireClass": "class:tripwire_clean",
+            "buildAdmissionPosture": "class:admission_skipped",
+        },
+        "admission": {
+            "verdict": verdict,
+            "reasonCodes": reason_by_verdict.get(verdict, ["fake_unknown"]),
+            "nextAction": next_action_by_verdict.get(verdict, "collect_source_and_environment_evidence"),
+            "reuseRunId": "vrun_existing" if verdict == "reuse_existing" else None,
+            "waitOwner": wait_owner,
+        },
+        "ledger": {
+            "source": "ledger_json",
+            "recordCount": 1,
+            "matchedRowId": "prow_fake",
+            "matchedState": "completed" if verdict == "reuse_existing" else None,
+        },
+        "matchedRecord": None,
+        "freshness": None,
+        "nextCommand": next_action_by_verdict.get(verdict, "collect_source_and_environment_evidence"),
+        "readOnly": True,
+    },
+}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+"#,
+    )
+}
+
 fn write_fake_build_admission_candidate(
     path: &Path,
     version_stdout: &str,
@@ -2208,6 +2293,483 @@ printf '[RCH] remote css (1.0s)\n'
         return Err(format!(
             "auto candidate should skip empty --version binary and use release candidate: {report}"
         ));
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_broker_dispatch_allowed_launches_single_remote_proof() -> TestResult {
+    let ledger = unique_tmp_path("proof-broker-dispatch-ledger").join("ledger.json");
+    fs::create_dir_all(
+        ledger
+            .parent()
+            .ok_or_else(|| "ledger path missing parent".to_owned())?,
+    )
+    .map_err(|error| format!("create proof-broker ledger dir: {error}"))?;
+    fs::write(&ledger, "[]").map_err(|error| format!("write proof-broker ledger: {error}"))?;
+    let fake_ee = write_fake_proof_broker_ee("fake-ee-proof-dispatch.sh")?;
+    let fake_ee_log = unique_tmp_path("proof-broker-dispatch-ee-invocations");
+    let ledger_arg = ledger
+        .to_str()
+        .ok_or_else(|| "ledger path is not utf-8".to_owned())?;
+    let fake_ee_arg = fake_ee
+        .to_str()
+        .ok_or_else(|| "fake ee path is not utf-8".to_owned())?;
+    let fake_ee_log_arg = fake_ee_log
+        .to_str()
+        .ok_or_else(|| "fake ee invocation log is not utf-8".to_owned())?;
+    let clean_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"ok","count":0,"processes":[],"detectedLocalBuilds":[]}"#;
+
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--skip-build-admission",
+            "--proof-broker-ledger",
+            ledger_arg,
+            "--proof-broker-ee-bin",
+            fake_ee_arg,
+            "--summary",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "proof_broker_dispatch",
+        ],
+        &[
+            ("FAKE_EE_INVOCATIONS", fake_ee_log_arg),
+            ("FAKE_PROOF_VERDICT", "dispatch_allowed"),
+            ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "Selected worker: trj\n[RCH] remote trj (0.1s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "31"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "dispatch-allowed broker run should pass\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse proof broker dispatch report: {error}"))?;
+    if report["status"] != "remote_pass"
+        || report["worker_id"] != "trj"
+        || report["proof_broker"]["verdict"] != "dispatch_allowed"
+        || report["proof_broker"]["remoteCargoLaunched"] != true
+    {
+        return Err(format!(
+            "dispatch admission did not launch one remote proof: {report}"
+        ));
+    }
+    if degraded_contains(&report, "rch_verify_proof_broker_bypassed")? {
+        return Err(format!(
+            "dispatch admission should not be bypassed: {report}"
+        ));
+    }
+    let invocations = fs::read_to_string(&fake_ee_log)
+        .map_err(|error| format!("read fake proof ee invocations: {error}"))?;
+    if !invocations.contains("proof admit")
+        || !invocations.contains("--local-cargo-tripwire-class class:tripwire_clean")
+        || !invocations.contains("--build-admission-posture class:admission_skipped")
+        || !invocations.contains("-- cargo test --lib proof_broker_dispatch")
+    {
+        return Err(format!(
+            "proof broker admission did not receive expected fingerprint args: {invocations}"
+        ));
+    }
+    let summary = report["summary_markdown"]
+        .as_str()
+        .ok_or_else(|| "summary missing".to_owned())?;
+    if !summary.contains("proof_broker: `dispatch_allowed` remote_cargo_launched=`true`") {
+        return Err(format!("summary missing broker dispatch line: {summary}"));
+    }
+    let ledger_rows: Value = serde_json::from_str(
+        &fs::read_to_string(&ledger).map_err(|error| format!("read broker ledger: {error}"))?,
+    )
+    .map_err(|error| format!("parse updated broker ledger: {error}"))?;
+    let rows = ledger_rows
+        .as_array()
+        .ok_or_else(|| format!("broker ledger should stay a JSON array: {ledger_rows}"))?;
+    if rows.len() != 1
+        || rows[0]["schema"] != "ee.proof_broker.v1"
+        || rows[0]["state"] != "completed"
+        || rows[0]["admission"]["verdict"] != "reuse_existing"
+        || rows[0]["admission"]["reuseRunId"]
+            .as_str()
+            .unwrap_or("")
+            .is_empty()
+        || rows[0]["rawOutputIncluded"] != false
+    {
+        return Err(format!(
+            "dispatch did not append reusable broker ledger row: {ledger_rows}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_broker_reuse_existing_skips_remote_dispatch() -> TestResult {
+    let ledger = unique_tmp_path("proof-broker-reuse-ledger").join("ledger.json");
+    fs::create_dir_all(
+        ledger
+            .parent()
+            .ok_or_else(|| "ledger path missing parent".to_owned())?,
+    )
+    .map_err(|error| format!("create proof-broker ledger dir: {error}"))?;
+    fs::write(&ledger, "[]").map_err(|error| format!("write proof-broker ledger: {error}"))?;
+    let fake_ee = write_fake_proof_broker_ee("fake-ee-proof-reuse.sh")?;
+    let fake_ee_log = unique_tmp_path("proof-broker-reuse-ee-invocations");
+    let ledger_arg = ledger
+        .to_str()
+        .ok_or_else(|| "ledger path is not utf-8".to_owned())?;
+    let fake_ee_arg = fake_ee
+        .to_str()
+        .ok_or_else(|| "fake ee path is not utf-8".to_owned())?;
+    let fake_ee_log_arg = fake_ee_log
+        .to_str()
+        .ok_or_else(|| "fake ee invocation log is not utf-8".to_owned())?;
+    let clean_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"ok","count":0,"processes":[],"detectedLocalBuilds":[]}"#;
+
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--skip-build-admission",
+            "--proof-broker-ledger",
+            ledger_arg,
+            "--proof-broker-ee-bin",
+            fake_ee_arg,
+            "--summary",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "proof_broker_reuse",
+        ],
+        &[
+            ("FAKE_EE_INVOCATIONS", fake_ee_log_arg),
+            ("FAKE_PROOF_VERDICT", "reuse_existing"),
+            ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "[RCH] remote should-not-run (0.1s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "reuse-existing broker run should return success\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse proof broker reuse report: {error}"))?;
+    if report["status"] != "proof_broker_reuse"
+        || report["exit_code"] != 0
+        || report["rch_invocation"]
+            .as_array()
+            .ok_or_else(|| "missing rch_invocation".to_owned())?
+            .len()
+            != 0
+        || report["proof_broker"]["verdict"] != "reuse_existing"
+        || report["proof_broker"]["reuseRunId"] != "vrun_existing"
+        || report["proof_broker"]["remoteCargoLaunched"] != false
+    {
+        return Err(format!(
+            "reuse admission did not skip remote dispatch: {report}"
+        ));
+    }
+    if !degraded_contains(&report, "rch_verify_proof_broker_reuse_existing")? {
+        return Err(format!("reuse degraded code missing: {report}"));
+    }
+    let summary = report["summary_markdown"]
+        .as_str()
+        .ok_or_else(|| "summary missing".to_owned())?;
+    if !summary.contains("proof_broker: `reuse_existing` remote_cargo_launched=`false`") {
+        return Err(format!("summary missing broker reuse line: {summary}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_broker_wait_for_inflight_refuses_before_remote_dispatch() -> TestResult {
+    let ledger = unique_tmp_path("proof-broker-wait-ledger").join("ledger.json");
+    fs::create_dir_all(
+        ledger
+            .parent()
+            .ok_or_else(|| "ledger path missing parent".to_owned())?,
+    )
+    .map_err(|error| format!("create proof-broker ledger dir: {error}"))?;
+    fs::write(&ledger, "[]").map_err(|error| format!("write proof-broker ledger: {error}"))?;
+    let fake_ee = write_fake_proof_broker_ee("fake-ee-proof-wait.sh")?;
+    let fake_ee_log = unique_tmp_path("proof-broker-wait-ee-invocations");
+    let ledger_arg = ledger
+        .to_str()
+        .ok_or_else(|| "ledger path is not utf-8".to_owned())?;
+    let fake_ee_arg = fake_ee
+        .to_str()
+        .ok_or_else(|| "fake ee path is not utf-8".to_owned())?;
+    let fake_ee_log_arg = fake_ee_log
+        .to_str()
+        .ok_or_else(|| "fake ee invocation log is not utf-8".to_owned())?;
+    let clean_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"ok","count":0,"processes":[],"detectedLocalBuilds":[]}"#;
+
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--skip-build-admission",
+            "--proof-broker-ledger",
+            ledger_arg,
+            "--proof-broker-ee-bin",
+            fake_ee_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "proof_broker_wait",
+        ],
+        &[
+            ("FAKE_EE_INVOCATIONS", fake_ee_log_arg),
+            ("FAKE_PROOF_VERDICT", "wait_for_inflight"),
+            ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "[RCH] remote should-not-run (0.1s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+        ],
+    )?;
+    if status.success() {
+        return Err("wait-for-inflight admission should refuse before RCH".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse proof broker wait report: {error}"))?;
+    if report["status"] != "proof_broker_refused"
+        || report["exit_code"] != 1
+        || report["proof_broker"]["verdict"] != "wait_for_inflight"
+        || report["proof_broker"]["waitOwner"]["rchJobId"] != "rch-job-fake"
+        || report["proof_broker"]["remoteCargoLaunched"] != false
+    {
+        return Err(format!("wait admission did not refuse correctly: {report}"));
+    }
+    if !degraded_contains(&report, "rch_verify_proof_broker_wait_for_inflight")? {
+        return Err(format!("wait degraded code missing: {report}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_broker_source_mismatch_refuses_before_remote_dispatch() -> TestResult {
+    let ledger = unique_tmp_path("proof-broker-source-mismatch-ledger").join("ledger.json");
+    fs::create_dir_all(
+        ledger
+            .parent()
+            .ok_or_else(|| "ledger path missing parent".to_owned())?,
+    )
+    .map_err(|error| format!("create proof-broker ledger dir: {error}"))?;
+    fs::write(&ledger, "[]").map_err(|error| format!("write proof-broker ledger: {error}"))?;
+    let fake_ee = write_fake_proof_broker_ee("fake-ee-proof-source-mismatch.sh")?;
+    let fake_ee_log = unique_tmp_path("proof-broker-source-mismatch-ee-invocations");
+    let ledger_arg = ledger
+        .to_str()
+        .ok_or_else(|| "ledger path is not utf-8".to_owned())?;
+    let fake_ee_arg = fake_ee
+        .to_str()
+        .ok_or_else(|| "fake ee path is not utf-8".to_owned())?;
+    let fake_ee_log_arg = fake_ee_log
+        .to_str()
+        .ok_or_else(|| "fake ee invocation log is not utf-8".to_owned())?;
+    let clean_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"ok","count":0,"processes":[],"detectedLocalBuilds":[]}"#;
+
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--skip-build-admission",
+            "--proof-broker-ledger",
+            ledger_arg,
+            "--proof-broker-ee-bin",
+            fake_ee_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "proof_broker_source_mismatch",
+        ],
+        &[
+            ("FAKE_EE_INVOCATIONS", fake_ee_log_arg),
+            ("FAKE_PROOF_VERDICT", "source_state_mismatch"),
+            ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "[RCH] remote should-not-run (0.1s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+        ],
+    )?;
+    if status.success() {
+        return Err("source mismatch admission should refuse before RCH".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse proof broker source mismatch report: {error}"))?;
+    if report["status"] != "proof_broker_refused"
+        || report["proof_broker"]["verdict"] != "source_state_mismatch"
+        || report["proof_broker"]["remoteCargoLaunched"] != false
+    {
+        return Err(format!(
+            "source mismatch admission did not refuse: {report}"
+        ));
+    }
+    if !degraded_contains(&report, "rch_verify_proof_broker_source_state_mismatch")? {
+        return Err(format!("source mismatch degraded code missing: {report}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_broker_local_cargo_bypass_is_unusable_without_bypass() -> TestResult {
+    let ledger = unique_tmp_path("proof-broker-local-bypass-ledger").join("ledger.json");
+    fs::create_dir_all(
+        ledger
+            .parent()
+            .ok_or_else(|| "ledger path missing parent".to_owned())?,
+    )
+    .map_err(|error| format!("create proof-broker ledger dir: {error}"))?;
+    fs::write(&ledger, "[]").map_err(|error| format!("write proof-broker ledger: {error}"))?;
+    let fake_ee = write_fake_proof_broker_ee("fake-ee-proof-local-bypass.sh")?;
+    let fake_ee_log = unique_tmp_path("proof-broker-local-bypass-ee-invocations");
+    let ledger_arg = ledger
+        .to_str()
+        .ok_or_else(|| "ledger path is not utf-8".to_owned())?;
+    let fake_ee_arg = fake_ee
+        .to_str()
+        .ok_or_else(|| "fake ee path is not utf-8".to_owned())?;
+    let fake_ee_log_arg = fake_ee_log
+        .to_str()
+        .ok_or_else(|| "fake ee invocation log is not utf-8".to_owned())?;
+    let bypass_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"bypass_detected","count":1,"processes":[{"pid":"123","packageCacheLockHeld":true}],"detectedLocalBuilds":[]}"#;
+
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--skip-build-admission",
+            "--proof-broker-ledger",
+            ledger_arg,
+            "--proof-broker-ee-bin",
+            fake_ee_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "proof_broker_local_cargo_bypass",
+        ],
+        &[
+            ("FAKE_EE_INVOCATIONS", fake_ee_log_arg),
+            ("FAKE_PROOF_VERDICT", "proof_unusable"),
+            ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", bypass_tripwire),
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "[RCH] remote should-not-run (0.1s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+        ],
+    )?;
+    if status.success() {
+        return Err("local Cargo bypass admission should refuse before RCH".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse proof broker local bypass report: {error}"))?;
+    if report["status"] != "proof_broker_refused"
+        || report["proof_broker"]["verdict"] != "proof_unusable"
+        || report["local_cargo_processes"]["status"] != "bypass_detected"
+    {
+        return Err(format!("local bypass admission did not refuse: {report}"));
+    }
+    if !degraded_contains(&report, "rch_verify_proof_broker_proof_unusable")?
+        || !degraded_contains(&report, "rch_verify_local_cargo_processes_present")?
+    {
+        return Err(format!("local bypass degraded codes missing: {report}"));
+    }
+    let invocations = fs::read_to_string(&fake_ee_log)
+        .map_err(|error| format!("read fake proof ee invocations: {error}"))?;
+    if !invocations.contains("--local-cargo-tripwire-class class:local_cargo_bypass_detected") {
+        return Err(format!(
+            "local Cargo bypass class was not sent to proof admission: {invocations}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_broker_explicit_bypass_runs_remote_and_records_reason() -> TestResult {
+    let ledger = unique_tmp_path("proof-broker-explicit-bypass-ledger").join("ledger.json");
+    fs::create_dir_all(
+        ledger
+            .parent()
+            .ok_or_else(|| "ledger path missing parent".to_owned())?,
+    )
+    .map_err(|error| format!("create proof-broker ledger dir: {error}"))?;
+    fs::write(&ledger, "[]").map_err(|error| format!("write proof-broker ledger: {error}"))?;
+    let fake_ee = write_fake_proof_broker_ee("fake-ee-proof-explicit-bypass.sh")?;
+    let fake_ee_log = unique_tmp_path("proof-broker-explicit-bypass-ee-invocations");
+    let ledger_arg = ledger
+        .to_str()
+        .ok_or_else(|| "ledger path is not utf-8".to_owned())?;
+    let fake_ee_arg = fake_ee
+        .to_str()
+        .ok_or_else(|| "fake ee path is not utf-8".to_owned())?;
+    let fake_ee_log_arg = fake_ee_log
+        .to_str()
+        .ok_or_else(|| "fake ee invocation log is not utf-8".to_owned())?;
+    let clean_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"ok","count":0,"processes":[],"detectedLocalBuilds":[]}"#;
+
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--skip-build-admission",
+            "--proof-broker-ledger",
+            ledger_arg,
+            "--proof-broker-ee-bin",
+            fake_ee_arg,
+            "--proof-broker-bypass",
+            "human requested emergency rerun",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "proof_broker_bypass",
+        ],
+        &[
+            ("FAKE_EE_INVOCATIONS", fake_ee_log_arg),
+            ("FAKE_PROOF_VERDICT", "wait_for_inflight"),
+            ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "Selected worker: css\n[RCH] remote css (0.1s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "19"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "explicit proof-broker bypass should run remote proof\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse proof broker bypass report: {error}"))?;
+    if report["status"] != "remote_pass"
+        || report["worker_id"] != "css"
+        || report["proof_broker"]["verdict"] != "wait_for_inflight"
+        || report["proof_broker"]["remoteCargoLaunched"] != true
+        || report["proof_broker"]["bypassReason"] != "human requested emergency rerun"
+    {
+        return Err(format!(
+            "explicit bypass did not run and record reason: {report}"
+        ));
+    }
+    if !degraded_contains(&report, "rch_verify_proof_broker_bypassed")?
+        || !degraded_contains(&report, "rch_verify_proof_broker_wait_for_inflight")?
+    {
+        return Err(format!("explicit bypass degraded codes missing: {report}"));
     }
     Ok(())
 }
