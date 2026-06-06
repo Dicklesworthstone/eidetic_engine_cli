@@ -19,6 +19,7 @@ pub enum TestPhase {
     Setup,
     Exercise,
     Verify,
+    #[allow(dead_code)]
     Teardown,
 }
 
@@ -94,6 +95,7 @@ impl TestTraceGuard {
         self.event(TestPhase::Verify, fixture_name, actual, expected, message);
     }
 
+    #[allow(dead_code)]
     pub fn teardown(&self, fixture_name: &str, message: &str) {
         self.event(TestPhase::Teardown, fixture_name, "", "", message);
     }
