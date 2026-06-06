@@ -5708,6 +5708,8 @@ fn diag_search_sync(
                         .into_iter()
                         .map(|result| search_hit_from_scored_result(result, explain))
                         .collect();
+                    let rerank_seed = Deterministic::from_seed(0).shared_child("search.rerank");
+                    canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                     sort_search_hits_by_score_order(&mut hits);
                     Ok(DiagSearchSyncResult {
                         pre_fusion: PreFusionDiagnostics {
@@ -5946,22 +5948,22 @@ fn search_hit_workspace_id(hit: &SearchHit) -> &str {
         .or_else(|| {
             metadata
                 .get("mesh")
-                .and_then(|mesh| metadata_string(mesh, "workspace_id"))
-        })
-        .or_else(|| {
-            metadata
-                .get("mesh")
-                .and_then(|mesh| metadata_string(mesh, "workspaceId"))
-        })
-        .or_else(|| {
-            metadata
-                .get("mesh")
                 .and_then(|mesh| metadata_string(mesh, "origin_workspace_id"))
         })
         .or_else(|| {
             metadata
                 .get("mesh")
                 .and_then(|mesh| metadata_string(mesh, "originWorkspaceId"))
+        })
+        .or_else(|| {
+            metadata
+                .get("mesh")
+                .and_then(|mesh| metadata_string(mesh, "workspace_id"))
+        })
+        .or_else(|| {
+            metadata
+                .get("mesh")
+                .and_then(|mesh| metadata_string(mesh, "workspaceId"))
         })
         .unwrap_or("")
 }
@@ -8302,10 +8304,21 @@ mod tests {
                     source_type: "outcome_observed".to_owned(),
                     source_id: Some("curate-validation".to_owned()),
                     reason: Some("bad calibration evidence".to_owned()),
-                    evidence_json: Some("{not json".to_owned()),
+                    evidence_json: Some("{}".to_owned()),
                     session_id: None,
                 },
             )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("PRAGMA ignore_check_constraints = ON")
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "UPDATE feedback_events SET evidence_json = '{not json' WHERE id = 'fb_malformed_calibration_0001'",
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("PRAGMA ignore_check_constraints = OFF")
             .map_err(|error| error.to_string())?;
 
         let mut hits = vec![synthetic_hit("mem_feedback_malformed", 0.8)];

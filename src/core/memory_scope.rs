@@ -1502,6 +1502,7 @@ fn mesh_namespace_alias(origin_workspace_id: &str, label: Option<&str>) -> Strin
 fn mesh_peer_display(producer_peer_id: &str, label: Option<&str>) -> String {
     label
         .and_then(redaction_safe_label)
+        .or_else(|| redaction_safe_label(producer_peer_id))
         .unwrap_or_else(|| stable_mesh_alias("mesh_peer", producer_peer_id))
 }
 

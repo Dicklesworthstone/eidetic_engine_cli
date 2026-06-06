@@ -450,7 +450,7 @@ fn harmful_penalty(harmful_count: u32, per_hit: f32, floor: f32) -> f32 {
 }
 
 fn redundancy_multiplier(redundancy: Option<f32>, lambda: f32) -> f32 {
-    let lambda = finite_unit(lambda);
+    let lambda = finite_unit_or(lambda, 1.0);
     1.0 - (1.0 - lambda) * finite_unit(redundancy.unwrap_or(0.0))
 }
 
@@ -463,6 +463,14 @@ fn finite_unit(value: f32) -> f32 {
         value.clamp(0.0, 1.0)
     } else {
         0.0
+    }
+}
+
+fn finite_unit_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        fallback.clamp(0.0, 1.0)
     }
 }
 

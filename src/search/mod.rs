@@ -748,11 +748,20 @@ fn search_projection_path_prefix_len(
     if bytes.first().is_some_and(|byte| byte.is_ascii_alphabetic())
         && matches!(bytes.get(1), Some(b':'))
         && matches!(bytes.get(2), Some(b'\\' | b'/'))
+        && search_projection_drive_prefix_is_bounded(input, cursor)
     {
         Some(3)
     } else {
         None
     }
+}
+
+fn search_projection_drive_prefix_is_bounded(input: &str, cursor: usize) -> bool {
+    cursor == 0
+        || input
+            .as_bytes()
+            .get(cursor.saturating_sub(1))
+            .is_none_or(|byte| !byte.is_ascii_alphanumeric())
 }
 
 fn search_projection_unix_prefix_matches(remaining: &str, prefix: &str) -> bool {
