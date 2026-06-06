@@ -35,6 +35,7 @@ const CACHE_ON_P50_BUDGET_MS: f64 = 100.0;
 const CACHE_ON_P99_BUDGET_MS: f64 = 500.0;
 const CACHE_OFF_P50_BUDGET_MS: f64 = 350.0;
 const CACHE_OFF_P99_BUDGET_MS: f64 = 1_000.0;
+#[cfg(test)]
 const DELIBERATE_REGRESSION_MS: f64 = 100.0;
 
 const ALL_GRAPH_FEATURES: &[&str] = &[
@@ -385,6 +386,7 @@ fn assert_workload_budget(mode: CacheMode, stats: WorkloadStats) {
     }
 }
 
+#[cfg(test)]
 fn deliberate_regression_is_rejected(mode: CacheMode) -> bool {
     let stats = WorkloadStats {
         p50_ms: mode.p50_budget_ms() + DELIBERATE_REGRESSION_MS,
