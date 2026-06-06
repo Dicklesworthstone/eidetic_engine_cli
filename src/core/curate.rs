@@ -7627,6 +7627,14 @@ fn persist_workspace_review_candidate(
     )
 }
 
+fn persisted_review_candidate_source_type(candidate: &ReviewSessionCandidate) -> String {
+    if candidate.source_type == "workspace_review" {
+        CandidateSource::AgentInference.as_str().to_owned()
+    } else {
+        candidate.source_type.clone()
+    }
+}
+
 fn persist_review_candidate(
     connection: &DbConnection,
     workspace_id: &str,
@@ -7667,7 +7675,7 @@ fn persist_review_candidate(
                 proposed_content: Some(candidate.proposed_content.clone()),
                 proposed_confidence: Some(candidate.proposed_confidence),
                 proposed_trust_class: None,
-                source_type: candidate.source_type.clone(),
+                source_type: persisted_review_candidate_source_type(candidate),
                 source_id: Some(candidate.source_ids.join(",")),
                 reason: candidate.reason.clone(),
                 confidence: candidate.confidence,
@@ -13966,6 +13974,7 @@ mod tests {
             prepared_reflection_request_fixture(&workspace_id, "reflect_req_corediag0001")?;
         persist_prepared_reflection_request_ledger(&connection, &current)
             .map_err(|error| error.to_string())?;
+        let current_request_id = current.ledger_material.request_id.clone();
 
         let expired =
             prepared_reflection_request_fixture(&workspace_id, "reflect_req_corediag0002")?;
@@ -14152,7 +14161,7 @@ mod tests {
         let current_row = report
             .requests
             .iter()
-            .find(|row| row.request_id == "reflect_req_corediag0001")
+            .find(|row| row.request_id == current_request_id)
             .ok_or_else(|| "expected current diagnostic row".to_owned())?;
         assert_eq!(current_row.posture, "pending");
         assert_eq!(current_row.source_ref_count, 1);
