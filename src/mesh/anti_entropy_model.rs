@@ -66,6 +66,7 @@ impl EventKey {
 }
 
 /// Mesh event kinds that affect deterministic replay visibility.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelEventKind {
     Create,
@@ -659,6 +660,7 @@ impl ModelNode {
     }
 
     #[must_use]
+    #[allow(dead_code)]
     pub fn events_for_range(&self, range: &EventRange) -> Vec<ModelEvent> {
         (range.start_seq..=range.end_seq)
             .filter_map(|seq| {
@@ -1186,9 +1188,9 @@ mod tests {
         assert_eq!(node.revision_notice_since(&read), None);
 
         assert_eq!(node.replay(second), ReplayOutcome::Accepted);
-        let notice = node
-            .revision_notice_since(&read)
-            .expect("revision notice after newer durable replay");
+        let Some(notice) = node.revision_notice_since(&read) else {
+            panic!("revision notice after newer durable replay");
+        };
         assert_eq!(notice.advanced_origins.len(), 1);
         assert_eq!(notice.advanced_origins[0].origin_node_id, "node_a");
         assert_eq!(notice.advanced_origins[0].from_seq, 1);
@@ -1507,9 +1509,9 @@ mod tests {
             vec![CURSOR_NOT_ADVANCED_LOG]
         );
 
-        let repaired = node
-            .repair_cursor_after_crash("node_a")
-            .expect("repairable cursor after crash");
+        let Some(repaired) = node.repair_cursor_after_crash("node_a") else {
+            panic!("repairable cursor after crash");
+        };
         assert_eq!(repaired.cursor_before, 0);
         assert_eq!(repaired.repaired_cursor, 1);
         assert_eq!(repaired.structured_log_events, vec![REPLAY_RECOVERED_LOG]);
@@ -1596,9 +1598,9 @@ mod tests {
             ReplayRepairAction::RevokePeer,
             ReplayRepairAction::ResetCache,
         ] {
-            let audit = node
-                .repair_quarantined_event(&key, action)
-                .expect("quarantined event can be repaired");
+            let Some(audit) = node.repair_quarantined_event(&key, action) else {
+                panic!("quarantined event can be repaired");
+            };
             assert!(!action.as_str().is_empty());
             assert_eq!(audit.action, action);
             assert_eq!(audit.degraded_code, MESH_EVENT_QUARANTINED_CODE);
@@ -1607,9 +1609,10 @@ mod tests {
             assert_eq!(audit.structured_log_events, vec![REPAIR_ACTION_LOG]);
         }
 
-        let skip = node
-            .repair_quarantined_event(&key, ReplayRepairAction::SkipWithAudit)
-            .expect("quarantined event can be skipped with audit");
+        let Some(skip) = node.repair_quarantined_event(&key, ReplayRepairAction::SkipWithAudit)
+        else {
+            panic!("quarantined event can be skipped with audit");
+        };
         assert_eq!(skip.cursor_before, 0);
         assert_eq!(skip.cursor_after, 1);
         assert_eq!(node.cursor_for("node_a"), 1);
