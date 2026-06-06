@@ -1020,10 +1020,6 @@ fn memory_show_tool_schema() -> Value {
             "database": {
                 "type": "string",
                 "description": "Database path override"
-            },
-            "includeTombstoned": {
-                "type": "boolean",
-                "description": "Include tombstoned memories"
             }
         },
         "required": ["memoryId"]
@@ -1586,9 +1582,6 @@ fn build_memory_show_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> R
         required_string(arguments, &["memoryId", "memory_id"])?,
     );
     append_optional_path_flag(args, arguments, &["database"], "--database")?;
-    if optional_bool(arguments, &["includeTombstoned", "include_tombstoned"])? {
-        push_arg(args, "--include-tombstoned");
-    }
     Ok(())
 }
 
@@ -1883,28 +1876,6 @@ fn append_resource_query_flag(
     }
 }
 
-fn append_resource_bool_flag(
-    args: &mut Vec<OsString>,
-    query: &[(String, String)],
-    names: &[&str],
-    flag: &str,
-) -> Result<(), String> {
-    let name = query_parameter_name(names)?;
-    let Some(value) = query_param(query, names) else {
-        return Ok(());
-    };
-    match value {
-        "true" => {
-            push_arg(args, flag);
-            Ok(())
-        }
-        "false" => Ok(()),
-        _ => Err(format!(
-            "URI query parameter '{name}' must be true or false"
-        )),
-    }
-}
-
 fn build_cli_args_for_resource(uri: &str) -> Result<Vec<OsString>, String> {
     let (path, query) = parse_resource_uri(uri)?;
     let mut args = Vec::new();
@@ -1958,12 +1929,6 @@ fn build_cli_args_for_resource(uri: &str) -> Result<Vec<OsString>, String> {
             push_arg(&mut args, "show");
             push_arg(&mut args, path_tail(path, "memories/", "memory ID")?);
             append_resource_query_flag(&mut args, &query, &["database"], "--database");
-            append_resource_bool_flag(
-                &mut args,
-                &query,
-                &["includeTombstoned", "include_tombstoned"],
-                "--include-tombstoned",
-            )?;
         }
         _ => return Err(format!("Unknown ee resource URI: {uri}")),
     }
@@ -2778,15 +2743,8 @@ mod tests {
     fn uri_query_helpers_reject_empty_name_lists_without_panicking() -> Result<(), String> {
         let query = vec![("includeContent".to_owned(), "maybe".to_owned())];
         let expected = "MCP URI query helper requires at least one query parameter name";
-        let mut args = Vec::new();
 
-        expect_error(required_query_param(&query, &[]), expected)?;
-        expect_error(
-            append_resource_bool_flag(&mut args, &query, &[], "--include-content"),
-            expected,
-        )?;
-        assert!(args.is_empty());
-        Ok(())
+        expect_error(required_query_param(&query, &[]), expected)
     }
 
     proptest! {

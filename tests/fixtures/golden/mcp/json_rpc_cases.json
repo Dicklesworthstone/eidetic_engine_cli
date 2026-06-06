@@ -262,25 +262,6 @@
     }
   },
   {
-    "name": "memory_resource_invalid_bool_error",
-    "request": {
-      "jsonrpc": "2.0",
-      "id": "memory-bool",
-      "method": "resources/read",
-      "params": {
-        "uri": "ee://memories/mem_123?includeTombstoned=maybe"
-      }
-    },
-    "response": {
-      "jsonrpc": "2.0",
-      "id": "memory-bool",
-      "error": {
-        "code": -32602,
-        "message": "URI query parameter 'includeTombstoned' must be true or false"
-      }
-    }
-  },
-  {
     "name": "remember_write_gate_error",
     "request": {
       "jsonrpc": "2.0",
