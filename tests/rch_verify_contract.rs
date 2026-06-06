@@ -2624,6 +2624,87 @@ fn proof_broker_source_mismatch_refuses_before_remote_dispatch() -> TestResult {
 }
 
 #[test]
+fn proof_broker_environment_blocked_refuses_before_remote_dispatch() -> TestResult {
+    let ledger = unique_tmp_path("proof-broker-environment-blocked-ledger").join("ledger.json");
+    fs::create_dir_all(
+        ledger
+            .parent()
+            .ok_or_else(|| "ledger path missing parent".to_owned())?,
+    )
+    .map_err(|error| format!("create proof-broker ledger dir: {error}"))?;
+    fs::write(&ledger, "[]").map_err(|error| format!("write proof-broker ledger: {error}"))?;
+    let fake_ee = write_fake_proof_broker_ee("fake-ee-proof-environment-blocked.sh")?;
+    let fake_ee_log = unique_tmp_path("proof-broker-environment-blocked-ee-invocations");
+    let ledger_arg = ledger
+        .to_str()
+        .ok_or_else(|| "ledger path is not utf-8".to_owned())?;
+    let fake_ee_arg = fake_ee
+        .to_str()
+        .ok_or_else(|| "fake ee path is not utf-8".to_owned())?;
+    let fake_ee_log_arg = fake_ee_log
+        .to_str()
+        .ok_or_else(|| "fake ee invocation log is not utf-8".to_owned())?;
+    let clean_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"ok","count":0,"processes":[],"detectedLocalBuilds":[]}"#;
+
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--skip-build-admission",
+            "--proof-broker-ledger",
+            ledger_arg,
+            "--proof-broker-ee-bin",
+            fake_ee_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "proof_broker_environment_blocked",
+        ],
+        &[
+            ("FAKE_EE_INVOCATIONS", fake_ee_log_arg),
+            ("FAKE_PROOF_VERDICT", "environment_blocked"),
+            ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "[RCH] remote should-not-run (0.1s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+        ],
+    )?;
+    if status.success() {
+        return Err("environment-blocked admission should refuse before RCH".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse proof broker environment-blocked report: {error}"))?;
+    if report["status"] != "proof_broker_refused"
+        || report["proof_broker"]["verdict"] != "environment_blocked"
+        || report["proof_broker"]["remoteCargoLaunched"] != false
+        || !report["rch_invocation"]
+            .as_array()
+            .ok_or_else(|| "missing rch_invocation".to_owned())?
+            .is_empty()
+    {
+        return Err(format!(
+            "environment-blocked admission did not refuse before remote dispatch: {report}"
+        ));
+    }
+    if !degraded_contains(&report, "rch_verify_proof_broker_environment_blocked")? {
+        return Err(format!(
+            "environment-blocked degraded code missing: {report}"
+        ));
+    }
+    let invocations = fs::read_to_string(&fake_ee_log)
+        .map_err(|error| format!("read fake proof ee invocations: {error}"))?;
+    if !invocations.contains("proof admit")
+        || !invocations.contains("-- cargo test --lib proof_broker_environment_blocked")
+    {
+        return Err(format!(
+            "proof broker environment-blocked admission did not receive expected command: {invocations}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn proof_broker_local_cargo_bypass_is_unusable_without_bypass() -> TestResult {
     let ledger = unique_tmp_path("proof-broker-local-bypass-ledger").join("ledger.json");
     fs::create_dir_all(
