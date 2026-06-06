@@ -369,8 +369,11 @@ fn strip_rust_noise(source: &str) -> Vec<String> {
                 } else if ch == '\'' {
                     state = StripState::Char { escaped: false };
                     index += 1;
+                } else if let Some(line) = lines.last_mut() {
+                    line.push(ch);
+                    index += 1;
                 } else {
-                    lines.last_mut().expect("at least one output line").push(ch);
+                    lines.push(ch.to_string());
                     index += 1;
                 }
             }
@@ -875,12 +878,15 @@ mod self_tests {
     }
 
     #[test]
-    fn determinism_required_proc_macro_crate_is_present_and_dependency_free() {
+    fn determinism_required_proc_macro_crate_is_present_and_dependency_free() -> Result<(), String>
+    {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let manifest = std::fs::read_to_string(root.join("crates/determinism/Cargo.toml"))
-            .expect("determinism proc-macro manifest");
-        let source = std::fs::read_to_string(root.join("crates/determinism/src/lib.rs"))
-            .expect("determinism proc-macro source");
+        let manifest_path = root.join("crates/determinism/Cargo.toml");
+        let source_path = root.join("crates/determinism/src/lib.rs");
+        let manifest = fs::read_to_string(&manifest_path)
+            .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
+        let source = fs::read_to_string(&source_path)
+            .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
 
         assert!(manifest.contains("proc-macro = true"));
         assert!(!manifest.contains("[dependencies]"));
@@ -894,5 +900,6 @@ mod self_tests {
         assert!(source.contains("SystemTime::now("));
         assert!(source.contains("std::fs::read_dir("));
         assert!(source.contains("contains_domain_id_now"));
+        Ok(())
     }
 }
