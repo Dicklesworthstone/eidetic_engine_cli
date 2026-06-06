@@ -9,7 +9,7 @@
 //! applies to the instrumented `pprRerank` stage so search and persistence
 //! variance do not get misattributed to the graph reranker.
 
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::path::{Path, PathBuf};
 
