@@ -1773,16 +1773,42 @@ fn redact_secret_key_values(input: &str, reasons: &mut Vec<&'static str>) -> (St
                 search_start = key_end;
                 continue;
             }
-            let placeholder = redaction_placeholder(pattern.code);
+            let code = {
+                let value = &output[value_start..value_end];
+                key_value_redaction_code(pattern.code, value)
+            };
+            let placeholder = redaction_placeholder(code);
             output.replace_range(value_start..value_end, &placeholder);
             lower = output.to_ascii_lowercase();
-            reasons.push(pattern.code);
+            reasons.push(code);
             changed = true;
             search_start = value_start + placeholder.len();
         }
     }
 
     (output, changed)
+}
+
+fn key_value_redaction_code(default_code: &'static str, value: &str) -> &'static str {
+    if default_code == "token" && looks_like_gitlab_personal_access_token(value) {
+        "personal_access_token"
+    } else {
+        default_code
+    }
+}
+
+fn looks_like_gitlab_personal_access_token(value: &str) -> bool {
+    let value = value.trim_matches(|ch| matches!(ch, '"' | '\''));
+    let Some(_) = value.strip_prefix("glpat-") else {
+        return false;
+    };
+    let after_prefix = "glpat-".len();
+    let token_end = value[after_prefix..]
+        .char_indices()
+        .find_map(|(offset, ch)| (!is_raw_token_char(ch)).then_some(after_prefix + offset))
+        .unwrap_or(value.len());
+    let actual_token_end = trim_raw_token_end(value, after_prefix, token_end);
+    actual_token_end - after_prefix >= 20
 }
 
 fn is_key_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
@@ -2297,14 +2323,17 @@ fn redact_high_entropy_secret_values(
             break;
         };
         let candidate = &input[token_start..token_end];
-        let should_redact = if looks_like_high_entropy_secret(candidate) {
-            // Very long high-entropy strings (64+ chars) are flagged standalone.
-            // Shorter high-entropy strings (32-63 chars) require nearby keyword.
-            looks_like_standalone_high_entropy_secret(candidate)
-                || has_nearby_secret_keyword(input, token_start, token_end)
-        } else {
-            false
-        };
+        let should_redact =
+            if entropy_candidate_segment_contains_redaction(input, token_start, token_end) {
+                false
+            } else if looks_like_high_entropy_secret(candidate) {
+                // Very long high-entropy strings (64+ chars) are flagged standalone.
+                // Shorter high-entropy strings (32-63 chars) require nearby keyword.
+                looks_like_standalone_high_entropy_secret(candidate)
+                    || has_nearby_secret_keyword(input, token_start, token_end)
+            } else {
+                false
+            };
         if should_redact {
             if !changed {
                 output = String::with_capacity(input.len());
@@ -2324,6 +2353,23 @@ fn redact_high_entropy_secret_values(
     } else {
         (input.to_owned(), false)
     }
+}
+
+fn entropy_candidate_segment_contains_redaction(
+    input: &str,
+    token_start: usize,
+    token_end: usize,
+) -> bool {
+    let segment_start = input[..token_start]
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| ch.is_whitespace().then_some(index + ch.len_utf8()))
+        .unwrap_or(0);
+    let segment_end = input[token_end..]
+        .char_indices()
+        .find_map(|(offset, ch)| ch.is_whitespace().then_some(token_end + offset))
+        .unwrap_or(input.len());
+    input[segment_start..segment_end].contains("[REDACTED:")
 }
 
 fn looks_like_standalone_high_entropy_secret(candidate: &str) -> bool {
