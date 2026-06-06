@@ -321,8 +321,13 @@ fsqlite-core = { path = "../frankensqlite/crates/fsqlite-core" }
 fsqlite-error = { path = "../frankensqlite/crates/fsqlite-error" }
 fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
 fsqlite-func = { path = "../frankensqlite/crates/fsqlite-func" }
+fsqlite-ext-fts3 = { path = "../frankensqlite/crates/fsqlite-ext-fts3" }
 fsqlite-ext-fts5 = { path = "../frankensqlite/crates/fsqlite-ext-fts5" }
 fsqlite-ext-json = { path = "../frankensqlite/crates/fsqlite-ext-json" }
+fsqlite-ext-rtree = { path = "../frankensqlite/crates/fsqlite-ext-rtree" }
+fsqlite-ext-session = { path = "../frankensqlite/crates/fsqlite-ext-session" }
+fsqlite-ext-icu = { path = "../frankensqlite/crates/fsqlite-ext-icu" }
+fsqlite-ext-misc = { path = "../frankensqlite/crates/fsqlite-ext-misc" }
 fsqlite-ast = { path = "../frankensqlite/crates/fsqlite-ast" }
 fsqlite-btree = { path = "../frankensqlite/crates/fsqlite-btree" }
 fsqlite-pager = { path = "../frankensqlite/crates/fsqlite-pager" }
