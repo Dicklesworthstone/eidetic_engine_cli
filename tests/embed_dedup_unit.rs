@@ -5,6 +5,8 @@
 //! The remember-path hook, database `content_simhash` column, env registry, and
 //! `ee why` dedupLink output are covered by later slices.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use ee::search::simhash::{
     SimHash128, first_confirmed_simhash_candidate, hamming_distance, simhash_128,
 };

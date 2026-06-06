@@ -22,6 +22,8 @@
 //!    the per-FM fixture suite and uses a temp workspace it leaves
 //!    behind for operator inspection per AGENTS.md RULE 1).
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::fs;
 use std::path::PathBuf;
 

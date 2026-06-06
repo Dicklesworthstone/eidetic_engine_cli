@@ -12,6 +12,8 @@
 //! generation-bump regression that drops the entry under
 //! contention fails the smoke.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::sync::{Arc, RwLock};
 use std::thread;
 

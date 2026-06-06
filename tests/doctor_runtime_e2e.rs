@@ -20,6 +20,8 @@
 //! - 🛡 Refuse-on-unsafe: writes outside the declared blast radius refuse.
 //! - 📜 Self-describing: CapabilitiesReport serializes with stable schema.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::fs;
 use std::path::PathBuf;
 
