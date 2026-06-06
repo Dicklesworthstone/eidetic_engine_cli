@@ -1448,10 +1448,7 @@ pub fn detect_instruction_like_content(content: &str) -> InstructionLikeReport {
 #[must_use]
 pub fn redact_secret_like_content(content: &str) -> SecretRedactionReport {
     let matches = detect_secret_like_matches(content);
-    let mut reasons = matches
-        .iter()
-        .map(|secret_match| secret_match.pattern_id)
-        .collect::<Vec<_>>();
+    let mut reasons = Vec::new();
     let (without_key_values, key_value_redacted) = redact_secret_key_values(content, &mut reasons);
     let (without_url_passwords, url_password_redacted) =
         redact_url_passwords(&without_key_values, &mut reasons);
@@ -1792,11 +1789,15 @@ fn is_key_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
     let before_ok = start == 0
         || bytes
             .get(start.saturating_sub(1))
-            .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
+            .is_none_or(|byte| !is_secret_key_identifier_byte(*byte));
     let after_ok = bytes
         .get(end)
-        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
+        .is_none_or(|byte| !is_secret_key_identifier_byte(*byte));
     before_ok && after_ok
+}
+
+fn is_secret_key_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
 }
 
 fn find_secret_key_pattern(

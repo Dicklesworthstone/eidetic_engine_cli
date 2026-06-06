@@ -14168,7 +14168,7 @@ mod tests {
         assert_eq!(current_row.source_content_hash_count, 1);
         assert_eq!(
             current_row.recovery.first().map(|action| action.kind),
-            Some("inspect_pending_reflection_request")
+            Some("ingest_reflection_result")
         );
 
         let expired_row = report
