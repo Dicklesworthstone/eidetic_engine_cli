@@ -10323,8 +10323,9 @@ fn evaluate_candidate_for_disposition(
                 "Candidate {} references missing TTL policy {policy_id}.",
                 stored.id
             ),
-            repair: "Run ee migrate run --workspace . --json or recreate the curation policy table."
-                .to_owned(),
+            repair:
+                "Run ee migrate run --workspace . --json or recreate the curation policy table."
+                    .to_owned(),
         });
         return Ok(blocked_disposition(
             stored,
