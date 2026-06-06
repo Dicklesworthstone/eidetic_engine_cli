@@ -5638,7 +5638,7 @@ pub fn run_review_workspace(
 
             let mut candidate = ReviewSessionCandidate {
                 candidate_id,
-                candidate_type: "review".to_owned(),
+                candidate_type: CandidateType::Rule.as_str().to_owned(),
                 candidate_kind: "workspace_memory".to_owned(),
                 topic_key: memory.kind.clone(),
                 target_memory_id: Some(memory.id.clone()),
@@ -13286,17 +13286,15 @@ mod tests {
         validate_curation_candidate,
     };
     use crate::curate::{
-        CandidateSource, PreparedReflectionRequest, REFLECTION_CHALLENGE_BINDING_SCHEMA,
-        REFLECTION_REQUEST_SCHEMA, REFLECTION_RESULT_SCHEMA, REFLECTION_SOURCE_PACKAGE_SCHEMA,
-        REFLECTION_SOURCE_REDACTION_POLICY_ID, ReflectionHmacKeyConfig,
-        ReflectionPromptTemplateDescriptor, ReflectionRequestArtifact,
-        ReflectionRequestCallerHints, ReflectionRequestChallenge, ReflectionRequestLedgerMaterial,
-        ReflectionRequestLifecycle, ReflectionRequestLifecycleConfig, ReflectionRequestNextCommand,
-        ReflectionResponseSchemaDescriptor, ReflectionResultArtifact,
+        CandidateSource, DerivationSourceKind, DerivationSourceRef, PreparedReflectionRequest,
+        REFLECTION_REQUEST_SCHEMA, REFLECTION_RESULT_SCHEMA, ReflectionHmacKeyConfig,
+        ReflectionRequestLedgerMaterial, ReflectionRequestLifecycle,
+        ReflectionRequestLifecycleConfig, ReflectionResultArtifact,
         ReflectionResultCandidateMaterial, ReflectionResultIngestDecision,
-        ReflectionResultProducer, ReflectionResultReplayGate, ReflectionSourcePackage,
-        ReflectionSourcePackageBudget, ReflectionSourcePackageEntry, ReflectionSourcePackageLimits,
-        ReflectionSourcePackageRedactionSummary,
+        ReflectionResultProducer, ReflectionResultReplayGate, ReflectionSourceInput,
+        ReflectionSourceMetadata, ReflectionSourcePackageLimits,
+        attach_reflection_request_challenge, build_reflection_request_artifact,
+        build_reflection_source_package, reflection_request_ledger_material,
     };
     use crate::db::{
         CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateFeedbackEventInput,
@@ -13428,102 +13426,52 @@ mod tests {
     fn prepared_reflection_request_fixture(
         workspace_id: &str,
         request_id: &str,
-    ) -> PreparedReflectionRequest {
-        let ledger_material = reflection_request_ledger_material_fixture(workspace_id, request_id);
-        let prompt_template = ReflectionPromptTemplateDescriptor {
-            id: "ee.reflect.prompt.summary",
-            version: "test",
-            hash: ledger_material.prompt_template_hash.clone(),
-        };
-        let response_schema = ReflectionResponseSchemaDescriptor {
-            id: REFLECTION_RESULT_SCHEMA,
-            hash: ledger_material.response_schema_hash.clone(),
-        };
+    ) -> Result<PreparedReflectionRequest, String> {
         let lifecycle = ReflectionRequestLifecycle {
-            created_at: ledger_material.created_at.clone(),
-            expires_at: ledger_material.expires_at.clone(),
+            created_at: "2026-05-24T00:00:00Z".to_owned(),
+            expires_at: "2026-05-24T01:00:00Z".to_owned(),
             key_rotation_grace_expires_at: "2026-05-24T02:00:00Z".to_owned(),
             request_ttl_seconds: 3600,
             hmac_rotation_grace_seconds: 3600,
         };
-        let source_package = ReflectionSourcePackage {
-            schema: REFLECTION_SOURCE_PACKAGE_SCHEMA,
-            budget: ReflectionSourcePackageBudget {
+
+        let source_excerpt = format!("Keep reflection requests replay-safe for {request_id}.");
+        let source_hash = format!(
+            "blake3:{}",
+            blake3::hash(source_excerpt.as_bytes()).to_hex()
+        );
+        let source_package = build_reflection_source_package(
+            &[ReflectionSourceInput::new(
+                DerivationSourceRef::new(DerivationSourceKind::Memory, "mem_a", &source_hash),
+                source_excerpt,
+                Some(format!("cass-session://{request_id}#L1-L1")),
+            )
+            .with_metadata(ReflectionSourceMetadata::memory("procedural", "rule"))],
+            ReflectionSourcePackageLimits {
                 max_sources: 4,
                 max_total_excerpt_bytes: 1024,
                 max_excerpt_bytes_per_source: 512,
             },
-            total_source_count: 1,
-            packaged_source_count: 1,
-            omitted_source_count: 0,
-            total_excerpt_bytes: 36,
-            request_hash: ledger_material.source_package_hash.clone(),
-            redaction_summary: ReflectionSourcePackageRedactionSummary {
-                policy_id: REFLECTION_SOURCE_REDACTION_POLICY_ID,
-                secret_placeholder: "[REDACTED]",
-                redacted_source_count: 0,
-                prompt_injection_like_source_count: 0,
-                class_counts: Vec::new(),
-                truncation_reason_counts: Vec::new(),
-                omission_reason_counts: Vec::new(),
-            },
-            sources: vec![ReflectionSourcePackageEntry {
-                kind: "memory",
-                id: "mem_a".to_owned(),
-                memory_level: Some("procedural".to_owned()),
-                memory_kind: Some("rule".to_owned()),
-                evidence_span_kind: None,
-                content_hash:
-                    "blake3:1111111111111111111111111111111111111111111111111111111111111111"
-                        .to_owned(),
-                excerpt: "Keep reflection requests replay-safe.".to_owned(),
-                excerpt_hash:
-                    "blake3:2222222222222222222222222222222222222222222222222222222222222222"
-                        .to_owned(),
-                excerpt_bytes: 36,
-                redaction_classes: Vec::new(),
-                truncation_reason: None,
-                provenance_uri: None,
-            }],
-            omitted_sources: Vec::new(),
-        };
+        )
+        .map_err(|error| error.to_string())?;
+        let artifact = build_reflection_request_artifact(workspace_id, "summary", source_package)
+            .map_err(|error| error.to_string())?;
+        let artifact = attach_reflection_request_challenge(
+            artifact,
+            &lifecycle.created_at,
+            &lifecycle.expires_at,
+            "reflect-key-v1",
+            b"fixture reflection key material",
+        )
+        .map_err(|error| error.to_string())?;
+        let ledger_material =
+            reflection_request_ledger_material(&artifact).map_err(|error| error.to_string())?;
 
-        PreparedReflectionRequest {
-            artifact: ReflectionRequestArtifact {
-                schema: REFLECTION_REQUEST_SCHEMA,
-                request_id: request_id.to_owned(),
-                request_hash: ledger_material.request_hash.clone(),
-                created_at: Some(lifecycle.created_at.clone()),
-                expires_at: Some(lifecycle.expires_at.clone()),
-                workspace_id: workspace_id.to_owned(),
-                reflection_kind: ledger_material.reflection_kind.clone(),
-                source_package_hash: ledger_material.source_package_hash.clone(),
-                prompt_template,
-                response_schema,
-                challenge: Some(ReflectionRequestChallenge {
-                    key_id: ledger_material.challenge_key_id.clone(),
-                    algorithm: "hmac-sha256".to_owned(),
-                    hmac: "fixture-challenge-token".to_owned(),
-                }),
-                caller_hints: Some(ReflectionRequestCallerHints {
-                    result_schema: REFLECTION_RESULT_SCHEMA,
-                    challenge_binding_schema: REFLECTION_CHALLENGE_BINDING_SCHEMA,
-                    replay_policy: "one_result_per_request",
-                    privacy: vec!["store ledger hash only"],
-                }),
-                next_commands: vec![ReflectionRequestNextCommand {
-                    kind: "reflect_request_ledger_diagnostics",
-                    command:
-                        "ee reflect request-ledger diagnostics --workspace . --status pending --json"
-                            .to_owned(),
-                    when: "after an external producer writes a result artifact",
-                    safety: "read-only diagnostics",
-                }],
-                source_package,
-            },
+        Ok(PreparedReflectionRequest {
+            artifact,
             ledger_material,
             lifecycle,
-        }
+        })
     }
 
     #[test]
@@ -13668,13 +13616,13 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let prepared = prepared_reflection_request_fixture(&workspace_id, request_id);
+        let prepared = prepared_reflection_request_fixture(&workspace_id, request_id)?;
         let inserted = persist_prepared_reflection_request_ledger(&connection, &prepared)
             .map_err(|error| error.to_string())?;
         assert_eq!(inserted, ReflectionRequestDurableLedgerOutcome::Inserted);
 
         let stored = connection
-            .get_reflection_request_ledger(&workspace_id, request_id)
+            .get_reflection_request_ledger(&workspace_id, &prepared.ledger_material.request_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "expected persisted reflection request ledger row".to_owned())?;
         assert_eq!(stored.status, "pending");
@@ -14015,38 +13963,31 @@ mod tests {
             .map_err(|error| error.to_string())?;
 
         let current =
-            prepared_reflection_request_fixture(&workspace_id, "reflect_req_corediag0001");
+            prepared_reflection_request_fixture(&workspace_id, "reflect_req_corediag0001")?;
         persist_prepared_reflection_request_ledger(&connection, &current)
             .map_err(|error| error.to_string())?;
 
-        let mut expired =
-            prepared_reflection_request_fixture(&workspace_id, "reflect_req_corediag0002");
-        expired.ledger_material.request_hash =
+        let expired =
+            prepared_reflection_request_fixture(&workspace_id, "reflect_req_corediag0002")?;
+        let mut expired_input =
+            reflection_request_ledger_input_from_material(&expired.ledger_material);
+        expired_input.request_hash =
             "blake3:9999999999999999999999999999999999999999999999999999999999999999".to_owned();
-        expired.ledger_material.created_at = "2026-05-24T00:00:00Z".to_owned();
-        expired.ledger_material.expires_at = "2026-05-24T00:30:00Z".to_owned();
-        expired.artifact.request_hash = expired.ledger_material.request_hash.clone();
-        expired.artifact.created_at = Some(expired.ledger_material.created_at.clone());
-        expired.artifact.expires_at = Some(expired.ledger_material.expires_at.clone());
-        expired.artifact.source_package.request_hash =
-            expired.ledger_material.source_package_hash.clone();
-        expired.lifecycle.created_at = expired.ledger_material.created_at.clone();
-        expired.lifecycle.expires_at = expired.ledger_material.expires_at.clone();
-        persist_prepared_reflection_request_ledger(&connection, &expired)
+        expired_input.created_at = "2026-05-24T00:00:00Z".to_owned();
+        expired_input.expires_at = "2026-05-24T00:30:00Z".to_owned();
+        connection
+            .insert_reflection_request_ledger("reflect_req_corediag0002", &expired_input)
             .map_err(|error| error.to_string())?;
 
-        let mut rotated =
-            prepared_reflection_request_fixture(&workspace_id, "reflect_req_corediag0003");
-        rotated.ledger_material.request_hash =
+        let rotated =
+            prepared_reflection_request_fixture(&workspace_id, "reflect_req_corediag0003")?;
+        let mut rotated_input =
+            reflection_request_ledger_input_from_material(&rotated.ledger_material);
+        rotated_input.request_hash =
             "blake3:8888888888888888888888888888888888888888888888888888888888888888".to_owned();
-        rotated.ledger_material.challenge_key_id = "reflect-key-v0".to_owned();
-        rotated.artifact.request_hash = rotated.ledger_material.request_hash.clone();
-        rotated.artifact.source_package.request_hash =
-            rotated.ledger_material.source_package_hash.clone();
-        if let Some(challenge) = rotated.artifact.challenge.as_mut() {
-            challenge.key_id = rotated.ledger_material.challenge_key_id.clone();
-        }
-        persist_prepared_reflection_request_ledger(&connection, &rotated)
+        rotated_input.challenge_key_id = "reflect-key-v0".to_owned();
+        connection
+            .insert_reflection_request_ledger("reflect_req_corediag0003", &rotated_input)
             .map_err(|error| error.to_string())?;
 
         let mut digest_mismatch =
@@ -14319,7 +14260,7 @@ mod tests {
             "wsp_reflection_core",
             "reflect_req_secret_meta",
         );
-        let raw_secret = format!("sk-{}{}", "test", "1234567890abcdef1234567890abcdef");
+        let raw_secret = format!("sk-proj-{}", "a".repeat(48));
         let secret_key_value = format!("OPENAI_API_KEY={raw_secret}");
         let stored = StoredReflectionRequestLedger {
             request_id: material.request_id.clone(),
@@ -18545,7 +18486,7 @@ mod tests {
                     candidate_type: "create_derived_memory".to_owned(),
                     target_memory_id: None,
                     proposed_content: Some(
-                        "Derived memory: memory-only source packages create provenance links without evidence attachment."
+                        "src/core/curate.rs memory-only create-derived apply for `ee curate apply` creates DerivedFrom links for 2 ee-mem:// sources and leaves evidence spans unattached."
                             .to_owned(),
                     ),
                     proposed_confidence: Some(0.62),
@@ -19060,7 +19001,7 @@ mod tests {
                     candidate_type: "create_derived_memory".to_owned(),
                     target_memory_id: None,
                     proposed_content: Some(
-                        "Derived memory: competing candidate cites the same evidence span."
+                        "src/core/curate.rs competing create-derived candidate for `ee curate apply` reuses evidence span ev_create_derived from cass-session://create-derived-session#L1-L2, so apply-time validation reports the conflict without partial mutation."
                             .to_owned(),
                     ),
                     proposed_confidence: Some(0.59),
@@ -19714,7 +19655,8 @@ mod tests {
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
         let workspace_id = test_workspace_id(workspace_path);
-        let other_workspace_id = "wsp_create_derived_other".to_owned();
+        let other_workspace_path = workspace_path.join("other");
+        let other_workspace_id = test_workspace_id(&other_workspace_path);
         let tombstoned_memory_id =
             MemoryId::from_uuid(uuid::Uuid::from_u128(0x7_101_1)).to_string();
         let cross_workspace_memory_id =
@@ -19727,7 +19669,6 @@ mod tests {
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
-        let other_workspace_path = workspace_path.join("other");
         for (workspace, name, path) in [
             (
                 &workspace_id,
@@ -19836,7 +19777,8 @@ mod tests {
                     candidate_type: "create_derived_memory".to_owned(),
                     target_memory_id: None,
                     proposed_content: Some(
-                        "Derived memory with invalid DB-backed source states.".to_owned(),
+                        "src/core/curate.rs create-derived validation for `ee curate validate` rejects tombstoned memory, cross-workspace memory, and pre-linked evidence source states from DB rows."
+                            .to_owned(),
                     ),
                     proposed_confidence: Some(0.61),
                     proposed_trust_class: Some("agent_assertion".to_owned()),
@@ -20123,7 +20065,9 @@ mod tests {
             .audit_id
             .as_ref()
             .ok_or_else(|| "bare reject should write an audit id".to_owned())?;
-        let audit = connection
+        let bare_audit_connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let audit = bare_audit_connection
             .get_audit(bare_audit)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "bare reject audit entry missing".to_owned())?;
@@ -21628,7 +21572,7 @@ mod tests {
                     candidate_type: "create_derived_memory".to_owned(),
                     target_memory_id: None,
                     proposed_content: Some(
-                        "Derived memory: validate `src/core/curate.rs` create-derived source hashes before running `ee curate apply`."
+                        "src/core/curate.rs create-derived memory apply for `ee curate apply` revalidates locked blake3: source hashes from cass-session://create-derived-session#L1-L2 before persisting the derived semantic memory."
                             .to_owned(),
                     ),
                     proposed_confidence: Some(0.61),
