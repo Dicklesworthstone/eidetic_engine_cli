@@ -392,7 +392,8 @@ fn graph_pagerank_returns_ranked_scores_for_two_edge_path() -> TestResult {
         format!("scores must contain three rows for three nodes; got {scores:?}"),
     )?;
     for (index, score) in scores.iter().enumerate() {
-        let expected_rank = u64::try_from(index + 1).expect("rank fits u64");
+        let expected_rank =
+            u64::try_from(index + 1).map_err(|error| format!("rank must fit u64: {error}"))?;
         ensure(
             score["rank"].as_u64() == Some(expected_rank),
             format!("scores[{index}].rank must be {expected_rank}; got {score}"),
