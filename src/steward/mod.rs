@@ -6974,6 +6974,37 @@ mod tests {
         src_memory_id: &str,
         dst_memory_id: &str,
     ) -> Result<(), String> {
+        insert_score_memory_link_with_direction(
+            connection,
+            link_id,
+            src_memory_id,
+            dst_memory_id,
+            false,
+        )
+    }
+
+    fn insert_directed_score_memory_link(
+        connection: &DbConnection,
+        link_id: &str,
+        src_memory_id: &str,
+        dst_memory_id: &str,
+    ) -> Result<(), String> {
+        insert_score_memory_link_with_direction(
+            connection,
+            link_id,
+            src_memory_id,
+            dst_memory_id,
+            true,
+        )
+    }
+
+    fn insert_score_memory_link_with_direction(
+        connection: &DbConnection,
+        link_id: &str,
+        src_memory_id: &str,
+        dst_memory_id: &str,
+        directed: bool,
+    ) -> Result<(), String> {
         connection
             .insert_memory_link(
                 link_id,
@@ -6983,7 +7014,7 @@ mod tests {
                     relation: MemoryLinkRelation::Supports,
                     weight: 1.0,
                     confidence: 1.0,
-                    directed: false,
+                    directed,
                     evidence_count: 1,
                     last_reinforced_at: None,
                     source: MemoryLinkSource::Agent,
@@ -8728,19 +8759,19 @@ mod tests {
             ] {
                 insert_score_memory(&connection, memory_id, 0.8)?;
             }
-            insert_score_memory_link(
+            insert_directed_score_memory_link(
                 &connection,
                 "link_00000000000000000000000161",
                 SCORE_MEMORY_A,
                 SCORE_MEMORY_B,
             )?;
-            insert_score_memory_link(
+            insert_directed_score_memory_link(
                 &connection,
                 "link_00000000000000000000000162",
                 SCORE_MEMORY_B,
                 score_memory_c,
             )?;
-            insert_score_memory_link(
+            insert_directed_score_memory_link(
                 &connection,
                 "link_00000000000000000000000163",
                 score_memory_c,
@@ -9339,7 +9370,7 @@ mod tests {
     fn manual_runner_graph_snapshot_prune_emits_operator_request_cache_evict() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let database_path = temp.path().join("ee.db");
-        let snapshot_id = "gsnap_steward_prune_operator_cache";
+        let snapshot_id = "gsnap_0000000000000000000000931";
         {
             let connection =
                 DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
@@ -9374,11 +9405,11 @@ mod tests {
                 .update_graph_snapshot_status(snapshot_id, GraphSnapshotStatus::Archived)
                 .map_err(|error| error.to_string())?;
             connection
-                .execute_raw(
+                .execute_raw(&format!(
                     "UPDATE graph_snapshots \
                      SET created_at = '2026-05-01T00:00:00Z' \
-                     WHERE id = 'gsnap_steward_prune_operator_cache'",
-                )
+                     WHERE id = '{snapshot_id}'"
+                ))
                 .map_err(|error| error.to_string())?;
             connection
                 .upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
