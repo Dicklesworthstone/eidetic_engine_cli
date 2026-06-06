@@ -526,7 +526,7 @@ fn lab_swarm_replay_malformed_inputs_emit_logged_machine_safe_results() -> TestR
             format!("event test id mismatch: {value}"),
         )?;
     }
-    ensure(line_count >= 1 + cases.len() * 3, "missing e2e log events")?;
+    ensure(line_count > cases.len() * 3, "missing e2e log events")?;
     ensure(
         !log_text.contains("/Users/") && !log_text.contains("rm -rf"),
         "e2e log leaked private path or raw destructive command",
