@@ -57,6 +57,36 @@ Use the full Agent Mail snapshot for `--agent-mail-snapshot` consumers and the
 companion `ee.coordination_snapshot.v1` file for `--coordination-snapshot`
 consumers. The shapes are intentionally different.
 
+## Snapshot-Backed Claim Gate
+
+The snapshot bridge is for claim-gate stops where Agent Mail evidence is
+missing, not for bypassing a conflict. Run the candidate gate first:
+
+```bash
+CANDIDATE=bd-example.1
+ee swarm work-packet --workspace . --include-rch \
+  --claim-gate --candidate "$CANDIDATE" --json
+```
+
+When that `ee.swarm.work_packet.claim_gate.v1` response reports
+`agent_mail_unavailable`, `safeToClaim=false`, or
+`sourceAuthority.agentMailStatus` as `unavailable`, `skipped`, or
+`degraded_read_only`, generate the full redacted snapshot shown above and retry
+the same candidate with the snapshot:
+
+```bash
+ee swarm work-packet --workspace . --include-rch \
+  --agent-mail-snapshot "$SNAPSHOT_PATH" \
+  --claim-gate --candidate "$CANDIDATE" --json \
+  | jq '.data | {verdict, safeToClaim, agentMailStatus: .sourceAuthority.agentMailStatus, unsafeReasons, staleReasons, degradedCodes}'
+```
+
+`agentMailStatus=fresh` or `healthy` means the gate consumed current redacted
+Agent Mail evidence. It does not erase conflicts. Active reservation
+collisions, stale tracker state, Beads/BV disagreement, or remote-proof blockers
+in `unsafeReasons`, `staleReasons`, or `degradedCodes` still mean coordinate
+through Agent Mail or Beads and do not claim.
+
 ## Fallback Workflow
 
 For each active task:

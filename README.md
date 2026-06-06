@@ -770,6 +770,35 @@ refuses the file before reading it. `scripts/swarm_coordination_health.sh`
 emits health evidence only; it is not a full reservation, roster, inbox, or
 thread snapshot.
 
+When the claim gate stops on missing Agent Mail evidence, bridge it with a
+snapshot before mutating Beads:
+
+```bash
+CANDIDATE=bd-example.1
+ee swarm work-packet --workspace . --include-rch \
+  --claim-gate --candidate "$CANDIDATE" --json \
+  | jq '.data | {schema, verdict, safeToClaim, agentMailStatus: .sourceAuthority.agentMailStatus, unsafeReasons, degradedCodes}'
+
+scripts/agent_mail_snapshot.sh \
+  --project "$PWD" \
+  --agent "$AGENT_NAME" \
+  --output "$SNAPSHOT_PATH"
+
+ee swarm work-packet --workspace . --include-rch \
+  --agent-mail-snapshot "$SNAPSHOT_PATH" \
+  --claim-gate --candidate "$CANDIDATE" --json \
+  | jq '.data | {schema, verdict, safeToClaim, agentMailStatus: .sourceAuthority.agentMailStatus, unsafeReasons, degradedCodes}'
+```
+
+The first response is `ee.swarm.work_packet.claim_gate.v1`; if it reports
+`agent_mail_unavailable`, `safeToClaim=false`, or
+`sourceAuthority.agentMailStatus` as `unavailable`, `skipped`, or
+`degraded_read_only`, do not claim. The retry is still read-only: a fresh
+snapshot may change `agentMailStatus` to `fresh` and make reservation and inbox
+evidence authoritative, but it does not authorize Beads mutation by itself.
+Keep coordinating through Agent Mail when `unsafeReasons` still name an active
+reservation, tracker stale state, a BV/Beads disagreement, or an RCH blocker.
+
 Useful JSON checks:
 
 ```bash
@@ -817,6 +846,10 @@ Operator workflow for crowded repos:
    `br update <id> --status in_progress --json` only when the gate reports
    `safeToClaim=true`, `verdict=safe_to_claim`, and a structured
    `claimCommandAction` for that candidate.
+   If the only blocker is missing Agent Mail evidence, generate a redacted
+   `ee.agent_mail.snapshot.v1` file and retry the same claim-gate command with
+   `--agent-mail-snapshot` before deciding. A snapshot is read-only evidence,
+   not authorization; remaining `unsafeReasons` still require coordination.
    The RCH authority fields are intentionally separate:
    `sourceAuthority.rchRemoteOnlyRequired=true` requires
    `sourceAuthority.rchSafeToLaunchCargoVerification=true`. Harnesses fail

@@ -22,6 +22,14 @@ Example:
 ee swarm brief --json | jq '.data.fileSurfaceRisks'
 ```
 
+If live Agent Mail evidence is missing, `ee swarm brief` and
+`ee swarm work-packet` can consume a redacted `ee.agent_mail.snapshot.v1` file
+with `--agent-mail-snapshot`. The brief reports coordination posture only. A
+snapshot-backed claim decision still belongs to
+`ee swarm work-packet --claim-gate --candidate <id> --agent-mail-snapshot <path> --json`;
+the snapshot is read-only evidence and never a reservation, claim, or closeout
+authorization by itself.
+
 ## Adaptive Posture
 
 SRR5 adaptive scheduling is a daemon/swarm concern, not a pack-budget concern.

@@ -203,6 +203,32 @@ claimable lane. When the reason is unclear, run
 `ee diag environment-attestation --workspace . --include-rch --json` and inspect
 the Beads/BV source-authority entries before choosing a static/docs fallback.
 
+When the selected candidate is blocked only because Agent Mail evidence is
+missing, the gate should expose read-only fallback actions for:
+
+1. generating a redacted `ee.agent_mail.snapshot.v1` with
+   `scripts/agent_mail_snapshot.sh`;
+2. retrying the same command with `--agent-mail-snapshot`; and
+3. inspecting `sourceAuthority.agentMailStatus`, `unsafeReasons`,
+   `staleReasons`, and `degradedCodes`.
+
+The retry command shape is:
+
+```bash
+ee swarm work-packet --workspace . --include-rch \
+  --agent-mail-snapshot /private/tmp/ee-agent-mail-snapshot.json \
+  --claim-gate --candidate <bead-id> --json
+```
+
+`sourceAuthority.agentMailStatus=fresh` (or legacy `healthy`) means the gate
+consumed current redacted Agent Mail evidence. That only removes the
+missing-evidence blocker. The claim command remains absent unless
+`safeToClaim=true`, `verdict=safe_to_claim`, reservation and inbox evidence are
+authoritative, RCH admission is compatible with the work, and no candidate
+`unsafeReasons` or `staleReasons` remain. Snapshot evidence must not turn an
+active reservation conflict, stale tracker, Beads/BV disagreement, or RCH
+proof-environment blocker into a claimable lane.
+
 `nextCommandActions[]` is restricted to non-mutating inspection commands:
 `mutatesState` must be `false`. The mutating Beads claim command, when one is
 safe to show, lives only in `claimCommandAction`. When `safeToClaim` is `false`,

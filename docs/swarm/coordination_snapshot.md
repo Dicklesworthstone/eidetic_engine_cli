@@ -231,6 +231,30 @@ coordination requires the companion `ee.coordination_snapshot.v1` shape with
 `--agent-mail-snapshot`: swarm brief and workspace hygiene expect the full
 Agent Mail arrays.
 
+## Snapshot-Backed Claim Gates
+
+`ee swarm work-packet --claim-gate` can also consume the full
+`ee.agent_mail.snapshot.v1` file through `--agent-mail-snapshot`. Use this when
+the first gate reports `agent_mail_unavailable` or a non-authoritative
+`sourceAuthority.agentMailStatus`:
+
+```bash
+CANDIDATE=bd-example.1
+ee swarm work-packet --workspace . --include-rch \
+  --agent-mail-snapshot "$SNAPSHOT_PATH" \
+  --claim-gate --candidate "$CANDIDATE" --json \
+  | jq '.data | {schema, verdict, safeToClaim, agentMailStatus: .sourceAuthority.agentMailStatus, unsafeReasons, degradedCodes}'
+```
+
+The snapshot only upgrades the evidence source from unknown to observed. It is
+read-only and never authorizes Beads claim, close, reservation, or Git mutation
+on its own. Agents may claim only when the retry still has
+`schema=ee.swarm.work_packet.claim_gate.v1`, `safeToClaim=true`,
+`verdict=safe_to_claim`, authoritative reservation and inbox flags, and a
+structured `claimCommandAction`. Any remaining active reservation, stale
+tracker, Beads/BV disagreement, or RCH blocker in `unsafeReasons`,
+`staleReasons`, or `degradedCodes` requires coordination instead of claiming.
+
 ## Examples
 
 Healthy full snapshot:

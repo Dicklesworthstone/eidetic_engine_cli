@@ -76,6 +76,38 @@ announce the exception in Agent Mail, and leave Beads mutation for the holder of
 unblock documentation or triage, but it is not source/test proof and must not be
 reported as a successful claim.
 
+## Agent Mail Snapshot Bridge
+
+Use this bridge only when the claim gate fails closed because Agent Mail
+evidence is missing:
+
+```bash
+CANDIDATE=bd-example.1
+ee swarm work-packet --workspace . --include-rch \
+  --claim-gate --candidate "$CANDIDATE" --json \
+  | jq '.data | {schema, verdict, safeToClaim, agentMailStatus: .sourceAuthority.agentMailStatus, unsafeReasons, degradedCodes}'
+
+SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
+scripts/agent_mail_snapshot.sh \
+  --project "$PWD" \
+  --agent "$AGENT_NAME" \
+  --output "$SNAPSHOT_PATH"
+
+ee swarm work-packet --workspace . --include-rch \
+  --agent-mail-snapshot "$SNAPSHOT_PATH" \
+  --claim-gate --candidate "$CANDIDATE" --json \
+  | jq '.data | {schema, verdict, safeToClaim, agentMailStatus: .sourceAuthority.agentMailStatus, unsafeReasons, staleReasons, degradedCodes}'
+```
+
+Treat `agent_mail_unavailable` and `agentMailStatus` values of `unavailable`,
+`skipped`, or `degraded_read_only` as unknown coordination evidence, not an
+empty inbox or no reservations. A retry that reaches `agentMailStatus=fresh` or
+`healthy` only means the gate consumed the redacted snapshot. Claim only when
+the retry still reports `safeToClaim=true`, `verdict=safe_to_claim`, and a
+runnable `claimCommandAction`. If `unsafeReasons` or `staleReasons` still name
+reservation collisions, stale tracker state, Beads/BV disagreement, or RCH
+blockers, coordinate instead of claiming.
+
 ## Copy-Pastable Runs
 
 Healthy checkout:

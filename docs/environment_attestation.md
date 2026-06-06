@@ -208,6 +208,10 @@ Use this order when a crowded checkout has contradictory readiness evidence:
 3. If `safeToClaim=false`, inspect this attestation report before acting on a
    fallback. `summary.environmentVerdict` tells you why the gate is blocked;
    `sourceAuthority[]` tells you which substrate produced that blocker.
+   When the blocker is `agent_mail_unavailable`, generate a redacted
+   `ee.agent_mail.snapshot.v1` and retry the same claim-gate candidate with
+   `--agent-mail-snapshot`; do not treat missing Agent Mail as empty
+   reservations.
 4. If BV recommends a Bead that Beads reports as blocked, assigned, or missing
    from ready work, Beads plus the claim gate wins. Treat the BV command as
    stale advisory text and do not paste its claim command.
@@ -289,6 +293,23 @@ before using binary output to claim or close work.
 
 Action: use live Agent Mail or a redacted snapshot. Do not infer that no one
 holds reservations from a failed or contradictory probe.
+
+Snapshot-backed retry:
+
+```bash
+CANDIDATE=bd-example.1
+SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
+scripts/agent_mail_snapshot.sh --project "$PWD" --agent "$AGENT_NAME" \
+  --output "$SNAPSHOT_PATH"
+ee swarm work-packet --workspace . --include-rch \
+  --agent-mail-snapshot "$SNAPSHOT_PATH" \
+  --claim-gate --candidate "$CANDIDATE" --json
+```
+
+The retry is still read-only evidence collection. It may change the claim-gate
+`sourceAuthority.agentMailStatus` to `fresh` or `healthy`; it must not override
+remaining reservation conflicts, stale tracker evidence, Beads/BV disagreement,
+RCH blockers, or a false `safeToClaim`.
 
 ### Beads and BV disagreement
 

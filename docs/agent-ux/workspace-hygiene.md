@@ -247,6 +247,12 @@ file is read side-effect free and may use the same compact shape consumed by
 `last_active_at`. Snapshot message bodies, subjects, attachments, and mailbox
 contents are ignored by workspace hygiene.
 
+For claim-gate repair loops, pass the same full
+`ee.agent_mail.snapshot.v1` file to both workspace hygiene and
+`ee swarm work-packet --claim-gate --agent-mail-snapshot`. Hygiene can show
+whether dirty paths overlap active reservations before the gate retry, but it
+does not claim Beads, reserve files, or make a staged path safe by itself.
+
 The overlay distinguishes three Agent Mail states:
 
 | State | Meaning |

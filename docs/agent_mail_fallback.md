@@ -110,6 +110,45 @@ The companion coordination file is the pack-compatible
 evidence. Use it only with `--coordination-snapshot`; swarm brief and workspace
 hygiene still consume the full Agent Mail snapshot.
 
+## Claim-Gate Bridge
+
+Use the snapshot bridge when `ee swarm work-packet --claim-gate` cannot observe
+Agent Mail and reports `agent_mail_unavailable`. First run the gate for the
+exact candidate without changing Beads:
+
+```bash
+CANDIDATE=bd-example.1
+ee swarm work-packet --workspace . --include-rch \
+  --claim-gate --candidate "$CANDIDATE" --json \
+  | jq '.data | {schema, verdict, safeToClaim, agentMailStatus: .sourceAuthority.agentMailStatus, unsafeReasons, degradedCodes}'
+```
+
+If the response schema is `ee.swarm.work_packet.claim_gate.v1` and
+`safeToClaim` is `false` because `degradedCodes` contains
+`agent_mail_unavailable` or `sourceAuthority.agentMailStatus` is
+`unavailable`, `skipped`, or `degraded_read_only`, generate a redacted
+`ee.agent_mail.snapshot.v1` snapshot and retry the same gate:
+
+```bash
+SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
+scripts/agent_mail_snapshot.sh \
+  --project "$PWD" \
+  --agent "$AGENT_NAME" \
+  --output "$SNAPSHOT_PATH"
+
+ee swarm work-packet --workspace . --include-rch \
+  --agent-mail-snapshot "$SNAPSHOT_PATH" \
+  --claim-gate --candidate "$CANDIDATE" --json \
+  | jq '.data | {schema, verdict, safeToClaim, agentMailStatus: .sourceAuthority.agentMailStatus, unsafeReasons, degradedCodes}'
+```
+
+Interpret `sourceAuthority.agentMailStatus` of `fresh` or `healthy` plus
+authoritative reservation/inbox flags as current snapshot evidence. It is not
+permission to claim by itself: `safeToClaim=true`, `verdict=safe_to_claim`, and
+a non-null `claimCommandAction` must still be present. If `unsafeReasons` still
+name active reservations, stale tracker state, BV disagreement, or RCH proof
+blockers, coordinate through Agent Mail or Beads comments instead of claiming.
+
 Useful full-snapshot environment overrides:
 
 ```bash
