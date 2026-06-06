@@ -2085,8 +2085,8 @@ mod tests {
             shards_dir_override: Some(shard_root),
             peer_workspace_ids: vec!["wsp_missing".to_owned(), "wsp_present".to_owned()],
         });
-        let connection =
-            DbConnection::open(DatabaseConfig::memory()).map_err(|error| error.to_string())?;
+        let connection = DbConnection::open(DatabaseConfig::file(temp.path().join("local.db")))
+            .map_err(|error| error.to_string())?;
         let execution = execute_peer_shard_read_attach_plan(&connection, &plan);
 
         assert_eq!(execution.schema, SHARD_FANOUT_ATTACH_EXECUTION_SCHEMA_V1);

@@ -589,7 +589,7 @@ fn workspace_row_counts(
             continue;
         };
         let sql = format!(
-            "SELECT COUNT(*) FROM {} AS row WHERE {}",
+            "SELECT COALESCE(COUNT(*), 0) FROM {} AS row WHERE {}",
             table_ref(schema, &table),
             predicate
         );
@@ -601,7 +601,13 @@ fn workspace_row_counts(
         })?;
         let count = rows
             .first()
-            .and_then(|row| row.get(0).and_then(|value| value.as_i64()))
+            .and_then(|row| {
+                row.get(0).and_then(|value| {
+                    value
+                        .as_i64()
+                        .or_else(|| value.as_str().and_then(|raw| raw.parse::<i64>().ok()))
+                })
+            })
             .ok_or_else(|| {
                 storage_error(
                     format!("Failed to read {table} row count for workspace {workspace_id}"),
