@@ -2669,12 +2669,13 @@ fn gha_verification_status(status: Option<&str>, conclusion: Option<&str>) -> Ve
         "failure" | "startup_failure" => VerificationStatus::Failed,
         "cancelled" | "canceled" | "timed_out" => VerificationStatus::Interrupted,
         "action_required" | "neutral" | "skipped" | "stale" => VerificationStatus::Blocked,
+        // Pending GitHub checks are non-final evidence, not terminal interruption.
         "" if matches!(
             normalized_status.as_str(),
             "queued" | "in_progress" | "waiting"
         ) =>
         {
-            VerificationStatus::Interrupted
+            VerificationStatus::Unknown
         }
         "" => VerificationStatus::Unknown,
         _ => VerificationStatus::Unknown,
@@ -3837,6 +3838,66 @@ mod tests {
         assert_eq!(record.exit_code, Some(1));
         assert!(!record.is_authoritative_pass());
         assert_eq!(record.producer.run.run_id.as_deref(), Some("26077398253"));
+        Ok(())
+    }
+
+    #[test]
+    fn github_actions_pending_maps_to_unknown_non_authoritative_evidence() -> TestResult {
+        let proof = serde_json::json!({
+            "schema": GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1,
+            "name": "verify",
+            "workflow_name": "CI",
+            "run_id": 27050712596_u64,
+            "check_run_id": 125_u64,
+            "repository": "Dicklesworthstone/eidetic_engine_cli",
+            "head_sha": "eb2e05e25a66b9b002caf62212f205c6d05a6b67",
+            "status": "queued",
+            "created_at": "2026-06-06T02:59:09Z",
+            "html_url": "https://github.example/checks/125",
+            "output": {
+                "title": "verify queued",
+                "text": "raw pending log text must not be copied"
+            }
+        });
+
+        let record = verification_evidence_record_from_github_actions_check_run(&proof)?;
+
+        assert_eq!(record.status, VerificationStatus::Unknown);
+        assert_eq!(record.exit_code, None);
+        assert!(!record.is_authoritative_pass());
+        assert_eq!(record.finished_at, None);
+        assert_eq!(
+            record.environment.workspace_fingerprint.as_deref(),
+            Some("github_head_sha:eb2e05e25a66b9b002caf62212f205c6d05a6b67")
+        );
+
+        let encoded = serde_json::to_string(&record)?;
+        assert!(!encoded.contains("raw pending log"));
+        assert!(encoded.contains("verify queued"));
+        Ok(())
+    }
+
+    #[test]
+    fn github_actions_cancelled_maps_to_interrupted_evidence() -> TestResult {
+        let proof = serde_json::json!({
+            "name": "verify",
+            "workflow_run": {
+                "id": 27050680484_u64,
+                "name": "CI",
+                "head_sha": "53773bb107a83334560dfcf1c126d9c8a5518033"
+            },
+            "status": "completed",
+            "conclusion": "cancelled",
+            "completed_at": "2026-06-06T02:59:11Z",
+            "html_url": "https://github.example/checks/126"
+        });
+
+        let record = verification_evidence_record_from_github_actions_check_run(&proof)?;
+
+        assert_eq!(record.status, VerificationStatus::Interrupted);
+        assert_eq!(record.exit_code, None);
+        assert!(!record.is_authoritative_pass());
+        assert_eq!(record.producer.run.run_id.as_deref(), Some("27050680484"));
         Ok(())
     }
 
