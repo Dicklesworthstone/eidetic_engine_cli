@@ -3927,7 +3927,7 @@ mod tests {
                 prev_event_hash: None,
                 event_hash: hash_for_test('c'),
                 event_kind: "create".to_string(),
-                logical_memory_id: "mesh_mem_replay_counts".to_string(),
+                logical_memory_id: "mem_mesh_replay_counts".to_string(),
                 content_hash: hash_for_test('d'),
                 material_lane: "metadata".to_string(),
                 redaction_class: "share".to_string(),

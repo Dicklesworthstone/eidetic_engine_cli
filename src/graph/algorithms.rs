@@ -2,7 +2,8 @@ use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, mpsc};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use asupersync::Cx;
@@ -41,7 +42,7 @@ pub const DEFAULT_FOREGROUND_BUDGET: Duration = Duration::from_millis(250);
 pub const DEFAULT_BACKGROUND_BUDGET: Duration = Duration::from_millis(2_000);
 pub const DEFAULT_CGSE_MODE: CompatibilityMode = CompatibilityMode::Strict;
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
-// `spawn_blocking` cancellation is soft in asupersync: after timeout the
+// Blocking-worker cancellation is soft: after timeout the
 // closure may continue running. Keep a bounded process-local slot until the
 // blocking closure actually exits so repeated graph timeouts cannot spawn an
 // unbounded orphan tail.
@@ -271,46 +272,45 @@ where
         return Err(error);
     };
 
-    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
-        .thread_name_prefix("ee-graph-budget")
-        .build()
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("ee-graph-budget".to_owned())
+        .spawn(move || {
+            let _worker_slot = worker_slot;
+            let _ = sender.send(std::panic::catch_unwind(AssertUnwindSafe(f)));
+        })
         .map_err(|error| GraphError::GraphEngine {
-            operation: "start graph budget runtime",
+            operation: "start graph budget worker",
             source: error.to_string(),
         })?;
 
-    let outcome = runtime.block_on(async {
-        let mut worker = std::pin::pin!(asupersync::runtime::spawn_blocking(move || {
-            let _worker_slot = worker_slot;
-            std::panic::catch_unwind(AssertUnwindSafe(f))
-        }));
-        loop {
-            check_cancelled(cx, name)?;
-            let Some(remaining) = budget.checked_sub(started.elapsed()) else {
-                return Err(GraphError::AlgorithmTimeout {
-                    algorithm: name.to_owned(),
-                    timeout_ms: duration_millis_saturating(budget),
-                });
-            };
-            if remaining.is_zero() {
-                return Err(GraphError::AlgorithmTimeout {
-                    algorithm: name.to_owned(),
-                    timeout_ms: duration_millis_saturating(budget),
-                });
-            }
+    let outcome = loop {
+        check_cancelled(cx, name)?;
+        let Some(remaining) = budget.checked_sub(started.elapsed()) else {
+            break Err(GraphError::AlgorithmTimeout {
+                algorithm: name.to_owned(),
+                timeout_ms: duration_millis_saturating(budget),
+            });
+        };
+        if remaining.is_zero() {
+            break Err(GraphError::AlgorithmTimeout {
+                algorithm: name.to_owned(),
+                timeout_ms: duration_millis_saturating(budget),
+            });
+        }
 
-            let poll_budget = remaining.min(CANCELLATION_POLL_INTERVAL);
-            if let Ok(result) = asupersync::time::timeout(
-                asupersync::time::wall_now(),
-                poll_budget,
-                worker.as_mut(),
-            )
-            .await
-            {
-                return Ok(result);
+        let poll_budget = remaining.min(CANCELLATION_POLL_INTERVAL);
+        match receiver.recv_timeout(poll_budget) {
+            Ok(result) => break Ok(result),
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break Err(GraphError::GraphEngine {
+                    operation: name,
+                    source: "graph algorithm worker exited without result".to_owned(),
+                });
             }
         }
-    });
+    };
 
     let result = match outcome {
         Ok(Ok(result)) => Ok(result),

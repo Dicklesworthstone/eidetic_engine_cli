@@ -2180,10 +2180,10 @@ mod tests {
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
-        let workspace_id = "wsp_loadbearinginsights000000";
+        let workspace_id = crate::core::curate::stable_workspace_id(workspace);
         connection
             .insert_workspace(
-                workspace_id,
+                &workspace_id,
                 &CreateWorkspaceInput {
                     path: workspace.to_string_lossy().into_owned(),
                     name: Some("load-bearing insights".to_owned()),
@@ -2197,7 +2197,7 @@ mod tests {
                 "Load-bearing source memory for release rules.",
             ),
             (
-                "mem_loadbearingsolo0000000001",
+                "mem_loadbearingsolo00000000001",
                 "Solo source memory for one release rule.",
             ),
         ] {
@@ -2205,7 +2205,7 @@ mod tests {
                 .insert_memory(
                     id,
                     &CreateMemoryInput {
-                        workspace_id: workspace_id.to_owned(),
+                        workspace_id: workspace_id.clone(),
                         level: "semantic".to_owned(),
                         kind: "fact".to_owned(),
                         content: content.to_owned(),
@@ -2226,14 +2226,14 @@ mod tests {
 
         for (rule_id, sources) in [
             (
-                "rule_loadbearingalpha00000001",
+                "rule_loadbearingalpha0000000000",
                 vec!["mem_loadbearinganchor000000001".to_owned()],
             ),
             (
-                "rule_loadbearingbeta000000001",
+                "rule_loadbearingbeta00000000000",
                 vec![
                     "mem_loadbearinganchor000000001".to_owned(),
-                    "mem_loadbearingsolo0000000001".to_owned(),
+                    "mem_loadbearingsolo00000000001".to_owned(),
                 ],
             ),
         ] {
@@ -2241,7 +2241,7 @@ mod tests {
                 .insert_procedural_rule(
                     rule_id,
                     &CreateProceduralRuleInput {
-                        workspace_id: workspace_id.to_owned(),
+                        workspace_id: workspace_id.clone(),
                         content: format!("Rule {rule_id} cites source memories."),
                         confidence: 0.9,
                         utility: 0.8,
@@ -2267,10 +2267,10 @@ mod tests {
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
-        let workspace_id = "wsp_insightsgraph000000000000";
+        let workspace_id = crate::core::curate::stable_workspace_id(workspace);
         connection
             .insert_workspace(
-                workspace_id,
+                &workspace_id,
                 &CreateWorkspaceInput {
                     path: workspace.to_string_lossy().into_owned(),
                     name: Some("real insights graph".to_owned()),
@@ -2279,9 +2279,9 @@ mod tests {
             .map_err(|error| error.to_string())?;
         connection
             .insert_graph_snapshot(
-                "snap_insightsstale000000000001",
+                "gsnap_insightsstale000000000000",
                 &CreateGraphSnapshotInput {
-                    workspace_id: workspace_id.to_owned(),
+                    workspace_id: workspace_id.clone(),
                     snapshot_version: 7,
                     schema_version: "ee.graph.snapshot.v1".to_owned(),
                     graph_type: GraphSnapshotType::MemoryLinks,
@@ -2296,44 +2296,44 @@ mod tests {
             .map_err(|error| error.to_string())?;
         connection
             .update_graph_snapshot_status(
-                "snap_insightsstale000000000001",
+                "gsnap_insightsstale000000000000",
                 GraphSnapshotStatus::Stale,
             )
             .map_err(|error| error.to_string())?;
 
         for (id, trust_class, content) in [
             (
-                "mem_insightsbridgea0000000001",
+                "mem_insightsbridgea00000000001",
                 "human_explicit",
                 "Bridge endpoint A.",
             ),
             (
-                "mem_insightsbridgeb0000000001",
+                "mem_insightsbridgeb00000000001",
                 "agent_validated",
                 "Bridge articulation B.",
             ),
             (
-                "mem_insightsbridgec0000000001",
+                "mem_insightsbridgec00000000001",
                 "agent_validated",
                 "Bridge articulation C.",
             ),
             (
-                "mem_insightsbridged0000000001",
+                "mem_insightsbridged00000000001",
                 "human_explicit",
                 "Bridge endpoint D.",
             ),
             (
-                "mem_insightscontraa0000000001",
+                "mem_insightscontraa00000000001",
                 "human_explicit",
                 "Contradiction exemplar A.",
             ),
             (
-                "mem_insightscontrab0000000001",
+                "mem_insightscontrab00000000001",
                 "agent_validated",
                 "Contradiction exemplar B.",
             ),
             (
-                "mem_insightscontrac0000000001",
+                "mem_insightscontrac00000000001",
                 "agent_validated",
                 "Contradiction exemplar C.",
             ),
@@ -2342,7 +2342,7 @@ mod tests {
                 .insert_memory(
                     id,
                     &CreateMemoryInput {
-                        workspace_id: workspace_id.to_owned(),
+                        workspace_id: workspace_id.clone(),
                         level: "semantic".to_owned(),
                         kind: "fact".to_owned(),
                         content: content.to_owned(),
@@ -2363,39 +2363,39 @@ mod tests {
 
         for (id, source, target, relation) in [
             (
-                "link_insightsbridge0000000001",
-                "mem_insightsbridgea0000000001",
-                "mem_insightsbridgeb0000000001",
+                "link_insightsbridge000000000001",
+                "mem_insightsbridgea00000000001",
+                "mem_insightsbridgeb00000000001",
                 MemoryLinkRelation::Supports,
             ),
             (
-                "link_insightsbridge0000000002",
-                "mem_insightsbridgeb0000000001",
-                "mem_insightsbridgec0000000001",
+                "link_insightsbridge000000000002",
+                "mem_insightsbridgeb00000000001",
+                "mem_insightsbridgec00000000001",
                 MemoryLinkRelation::Supports,
             ),
             (
-                "link_insightsbridge0000000003",
-                "mem_insightsbridgec0000000001",
-                "mem_insightsbridged0000000001",
+                "link_insightsbridge000000000003",
+                "mem_insightsbridgec00000000001",
+                "mem_insightsbridged00000000001",
                 MemoryLinkRelation::Supports,
             ),
             (
-                "link_insightscontra0000000001",
-                "mem_insightscontraa0000000001",
-                "mem_insightscontrab0000000001",
+                "link_insightscontra000000000001",
+                "mem_insightscontraa00000000001",
+                "mem_insightscontrab00000000001",
                 MemoryLinkRelation::Contradicts,
             ),
             (
-                "link_insightscontra0000000002",
-                "mem_insightscontrab0000000001",
-                "mem_insightscontrac0000000001",
+                "link_insightscontra000000000002",
+                "mem_insightscontrab00000000001",
+                "mem_insightscontrac00000000001",
                 MemoryLinkRelation::Supersedes,
             ),
             (
-                "link_insightscontra0000000003",
-                "mem_insightscontraa0000000001",
-                "mem_insightscontrac0000000001",
+                "link_insightscontra000000000003",
+                "mem_insightscontraa00000000001",
+                "mem_insightscontrac00000000001",
                 MemoryLinkRelation::Contradicts,
             ),
         ] {

@@ -2744,9 +2744,16 @@ mod tests {
         );
     }
 
+    fn private_tempdir() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("make tempdir private");
+        temp
+    }
+
     #[test]
     fn start_server_then_echo_is_disabled_by_default() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = private_tempdir();
         let socket_path = temp.path().join("ee-daemon-test.sock");
         let mut handle = start_server(&socket_path).expect("server must start");
 
@@ -2772,7 +2779,7 @@ mod tests {
 
     #[test]
     fn start_server_refuses_non_socket_existing_file() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = private_tempdir();
         let path = temp.path().join("not-a-socket");
         fs::write(&path, b"i am a regular file").expect("write");
         let error = start_server(&path).expect_err("must refuse non-socket");
@@ -2830,7 +2837,7 @@ mod tests {
 
     #[test]
     fn start_server_refuses_live_existing_socket() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = private_tempdir();
         let socket_path = temp.path().join("ee-daemon-live.sock");
         let mut first = start_server(&socket_path).expect("first server must start");
 
@@ -2865,7 +2872,7 @@ mod tests {
     /// proposed-fix bullet 4.
     #[test]
     fn start_server_socket_file_is_owner_rw_only() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = private_tempdir();
         let socket_path = temp.path().join("ee-daemon-mode.sock");
         let mut handle = start_server(&socket_path).expect("server must start");
         // The chmod runs synchronously inside start_server before it
@@ -2896,7 +2903,7 @@ mod tests {
     /// caller.
     #[test]
     fn handle_connection_admits_same_uid_peer() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = private_tempdir();
         let socket_path = temp.path().join("ee-daemon-peer.sock");
         let mut handle = start_server(&socket_path).expect("server must start");
 
@@ -2919,7 +2926,7 @@ mod tests {
 
     #[test]
     fn start_server_for_workspace_rejects_same_uid_context_for_wrong_workspace() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = private_tempdir();
         let socket_path = temp.path().join("ee-daemon-workspace-auth.sock");
         let mut handle = start_server_for_workspace(&socket_path, TEST_WORKSPACE_ID)
             .expect("workspace-bound server must start");
@@ -2958,7 +2965,7 @@ mod tests {
     fn start_server_replaces_stale_socket_atomically() {
         use std::os::unix::fs::FileTypeExt;
 
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = private_tempdir();
         let socket_path = temp.path().join("ee-daemon-stale.sock");
 
         // Simulate a crashed daemon: bind then drop the listener WITHOUT
@@ -3011,7 +3018,7 @@ mod tests {
         use std::os::unix::fs::FileTypeExt;
         use std::sync::Barrier;
 
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = private_tempdir();
         let socket_path = temp.path().join("ee-daemon-race.sock");
 
         let barrier = Arc::new(Barrier::new(2));
@@ -3208,7 +3215,7 @@ mod tests {
     /// socket vanished out from under the first pass.
     #[test]
     fn shutdown_is_idempotent_across_repeated_calls() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = private_tempdir();
         let socket_path = temp.path().join("ee-daemon-idempotent.sock");
         let mut handle = start_server(&socket_path).expect("server must start");
 

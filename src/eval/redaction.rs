@@ -721,7 +721,10 @@ mod tests {
     #[test]
     fn context_extraction_adds_ellipsis() -> TestResult {
         let long_output = "a".repeat(100) + "SECRET" + &"b".repeat(100);
-        let context = extract_context(&long_output, "SECRET", 0);
+        let pos = long_output
+            .find("SECRET")
+            .ok_or_else(|| "fixture must contain SECRET".to_string())?;
+        let context = extract_context(&long_output, "SECRET", pos);
 
         ensure(context.starts_with("..."), true, "starts with ellipsis")?;
         ensure(context.ends_with("..."), true, "ends with ellipsis")?;

@@ -804,6 +804,8 @@ fn env_option_takes_value(word: &str) -> bool {
         "-u" | "--unset"
             | "-C"
             | "--chdir"
+            | "-S"
+            | "--split-string"
             | "--block-signal"
             | "--default-signal"
             | "--ignore-signal"
@@ -814,6 +816,7 @@ fn env_option_is_value_form(word: &str) -> bool {
     [
         "--unset=",
         "--chdir=",
+        "--split-string=",
         "--block-signal=",
         "--default-signal=",
         "--ignore-signal=",

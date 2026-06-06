@@ -108,11 +108,65 @@ jobs:
           RUSTFLAGS: "-C debuginfo=0 -C linker-features=-lld"
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Tests
+      - name: MCP parity tests
         env:
-          CARGO_BUILD_JOBS: "1"
           RUSTFLAGS: "-C debuginfo=0 -C linker-features=-lld"
-          RUST_TEST_THREADS: "1"
+        run: cargo test --workspace --features mcp --test mcp_parity
+
+  verify-tests:
+    if: github.event_name != 'schedule'
+    name: verify-tests (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - lib-cache-cass-config
+          - lib-cli
+          - lib-core
+          - lib-curate-daemon
+          - lib-db
+          - lib-eval-graph
+          - lib-rest
+          - targets
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "1"
+      RUSTFLAGS: "-C debuginfo=0 -C linker-features=-lld"
+      RUST_TEST_THREADS: "1"
+      TEST_SHARD: ${{ matrix.shard }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Checkout Franken stack path dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          project_root="$GITHUB_WORKSPACE/.ci/franken-stack/projects"
+          mkdir -p "$project_root"
+          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$project_root/asupersync"
+          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git "$project_root/franken_agent_detection"
+          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git "$project_root/franken_networkx"
+          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git "$project_root/frankensearch"
+          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git "$project_root/frankensqlite"
+          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git "$project_root/sqlmodel_rust"
+          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$project_root/toon_rust"
+          CARGO_PATH_ROOT=".ci/franken-stack/projects" perl -0pi -e '
+            s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+            s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+          ' Cargo.toml
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Tests
+        shell: bash
         run: |
           set -euo pipefail
           heartbeat_pid=""
@@ -120,33 +174,83 @@ jobs:
             if [ -n "$heartbeat_pid" ]; then
               kill "$heartbeat_pid" 2>/dev/null || true
               wait "$heartbeat_pid" 2>/dev/null || true
+              heartbeat_pid=""
             fi
           }
           trap cleanup EXIT
-          (
-            while true; do
-              sleep 300
-              echo "::notice::cargo test still running at $(date -u +%FT%TZ)"
-            done
-          ) &
-          heartbeat_pid=$!
-          echo "::notice::cargo test started at $(date -u +%FT%TZ) with CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS RUSTFLAGS=$RUSTFLAGS RUST_TEST_THREADS=$RUST_TEST_THREADS"
-          set +e
-          timeout --foreground --kill-after=30s 90m \
-            cargo test --workspace --lib --bins --tests --examples --jobs 1 -- --test-threads=1 --nocapture
-          status=$?
-          set -e
-          cleanup
-          trap - EXIT
-          if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
-            echo "::error::cargo test exceeded the 90m CI test budget; inspect the last emitted test name/output above for the hanging test." >&2
-          fi
-          exit "$status"
 
-      - name: MCP parity tests
-        env:
-          RUSTFLAGS: "-C debuginfo=0 -C linker-features=-lld"
-        run: cargo test --workspace --features mcp --test mcp_parity
+          run_test() {
+            local label="$1"
+            shift
+            cleanup
+            (
+              while true; do
+                sleep 300
+                echo "::notice::$label still running at $(date -u +%FT%TZ)"
+              done
+            ) &
+            heartbeat_pid=$!
+            echo "::notice::$label started at $(date -u +%FT%TZ) with CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS RUSTFLAGS=$RUSTFLAGS RUST_TEST_THREADS=$RUST_TEST_THREADS"
+            set +e
+            timeout --foreground --kill-after=30s 90m "$@"
+            local status=$?
+            set -e
+            cleanup
+            if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+              echo "::error::$label exceeded the 90m CI test budget; inspect the last emitted test name/output above for the hanging test." >&2
+            fi
+            return "$status"
+          }
+
+          case "$TEST_SHARD" in
+            lib-cache-cass-config)
+              run_test "cargo test --lib cache::" cargo test --workspace --lib --jobs 1 cache:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib cass::" cargo test --workspace --lib --jobs 1 cass:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib config::" cargo test --workspace --lib --jobs 1 config:: -- --test-threads=1 --nocapture
+              ;;
+            lib-cli)
+              run_test "cargo test --lib cli::" cargo test --workspace --lib --jobs 1 cli:: -- --test-threads=1 --nocapture
+              ;;
+            lib-core)
+              run_test "cargo test --lib core::" cargo test --workspace --lib --jobs 1 core:: -- --test-threads=1 --nocapture
+              ;;
+            lib-curate-daemon)
+              run_test "cargo test --lib curate::" cargo test --workspace --lib --jobs 1 curate:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib daemon::" cargo test --workspace --lib --jobs 1 daemon:: -- --test-threads=1 --nocapture
+              ;;
+            lib-db)
+              run_test "cargo test --lib db::" cargo test --workspace --lib --jobs 1 db:: -- --test-threads=1 --nocapture
+              ;;
+            lib-eval-graph)
+              run_test "cargo test --lib eval::" cargo test --workspace --lib --jobs 1 eval:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib graph::" cargo test --workspace --lib --jobs 1 graph:: -- --test-threads=1 --nocapture
+              ;;
+            lib-rest)
+              run_test "cargo test --lib fuzz::" cargo test --workspace --lib --jobs 1 fuzz:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib hooks::" cargo test --workspace --lib --jobs 1 hooks:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib mesh::" cargo test --workspace --lib --jobs 1 mesh:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib models::" cargo test --workspace --lib --jobs 1 models:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib obs::" cargo test --workspace --lib --jobs 1 obs:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib output::" cargo test --workspace --lib --jobs 1 output:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib pack::" cargo test --workspace --lib --jobs 1 pack:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib policy::" cargo test --workspace --lib --jobs 1 policy:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib runtime::" cargo test --workspace --lib --jobs 1 runtime:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib science::" cargo test --workspace --lib --jobs 1 science:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib search::" cargo test --workspace --lib --jobs 1 search:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib serve::" cargo test --workspace --lib --jobs 1 serve:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib shadow::" cargo test --workspace --lib --jobs 1 shadow:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib steward::" cargo test --workspace --lib --jobs 1 steward:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib testing::" cargo test --workspace --lib --jobs 1 testing:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib util::" cargo test --workspace --lib --jobs 1 util:: -- --test-threads=1 --nocapture
+              ;;
+            targets)
+              run_test "cargo test targets" cargo test --workspace --bins --tests --examples --jobs 1 -- --test-threads=1 --nocapture
+              ;;
+            *)
+              echo "::error::unknown TEST_SHARD=$TEST_SHARD" >&2
+              exit 1
+              ;;
+          esac
 
   cross-platform-determinism:
     if: github.event_name != 'schedule'

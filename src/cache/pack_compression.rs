@@ -665,30 +665,28 @@ mod tests {
 
     #[test]
     fn dictionary_freshness_detects_missing_fresh_and_stale_corpus() -> TestResult {
-        let samples = vec![
-            sample(
-                PackCompressionSampleSourceKind::PackRecord,
-                "pack-a",
-                1,
-                "{\"schema\":\"ee.pack.v2\",\"items\":[\"mem_a\"]}",
-            ),
-            sample(
-                PackCompressionSampleSourceKind::PackRecord,
-                "pack-b",
-                2,
-                "{\"schema\":\"ee.pack.v2\",\"items\":[\"mem_b\"]}",
-            ),
-        ];
+        let samples = (0..96)
+            .map(|index| {
+                sample(
+                    PackCompressionSampleSourceKind::PackRecord,
+                    &format!("pack-{index:03}"),
+                    index,
+                    &format!(
+                        "{{\"schema\":\"ee.pack.v2\",\"pack\":\"freshness\",\"index\":{index},\"items\":[\"mem_alpha\",\"mem_beta\"],\"provenance\":\"deterministic-pack-corpus\"}}"
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
         let mut changed_samples = samples.clone();
         changed_samples.push(sample(
             PackCompressionSampleSourceKind::PackRecord,
             "pack-c",
-            3,
-            "{\"schema\":\"ee.pack.v2\",\"items\":[\"mem_c\"]}",
+            97,
+            "{\"schema\":\"ee.pack.v2\",\"pack\":\"freshness\",\"items\":[\"mem_c\"],\"provenance\":\"changed-pack-corpus\"}",
         ));
         let options = PackCompressionTrainingOptions {
-            max_dictionary_bytes: 4096,
-            max_sample_count: 16,
+            max_dictionary_bytes: 8192,
+            max_sample_count: 128,
             max_sample_bytes: 32 * 1024,
             ..PackCompressionTrainingOptions::default()
         };

@@ -17390,7 +17390,7 @@ impl DbConnection {
         self.insert_audit(
             &audit_id,
             &CreateAuditInput {
-                workspace_id: advisory_lock_workspace_id(&lock.id),
+                workspace_id: self.advisory_lock_existing_workspace_id(&lock.id)?,
                 actor: Some(actor.to_owned()),
                 action: action.to_owned(),
                 target_type: Some("advisory_lock".to_owned()),
@@ -17399,6 +17399,18 @@ impl DbConnection {
             },
         )?;
         Ok(audit_id)
+    }
+
+    fn advisory_lock_existing_workspace_id(
+        &self,
+        lock_id: &AdvisoryLockId,
+    ) -> Result<Option<String>> {
+        let Some(workspace_id) = advisory_lock_workspace_id(lock_id) else {
+            return Ok(None);
+        };
+        Ok(self
+            .get_workspace(&workspace_id)?
+            .map(|workspace| workspace.id))
     }
 
     /// Release an advisory lock held by the specified holder.
@@ -18980,7 +18992,11 @@ impl DbConnection {
         ];
         if let Some(bead) = bead_id {
             params.push(Value::Text(bead.to_string()));
-            sql.push_str(&format!(" AND bead_id = ?{}", params.len()));
+            sql.push_str(&format!(
+                " AND (bead_id = ?{} OR remediation_bead = ?{})",
+                params.len(),
+                params.len()
+            ));
         }
         sql.push_str(
             " ORDER BY retry_after IS NULL, retry_after ASC, command_kind ASC, \
@@ -20537,6 +20553,7 @@ mod tests {
     #[test]
     fn recorder_event_sequence_above_sqlite_integer_range_is_rejected() -> TestResult {
         let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
         connection.insert_recorder_run(
             "run_sequence_overflow",
             &CreateRecorderRunInput {
@@ -20603,6 +20620,7 @@ mod tests {
     #[test]
     fn recorder_count_and_byte_fields_above_sqlite_integer_range_are_rejected() -> TestResult {
         let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
         let oversized = u64::try_from(i64::MAX).expect("i64 max fits u64") + 1;
         let base_run = CreateRecorderRunInput {
             workspace_id: None,
@@ -21724,8 +21742,8 @@ mod tests {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
         let workspace_id = "wsp_1a23456789abcdef0123456789";
-        let active_snapshot_id = "gsnap_1a23456789abcdef01234567";
-        let archived_snapshot_id = "gsnap_1b23456789abcdef01234567";
+        let active_snapshot_id = "gsnap_1a23456789abcdef012345678";
+        let archived_snapshot_id = "gsnap_1b23456789abcdef012345678";
 
         connection.insert_workspace(
             workspace_id,
@@ -21793,7 +21811,7 @@ mod tests {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
         let workspace_id = "wsp_1c23456789abcdef0123456789";
-        let snapshot_id = "gsnap_1c23456789abcdef01234567";
+        let snapshot_id = "gsnap_1c23456789abcdef012345678";
 
         connection.insert_workspace(
             workspace_id,
@@ -24069,12 +24087,12 @@ mod tests {
         connection.migrate()?;
         setup_workspace(&connection)?;
         connection.insert_session(
-            "sess_attachderived00000000000001",
+            "sess_attachderived0000000000000",
             &session_input("cass-session-attach-derived"),
         )?;
         for memory_id in [
-            "mem_attachderived00000000000001",
-            "mem_attachderived00000000000002",
+            "mem_attachderived0000000000000",
+            "mem_attachderived0000000000001",
         ] {
             connection.insert_memory(
                 memory_id,
@@ -24097,19 +24115,16 @@ mod tests {
             )?;
         }
 
-        let input = evidence_span_input(
-            "sess_attachderived00000000000001",
-            "span-attach-derived",
-            10,
-        );
+        let input =
+            evidence_span_input("sess_attachderived0000000000000", "span-attach-derived", 10);
         let expected_hash = input.content_hash.clone();
-        connection.insert_evidence_span("ev_attachderived000000000000001", &input)?;
+        connection.insert_evidence_span("ev_attachderived0000000000000", &input)?;
 
         let wrong_hash = connection.attach_evidence_span_to_memory_if_unlinked(
             "wsp_01234567890123456789012345",
-            "ev_attachderived000000000000001",
+            "ev_attachderived0000000000000",
             "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-            "mem_attachderived00000000000001",
+            "mem_attachderived0000000000000",
         )?;
         ensure_equal(
             &wrong_hash,
@@ -24119,9 +24134,9 @@ mod tests {
 
         let attached = connection.attach_evidence_span_to_memory_if_unlinked(
             "wsp_01234567890123456789012345",
-            "ev_attachderived000000000000001",
+            "ev_attachderived0000000000000",
             &expected_hash,
-            "mem_attachderived00000000000001",
+            "mem_attachderived0000000000000",
         )?;
         ensure_equal(
             &attached,
@@ -24129,19 +24144,19 @@ mod tests {
             "matching unlinked evidence span attaches",
         )?;
         let span = connection
-            .get_evidence_span("ev_attachderived000000000000001")?
+            .get_evidence_span("ev_attachderived0000000000000")?
             .ok_or_else(|| TestFailure::new("attached evidence span missing"))?;
         ensure_equal(
             &span.memory_id,
-            &Some("mem_attachderived00000000000001".to_string()),
+            &Some("mem_attachderived0000000000000".to_string()),
             "evidence span records attached memory",
         )?;
 
         let idempotent = connection.attach_evidence_span_to_memory_if_unlinked(
             "wsp_01234567890123456789012345",
-            "ev_attachderived000000000000001",
+            "ev_attachderived0000000000000",
             &expected_hash,
-            "mem_attachderived00000000000001",
+            "mem_attachderived0000000000000",
         )?;
         ensure_equal(
             &idempotent,
@@ -24151,9 +24166,9 @@ mod tests {
 
         let conflict = connection.attach_evidence_span_to_memory_if_unlinked(
             "wsp_01234567890123456789012345",
-            "ev_attachderived000000000000001",
+            "ev_attachderived0000000000000",
             &expected_hash,
-            "mem_attachderived00000000000002",
+            "mem_attachderived0000000000001",
         )?;
         ensure_equal(
             &conflict,
@@ -32929,7 +32944,7 @@ mod tests {
                  id, workspace_id, candidate_type, target_memory_id, source_type, reason, \
                  confidence, status, created_at, review_state\
              ) VALUES (\
-                 'curate_v060compatibility0test01', 'wsp_01234567890123456789012345', \
+                 'curate_v060compat0000000000000000', 'wsp_01234567890123456789012345', \
                  'anti_pattern_proposal', 'mem_01234567890123456789012345', 'rule_engine', \
                  'v061 must not disturb v060 anti-pattern schema', 0.7, 'pending', \
                  '2026-05-23T04:55:00Z', 'new'\
@@ -32937,7 +32952,7 @@ mod tests {
         )?;
 
         let rows = connection.query(
-            "SELECT candidate_type FROM curation_candidates WHERE id = 'curate_v060compatibility0test01'",
+            "SELECT candidate_type FROM curation_candidates WHERE id = 'curate_v060compat0000000000000000'",
             &[],
         )?;
         ensure_equal(&rows.len(), &1_usize, "v060 row survives v061 application")?;
