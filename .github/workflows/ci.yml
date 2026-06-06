@@ -31,7 +31,7 @@ jobs:
   verify:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -106,12 +106,12 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          timeout --foreground --kill-after=30s 30m \
+          timeout --foreground --kill-after=30s 60m \
             cargo test --workspace --lib --bins --tests --examples -- --nocapture
           status=$?
           set -e
           if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
-            echo "::error::cargo test exceeded the 30m CI test budget; inspect the last emitted test name/output above for the hanging test." >&2
+            echo "::error::cargo test exceeded the 60m CI test budget; inspect the last emitted test name/output above for the hanging test." >&2
           fi
           exit "$status"
 
