@@ -88,11 +88,11 @@ fn full_emitted_search_document() -> Result<Value, String> {
             }],
         }),
     }]);
-    Ok(report
+    report
         .data_json()
         .pointer("/results/0")
         .cloned()
-        .ok_or_else(|| "missing emitted search result".to_string())?)
+        .ok_or_else(|| "missing emitted search result".to_string())
 }
 
 fn minimal_emitted_search_document() -> Result<Value, String> {
@@ -107,11 +107,11 @@ fn minimal_emitted_search_document() -> Result<Value, String> {
         metadata: None,
         explanation: None,
     }]);
-    Ok(report
+    report
         .data_json()
         .pointer("/results/0")
         .cloned()
-        .ok_or_else(|| "missing minimal emitted search result".to_string())?)
+        .ok_or_else(|| "missing minimal emitted search result".to_string())
 }
 
 #[test]

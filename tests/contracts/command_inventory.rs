@@ -5,7 +5,7 @@ use ee::cli::Cli;
 use ee::models::RESPONSE_SCHEMA_V2;
 
 #[path = "../support/command_inventory.rs"]
-mod command_inventory;
+mod command_inventory_support;
 
 type TestResult = Result<(), String>;
 
@@ -25,8 +25,8 @@ fn count_leaf_commands(command: &clap::Command) -> usize {
 
 #[test]
 fn inventory_covers_every_clap_command_path() -> TestResult {
-    let expected = command_inventory::ee_command_paths();
-    let actual = command_inventory::ee_command_inventory()
+    let expected = command_inventory_support::ee_command_paths();
+    let actual = command_inventory_support::ee_command_inventory()
         .into_iter()
         .map(|entry| entry.path)
         .collect();
@@ -42,7 +42,7 @@ fn inventory_covers_every_clap_command_path() -> TestResult {
 
 #[test]
 fn inventory_leaf_count_matches_live_clap_leaf_count() -> TestResult {
-    let inventory_leaf_count = command_inventory::ee_command_inventory()
+    let inventory_leaf_count = command_inventory_support::ee_command_inventory()
         .into_iter()
         .filter(|entry| entry.is_leaf)
         .count();
@@ -57,7 +57,7 @@ fn inventory_leaf_count_matches_live_clap_leaf_count() -> TestResult {
 
 #[test]
 fn inventory_entries_have_schema_and_side_effect_metadata() -> TestResult {
-    let entries = command_inventory::ee_command_inventory_by_path();
+    let entries = command_inventory_support::ee_command_inventory_by_path();
     let mut invalid = Vec::new();
 
     for entry in entries.values() {
@@ -92,7 +92,7 @@ fn inventory_entries_have_schema_and_side_effect_metadata() -> TestResult {
 
 #[test]
 fn inventory_includes_nested_command_groups() -> TestResult {
-    let paths = command_inventory::ee_command_paths();
+    let paths = command_inventory_support::ee_command_paths();
     for expected in [
         "agent-docs",
         "curate candidates",

@@ -10,14 +10,13 @@
 //! This file pins the bounded summary fields downstream fuzz harnesses
 //! match against, mirroring the bd-3ry2a `parse_*_json_summary` pattern:
 //!
-//!   - `line_count`        — total newline-delimited records consumed
-//!   - `bytes_seen`        — sum of per-line byte lengths (after
-//!                           stripping the trailing LF / CRLF)
-//!   - `peak_line_bytes`   — maximum per-line byte length (post-strip)
-//!   - `peak_buffer_bytes` — maximum internal buffer high-water mark
-//!                           (includes the trailing newline byte while
-//!                           the line is in the buffer, so it is at
-//!                           least `peak_line_bytes`)
+//! - `line_count`        — total newline-delimited records consumed
+//! - `bytes_seen`        — sum of per-line byte lengths (after
+//!   stripping the trailing LF / CRLF)
+//! - `peak_line_bytes`   — maximum per-line byte length (post-strip)
+//! - `peak_buffer_bytes` — maximum internal buffer high-water mark
+//!   (includes the trailing newline byte while the line is in the buffer,
+//!   so it is at least `peak_line_bytes`)
 //!
 //! Deterministic; no external fixtures; no new public API.
 

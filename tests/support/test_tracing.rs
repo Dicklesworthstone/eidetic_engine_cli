@@ -14,12 +14,12 @@ thread_local! {
     static TRACE_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TestPhase {
     Setup,
     Exercise,
     Verify,
-    #[allow(dead_code)]
     Teardown,
 }
 
@@ -77,14 +77,17 @@ impl TestTraceGuard {
         );
     }
 
+    #[allow(dead_code)]
     pub fn setup(&self, fixture_name: &str, message: &str) {
         self.event(TestPhase::Setup, fixture_name, "", "", message);
     }
 
+    #[allow(dead_code)]
     pub fn exercise(&self, fixture_name: &str, actual: impl ToString, message: &str) {
         self.event(TestPhase::Exercise, fixture_name, actual, "", message);
     }
 
+    #[allow(dead_code)]
     pub fn verify(
         &self,
         fixture_name: &str,

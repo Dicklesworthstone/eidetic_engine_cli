@@ -13,6 +13,8 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::slice;
+
 use ee::eval::runner::{PackQualityQuerySurface, PackQualityTokenBudget};
 use ee::eval::{
     PACK_QUALITY_REPORT_SCHEMA_V1, PackQualityActual, PackQualityCase, PackQualityReport,
@@ -130,18 +132,25 @@ fn selected_ids_change_under_profile_swap_yields_distinct_reports() -> TestResul
 
     assert_deterministic_evaluation(
         "profile_swap_balanced",
-        &[case.clone()],
-        &[actual_balanced.clone()],
+        slice::from_ref(&case),
+        slice::from_ref(&actual_balanced),
     )?;
     assert_deterministic_evaluation(
         "profile_swap_compact",
-        &[case.clone()],
-        &[actual_compact.clone()],
+        slice::from_ref(&case),
+        slice::from_ref(&actual_compact),
     )?;
 
-    let balanced_report =
-        evaluate_pack_quality("profile_swap_balanced", &[case.clone()], &[actual_balanced]);
-    let compact_report = evaluate_pack_quality("profile_swap_compact", &[case], &[actual_compact]);
+    let balanced_report = evaluate_pack_quality(
+        "profile_swap_balanced",
+        slice::from_ref(&case),
+        slice::from_ref(&actual_balanced),
+    );
+    let compact_report = evaluate_pack_quality(
+        "profile_swap_compact",
+        slice::from_ref(&case),
+        slice::from_ref(&actual_compact),
+    );
 
     ensure_eq(
         &balanced_report.aggregate_verdict,
@@ -179,14 +188,14 @@ fn omitted_critical_ids_report_with_reason_codes() -> TestResult {
 
     assert_deterministic_evaluation(
         "critical_omitted_fixture",
-        &[case.clone()],
-        &[actual.clone()],
+        slice::from_ref(&case),
+        slice::from_ref(&actual),
     )?;
 
     let report = evaluate_pack_quality(
         "critical_omitted_fixture",
-        &[case.clone()],
-        &[actual.clone()],
+        slice::from_ref(&case),
+        slice::from_ref(&actual),
     );
     ensure_eq(
         &report.aggregate_verdict,
@@ -244,20 +253,20 @@ fn degradation_posture_is_stable_across_runs() -> TestResult {
 
     assert_deterministic_evaluation(
         "degradation_allowed_only",
-        &[case.clone()],
-        &[actual_allowed_only.clone()],
+        slice::from_ref(&case),
+        slice::from_ref(&actual_allowed_only),
     )?;
     assert_deterministic_evaluation(
         "degradation_with_unexpected",
-        &[case.clone()],
-        &[actual_with_unexpected.clone()],
+        slice::from_ref(&case),
+        slice::from_ref(&actual_with_unexpected),
     )?;
 
     // Allowed-only must yield Within (no contract violation).
     let allowed_report = evaluate_pack_quality(
         "degradation_allowed_only",
-        &[case.clone()],
-        &[actual_allowed_only],
+        slice::from_ref(&case),
+        slice::from_ref(&actual_allowed_only),
     );
     ensure_eq(
         &allowed_report.aggregate_verdict,
@@ -292,19 +301,30 @@ fn forbidden_redaction_leak_drops_verdict_to_regression() -> TestResult {
 
     assert_deterministic_evaluation(
         "redaction_leaking",
-        &[case.clone()],
-        &[actual_leaking.clone()],
+        slice::from_ref(&case),
+        slice::from_ref(&actual_leaking),
     )?;
-    assert_deterministic_evaluation("redaction_clean", &[case.clone()], &[actual_clean.clone()])?;
+    assert_deterministic_evaluation(
+        "redaction_clean",
+        slice::from_ref(&case),
+        slice::from_ref(&actual_clean),
+    )?;
 
-    let leaking_report =
-        evaluate_pack_quality("redaction_leaking", &[case.clone()], &[actual_leaking]);
+    let leaking_report = evaluate_pack_quality(
+        "redaction_leaking",
+        slice::from_ref(&case),
+        slice::from_ref(&actual_leaking),
+    );
     ensure_eq(
         &leaking_report.aggregate_verdict,
         &PackQualityVerdict::Regression,
         "forbidden redaction leak must surface as Regression",
     )?;
-    let clean_report = evaluate_pack_quality("redaction_clean", &[case], &[actual_clean]);
+    let clean_report = evaluate_pack_quality(
+        "redaction_clean",
+        slice::from_ref(&case),
+        slice::from_ref(&actual_clean),
+    );
     ensure_eq(
         &clean_report.aggregate_verdict,
         &PackQualityVerdict::Within,
