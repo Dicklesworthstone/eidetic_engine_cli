@@ -37,6 +37,13 @@ fn pretty_json(value: &Value) -> Result<String, String> {
     Ok(rendered)
 }
 
+fn compact_json_for_error(value: &Value) -> String {
+    match serde_json::to_string(value) {
+        Ok(rendered) => rendered,
+        Err(error) => format!("<failed to serialize JSON: {error}>"),
+    }
+}
+
 fn elapsed_ms_since(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -103,8 +110,7 @@ fn remember(workspace_arg: &str, content: &str) -> Result<String, String> {
         .ok_or_else(|| {
             format!(
                 "remember response missing memory id: {}",
-                serde_json::to_string(&parsed)
-                    .expect("remember response JSON serialization should not fail")
+                compact_json_for_error(&parsed)
             )
         })
 }
@@ -135,8 +141,7 @@ fn revise_memory(workspace_arg: &str, source_id: &str, content: &str) -> Result<
         .ok_or_else(|| {
             format!(
                 "memory revise response missing new_id: {}",
-                serde_json::to_string(&parsed)
-                    .expect("memory revise response JSON serialization should not fail")
+                compact_json_for_error(&parsed)
             )
         })
 }
