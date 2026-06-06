@@ -5,6 +5,8 @@
 //! 2. Profile thresholds partition the resource space correctly
 //! 3. Budget scaling is monotonic with profile tier
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use ee::core::profile::{
     CpuProbe, EnvironmentProbe, HOST_PROFILE_PROBE_SCHEMA_V1, HostCalibrationFreshness, HostClass,
     HostClassificationOptions, HostResourceProbeReport, HostTopologyProbe, MemoryProbe,

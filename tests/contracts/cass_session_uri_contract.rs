@@ -7,6 +7,8 @@
 //! relaxing any branch would leave only downstream importer assertions to
 //! catch it.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use ee::cass::{CassSessionReference, normalize_cass_session_uri};
 
 type TestResult = Result<(), String>;

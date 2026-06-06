@@ -13,6 +13,8 @@
 //! and artifact paths. Raw stdout/stderr bodies are deliberately omitted;
 //! only bounded tails and hashes leave the test surface.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 #[cfg(unix)]
 use std::fs;
 #[cfg(unix)]

@@ -14,6 +14,8 @@
 //! - the report is byte-equal across repeated calls for the same probe and
 //!   options (clock-independent / order-independent).
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::{collections::BTreeSet, fs};
 
 use ee::core::profile::{

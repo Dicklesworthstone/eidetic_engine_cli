@@ -30,6 +30,8 @@
 //!    no `git reset`, no `rm -rf` literal — the harness must stay
 //!    non-Cargo and AGENTS.md-RULE-1-compliant).
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::fs;
 use std::path::PathBuf;
 

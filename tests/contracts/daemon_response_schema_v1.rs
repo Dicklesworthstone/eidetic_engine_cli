@@ -4,6 +4,8 @@
 //! bd-3cwdd pins real Rust-serialized daemon envelopes against the published
 //! schema files so Rust type drift cannot silently diverge from the docs.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;

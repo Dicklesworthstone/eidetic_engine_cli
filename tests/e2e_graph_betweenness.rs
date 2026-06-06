@@ -19,6 +19,7 @@
 //!   surviving row matches the rank-1 row from the unbounded run
 
 #![cfg(unix)]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::fs;
 use std::path::PathBuf;

@@ -17,6 +17,8 @@
 //! - The `HYGIENE_CLASSIFICATION_ROW_SCHEMA_V1` constant must remain
 //!   `ee.hygiene_classification_row.v1`.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::collections::BTreeSet;
 
 use ee::core::hygiene_classifier::{Bucket, HYGIENE_CLASSIFICATION_ROW_SCHEMA_V1, Kind, reason};

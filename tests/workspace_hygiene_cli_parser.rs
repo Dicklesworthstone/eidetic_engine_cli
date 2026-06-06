@@ -15,6 +15,8 @@
 //! The tests intentionally use `Cli::try_parse_from` directly so they do not
 //! require a built binary and run anywhere the crate compiles.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::path::PathBuf;
 
 use clap::Parser;

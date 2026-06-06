@@ -4,6 +4,8 @@
 //! randomness in deterministic paths. Any exemption must be rare, justified in
 //! source, and counted against a versioned baseline.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::path::{Path, PathBuf};
 
 const BASELINE: &str =
