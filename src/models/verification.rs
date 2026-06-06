@@ -2424,10 +2424,16 @@ fn rch_verification_status(
 }
 
 fn rch_status_is_fallback(raw_status: &str, degraded_codes: &[String]) -> bool {
-    raw_status.contains("fallback")
+    rch_status_token_is_fallback(raw_status)
         || degraded_codes
             .iter()
-            .any(|code| code.contains("local_fallback") || code.contains("fallback_detected"))
+            .any(|code| rch_status_token_is_fallback(code))
+}
+
+fn rch_status_token_is_fallback(token: &str) -> bool {
+    let token = token.trim();
+    token.contains("fallback_detected")
+        || (token.contains("local_fallback") && !token.contains("local_fallback_refused"))
 }
 
 fn rch_status_is_blocked(raw_status: &str, degraded_codes: &[String]) -> bool {
@@ -2460,7 +2466,7 @@ fn rch_fallback_reason(value: &JsonValue, degraded_codes: &[String]) -> Option<S
     rch_string(value, "fallback_reason").or_else(|| {
         degraded_codes
             .iter()
-            .find(|code| code.contains("local_fallback") || code.contains("fallback_detected"))
+            .find(|code| rch_status_token_is_fallback(code))
             .cloned()
     })
 }

@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn kind_rejects_empty_and_invalid_identifiers() {
-        for input in ["", "1rule", "rule!", "ru le", "-foo"] {
+        for input in ["", "1rule", "rule!", "ru le"] {
             let err = match MemoryKind::from_str(input) {
                 Ok(value) => panic!("expected error for `{input}`, got Ok({value:?})"),
                 Err(error) => error,

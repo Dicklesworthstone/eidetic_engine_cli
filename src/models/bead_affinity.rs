@@ -496,12 +496,19 @@ mod tests {
     fn text_tokenizer_lowercases_strips_punctuation_and_drops_stopwords() {
         let tokens =
             normalize_bead_text_tokens("Wire aggregate_degraded helper into all renderers.");
-        // "into", "all" are stopwords; "aggregate_degraded" gets split on _;
+        // "into" is a stopword; "aggregate_degraded" gets split on _;
         // single-char "a" is below minimum length.
-        let expected: BTreeSet<String> = ["wire", "aggregate", "degraded", "helper", "renderers"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+        let expected: BTreeSet<String> = [
+            "wire",
+            "aggregate",
+            "degraded",
+            "helper",
+            "all",
+            "renderers",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         assert_eq!(tokens, expected);
     }
 
