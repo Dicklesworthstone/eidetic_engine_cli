@@ -143,8 +143,8 @@
     "rawOutputIncluded": { "type": "boolean", "const": false }
   },
   "x-ee-status": {
-    "shipped": false,
-    "available_in_build": false,
+    "shipped": true,
+    "available_in_build": true,
     "tracking_bead": "bd-1n3x1.1"
   },
   "x-ee-doc": "docs/swarm/proof_broker.md",

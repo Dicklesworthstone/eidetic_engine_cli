@@ -69,7 +69,7 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         file_name: "ee.proof_broker.v1.json",
         doc_path: "docs/swarm/proof_broker.md",
         tracking_bead: "bd-1n3x1.1",
-        shipped: false,
+        shipped: true,
     },
     SchemaCase {
         id: "ee.verification.run.v1",
