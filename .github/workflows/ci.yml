@@ -103,7 +103,17 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test --workspace --lib --bins --tests --examples
+        run: |
+          set -euo pipefail
+          set +e
+          timeout --foreground --kill-after=30s 30m \
+            cargo test --workspace --lib --bins --tests --examples -- --nocapture
+          status=$?
+          set -e
+          if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+            echo "::error::cargo test exceeded the 30m CI test budget; inspect the last emitted test name/output above for the hanging test." >&2
+          fi
+          exit "$status"
 
       - name: MCP parity tests
         run: cargo test --workspace --features mcp --test mcp_parity
