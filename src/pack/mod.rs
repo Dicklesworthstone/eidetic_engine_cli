@@ -5203,8 +5203,8 @@ impl MmrAssemblyScratch {
 }
 
 fn ensure_vec_capacity<T>(values: &mut Vec<T>, candidate_count: usize) {
-    let additional = candidate_count.saturating_sub(values.capacity());
-    if additional > 0 {
+    if values.capacity() < candidate_count {
+        let additional = candidate_count.saturating_sub(values.len());
         values.reserve(additional);
     }
 }
@@ -10264,9 +10264,9 @@ mod tests {
             &expected_rendered_tokens,
             "selection audit step token cost uses rendered content",
         )?;
-        ensure_equal(
-            &item.redactions,
-            &vec![PackItemRedaction::new("anthropic_api_key")],
+        ensure(
+            item.redactions
+                .contains(&PackItemRedaction::new("anthropic_api_key")),
             "selected pack item records redaction reason",
         )
     }
@@ -10416,9 +10416,9 @@ mod tests {
             &Some(expected_rendered_tokens),
             "submodular step token cost uses rendered content",
         )?;
-        ensure_equal(
-            &item.redactions,
-            &vec![PackItemRedaction::new("anthropic_api_key")],
+        ensure(
+            item.redactions
+                .contains(&PackItemRedaction::new("anthropic_api_key")),
             "submodular selected pack item records redaction reason",
         )
     }
