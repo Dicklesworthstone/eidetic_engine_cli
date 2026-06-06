@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic.engine/schemas/ee.memory.delta.v1.json",
-  "title": "Eidetic Engine Memory Delta",
+  "title": "ee.memory.delta.v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
