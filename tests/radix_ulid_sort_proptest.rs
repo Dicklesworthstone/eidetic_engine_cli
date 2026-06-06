@@ -13,7 +13,10 @@ fn payload_strategy() -> impl Strategy<Value = String> {
             let mut bytes = Vec::with_capacity(26);
             bytes.push(DIGITS[first]);
             bytes.extend(rest.into_iter().map(|index| DIGITS[index]));
-            String::from_utf8(bytes).expect("strategy emits ASCII ULID payload")
+            match String::from_utf8(bytes) {
+                Ok(payload) => payload,
+                Err(error) => panic!("strategy emits ASCII ULID payload: {error}"),
+            }
         })
 }
 
@@ -56,8 +59,10 @@ fn rejects_missing_payload_without_mutating_input() {
     ];
     let mut rows = original.clone();
 
-    let error = sort_by_ulid_payload(&mut rows, String::as_str)
-        .expect_err("missing payload should fail before sorting");
+    let error = match sort_by_ulid_payload(&mut rows, String::as_str) {
+        Ok(()) => panic!("missing payload should fail before sorting"),
+        Err(error) => error,
+    };
 
     assert_eq!(rows, original);
     assert_eq!(error.index(), 0);
