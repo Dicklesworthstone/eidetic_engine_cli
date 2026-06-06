@@ -97,7 +97,7 @@ jobs:
 
       - name: Vision coverage
         run: |
-          git fetch origin main:refs/remotes/origin/main --depth=1
+          git fetch origin +main:refs/remotes/origin/main --depth=1
           sh ./scripts/vision-coverage.sh --json --compare-ref origin/main
 
       - name: Format
