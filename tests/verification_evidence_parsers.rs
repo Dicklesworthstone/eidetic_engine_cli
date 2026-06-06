@@ -26,11 +26,15 @@
 use std::path::PathBuf;
 
 use ee::obs::verification_evidence::{
-    EvidenceSource, EvidenceStatus, ParseError, VERIFICATION_EVIDENCE_SCHEMA_V1, compact_summary,
-    parse_github_actions_job, parse_rch_verify, parse_static_check, parse_verify_script_event,
+    EvidenceSource, EvidenceStatus, ParseError, VERIFICATION_EVIDENCE_SCHEMA_V1,
+    VerificationEvidence, compact_summary, parse_github_actions_job, parse_rch_verify,
+    parse_static_check, parse_verify_script_event,
 };
+use serde_json::{Map, Value};
 
-fn fixture(name: &str) -> serde_json::Value {
+type TestResult = Result<(), String>;
+
+fn fixture(name: &str) -> Value {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("tests");
     path.push("fixtures");
@@ -42,20 +46,50 @@ fn fixture(name: &str) -> serde_json::Value {
         .unwrap_or_else(|err| panic!("parse fixture {}: {err}", path.display()))
 }
 
+fn parse_rch_fixture(name: &str) -> Result<VerificationEvidence, String> {
+    parse_rch_verify(&fixture(name)).map_err(|error| format!("parse {name}: {error}"))
+}
+
+fn parse_verify_script_fixture(name: &str) -> Result<VerificationEvidence, String> {
+    parse_verify_script_event(&fixture(name)).map_err(|error| format!("parse {name}: {error}"))
+}
+
+fn parse_github_actions_fixture(name: &str) -> Result<VerificationEvidence, String> {
+    parse_github_actions_job(&fixture(name)).map_err(|error| format!("parse {name}: {error}"))
+}
+
+fn parse_static_fixture(name: &str) -> Result<VerificationEvidence, String> {
+    parse_static_check(&fixture(name)).map_err(|error| format!("parse {name}: {error}"))
+}
+
+fn expect_rch_fixture_parse_error(name: &str) -> Result<ParseError, String> {
+    match parse_rch_verify(&fixture(name)) {
+        Ok(evidence) => Err(format!("expected {name} to fail, got {evidence:?}")),
+        Err(error) => Ok(error),
+    }
+}
+
+fn object_value<'a>(value: &'a Value, context: &str) -> Result<&'a Map<String, Value>, String> {
+    value
+        .as_object()
+        .ok_or_else(|| format!("{context} must serialize to a JSON object: {value}"))
+}
+
 #[test]
-fn rch_remote_pass_fixture_normalizes_to_passed_status() {
-    let evidence = parse_rch_verify(&fixture("rch_remote_pass.json")).expect("parses");
+fn rch_remote_pass_fixture_normalizes_to_passed_status() -> TestResult {
+    let evidence = parse_rch_fixture("rch_remote_pass.json")?;
     assert_eq!(evidence.schema, VERIFICATION_EVIDENCE_SCHEMA_V1);
     assert_eq!(evidence.source, EvidenceSource::RchVerify);
     assert_eq!(evidence.status, EvidenceStatus::Passed);
     assert_eq!(evidence.command_kind.as_deref(), Some("cargo_check"));
     assert!(evidence.environment_blocker_codes.is_empty());
     assert!(evidence.error_codes.is_empty());
+    Ok(())
 }
 
 #[test]
-fn rch_path_dep_version_skew_fixture_classifies_as_environment_blocked() {
-    let evidence = parse_rch_verify(&fixture("rch_path_dep_version_skew.json")).expect("parses");
+fn rch_path_dep_version_skew_fixture_classifies_as_environment_blocked() -> TestResult {
+    let evidence = parse_rch_fixture("rch_path_dep_version_skew.json")?;
     assert_eq!(evidence.status, EvidenceStatus::EnvironmentBlocked);
     assert!(
         evidence
@@ -76,11 +110,12 @@ fn rch_path_dep_version_skew_fixture_classifies_as_environment_blocked() {
         .filter(|c| c.as_str() == "rch_verify_cargo_path_dependency_version_blocked")
         .count();
     assert_eq!(occurrences, 1);
+    Ok(())
 }
 
 #[test]
-fn rch_topology_refusal_fixture_preserves_error_codes_and_classifies_env_blocked() {
-    let evidence = parse_rch_verify(&fixture("rch_topology_refusal.json")).expect("parses");
+fn rch_topology_refusal_fixture_preserves_error_codes_and_classifies_env_blocked() -> TestResult {
+    let evidence = parse_rch_fixture("rch_topology_refusal.json")?;
     assert_eq!(evidence.status, EvidenceStatus::EnvironmentBlocked);
     assert_eq!(evidence.error_codes, vec!["RCH-E327".to_owned()]);
     assert!(
@@ -101,11 +136,12 @@ fn rch_topology_refusal_fixture_preserves_error_codes_and_classifies_env_blocked
             .iter()
             .any(|code| code == "rch_verify_remote_marker_missing")
     );
+    Ok(())
 }
 
 #[test]
-fn rch_remote_compile_error_fixture_classifies_as_code_failure() {
-    let evidence = parse_rch_verify(&fixture("rch_remote_compile_error.json")).expect("parses");
+fn rch_remote_compile_error_fixture_classifies_as_code_failure() -> TestResult {
+    let evidence = parse_rch_fixture("rch_remote_compile_error.json")?;
     assert_eq!(evidence.status, EvidenceStatus::FailedInCode);
     assert!(evidence.environment_blocker_codes.is_empty());
     assert_eq!(
@@ -117,12 +153,12 @@ fn rch_remote_compile_error_fixture_classifies_as_code_failure() {
         evidence.first_error.message.as_deref(),
         Some("expected struct, got enum")
     );
+    Ok(())
 }
 
 #[test]
-fn verify_script_event_fixture_classifies_rch_e327_as_environment_blocked() {
-    let evidence =
-        parse_verify_script_event(&fixture("verify_script_rch_e327_event.json")).expect("parses");
+fn verify_script_event_fixture_classifies_rch_e327_as_environment_blocked() -> TestResult {
+    let evidence = parse_verify_script_fixture("verify_script_rch_e327_event.json")?;
     assert_eq!(evidence.source, EvidenceSource::VerifyScript);
     assert_eq!(evidence.status, EvidenceStatus::EnvironmentBlocked);
     assert_eq!(evidence.bead_id.as_deref(), Some("bd-1nxz4.5"));
@@ -144,12 +180,12 @@ fn verify_script_event_fixture_classifies_rch_e327_as_environment_blocked() {
             .iter()
             .any(|code| code == "rch_verify_local_fallback_refused")
     );
+    Ok(())
 }
 
 #[test]
-fn github_actions_check_failure_fixture_classifies_as_code_failure() {
-    let evidence =
-        parse_github_actions_job(&fixture("github_actions_check_failure.json")).expect("parses");
+fn github_actions_check_failure_fixture_classifies_as_code_failure() -> TestResult {
+    let evidence = parse_github_actions_fixture("github_actions_check_failure.json")?;
     assert_eq!(evidence.source, EvidenceSource::GitHubActionsJob);
     assert_eq!(evidence.status, EvidenceStatus::FailedInCode);
     assert_eq!(
@@ -168,11 +204,12 @@ fn github_actions_check_failure_fixture_classifies_as_code_failure() {
         evidence.first_error.message.as_deref(),
         Some("assertion failed: environment blockers were empty")
     );
+    Ok(())
 }
 
 #[test]
-fn static_check_pass_fixture_classifies_as_passed() {
-    let evidence = parse_static_check(&fixture("static_check_pass.json")).expect("parses");
+fn static_check_pass_fixture_classifies_as_passed() -> TestResult {
+    let evidence = parse_static_fixture("static_check_pass.json")?;
     assert_eq!(evidence.source, EvidenceSource::StaticCheck);
     assert_eq!(evidence.status, EvidenceStatus::Passed);
     assert_eq!(evidence.command_kind.as_deref(), Some("rustfmt_check"));
@@ -181,12 +218,12 @@ fn static_check_pass_fixture_classifies_as_passed() {
         Some("blake3:rustfmt-static")
     );
     assert!(evidence.environment_blocker_codes.is_empty());
+    Ok(())
 }
 
 #[test]
-fn static_check_failed_fixture_classifies_as_code_failure() {
-    let evidence =
-        parse_static_check(&fixture("static_check_failed_shell_text.json")).expect("parses");
+fn static_check_failed_fixture_classifies_as_code_failure() -> TestResult {
+    let evidence = parse_static_fixture("static_check_failed_shell_text.json")?;
     assert_eq!(evidence.source, EvidenceSource::StaticCheck);
     assert_eq!(evidence.status, EvidenceStatus::FailedInCode);
     assert_eq!(evidence.exit_code, Some(1));
@@ -194,12 +231,12 @@ fn static_check_failed_fixture_classifies_as_code_failure() {
         evidence.first_error.file.as_deref(),
         Some("src/obs/verification_evidence.rs")
     );
+    Ok(())
 }
 
 #[test]
-fn compact_summary_strips_shell_command_substitution_text() {
-    let evidence =
-        parse_static_check(&fixture("static_check_failed_shell_text.json")).expect("parses");
+fn compact_summary_strips_shell_command_substitution_text() -> TestResult {
+    let evidence = parse_static_fixture("static_check_failed_shell_text.json")?;
     let summary = compact_summary(&evidence);
     assert!(
         !summary.contains("$("),
@@ -213,11 +250,12 @@ fn compact_summary_strips_shell_command_substitution_text() {
         summary.contains("git diff --check __touch /tmp/ee-owned_"),
         "summary should keep a readable sanitized command: {summary}"
     );
+    Ok(())
 }
 
 #[test]
-fn malformed_wrong_schema_fixture_returns_unexpected_schema_error() {
-    let error = parse_rch_verify(&fixture("malformed_wrong_schema.json")).unwrap_err();
+fn malformed_wrong_schema_fixture_returns_unexpected_schema_error() -> TestResult {
+    let error = expect_rch_fixture_parse_error("malformed_wrong_schema.json")?;
     match error {
         ParseError::UnexpectedSchema { found, expected } => {
             assert_eq!(found, "ee.test_event.v1");
@@ -225,11 +263,12 @@ fn malformed_wrong_schema_fixture_returns_unexpected_schema_error() {
         }
         other => panic!("unexpected error variant: {other:?}"),
     }
+    Ok(())
 }
 
 #[test]
-fn compact_summary_for_env_blocked_evidence_is_beads_ready_markdown() {
-    let evidence = parse_rch_verify(&fixture("rch_path_dep_version_skew.json")).expect("parses");
+fn compact_summary_for_env_blocked_evidence_is_beads_ready_markdown() -> TestResult {
+    let evidence = parse_rch_fixture("rch_path_dep_version_skew.json")?;
     let summary = compact_summary(&evidence);
     // First line names the command and the normalized status:
     let first = summary.lines().next().unwrap_or("");
@@ -247,6 +286,7 @@ fn compact_summary_for_env_blocked_evidence_is_beads_ready_markdown() {
     assert!(summary.contains("- command_hash: `eae0cb5e0af81aca"));
     assert!(summary.contains("- environment_blocker_codes:"));
     assert!(summary.contains("rch_verify_cargo_path_dependency_version_blocked"));
+    Ok(())
 }
 
 #[test]
@@ -261,10 +301,11 @@ fn schema_tag_constant_matches_public_schema_file() {
 }
 
 #[test]
-fn evidence_envelopes_serialize_to_json_objects_with_required_fields() {
-    let evidence = parse_rch_verify(&fixture("rch_path_dep_version_skew.json")).expect("parses");
-    let json = serde_json::to_value(&evidence).expect("serializes");
-    let object = json.as_object().expect("object");
+fn evidence_envelopes_serialize_to_json_objects_with_required_fields() -> TestResult {
+    let evidence = parse_rch_fixture("rch_path_dep_version_skew.json")?;
+    let json =
+        serde_json::to_value(&evidence).map_err(|error| format!("serialize evidence: {error}"))?;
+    let object = object_value(&json, "verification evidence")?;
     for required in [
         "schema",
         "source",
@@ -278,4 +319,5 @@ fn evidence_envelopes_serialize_to_json_objects_with_required_fields() {
             "envelope should expose required schema field `{required}` in {json}"
         );
     }
+    Ok(())
 }
