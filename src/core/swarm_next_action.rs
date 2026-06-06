@@ -2096,8 +2096,13 @@ fn work_packet_agent_mail(
     });
     let unavailable_reason = agent_mail_unavailable_reason(snapshot);
     let semantic_failure_reason = agent_mail_semantic_failure_reason(snapshot);
+    let agent_mail_unavailable_degraded = degraded_codes
+        .iter()
+        .any(|code| code == AGENT_MAIL_UNAVAILABLE_CODE);
     let status = if semantic_failure_reason.is_some() {
         "semantic_readiness_failed"
+    } else if agent_mail_unavailable_degraded {
+        "unavailable"
     } else {
         status
     };
@@ -7232,6 +7237,52 @@ mod tests {
             action.command_id == "swarm_work_packet_retry_with_agent_mail_snapshot"
                 && action.display_command.contains("--candidate bd-mail")
                 && action.display_command.contains("--agent-mail-snapshot")
+                && !action.mutates_state
+        }));
+    }
+
+    #[test]
+    fn work_packet_claim_gate_blocks_when_agent_mail_degraded_code_is_present() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let agent_mail_degradation = degradation(
+            SwarmBriefSourceKind::AgentMail,
+            AGENT_MAIL_UNAVAILABLE_CODE,
+            "No redacted Agent Mail snapshot path was configured.",
+            Some("Provide --agent-mail-snapshot before claiming.".to_owned()),
+        );
+        brief.sources.push(SwarmBriefSourceSnapshot {
+            source: SwarmBriefSourceKind::AgentMail,
+            status: SwarmBriefSourceStatus::Skipped,
+            freshness: SwarmBriefSourceFreshness::unknown(),
+            provenance: SwarmBriefSourceProvenance::local_probe(),
+            item_count: 0,
+            degraded: vec![agent_mail_degradation.clone()],
+        });
+        brief.degraded = vec![agent_mail_degradation];
+        brief.beads.ready = vec![bead("bd-mail", "Policy redaction collision proof", 1)];
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let gate = packet.claim_gate(Some("bd-mail"));
+
+        assert_eq!(packet.coordination.agent_mail.status, "unavailable");
+        assert_eq!(
+            packet.coordination.agent_mail.reservation_authoritative,
+            Some(false)
+        );
+        assert!(!gate.safe_to_claim);
+        assert_eq!(gate.verdict, "external_state_required");
+        assert!(
+            gate.degraded_codes
+                .contains(&AGENT_MAIL_UNAVAILABLE_CODE.to_owned())
+        );
+        assert!(
+            gate.unsafe_reasons
+                .contains(&AGENT_MAIL_UNAVAILABLE_CODE.to_owned())
+        );
+        assert!(gate.claim_command_action.is_none());
+        assert!(gate.next_command_actions.iter().any(|action| {
+            action.command_id == "swarm_work_packet_retry_with_agent_mail_snapshot"
                 && !action.mutates_state
         }));
     }
