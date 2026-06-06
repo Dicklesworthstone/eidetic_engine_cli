@@ -11101,6 +11101,48 @@ mod tests {
     }
 
     #[test]
+    fn why_not_freshness_penalty_treats_current_and_unknown_as_healthy() -> TestResult {
+        for (status, window_kind) in [("current", "bounded"), ("unknown", "unbounded")] {
+            let target =
+                candidate_with_content(30, 0.8, 0.5, 10, format!("{status} lifecycle target"))?
+                    .with_lifecycle(super::PackItemLifecycle {
+                        validity_status: status.to_string(),
+                        validity_window_kind: window_kind.to_string(),
+                        valid_from: None,
+                        valid_to: None,
+                    });
+            let penalty = super::why_not_freshness_penalty(&target);
+
+            ensure_equal(&penalty.value, &0.0, "healthy lifecycle freshness penalty")?;
+            ensure(
+                !penalty
+                    .signals
+                    .iter()
+                    .any(|signal| signal.starts_with("validity_status:")),
+                format!("healthy status {status} should not emit validity_status penalty"),
+            )?;
+        }
+
+        let expired = candidate_with_content(31, 0.8, 0.5, 10, "expired lifecycle target")?
+            .with_lifecycle(super::PackItemLifecycle {
+                validity_status: "expired".to_string(),
+                validity_window_kind: "bounded".to_string(),
+                valid_from: None,
+                valid_to: None,
+            });
+        let penalty = super::why_not_freshness_penalty(&expired);
+
+        ensure_equal(&penalty.value, &0.5, "expired freshness penalty")?;
+        ensure(
+            penalty
+                .signals
+                .iter()
+                .any(|signal| signal == "validity_status:expired"),
+            "expired lifecycle should emit validity_status penalty",
+        )
+    }
+
+    #[test]
     fn facility_location_lazy_queue_matches_exhaustive_selector() -> TestResult {
         let budget =
             TokenBudget::new(1_000).map_err(|error| format!("budget rejected: {error:?}"))?;

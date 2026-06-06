@@ -18811,6 +18811,34 @@ mod tests {
     }
 
     #[test]
+    fn context_degraded_aggregation_preserves_warning_severity() -> TestResult {
+        let mut response = context_response_fixture()?;
+        response.data.degraded.push(
+            crate::pack::ContextResponseDegradation::new(
+                "embed_model_unavailable",
+                crate::pack::ContextResponseSeverity::Warning,
+                "Embedding model unavailable; semantic similarity is disabled.",
+                Some("ee index reembed --workspace .".to_string()),
+            )
+            .map_err(|error| format!("degradation rejected: {error:?}"))?,
+        );
+
+        let aggregated = super::context_response_with_aggregated_degraded(&response);
+        let severity = aggregated
+            .data
+            .degraded
+            .iter()
+            .find(|entry| entry.code == "embed_model_unavailable")
+            .map(|entry| entry.severity);
+
+        ensure_equal(
+            &severity,
+            &Some(crate::pack::ContextResponseSeverity::Warning),
+            "aggregated context degradation severity",
+        )
+    }
+
+    #[test]
     fn context_markdown_preserves_section_order_by_rank() -> TestResult {
         // Create items in a specific non-alphabetical order: Failures (rank 1),
         // ProceduralRules (rank 2), Decisions (rank 3). Alphabetically this would
