@@ -78,6 +78,13 @@ The central `scripts/verify.sh` runner also executes this harness as the
 schema and compact fixtures; it does not scan the entire Rust tree and does not
 run Cargo.
 
+The same runner executes `scripts/e2e_overhaul/swarm_slo_replay.sh` early as
+the `Swarm SLO Replay Contract` stage. That stage replays the compact
+`tests/fixtures/swarm_slo_replay/` trace/golden pair, checks deterministic
+event-index tie ordering, validates the summary schema and mutation flags, and
+does not run Cargo. Treat it as a shell replay-contract check, not as evidence
+that Rust-backed swarm replay code compiled or passed.
+
 Use this as a cheap hygiene check before remote verification. It is not a
 replacement for `scripts/rch_verify.sh -- cargo clippy --all-targets -- -D
 warnings`, and it must not be used to claim a Rust proof when code changed.

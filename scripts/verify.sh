@@ -46,6 +46,7 @@ set -euo pipefail
 #   4.65. Contract Drift Radar - advisory schema/docs/taxonomy drift scanner (bd-31nul.5)
 #   4.66. E2E Event Contract Radar - advisory shell evidence coverage scanner (bd-2ljka.4)
 #   4.67. Panic Helper Radar Contract - no-Cargo schema/golden scanner contract gate
+#   4.68. Swarm SLO Replay Contract - no-Cargo replay fixture/golden contract gate
 #   4.7. Package Artifact Leak - cargo package list gate for generated artifacts
 #   4.8. Fuzz Target Audit     - static cargo-fuzz target registration/docs check
 #   4.9. Fuzz Smoke            - optional 30s search query parser cargo-fuzz sweep
@@ -57,7 +58,6 @@ set -euo pipefail
 #   6.06 Replay Lab Smoke E2E  - scripts/e2e_overhaul/swarm_replay_lab_smoke.sh
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
-#   6.5.1. Swarm SLO Replay    - scripts/e2e_overhaul/swarm_slo_replay.sh
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
 #   7. Advanced E2E            - scripts/e2e_advanced.sh
 #   8. Boundary Migration      - scripts/e2e_boundary_migration.sh
@@ -771,6 +771,12 @@ run_stage "E2E Event Contract Radar Advisory" "e2e_event_contract_radar_advisory
 # caught without scanning the entire legacy Rust tree.
 run_stage "Panic Helper Radar Contract" "./scripts/panic_helper_radar_golden.sh"
 
+# Gate 3.87: Swarm SLO replay contract (bd-ppbue.31). This no-Cargo harness
+# replays the compact swarm trace fixture, checks deterministic tie ordering,
+# verifies summary schema/mutation flags, and fails before Cargo-backed gates
+# if the shell replay contract drifts.
+run_stage "Swarm SLO Replay Contract" "./scripts/e2e_overhaul/swarm_slo_replay.sh"
+
 # Gate 4.7: Package artifact leakage guard. This is a quick packaging gate:
 # it runs cargo package --list without building and fails if local/generated
 # tracker, perf, backup, or temp artifact paths would enter the published crate.
@@ -826,10 +832,6 @@ if [ "$CI_SMOKE" != "true" ]; then
     # pass across CI. The driver itself respects VERIFY_OVERHAUL=0 and
     # exits 0 without running, so this stage stays fast in default CI.
     run_stage "Overhaul Integration E2E (J4)" "./scripts/e2e_overhaul.sh"
-
-    # Gate 6.5.1: Swarm SLO replay proof. This exercises the read-only replay
-    # driver and fixture pair so ordering drift fails the normal verifier.
-    run_stage "Swarm SLO Replay Proof E2E (bd-36tzt)" "./scripts/e2e_overhaul/swarm_slo_replay.sh"
 
     # Gate 6.5.2: Lightweight swarm next-action recommendation-card contract.
     # This keeps SWA6's golden next-action overlap proof in the default gate
