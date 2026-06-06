@@ -73,6 +73,11 @@ golden harness when changing the scanner contract:
 scripts/panic_helper_radar_golden.sh
 ```
 
+The central `scripts/verify.sh` runner also executes this harness as the
+`Panic Helper Radar Contract` stage. That stage validates only the scanner
+schema and compact fixtures; it does not scan the entire Rust tree and does not
+run Cargo.
+
 Use this as a cheap hygiene check before remote verification. It is not a
 replacement for `scripts/rch_verify.sh -- cargo clippy --all-targets -- -D
 warnings`, and it must not be used to claim a Rust proof when code changed.

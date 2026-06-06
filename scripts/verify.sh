@@ -45,6 +45,7 @@ set -euo pipefail
 #   4.6. Plan Drift Advisory   - advisory plan_doc_section drift hints for Beads triage
 #   4.65. Contract Drift Radar - advisory schema/docs/taxonomy drift scanner (bd-31nul.5)
 #   4.66. E2E Event Contract Radar - advisory shell evidence coverage scanner (bd-2ljka.4)
+#   4.67. Panic Helper Radar Contract - no-Cargo schema/golden scanner contract gate
 #   4.7. Package Artifact Leak - cargo package list gate for generated artifacts
 #   4.8. Fuzz Target Audit     - static cargo-fuzz target registration/docs check
 #   4.9. Fuzz Smoke            - optional 30s search query parser cargo-fuzz sweep
@@ -764,6 +765,11 @@ run_stage "Contract Drift Radar Advisory" "./scripts/contract-drift-radar.sh --q
 # .e2e-event-contract-radar-report.json by default and does not fail the
 # readiness gate for advisory or known gaps; scanner/runtime errors still fail.
 run_stage "E2E Event Contract Radar Advisory" "e2e_event_contract_radar_advisory"
+
+# Gate 3.86: Panic-helper radar contract (bd-ppbue.30). This no-Cargo harness
+# validates ee.panic_helper_radar.v1 schema/golden fixtures so scanner drift is
+# caught without scanning the entire legacy Rust tree.
+run_stage "Panic Helper Radar Contract" "./scripts/panic_helper_radar_golden.sh"
 
 # Gate 4.7: Package artifact leakage guard. This is a quick packaging gate:
 # it runs cargo package --list without building and fails if local/generated
