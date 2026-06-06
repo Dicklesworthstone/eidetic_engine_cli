@@ -834,6 +834,9 @@ pub enum Command {
     /// Run, show, or close preflight risk assessments.
     #[command(subcommand)]
     Preflight(PreflightCommand),
+    /// Read-only proof-broker admission and status decisions.
+    #[command(subcommand)]
+    Proof(ProofCommand),
     /// Agent goal planner and command recipe resolver.
     #[command(subcommand)]
     Plan(PlanCommand),
@@ -4956,6 +4959,83 @@ pub struct VerifyBrokerLookupArgs {
         conflicts_with = "records_json"
     )]
     pub runs_jsonl: Option<PathBuf>,
+}
+
+/// Subcommands for `ee proof`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum ProofCommand {
+    /// Decide whether a proof can be reused, waited on, or dispatched.
+    Admit(ProofAdmitArgs),
+    /// Inspect a retained proof-broker fingerprint in an existing ledger.
+    Status(ProofStatusArgs),
+}
+
+/// Arguments for `ee proof admit`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ProofAdmitArgs {
+    /// JSON array of retained `ee.proof_broker.v1` ledger records.
+    #[arg(long = "ledger-json", value_name = "PATH")]
+    pub ledger_json: Option<PathBuf>,
+    /// Bead ID associated with the requested proof.
+    #[arg(long = "bead-id", value_name = "BEAD")]
+    pub bead_id: Option<String>,
+    /// Stable command class, such as cargo_test or cargo_check.
+    #[arg(long = "command-class", default_value = "cargo_test")]
+    pub command_class: String,
+    /// Normalized command hash. Defaults to the hash of the trailing command.
+    #[arg(long = "command-hash", value_name = "HASH")]
+    pub command_hash: Option<String>,
+    /// Fingerprint of normalized argv. Defaults to the resolved command hash.
+    #[arg(long = "normalized-argv-hash", value_name = "HASH")]
+    pub normalized_argv_hash: Option<String>,
+    /// Source tree fingerprint for the current checkout.
+    #[arg(long = "source-hash", value_name = "HASH")]
+    pub source_hash: Option<String>,
+    /// Source materialization class, such as class:external_cargo_target.
+    #[arg(long = "source-materialization", value_name = "CLASS")]
+    pub source_materialization: Option<String>,
+    /// Dirty-status fingerprint or class for the current checkout.
+    #[arg(long = "dirty-status-hash", value_name = "HASH|CLASS")]
+    pub dirty_status_hash: Option<String>,
+    /// Environment fingerprint class for compatibility checks.
+    #[arg(long = "env-fingerprint-class", value_name = "CLASS")]
+    pub env_fingerprint_class: Option<String>,
+    /// Target profile, such as debug or release.
+    #[arg(long = "target-profile", value_name = "PROFILE")]
+    pub target_profile: Option<String>,
+    /// Execution substrate used by the proof, such as rch.
+    #[arg(long = "execution-substrate", default_value = "rch")]
+    pub execution_substrate: String,
+    /// RCH client/daemon/runtime compatibility class.
+    #[arg(long = "rch-runtime-class", value_name = "CLASS")]
+    pub rch_runtime_class: Option<String>,
+    /// Worker requirement class or exact worker selector.
+    #[arg(long = "worker-requirement", value_name = "CLASS|WORKER")]
+    pub worker_requirement: Option<String>,
+    /// Local Cargo tripwire class for the current process scan.
+    #[arg(long = "local-cargo-tripwire-class", value_name = "CLASS")]
+    pub local_cargo_tripwire_class: Option<String>,
+    /// Build admission posture class, such as class:admission_ok.
+    #[arg(long = "build-admission-posture", value_name = "CLASS")]
+    pub build_admission_posture: Option<String>,
+    /// Verification command being considered. This surface never executes it.
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "COMMAND"
+    )]
+    pub command: Vec<String>,
+}
+
+/// Arguments for `ee proof status`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ProofStatusArgs {
+    /// JSON array of retained `ee.proof_broker.v1` ledger records.
+    #[arg(long = "ledger-json", value_name = "PATH")]
+    pub ledger_json: Option<PathBuf>,
+    /// Proof-broker fingerprint ID to inspect.
+    #[arg(long = "fingerprint", value_name = "FINGERPRINT_ID")]
+    pub fingerprint: String,
 }
 
 /// Arguments for `ee verify closeout capsule`.
@@ -11535,6 +11615,12 @@ where
         }
         Some(Command::Tripwire(TripwireCommand::Check(ref args))) => {
             handle_tripwire_check(&cli, args, stdout, stderr)
+        }
+        Some(Command::Proof(ProofCommand::Admit(ref args))) => {
+            handle_proof_admit(&cli, args, stdout, stderr)
+        }
+        Some(Command::Proof(ProofCommand::Status(ref args))) => {
+            handle_proof_status(&cli, args, stdout, stderr)
         }
         Some(Command::Verify(VerifyCommand::Record(ref args))) => {
             handle_verification_ingest(&cli, args, stdout, stderr)
@@ -36641,6 +36727,460 @@ fn proof_check_status_label(status: ProofCheckStatus) -> &'static str {
     }
 }
 
+fn handle_proof_admit<W, E>(
+    cli: &Cli,
+    args: &ProofAdmitArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let command_text = proof_command_text(&args.command);
+    if let Some(error) = proof_admit_command_error(args, command_text.as_deref()) {
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let command_hash = args
+        .command_hash
+        .clone()
+        .or_else(|| command_text.as_deref().map(crate::models::command_hash))
+        .unwrap_or_else(|| "class:unknown_command_hash".to_owned());
+    let normalized_argv_hash = args
+        .normalized_argv_hash
+        .as_deref()
+        .unwrap_or(command_hash.as_str());
+    let fingerprint =
+        crate::models::proof_broker_fingerprint(crate::models::ProofBrokerFingerprintInput {
+            bead_id: args.bead_id.as_deref(),
+            command_class: args.command_class.as_str(),
+            command_hash: command_hash.as_str(),
+            normalized_argv_hash,
+            source_tree_fingerprint: args.source_hash.as_deref(),
+            source_materialization: args.source_materialization.as_deref(),
+            dirty_status_hash: args.dirty_status_hash.as_deref(),
+            env_fingerprint_class: args.env_fingerprint_class.as_deref(),
+            target_profile: args.target_profile.as_deref(),
+            execution_substrate: args.execution_substrate.as_str(),
+            rch_runtime_class: args.rch_runtime_class.as_deref(),
+            worker_requirement: args.worker_requirement.as_deref(),
+            local_cargo_tripwire_class: args.local_cargo_tripwire_class.as_deref(),
+            build_admission_posture: args.build_admission_posture.as_deref(),
+        });
+    let records = match read_proof_broker_ledger_records(args.ledger_json.as_deref()) {
+        Ok(records) => records,
+        Err(error) => {
+            let domain_error = proof_ledger_usage_error(error);
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let matched_record = records
+        .iter()
+        .find(|record| record.fingerprint.fingerprint_id == fingerprint.fingerprint_id);
+    let admission = proof_admission_for_fingerprint(
+        &fingerprint,
+        &records,
+        matched_record,
+        args.ledger_json.is_some(),
+    );
+    let verdict = admission.verdict;
+    let data = serde_json::json!({
+        "command": "proof admit",
+        "schema": crate::models::PROOF_BROKER_SCHEMA_V1,
+        "fingerprint": fingerprint,
+        "admission": admission,
+        "ledger": {
+            "source": proof_ledger_source_label(args.ledger_json.as_deref()),
+            "recordCount": records.len(),
+            "matchedRowId": matched_record.map(|record| record.row_id.as_str()),
+            "matchedState": matched_record.map(|record| record.state.as_str()),
+        },
+        "matchedRecord": matched_record,
+        "freshness": matched_record.map(proof_record_freshness_json),
+        "nextCommand": proof_next_command(verdict, command_text.as_deref(), matched_record),
+        "readOnly": true,
+    });
+
+    write_proof_broker_response(cli, "proof admission", &data, stdout)
+}
+
+fn handle_proof_status<W, E>(
+    cli: &Cli,
+    args: &ProofStatusArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let records = match read_proof_broker_ledger_records(args.ledger_json.as_deref()) {
+        Ok(records) => records,
+        Err(error) => {
+            let domain_error = proof_ledger_usage_error(error);
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let matches: Vec<&crate::models::ProofBrokerLedgerRecord> = records
+        .iter()
+        .filter(|record| record.fingerprint.fingerprint_id == args.fingerprint)
+        .collect();
+    let admission = if let Some(record) = matches.first().copied() {
+        record.admission.clone()
+    } else if args.ledger_json.is_none() {
+        proof_admission_decision(
+            crate::models::ProofBrokerAdmissionVerdict::UnknownInsufficientEvidence,
+            vec!["ledger_missing"],
+            "provide_proof_broker_ledger",
+            None,
+            None,
+        )
+    } else {
+        proof_admission_decision(
+            crate::models::ProofBrokerAdmissionVerdict::UnknownInsufficientEvidence,
+            vec!["fingerprint_not_found"],
+            "collect_or_dispatch_fresh_proof",
+            None,
+            None,
+        )
+    };
+    let verdict = admission.verdict;
+    let first_record = matches.first().copied();
+    let data = serde_json::json!({
+        "command": "proof status",
+        "schema": crate::models::PROOF_BROKER_SCHEMA_V1,
+        "fingerprintId": args.fingerprint,
+        "admission": admission,
+        "ledger": {
+            "source": proof_ledger_source_label(args.ledger_json.as_deref()),
+            "recordCount": records.len(),
+            "matchCount": matches.len(),
+        },
+        "matches": matches,
+        "freshness": first_record.map(proof_record_freshness_json),
+        "nextCommand": proof_next_command(verdict, None, first_record),
+        "readOnly": true,
+    });
+
+    write_proof_broker_response(cli, "proof status", &data, stdout)
+}
+
+fn proof_admit_command_error(
+    args: &ProofAdmitArgs,
+    command_text: Option<&str>,
+) -> Option<DomainError> {
+    if args.command_hash.is_none() && command_text.is_none() {
+        return Some(proof_usage_error(
+            "proof_admit_command_missing",
+            "proof admission needs either --command-hash or a trailing command after --",
+            "rerun with --command-hash <hash> or `-- cargo test ...`",
+        ));
+    }
+    if !args.command.is_empty() && !proof_command_is_supported(&args.command) {
+        return Some(proof_usage_error(
+            "proof_admit_command_unsupported",
+            format!(
+                "unsupported proof command '{}'",
+                args.command.first().map(String::as_str).unwrap_or("")
+            ),
+            "use a cargo command, rch command, or scripts/rch_verify.sh command",
+        ));
+    }
+    None
+}
+
+fn proof_command_text(command: &[String]) -> Option<String> {
+    if command.is_empty() {
+        None
+    } else {
+        Some(command.join(" "))
+    }
+}
+
+fn proof_command_is_supported(command: &[String]) -> bool {
+    command.iter().any(|token| {
+        token == "cargo"
+            || token == "rch"
+            || token == "scripts/rch_verify.sh"
+            || token == "./scripts/rch_verify.sh"
+            || token.ends_with("/scripts/rch_verify.sh")
+    })
+}
+
+fn read_proof_broker_ledger_records(
+    path: Option<&Path>,
+) -> Result<Vec<crate::models::ProofBrokerLedgerRecord>, String> {
+    let Some(path) = path else {
+        return Ok(Vec::new());
+    };
+    let input = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "Failed to read proof broker ledger '{}': {error}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str::<Vec<crate::models::ProofBrokerLedgerRecord>>(&input)
+        .map_err(|error| format!("Invalid proof broker ledger JSON: {error}"))
+}
+
+fn proof_admission_for_fingerprint(
+    fingerprint: &crate::models::ProofBrokerFingerprint,
+    records: &[crate::models::ProofBrokerLedgerRecord],
+    matched_record: Option<&crate::models::ProofBrokerLedgerRecord>,
+    ledger_was_supplied: bool,
+) -> crate::models::ProofBrokerAdmissionDecision {
+    if let Some(record) = matched_record {
+        return record.admission.clone();
+    }
+    if !ledger_was_supplied {
+        return proof_admission_decision(
+            crate::models::ProofBrokerAdmissionVerdict::UnknownInsufficientEvidence,
+            vec!["ledger_missing"],
+            "provide_proof_broker_ledger",
+            None,
+            None,
+        );
+    }
+    if records.iter().any(|record| {
+        record.fingerprint.command_hash == fingerprint.command_hash
+            && record.fingerprint.command_class == fingerprint.command_class
+            && record.fingerprint.execution_substrate == fingerprint.execution_substrate
+    }) {
+        return proof_admission_decision(
+            crate::models::ProofBrokerAdmissionVerdict::SourceStateMismatch,
+            vec!["command_match", "fingerprint_mismatch"],
+            "rerun_current_source",
+            records
+                .iter()
+                .find_map(|record| record.admission.reuse_run_id.as_deref()),
+            None,
+        );
+    }
+    if proof_fingerprint_is_unknown(fingerprint) {
+        return proof_admission_decision(
+            crate::models::ProofBrokerAdmissionVerdict::UnknownInsufficientEvidence,
+            proof_unknown_reason_codes(fingerprint),
+            "collect_source_and_environment_evidence",
+            None,
+            None,
+        );
+    }
+    if fingerprint.rch_runtime_class.contains("mismatch")
+        || fingerprint.worker_requirement.contains("no_worker")
+        || fingerprint.build_admission_posture.contains("blocked")
+    {
+        return proof_admission_decision(
+            crate::models::ProofBrokerAdmissionVerdict::EnvironmentBlocked,
+            vec!["environment_or_worker_blocked"],
+            "repair_remote_runtime_before_dispatch",
+            None,
+            None,
+        );
+    }
+    if fingerprint.local_cargo_tripwire_class.contains("bypass")
+        || fingerprint.local_cargo_tripwire_class.contains("blocked")
+    {
+        return proof_admission_decision(
+            crate::models::ProofBrokerAdmissionVerdict::ProofUnusable,
+            vec!["local_cargo_tripwire_blocked", "remote_required"],
+            "discard_local_cargo_evidence_and_rerun_remote",
+            None,
+            None,
+        );
+    }
+    proof_admission_decision(
+        crate::models::ProofBrokerAdmissionVerdict::DispatchAllowed,
+        vec!["no_equivalent_record", "read_only_admission"],
+        "launch_single_rch_proof",
+        None,
+        None,
+    )
+}
+
+fn proof_fingerprint_is_unknown(fingerprint: &crate::models::ProofBrokerFingerprint) -> bool {
+    fingerprint.source_tree_fingerprint == "class:unknown_source"
+        || fingerprint.env_fingerprint_class == "class:unknown_env"
+        || fingerprint.rch_runtime_class == "class:unknown_rch_runtime"
+        || fingerprint.local_cargo_tripwire_class == "class:tripwire_unknown"
+        || fingerprint.build_admission_posture == "class:admission_unknown"
+}
+
+fn proof_unknown_reason_codes(
+    fingerprint: &crate::models::ProofBrokerFingerprint,
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if fingerprint.source_tree_fingerprint == "class:unknown_source" {
+        reasons.push("source_fingerprint_missing");
+    }
+    if fingerprint.env_fingerprint_class == "class:unknown_env" {
+        reasons.push("env_class_missing");
+    }
+    if fingerprint.rch_runtime_class == "class:unknown_rch_runtime" {
+        reasons.push("rch_runtime_unknown");
+    }
+    if fingerprint.local_cargo_tripwire_class == "class:tripwire_unknown" {
+        reasons.push("tripwire_unknown");
+    }
+    if fingerprint.build_admission_posture == "class:admission_unknown" {
+        reasons.push("build_admission_unknown");
+    }
+    reasons
+}
+
+fn proof_admission_decision(
+    verdict: crate::models::ProofBrokerAdmissionVerdict,
+    reason_codes: Vec<&str>,
+    next_action: &str,
+    reuse_run_id: Option<&str>,
+    wait_owner: Option<crate::models::ProofBrokerOwnerRef>,
+) -> crate::models::ProofBrokerAdmissionDecision {
+    crate::models::ProofBrokerAdmissionDecision {
+        verdict,
+        reason_codes: reason_codes.into_iter().map(str::to_owned).collect(),
+        next_action: next_action.to_owned(),
+        reuse_run_id: reuse_run_id.map(str::to_owned),
+        wait_owner,
+    }
+}
+
+fn proof_next_command(
+    verdict: crate::models::ProofBrokerAdmissionVerdict,
+    command_text: Option<&str>,
+    record: Option<&crate::models::ProofBrokerLedgerRecord>,
+) -> String {
+    match verdict {
+        crate::models::ProofBrokerAdmissionVerdict::ReuseExisting => record
+            .and_then(|record| record.admission.reuse_run_id.as_deref())
+            .map(|run_id| format!("cite proof broker run {run_id}"))
+            .unwrap_or_else(|| "cite matched proof broker row".to_owned()),
+        crate::models::ProofBrokerAdmissionVerdict::WaitForInflight => record
+            .and_then(|record| record.owner.as_ref())
+            .and_then(|owner| owner.rch_job_id.as_deref())
+            .map(|job_id| format!("wait for in-flight RCH job {job_id}"))
+            .unwrap_or_else(|| "wait for in-flight proof owner".to_owned()),
+        crate::models::ProofBrokerAdmissionVerdict::DispatchAllowed => command_text
+            .map(proof_dispatch_command)
+            .unwrap_or_else(|| "run one remote proof through scripts/rch_verify.sh".to_owned()),
+        crate::models::ProofBrokerAdmissionVerdict::SourceStateMismatch => {
+            "refresh source fingerprint and rerun remote proof for current source".to_owned()
+        }
+        crate::models::ProofBrokerAdmissionVerdict::EnvironmentBlocked => {
+            "repair RCH runtime or worker admission before dispatch".to_owned()
+        }
+        crate::models::ProofBrokerAdmissionVerdict::ProofUnusable => {
+            "discard unusable evidence and collect a remote-required proof".to_owned()
+        }
+        crate::models::ProofBrokerAdmissionVerdict::UnknownInsufficientEvidence => {
+            "collect source, environment, tripwire, and ledger evidence before dispatch".to_owned()
+        }
+    }
+}
+
+fn proof_dispatch_command(command_text: &str) -> String {
+    if command_text.contains("scripts/rch_verify.sh") || command_text.starts_with("rch ") {
+        command_text.to_owned()
+    } else {
+        format!("RCH_REQUIRE_REMOTE=1 scripts/rch_verify.sh -- {command_text}")
+    }
+}
+
+fn proof_record_freshness_json(
+    record: &crate::models::ProofBrokerLedgerRecord,
+) -> serde_json::Value {
+    serde_json::json!({
+        "createdAt": record.created_at,
+        "startedAt": record.started_at,
+        "completedAt": record.completed_at,
+        "expiresAt": record.expires_at,
+        "sourceStateValidUntil": record.source_state_valid_until,
+        "invalidationReasons": record.invalidation_reasons,
+    })
+}
+
+fn proof_ledger_source_label(path: Option<&Path>) -> &'static str {
+    if path.is_some() {
+        "ledger_json"
+    } else {
+        "none"
+    }
+}
+
+fn proof_usage_error(
+    code: &'static str,
+    message: impl Into<String>,
+    repair: impl Into<String>,
+) -> DomainError {
+    let repair = repair.into();
+    DomainError::UsageCodeWithDetails {
+        code,
+        message: message.into(),
+        repair: Some(repair.clone()),
+        details_json: serde_json::json!({
+            "recovery": [
+                {
+                    "priority": 1,
+                    "kind": "command",
+                    "rationale": "Proof admission is read-only and never launches Cargo or RCH.",
+                    "command": "ee proof admit --json --ledger-json proof-ledger.json --bead-id <id> -- cargo test --workspace --lib <filter>",
+                    "resultsIn": "A reusable, wait, dispatch, blocked, unusable, or unknown admission decision."
+                }
+            ],
+            "repairHint": repair,
+        })
+        .to_string(),
+    }
+}
+
+fn proof_ledger_usage_error(message: String) -> DomainError {
+    proof_usage_error(
+        "proof_broker_ledger_invalid",
+        message,
+        "provide a JSON array of ee.proof_broker.v1 ledger records",
+    )
+}
+
+fn write_proof_broker_response<W>(
+    cli: &Cli,
+    label: &str,
+    data: &serde_json::Value,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_proof_broker_human(label, data))
+        }
+        output::Renderer::Toon => {
+            let json = verification_response_json(data.clone()).to_string();
+            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = verification_response_json(data.clone());
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn render_proof_broker_human(label: &str, data: &serde_json::Value) -> String {
+    let verdict = data["admission"]["verdict"].as_str().unwrap_or("unknown");
+    let next_action = data["admission"]["nextAction"]
+        .as_str()
+        .unwrap_or("inspect_broker_record");
+    let fingerprint = data["fingerprint"]["fingerprintId"]
+        .as_str()
+        .or_else(|| data["fingerprintId"].as_str())
+        .unwrap_or("unknown");
+    let count = data["ledger"]["recordCount"].as_u64().unwrap_or(0);
+    format!(
+        "{label}\n  Verdict: {verdict}\n  Next action: {next_action}\n  Fingerprint: {fingerprint}\n  Ledger records: {count}\n"
+    )
+}
+
 fn handle_verify_broker_lookup<W, E>(
     cli: &Cli,
     args: &VerifyBrokerLookupArgs,
@@ -48293,6 +48833,7 @@ const COMMAND_NAMES: &[&str] = &[
     "plan",
     "playbook",
     "preflight",
+    "proof",
     "proximity",
     "profile",
     "procedure",
@@ -48439,6 +48980,7 @@ const PREFLIGHT_SUBCOMMANDS: &[&str] = &[
     "revoke-bypass-token",
     "list-bypass-tokens",
 ];
+const PROOF_SUBCOMMANDS: &[&str] = &["admit", "status"];
 const PROFILE_SUBCOMMANDS: &[&str] = &["config"];
 const PROFILE_CONFIG_SUBCOMMANDS: &[&str] = &["plan", "apply"];
 const PROCEDURE_SUBCOMMANDS: &[&str] = &[
@@ -48833,6 +49375,10 @@ impl NormalizedInvocation {
                     PreflightCommand::Check(_) => "preflight check".to_string(),
                     PreflightCommand::Guard(_) => "preflight guard".to_string(),
                 },
+                Command::Proof(proof) => match proof {
+                    ProofCommand::Admit(_) => "proof admit".to_string(),
+                    ProofCommand::Status(_) => "proof status".to_string(),
+                },
                 Command::Plan(plan) => match plan {
                     PlanCommand::Goal(_) => "plan goal".to_string(),
                     PlanCommand::Recipe(PlanRecipeCommand::List(_)) => {
@@ -49155,6 +49701,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "plan recipe" => Some(PLAN_RECIPE_SUBCOMMANDS),
         "playbook" => Some(PLAYBOOK_SUBCOMMANDS),
         "preflight" => Some(PREFLIGHT_SUBCOMMANDS),
+        "proof" => Some(PROOF_SUBCOMMANDS),
         "profile" => Some(PROFILE_SUBCOMMANDS),
         "profile config" => Some(PROFILE_CONFIG_SUBCOMMANDS),
         "procedure" => Some(PROCEDURE_SUBCOMMANDS),
@@ -56098,6 +56645,289 @@ mod tests {
             &value["data"]["broker"]["suggestedAction"],
             &serde_json::json!("cite_existing_run"),
             "verify broker suggested action",
+        )
+    }
+
+    #[test]
+    fn proof_admit_json_reuses_completed_record_without_running() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ledger_path = tempdir.path().join("proof-ledger.json");
+        let records = crate::models::sample_proof_broker_ledger_records();
+        let records_json = serde_json::to_string(&records)
+            .map_err(|error| format!("serialize proof ledger records: {error}"))?;
+        fs::write(&ledger_path, records_json)
+            .map_err(|error| format!("write proof ledger fixture: {error}"))?;
+        let ledger_path = ledger_path.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "proof",
+            "admit",
+            "--ledger-json",
+            &ledger_path,
+            "--bead-id",
+            "bd-1n3x1.1",
+            "--command-hash",
+            "blake3:rch-command",
+            "--normalized-argv-hash",
+            "blake3:rch-command-argv",
+            "--source-hash",
+            "blake3:source",
+            "--source-materialization",
+            "git_worktree",
+            "--dirty-status-hash",
+            "blake3:dirty-status-clean",
+            "--env-fingerprint-class",
+            "class:external_cargo_target",
+            "--target-profile",
+            "debug",
+            "--execution-substrate",
+            "rch",
+            "--rch-runtime-class",
+            "class:rch_client_1_0_37_daemon_0_1_3",
+            "--worker-requirement",
+            "required_runtime:rust",
+            "--local-cargo-tripwire-class",
+            "class:tripwire_clean",
+            "--build-admission-posture",
+            "remote_required_no_local_fallback",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "proof admit reuse exit")?;
+        ensure(stderr.is_empty(), "proof admit reuse stderr clean")?;
+        ensure_ends_with(&stdout, '\n', "proof admit reuse trailing newline")?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("proof admit reuse stdout must parse: {error}"))?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v2"),
+            "proof admit response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!("ee.proof_broker.v1"),
+            "proof admit data schema",
+        )?;
+        ensure_equal(
+            &value["data"]["admission"]["verdict"],
+            &serde_json::json!("reuse_existing"),
+            "proof admit reuse verdict",
+        )?;
+        ensure_equal(
+            &value["data"]["ledger"]["matchedState"],
+            &serde_json::json!("completed"),
+            "proof admit reuse matched state",
+        )?;
+        ensure_equal(
+            &value["data"]["admission"]["reuseRunId"],
+            &serde_json::json!("vrun_rch_00000000000000000001"),
+            "proof admit reuse run id",
+        )?;
+        ensure_equal(
+            &value["data"]["readOnly"],
+            &serde_json::json!(true),
+            "proof admit is read-only",
+        )
+    }
+
+    #[test]
+    fn proof_status_json_reports_inflight_owner() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ledger_path = tempdir.path().join("proof-ledger.json");
+        let records = crate::models::sample_proof_broker_ledger_records();
+        let fingerprint = records[1].fingerprint.fingerprint_id.clone();
+        let records_json = serde_json::to_string(&records)
+            .map_err(|error| format!("serialize proof ledger records: {error}"))?;
+        fs::write(&ledger_path, records_json)
+            .map_err(|error| format!("write proof ledger fixture: {error}"))?;
+        let ledger_path = ledger_path.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "proof",
+            "status",
+            "--ledger-json",
+            &ledger_path,
+            "--fingerprint",
+            &fingerprint,
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "proof status inflight exit",
+        )?;
+        ensure(stderr.is_empty(), "proof status inflight stderr clean")?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("proof status stdout must parse: {error}"))?;
+        ensure_equal(
+            &value["data"]["admission"]["verdict"],
+            &serde_json::json!("wait_for_inflight"),
+            "proof status inflight verdict",
+        )?;
+        ensure_equal(
+            &value["data"]["ledger"]["matchCount"],
+            &serde_json::json!(1),
+            "proof status match count",
+        )?;
+        ensure_equal(
+            &value["data"]["admission"]["waitOwner"]["rchJobId"],
+            &serde_json::json!("rch-job-20260605-0001"),
+            "proof status wait owner job id",
+        )
+    }
+
+    #[test]
+    fn proof_admit_without_ledger_returns_unknown_insufficient_evidence() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "proof",
+            "admit",
+            "--command-hash",
+            "blake3:no-record",
+            "--source-hash",
+            "blake3:source",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "proof admit missing ledger exit",
+        )?;
+        ensure(stderr.is_empty(), "proof admit missing ledger stderr clean")?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("proof admit missing ledger stdout must parse: {error}"))?;
+        ensure_equal(
+            &value["data"]["admission"]["verdict"],
+            &serde_json::json!("unknown_insufficient_evidence"),
+            "proof admit missing ledger verdict",
+        )?;
+        ensure_equal(
+            &value["data"]["admission"]["reasonCodes"],
+            &serde_json::json!(["ledger_missing"]),
+            "proof admit missing ledger reason",
+        )
+    }
+
+    #[test]
+    fn proof_admit_json_surfaces_source_state_mismatch() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ledger_path = tempdir.path().join("proof-ledger.json");
+        let records = crate::models::sample_proof_broker_ledger_records();
+        let records_json = serde_json::to_string(&records)
+            .map_err(|error| format!("serialize proof ledger records: {error}"))?;
+        fs::write(&ledger_path, records_json)
+            .map_err(|error| format!("write proof ledger fixture: {error}"))?;
+        let ledger_path = ledger_path.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "proof",
+            "admit",
+            "--ledger-json",
+            &ledger_path,
+            "--bead-id",
+            "bd-1n3x1.1",
+            "--command-hash",
+            "blake3:rch-command",
+            "--normalized-argv-hash",
+            "blake3:rch-command-argv",
+            "--source-hash",
+            "blake3:new-source",
+            "--source-materialization",
+            "git_worktree",
+            "--dirty-status-hash",
+            "blake3:dirty-status-clean",
+            "--env-fingerprint-class",
+            "class:external_cargo_target",
+            "--target-profile",
+            "debug",
+            "--execution-substrate",
+            "rch",
+            "--rch-runtime-class",
+            "class:rch_client_1_0_37_daemon_0_1_3",
+            "--worker-requirement",
+            "required_runtime:rust",
+            "--local-cargo-tripwire-class",
+            "class:tripwire_clean",
+            "--build-admission-posture",
+            "remote_required_no_local_fallback",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "proof admit source mismatch exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "proof admit source mismatch stderr clean",
+        )?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("proof admit source mismatch stdout must parse: {error}"))?;
+        ensure_equal(
+            &value["data"]["admission"]["verdict"],
+            &serde_json::json!("source_state_mismatch"),
+            "proof admit source mismatch verdict",
+        )?;
+        ensure(
+            value["data"]["admission"]["reasonCodes"]
+                .as_array()
+                .is_some_and(|reasons| {
+                    reasons
+                        .iter()
+                        .any(|reason| reason == "fingerprint_mismatch")
+                }),
+            "proof admit source mismatch includes reason",
+        )
+    }
+
+    #[test]
+    fn proof_admit_missing_command_returns_usage_error() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "proof", "admit"]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Usage,
+            "proof admit missing command exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "proof admit missing command stderr clean",
+        )?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("proof admit missing command stdout must parse: {error}"))?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.error.v2"),
+            "proof admit missing command error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("proof_admit_command_missing"),
+            "proof admit missing command error code",
+        )
+    }
+
+    #[test]
+    fn proof_admit_unsupported_command_returns_usage_error() -> TestResult {
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--json", "proof", "admit", "--", "echo", "nope"]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Usage,
+            "proof admit unsupported command exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "proof admit unsupported command stderr clean",
+        )?;
+        let value: serde_json::Value = serde_json::from_str(&stdout).map_err(|error| {
+            format!("proof admit unsupported command stdout must parse: {error}")
+        })?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("proof_admit_command_unsupported"),
+            "proof admit unsupported command error code",
         )
     }
 
