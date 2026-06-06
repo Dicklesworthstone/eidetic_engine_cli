@@ -24,7 +24,7 @@ use ee::search::plan_cache::{
     compute_plan_tree_hash, compute_search_config_hash,
 };
 use proptest::prelude::*;
-use proptest::test_runner::Config as ProptestConfig;
+use proptest::test_runner::{Config as ProptestConfig, TestCaseError};
 
 fn arbitrary_query_string() -> impl Strategy<Value = String> {
     // Keep generated queries short so each proptest iteration stays cheap.
@@ -96,7 +96,10 @@ proptest! {
     ) {
         let mut cache = PlanCache::new(capacity);
         let inserted = cache.insert(key, plan.clone());
-        let hit = cache.get(&key).expect("round-trip should hit");
+        let hit = match cache.get(&key) {
+            Some(hit) => hit,
+            None => return Err(TestCaseError::fail("round-trip should hit")),
+        };
         prop_assert_eq!(&hit.plan, &plan);
         prop_assert_eq!(&hit.plan_tree_hash, &inserted.plan_tree_hash);
     }
