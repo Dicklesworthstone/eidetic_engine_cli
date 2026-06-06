@@ -639,7 +639,7 @@ mod tests {
             Instant::now(),
             Duration::from_secs(1),
             Duration::from_secs(1),
-            Duration::from_millis(1),
+            Duration::ZERO,
         ))?;
 
         assert_eq!(report.status, CentralityRefreshStatus::Refreshed);

@@ -253,9 +253,15 @@ fn compare_explanation_cost(
     // `src/core/focus_suggest.rs:569`, `src/core/plan.rs:1355`, and
     // `src/core/situation.rs:1268` migrated to. The pre-sort by
     // `sort_by_ulid_payload_or_lexical` at line 183-185 still
-    // provides the cause_id-order tiebreak for true cost ties via
-    // Rust's stable `sort_by`.
-    left.total_cost.total_cmp(&right.total_cost)
+    // provides the cause_id-order tiebreak for ordinary equal-cost
+    // explanations via Rust's stable `sort_by`; repeat the same
+    // lexical tiebreak here for distinct NaN payloads because
+    // `total_cmp` orders those payloads, and tests intentionally use
+    // multiple `f64::NAN` values whose payload ordering is not a
+    // useful public contract.
+    left.total_cost
+        .total_cmp(&right.total_cost)
+        .then_with(|| left.cause_id.cmp(&right.cause_id))
 }
 
 fn terminal_ancestors(graph: &DiGraph, failure_id: &str) -> Vec<String> {

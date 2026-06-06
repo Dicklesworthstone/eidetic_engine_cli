@@ -2358,7 +2358,7 @@ mod tests {
             snapshot_content_hash: "blake3:algorithm-expired-persistent-cache-snapshot",
             algorithm: "pagerank",
             params: &params,
-            ttl_seconds: 0,
+            ttl_seconds: 1,
         };
         let params_hash = graph_result(graph_algorithm_params_hash(
             spec.algorithm,
@@ -2372,8 +2372,22 @@ mod tests {
                 algorithm: spec.algorithm.to_owned(),
                 params_hash: params_hash.clone(),
                 result_json: r#"{"scores":[["mem_a",0.75]]}"#.to_owned(),
-                ttl_seconds: 0,
+                ttl_seconds: 1,
             })
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "UPDATE graph_algorithm_results SET computed_at = ?1 \
+                 WHERE workspace_id = ?2 AND snapshot_id = ?3 \
+                 AND algorithm = ?4 AND params_hash = ?5",
+                &[
+                    fsqlite::Value::Text("2026-01-01T00:00:00Z".to_owned()),
+                    fsqlite::Value::Text(workspace_id.to_owned()),
+                    fsqlite::Value::Text(snapshot_id.to_owned()),
+                    fsqlite::Value::Text(spec.algorithm.to_owned()),
+                    fsqlite::Value::Text(params_hash.clone()),
+                ],
+            )
             .map_err(|error| error.to_string())?;
 
         let mut first_loaded = Some(serde_json::json!({"scores":[["mem_a",0.75]]}));

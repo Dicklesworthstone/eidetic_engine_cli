@@ -7882,7 +7882,7 @@ mod tests {
         insert_link_with_metadata(
             &connection,
             "link_00000000000000000000000029",
-            MEMORY_C,
+            MEMORY_B,
             MEMORY_A,
             true,
             0.9,
@@ -7895,7 +7895,7 @@ mod tests {
             &connection,
             "link_00000000000000000000000030",
             MEMORY_A,
-            MEMORY_C,
+            MEMORY_A,
             true,
             0.9,
             0.9,
@@ -7906,8 +7906,8 @@ mod tests {
         insert_link_with_metadata(
             &connection,
             "link_00000000000000000000000031",
-            MEMORY_A,
-            MEMORY_C,
+            MEMORY_B,
+            MEMORY_B,
             true,
             0.9,
             0.9,

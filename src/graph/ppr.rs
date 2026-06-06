@@ -1698,20 +1698,20 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
-        for snapshot_id in [snapshot_a, snapshot_b] {
+        for (snapshot_id, snapshot_version) in [(snapshot_a, 14), (snapshot_b, 15)] {
             connection
                 .insert_graph_snapshot(
                     snapshot_id,
                     &CreateGraphSnapshotInput {
                         workspace_id: WORKSPACE_ID.to_owned(),
-                        snapshot_version: 14,
+                        snapshot_version,
                         schema_version: "ee.graph.snapshot.v1".to_owned(),
                         graph_type: GraphSnapshotType::MemoryLinks,
                         node_count: 2,
                         edge_count: 1,
                         metrics_json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
                         content_hash: content_hash.to_owned(),
-                        source_generation: 14,
+                        source_generation: snapshot_version,
                         expires_at: None,
                     },
                 )

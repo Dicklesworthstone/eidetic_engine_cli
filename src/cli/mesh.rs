@@ -3930,7 +3930,7 @@ mod tests {
                 logical_memory_id: "mem_mesh_replay_counts".to_string(),
                 content_hash: hash_for_test('d'),
                 material_lane: "metadata".to_string(),
-                redaction_class: "share".to_string(),
+                redaction_class: "metadataOnly".to_string(),
                 trust_lane: "peerAgent".to_string(),
                 import_decision: "accepted".to_string(),
                 local_memory_id: None,

@@ -3292,7 +3292,7 @@ AGENT_NAME = os.environ.get("AGENT_NAME", "").strip()
             Err(error) => error,
         };
 
-        assert_eq!(error.code(), "storage_error");
+        assert_eq!(error.code(), "storage");
         assert!(
             error
                 .message()
