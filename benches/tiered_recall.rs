@@ -30,6 +30,23 @@ const TIERED_RECALL_CANDIDATE_POOL: u32 = 192;
 const TIERED_RECALL_BUDGET_P50_MS: f64 = 140.0;
 const TIERED_RECALL_BUDGET_P99_MS: f64 = 340.0;
 
+const _: () = assert!(
+    (TIERED_RECALL_CANDIDATE_POOL as usize) < TIERED_RECALL_MEMORY_COUNT,
+    "tiered recall proof must not request the whole corpus"
+);
+const _: () = assert!(
+    TIERED_RECALL_CANDIDATE_POOL > 128,
+    "bounded pool should still cross the hot tier budget and exercise warm admission"
+);
+const _: () = assert!(
+    TIERED_RECALL_MEMORY_COUNT > 640,
+    "default hot+warm budgets are 640, so the fixture must force a cold tier"
+);
+const _: () = assert!(
+    TIERED_RECALL_BUDGET_P50_MS > 0.0 && TIERED_RECALL_BUDGET_P99_MS >= TIERED_RECALL_BUDGET_P50_MS,
+    "tiered recall benchmark budgets must be positive and monotonic"
+);
+
 fn stable_workspace_id(path: &Path) -> String {
     let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
     let mut bytes = [0_u8; 16];
@@ -190,23 +207,6 @@ fn context_options(workspace_path: &Path, index_dir: &Path) -> ContextPackOption
 fn assert_tiered_recall_benchmark_contract() {
     assert_eq!(TIERED_RECALL_BENCH_GROUP, "ee_tiered_recall");
     assert_eq!(TIERED_RECALL_OPERATION, "ee_tiered_recall_context");
-    assert!(
-        (TIERED_RECALL_CANDIDATE_POOL as usize) < TIERED_RECALL_MEMORY_COUNT,
-        "tiered recall proof must not request the whole corpus"
-    );
-    assert!(
-        TIERED_RECALL_CANDIDATE_POOL > 128,
-        "bounded pool should still cross the hot tier budget and exercise warm admission"
-    );
-    assert!(
-        TIERED_RECALL_MEMORY_COUNT > 640,
-        "default hot+warm budgets are 640, so the fixture must force a cold tier"
-    );
-    assert!(
-        TIERED_RECALL_BUDGET_P50_MS > 0.0
-            && TIERED_RECALL_BUDGET_P99_MS >= TIERED_RECALL_BUDGET_P50_MS,
-        "tiered recall benchmark budgets must be positive and monotonic"
-    );
     black_box((TIERED_RECALL_BUDGET_P50_MS, TIERED_RECALL_BUDGET_P99_MS));
 }
 
