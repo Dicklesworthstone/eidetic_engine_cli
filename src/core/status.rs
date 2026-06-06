@@ -4248,7 +4248,7 @@ fn gather_memory_health_with_connection(
                     code: "memory_health_unavailable",
                     severity: "medium",
                     message: "Memory health is unavailable because memory rows could not be read.",
-                    repair: "Run `ee db migrate --workspace .` and `ee doctor --json`.",
+                    repair: "Run `ee migrate run --workspace .` and `ee doctor --json`.",
                 }],
             );
         }
@@ -4483,7 +4483,7 @@ fn gather_curation_health_with_connection(
                     code: "curation_health_unavailable",
                     severity: "medium",
                     message: "Curation health is unavailable because candidate rows could not be read.",
-                    repair: "Run `ee db migrate --workspace .` and `ee doctor --json`.",
+                    repair: "Run `ee migrate run --workspace .` and `ee doctor --json`.",
                 }],
             );
         }
@@ -4571,7 +4571,7 @@ fn gather_feedback_health_with_connection(
                     code: "feedback_health_unavailable",
                     severity: "medium",
                     message: "Feedback health is unavailable because feedback rows could not be read.",
-                    repair: "Run `ee db migrate --workspace .` and `ee doctor --json`.",
+                    repair: "Run `ee migrate run --workspace .` and `ee doctor --json`.",
                 }],
             );
         }

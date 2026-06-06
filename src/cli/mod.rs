@@ -31353,6 +31353,12 @@ fn write_db_status_output<W: Write>(
     let degraded = db_status_degraded(report);
     let migration_pending = db_status_has_pending_migration(report);
     let success = report.error.is_none() && !migration_pending;
+    // `db status` is a read-only diagnostic: it exits 0 once it has successfully
+    // inspected the workspace, reporting DB health (including a missing/unopenable
+    // DB) in the `error` field + `success: false` rather than failing the process
+    // — the same pattern as `ee status`/`ee doctor`, and asserted by
+    // `db_status_reports_missing_database_explicitly`. Only a pending migration
+    // escalates the exit code so scripts can gate on it.
     let exit_code = if migration_pending {
         ProcessExitCode::MigrationRequired
     } else {
@@ -32597,7 +32603,7 @@ where
 // (migrate() / needs_migration() / schema_version()). Each handler emits an
 // ee.response.v2 envelope and uses the standard exit codes:
 //   - Success when up-to-date (status) or applied (run)
-//   - DegradedRequired (8) when status reports pending migrations
+//   - MigrationRequired (8) when status reports pending migrations
 //   - Storage on DB open / mutation errors
 // ============================================================================
 
@@ -32691,7 +32697,7 @@ where
         }
     }
 
-    // Exit code 8 (DegradedRequired) when migration is needed so calling
+    // Exit code 8 (MigrationRequired) when migration is needed so calling
     // scripts/agents can detect the condition without parsing JSON.
     if needs_migration {
         ProcessExitCode::MigrationRequired
