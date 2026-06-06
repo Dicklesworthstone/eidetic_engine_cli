@@ -1283,7 +1283,7 @@ fn explain_memory_inner(
                 code: "why_pack_selection_unavailable",
                 severity: "low",
                 message,
-                repair: Some("ee db migrate".to_string()),
+                repair: Some("ee migrate run --workspace . --json".to_string()),
             });
         }
     };
@@ -2642,7 +2642,7 @@ impl<T> WhyEvidenceFetch<T> {
                 message: format!(
                     "Could not read {label} for this memory; the evidence is omitted instead of treated as absent. Error: {error}"
                 ),
-                repair: Some("ee db migrate".to_owned()),
+                repair: Some("ee migrate run --workspace . --json".to_owned()),
             }),
         }
     }
@@ -4374,7 +4374,7 @@ mod tests {
                 code: "graph_dominance_no_revision_chain".to_owned(),
                 severity: "warning".to_owned(),
                 message: "higher-severity graph dominance message".to_owned(),
-                repair: Some("ee graph refresh --workspace .".to_owned()),
+                repair: Some("ee graph snapshot refresh --workspace .".to_owned()),
             },
         ]);
 
@@ -4396,7 +4396,7 @@ mod tests {
         )?;
         ensure(
             degraded[0]["repair"].as_str(),
-            Some("ee graph refresh --workspace ."),
+            Some("ee graph snapshot refresh --workspace ."),
             "aggregate repair",
         )?;
         ensure(

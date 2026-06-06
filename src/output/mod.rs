@@ -19654,7 +19654,7 @@ mod tests {
                 contradiction_density: 0.625,
                 example_memory_ids: vec!["mem_a".to_owned(), "mem_b".to_owned()],
                 severity: "medium".to_owned(),
-                suggested_action: "ee curate review --cluster cluster_contradiction".to_owned(),
+                suggested_action: "ee curate candidates --workspace . --json".to_owned(),
             }],
             summary: StructuralHealthSummary {
                 status: "degraded".to_owned(),
@@ -20097,7 +20097,7 @@ mod tests {
         )?;
         ensure_contains(
             &markdown,
-            "- `cluster_contradiction` memories=3 density=0.625000 severity=`medium` examples=mem_a, mem_b action=`ee curate review --cluster cluster_contradiction`",
+            "- `cluster_contradiction` memories=3 density=0.625000 severity=`medium` examples=mem_a, mem_b action=`ee curate candidates --workspace . --json`",
             "structural markdown contradiction cluster",
         )?;
         ensure_contains(

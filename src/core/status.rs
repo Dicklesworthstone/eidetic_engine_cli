@@ -3112,7 +3112,9 @@ const fn curation_posture_fallback(
         SubsystemPostureStatus::DegradedRecoverable => {
             Some("ee curate candidates --workspace . --json")
         }
-        SubsystemPostureStatus::DegradedRequired => Some("ee curate review --workspace . --json"),
+        SubsystemPostureStatus::DegradedRequired => {
+            Some("ee curate candidates --workspace . --json")
+        }
         SubsystemPostureStatus::Blocked => Some("ee doctor --json"),
         SubsystemPostureStatus::Unimplemented => Some("use a binary built with curation support"),
     }
@@ -4497,7 +4499,7 @@ fn gather_curation_health_with_connection(
                     code: "curation_ttl_policy_unavailable",
                     severity: "medium",
                     message: "Curation TTL policy rows could not be read.",
-                    repair: "Run `ee db migrate --workspace .`.",
+                    repair: "Run `ee migrate run --workspace .`.",
                 }],
             );
         }
@@ -4586,7 +4588,7 @@ fn gather_feedback_health_with_connection(
                         code: "feedback_quarantine_unavailable",
                         severity: "medium",
                         message: "Feedback quarantine rows could not be read.",
-                        repair: "Run `ee db migrate --workspace .`.",
+                        repair: "Run `ee migrate run --workspace .`.",
                     }],
                 );
             }
@@ -4600,7 +4602,7 @@ fn gather_feedback_health_with_connection(
                     code: "feedback_protected_rules_unavailable",
                     severity: "medium",
                     message: "Protected procedural rule rows could not be read.",
-                    repair: "Run `ee db migrate --workspace .`.",
+                    repair: "Run `ee migrate run --workspace .`.",
                 }],
             );
         }

@@ -398,7 +398,9 @@ impl JsonlImportError {
     pub const fn repair_hint(&self) -> Option<&'static str> {
         match self {
             Self::Io { .. } => Some("check the JSONL source path and workspace permissions"),
-            Self::Storage(_) => Some("ee init --workspace . && ee db migrate --workspace ."),
+            Self::Storage(_) => {
+                Some("ee init --workspace . && ee migrate run --workspace . --json")
+            }
         }
     }
 }

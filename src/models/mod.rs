@@ -940,7 +940,6 @@ pub fn repair_action_safety(kind: RecoveryKind, command: Option<&str>) -> Repair
         }
     } else if command_lower.starts_with("ee migrate run")
         || command_lower.starts_with("ee init")
-        || command_lower.starts_with("ee db migrate")
         || command_lower.starts_with("ee doctor --fix")
         || command_lower.starts_with("ee curate propose-derived")
         || command_lower.starts_with("ee curate apply")

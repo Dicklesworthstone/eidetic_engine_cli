@@ -52999,13 +52999,13 @@ mod tests {
                     code: "why_pack_selection_unavailable",
                     severity: "low",
                     message: "graph selection unavailable".to_string(),
-                    repair: Some("ee graph snapshot rebuild --json".to_string()),
+                    repair: Some("ee graph snapshot refresh --json".to_string()),
                 },
                 WhyDegradation {
                     code: "why_pack_selection_unavailable",
                     severity: "medium",
                     message: "graph selection still unavailable".to_string(),
-                    repair: Some("ee graph snapshot rebuild --workspace . --json".to_string()),
+                    repair: Some("ee graph snapshot refresh --workspace . --json".to_string()),
                 },
             ],
         };

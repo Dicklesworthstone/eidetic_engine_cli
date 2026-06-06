@@ -3295,7 +3295,7 @@ fn mi_dedup_proposals_from_memories(
     // SQLite and is finite today because every insert path runs the
     // value through `UnitScore::parse`, which rejects NaN / Inf. But
     // the proposals returned here render through `mi_dedup_curation_candidates`
-    // into `ee curate list` and `ee curate review` output — a
+    // into `ee curate candidates` output — a
     // determinism-contract surface (same workspace + same memories →
     // byte-identical proposal order). `partial_cmp(NaN, x)` returns
     // `None`, which `unwrap_or(Equal)` then collapses onto an
@@ -5030,7 +5030,7 @@ fn load_bearing_tombstone_protection(
             message: format!(
                 "Failed to build rule-provenance graph for load-bearing guard: {error}"
             ),
-            repair: Some("ee graph refresh --type rule_provenance".to_owned()),
+            repair: Some("ee graph snapshot refresh --graph rule_provenance".to_owned()),
         })?;
     if graph.node_count() == 0 {
         return Ok(None);
@@ -10156,7 +10156,7 @@ fn curate_structural_decay_adjustments(
         .list_all_memory_links(None)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list memory links for structural decay: {error}"),
-            repair: Some("ee graph project --json".to_owned()),
+            repair: Some("ee graph snapshot refresh --json".to_owned()),
         })?;
     let visible_links = links
         .into_iter()
@@ -10323,7 +10323,8 @@ fn evaluate_candidate_for_disposition(
                 "Candidate {} references missing TTL policy {policy_id}.",
                 stored.id
             ),
-            repair: "Run ee db migrate --json or recreate the curation policy table.".to_owned(),
+            repair: "Run ee migrate run --workspace . --json or recreate the curation policy table."
+                .to_owned(),
         });
         return Ok(blocked_disposition(
             stored,
@@ -10331,7 +10332,7 @@ fn evaluate_candidate_for_disposition(
             &review_state,
             "policy_missing",
             "Candidate TTL policy is missing.",
-            "Run ee db migrate --json.",
+            "Run ee migrate run --workspace . --json.",
         ));
     };
 
@@ -13032,7 +13033,7 @@ fn open_existing_database(database_path: &Path) -> Result<DbConnection, DomainEr
         .migrate()
         .map_err(|error| DomainError::MigrationRequired {
             message: format!("Failed to migrate curation database: {error}"),
-            repair: Some("ee db migrate --workspace .".to_owned()),
+            repair: Some("ee migrate run --workspace . --json".to_owned()),
         })?;
     Ok(connection)
 }
