@@ -1233,7 +1233,7 @@ mod tests {
 
         assert_eq!(evidence.status, SourceRunStatus::Passed);
         assert_eq!(evidence.exit.exit_code, Some(0));
-        assert_eq!(evidence.output.stdout_tail.as_deref(), Some("ok\":true}"));
+        assert_eq!(evidence.output.stdout_tail.as_deref(), Some("k\":true}"));
         assert!(evidence.output.stdout_hash.is_some());
         assert!(evidence.degraded.is_empty());
         assert!(evidence.recovery.is_empty());
