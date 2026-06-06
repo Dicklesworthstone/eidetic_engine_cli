@@ -19,7 +19,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use blake3::Hasher;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlmodel_core::{Row as SqlRow, Value as SqlValue};
@@ -36,9 +36,10 @@ use crate::models::regression_causality::{
 };
 use crate::models::{
     ArtifactDegradationSeverity, ArtifactKind, ArtifactSummary, DomainError, MetricValue,
-    ProfileReference, ProvenanceEntry, RedactionLevel, RedactionPosture, SummaryDegradation,
-    SummaryDegradationCode, VERIFICATION_EVIDENCE_SCHEMA_V1, VerificationEvidenceRecord,
-    VerificationStatus, verification_evidence_beads_summary,
+    PROOF_BROKER_SCHEMA_V1, ProfileReference, ProofBrokerLedgerRecord, ProvenanceEntry,
+    RedactionLevel, RedactionPosture, SummaryDegradation, SummaryDegradationCode,
+    VERIFICATION_EVIDENCE_SCHEMA_V1, VerificationEvidenceRecord, VerificationStatus,
+    verification_evidence_beads_summary,
 };
 use crate::output;
 use crate::pack::{
@@ -67,6 +68,7 @@ const STATUS_FILE: &str = "status.json";
 const DOCTOR_FILE: &str = "doctor.json";
 const AUDIT_FILE: &str = "audit.jsonl";
 const VERIFICATION_EVIDENCE_SUMMARY_FILE: &str = "verification_evidence_summary.json";
+const PROOF_BROKER_SUMMARY_FILE: &str = "proof_broker_summary.json";
 const MEMORY_DRIFT_SUMMARY_FILE: &str = "memory_drift_summary.json";
 const CAPABILITIES_FILE: &str = "capabilities.json";
 const SCHEMA_FILE: &str = "schema_version.json";
@@ -118,6 +120,14 @@ const SWARM_INCIDENT_SUMMARY_FILE: &str = "swarm_incident_summary.json";
 const COORDINATION_FALLBACK_SUMMARY_FILE: &str = "coordination_fallback_summary.json";
 const COORDINATION_FALLBACK_LEDGER_FILE: &str = "coordination-fallback-evidence.jsonl";
 const MAX_COORDINATION_FALLBACK_SUMMARY_RECORDS: usize = 16;
+const MAX_PROOF_BROKER_SUMMARY_RECORDS: usize = 16;
+const MAX_PROOF_BROKER_LEDGER_BYTES: u64 = 4 * 1024 * 1024;
+const PROOF_BROKER_LEDGER_CANDIDATES: &[&str] = &[
+    ".ee/derived/rch/proof_broker_ledger.json",
+    ".ee/proof_broker_ledger.json",
+    ".ee/proof-broker-ledger.json",
+    ".ee/proof_broker/ledger.json",
+];
 /// Hard upper bound on the byte length of the coordination-fallback ledger
 /// read into the support bundle summary. The ledger is an append-only
 /// workspace-local JSONL file at `.ee/coordination-fallback-evidence.jsonl`
@@ -138,6 +148,8 @@ const LOCAL_CARGO_TRIPWIRE_FILE: &str = "local_cargo_tripwire.json";
 const REGRESSION_CAUSALITY_SUMMARY_FILE: &str = "regression_causality_summary.json";
 const SUPPORT_BUNDLE_REGRESSION_CAUSALITY_SUMMARY_SCHEMA_V1: &str =
     "ee.support_bundle.regression_causality_summary.v1";
+pub(crate) const SUPPORT_BUNDLE_PROOF_BROKER_SUMMARY_SCHEMA_V1: &str =
+    "ee.support_bundle.proof_broker_summary.v1";
 const ENVIRONMENT_ATTESTATION_SUMMARY_FILE: &str = "environment_attestation_summary.json";
 pub(crate) const SUPPORT_BUNDLE_ENVIRONMENT_ATTESTATION_SUMMARY_SCHEMA_V1: &str =
     "ee.support_bundle.environment_attestation_summary.v1";
@@ -329,6 +341,7 @@ struct CollectedDiagnostics {
     doctor_json: String,
     audit_json: String,
     verification_evidence_summary_json: String,
+    proof_broker_summary_json: String,
     memory_drift_summary_json: String,
     capabilities_json: String,
     schema_json: String,
@@ -428,6 +441,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (
             VERIFICATION_EVIDENCE_SUMMARY_FILE,
             &diagnostics.verification_evidence_summary_json,
+        ),
+        (
+            PROOF_BROKER_SUMMARY_FILE,
+            &diagnostics.proof_broker_summary_json,
         ),
         (
             MEMORY_DRIFT_SUMMARY_FILE,
@@ -997,6 +1014,7 @@ fn collect_diagnostics(
     let audit_json = collect_audit_entries(workspace, audit_limit);
     let verification_evidence_summary_json =
         verification_evidence_summary_json(workspace, audit_limit);
+    let proof_broker_summary_json = proof_broker_summary_json(workspace);
     let memory_drift_summary_json = memory_drift_summary_json(workspace, audit_limit);
 
     let capabilities_json = json!({
@@ -1035,6 +1053,7 @@ fn collect_diagnostics(
     let regression_causality_summary_json =
         regression_causality_summary_json(&regression_causality_support_sections(
             verification_evidence_summary_json.as_str(),
+            proof_broker_summary_json.as_str(),
             pack_replay_summary_json.as_str(),
             swarm_replay_summary_json.as_str(),
             swarm_brief_summary_json.as_str(),
@@ -1053,6 +1072,7 @@ fn collect_diagnostics(
         doctor_json,
         audit_json,
         verification_evidence_summary_json,
+        proof_broker_summary_json,
         memory_drift_summary_json,
         capabilities_json,
         schema_json,
@@ -1818,6 +1838,7 @@ pub(crate) fn collect_regression_causality_summary(workspace: &Path) -> Value {
     let status = StatusReport::gather_for_workspace(workspace);
     let swarm_reports = discover_swarm_report_summaries(workspace);
     let verification_evidence_summary_json = verification_evidence_summary_json(workspace, 100);
+    let proof_broker_summary_json = proof_broker_summary_json(workspace);
     let pack_replay_summary_json = pack_replay_summary_json(workspace);
     let swarm_replay_summary_json = swarm_replay_summary_json(workspace);
     let swarm_brief_summary_json = swarm_brief_summary_json(workspace);
@@ -1832,6 +1853,7 @@ pub(crate) fn collect_regression_causality_summary(workspace: &Path) -> Value {
 
     regression_causality_summary_value(&regression_causality_support_sections(
         verification_evidence_summary_json.as_str(),
+        proof_broker_summary_json.as_str(),
         pack_replay_summary_json.as_str(),
         swarm_replay_summary_json.as_str(),
         swarm_brief_summary_json.as_str(),
@@ -2566,6 +2588,17 @@ pub(crate) fn regression_causality_summary_evidence_id(summary: &Value) -> Strin
     format!("regression_causality_summary:{short_hash}")
 }
 
+pub(crate) fn proof_broker_summary_evidence_id(summary: &Value) -> String {
+    let hash = summary
+        .get("summaryHash")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| blake3_text_hash(&stable_json(summary)));
+    let short_hash = hash.trim_start_matches("blake3:");
+    let short_hash = short_hash.get(..12).unwrap_or(short_hash);
+    format!("proof_broker_summary:{short_hash}")
+}
+
 pub(crate) fn shadow_policy_summary_evidence_id(summary: &Value) -> String {
     let hash = summary
         .get("summaryHash")
@@ -2632,6 +2665,80 @@ pub(crate) fn render_regression_causality_summary_for_handoff(summary: &Value) -
             .to_owned(),
     ]
     .join("\n")
+}
+
+pub(crate) fn render_proof_broker_summary_for_handoff(summary: &Value) -> String {
+    let schema = summary
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or(SUPPORT_BUNDLE_PROOF_BROKER_SUMMARY_SCHEMA_V1);
+    let source_schema = summary
+        .get("sourceSchema")
+        .and_then(Value::as_str)
+        .unwrap_or(PROOF_BROKER_SCHEMA_V1);
+    let status = summary
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let record_count = summary
+        .pointer("/ledger/recordCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let stale_count = summary
+        .pointer("/ledger/staleRecordCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let redaction_problem_count = summary
+        .pointer("/ledger/redactionProblemCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let admission_counts = summary
+        .get("admissionCounts")
+        .map(stable_json)
+        .unwrap_or_else(|| "{}".to_owned());
+    let tripwire_counts = summary
+        .get("localCargoTripwireCounts")
+        .map(stable_json)
+        .unwrap_or_else(|| "{}".to_owned());
+    let runtime_counts = summary
+        .get("rchRuntimeCounts")
+        .map(stable_json)
+        .unwrap_or_else(|| "{}".to_owned());
+    let summary_hash = summary
+        .get("summaryHash")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let degraded_codes = summary
+        .get("degradedCodes")
+        .and_then(Value::as_array)
+        .map(|codes| {
+            codes
+                .iter()
+                .filter_map(Value::as_str)
+                .take(6)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut lines = vec![
+        format!(
+            "Proof broker summary: status={status}, source_schema={source_schema}, schema={schema}, records={record_count}, stale_records={stale_count}, redaction_problems={redaction_problem_count}, summary_hash={summary_hash}."
+        ),
+        format!(
+            "Admission counts: {admission_counts}; local_cargo_tripwire_counts={tripwire_counts}; rch_runtime_counts={runtime_counts}."
+        ),
+        "Redaction: raw_commands_included=false, raw_logs_included=false, raw_mail_bodies_included=false, raw_memory_bodies_included=false, env_dumps_included=false, private_paths_included=false, evidence_refs=ids_hashes_only."
+            .to_owned(),
+        "Diagnostic posture only; rerun ee proof admit/status against the current ledger before reusing, waiting on, or dispatching a proof."
+            .to_owned(),
+    ];
+    if !degraded_codes.is_empty() {
+        lines.push(format!(
+            "Proof broker degraded codes: {}.",
+            degraded_codes.join(", ")
+        ));
+    }
+    lines.join("\n")
 }
 
 pub(crate) fn render_shadow_policy_summary_for_handoff(summary: &Value) -> String {
@@ -3187,6 +3294,7 @@ fn regression_causality_summary_json(sections: &[(&str, RegressionEvidenceKind, 
 
 fn regression_causality_support_sections<'a>(
     verification_evidence_summary_json: &'a str,
+    proof_broker_summary_json: &'a str,
     pack_replay_summary_json: &'a str,
     swarm_replay_summary_json: &'a str,
     swarm_brief_summary_json: &'a str,
@@ -3198,12 +3306,17 @@ fn regression_causality_support_sections<'a>(
     local_cargo_tripwire_json: &'a str,
     environment_attestation_summary_json: &'a str,
     shadow_policy_summary_json: &'a str,
-) -> [(&'static str, RegressionEvidenceKind, &'a str); 12] {
+) -> [(&'static str, RegressionEvidenceKind, &'a str); 13] {
     [
         (
             "support_bundle:verification_evidence_summary",
             RegressionEvidenceKind::VerificationEvidence,
             verification_evidence_summary_json,
+        ),
+        (
+            "support_bundle:proof_broker_summary",
+            RegressionEvidenceKind::VerificationEvidence,
+            proof_broker_summary_json,
         ),
         (
             "support_bundle:pack_replay_summary",
@@ -4572,6 +4685,414 @@ fn verification_evidence_support_result_class(record: &VerificationEvidenceRecor
     }
 }
 
+fn proof_broker_summary_json(workspace: &Path) -> String {
+    stable_json(&collect_proof_broker_summary(workspace))
+}
+
+pub(crate) fn collect_proof_broker_summary(workspace: &Path) -> Value {
+    collect_proof_broker_summary_at(workspace, Utc::now())
+}
+
+fn collect_proof_broker_summary_at(workspace: &Path, now: DateTime<Utc>) -> Value {
+    let mut ledger = json!({
+        "candidatePaths": PROOF_BROKER_LEDGER_CANDIDATES,
+        "presentLedgerCount": 0,
+        "readableLedgerCount": 0,
+        "recordCount": 0,
+        "malformedCount": 0,
+        "staleRecordCount": 0,
+        "redactionProblemCount": 0,
+        "summarizedRecordCount": 0,
+        "files": [],
+    });
+    let mut file_summaries = Vec::new();
+    let mut records = Vec::new();
+    let mut degraded_codes = BTreeSet::new();
+
+    for relative in PROOF_BROKER_LEDGER_CANDIDATES {
+        let path = workspace.join(relative);
+        let mut file_summary = json!({
+            "path": relative,
+            "present": path.exists(),
+            "readable": false,
+            "recordCount": 0,
+            "malformedCount": 0,
+            "contentHash": null,
+        });
+        if !path.exists() {
+            file_summaries.push(file_summary);
+            continue;
+        }
+        increment_json_count(&mut ledger, "presentLedgerCount");
+
+        let Ok(content) = read_proof_broker_ledger_content(&path) else {
+            degraded_codes.insert("proof_broker_ledger_unreadable".to_owned());
+            file_summaries.push(file_summary);
+            continue;
+        };
+
+        file_summary["readable"] = json!(true);
+        file_summary["contentHash"] = json!(blake3_text_hash(&content));
+        increment_json_count(&mut ledger, "readableLedgerCount");
+
+        let (parsed_records, malformed_count) = parse_proof_broker_ledger_records(&content);
+        file_summary["recordCount"] = json!(parsed_records.len());
+        file_summary["malformedCount"] = json!(malformed_count);
+        ledger["recordCount"] = json!(
+            ledger
+                .get("recordCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                + parsed_records.len() as u64
+        );
+        ledger["malformedCount"] = json!(
+            ledger
+                .get("malformedCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                + malformed_count as u64
+        );
+        if malformed_count > 0 {
+            degraded_codes.insert("proof_broker_ledger_malformed".to_owned());
+        }
+
+        for record in parsed_records {
+            if proof_broker_record_is_stale(&record, now) {
+                increment_json_count(&mut ledger, "staleRecordCount");
+                degraded_codes.insert("proof_broker_evidence_stale".to_owned());
+            }
+            if proof_broker_record_has_redaction_problem(&record) {
+                increment_json_count(&mut ledger, "redactionProblemCount");
+                degraded_codes.insert("proof_broker_redaction_prevented_attribution".to_owned());
+            }
+            records.push(summarize_proof_broker_ledger_record(&record, now));
+        }
+        file_summaries.push(file_summary);
+    }
+
+    records.sort_by(|left, right| {
+        left.pointer("/createdAt")
+            .and_then(Value::as_str)
+            .cmp(&right.pointer("/createdAt").and_then(Value::as_str))
+            .then_with(|| {
+                left.pointer("/rowId")
+                    .and_then(Value::as_str)
+                    .cmp(&right.pointer("/rowId").and_then(Value::as_str))
+            })
+    });
+    records.truncate(MAX_PROOF_BROKER_SUMMARY_RECORDS);
+    ledger["summarizedRecordCount"] = json!(records.len());
+    ledger["files"] = json!(file_summaries);
+
+    if ledger
+        .get("recordCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        == 0
+    {
+        degraded_codes.insert("proof_broker_evidence_absent".to_owned());
+    }
+
+    let status = if degraded_codes.is_empty() {
+        "available"
+    } else if ledger
+        .get("recordCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        == 0
+    {
+        "evidence_absent"
+    } else {
+        "available_with_degraded_evidence"
+    };
+
+    proof_broker_summary_value(
+        status,
+        ledger,
+        records,
+        degraded_codes.into_iter().collect(),
+    )
+}
+
+fn read_proof_broker_ledger_content(path: &Path) -> Result<String, DomainError> {
+    if !regular_file_no_symlink(path) {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Proof broker ledger is not a regular non-symlink file: {}.",
+                path.display()
+            ),
+            repair: Some("Regenerate the proof broker ledger.".to_owned()),
+        });
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to inspect proof broker ledger {}: {error}",
+            path.display()
+        ),
+        repair: Some("Check proof broker ledger permissions.".to_owned()),
+    })?;
+    if metadata.len() > MAX_PROOF_BROKER_LEDGER_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Proof broker ledger {} exceeds the {}-byte support-bundle read cap.",
+                path.display(),
+                MAX_PROOF_BROKER_LEDGER_BYTES
+            ),
+            repair: Some("Archive or compact the proof broker ledger before bundling.".to_owned()),
+        });
+    }
+
+    let mut file = open_support_bundle_file_for_read_no_follow(path)?;
+    let opened_metadata = file.metadata().map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to inspect opened proof broker ledger {}: {error}",
+            path.display()
+        ),
+        repair: Some("Check proof broker ledger permissions.".to_owned()),
+    })?;
+    if !opened_metadata.file_type().is_file()
+        || opened_metadata.len() > MAX_PROOF_BROKER_LEDGER_BYTES
+    {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Proof broker ledger {} is unsafe or oversized after open.",
+                path.display()
+            ),
+            repair: Some("Regenerate the proof broker ledger.".to_owned()),
+        });
+    }
+
+    let mut content = String::new();
+    (&mut file)
+        .take(MAX_PROOF_BROKER_LEDGER_BYTES.saturating_add(1))
+        .read_to_string(&mut content)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to read proof broker ledger {}: {error}",
+                path.display()
+            ),
+            repair: Some("Check proof broker ledger permissions.".to_owned()),
+        })?;
+    if u64::try_from(content.len()).unwrap_or(u64::MAX) > MAX_PROOF_BROKER_LEDGER_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Proof broker ledger {} exceeded the {}-byte read cap while reading.",
+                path.display(),
+                MAX_PROOF_BROKER_LEDGER_BYTES
+            ),
+            repair: Some("Archive or compact the proof broker ledger before bundling.".to_owned()),
+        });
+    }
+    Ok(content)
+}
+
+fn parse_proof_broker_ledger_records(content: &str) -> (Vec<ProofBrokerLedgerRecord>, usize) {
+    if let Ok(records) = serde_json::from_str::<Vec<ProofBrokerLedgerRecord>>(content) {
+        return (records, 0);
+    }
+
+    let mut records = Vec::new();
+    let mut malformed = 0usize;
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        match serde_json::from_str::<ProofBrokerLedgerRecord>(line) {
+            Ok(record) => records.push(record),
+            Err(_) => malformed = malformed.saturating_add(1),
+        }
+    }
+    if records.is_empty() && !content.trim().is_empty() {
+        malformed = malformed.max(1);
+    }
+    (records, malformed)
+}
+
+fn proof_broker_summary_value(
+    status: &str,
+    ledger: Value,
+    records: Vec<Value>,
+    degraded_codes: Vec<String>,
+) -> Value {
+    let admission_counts = coordination_fallback_counts(&records, "/admissionVerdict");
+    let state_counts = coordination_fallback_counts(&records, "/state");
+    let tripwire_counts = coordination_fallback_counts(&records, "/localCargoTripwireClass");
+    let rch_runtime_counts = coordination_fallback_counts(&records, "/rchRuntimeClass");
+    let summary_hash = blake3_text_hash(&stable_json(&json!({
+        "status": status,
+        "ledger": &ledger,
+        "records": &records,
+        "degradedCodes": &degraded_codes,
+    })));
+
+    json!({
+        "schema": SUPPORT_BUNDLE_PROOF_BROKER_SUMMARY_SCHEMA_V1,
+        "sourceSchema": PROOF_BROKER_SCHEMA_V1,
+        "source": ".ee proof broker ledger candidates",
+        "status": status,
+        "summaryHash": summary_hash,
+        "redactionStatus": "ids_hashes_counts_owner_refs_only_no_raw_commands_no_raw_logs_no_mail_bodies_no_memory_bodies_no_env_dumps_no_private_paths",
+        "limits": {
+            "maxRecords": MAX_PROOF_BROKER_SUMMARY_RECORDS,
+            "maxLedgerBytes": MAX_PROOF_BROKER_LEDGER_BYTES,
+        },
+        "ledger": ledger,
+        "admissionCounts": admission_counts,
+        "stateCounts": state_counts,
+        "localCargoTripwireCounts": tripwire_counts,
+        "rchRuntimeCounts": rch_runtime_counts,
+        "degradedCodes": degraded_codes,
+        "records": records,
+        "redaction": {
+            "rawCommandsIncluded": false,
+            "rawLogsIncluded": false,
+            "rawMailBodiesIncluded": false,
+            "rawMemoryBodiesIncluded": false,
+            "environmentDumpsIncluded": false,
+            "privatePathsIncluded": false,
+            "ownerMetadataIncluded": true,
+            "hashesOnlyForEvidenceRefs": true,
+        },
+        "provenance": [
+            {
+                "field": "records[]",
+                "sourceKind": "proof_broker_ledger",
+                "source": ".ee proof broker ledger candidates",
+                "redaction": "schema_ids_hashes_counts_owner_refs_only",
+            },
+            {
+                "field": "records[].evidenceRefs[]",
+                "sourceKind": "proof_broker_evidence_refs",
+                "source": "ee.proof_broker.v1 evidenceRefs",
+                "redaction": "ids_hashes_redaction_flags_only",
+            }
+        ],
+    })
+}
+
+fn summarize_proof_broker_ledger_record(
+    record: &ProofBrokerLedgerRecord,
+    now: DateTime<Utc>,
+) -> Value {
+    let stale = proof_broker_record_is_stale(record, now);
+    let redaction_problem = proof_broker_record_has_redaction_problem(record);
+    json!({
+        "rowId": proof_broker_label(&record.row_id),
+        "fingerprintId": proof_broker_label(&record.fingerprint.fingerprint_id),
+        "beadId": proof_broker_optional_label(record.fingerprint.bead_id.as_deref()),
+        "commandClass": proof_broker_label(&record.fingerprint.command_class),
+        "commandHash": proof_broker_label(&record.fingerprint.command_hash),
+        "normalizedArgvHash": proof_broker_label(&record.fingerprint.normalized_argv_hash),
+        "sourceTreeFingerprint": proof_broker_label(&record.fingerprint.source_tree_fingerprint),
+        "sourceMaterialization": proof_broker_label(&record.fingerprint.source_materialization),
+        "dirtyStatusHash": proof_broker_label(&record.fingerprint.dirty_status_hash),
+        "envFingerprintClass": proof_broker_label(&record.fingerprint.env_fingerprint_class),
+        "targetProfile": proof_broker_optional_label(record.fingerprint.target_profile.as_deref()),
+        "executionSubstrate": proof_broker_label(&record.fingerprint.execution_substrate),
+        "rchRuntimeClass": proof_broker_label(&record.fingerprint.rch_runtime_class),
+        "workerRequirement": proof_broker_label(&record.fingerprint.worker_requirement),
+        "localCargoTripwireClass": proof_broker_label(&record.fingerprint.local_cargo_tripwire_class),
+        "buildAdmissionPosture": proof_broker_label(&record.fingerprint.build_admission_posture),
+        "state": record.state.as_str(),
+        "admissionVerdict": record.admission.verdict.as_str(),
+        "reasonCodes": proof_broker_string_array(&record.admission.reason_codes),
+        "nextAction": proof_broker_label(&record.admission.next_action),
+        "reuseRunId": proof_broker_optional_label(record.admission.reuse_run_id.as_deref()),
+        "waitOwner": proof_broker_owner_summary(record.admission.wait_owner.as_ref()),
+        "runId": proof_broker_optional_label(record.run_id.as_deref()),
+        "owner": proof_broker_owner_summary(record.owner.as_ref()),
+        "createdAt": proof_broker_label(&record.created_at),
+        "startedAt": proof_broker_optional_label(record.started_at.as_deref()),
+        "completedAt": proof_broker_optional_label(record.completed_at.as_deref()),
+        "expiresAt": proof_broker_optional_label(record.expires_at.as_deref()),
+        "sourceStateValidUntil": proof_broker_optional_label(record.source_state_valid_until.as_deref()),
+        "expired": proof_broker_timestamp_is_past(record.expires_at.as_deref(), now),
+        "sourceStateExpired": proof_broker_timestamp_is_past(record.source_state_valid_until.as_deref(), now),
+        "stale": stale,
+        "invalidationReasons": proof_broker_string_array(&record.invalidation_reasons),
+        "evidenceRefCount": record.evidence_refs.len(),
+        "evidenceRefs": record
+            .evidence_refs
+            .iter()
+            .map(proof_broker_evidence_ref_summary)
+            .collect::<Vec<_>>(),
+        "rawOutputIncluded": false,
+        "rawOutputObserved": record.raw_output_included,
+        "redactionPreventedAttribution": redaction_problem,
+    })
+}
+
+fn proof_broker_owner_summary(owner: Option<&crate::models::ProofBrokerOwnerRef>) -> Value {
+    owner.map_or(Value::Null, |owner| {
+        json!({
+            "agentName": proof_broker_optional_label(owner.agent_name.as_deref()),
+            "beadId": proof_broker_optional_label(owner.bead_id.as_deref()),
+            "mailThreadId": proof_broker_optional_label(owner.mail_thread_id.as_deref()),
+            "buildSlot": proof_broker_optional_label(owner.build_slot.as_deref()),
+            "rchJobId": proof_broker_optional_label(owner.rch_job_id.as_deref()),
+        })
+    })
+}
+
+fn proof_broker_evidence_ref_summary(reference: &crate::models::ProofBrokerEvidenceRef) -> Value {
+    json!({
+        "kind": proof_broker_label(&reference.kind),
+        "id": proof_broker_label(&reference.id),
+        "contentHash": proof_broker_optional_label(reference.content_hash.as_deref()),
+        "redacted": reference.redacted,
+    })
+}
+
+fn proof_broker_record_is_stale(record: &ProofBrokerLedgerRecord, now: DateTime<Utc>) -> bool {
+    !record.invalidation_reasons.is_empty()
+        || proof_broker_timestamp_is_past(record.expires_at.as_deref(), now)
+        || proof_broker_timestamp_is_past(record.source_state_valid_until.as_deref(), now)
+}
+
+fn proof_broker_record_has_redaction_problem(record: &ProofBrokerLedgerRecord) -> bool {
+    record.raw_output_included
+        || record
+            .evidence_refs
+            .iter()
+            .any(|reference| !reference.redacted)
+}
+
+fn proof_broker_timestamp_is_past(value: Option<&str>, now: DateTime<Utc>) -> bool {
+    value
+        .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+        .is_some_and(|timestamp| timestamp.with_timezone(&Utc) < now)
+}
+
+fn proof_broker_string_array(values: &[String]) -> Vec<String> {
+    let mut labels = values
+        .iter()
+        .map(|value| proof_broker_label(value))
+        .collect::<Vec<_>>();
+    labels.sort();
+    labels.dedup();
+    labels
+}
+
+fn proof_broker_optional_label(value: Option<&str>) -> Option<String> {
+    value.map(proof_broker_label)
+}
+
+fn proof_broker_label(value: &str) -> String {
+    let sanitized = value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, ':' | '_' | '-' | '.' | '=' | ',') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "empty".to_owned()
+    } else {
+        sanitized
+    }
+}
+
 fn verification_optional_summary_label(value: Option<&str>) -> Option<String> {
     value.map(verification_summary_label)
 }
@@ -4610,6 +5131,7 @@ fn planned_files() -> Vec<String> {
         DOCTOR_FILE.to_owned(),
         AUDIT_FILE.to_owned(),
         VERIFICATION_EVIDENCE_SUMMARY_FILE.to_owned(),
+        PROOF_BROKER_SUMMARY_FILE.to_owned(),
         MEMORY_DRIFT_SUMMARY_FILE.to_owned(),
         CAPABILITIES_FILE.to_owned(),
         SCHEMA_FILE.to_owned(),
@@ -8131,6 +8653,137 @@ mod tests {
         assert!(!encoded.contains("stderr"));
         assert!(!encoded.contains('$'));
         assert!(!encoded.contains('`'));
+        Ok(())
+    }
+
+    #[test]
+    fn proof_broker_summary_redacts_raw_proof_surfaces() -> TestResult {
+        let mut records = crate::models::sample_proof_broker_ledger_records();
+        let in_flight = records
+            .iter_mut()
+            .find(|record| record.state.as_str() == "in_flight")
+            .ok_or_else(|| "sample proof broker records missing in-flight row".to_owned())?;
+        if let Some(owner) = in_flight.owner.as_mut() {
+            owner.agent_name = Some("/Users/alice raw mail body".to_owned());
+            owner.build_slot = Some("proof:/private/slot".to_owned());
+        }
+        in_flight.raw_output_included = true;
+        if let Some(reference) = in_flight.evidence_refs.first_mut() {
+            reference.redacted = false;
+        }
+
+        let now = DateTime::parse_from_rfc3339("2026-06-05T18:22:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+        let summaries = records
+            .iter()
+            .map(|record| summarize_proof_broker_ledger_record(record, now))
+            .collect::<Vec<_>>();
+        let summary = proof_broker_summary_value(
+            "available_with_degraded_evidence",
+            json!({
+                "recordCount": records.len(),
+                "staleRecordCount": 1,
+                "redactionProblemCount": 1,
+            }),
+            summaries,
+            vec![
+                "proof_broker_evidence_stale".to_owned(),
+                "proof_broker_redaction_prevented_attribution".to_owned(),
+            ],
+        );
+        let encoded = stable_json(&summary);
+        let rendered = render_proof_broker_summary_for_handoff(&summary);
+
+        assert!(encoded.contains("\"schema\":\"ee.support_bundle.proof_broker_summary.v1\""));
+        assert!(encoded.contains("\"sourceSchema\":\"ee.proof_broker.v1\""));
+        assert!(encoded.contains("\"wait_for_inflight\""));
+        assert!(encoded.contains("\"localCargoTripwireCounts\""));
+        assert!(encoded.contains("\"rawOutputIncluded\":false"));
+        assert!(encoded.contains("\"rawOutputObserved\":true"));
+        assert!(encoded.contains("\"rawCommandsIncluded\":false"));
+        assert!(encoded.contains("\"proof_broker_redaction_prevented_attribution\""));
+        assert!(rendered.contains("Proof broker summary: status=available_with_degraded_evidence"));
+        for forbidden in [
+            "/Users/",
+            "/private/",
+            "cargo test --lib",
+            "raw mail body",
+            "BEGIN PRIVATE KEY",
+            "sk-",
+            "ghp_",
+            "body_md",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "proof broker summary leaked forbidden substring {forbidden:?}"
+            );
+            assert!(
+                !rendered.contains(forbidden),
+                "proof broker handoff render leaked forbidden substring {forbidden:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn proof_broker_summary_collects_workspace_ledger_artifact() -> TestResult {
+        let workspace = unique_test_path("proof-broker-summary-ledger");
+        let ledger_path = workspace
+            .join(".ee")
+            .join("derived")
+            .join("rch")
+            .join("proof_broker_ledger.json");
+        fs::create_dir_all(
+            ledger_path
+                .parent()
+                .ok_or_else(|| "ledger path missing parent".to_owned())?,
+        )
+        .map_err(|error| format!("create proof broker ledger dir: {error}"))?;
+        let records = crate::models::sample_proof_broker_ledger_records();
+        fs::write(
+            &ledger_path,
+            serde_json::to_string(&records).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("write proof broker ledger: {error}"))?;
+
+        let now = DateTime::parse_from_rfc3339("2026-06-05T17:27:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+        let summary = collect_proof_broker_summary_at(&workspace, now);
+        assert_eq!(
+            summary.get("status").and_then(Value::as_str),
+            Some("available_with_degraded_evidence")
+        );
+        assert_eq!(
+            summary
+                .pointer("/ledger/readableLedgerCount")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            summary
+                .pointer("/ledger/recordCount")
+                .and_then(Value::as_u64),
+            Some(records.len() as u64)
+        );
+        assert!(
+            summary
+                .get("records")
+                .and_then(Value::as_array)
+                .is_some_and(|rows| rows.iter().any(|row| {
+                    row.get("admissionVerdict").and_then(Value::as_str) == Some("reuse_existing")
+                }))
+        );
+        assert!(
+            summary
+                .get("degradedCodes")
+                .and_then(Value::as_array)
+                .is_some_and(|codes| codes
+                    .iter()
+                    .any(|code| code == "proof_broker_evidence_stale"))
+        );
+        assert!(planned_files().contains(&PROOF_BROKER_SUMMARY_FILE.to_owned()));
         Ok(())
     }
 

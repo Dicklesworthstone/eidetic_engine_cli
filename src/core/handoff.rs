@@ -27,10 +27,11 @@ use sha2::{Digest, Sha256};
 use crate::core::focus::{focus_state_hash, read_active_focus_state};
 use crate::core::singleflight::singleflight_posture_report;
 use crate::core::support_bundle::{
-    collect_environment_attestation_summary, collect_regression_causality_summary,
-    collect_shadow_policy_summary, environment_attestation_summary_evidence_id,
+    collect_environment_attestation_summary, collect_proof_broker_summary,
+    collect_regression_causality_summary, collect_shadow_policy_summary,
+    environment_attestation_summary_evidence_id, proof_broker_summary_evidence_id,
     redact_support_bundle_swarm_brief_summary, regression_causality_summary_evidence_id,
-    render_environment_attestation_summary_for_handoff,
+    render_environment_attestation_summary_for_handoff, render_proof_broker_summary_for_handoff,
     render_regression_causality_summary_for_handoff, render_shadow_policy_summary_for_handoff,
     shadow_policy_summary_evidence_id,
 };
@@ -482,6 +483,7 @@ pub struct PreviewReport {
     pub swarm_incident_summary: Option<serde_json::Value>,
     pub swarm_replay_summary: Option<serde_json::Value>,
     pub environment_attestation_summary: Option<serde_json::Value>,
+    pub proof_broker_summary: Option<serde_json::Value>,
     pub regression_causality_summary: Option<serde_json::Value>,
     pub shadow_policy_summary: Option<serde_json::Value>,
     pub token_estimate: usize,
@@ -525,6 +527,7 @@ impl PreviewReport {
             swarm_incident_summary: None,
             swarm_replay_summary: None,
             environment_attestation_summary: None,
+            proof_broker_summary: None,
             regression_causality_summary: None,
             shadow_policy_summary: None,
             token_estimate: 0,
@@ -711,6 +714,7 @@ pub struct CreateReport {
     pub swarm_incident_summary: Option<serde_json::Value>,
     pub swarm_replay_summary: Option<serde_json::Value>,
     pub environment_attestation_summary: Option<serde_json::Value>,
+    pub proof_broker_summary: Option<serde_json::Value>,
     pub regression_causality_summary: Option<serde_json::Value>,
     pub shadow_policy_summary: Option<serde_json::Value>,
     pub token_count: usize,
@@ -745,6 +749,7 @@ impl CreateReport {
             swarm_incident_summary: None,
             swarm_replay_summary: None,
             environment_attestation_summary: None,
+            proof_broker_summary: None,
             regression_causality_summary: None,
             shadow_policy_summary: None,
             token_count: 0,
@@ -1109,6 +1114,7 @@ pub struct ResumeReport {
     pub swarm_incident_summary: Option<serde_json::Value>,
     pub swarm_replay_summary: Option<serde_json::Value>,
     pub environment_attestation_summary: Option<serde_json::Value>,
+    pub proof_broker_summary: Option<serde_json::Value>,
     pub regression_causality_summary: Option<serde_json::Value>,
     pub shadow_policy_summary: Option<serde_json::Value>,
     pub artifact_pointers: Vec<ArtifactPointer>,
@@ -1298,6 +1304,7 @@ impl ResumeReport {
             swarm_incident_summary: None,
             swarm_replay_summary: None,
             environment_attestation_summary: None,
+            proof_broker_summary: None,
             regression_causality_summary: None,
             shadow_policy_summary: None,
             artifact_pointers: Vec::new(),
@@ -1401,6 +1408,7 @@ fn strip_swarm_diagnostic_section_content_by_id(value: &mut serde_json::Value) {
                         | "swarm_incident_summary"
                         | "swarm_replay_summary"
                         | "environment_attestation_summary"
+                        | "proof_broker_summary"
                         | "regression_causality_summary"
                         | "shadow_policy_summary"
                 )
@@ -3098,6 +3106,93 @@ fn add_environment_attestation_summary_to_resume(
     }
 }
 
+fn add_proof_broker_summary_to_resume(report: &mut ResumeReport, summary: &serde_json::Value) {
+    let status = summary
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let record_count = summary
+        .pointer("/ledger/recordCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let stale_count = summary
+        .pointer("/ledger/staleRecordCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let redaction_problem_count = summary
+        .pointer("/ledger/redactionProblemCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let admission_counts = summary
+        .get("admissionCounts")
+        .map(crate::core::serialize_or_error)
+        .unwrap_or_else(|| "{}".to_owned());
+    let summary_hash = summary
+        .get("summaryHash")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let posture = format!(
+        "Embedded proof broker summary: status={status}, records={record_count}, stale_records={stale_count}, redaction_problems={redaction_problem_count}, admission_counts={admission_counts}, summary_hash={summary_hash}; raw_commands_included=false; raw_logs_included=false; raw_mail_bodies_included=false; raw_memory_bodies_included=false; private_paths_included=false; diagnostic_not_live=true."
+    );
+    report.status_summary = Some(match report.status_summary.take() {
+        Some(existing) => format!("{existing}\n{posture}"),
+        None => posture,
+    });
+    report.artifact_pointers.push(ArtifactPointer {
+        id: proof_broker_summary_evidence_id(summary),
+        path: None,
+        description:
+            "Redaction-safe proof broker summary embedded in the handoff capsule; proof rows are summarized as ids, hashes, owner refs, verdict counts, and degraded codes only."
+                .to_owned(),
+    });
+    report.next_actions.push(
+        NextAction::new(
+            1,
+            "Refresh proof broker admission against the current ledger before reusing, waiting on, or dispatching a proof.",
+        )
+        .with_reason(
+            "Embedded proof broker summaries are support-bundle context, not live admission.",
+        )
+        .with_command(
+            "ee proof admit --json --ledger-json .ee/derived/rch/proof_broker_ledger.json -- cargo test <filter>",
+        ),
+    );
+    report.next_actions.push(
+        NextAction::new(
+            1,
+            "Inspect proof broker owner status before waiting on an in-flight proof.",
+        )
+        .with_reason(
+            "Owner metadata in a capsule may be stale and must not be treated as a live lease.",
+        )
+        .with_command(
+            "ee proof status --json --ledger-json .ee/derived/rch/proof_broker_ledger.json --fingerprint-id <id>",
+        ),
+    );
+
+    if let Some(codes) = summary
+        .get("degradedCodes")
+        .and_then(serde_json::Value::as_array)
+    {
+        for code in codes.iter().filter_map(serde_json::Value::as_str).take(8) {
+            let code = if code.starts_with("proof_broker_") {
+                code.to_owned()
+            } else {
+                format!("proof_broker_{code}")
+            };
+            report.degradations.push(
+                DegradationInfo::new(
+                    code,
+                    "Embedded proof broker summary reported degraded proof reuse evidence.",
+                )
+                .with_next_action(
+                    "ee proof admit --json --ledger-json .ee/derived/rch/proof_broker_ledger.json -- cargo test <filter>",
+                ),
+            );
+        }
+    }
+}
+
 fn add_regression_causality_summary_to_resume(
     report: &mut ResumeReport,
     summary: &serde_json::Value,
@@ -3399,6 +3494,24 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
         token_estimate: environment_attestation_section.token_estimate,
     });
 
+    let proof_broker_summary = collect_proof_broker_summary(&options.workspace);
+    let proof_broker_evidence = vec![proof_broker_summary_evidence_id(&proof_broker_summary)];
+    let proof_broker_section = CapsuleSection::new("proof_broker_summary", "Proof Broker Summary")
+        .with_content(render_proof_broker_summary_for_handoff(
+            &proof_broker_summary,
+        ))
+        .with_confidence(EvidenceConfidence::Verified)
+        .with_evidence(proof_broker_evidence.clone());
+    report.evidence_ids.extend(proof_broker_evidence);
+    report.proof_broker_summary = Some(proof_broker_summary);
+    report.planned_sections.push(PlannedSection {
+        id: proof_broker_section.id.clone(),
+        title: proof_broker_section.title.clone(),
+        confidence: proof_broker_section.confidence.as_str().to_owned(),
+        evidence_count: proof_broker_section.evidence_ids.len(),
+        token_estimate: proof_broker_section.token_estimate,
+    });
+
     let regression_causality_summary = collect_regression_causality_summary(&options.workspace);
     let regression_causality_evidence = vec![regression_causality_summary_evidence_id(
         &regression_causality_summary,
@@ -3668,6 +3781,21 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         .saturating_add(environment_attestation_evidence.len());
     report.environment_attestation_summary = Some(environment_attestation_summary.clone());
 
+    let proof_broker_summary = collect_proof_broker_summary(&options.workspace);
+    let proof_broker_evidence = vec![proof_broker_summary_evidence_id(&proof_broker_summary)];
+    sections.push(
+        CapsuleSection::new("proof_broker_summary", "Proof Broker Summary")
+            .with_content(render_proof_broker_summary_for_handoff(
+                &proof_broker_summary,
+            ))
+            .with_confidence(EvidenceConfidence::Verified)
+            .with_evidence(proof_broker_evidence.clone()),
+    );
+    report.evidence_count = report
+        .evidence_count
+        .saturating_add(proof_broker_evidence.len());
+    report.proof_broker_summary = Some(proof_broker_summary.clone());
+
     let regression_causality_summary = collect_regression_causality_summary(&options.workspace);
     let regression_causality_evidence = vec![regression_causality_summary_evidence_id(
         &regression_causality_summary,
@@ -3767,6 +3895,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         "swarm_incident_summary": swarm_incident_summary,
         "swarm_replay_summary": swarm_replay_summary,
         "environment_attestation_summary": environment_attestation_summary,
+        "proof_broker_summary": proof_broker_summary,
         "regression_causality_summary": regression_causality_summary,
         "shadow_policy_summary": shadow_policy_summary,
         "created_at": created_at,
@@ -4139,6 +4268,14 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         .filter(|value| !value.is_null());
     if let Some(summary) = report.environment_attestation_summary.clone() {
         add_environment_attestation_summary_to_resume(&mut report, &summary);
+    }
+
+    report.proof_broker_summary = capsule
+        .get("proof_broker_summary")
+        .cloned()
+        .filter(|value| !value.is_null());
+    if let Some(summary) = report.proof_broker_summary.clone() {
+        add_proof_broker_summary_to_resume(&mut report, &summary);
     }
 
     report.regression_causality_summary = capsule
@@ -6477,6 +6614,17 @@ memories_revised = 3
             report
                 .planned_sections
                 .iter()
+                .any(|section| section.id == "proof_broker_summary"),
+            "preview plans proof broker summary section",
+        )?;
+        ensure(
+            report.proof_broker_summary.is_some(),
+            "preview carries proof broker summary JSON",
+        )?;
+        ensure(
+            report
+                .planned_sections
+                .iter()
                 .any(|section| section.id == "regression_causality_summary"),
             "preview plans regression causality summary section",
         )?;
@@ -6673,6 +6821,119 @@ memories_revised = 3
             ensure(
                 !status.contains(forbidden),
                 format!("attestation handoff status leaked forbidden text {forbidden:?}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resume_handoff_surfaces_proof_broker_summary_without_raw_inputs() -> TestResult {
+        let summary = serde_json::json!({
+            "schema": "ee.support_bundle.proof_broker_summary.v1",
+            "sourceSchema": "ee.proof_broker.v1",
+            "status": "available_with_degraded_evidence",
+            "summaryHash": "blake3:proofabcdef1234567890",
+            "ledger": {
+                "recordCount": 3,
+                "staleRecordCount": 1,
+                "redactionProblemCount": 0
+            },
+            "admissionCounts": {
+                "reuse_existing": 1,
+                "wait_for_inflight": 1,
+                "environment_blocked": 1
+            },
+            "localCargoTripwireCounts": {
+                "class:tripwire_clean": 2
+            },
+            "rchRuntimeCounts": {
+                "class:rch_client_1_0_37_daemon_0_1_3": 2
+            },
+            "degradedCodes": ["proof_broker_evidence_stale"],
+            "records": [{
+                "rowId": "prow_safe",
+                "owner": {
+                    "agentName": "RubyWolf",
+                    "mailThreadId": "8198",
+                    "buildSlot": "proof:bd-1n3x1.1:broker",
+                    "rchJobId": "rch-job-20260605-0001",
+                    "rawMailBody": "secret mail body"
+                },
+                "rawCommand": "cargo test --lib --token sk-secret",
+                "privatePath": "/Users/alice/private",
+                "rawOutputIncluded": false
+            }],
+            "redaction": {
+                "rawCommandsIncluded": false,
+                "rawLogsIncluded": false,
+                "rawMailBodiesIncluded": false,
+                "rawMemoryBodiesIncluded": false,
+                "environmentDumpsIncluded": false,
+                "privatePathsIncluded": false
+            }
+        });
+        let mut report = ResumeReport::new(
+            "hcap_proof_broker".to_owned(),
+            PathBuf::from("handoff.json"),
+        );
+
+        add_proof_broker_summary_to_resume(&mut report, &summary);
+
+        let status = report
+            .status_summary
+            .as_deref()
+            .ok_or_else(|| "resume status summary missing".to_owned())?;
+        ensure(
+            status
+                .contains("Embedded proof broker summary: status=available_with_degraded_evidence"),
+            "resume status includes proof broker posture",
+        )?;
+        ensure(
+            status.contains("records=3")
+                && status.contains("stale_records=1")
+                && status.contains("reuse_existing")
+                && status.contains("wait_for_inflight")
+                && status.contains("raw_commands_included=false")
+                && status.contains("raw_mail_bodies_included=false")
+                && status.contains("diagnostic_not_live=true"),
+            "resume status includes compact redaction-safe proof broker counts",
+        )?;
+        ensure(
+            report
+                .artifact_pointers
+                .iter()
+                .any(|pointer| pointer.id.starts_with("proof_broker_summary:")),
+            "resume artifact pointers include proof broker summary evidence id",
+        )?;
+        ensure(
+            report.next_actions.iter().any(|action| {
+                action
+                    .suggested_command
+                    .as_deref()
+                    .is_some_and(|command| command.starts_with("ee proof admit --json"))
+            }),
+            "resume next actions include proof admit refresh command",
+        )?;
+        ensure(
+            report
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "proof_broker_evidence_stale"),
+            "resume degraded list includes proof broker degraded code",
+        )?;
+        for forbidden in [
+            "/Users/alice",
+            "secret mail body",
+            "cargo test --lib",
+            "sk-secret",
+            "BEGIN PRIVATE KEY",
+            "ghp_",
+            "rawCommand",
+            "privatePath",
+        ] {
+            ensure(
+                !status.contains(forbidden),
+                format!("proof broker handoff status leaked forbidden text {forbidden:?}"),
             )?;
         }
         Ok(())
