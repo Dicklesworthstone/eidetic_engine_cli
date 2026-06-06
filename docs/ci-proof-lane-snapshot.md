@@ -24,6 +24,13 @@ transforms `ee.ci_proof_lane_input.v1` fixtures under
 `tests/fixtures/ci_proof_lane_live/` into the public snapshot schema so contract
 checks can run without network access.
 
+The offline fixture contract is pinned by
+`scripts/ci_proof_lane_snapshot_fixture_test.sh`. The central
+`scripts/verify.sh` runner executes that harness as the
+`CI Proof-Lane Snapshot Contract` stage before Cargo-backed gates, so duplicate
+dispatch, artifact freshness, checksum, surface-probe, `gh` unavailability, and
+invalid-SHA behavior drift fails without launching CI, RCH, or local Cargo.
+
 The snapshot records:
 
 - repository owner/name/default branch/current head SHA

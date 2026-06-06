@@ -47,6 +47,7 @@ set -euo pipefail
 #   4.66. E2E Event Contract Radar - advisory shell evidence coverage scanner (bd-2ljka.4)
 #   4.67. Panic Helper Radar Contract - no-Cargo schema/golden scanner contract gate
 #   4.68. Swarm SLO Replay Contract - no-Cargo replay fixture/golden contract gate
+#   4.69. CI Proof-Lane Snapshot Contract - no-Cargo proof-lane fixture gate
 #   4.7. Package Artifact Leak - cargo package list gate for generated artifacts
 #   4.8. Fuzz Target Audit     - static cargo-fuzz target registration/docs check
 #   4.9. Fuzz Smoke            - optional 30s search query parser cargo-fuzz sweep
@@ -776,6 +777,12 @@ run_stage "Panic Helper Radar Contract" "./scripts/panic_helper_radar_golden.sh"
 # verifies summary schema/mutation flags, and fails before Cargo-backed gates
 # if the shell replay contract drifts.
 run_stage "Swarm SLO Replay Contract" "./scripts/e2e_overhaul/swarm_slo_replay.sh"
+
+# Gate 3.88: CI proof-lane snapshot contract (bd-1n3x1.7). This no-Cargo
+# harness transforms offline proof-lane fixtures and verifies duplicate-run,
+# missing/stale artifact, checksum, surface-probe, unavailable-gh, and invalid
+# SHA behavior before agents rely on CI artifact source-authority evidence.
+run_stage "CI Proof-Lane Snapshot Contract" "./scripts/ci_proof_lane_snapshot_fixture_test.sh"
 
 # Gate 4.7: Package artifact leakage guard. This is a quick packaging gate:
 # it runs cargo package --list without building and fails if local/generated
