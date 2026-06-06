@@ -10540,7 +10540,7 @@ Then update src/policy/mod.rs on main."
             candidate_type: CandidateType::CreateDerivedMemory,
             target_memory_id: None,
             proposed_content: Some(
-                "Derived memory from ev_1 and mem_1 about release verification.".to_owned(),
+                "Derived memory from ev_1 and mem_1: run `scripts/rch_verify.sh -- cargo test --workspace --lib` before merging to main; preserve RCH-E327 evidence from file:docs/verification.md.".to_owned(),
             ),
             proposed_confidence: Some(0.7),
             proposed_trust_class: None,
@@ -11384,7 +11384,7 @@ Then update src/policy/mod.rs on main."
         assert_eq!(invalid_error.code(), "invalid_reflection_request_artifact");
         let invalid_recovery = serde_json::to_string(&invalid_error.recovery_actions())
             .map_err(|error| error.to_string())?;
-        assert!(invalid_recovery.contains("fresh"));
+        assert!(invalid_recovery.contains("valid challenged request artifact"));
         assert!(!invalid_recovery.contains("super secret ledger matching key material"));
         Ok(())
     }

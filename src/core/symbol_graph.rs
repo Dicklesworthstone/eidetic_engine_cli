@@ -549,15 +549,30 @@ fn resolve_symbol_evidence_input(
                 "multiple symbols matched the evidence span with equal specificity",
             )
         }
-        [symbol, ..] => link_with_symbol(
-            input,
-            &target_path,
-            target_range,
-            symbol,
-            confidence,
-            SymbolEvidenceResolution::ContainingSymbol,
-            SymbolEvidenceReasonCode::ContainingSymbolSpan,
-        ),
+        [symbol, ..] => {
+            let exact = symbol.range.start_line == input.start_line
+                && symbol.range.end_line == input.end_line;
+            let (resolution, reason) = if exact {
+                (
+                    SymbolEvidenceResolution::ExactSymbol,
+                    SymbolEvidenceReasonCode::ExactSymbolSpan,
+                )
+            } else {
+                (
+                    SymbolEvidenceResolution::ContainingSymbol,
+                    SymbolEvidenceReasonCode::ContainingSymbolSpan,
+                )
+            };
+            link_with_symbol(
+                input,
+                &target_path,
+                target_range,
+                symbol,
+                confidence,
+                resolution,
+                reason,
+            )
+        }
     }
 }
 
