@@ -13,11 +13,13 @@ use ee::mesh::remote_evidence::{
 
 #[test]
 fn cass_session_reference_normalizes_without_fetching_session_body() {
-    let uri = normalize_remote_evidence_uri(
+    let uri = match normalize_remote_evidence_uri(
         MeshRemoteEvidenceKind::CassSession,
         " cass-session://sess_A1-B2#L7-11 ",
-    )
-    .expect("valid CASS session evidence URI");
+    ) {
+        Ok(uri) => uri,
+        Err(err) => panic!("expected valid CASS session evidence URI, got {err:?}"),
+    };
 
     assert_eq!(uri, "cass-session://sess_A1-B2#L7-11");
 
@@ -184,18 +186,22 @@ fn hash_mismatch_quarantines_remote_material_without_persistence() {
 
 #[test]
 fn unsafe_remote_evidence_uris_are_rejected_before_indexing() {
-    let err = normalize_remote_evidence_uri(
+    let err = match normalize_remote_evidence_uri(
         MeshRemoteEvidenceKind::Artifact,
         "artifact://../private_bundle",
-    )
-    .expect_err("path-like artifact ids are unsafe");
+    ) {
+        Ok(uri) => panic!("expected path-like artifact id to be unsafe, got {uri}"),
+        Err(err) => err,
+    };
     assert_eq!(err.reason(), "unsafe_uri_identifier");
 
-    let err = normalize_remote_evidence_uri(
+    let err = match normalize_remote_evidence_uri(
         MeshRemoteEvidenceKind::EvidenceSpan,
         "evidence://localhost/span_001",
-    )
-    .expect_err("localhost URI is unsafe");
+    ) {
+        Ok(uri) => panic!("expected localhost URI to be unsafe, got {uri}"),
+        Err(err) => err,
+    };
     assert_eq!(err.reason(), "unsafe_uri");
 }
 
