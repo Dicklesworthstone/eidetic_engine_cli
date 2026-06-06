@@ -36,7 +36,6 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
-      RUSTFLAGS: "-C debuginfo=0 -C linker-features=-lld"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -105,11 +104,14 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
+        env:
+          RUSTFLAGS: "-C debuginfo=0 -C linker-features=-lld"
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Tests
         env:
           CARGO_BUILD_JOBS: "1"
+          RUSTFLAGS: "-C debuginfo=0 -C linker-features=-lld"
           RUST_TEST_THREADS: "1"
         run: |
           set -euo pipefail
@@ -142,6 +144,8 @@ jobs:
           exit "$status"
 
       - name: MCP parity tests
+        env:
+          RUSTFLAGS: "-C debuginfo=0 -C linker-features=-lld"
         run: cargo test --workspace --features mcp --test mcp_parity
 
   cross-platform-determinism:
