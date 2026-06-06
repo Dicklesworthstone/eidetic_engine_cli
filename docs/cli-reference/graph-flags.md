@@ -358,13 +358,14 @@ bead or runs an RCH-gated verification.
 | --- | --- | --- | --- | --- |
 | `ee swarm brief` | `--sources <LIST>` | comma-separated: `default`, `all`, `none`, `git`, `beads`, `bv`, `agent-mail`, `rch`, `host-profile`, `agent-inventory` | `default` | Selects read-only inputs for the coordination brief. Bare JSON-like output uses the compact `summary` field preset; use `--fields full` for the full report. |
 | `ee swarm next-action` | `--sources <LIST>` | same as `ee swarm brief` | `default`; includes RCH for next-action | Selects read-only inputs for work allocation. |
-| `ee swarm brief`, `ee swarm next-action` | `--include-rch` | boolean | false | Adds the optional RCH status probe; equivalent to including `rch` in `--sources`. |
-| `ee swarm brief`, `ee swarm next-action` | `--agent-mail-snapshot <PATH>` | JSON file path | omitted | Includes a redacted Agent Mail snapshot without mutating live mail. If omitted for brief, the Agent Mail source reports snapshot absence and a bounded `127.0.0.1:8765/health` probe result. |
-| `ee swarm next-action` | `--verifier-evidence <PATH>` | `ee.rch.verify.v1` proof JSON path | omitted | Includes recent compile-health evidence for work-allocation preflight. |
-| `ee swarm brief`, `ee swarm next-action` | `--agent-inventory-only <SLUGS>` | comma-separated connector slugs | omitted | Limits agent inventory inspection to selected connectors when inventory is enabled. |
-| `ee swarm brief`, `ee swarm next-action` | `--max-recent-commits <N>` | integer | `8` | Caps recent git commits included by the git source. |
-| `ee swarm brief`, `ee swarm next-action` | `--command-timeout-ms <MS>` | integer milliseconds | `1500` | Sets the timeout budget for each selected source probe. |
-| `ee swarm brief`, `ee swarm next-action` | `--require-sources` | boolean | false | Exits 6 when any selected source is unavailable, unconfigured, or skipped. |
+| `ee swarm work-packet` | `--sources <LIST>` | same as `ee swarm brief` | `default`; includes RCH for work-packet | Selects read-only inputs for the work packet and claim gate. |
+| `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--include-rch` | boolean | false | Adds the optional RCH status probe; equivalent to including `rch` in `--sources`. |
+| `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--agent-mail-snapshot <PATH>` | JSON file path | omitted | Includes a redacted Agent Mail snapshot without mutating live mail. If omitted for brief, the Agent Mail source reports snapshot absence and a bounded `127.0.0.1:8765/health` probe result; work-packet claim gates treat missing Agent Mail evidence as unsafe until a snapshot or live source is available. |
+| `ee swarm next-action`, `ee swarm work-packet` | `--verifier-evidence <PATH>` | `ee.rch.verify.v1` proof JSON path | omitted | Includes recent compile-health evidence for work-allocation and work-packet preflight. |
+| `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--agent-inventory-only <SLUGS>` | comma-separated connector slugs | omitted | Limits agent inventory inspection to selected connectors when inventory is enabled. |
+| `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--max-recent-commits <N>` | integer | `8` | Caps recent git commits included by the git source. |
+| `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--command-timeout-ms <MS>` | integer milliseconds | `1500` | Sets the timeout budget for each selected source probe. |
+| `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--require-sources` | boolean | false | Exits 6 when any selected source is unavailable, unconfigured, or skipped. |
 | `ee diag host-profile` | `--full-paths` | boolean | false | Includes absolute host paths in path probes; omit for redacted labels. |
 | `ee profile config plan` | `--profile <PROFILE>` | `constrained`, `portable`, `workstation`, `swarm` | host-adaptive recommendation | Plans exact `.ee/config.toml` profile changes without writing. |
 | `ee profile config plan`, `ee profile config apply` | `--config <PATH>` | filesystem path | `<workspace>/.ee/config.toml` | Selects the config file to inspect or update. |
