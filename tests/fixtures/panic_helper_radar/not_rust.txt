@@ -1,0 +1,2 @@
+This fixture is intentionally not a Rust file. The radar should skip it with
+reason not_rust_file when it is passed explicitly.

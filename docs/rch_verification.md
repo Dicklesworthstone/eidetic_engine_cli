@@ -65,6 +65,14 @@ failure points to unallowed `.expect()`, `.expect_err()`, `.unwrap()`, or
 `#[allow(clippy::expect_used)]` / `#[allow(clippy::unwrap_used)]` annotations
 are treated as intentional posture, not as scanner failures.
 
+The schema is pinned in `docs/schemas/ee.panic_helper_radar.v1.json`, with
+compact fixtures under `tests/fixtures/panic_helper_radar/`. Run the no-Cargo
+golden harness when changing the scanner contract:
+
+```bash
+scripts/panic_helper_radar_golden.sh
+```
+
 Use this as a cheap hygiene check before remote verification. It is not a
 replacement for `scripts/rch_verify.sh -- cargo clippy --all-targets -- -D
 warnings`, and it must not be used to claim a Rust proof when code changed.

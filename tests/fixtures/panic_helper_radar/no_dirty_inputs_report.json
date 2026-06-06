@@ -1,0 +1,13 @@
+{
+  "schema": "ee.panic_helper_radar.v1",
+  "generatedAt": "2026-06-06T00:00:00Z",
+  "verdict": "pass",
+  "summary": {
+    "scannedFileCount": 0,
+    "violationCount": 0,
+    "skippedCount": 0,
+    "scannedPaths": []
+  },
+  "violations": [],
+  "skipped": []
+}

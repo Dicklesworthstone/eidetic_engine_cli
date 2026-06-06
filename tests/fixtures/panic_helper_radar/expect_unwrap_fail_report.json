@@ -1,0 +1,36 @@
+{
+  "schema": "ee.panic_helper_radar.v1",
+  "generatedAt": "2026-06-06T00:00:00Z",
+  "verdict": "fail",
+  "summary": {
+    "scannedFileCount": 2,
+    "violationCount": 2,
+    "skippedCount": 1,
+    "scannedPaths": [
+      "tests/fixtures/panic_helper_radar/expect_fail.rs",
+      "tests/fixtures/panic_helper_radar/unwrap_fail.rs"
+    ]
+  },
+  "violations": [
+    {
+      "path": "tests/fixtures/panic_helper_radar/expect_fail.rs",
+      "line": 2,
+      "helper": "expect",
+      "lint": "expect_used",
+      "text": "let _value = Some(1).expect(\"fixture should report expect_used\");"
+    },
+    {
+      "path": "tests/fixtures/panic_helper_radar/unwrap_fail.rs",
+      "line": 2,
+      "helper": "unwrap_err",
+      "lint": "unwrap_used",
+      "text": "let _err = Result::<(), &str>::Err(\"fixture should report unwrap_used\").unwrap_err();"
+    }
+  ],
+  "skipped": [
+    {
+      "path": "tests/fixtures/panic_helper_radar/not_rust.txt",
+      "reason": "not_rust_file"
+    }
+  ]
+}
