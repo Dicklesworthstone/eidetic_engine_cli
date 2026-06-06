@@ -8,7 +8,7 @@ expression: value
     "code": "graph",
     "message": "Graph projection outdated.",
     "severity": "medium",
-    "repair": "ee graph refresh",
+    "repair": "ee graph snapshot refresh",
     "details": {}
   }
 }

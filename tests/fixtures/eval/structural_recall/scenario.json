@@ -294,7 +294,7 @@
     {
       "code": "graph_snapshot_stale",
       "description": "Graph boosts unavailable or stale; the structural recall snapshot reports the blocked PPR contract instead of claiming a pass.",
-      "repair_action": "ee graph refresh --workspace <workspace>",
+      "repair_action": "ee graph snapshot refresh --workspace <workspace>",
       "preserves_success_signal": true
     }
   ],

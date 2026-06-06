@@ -8,7 +8,7 @@ expression: value
     "code": "migration_required",
     "message": "Database schema is at version 5, current is 7.",
     "severity": "medium",
-    "repair": "ee migrate",
+    "repair": "ee migrate run",
     "details": {
       "recovery": [
         {

@@ -84,7 +84,7 @@ expression: value
         "fixtureId": "fx.release_failure.v1",
         "code": "graph_snapshot_stale",
         "description": "Graph boosts unavailable or stale; context pack still includes explicit release evidence with provenance.",
-        "repairAction": "ee graph refresh --workspace <workspace>",
+        "repairAction": "ee graph snapshot refresh --workspace <workspace>",
         "preservesSuccessSignal": true,
         "executed": true,
         "mode": "declared_fixture_branch"

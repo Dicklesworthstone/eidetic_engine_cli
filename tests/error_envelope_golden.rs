@@ -122,7 +122,7 @@ fn error_envelope_search_index() -> TestResult {
 fn error_envelope_graph() -> TestResult {
     let error = DomainError::Graph {
         message: "Graph projection outdated.".into(),
-        repair: Some("ee graph refresh".into()),
+        repair: Some("ee graph snapshot refresh".into()),
     };
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
@@ -188,7 +188,7 @@ fn error_envelope_policy_denied() -> TestResult {
 fn error_envelope_migration_required() -> TestResult {
     let error = DomainError::MigrationRequired {
         message: "Database schema is at version 5, current is 7.".into(),
-        repair: Some("ee migrate".into()),
+        repair: Some("ee migrate run".into()),
     };
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
