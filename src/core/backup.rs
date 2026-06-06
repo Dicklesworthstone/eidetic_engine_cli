@@ -1889,6 +1889,15 @@ fn restore_graph_cache_assets(
             ),
             repair: Some("retry restore with a fresh --side-path".to_owned()),
         })?;
+    connection.migrate().map_err(|error| DomainError::Import {
+        message: format!(
+            "failed preparing restored database '{}' for graph cache restore: {error}",
+            restored_database_path.display()
+        ),
+        repair: Some(
+            "inspect restored records.jsonl and retry with a fresh --side-path".to_owned(),
+        ),
+    })?;
     let restored_workspace_id = connection
         .list_workspaces()
         .map_err(|error| DomainError::Import {

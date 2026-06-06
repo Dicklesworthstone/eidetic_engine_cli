@@ -1348,6 +1348,13 @@ fn completion_verdict(
     {
         return CompletionVerdict::Blocked;
     }
+    if !checklist.unknown_clauses.is_empty()
+        || contradictions
+            .iter()
+            .any(|contradiction| contradiction.kind == ClaimContradictionKind::NeedsOwnerDecision)
+    {
+        return CompletionVerdict::Unknown;
+    }
     if evidence
         .iter()
         .any(|item| item.support != RequirementSupport::Direct)
@@ -1360,13 +1367,6 @@ fn completion_verdict(
         })
     {
         return CompletionVerdict::Incomplete;
-    }
-    if !checklist.unknown_clauses.is_empty()
-        || contradictions
-            .iter()
-            .any(|contradiction| contradiction.kind == ClaimContradictionKind::NeedsOwnerDecision)
-    {
-        return CompletionVerdict::Unknown;
     }
     CompletionVerdict::Complete
 }

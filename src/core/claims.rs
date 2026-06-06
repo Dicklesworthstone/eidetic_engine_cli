@@ -1782,7 +1782,7 @@ mod tests {
     const VALID_CLAIMS_YAML: &str = r#"schema: ee.claims_file.v1
 version: 1
 claims:
-  - id: claim_fixture_001
+  - id: claim_00000000000000000000000001
     title: Symlink guard fixture
     status: active
     frequency: weekly
@@ -2024,12 +2024,15 @@ claims:
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         std::fs::write(temp.path().join("claims.yaml"), VALID_CLAIMS_YAML)
             .map_err(|error| error.to_string())?;
-        let claim_dir = temp.path().join("artifacts").join("claim_fixture_001");
+        let claim_dir = temp
+            .path()
+            .join("artifacts")
+            .join("claim_00000000000000000000000001");
         std::fs::create_dir_all(&claim_dir).map_err(|error| error.to_string())?;
         let outside_manifest = temp.path().join("outside-manifest.json");
         std::fs::write(
             &outside_manifest,
-            r#"{"schema":"ee.claim_manifest.v1","claimId":"claim_fixture_001","artifacts":[]}"#,
+            r#"{"schema":"ee.claim_manifest.v1","claimId":"claim_00000000000000000000000001","artifacts":[]}"#,
         )
         .map_err(|error| error.to_string())?;
         symlink(&outside_manifest, claim_dir.join("manifest.json"))
@@ -2037,7 +2040,7 @@ claims:
 
         let error = build_claim_show_report(&ClaimShowOptions {
             workspace_path: temp.path().to_path_buf(),
-            claim_id: "claim_fixture_001".to_owned(),
+            claim_id: "claim_00000000000000000000000001".to_owned(),
             include_manifest: true,
             ..Default::default()
         })
@@ -2058,13 +2061,13 @@ claims:
         let manifest_path = temp
             .path()
             .join("artifacts")
-            .join("claim_fixture_001")
+            .join("claim_00000000000000000000000001")
             .join("manifest.json");
         std::fs::create_dir_all(&manifest_path).map_err(|error| error.to_string())?;
 
         let error = build_claim_show_report(&ClaimShowOptions {
             workspace_path: temp.path().to_path_buf(),
-            claim_id: "claim_fixture_001".to_owned(),
+            claim_id: "claim_00000000000000000000000001".to_owned(),
             include_manifest: true,
             ..Default::default()
         })
@@ -2082,13 +2085,16 @@ claims:
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         std::fs::write(temp.path().join("claims.yaml"), VALID_CLAIMS_YAML)
             .map_err(|error| error.to_string())?;
-        let claim_dir = temp.path().join("artifacts").join("claim_fixture_001");
+        let claim_dir = temp
+            .path()
+            .join("artifacts")
+            .join("claim_00000000000000000000000001");
         std::fs::create_dir_all(&claim_dir).map_err(|error| error.to_string())?;
         std::fs::create_dir_all(claim_dir.join("stdout.json"))
             .map_err(|error| error.to_string())?;
         let manifest = serde_json::json!({
             "schema": "ee.claim_manifest.v1",
-            "claimId": "claim_fixture_001",
+            "claimId": "claim_00000000000000000000000001",
             "artifacts": [
                 {
                     "path": "stdout.json",
@@ -2107,7 +2113,7 @@ claims:
 
         let report = build_claim_verify_report(&ClaimVerifyOptions {
             workspace_path: temp.path().to_path_buf(),
-            claim_id: "claim_fixture_001".to_owned(),
+            claim_id: "claim_00000000000000000000000001".to_owned(),
             ..Default::default()
         })
         .map_err(|error| error.to_string())?;
@@ -2134,14 +2140,14 @@ claims:
         std::fs::write(
             temp.path().join("claims.yaml"),
             format!(
-                "schema: ee.claims_file.v1\nversion: 1\nclaims:\n  - id: claim_fixture_001\n    title: File evidence claim\n    status: active\n    frequency: weekly\n    evidence:\n      kind: file-hash\n      target: evidence/payload.txt\n      expected_hash: {expected_hash}\n"
+                "schema: ee.claims_file.v1\nversion: 1\nclaims:\n  - id: claim_00000000000000000000000001\n    title: File evidence claim\n    status: active\n    frequency: weekly\n    evidence:\n      kind: file-hash\n      target: evidence/payload.txt\n      expected_hash: {expected_hash}\n"
             ),
         )
         .map_err(|error| error.to_string())?;
 
         let report = build_claim_verify_report(&ClaimVerifyOptions {
             workspace_path: temp.path().to_path_buf(),
-            claim_id: "claim_fixture_001".to_owned(),
+            claim_id: "claim_00000000000000000000000001".to_owned(),
             ..Default::default()
         })
         .map_err(|error| error.to_string())?;
@@ -2174,14 +2180,14 @@ claims:
         std::fs::write(
             temp.path().join("claims.yaml"),
             format!(
-                "schema: ee.claims_file.v1\nversion: 1\nclaims:\n  - id: claim_fixture_001\n    title: File evidence claim\n    status: active\n    frequency: weekly\n    evidence:\n      kind: file-hash\n      target: \" evidence/payload.txt \"\n      expected_hash: \" {expected_hash} \"\n"
+                "schema: ee.claims_file.v1\nversion: 1\nclaims:\n  - id: claim_00000000000000000000000001\n    title: File evidence claim\n    status: active\n    frequency: weekly\n    evidence:\n      kind: file-hash\n      target: \" evidence/payload.txt \"\n      expected_hash: \" {expected_hash} \"\n"
             ),
         )
         .map_err(|error| error.to_string())?;
 
         let report = build_claim_verify_report(&ClaimVerifyOptions {
             workspace_path: temp.path().to_path_buf(),
-            claim_id: "claim_fixture_001".to_owned(),
+            claim_id: "claim_00000000000000000000000001".to_owned(),
             ..Default::default()
         })
         .map_err(|error| error.to_string())?;
@@ -2195,10 +2201,13 @@ claims:
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         std::fs::write(
             temp.path().join("claims.yaml"),
-            "schema: ee.claims_file.v1\nversion: 1\nclaims:\n  - id: claim_fixture_001\n    title: Manifest artifact claim\n    status: active\n    frequency: weekly\n",
+            "schema: ee.claims_file.v1\nversion: 1\nclaims:\n  - id: claim_00000000000000000000000001\n    title: Manifest artifact claim\n    status: active\n    frequency: weekly\n",
         )
         .map_err(|error| error.to_string())?;
-        let claim_dir = temp.path().join("artifacts").join("claim_fixture_001");
+        let claim_dir = temp
+            .path()
+            .join("artifacts")
+            .join("claim_00000000000000000000000001");
         std::fs::create_dir_all(&claim_dir).map_err(|error| error.to_string())?;
         let payload = b"manifest artifact payload";
         std::fs::write(claim_dir.join("stdout.json"), payload)
@@ -2209,7 +2218,7 @@ claims:
             .to_ascii_uppercase();
         let manifest = serde_json::json!({
             "schema": "ee.claim_manifest.v1",
-            "claimId": "claim_fixture_001",
+            "claimId": "claim_00000000000000000000000001",
             "artifacts": [
                 {
                     "path": "stdout.json",
@@ -2228,7 +2237,7 @@ claims:
 
         let report = build_claim_verify_report(&ClaimVerifyOptions {
             workspace_path: temp.path().to_path_buf(),
-            claim_id: "claim_fixture_001".to_owned(),
+            claim_id: "claim_00000000000000000000000001".to_owned(),
             ..Default::default()
         })
         .map_err(|error| error.to_string())?;

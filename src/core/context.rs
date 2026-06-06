@@ -9557,7 +9557,7 @@ mod tests {
         let required_id = MemoryId::from_uuid(uuid::Uuid::from_u128(938));
         let mut candidates = vec![
             tier_candidate(hot_id, 0.91, "matched 'release failure' via lexical")?,
-            tier_candidate(warm_id, 0.89, "matched 'release failure' via lexical")?,
+            tier_candidate(warm_id, 0.89, "selected by fixture")?,
             tier_candidate(required_id, 0.87, "matched 'release failure' via lexical")?,
         ];
         let memories = tier_memory_map(vec![
@@ -9637,9 +9637,12 @@ mod tests {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let src_dir = tempdir.path().join("src");
         std::fs::create_dir_all(&src_dir).map_err(|error| error.to_string())?;
+        let padding = "\n".repeat(25);
         std::fs::write(
             src_dir.join("lib.rs"),
-            "pub fn changed_symbol() -> u64 { 1 }\n\npub fn other_symbol() -> u64 { 2 }\n",
+            format!(
+                "pub fn changed_symbol() -> u64 {{ 1 }}\n{padding}pub fn other_symbol() -> u64 {{ 2 }}\n"
+            ),
         )
         .map_err(|error| error.to_string())?;
 
@@ -9647,7 +9650,7 @@ mod tests {
         let other = MemoryId::from_uuid(uuid::Uuid::from_u128(1202));
         let mut candidates = vec![
             symbol_candidate(changed, 0.50, tempdir.path(), "src/lib.rs", 1)?,
-            symbol_candidate(other, 0.53, tempdir.path(), "src/lib.rs", 3)?,
+            symbol_candidate(other, 0.53, tempdir.path(), "src/lib.rs", 27)?,
         ];
         let mut degraded = Vec::new();
 
@@ -9865,17 +9868,20 @@ pub fn far_symbol() -> u64 {{
         let source_dir = tempdir.path().join("src");
         std::fs::create_dir_all(&source_dir).map_err(|error| error.to_string())?;
         let relative_path = "src/symbol_context_boost.rs";
+        let padding = "\n".repeat(25);
         std::fs::write(
             tempdir.path().join(relative_path),
-            "\
+            format!(
+                "\
 pub fn render_context_boost() -> u64 {
     42
 }
-
+{padding}
 pub fn unrelated_context() -> u64 {
     7
 }
-",
+"
+            ),
         )
         .map_err(|error| error.to_string())?;
 
@@ -9895,7 +9901,7 @@ pub fn unrelated_context() -> u64 {
             ProvenanceUri::File {
                 path: relative_path.to_string(),
                 span: Some(
-                    crate::models::LineSpan::range(5, 7).map_err(|error| error.to_string())?,
+                    crate::models::LineSpan::range(29, 31).map_err(|error| error.to_string())?,
                 ),
             },
             "neutral symbol fixture",
@@ -12179,7 +12185,7 @@ pub fn unrelated_context() -> u64 {
             workspace_path: workspace,
             database_path: Some(db_path),
             index_dir: Some(empty_index_dir),
-            query: "format before release".to_owned(),
+            query: "fmt before release".to_owned(),
             speed: crate::search::SpeedMode::Default,
             source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
             strict_source_mode: false,

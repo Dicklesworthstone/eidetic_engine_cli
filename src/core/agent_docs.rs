@@ -219,6 +219,27 @@ pub struct EnvVarEntry {
     pub category: &'static str,
 }
 
+impl EnvVarEntry {
+    #[must_use]
+    pub const fn from_env_var(var: EnvVar) -> Self {
+        Self {
+            name: var.name(),
+            description: var.description(),
+            default: var.default_value(),
+            category: var.category(),
+        }
+    }
+}
+
+#[must_use]
+pub fn env_var_entries() -> Vec<EnvVarEntry> {
+    EnvVar::all()
+        .iter()
+        .copied()
+        .map(EnvVarEntry::from_env_var)
+        .collect()
+}
+
 pub const ENV_VARS: &[EnvVarEntry] = &[
     EnvVarEntry {
         name: EnvVar::AgentName.name(),
@@ -1210,8 +1231,8 @@ mod tests {
     use std::fmt::Debug;
 
     use super::{
-        AGENT_DOC_RECIPES, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, ENV_VARS, EXAMPLES,
-        EXIT_CODES, FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS,
+        AGENT_DOC_RECIPES, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, EXAMPLES, EXIT_CODES,
+        FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS, env_var_entries,
     };
     use crate::config::EnvVar;
     use crate::models::ProcessExitCode;
@@ -1316,8 +1337,9 @@ mod tests {
 
     #[test]
     fn env_vars_are_non_empty() -> TestResult {
-        ensure(!ENV_VARS.is_empty(), "env vars exist")?;
-        for var in ENV_VARS {
+        let env_vars = env_var_entries();
+        ensure(!env_vars.is_empty(), "env vars exist")?;
+        for var in &env_vars {
             ensure(!var.name.is_empty(), "env var name non-empty")?;
             ensure(!var.description.is_empty(), "env var description non-empty")?;
         }
@@ -1326,7 +1348,8 @@ mod tests {
 
     #[test]
     fn env_docs_match_registry_order() -> TestResult {
-        for (entry, var) in ENV_VARS.iter().zip(EnvVar::all()) {
+        let env_vars = env_var_entries();
+        for (entry, var) in env_vars.iter().zip(EnvVar::all()) {
             ensure_equal(&entry.name, &var.name(), "env docs name")?;
             ensure_equal(
                 &entry.description,
@@ -1345,7 +1368,7 @@ mod tests {
             )?;
         }
         ensure_equal(
-            &ENV_VARS.len(),
+            &env_vars.len(),
             &EnvVar::all().len(),
             "env docs registry count",
         )

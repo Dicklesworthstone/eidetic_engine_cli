@@ -1540,7 +1540,8 @@ pub fn pack_item_provenance_json(provenance: &[PackProvenance]) -> String {
 }
 
 pub(crate) fn redact_pack_provenance_text(value: &str) -> String {
-    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    let path_redacted = redact_pack_absolute_path_like_segments(value);
+    let secret_redacted = crate::policy::redact_secret_like_content(&path_redacted).content;
     redact_pack_absolute_path_like_segments(&secret_redacted)
 }
 

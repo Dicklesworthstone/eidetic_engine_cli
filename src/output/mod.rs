@@ -12088,8 +12088,8 @@ pub fn render_agent_status_toon(report: &AgentInventoryReport) -> String {
 }
 
 use crate::core::agent_docs::{
-    AGENT_DOC_RECIPES, AgentDocsReport, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, ENV_VARS,
-    EXAMPLES, EXIT_CODES, FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS,
+    AGENT_DOC_RECIPES, AgentDocsReport, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, EXAMPLES,
+    EXIT_CODES, FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS, env_var_entries,
 };
 
 #[must_use]
@@ -12213,7 +12213,8 @@ fn render_agent_docs_topic_json(d: &mut JsonBuilder, topic: AgentDocsTopic) {
             });
         }
         AgentDocsTopic::Env => {
-            d.field_array_of_objects("envVars", ENV_VARS, |obj, var| {
+            let env_vars = env_var_entries();
+            d.field_array_of_objects("envVars", &env_vars, |obj, var| {
                 obj.field_str("name", var.name);
                 obj.field_str("description", var.description);
                 obj.field_str("category", var.category);
@@ -12368,7 +12369,8 @@ fn render_agent_docs_topic_human(output: &mut String, topic: AgentDocsTopic) {
         }
         AgentDocsTopic::Env => {
             output.push_str("\nEnvironment variables:\n");
-            for var in ENV_VARS {
+            let env_vars = env_var_entries();
+            for var in &env_vars {
                 let def = var
                     .default
                     .map_or(String::new(), |d| format!(" (default: {})", d));
