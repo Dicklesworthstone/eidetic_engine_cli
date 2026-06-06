@@ -440,17 +440,22 @@ fn lookup_failures_and_context_provenance_are_redaction_safe() -> TestResult {
     let unknown_peer_with_secret =
         "peer_MESH_PRIVACY_SENTINEL_PEER_PASSWORD_password-not-real-000000000000";
 
-    let missing = registry
-        .select_inbound_policy(&MeshPeerPolicyDecisionInput {
-            local_workspace_id: LOCAL_WORKSPACE,
-            origin_workspace_id: ORIGIN_WORKSPACE,
-            producer_peer_id: unknown_peer_with_secret,
-            material_lane: MeshLane::Metadata,
-            event_validity: MeshEventValidity::Valid,
-            requested_body_bytes: None,
-            body_fetch_consent: false,
-        })
-        .expect_err("unknown peer should fail closed before authorization");
+    let missing = match registry.select_inbound_policy(&MeshPeerPolicyDecisionInput {
+        local_workspace_id: LOCAL_WORKSPACE,
+        origin_workspace_id: ORIGIN_WORKSPACE,
+        producer_peer_id: unknown_peer_with_secret,
+        material_lane: MeshLane::Metadata,
+        event_validity: MeshEventValidity::Valid,
+        requested_body_bytes: None,
+        body_fetch_consent: false,
+    }) {
+        Ok(decision) => {
+            return Err(format!(
+                "unknown peer should fail closed before authorization: {decision:?}"
+            ));
+        }
+        Err(error) => error,
+    };
     let lookup_json = missing.to_json();
     if lookup_json["code"] != "mesh_peer_policy_lookup_missing" {
         return Err(format!("unexpected lookup failure JSON: {lookup_json}"));
@@ -469,17 +474,22 @@ fn lookup_failures_and_context_provenance_are_redaction_safe() -> TestResult {
         ));
     }
 
-    let stale_missing = registry
-        .select_inbound_policy(&MeshPeerPolicyDecisionInput {
-            local_workspace_id: LOCAL_WORKSPACE,
-            origin_workspace_id: ORIGIN_WORKSPACE,
-            producer_peer_id: STALE_PEER_WITH_SECRET,
-            material_lane: MeshLane::Metadata,
-            event_validity: MeshEventValidity::Valid,
-            requested_body_bytes: None,
-            body_fetch_consent: false,
-        })
-        .expect_err("stale/unknown peer should fail closed before authorization");
+    let stale_missing = match registry.select_inbound_policy(&MeshPeerPolicyDecisionInput {
+        local_workspace_id: LOCAL_WORKSPACE,
+        origin_workspace_id: ORIGIN_WORKSPACE,
+        producer_peer_id: STALE_PEER_WITH_SECRET,
+        material_lane: MeshLane::Metadata,
+        event_validity: MeshEventValidity::Valid,
+        requested_body_bytes: None,
+        body_fetch_consent: false,
+    }) {
+        Ok(decision) => {
+            return Err(format!(
+                "stale/unknown peer should fail closed before authorization: {decision:?}"
+            ));
+        }
+        Err(error) => error,
+    };
     let stale_json = stale_missing.to_json();
     assert_json_no_sentinel("stale_peer_lookup_failure_redacted", &stale_json, &fixture)?;
     if stale_json["code"] != "mesh_peer_policy_lookup_missing"

@@ -181,6 +181,4 @@ mod windows {
 
 #[cfg(not(windows))]
 #[test]
-fn windows_msvc_cli_smoke_is_windows_only() {
-    assert!(cfg!(not(windows)));
-}
+fn windows_msvc_cli_smoke_is_windows_only() {}
