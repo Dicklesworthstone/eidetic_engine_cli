@@ -48,6 +48,7 @@ set -euo pipefail
 #   4.67. Panic Helper Radar Contract - no-Cargo schema/golden scanner contract gate
 #   4.68. Swarm SLO Replay Contract - no-Cargo replay fixture/golden contract gate
 #   4.69. CI Proof-Lane Snapshot Contract - no-Cargo proof-lane fixture gate
+#   4.70. CI Proof-Lane Hygiene Advisory - no-Cargo workflow policy scanner
 #   4.7. Package Artifact Leak - cargo package list gate for generated artifacts
 #   4.8. Fuzz Target Audit     - static cargo-fuzz target registration/docs check
 #   4.9. Fuzz Smoke            - optional 30s search query parser cargo-fuzz sweep
@@ -783,6 +784,12 @@ run_stage "Swarm SLO Replay Contract" "./scripts/e2e_overhaul/swarm_slo_replay.s
 # missing/stale artifact, checksum, surface-probe, unavailable-gh, and invalid
 # SHA behavior before agents rely on CI artifact source-authority evidence.
 run_stage "CI Proof-Lane Snapshot Contract" "./scripts/ci_proof_lane_snapshot_fixture_test.sh"
+
+# Gate 3.89: CI proof-lane hygiene advisory (bd-1n3x1.8). This no-Cargo,
+# network-free workflow scanner emits ee.ci_proof_lane_hygiene.v1 so agents see
+# duplicate-dispatch, cancel-in-progress, artifact-retention, release-artifact,
+# and unclassified artifact-lane posture before spending CI/RCH proof slots.
+run_stage "CI Proof-Lane Hygiene Advisory" "./scripts/ci_proof_lane_hygiene.sh --json"
 
 # Gate 4.7: Package artifact leakage guard. This is a quick packaging gate:
 # it runs cargo package --list without building and fails if local/generated

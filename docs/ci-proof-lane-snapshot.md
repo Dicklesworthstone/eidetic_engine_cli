@@ -30,6 +30,11 @@ The offline fixture contract is pinned by
 `CI Proof-Lane Snapshot Contract` stage before Cargo-backed gates, so duplicate
 dispatch, artifact freshness, checksum, surface-probe, `gh` unavailability, and
 invalid-SHA behavior drift fails without launching CI, RCH, or local Cargo.
+The same runner also executes `scripts/ci_proof_lane_hygiene.sh --json` as the
+`CI Proof-Lane Hygiene Advisory` stage. That static workflow-policy scan emits
+`ee.ci_proof_lane_hygiene.v1` and surfaces duplicate-dispatch,
+cancel-in-progress, artifact-retention, release-artifact, and unclassified
+artifact-lane posture without network access.
 
 The snapshot records:
 
