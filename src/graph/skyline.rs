@@ -228,7 +228,17 @@ fn community_summaries(
             let onion_layer_min = layers.iter().copied().min().unwrap_or(0);
             let onion_layer_max = layers.iter().copied().max().unwrap_or(0);
             let midpoint = onion_layer_min + (onion_layer_max.saturating_sub(onion_layer_min) / 2);
-            let periphery_count = layers.iter().filter(|layer| **layer <= midpoint).count();
+            // Onion layers count outward from the periphery, so a higher layer is
+            // more core. A community whose members all share a single layer (e.g.
+            // a clique) is uniformly core, not periphery: without this guard the
+            // `<= midpoint` predicate sweeps every member into `periphery_count`
+            // (midpoint == min == max) and mislabels the densest possible core as
+            // PeripheryHeavy. Multi-layer communities keep the normal split.
+            let periphery_count = if onion_layer_min == onion_layer_max {
+                0
+            } else {
+                layers.iter().filter(|layer| **layer <= midpoint).count()
+            };
             let core_count = layers.len().saturating_sub(periphery_count);
             let k_truss_core_count = members
                 .iter()

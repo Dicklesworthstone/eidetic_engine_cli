@@ -902,8 +902,14 @@ impl DbConnection {
 
         match f() {
             Ok(result) => {
-                guard.completed = true;
+                // Commit while the guard is still armed: if `commit()` fails the
+                // `?` returns early and `TransactionGuard::drop` rolls the
+                // transaction back, honoring the "rolls back on error" contract.
+                // Disarming before the commit would strand an open transaction on
+                // commit failure (matches `apply_migration`/cass import, which
+                // also roll back when commit fails).
                 self.commit()?;
+                guard.completed = true;
                 Ok(result)
             }
             Err(err) => {
