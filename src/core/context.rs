@@ -9873,13 +9873,13 @@ pub fn far_symbol() -> u64 {{
             tempdir.path().join(relative_path),
             format!(
                 "\
-pub fn render_context_boost() -> u64 {
+pub fn render_context_boost() -> u64 {{
     42
-}
+}}
 {padding}
-pub fn unrelated_context() -> u64 {
+pub fn unrelated_context() -> u64 {{
     7
-}
+}}
 "
             ),
         )
