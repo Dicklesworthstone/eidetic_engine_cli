@@ -2467,11 +2467,10 @@ fn proof_broker_reuse_existing_skips_remote_dispatch() -> TestResult {
         .map_err(|error| format!("parse proof broker reuse report: {error}"))?;
     if report["status"] != "proof_broker_reuse"
         || report["exit_code"] != 0
-        || report["rch_invocation"]
+        || !report["rch_invocation"]
             .as_array()
             .ok_or_else(|| "missing rch_invocation".to_owned())?
-            .len()
-            != 0
+            .is_empty()
         || report["proof_broker"]["verdict"] != "reuse_existing"
         || report["proof_broker"]["reuseRunId"] != "vrun_existing"
         || report["proof_broker"]["remoteCargoLaunched"] != false
