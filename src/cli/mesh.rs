@@ -3932,7 +3932,7 @@ mod tests {
                 material_lane: "metadata".to_string(),
                 redaction_class: "metadataOnly".to_string(),
                 trust_lane: "peerAgent".to_string(),
-                import_decision: "accepted".to_string(),
+                import_decision: "allow".to_string(),
                 local_memory_id: None,
                 body_cache_key: None,
                 policy_failure_surface_json: None,

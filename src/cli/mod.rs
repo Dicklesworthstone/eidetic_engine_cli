@@ -57122,7 +57122,7 @@ mod tests {
 
     #[test]
     fn fields_minimal_includes_fields_indicator() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&["ee", "--fields", "minimal", "--json", "status"]);
+        let (exit, stdout, stderr) = invoke(&["ee", "status", "--json", "--fields", "minimal"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "fields minimal exit")?;
         ensure_contains(&stdout, "\"fields\":\"minimal\"", "fields indicator")?;
         ensure(stderr.is_empty(), "stderr empty")
@@ -57130,7 +57130,7 @@ mod tests {
 
     #[test]
     fn fields_minimal_excludes_arrays() -> TestResult {
-        let (_, stdout, _) = invoke(&["ee", "--fields", "minimal", "--json", "status"]);
+        let (_, stdout, _) = invoke(&["ee", "status", "--json", "--fields", "minimal"]);
         ensure(
             !stdout.contains("\"degraded\":["),
             "minimal excludes degraded array",
@@ -57143,7 +57143,7 @@ mod tests {
 
     #[test]
     fn fields_standard_includes_arrays() -> TestResult {
-        let (_, stdout, _) = invoke(&["ee", "--fields", "standard", "--json", "status"]);
+        let (_, stdout, _) = invoke(&["ee", "status", "--json", "--fields", "standard"]);
         ensure_contains(&stdout, "\"fields\":\"standard\"", "standard indicator")?;
         ensure_contains(
             &stdout,
@@ -57154,15 +57154,15 @@ mod tests {
 
     #[test]
     fn fields_full_includes_repair_hints() -> TestResult {
-        let (_, stdout, _) = invoke(&["ee", "--fields", "full", "--json", "status"]);
+        let (_, stdout, _) = invoke(&["ee", "status", "--json", "--fields", "full"]);
         ensure_contains(&stdout, "\"fields\":\"full\"", "full indicator")?;
         ensure_contains(&stdout, "\"repair\":", "full includes repair hints")
     }
 
     #[test]
     fn fields_affects_capabilities_output() -> TestResult {
-        let (_, minimal, _) = invoke(&["ee", "--fields", "minimal", "--json", "capabilities"]);
-        let (_, full, _) = invoke(&["ee", "--fields", "full", "--json", "capabilities"]);
+        let (_, minimal, _) = invoke(&["ee", "capabilities", "--json", "--fields", "minimal"]);
+        let (_, full, _) = invoke(&["ee", "capabilities", "--json", "--fields", "full"]);
 
         ensure_contains(&minimal, "\"fields\":\"minimal\"", "capabilities minimal")?;
         ensure_contains(&full, "\"fields\":\"full\"", "capabilities full")?;
@@ -57175,7 +57175,7 @@ mod tests {
     #[test]
     fn fields_explicit_list_filters_data_payload() -> TestResult {
         let (exit, stdout, stderr) =
-            invoke(&["ee", "--fields", "command,version", "--json", "status"]);
+            invoke(&["ee", "status", "--json", "--fields", "command,version"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "explicit fields exit")?;
         ensure(stderr.is_empty(), "stderr empty")?;
         let value: serde_json::Value = serde_json::from_str(&stdout)
@@ -57200,7 +57200,7 @@ mod tests {
     #[test]
     fn fields_unknown_name_returns_structured_error() -> TestResult {
         let (exit, stdout, stderr) =
-            invoke(&["ee", "--fields", "missingField", "--json", "status"]);
+            invoke(&["ee", "status", "--json", "--fields", "missingField"]);
         ensure_equal(&exit, &ProcessExitCode::Usage, "unknown field exit")?;
         ensure(stderr.is_empty(), "stderr empty")?;
         let value: serde_json::Value = serde_json::from_str(&stdout)
@@ -57231,7 +57231,7 @@ mod tests {
     #[test]
     fn fields_conflicting_presets_return_structured_error() -> TestResult {
         let (exit, stdout, stderr) =
-            invoke(&["ee", "--fields", "minimal,summary", "--json", "status"]);
+            invoke(&["ee", "status", "--json", "--fields", "minimal,summary"]);
         ensure_equal(&exit, &ProcessExitCode::Usage, "conflicting presets exit")?;
         ensure(stderr.is_empty(), "stderr empty")?;
         let value: serde_json::Value = serde_json::from_str(&stdout)

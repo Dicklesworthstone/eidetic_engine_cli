@@ -493,7 +493,7 @@ mod tests {
 
     type TestResult = Result<(), String>;
 
-    const WORKSPACE_ID: &str = "wsp_meshaust000000000000000aa";
+    const WORKSPACE_ID: &str = "wsp_meshaust000000000000000aaa";
     const WORKSPACE_PATH: &str = "/tmp/ee-mesh-audit-test";
 
     fn fixture_details() -> Result<MeshAuditDetails, MeshAuditLedgerError> {
