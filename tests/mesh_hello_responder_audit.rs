@@ -318,16 +318,16 @@ fn hello_responder_rate_limit_is_per_peer_and_windowed() {
 #[test]
 fn hello_responder_tailnet_header_is_required_and_exact() {
     assert!(validate_tailnet_header("tailnet-a", Some("tailnet-a")).is_ok());
-    assert_eq!(
-        validate_tailnet_header("tailnet-a", Some("tailnet-b"))
-            .unwrap_err()
-            .code,
-        "tailnet_mismatch"
-    );
-    assert_eq!(
-        validate_tailnet_header("tailnet-a", None).unwrap_err().code,
-        "tailnet_header_missing"
-    );
+    let mismatch = match validate_tailnet_header("tailnet-a", Some("tailnet-b")) {
+        Ok(()) => panic!("mismatched tailnet header must fail"),
+        Err(error) => error,
+    };
+    assert_eq!(mismatch.code, "tailnet_mismatch");
+    let missing = match validate_tailnet_header("tailnet-a", None) {
+        Ok(()) => panic!("missing tailnet header must fail"),
+        Err(error) => error,
+    };
+    assert_eq!(missing.code, "tailnet_header_missing");
 }
 
 #[test]
