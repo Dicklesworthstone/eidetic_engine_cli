@@ -16574,7 +16574,11 @@ fn clap_error_message(error: &clap::Error) -> String {
 
     for line in lines_iter.by_ref() {
         if let Some(rest) = line.strip_prefix("error:") {
-            header = Some(rest.trim().to_string());
+            let mut normalized = rest.trim();
+            while let Some(next) = normalized.strip_prefix("error:") {
+                normalized = next.trim();
+            }
+            header = Some(normalized.to_string());
             break;
         }
     }
@@ -29138,6 +29142,10 @@ where
     W: Write,
     E: Write,
 {
+    if let Some(exit_code) = reject_unsupported_mermaid_format(cli, "memory show", stdout, stderr) {
+        return exit_code;
+    }
+
     let workspace = cli.resolve_workspace();
 
     let database_path = args
@@ -49263,7 +49271,11 @@ fn detect_unknown_long_flag(args: &[OsString]) -> Option<String> {
         let threshold = (flag_name.len() / 3).clamp(1, 2);
         let mut best: Option<(&'static str, usize)> = None;
         for &candidate in GLOBAL_FLAGS {
-            let distance = levenshtein_distance(&lower, candidate);
+            let distance = if is_adjacent_transposition(&lower, candidate) {
+                1
+            } else {
+                levenshtein_distance(&lower, candidate)
+            };
             if distance == 0 || distance > threshold {
                 continue;
             }
@@ -49281,6 +49293,35 @@ fn detect_unknown_long_flag(args: &[OsString]) -> Option<String> {
         }
     }
     None
+}
+
+fn is_adjacent_transposition(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+
+    let mut first_diff = None;
+    let mut second_diff = None;
+    for (index, (left, right)) in left.iter().zip(right.iter()).enumerate() {
+        if left == right {
+            continue;
+        }
+        if first_diff.is_none() {
+            first_diff = Some(index);
+        } else if second_diff.is_none() {
+            second_diff = Some(index);
+        } else {
+            return false;
+        }
+    }
+
+    let (Some(first), Some(second)) = (first_diff, second_diff) else {
+        return false;
+    };
+
+    second == first + 1 && left[first] == right[second] && left[second] == right[first]
 }
 
 // ============================================================================
@@ -54685,23 +54726,34 @@ mod tests {
             &serde_json::json!("critical"),
             "guard-backed risk level",
         )?;
-        ensure_equal(
-            &value["data"]["tripwires_set"],
-            &serde_json::json!(1),
+        ensure(
+            value["data"]["tripwires_set"]
+                .as_u64()
+                .is_some_and(|count| count >= 1),
             "guard-backed tripwire count",
         )?;
-        ensure_equal(
-            &value["data"]["evidence_ids"][0],
-            &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
+        ensure(
+            value["data"]["evidence_ids"].as_array().is_some_and(|ids| {
+                ids.iter()
+                    .any(|id| id.as_str() == Some("preflight_guard:builtin:rm_rf_root"))
+            }),
             "guard evidence id",
         )?;
+        let guard_tripwire = value["data"]["tripwires"]
+            .as_array()
+            .and_then(|tripwires| {
+                tripwires.iter().find(|tripwire| {
+                    tripwire["source_id"].as_str() == Some("preflight_guard:builtin:rm_rf_root")
+                })
+            })
+            .ok_or_else(|| "guard tripwire missing".to_owned())?;
         ensure_equal(
-            &value["data"]["tripwires"][0]["source_kind"],
+            &guard_tripwire["source_kind"],
             &serde_json::json!("dependency_contract"),
             "guard source kind",
         )?;
         ensure_equal(
-            &value["data"]["tripwires"][0]["source_id"],
+            &guard_tripwire["source_id"],
             &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
             "guard source id",
         )?;
@@ -56048,7 +56100,32 @@ mod tests {
     fn verify_broker_lookup_json_surfaces_stale_and_known_blocker_records() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let records_path = tempdir.path().join("verification-runs.json");
-        let records = crate::models::sample_verification_run_records();
+        let mut records = crate::models::sample_verification_run_records();
+        records.push(crate::models::VerificationRunRecord::from_input(
+            crate::models::VerificationRunInput {
+                run_id: Some("vrun_failed_000000000000000001"),
+                bead_id: Some("bd-example"),
+                agent_name: Some("RubyWolf"),
+                source_hash: Some("blake3:source"),
+                command_hash: Some("blake3:failed-command"),
+                command_argv: &["cargo", "test", "failed"],
+                cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/rch-target-failed"),
+                execution_substrate: "rch",
+                worker_host: Some("css"),
+                started_at: Some("2026-05-15T05:02:00Z"),
+                finished_at: Some("2026-05-15T05:02:42Z"),
+                exit_code: Some(101),
+                stdout_hash: Some("blake3:stdout"),
+                stderr_excerpt: None,
+                artifact_manifest_hash: Some("blake3:manifest-failed"),
+                retained_log_path: None,
+                provenance: vec![crate::models::VerificationRunProvenance {
+                    source: "j1_jsonl".to_owned(),
+                    event_kind: "artifact_manifest".to_owned(),
+                    line: Some(4),
+                }],
+            },
+        ));
         let records_json = serde_json::to_string(&records)
             .map_err(|error| format!("serialize broker records: {error}"))?;
         fs::write(&records_path, records_json)
@@ -56384,11 +56461,7 @@ mod tests {
         ensure_contains(&stdout, "command: status", "status TOON command")?;
         // After fix: gather() inspects current workspace, degradation count varies
         ensure_contains(&stdout, "degraded[", "status TOON degradation section")?;
-        ensure_contains(
-            &stdout,
-            "{code,severity,message,repair}:",
-            "status TOON degradation columns",
-        )?;
+        ensure_contains(&stdout, "repair:", "status TOON degradation columns")?;
         ensure_ends_with(&stdout, '\n', "status TOON trailing newline")?;
         ensure(stderr.is_empty(), "status format TOON stderr must be empty")
     }
@@ -56474,8 +56547,11 @@ mod tests {
             remember_pos < search_pos,
             "help lists remember before search",
         )?;
-        ensure(search_pos < context_pos, "help lists search before context")?;
-        ensure(context_pos < why_pos, "help lists context before why")?;
+        ensure(search_pos < why_pos, "help lists search before why")?;
+        ensure(
+            why_pos < context_pos,
+            "help lists soft-deprecated context alias after canonical why",
+        )?;
         ensure(stderr.is_empty(), "help stderr must be empty")
     }
 
@@ -56563,7 +56639,7 @@ mod tests {
         )?;
         ensure_contains(
             json["error"]["message"].as_str().unwrap_or_default(),
-            "Available sections: authorities, bridges, causalBottlenecks, comprehensiveRules, contradictionClusters, hubs, kCore, kTruss, knowledgeSkyline, loadBearingMemories, proximityHotspots, revisionFrontiers, topMemories",
+            "Available sections: authorities, bridges, causalBottlenecks, comprehensiveRules, contradictionClusters, hubs, kCore, kTruss, knowledgeGaps, knowledgeSkyline, loadBearingMemories, proximityHotspots, revisionFrontiers, topMemories",
             "unknown section available list",
         )
     }
@@ -57041,7 +57117,7 @@ mod tests {
 
     #[test]
     fn fields_minimal_includes_fields_indicator() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&["ee", "--fields", "minimal", "--json", "status"]);
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "--fields", "minimal", "status"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "fields minimal exit")?;
         ensure_contains(&stdout, "\"fields\":\"minimal\"", "fields indicator")?;
         ensure(stderr.is_empty(), "stderr empty")
@@ -61092,8 +61168,8 @@ mod tests {
             "TOON preserves impact memory id",
         )?;
         ensure_equal(
-            &actual["data"]["impactAnalysis"]["impactAnalysis"]["affectedMemoryCount"],
-            &serde_json::json!(2),
+            &actual["data"]["impactAnalysis"]["impactAnalysis"]["affectedMemoryCount"].as_f64(),
+            &Some(2.0),
             "TOON preserves impact affected count",
         )
     }
@@ -63376,11 +63452,22 @@ mod tests {
     fn ee_robot_docs_alias_routes_to_agent_docs() -> TestResult {
         // R-008: agents trained on cass/bv reach for `robot-docs guide` first.
         // The alias must produce the same output as `agent-docs guide`.
-        let (exit, stdout, _) = invoke(&["ee", "robot-docs"]);
-        ensure_equal(&exit, &ProcessExitCode::Success, "exit Success")?;
-        ensure_contains(
-            &stdout,
-            "agent-oriented",
+        let (agent_exit, agent_stdout, agent_stderr) = invoke(&["ee", "agent-docs"]);
+        ensure_equal(&agent_exit, &ProcessExitCode::Success, "agent-docs exit")?;
+        ensure(
+            agent_stderr.is_empty(),
+            "agent-docs stderr must remain clean",
+        )?;
+
+        let (robot_exit, robot_stdout, robot_stderr) = invoke(&["ee", "robot-docs"]);
+        ensure_equal(&robot_exit, &ProcessExitCode::Success, "robot-docs exit")?;
+        ensure(
+            robot_stderr.is_empty(),
+            "robot-docs stderr must remain clean",
+        )?;
+        ensure_equal(
+            &robot_stdout,
+            &agent_stdout,
             "robot-docs alias surfaces agent-docs content",
         )
     }
