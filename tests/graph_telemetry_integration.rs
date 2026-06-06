@@ -45,7 +45,6 @@ use std::time::Duration;
 
 use ee::core::graph_telemetry::{ALGORITHM_COMPUTE_EVENT, ALL_GRAPH_TELEMETRY_EVENTS};
 use ee::graph::algorithms::{current_or_testing_cx, run_with_budget};
-use tracing::Level;
 use tracing::subscriber::with_default;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
@@ -56,7 +55,6 @@ type TestResult = Result<(), String>;
 #[derive(Clone)]
 struct CapturedEvent {
     target: String,
-    level: Level,
     fields: BTreeMap<String, String>,
 }
 
@@ -64,7 +62,6 @@ impl Default for CapturedEvent {
     fn default() -> Self {
         Self {
             target: String::new(),
-            level: Level::INFO,
             fields: BTreeMap::new(),
         }
     }
@@ -82,14 +79,16 @@ where
     fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
         let mut captured = CapturedEvent {
             target: event.metadata().target().to_owned(),
-            level: *event.metadata().level(),
             ..CapturedEvent::default()
         };
         let mut visitor = CaptureVisitor {
             fields: &mut captured.fields,
         };
         event.record(&mut visitor);
-        self.events.lock().expect("capture lock").push(captured);
+        match self.events.lock() {
+            Ok(mut events) => events.push(captured),
+            Err(error) => panic!("capture lock poisoned: {error}"),
+        }
     }
 }
 
@@ -127,7 +126,10 @@ fn capture<F: FnOnce()>(thunk: F) -> Vec<CapturedEvent> {
         .with(layer)
         .with(tracing_subscriber::filter::LevelFilter::TRACE);
     with_default(subscriber, thunk);
-    events.lock().expect("capture lock").clone()
+    match events.lock() {
+        Ok(events) => events.clone(),
+        Err(error) => panic!("capture lock poisoned: {error}"),
+    }
 }
 
 /// Boundary-crossing drift guard: every `ee.graph.*` event
