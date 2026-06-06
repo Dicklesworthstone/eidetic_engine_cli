@@ -1773,6 +1773,10 @@ fn redact_secret_key_values(input: &str, reasons: &mut Vec<&'static str>) -> (St
                 search_start = key_end;
                 continue;
             }
+            if output[value_start..value_end].starts_with("[REDACTED:") {
+                search_start = value_end;
+                continue;
+            }
             let code = {
                 let value = &output[value_start..value_end];
                 key_value_redaction_code(pattern.code, value)
