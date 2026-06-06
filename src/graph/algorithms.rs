@@ -2376,18 +2376,12 @@ mod tests {
             })
             .map_err(|error| error.to_string())?;
         connection
-            .execute(
-                "UPDATE graph_algorithm_results SET computed_at = ?1 \
-                 WHERE workspace_id = ?2 AND snapshot_id = ?3 \
-                 AND algorithm = ?4 AND params_hash = ?5",
-                &[
-                    fsqlite::Value::Text("2026-01-01T00:00:00Z".to_owned()),
-                    fsqlite::Value::Text(workspace_id.to_owned()),
-                    fsqlite::Value::Text(snapshot_id.to_owned()),
-                    fsqlite::Value::Text(spec.algorithm.to_owned()),
-                    fsqlite::Value::Text(params_hash.clone()),
-                ],
-            )
+            .execute_raw(&format!(
+                "UPDATE graph_algorithm_results SET computed_at = '2026-01-01T00:00:00Z' \
+                 WHERE workspace_id = '{workspace_id}' AND snapshot_id = '{snapshot_id}' \
+                 AND algorithm = '{}' AND params_hash = '{params_hash}'",
+                spec.algorithm
+            ))
             .map_err(|error| error.to_string())?;
 
         let mut first_loaded = Some(serde_json::json!({"scores":[["mem_a",0.75]]}));
