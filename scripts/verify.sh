@@ -50,6 +50,8 @@ set -euo pipefail
 #   4.69. CI Proof-Lane Snapshot Contract - no-Cargo proof-lane fixture gate
 #   4.70. CI Proof-Lane Hygiene Advisory - no-Cargo workflow policy scanner
 #   4.71. RCH Doc Examples Lint - no-Cargo docs command-shape scanner
+#   4.72. Local Cargo Tripwire Contract - no-Cargo guardrail self-test
+#   4.73. RCH Portability Diagnostic Contract - no-Cargo Mac-leak self-test
 #   4.7. Package Artifact Leak - cargo package list gate for generated artifacts
 #   4.8. Fuzz Target Audit     - static cargo-fuzz target registration/docs check
 #   4.9. Fuzz Smoke            - optional 30s search query parser cargo-fuzz sweep
@@ -796,6 +798,16 @@ run_stage "CI Proof-Lane Hygiene Advisory" "./scripts/ci_proof_lane_hygiene.sh -
 # fails before expensive gates if AGENTS.md, README.md, or the RCH runbooks grow
 # copy-pasteable local Cargo compile examples that bypass the verifier wrapper.
 run_stage "RCH Doc Examples Lint" "python3 scripts/check-rch-doc-examples.py --json"
+
+# Gate 3.91: Local Cargo tripwire contract (bd-1n3x1.10). This deterministic
+# self-test validates command-shape denials, JSON repair actions, and fixture
+# process classification without scanning live peer processes or running Cargo.
+run_stage "Local Cargo Tripwire Contract" "./scripts/check-local-cargo-tripwire.sh --self-test"
+
+# Gate 3.92: RCH portability diagnostic contract (bd-1n3x1.10). This
+# deterministic self-test verifies the Mac-leak anomaly detector for remote
+# transcripts without mutating workers, launching RCH, or deleting artifacts.
+run_stage "RCH Portability Diagnostic Contract" "./scripts/check-rch-portability.sh --self-test"
 
 # Gate 4.7: Package artifact leakage guard. This is a quick packaging gate:
 # it runs cargo package --list without building and fails if local/generated

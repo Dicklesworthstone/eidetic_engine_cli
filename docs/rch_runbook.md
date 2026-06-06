@@ -145,6 +145,11 @@ scripts/check-rch-portability.sh --json <transcript> # bd-1h8ji.4 portability an
 scripts/check-local-cargo-tripwire.sh --cmd '<cmd>' --json # RCH-bypass preflight
 ```
 
+The central `scripts/verify.sh` runner also executes the deterministic
+`--self-test` contracts for both guardrails before Cargo-backed gates. Those
+stages validate classifier and portability logic only; they do not scan live
+peer processes, kill processes, delete artifacts, launch RCH, or run Cargo.
+
 None of those need a Cargo round-trip. They run instantly on your shell.
 
 ## Local-Cargo tripwire contract
