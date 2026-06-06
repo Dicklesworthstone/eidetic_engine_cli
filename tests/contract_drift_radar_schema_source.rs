@@ -408,10 +408,9 @@ fn current_public_registry_sources_do_not_claim_legacy_success_envelopes() -> Te
     let inventory = contract_inventory()?;
     let mut violations = Vec::new();
 
-    for path in ["src/output/mod.rs"] {
-        let text = read_source_file(path)?;
-        violations.extend(source_schema_violations_for_text(path, &text, &inventory));
-    }
+    let path = "src/output/mod.rs";
+    let text = read_source_file(path)?;
+    violations.extend(source_schema_violations_for_text(path, &text, &inventory));
 
     ensure(
         violations.is_empty(),
