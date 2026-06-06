@@ -1896,7 +1896,10 @@ fn secret_value_range(
         .char_indices()
         .find_map(|(offset, ch)| {
             if ch.is_whitespace()
-                || matches!(ch, ',' | ';' | '&')
+                || matches!(
+                    ch,
+                    ',' | ';' | '&' | '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}'
+                )
                 || (stop_at_uri_fragment && ch == '#')
             {
                 Some(cursor + offset)
@@ -3969,6 +3972,20 @@ mod tests {
         );
         assert!(!report.content.contains(&secret));
         assert!(!report.redacted_reasons.contains(&"high_entropy_secret"));
+    }
+
+    #[test]
+    fn secret_redactor_preserves_json_punctuation_after_secret_query_values() {
+        let report = redact_secret_like_content(
+            r#"{"sourcePath":"file:///Users/alice/session.jsonl?api_key=redaction-fixture"}"#,
+        );
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"api_key"));
+        assert_eq!(
+            report.content,
+            r#"{"sourcePath":"file:///Users/alice/session.jsonl?api_key=[REDACTED:api_key]"}"#
+        );
     }
 
     #[test]

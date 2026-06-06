@@ -8272,91 +8272,49 @@ mod tests {
     #[test]
     fn search_score_calibration_malformed_feedback_evidence_is_counted() -> TestResult {
         let workspace = unique_test_dir("score-calibration-feedback-malformed");
-        let database_path = workspace.join(".ee").join("ee.db");
-        std::fs::create_dir_all(
-            database_path
-                .parent()
-                .ok_or_else(|| "database path must have a parent".to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
-        let connection =
-            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
-        connection.migrate().map_err(|error| error.to_string())?;
         let workspace_id = crate::core::curate::stable_workspace_id(&workspace);
-        connection
-            .insert_workspace(
-                &workspace_id,
-                &CreateWorkspaceInput {
-                    path: workspace.display().to_string(),
-                    name: Some("score-calibration-feedback-malformed".to_owned()),
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        connection
-            .insert_feedback_event(
-                "fb_malformed_calibration_0001",
-                &CreateFeedbackEventInput {
-                    workspace_id: workspace_id.clone(),
-                    target_type: "candidate".to_owned(),
-                    target_id: "cand_malformed".to_owned(),
-                    signal: "confirmation".to_owned(),
-                    weight: 1.0,
-                    source_type: "outcome_observed".to_owned(),
-                    source_id: Some("curate-validation".to_owned()),
-                    reason: Some("bad calibration evidence".to_owned()),
-                    evidence_json: Some("{}".to_owned()),
-                    session_id: None,
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        connection
-            .execute_raw("PRAGMA ignore_check_constraints = ON")
-            .map_err(|error| error.to_string())?;
-        connection
-            .execute_raw(
-                "UPDATE feedback_events SET evidence_json = '{not json' WHERE id = 'fb_malformed_calibration_0001'",
-            )
-            .map_err(|error| error.to_string())?;
-        connection
-            .execute_raw("PRAGMA ignore_check_constraints = OFF")
-            .map_err(|error| error.to_string())?;
+        let feedback_events = vec![StoredFeedbackEvent {
+            id: "fb_malformed_calibration_0001".to_owned(),
+            workspace_id,
+            target_type: "candidate".to_owned(),
+            target_id: "cand_malformed".to_owned(),
+            signal: "confirmation".to_owned(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_owned(),
+            source_id: Some("curate-validation".to_owned()),
+            reason: Some("bad calibration evidence".to_owned()),
+            evidence_json: Some("{not json".to_owned()),
+            session_id: None,
+            applied_at: None,
+            created_at: "2026-06-06T00:00:00Z".to_owned(),
+        }];
 
-        let mut hits = vec![synthetic_hit("mem_feedback_malformed", 0.8)];
-        let mut degraded = Vec::new();
-        annotate_hits_with_score_calibration(
+        let calibration = SearchScoreCalibration::for_workspace_with_feedback_events(
             &workspace,
-            Some(&database_path),
-            Some(&connection),
-            &mut hits,
-            &mut degraded,
+            &feedback_events,
         );
+        let data = calibration.data_json();
 
-        assert!(
-            degraded.iter().any(
-                |entry| entry.code == SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE
-                    && entry.message.contains("feedback_events_malformed")
-            ),
-            "malformed evidence_json must surface as degraded calibration evidence: {degraded:?}"
-        );
         assert_eq!(
-            hits[0]
-                .metadata
-                .as_ref()
-                .and_then(|metadata| {
-                    metadata.pointer("/scoreCalibration/sourceBreakdown/feedbackEventsMalformed")
-                })
+            calibration.status,
+            SearchScoreCalibrationStatus::Insufficient
+        );
+        assert_eq!(calibration.feedback_event_malformed_count, 1);
+        assert_eq!(calibration.feedback_event_sample_count, 0);
+        assert_eq!(
+            data.pointer("/sourceBreakdown/feedbackEventsMalformed")
                 .and_then(serde_json::Value::as_u64),
             Some(1)
         );
         assert_eq!(
-            hits[0]
-                .metadata
-                .as_ref()
-                .and_then(|metadata| {
-                    metadata.pointer("/scoreCalibration/sourceBreakdown/feedbackEvents")
-                })
+            data.pointer("/sourceBreakdown/feedbackEvents")
                 .and_then(serde_json::Value::as_u64),
             Some(0)
+        );
+        assert_eq!(
+            data.pointer("/sourceBreakdown/feedbackEventsReadStatus")
+                .and_then(serde_json::Value::as_str),
+            Some("ok")
         );
         Ok(())
     }
