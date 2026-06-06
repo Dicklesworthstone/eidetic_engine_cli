@@ -53,7 +53,7 @@ fn eight_overlapping_callers_hit_the_cache_after_the_first() {
         let lookup_key = hot_seed_key.clone();
         let expected_scores = hot_scores.clone();
         handles.push(thread::spawn(move || -> bool {
-            let mut guard = cache.write().expect("cache write lock for reader");
+            let guard = cache.write().expect("cache write lock for reader");
             match guard.get(&lookup_key) {
                 Some(hit) => {
                     assert_eq!(
