@@ -47,6 +47,82 @@ ids, Agent Mail thread ids, and build-slot labels.
 `rawOutputIncluded` is always `false`. Each evidence ref sets `redacted: true`
 to document that it is safe for support bundles and handoffs.
 
+## Owner Bridge
+
+`ee proof admit --json` and `ee proof status --json` expose two additive fields
+for coordination:
+
+- `ownerStatus` is a compact, redaction-safe summary of the matched ledger row's
+  owner. It can be embedded in support bundles and handoff capsules without raw
+  Agent Mail bodies. The field includes `status`, `active`, `shouldWait`,
+  `owner`, `expiresAt`, `reasonCodes`, and `recoveryActions`.
+- `coordination` records caller-supplied live coordination posture such as
+  `--agent-mail-status unavailable`, `disabled`, `reservation_conflict`, or
+  `owner_gone`. Admission remains local and read-only; live Agent Mail
+  unavailability becomes a coordination degradation, not a proof blocker.
+
+In-flight owner expiry is deterministic. Pass `--now <RFC3339>` in tests,
+support-bundle generation, or handoff rendering so `ownerStatus.status` and the
+admission verdict are reproducible. When an equivalent in-flight row has
+expired, admission changes from `wait_for_inflight` to `dispatch_allowed` with
+`owner_expired`, and the next command tells the agent to dispatch one fresh
+remote proof or refresh the owner. No cleanup, lease release, Beads mutation, or
+Agent Mail write is required.
+
+Agent Mail build slots are optional metadata. If a live build-slot API is
+available, callers can include the slot label in `owner.buildSlot`; if build
+slots are disabled or Agent Mail is unavailable, the broker still uses the
+ledger row, RCH job id, expiry, and evidence refs. Agents should coordinate
+through the listed `owner.mailThreadId`, `owner.beadId`, and `owner.rchJobId`
+when they are present, but should not launch a duplicate proof while
+`ownerStatus.shouldWait` is `true`.
+
+Example active owner status:
+
+```json
+{
+  "status": "active",
+  "active": true,
+  "shouldWait": true,
+  "source": "proof_broker_ledger",
+  "agentMailStatus": "fresh",
+  "agentMailRequired": false,
+  "owner": {
+    "agentName": "RubyWolf",
+    "beadId": "bd-1n3x1.1",
+    "mailThreadId": "8198",
+    "buildSlot": "proof:bd-1n3x1.1:broker",
+    "rchJobId": "rch-job-20260605-0001"
+  },
+  "expiresAt": "2026-06-05T18:21:00Z",
+  "reasonCodes": ["equivalent_inflight", "owner_active"],
+  "recoveryActions": ["wait_for_owner_or_watch_job"]
+}
+```
+
+Example expired owner status:
+
+```json
+{
+  "status": "expired",
+  "active": false,
+  "shouldWait": false,
+  "source": "proof_broker_ledger",
+  "agentMailStatus": "unavailable",
+  "agentMailRequired": false,
+  "owner": {
+    "agentName": "RubyWolf",
+    "beadId": "bd-1n3x1.1",
+    "mailThreadId": "8198",
+    "buildSlot": "proof:bd-1n3x1.1:broker",
+    "rchJobId": "rch-job-20260605-0001"
+  },
+  "expiresAt": "2026-06-05T18:21:00Z",
+  "reasonCodes": ["equivalent_inflight_expired", "owner_expired"],
+  "recoveryActions": ["dispatch_fresh_proof_or_refresh_owner"]
+}
+```
+
 ## Non-goals
 
 - No Cargo, RCH, Beads, Agent Mail, Git, or tracker mutation happens when this

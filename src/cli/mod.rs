@@ -4976,6 +4976,12 @@ pub struct ProofAdmitArgs {
     /// JSON array of retained `ee.proof_broker.v1` ledger records.
     #[arg(long = "ledger-json", value_name = "PATH")]
     pub ledger_json: Option<PathBuf>,
+    /// Deterministic clock for owner-expiry checks.
+    #[arg(long = "now", value_name = "RFC3339", value_parser = parse_rfc3339_arg)]
+    pub now: Option<chrono::DateTime<chrono::Utc>>,
+    /// Live Agent Mail posture supplied by the caller or a redacted snapshot.
+    #[arg(long = "agent-mail-status", default_value = "not_checked")]
+    pub agent_mail_status: String,
     /// Bead ID associated with the requested proof.
     #[arg(long = "bead-id", value_name = "BEAD")]
     pub bead_id: Option<String>,
@@ -5033,6 +5039,12 @@ pub struct ProofStatusArgs {
     /// JSON array of retained `ee.proof_broker.v1` ledger records.
     #[arg(long = "ledger-json", value_name = "PATH")]
     pub ledger_json: Option<PathBuf>,
+    /// Deterministic clock for owner-expiry checks.
+    #[arg(long = "now", value_name = "RFC3339", value_parser = parse_rfc3339_arg)]
+    pub now: Option<chrono::DateTime<chrono::Utc>>,
+    /// Live Agent Mail posture supplied by the caller or a redacted snapshot.
+    #[arg(long = "agent-mail-status", default_value = "not_checked")]
+    pub agent_mail_status: String,
     /// Proof-broker fingerprint ID to inspect.
     #[arg(long = "fingerprint", value_name = "FINGERPRINT_ID")]
     pub fingerprint: String,
@@ -36774,6 +36786,7 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
+    let now = args.now.unwrap_or_else(chrono::Utc::now);
     let matched_record = records
         .iter()
         .find(|record| record.fingerprint.fingerprint_id == fingerprint.fingerprint_id);
@@ -36782,6 +36795,7 @@ where
         &records,
         matched_record,
         args.ledger_json.is_some(),
+        now,
     );
     let verdict = admission.verdict;
     let data = serde_json::json!({
@@ -36796,7 +36810,11 @@ where
             "matchedState": matched_record.map(|record| record.state.as_str()),
         },
         "matchedRecord": matched_record,
-        "freshness": matched_record.map(proof_record_freshness_json),
+        "freshness": matched_record.map(|record| proof_record_freshness_json(record, now)),
+        "ownerStatus": matched_record.map(|record| {
+            proof_owner_status_json(record, now, args.agent_mail_status.as_str())
+        }),
+        "coordination": proof_coordination_json(args.agent_mail_status.as_str()),
         "nextCommand": proof_next_command(verdict, command_text.as_deref(), matched_record),
         "readOnly": true,
     });
@@ -36825,8 +36843,9 @@ where
         .iter()
         .filter(|record| record.fingerprint.fingerprint_id == args.fingerprint)
         .collect();
+    let now = args.now.unwrap_or_else(chrono::Utc::now);
     let admission = if let Some(record) = matches.first().copied() {
-        record.admission.clone()
+        proof_adjusted_admission_for_record(record, now)
     } else if args.ledger_json.is_none() {
         proof_admission_decision(
             crate::models::ProofBrokerAdmissionVerdict::UnknownInsufficientEvidence,
@@ -36857,7 +36876,11 @@ where
             "matchCount": matches.len(),
         },
         "matches": matches,
-        "freshness": first_record.map(proof_record_freshness_json),
+        "freshness": first_record.map(|record| proof_record_freshness_json(record, now)),
+        "ownerStatus": first_record.map(|record| {
+            proof_owner_status_json(record, now, args.agent_mail_status.as_str())
+        }),
+        "coordination": proof_coordination_json(args.agent_mail_status.as_str()),
         "nextCommand": proof_next_command(verdict, None, first_record),
         "readOnly": true,
     });
@@ -36928,9 +36951,10 @@ fn proof_admission_for_fingerprint(
     records: &[crate::models::ProofBrokerLedgerRecord],
     matched_record: Option<&crate::models::ProofBrokerLedgerRecord>,
     ledger_was_supplied: bool,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> crate::models::ProofBrokerAdmissionDecision {
     if let Some(record) = matched_record {
-        return record.admission.clone();
+        return proof_adjusted_admission_for_record(record, now);
     }
     if !ledger_was_supplied {
         return proof_admission_decision(
@@ -37043,6 +37067,198 @@ fn proof_admission_decision(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProofOwnerStatusKind {
+    Historical,
+    NoActiveOwner,
+    Active,
+    Expired,
+    MissingOwner,
+    MissingExpiry,
+    InvalidExpiry,
+}
+
+impl ProofOwnerStatusKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Historical => "historical",
+            Self::NoActiveOwner => "no_active_owner",
+            Self::Active => "active",
+            Self::Expired => "expired",
+            Self::MissingOwner => "missing_owner",
+            Self::MissingExpiry => "missing_expiry",
+            Self::InvalidExpiry => "invalid_expiry",
+        }
+    }
+}
+
+fn proof_adjusted_admission_for_record(
+    record: &crate::models::ProofBrokerLedgerRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> crate::models::ProofBrokerAdmissionDecision {
+    match proof_owner_status_kind(record, now) {
+        ProofOwnerStatusKind::Expired => proof_admission_decision(
+            crate::models::ProofBrokerAdmissionVerdict::DispatchAllowed,
+            vec!["equivalent_inflight_expired", "owner_expired"],
+            "dispatch_fresh_proof_or_refresh_owner",
+            None,
+            None,
+        ),
+        ProofOwnerStatusKind::MissingOwner => proof_admission_decision(
+            crate::models::ProofBrokerAdmissionVerdict::UnknownInsufficientEvidence,
+            vec!["equivalent_inflight_owner_missing"],
+            "inspect_ledger_or_refresh_owner_before_dispatch",
+            None,
+            None,
+        ),
+        ProofOwnerStatusKind::MissingExpiry => proof_admission_decision(
+            crate::models::ProofBrokerAdmissionVerdict::UnknownInsufficientEvidence,
+            vec!["equivalent_inflight_expiry_missing"],
+            "refresh_owner_expiry_or_coordinate",
+            None,
+            proof_owner_ref(record).cloned(),
+        ),
+        ProofOwnerStatusKind::InvalidExpiry => proof_admission_decision(
+            crate::models::ProofBrokerAdmissionVerdict::UnknownInsufficientEvidence,
+            vec!["equivalent_inflight_expiry_invalid"],
+            "repair_owner_expiry_timestamp",
+            None,
+            proof_owner_ref(record).cloned(),
+        ),
+        ProofOwnerStatusKind::Historical
+        | ProofOwnerStatusKind::NoActiveOwner
+        | ProofOwnerStatusKind::Active => record.admission.clone(),
+    }
+}
+
+fn proof_owner_status_kind(
+    record: &crate::models::ProofBrokerLedgerRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ProofOwnerStatusKind {
+    if record.state != crate::models::ProofBrokerLedgerState::InFlight {
+        return if proof_owner_ref(record).is_some() {
+            ProofOwnerStatusKind::Historical
+        } else {
+            ProofOwnerStatusKind::NoActiveOwner
+        };
+    }
+    if proof_owner_ref(record).is_none() {
+        return ProofOwnerStatusKind::MissingOwner;
+    }
+    let Some(expires_at) = record.expires_at.as_deref() else {
+        return ProofOwnerStatusKind::MissingExpiry;
+    };
+    match chrono::DateTime::parse_from_rfc3339(expires_at) {
+        Ok(expires_at) if expires_at.with_timezone(&chrono::Utc) <= now => {
+            ProofOwnerStatusKind::Expired
+        }
+        Ok(_) => ProofOwnerStatusKind::Active,
+        Err(_) => ProofOwnerStatusKind::InvalidExpiry,
+    }
+}
+
+fn proof_owner_ref(
+    record: &crate::models::ProofBrokerLedgerRecord,
+) -> Option<&crate::models::ProofBrokerOwnerRef> {
+    record
+        .owner
+        .as_ref()
+        .or(record.admission.wait_owner.as_ref())
+}
+
+fn proof_owner_status_json(
+    record: &crate::models::ProofBrokerLedgerRecord,
+    now: chrono::DateTime<chrono::Utc>,
+    agent_mail_status: &str,
+) -> serde_json::Value {
+    let kind = proof_owner_status_kind(record, now);
+    let (reason_codes, recovery_actions): (Vec<&str>, Vec<&str>) = match kind {
+        ProofOwnerStatusKind::Historical => (
+            vec!["owner_metadata_historical"],
+            vec!["cite_or_ignore_historical_owner"],
+        ),
+        ProofOwnerStatusKind::NoActiveOwner => {
+            (vec!["no_active_owner"], vec!["use_admission_verdict"])
+        }
+        ProofOwnerStatusKind::Active => (
+            vec!["equivalent_inflight", "owner_active"],
+            vec!["wait_for_owner_or_watch_job"],
+        ),
+        ProofOwnerStatusKind::Expired => (
+            vec!["equivalent_inflight_expired", "owner_expired"],
+            vec!["dispatch_fresh_proof_or_refresh_owner"],
+        ),
+        ProofOwnerStatusKind::MissingOwner => (
+            vec!["equivalent_inflight_owner_missing"],
+            vec!["inspect_ledger_or_refresh_owner_before_dispatch"],
+        ),
+        ProofOwnerStatusKind::MissingExpiry => (
+            vec!["equivalent_inflight_expiry_missing"],
+            vec!["refresh_owner_expiry_or_coordinate"],
+        ),
+        ProofOwnerStatusKind::InvalidExpiry => (
+            vec!["equivalent_inflight_expiry_invalid"],
+            vec!["repair_owner_expiry_timestamp"],
+        ),
+    };
+    serde_json::json!({
+        "status": kind.as_str(),
+        "active": kind == ProofOwnerStatusKind::Active,
+        "shouldWait": kind == ProofOwnerStatusKind::Active,
+        "source": "proof_broker_ledger",
+        "agentMailStatus": proof_normalized_coordination_status(agent_mail_status),
+        "agentMailRequired": false,
+        "owner": proof_owner_ref(record),
+        "expiresAt": record.expires_at,
+        "reasonCodes": reason_codes,
+        "recoveryActions": recovery_actions,
+    })
+}
+
+fn proof_coordination_json(agent_mail_status: &str) -> serde_json::Value {
+    let status = proof_normalized_coordination_status(agent_mail_status);
+    let degraded = match status.as_str() {
+        "unavailable" | "disabled" | "not_checked" => vec![serde_json::json!({
+            "code": "proof_broker_agent_mail_unavailable",
+            "severity": "warning",
+            "message": "Agent Mail was not available as live authority; proof admission used ledger evidence only.",
+            "repair": "refresh Agent Mail or provide a redacted coordination snapshot before relying on owner contact metadata."
+        })],
+        "reservation_conflict" | "conflict" => vec![serde_json::json!({
+            "code": "proof_broker_reservation_conflict",
+            "severity": "warning",
+            "message": "A file reservation or build-slot conflict was reported by the caller.",
+            "repair": "coordinate with the reservation holder before launching a duplicate proof."
+        })],
+        "owner_gone" | "stale_owner" => vec![serde_json::json!({
+            "code": "proof_broker_owner_unreachable",
+            "severity": "warning",
+            "message": "The caller reported that the proof owner is no longer reachable.",
+            "repair": "refresh owner metadata, wait only on a live RCH job, or dispatch one fresh remote proof after coordination."
+        })],
+        _ => Vec::new(),
+    };
+    serde_json::json!({
+        "agentMailStatus": status,
+        "agentMailRequired": false,
+        "admissionDependsOnAgentMail": false,
+        "degraded": degraded,
+    })
+}
+
+fn proof_normalized_coordination_status(status: &str) -> String {
+    let normalized = status
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .replace(' ', "_");
+    if normalized.is_empty() {
+        "not_checked".to_owned()
+    } else {
+        normalized
+    }
+}
+
 fn proof_next_command(
     verdict: crate::models::ProofBrokerAdmissionVerdict,
     command_text: Option<&str>,
@@ -37086,12 +37302,19 @@ fn proof_dispatch_command(command_text: &str) -> String {
 
 fn proof_record_freshness_json(
     record: &crate::models::ProofBrokerLedgerRecord,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> serde_json::Value {
+    let expires_at = record.expires_at.as_deref().and_then(|expires_at| {
+        chrono::DateTime::parse_from_rfc3339(expires_at)
+            .ok()
+            .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+    });
     serde_json::json!({
         "createdAt": record.created_at,
         "startedAt": record.started_at,
         "completedAt": record.completed_at,
         "expiresAt": record.expires_at,
+        "expired": expires_at.is_some_and(|expires_at| expires_at <= now),
         "sourceStateValidUntil": record.source_state_valid_until,
         "invalidationReasons": record.invalidation_reasons,
     })
@@ -56749,6 +56972,10 @@ mod tests {
             "status",
             "--ledger-json",
             &ledger_path,
+            "--now",
+            "2026-06-05T17:30:00Z",
+            "--agent-mail-status",
+            "fresh",
             "--fingerprint",
             &fingerprint,
         ]);
@@ -56774,6 +57001,160 @@ mod tests {
             &value["data"]["admission"]["waitOwner"]["rchJobId"],
             &serde_json::json!("rch-job-20260605-0001"),
             "proof status wait owner job id",
+        )?;
+        ensure_equal(
+            &value["data"]["ownerStatus"]["status"],
+            &serde_json::json!("active"),
+            "proof status owner is active",
+        )?;
+        ensure_equal(
+            &value["data"]["ownerStatus"]["shouldWait"],
+            &serde_json::json!(true),
+            "proof status should wait",
+        )?;
+        let encoded = value.to_string();
+        ensure(
+            !encoded.contains("body_md")
+                && !encoded.contains("bodyMd")
+                && !encoded.contains("raw mail"),
+            "proof status owner metadata omits raw mail bodies",
+        )
+    }
+
+    #[test]
+    fn proof_status_json_expires_stale_inflight_owner() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ledger_path = tempdir.path().join("proof-ledger.json");
+        let records = crate::models::sample_proof_broker_ledger_records();
+        let fingerprint = records[1].fingerprint.fingerprint_id.clone();
+        let records_json = serde_json::to_string(&records)
+            .map_err(|error| format!("serialize proof ledger records: {error}"))?;
+        fs::write(&ledger_path, records_json)
+            .map_err(|error| format!("write proof ledger fixture: {error}"))?;
+        let ledger_path = ledger_path.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "proof",
+            "status",
+            "--ledger-json",
+            &ledger_path,
+            "--now",
+            "2026-06-05T18:22:00Z",
+            "--fingerprint",
+            &fingerprint,
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "proof status expired owner exit",
+        )?;
+        ensure(stderr.is_empty(), "proof status expired owner stderr clean")?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("proof status expired stdout must parse: {error}"))?;
+        ensure_equal(
+            &value["data"]["admission"]["verdict"],
+            &serde_json::json!("dispatch_allowed"),
+            "expired owner no longer forces wait",
+        )?;
+        ensure_equal(
+            &value["data"]["ownerStatus"]["status"],
+            &serde_json::json!("expired"),
+            "proof status owner expired",
+        )?;
+        ensure_equal(
+            &value["data"]["ownerStatus"]["shouldWait"],
+            &serde_json::json!(false),
+            "expired proof owner should not be waited on",
+        )?;
+        ensure_equal(
+            &value["data"]["freshness"]["expired"],
+            &serde_json::json!(true),
+            "proof status freshness marks expired row",
+        )?;
+        ensure(
+            value["data"]["admission"]["reasonCodes"]
+                .as_array()
+                .is_some_and(|reasons| reasons.iter().any(|reason| reason == "owner_expired")),
+            "expired owner admission includes reason",
+        )
+    }
+
+    #[test]
+    fn proof_admit_json_degrades_when_agent_mail_unavailable_without_blocking() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ledger_path = tempdir.path().join("proof-ledger.json");
+        let records = crate::models::sample_proof_broker_ledger_records();
+        let records_json = serde_json::to_string(&records)
+            .map_err(|error| format!("serialize proof ledger records: {error}"))?;
+        fs::write(&ledger_path, records_json)
+            .map_err(|error| format!("write proof ledger fixture: {error}"))?;
+        let ledger_path = ledger_path.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "proof",
+            "admit",
+            "--ledger-json",
+            &ledger_path,
+            "--now",
+            "2026-06-05T17:30:00Z",
+            "--agent-mail-status",
+            "unavailable",
+            "--bead-id",
+            "bd-1n3x1.1",
+            "--command-hash",
+            "blake3:in-flight-command",
+            "--normalized-argv-hash",
+            "blake3:in-flight-argv",
+            "--source-hash",
+            "blake3:source",
+            "--source-materialization",
+            "git_worktree",
+            "--dirty-status-hash",
+            "blake3:dirty-status-clean",
+            "--env-fingerprint-class",
+            "class:external_cargo_target",
+            "--target-profile",
+            "debug",
+            "--execution-substrate",
+            "rch",
+            "--rch-runtime-class",
+            "class:rch_client_1_0_37_daemon_0_1_3",
+            "--worker-requirement",
+            "required_runtime:rust",
+            "--local-cargo-tripwire-class",
+            "class:tripwire_clean",
+            "--build-admission-posture",
+            "remote_required_no_local_fallback",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "proof admit agent-mail unavailable exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "proof admit agent-mail unavailable stderr clean",
+        )?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("proof admit agent-mail unavailable stdout parse: {error}"))?;
+        ensure_equal(
+            &value["data"]["admission"]["verdict"],
+            &serde_json::json!("wait_for_inflight"),
+            "ledger still drives in-flight wait",
+        )?;
+        ensure_equal(
+            &value["data"]["coordination"]["admissionDependsOnAgentMail"],
+            &serde_json::json!(false),
+            "admission does not depend on live Agent Mail",
+        )?;
+        ensure_equal(
+            &value["data"]["coordination"]["degraded"][0]["code"],
+            &serde_json::json!("proof_broker_agent_mail_unavailable"),
+            "agent-mail unavailable degraded code",
         )
     }
 

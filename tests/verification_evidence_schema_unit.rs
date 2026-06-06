@@ -271,6 +271,19 @@ fn proof_broker_ledger_golden_covers_all_admission_verdicts() -> TestResult {
             .iter()
             .all(|record| record.schema == PROOF_BROKER_SCHEMA_V1)
     );
+    let owner_rows = actual
+        .iter()
+        .filter(|record| record.owner.is_some())
+        .collect::<Vec<_>>();
+    assert!(owner_rows.len() >= 2);
+    assert!(owner_rows.iter().any(|record| {
+        record
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.build_slot.is_some() && owner.rch_job_id.is_some())
+    }));
+    assert!(!encoded.contains("body_md"));
+    assert!(!encoded.contains("bodyMd"));
     Ok(())
 }
 
