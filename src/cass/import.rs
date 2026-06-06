@@ -3113,6 +3113,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let root = unique_test_dir("cass-import-db-symlink-file")?;
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
         let outside_database = root.join("outside-ee.db");
         fs::write(&outside_database, b"outside").map_err(|error| error.to_string())?;
         let database_path = root.join("ee.db");
