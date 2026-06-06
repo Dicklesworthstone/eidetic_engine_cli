@@ -883,9 +883,9 @@ mod self_tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let manifest_path = root.join("crates/determinism/Cargo.toml");
         let source_path = root.join("crates/determinism/src/lib.rs");
-        let manifest = fs::read_to_string(&manifest_path)
+        let manifest = std::fs::read_to_string(&manifest_path)
             .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
-        let source = fs::read_to_string(&source_path)
+        let source = std::fs::read_to_string(&source_path)
             .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
 
         assert!(manifest.contains("proc-macro = true"));
