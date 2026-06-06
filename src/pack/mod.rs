@@ -2475,7 +2475,11 @@ fn why_not_freshness_penalty(target: &PackCandidate) -> WhyNotFreshnessPenalty {
         signals.push("tombstoned".to_string());
     }
     if let Some(lifecycle) = &target.lifecycle {
-        if lifecycle.validity_status != "valid" {
+        // `validity_status` is one of `current`, `unknown`, `future`, `expired`,
+        // or `malformed` (see `validity_status_for_memory`). Only `future`,
+        // `expired`, and `malformed` are freshness defects; `current` (in-window)
+        // and `unknown` (unbounded window) are healthy and must not be penalized.
+        if lifecycle.validity_status != "current" && lifecycle.validity_status != "unknown" {
             value = value.max(0.5);
             signals.push(format!("validity_status:{}", lifecycle.validity_status));
         }

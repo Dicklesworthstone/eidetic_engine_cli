@@ -3249,7 +3249,8 @@ fn context_degradation_source(code: &str) -> &'static str {
 fn context_severity_from_str(severity: &str) -> ContextResponseSeverity {
     match severity {
         "info" => ContextResponseSeverity::Info,
-        "low" | "warning" => ContextResponseSeverity::Low,
+        "low" => ContextResponseSeverity::Low,
+        "warning" => ContextResponseSeverity::Warning,
         "medium" => ContextResponseSeverity::Medium,
         "high" | "critical" => ContextResponseSeverity::High,
         _ => ContextResponseSeverity::Info,
