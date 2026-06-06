@@ -1420,7 +1420,11 @@ fn work_packet_claim_gate_verdict(
 ) -> &'static str {
     let Some(candidate) = candidate else {
         return if requested_candidate_id.is_some() {
-            "candidate_not_found"
+            if packet.tracker_integrity.br_reads_authoritative {
+                "candidate_not_found"
+            } else {
+                "external_state_required"
+            }
         } else {
             "no_candidate"
         };
@@ -1458,7 +1462,14 @@ fn work_packet_claim_gate_unsafe_reasons(
         }
         None => {
             if let Some(candidate_id) = requested_candidate_id {
-                reasons.push(format!("candidate_not_found:{candidate_id}"));
+                if packet.tracker_integrity.br_reads_authoritative {
+                    reasons.push(format!("candidate_not_found:{candidate_id}"));
+                } else {
+                    reasons.push(format!(
+                        "candidate_unresolved_due_to_tracker_state:{}:{candidate_id}",
+                        beads_integrity_health_label(packet.tracker_integrity.health)
+                    ));
+                }
             } else {
                 reasons.push("no_candidate_available".to_owned());
             }
@@ -7383,6 +7394,70 @@ mod tests {
                 .suggested_commands
                 .iter()
                 .any(|command| command.contains("br update"))
+        );
+    }
+
+    #[test]
+    fn missing_requested_candidate_requires_external_state_when_tracker_stale() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(Vec::new());
+        let merge_artifact_paths = Vec::new();
+        let tracker_integrity = compose_integrity_report(BeadsIntegrityInputs {
+            jsonl_path: ".beads/issues.jsonl",
+            db_path: ".beads/beads.db",
+            jsonl_record_count: 12,
+            db_record_count: 12,
+            auto_import_enabled: true,
+            external_changes_pending_import: true,
+            dirty_issue_count: 1,
+            merge_artifact_paths: &merge_artifact_paths,
+            jsonl_parse_error: None,
+        });
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action_with_tracker_integrity(
+            &brief,
+            &snapshot,
+            tracker_integrity,
+        );
+        let gate = packet.claim_gate(Some("bd-stale-missing"));
+
+        assert!(!packet.tracker_integrity.br_reads_authoritative);
+        assert_eq!(gate.verdict, "external_state_required");
+        assert!(!gate.safe_to_claim);
+        assert!(gate.selected_candidate.is_none());
+        assert!(gate.claim_command_action.is_none());
+        assert_eq!(gate.recommended_safe_to_claim, None);
+        assert!(
+            gate.unsafe_reasons.contains(
+                &"candidate_unresolved_due_to_tracker_state:external_changes_pending_import:bd-stale-missing"
+                    .to_owned()
+            )
+        );
+        assert!(
+            !gate
+                .unsafe_reasons
+                .contains(&"candidate_not_found:bd-stale-missing".to_owned())
+        );
+        let stale_show_argv = [
+            "br",
+            "--no-auto-import",
+            "--allow-stale",
+            "show",
+            "bd-stale-missing",
+            "--json",
+        ];
+        assert!(gate.next_command_actions.iter().any(|action| {
+            action.command_id == "bead_show_candidate_stale_safe"
+                && action
+                    .argv
+                    .iter()
+                    .map(String::as_str)
+                    .eq(stale_show_argv.iter().copied())
+        }));
+        assert!(
+            gate.next_command_actions
+                .iter()
+                .all(|action| !action.mutates_state)
         );
     }
 
