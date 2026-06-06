@@ -82,7 +82,7 @@ impl Drop for WorkerFinishedGuard {
 /// closure busy-loops at 1 kHz, incrementing `ticks` on every pass,
 /// until `kill` is set or 10 seconds have elapsed (hard cap so a
 /// runaway never bleeds across tests).
-fn workload(probe: Arc<WorkerProbe>) -> impl FnOnce() -> () + Send + 'static {
+fn workload(probe: Arc<WorkerProbe>) -> impl FnOnce() + Send + 'static {
     move || {
         let _guard = WorkerFinishedGuard {
             probe: probe.clone(),
