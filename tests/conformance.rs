@@ -35,10 +35,6 @@ enum EnvelopeKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Enforcement {
     Required,
-    KnownGap {
-        bead: &'static str,
-        reason: &'static str,
-    },
 }
 
 #[derive(Clone, Debug)]
@@ -158,13 +154,10 @@ fn error_case(
     }
 }
 
-fn fixed_gap(bead: &'static str, reason: &'static str) -> Enforcement {
-    Enforcement::KnownGap { bead, reason }
-}
-
 #[test]
 fn response_envelope_harness_uses_shared_command_inventory() -> TestResult {
     let inventory = command_inventory::ee_command_inventory_by_path();
+    let paths = command_inventory::ee_command_paths();
     for command_path in [
         "init",
         "remember",
@@ -186,6 +179,11 @@ fn response_envelope_harness_uses_shared_command_inventory() -> TestResult {
         "diag artifacts",
         "diag build-admission",
     ] {
+        if !paths.contains(command_path) {
+            return Err(format!(
+                "response envelope conformance case `{command_path}` is not in the shared clap-derived path set"
+            ));
+        }
         let entry = inventory.get(command_path).ok_or_else(|| {
             format!(
                 "response envelope conformance case `{command_path}` is not in the shared clap-derived inventory"
@@ -381,10 +379,6 @@ fn ensure_degraded_array(value: &Value, case_id: &str) -> TestResult {
 fn enforcement_label(enforcement: Enforcement) -> Value {
     match enforcement {
         Enforcement::Required => json!("required"),
-        Enforcement::KnownGap { bead, reason } => json!({
-            "knownGap": bead,
-            "reason": reason,
-        }),
     }
 }
 
@@ -436,8 +430,7 @@ fn expected_conformance_matrix(cases: &[CommandCase]) -> String {
             EnvelopeKind::Error => "error",
         };
         let enforcement = match case.enforcement {
-            Enforcement::Required => "required".to_owned(),
-            Enforcement::KnownGap { bead, .. } => format!("known gap {bead}"),
+            Enforcement::Required => "required",
         };
         matrix.push_str(&format!(
             "| {} | {envelope} | {} | {} | {enforcement} |\n",
@@ -451,8 +444,8 @@ fn expected_conformance_matrix(cases: &[CommandCase]) -> String {
 
 fn conformance_matrix(rows: &[ObservedCase]) -> String {
     let mut matrix = String::from(
-        "| subcommand | envelope | schema | docs schema | required fields | recovery | status |\n\
-         | --- | --- | --- | --- | --- | --- | --- |\n",
+        "| subcommand | envelope | exit code | schema | docs schema | required fields | recovery | status |\n\
+         | --- | --- | --- | --- | --- | --- | --- | --- |\n",
     );
     for row in rows {
         let envelope = match row.expected {
@@ -462,14 +455,12 @@ fn conformance_matrix(rows: &[ObservedCase]) -> String {
         let status = match row.enforcement {
             Enforcement::Required if row.conforms() => "pass".to_owned(),
             Enforcement::Required => "fail".to_owned(),
-            Enforcement::KnownGap { bead, .. } if row.conforms() => {
-                format!("pass; close {bead}")
-            }
-            Enforcement::KnownGap { bead, .. } => format!("known gap {bead}"),
         };
         matrix.push_str(&format!(
-            "| {} | {envelope} | {} | {} | {} | {} | {status} |\n",
+            "| {} | {envelope} | {} | {} | {} | {} | {} | {status} |\n",
             row.surface,
+            row.exit_code
+                .map_or_else(|| "<signal>".to_owned(), |code| code.to_string()),
             row.schema.as_deref().unwrap_or("<missing>"),
             bool_cell(row.schema_file_valid),
             bool_cell(row.envelope_valid),
