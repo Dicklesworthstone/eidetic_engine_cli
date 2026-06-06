@@ -347,7 +347,8 @@ fn capped_bias_sample_is_structurally_valid() -> TestResult {
             .as_f64()
             .ok_or("topBiases[].bias must be number")?;
         ensure(
-            bias >= -MAX_BIAS_MAGNITUDE - f64::EPSILON && bias <= MAX_BIAS_MAGNITUDE + f64::EPSILON,
+            (-MAX_BIAS_MAGNITUDE - f64::EPSILON..=MAX_BIAS_MAGNITUDE + f64::EPSILON)
+                .contains(&bias),
             format!("topBiases[].bias {bias} must be within [-0.05, +0.05]"),
         )?;
         let features = item["features"]
