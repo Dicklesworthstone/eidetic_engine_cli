@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use crate::graph::algorithms::{DEFAULT_BACKGROUND_BUDGET, current_or_testing_cx, run_with_budget};
 use crate::graph::{GraphError, GraphResult};
 use crate::models::degradation::GRAPH_CAUSAL_NO_EVIDENCE_CODE;
-use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
+use crate::util::radix_ulid_sort::{
+    compare_ulid_payload_or_lexical, sort_by_ulid_payload_or_lexical,
+};
 
 use super::{AttrMap, DiGraph};
 
@@ -254,14 +256,12 @@ fn compare_explanation_cost(
     // `src/core/situation.rs:1268` migrated to. The pre-sort by
     // `sort_by_ulid_payload_or_lexical` at line 183-185 still
     // provides the cause_id-order tiebreak for ordinary equal-cost
-    // explanations via Rust's stable `sort_by`; repeat the same
-    // lexical tiebreak here for distinct NaN payloads because
-    // `total_cmp` orders those payloads, and tests intentionally use
-    // multiple `f64::NAN` values whose payload ordering is not a
-    // useful public contract.
+    // explanations via Rust's stable `sort_by`; repeat that tiebreak
+    // explicitly here because `total_cmp` orders distinct NaN payloads,
+    // and those payload bits are not a useful public contract.
     left.total_cost
         .total_cmp(&right.total_cost)
-        .then_with(|| left.cause_id.cmp(&right.cause_id))
+        .then_with(|| compare_ulid_payload_or_lexical(&left.cause_id, &right.cause_id))
 }
 
 fn terminal_ancestors(graph: &DiGraph, failure_id: &str) -> Vec<String> {

@@ -7830,6 +7830,7 @@ mod tests {
     #[test]
     fn projection_filters_non_allowed_mesh_link_metadata() -> TestResult {
         let connection = open_projection_db()?;
+        insert_memory(&connection, MEMORY_D, "Filtered mesh metadata memory")?;
         insert_link(
             &connection,
             "link_00000000000000000000000024",
@@ -7895,7 +7896,7 @@ mod tests {
             &connection,
             "link_00000000000000000000000030",
             MEMORY_A,
-            MEMORY_A,
+            MEMORY_D,
             true,
             0.9,
             0.9,
@@ -7907,7 +7908,7 @@ mod tests {
             &connection,
             "link_00000000000000000000000031",
             MEMORY_B,
-            MEMORY_B,
+            MEMORY_D,
             true,
             0.9,
             0.9,
@@ -7925,6 +7926,7 @@ mod tests {
         assert_eq!(projection.edge_count, 2);
         assert!(projection.graph.has_edge(MEMORY_A, MEMORY_B));
         assert!(projection.graph.has_edge(MEMORY_B, MEMORY_C));
+        assert!(!projection.graph.has_node(MEMORY_D));
         assert!(!projection.graph.has_edge(MEMORY_C, MEMORY_A));
         assert!(!projection.graph.has_edge(MEMORY_A, MEMORY_C));
         assert!(!projection.graph.has_edge(MEMORY_C, MEMORY_B));

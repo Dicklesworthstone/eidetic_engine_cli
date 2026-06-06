@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine.local/schemas/ee.proof_check.v1.json",
-  "title": "ee proof check report",
+  "title": "ee.proof_check.v1",
   "description": "Machine-readable report emitted by the proof verification surface. Missing Lean4 or TLC tooling is reported as degraded proof_tool_missing and does not make the report unsuccessful.",
   "type": "object",
   "required": ["schema", "success", "checks", "degraded"],
