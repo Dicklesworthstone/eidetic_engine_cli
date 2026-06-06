@@ -78,12 +78,11 @@ fn persist_artifact(name: &str, output: &Output) {
     let _ = fs::write(&stderr_path, &output.stderr);
 }
 
-fn persist_json_artifact(name: &str, value: &serde_json::Value) {
+fn persist_json_artifact(name: &str, value: &serde_json::Value) -> TestResult {
     let dir = artifact_dir();
     let path = dir.join(format!("{name}.json"));
-    let serialized =
-        serde_json::to_string_pretty(value).expect("artifact JSON serialization should not fail");
-    let _ = fs::write(&path, serialized);
+    let serialized = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
+    fs::write(&path, serialized).map_err(|error| error.to_string())
 }
 
 // ============================================================================
@@ -103,7 +102,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
     ensure(stdout_is_json(&init), "init stdout must be valid JSON")?;
     ensure(stdout_is_clean(&init), "init stdout must be clean")?;
     let init_json = stdout_json(&init)?;
-    persist_json_artifact("01_init", &init_json);
+    persist_json_artifact("01_init", &init_json)?;
     ensure_equal(
         &init_json["schema"],
         &serde_json::json!("ee.response.v2"),
@@ -148,7 +147,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
         "remember rule stdout must be clean",
     )?;
     let remember_rule_json = stdout_json(&remember_rule)?;
-    persist_json_artifact("02_remember_rule", &remember_rule_json);
+    persist_json_artifact("02_remember_rule", &remember_rule_json)?;
     ensure_equal(
         &remember_rule_json["schema"],
         &serde_json::json!("ee.response.v2"),
@@ -191,7 +190,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
         "remember fact stdout must be valid JSON",
     )?;
     let remember_fact_json = stdout_json(&remember_fact)?;
-    persist_json_artifact("03_remember_fact", &remember_fact_json);
+    persist_json_artifact("03_remember_fact", &remember_fact_json)?;
     let fact_memory_id = remember_fact_json["data"]["memory_id"]
         .as_str()
         .ok_or_else(|| "remember fact memory_id must be a string".to_string())?;
@@ -213,7 +212,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
         "index rebuild stdout must be valid JSON",
     )?;
     let rebuild_json = stdout_json(&rebuild)?;
-    persist_json_artifact("04_index_rebuild", &rebuild_json);
+    persist_json_artifact("04_index_rebuild", &rebuild_json)?;
     ensure_equal(
         &rebuild_json["data"]["memories_indexed"],
         &serde_json::json!(2),
@@ -235,7 +234,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
     ensure(stdout_is_json(&search), "search stdout must be valid JSON")?;
     ensure(stdout_is_clean(&search), "search stdout must be clean")?;
     let search_json = stdout_json(&search)?;
-    persist_json_artifact("05_search", &search_json);
+    persist_json_artifact("05_search", &search_json)?;
     ensure_equal(
         &search_json["schema"],
         &serde_json::json!("ee.response.v2"),
@@ -292,7 +291,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
     )?;
     ensure(stdout_is_clean(&context), "context stdout must be clean")?;
     let context_json = stdout_json(&context)?;
-    persist_json_artifact("06_context", &context_json);
+    persist_json_artifact("06_context", &context_json)?;
     ensure_equal(
         &context_json["schema"],
         &serde_json::json!("ee.response.v2"),
@@ -358,7 +357,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
     ensure(stdout_is_json(&why), "why stdout must be valid JSON")?;
     ensure(stdout_is_clean(&why), "why stdout must be clean")?;
     let why_json = stdout_json(&why)?;
-    persist_json_artifact("07_why", &why_json);
+    persist_json_artifact("07_why", &why_json)?;
     ensure_equal(
         &why_json["schema"],
         &serde_json::json!("ee.response.v2"),
@@ -404,7 +403,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
         "context replay exit code",
     )?;
     let context_replay_json = stdout_json(&context_replay)?;
-    persist_json_artifact("08_context_replay", &context_replay_json);
+    persist_json_artifact("08_context_replay", &context_replay_json)?;
     let replay_pack_hash = context_replay_json["data"]["pack"]["hash"]
         .as_str()
         .ok_or_else(|| "context replay pack hash must be a string".to_string())?;
@@ -441,7 +440,7 @@ fn cli_loop_search_empty_workspace_returns_empty_results() -> TestResult {
     ensure_equal(&search.status.code(), &Some(0), "search exit code")?;
     ensure(search.stderr.is_empty(), "search stderr must be empty")?;
     let search_json = stdout_json(&search)?;
-    persist_json_artifact("empty_ws_search", &search_json);
+    persist_json_artifact("empty_ws_search", &search_json)?;
     let results = search_json["data"]["results"]
         .as_array()
         .ok_or_else(|| "search results must be an array".to_string())?;
@@ -486,7 +485,7 @@ fn cli_loop_context_empty_workspace_degrades_gracefully() -> TestResult {
     )?;
 
     let context_json = stdout_json(&context)?;
-    persist_json_artifact("empty_ctx_context", &context_json);
+    persist_json_artifact("empty_ctx_context", &context_json)?;
 
     if exit_code == 0 {
         // If successful, pack should be empty
@@ -534,7 +533,7 @@ fn cli_loop_why_unknown_memory_returns_error() -> TestResult {
     persist_artifact("why_unknown", &why);
     ensure(stdout_is_json(&why), "why stdout must be valid JSON")?;
     let why_json = stdout_json(&why)?;
-    persist_json_artifact("why_unknown", &why_json);
+    persist_json_artifact("why_unknown", &why_json)?;
     ensure(
         why_json["schema"].as_str() == Some("ee.error.v2")
             || why_json["success"].as_bool() == Some(false),
@@ -590,7 +589,7 @@ fn cli_loop_multiple_memories_with_same_tags_are_searchable() -> TestResult {
     persist_artifact("multi_tag_search", &search);
     ensure_equal(&search.status.code(), &Some(0), "search exit code")?;
     let search_json = stdout_json(&search)?;
-    persist_json_artifact("multi_tag_search", &search_json);
+    persist_json_artifact("multi_tag_search", &search_json)?;
     let results = search_json["data"]["results"]
         .as_array()
         .ok_or_else(|| "search results must be an array".to_string())?;
@@ -659,7 +658,7 @@ fn cli_loop_status_reports_workspace_health() -> TestResult {
     ensure(stdout_is_json(&status), "status stdout must be valid JSON")?;
     ensure(stdout_is_clean(&status), "status stdout must be clean")?;
     let status_json = stdout_json(&status)?;
-    persist_json_artifact("status_check", &status_json);
+    persist_json_artifact("status_check", &status_json)?;
     ensure_equal(
         &status_json["schema"],
         &serde_json::json!("ee.response.v2"),
