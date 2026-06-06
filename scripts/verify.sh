@@ -49,6 +49,7 @@ set -euo pipefail
 #   4.68. Swarm SLO Replay Contract - no-Cargo replay fixture/golden contract gate
 #   4.69. CI Proof-Lane Snapshot Contract - no-Cargo proof-lane fixture gate
 #   4.70. CI Proof-Lane Hygiene Advisory - no-Cargo workflow policy scanner
+#   4.71. RCH Doc Examples Lint - no-Cargo docs command-shape scanner
 #   4.7. Package Artifact Leak - cargo package list gate for generated artifacts
 #   4.8. Fuzz Target Audit     - static cargo-fuzz target registration/docs check
 #   4.9. Fuzz Smoke            - optional 30s search query parser cargo-fuzz sweep
@@ -790,6 +791,11 @@ run_stage "CI Proof-Lane Snapshot Contract" "./scripts/ci_proof_lane_snapshot_fi
 # duplicate-dispatch, cancel-in-progress, artifact-retention, release-artifact,
 # and unclassified artifact-lane posture before spending CI/RCH proof slots.
 run_stage "CI Proof-Lane Hygiene Advisory" "./scripts/ci_proof_lane_hygiene.sh --json"
+
+# Gate 3.90: RCH doc examples lint (bd-1n3x1.9). This no-Cargo docs scanner
+# fails before expensive gates if AGENTS.md, README.md, or the RCH runbooks grow
+# copy-pasteable local Cargo compile examples that bypass the verifier wrapper.
+run_stage "RCH Doc Examples Lint" "python3 scripts/check-rch-doc-examples.py --json"
 
 # Gate 4.7: Package artifact leakage guard. This is a quick packaging gate:
 # it runs cargo package --list without building and fails if local/generated

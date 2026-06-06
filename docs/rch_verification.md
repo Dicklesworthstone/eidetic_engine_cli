@@ -698,6 +698,10 @@ RCH-specific fenced blocks in AGENTS.md and README.md are scanned too.
 python3 scripts/check-rch-doc-examples.py --json
 ```
 
+The central `scripts/verify.sh` runner executes the same static lint as the
+`RCH Doc Examples Lint` stage before Cargo-backed gates, so unwrapped
+copy-pasteable Cargo examples fail while the fix is still a docs-only change.
+
 The copy-paste smoke harness extracts the first documented dry-run verifier
 example and executes that exact docs text. It expects an `ee.rch.verify.v1`
 proof with `status=dry_run` and an explicit `rch exec` invocation, so the
