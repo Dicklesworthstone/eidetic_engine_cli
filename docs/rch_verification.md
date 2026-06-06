@@ -46,6 +46,29 @@ the widened local topology above. The worker preflight remains fixed to
 `/dp -> /data/projects`, so `/data` is only the local alias root used by the
 dependency planner.
 
+## Cargo-Free Panic Helper Radar
+
+Before spending an RCH or CI Clippy slot on touched Rust tests or benches, run
+the panic-helper radar over the files you changed:
+
+```bash
+scripts/panic-helper-radar.sh --json tests/new_contract.rs benches/new_bench.rs
+scripts/panic-helper-radar.sh --json
+```
+
+The no-argument form scans only dirty, staged, or untracked `*.rs` files. It
+does not scan the whole repository unless `--all` is passed, and it never runs
+Cargo or rewrites code. The report schema is `ee.panic_helper_radar.v1`; a
+failure points to unallowed `.expect()`, `.expect_err()`, `.unwrap()`, or
+`.unwrap_err()` calls with the corresponding Clippy lint family
+(`expect_used` or `unwrap_used`). Explicit file-level or nearby
+`#[allow(clippy::expect_used)]` / `#[allow(clippy::unwrap_used)]` annotations
+are treated as intentional posture, not as scanner failures.
+
+Use this as a cheap hygiene check before remote verification. It is not a
+replacement for `scripts/rch_verify.sh -- cargo clippy --all-targets -- -D
+warnings`, and it must not be used to claim a Rust proof when code changed.
+
 Proof:
 
 ```text
