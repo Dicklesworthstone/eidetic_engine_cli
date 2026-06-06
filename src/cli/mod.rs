@@ -29587,7 +29587,7 @@ fn memory_revise_error_to_domain(report: &MemoryReviseReport, memory_id: &str) -
         },
         Some("Cannot revise tombstoned memory") => DomainError::PolicyDenied {
             message: "Cannot revise tombstoned memory.".to_string(),
-            repair: Some("Use ee memory show --include-tombstoned to inspect it.".to_string()),
+            repair: Some("Use ee memory show to inspect it.".to_string()),
         },
         Some(message) if message.starts_with("Memory revision writes are unavailable") => {
             DomainError::PolicyDenied {

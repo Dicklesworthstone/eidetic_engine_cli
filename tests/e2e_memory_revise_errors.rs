@@ -19,8 +19,7 @@
 //!   `"No memory revision changes were specified."` + repair listing
 //!   every revisable field
 //! * Revise a tombstoned memory -> PolicyDenied `"Cannot revise
-//!   tombstoned memory."` + `"ee memory show
-//!   --include-tombstoned"`
+//!   tombstoned memory."` + `"ee memory show"`
 
 #![cfg(unix)]
 
@@ -323,6 +322,6 @@ fn memory_revise_rejects_tombstoned_memory_with_policy_repair() -> TestResult {
     assert_error_with_repair(
         &parsed,
         &["Cannot revise tombstoned memory."],
-        &["ee memory show", "--include-tombstoned"],
+        &["ee memory show"],
     )
 }

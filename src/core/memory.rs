@@ -5672,9 +5672,7 @@ pub fn update_memory_link(
             if source_memory.tombstoned_at.is_some() || target_memory.tombstoned_at.is_some() {
                 return Err(DomainError::PolicyDenied {
                     message: "Cannot create memory links involving expired memories.".to_owned(),
-                    repair: Some(
-                        "Use ee memory show --include-tombstoned to inspect them.".to_owned(),
-                    ),
+                    repair: Some("Use ee memory show to inspect them.".to_owned()),
                 });
             }
 
@@ -5820,7 +5818,7 @@ pub fn update_memory_tags(
         } else {
             return Err(DomainError::PolicyDenied {
                 message: "Cannot mutate tags on an expired memory.".to_owned(),
-                repair: Some("Use ee memory show --include-tombstoned to inspect it.".to_owned()),
+                repair: Some("Use ee memory show to inspect it.".to_owned()),
             });
         }
     }

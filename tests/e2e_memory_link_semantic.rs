@@ -19,7 +19,7 @@
 //! * Link involving a tombstoned target memory ->
 //!   `DomainError::PolicyDenied` `"Cannot create memory links
 //!   involving expired memories."` +
-//!   `"Use ee memory show --include-tombstoned to inspect them."`
+//!   `"Use ee memory show to inspect them."`
 
 #![cfg(unix)]
 
@@ -257,10 +257,8 @@ fn memory_link_rejects_links_involving_tombstoned_memory_with_policy_repair() ->
     )?;
     let repair = error["repair"].as_str().unwrap_or_default();
     ensure(
-        repair.contains("ee memory show --include-tombstoned"),
-        format!(
-            "tombstoned-link repair must point at `ee memory show --include-tombstoned`; got {repair}"
-        ),
+        repair.contains("ee memory show"),
+        format!("tombstoned-link repair must point at `ee memory show`; got {repair}"),
     )?;
     Ok(())
 }
