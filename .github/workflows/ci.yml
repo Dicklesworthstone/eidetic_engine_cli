@@ -104,7 +104,7 @@ jobs:
 
       - name: Tests
         env:
-          CARGO_BUILD_JOBS: "2"
+          CARGO_BUILD_JOBS: "1"
           RUST_TEST_THREADS: "1"
         run: |
           set -euo pipefail
@@ -126,7 +126,7 @@ jobs:
           echo "::notice::cargo test started at $(date -u +%FT%TZ) with CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS RUST_TEST_THREADS=$RUST_TEST_THREADS"
           set +e
           timeout --foreground --kill-after=30s 90m \
-            cargo test --workspace --lib --bins --tests --examples --jobs 2 -- --test-threads=1 --nocapture
+            cargo test --workspace --lib --bins --tests --examples --jobs 1 -- --test-threads=1 --nocapture
           status=$?
           set -e
           cleanup
