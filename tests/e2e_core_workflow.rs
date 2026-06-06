@@ -74,12 +74,11 @@ fn persist_artifact(name: &str, output: &Output) {
     let _ = fs::write(&stderr_path, &output.stderr);
 }
 
-fn persist_json_artifact(name: &str, value: &serde_json::Value) {
+fn persist_json_artifact(name: &str, value: &serde_json::Value) -> TestResult {
     let dir = artifact_dir();
     let path = dir.join(format!("{name}.json"));
-    let serialized =
-        serde_json::to_string_pretty(value).expect("artifact JSON serialization should not fail");
-    let _ = fs::write(&path, serialized);
+    let serialized = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
+    fs::write(&path, serialized).map_err(|error| error.to_string())
 }
 
 fn assert_schema(json: &serde_json::Value, expected: &str, context: &str) -> TestResult {
@@ -488,7 +487,7 @@ fn context_pack_includes_relevant_memories() -> TestResult {
         )?;
         assert_stderr_empty(&remember, &format!("remember {index}"))?;
         let remember_json = stdout_json(&remember)?;
-        persist_json_artifact(&format!("pack_context_remember_{index}"), &remember_json);
+        persist_json_artifact(&format!("pack_context_remember_{index}"), &remember_json)?;
         let memory_id = json_str(&remember_json, "/data/memory_id", "remember")?.to_owned();
         remembered.insert(
             memory_id,
@@ -523,7 +522,7 @@ fn context_pack_includes_relevant_memories() -> TestResult {
         )?;
         assert_stderr_empty(&context, &format!("context {max_tokens}"))?;
         let context_json = stdout_json(&context)?;
-        persist_json_artifact(&format!("pack_context_context_{max_tokens}"), &context_json);
+        persist_json_artifact(&format!("pack_context_context_{max_tokens}"), &context_json)?;
         assert_schema(&context_json, "ee.response.v2", "context")?;
         let requested_tokens = max_tokens
             .parse::<u64>()
@@ -609,7 +608,7 @@ fn context_pack_includes_relevant_memories() -> TestResult {
         )?;
         assert_stderr_empty(&why, &format!("why {memory_id}"))?;
         let why_json = stdout_json(&why)?;
-        persist_json_artifact(&format!("pack_context_why_{memory_id}"), &why_json);
+        persist_json_artifact(&format!("pack_context_why_{memory_id}"), &why_json)?;
         assert_schema(&why_json, "ee.response.v2", "why")?;
         ensure_equal(
             &json_str(&why_json, "/data/memoryId", "why")?,
