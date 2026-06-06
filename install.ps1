@@ -837,6 +837,13 @@ function Main {
         Write-ErrorExit "-RequireProvenance cannot be combined with -FromSource: a source build has no Sigstore-signed release artifact to verify."
     }
 
+    # -RequireProvenance enforces signature verification, which -NoVerify
+    # (or EE_SKIP_VERIFY=1) skips; combining them is contradictory (parity
+    # with install.sh).
+    if ($RequireProvenance -and $NoVerify) {
+        Write-ErrorExit "-RequireProvenance cannot be combined with -NoVerify / EE_SKIP_VERIFY=1."
+    }
+
     # Version.
     if ($FromSource) {
         if (-not $Version) { $Version = "" }
