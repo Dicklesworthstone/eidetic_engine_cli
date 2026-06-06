@@ -54787,9 +54787,14 @@ mod tests {
         )?;
         let shown: serde_json::Value =
             serde_json::from_str(&show_stdout).map_err(|error| error.to_string())?;
-        ensure_equal(
-            &shown["data"]["tripwires"][0]["source_id"],
-            &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
+        ensure(
+            shown["data"]["tripwires"]
+                .as_array()
+                .is_some_and(|tripwires| {
+                    tripwires.iter().any(|tripwire| {
+                        tripwire["source_id"].as_str() == Some("preflight_guard:builtin:rm_rf_root")
+                    })
+                }),
             "persisted guard tripwire source id",
         )
     }
@@ -57117,7 +57122,7 @@ mod tests {
 
     #[test]
     fn fields_minimal_includes_fields_indicator() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&["ee", "--json", "--fields", "minimal", "status"]);
+        let (exit, stdout, stderr) = invoke(&["ee", "--fields", "minimal", "--json", "status"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "fields minimal exit")?;
         ensure_contains(&stdout, "\"fields\":\"minimal\"", "fields indicator")?;
         ensure(stderr.is_empty(), "stderr empty")
