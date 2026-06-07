@@ -38,6 +38,7 @@ use chrono::{DateTime, Utc};
 use rustix::fs::{FlockOperation, flock};
 #[cfg(unix)]
 use rustix::io::Errno;
+use sqlmodel_core::Value as SqlValue;
 
 use crate::cache::hotset::{
     MemoryStorageTier, MemoryTierAssignment, MemoryTierInput, MemoryTierPolicyConfig,
@@ -4380,16 +4381,19 @@ fn context_pack_l2_prepare(
             return None;
         }
     };
-    let database_generation = match context_pack_l2_database_generation(connection) {
-        Ok(generation) => generation,
-        Err(message) => {
-            push_pack_l2_unavailable(
-                degraded,
-                format!("L2 pack cache key generation could not read database posture: {message}"),
-            );
-            return None;
-        }
-    };
+    let database_generation =
+        match context_pack_l2_database_generation(connection, Some(&workspace_id)) {
+            Ok(generation) => generation,
+            Err(message) => {
+                push_pack_l2_unavailable(
+                    degraded,
+                    format!(
+                        "L2 pack cache key generation could not read database posture: {message}"
+                    ),
+                );
+                return None;
+            }
+        };
     let graph_generation = match context_pack_l2_graph_generation(connection) {
         Ok(generation) => generation,
         Err(message) => {
@@ -4687,10 +4691,17 @@ fn pack_l2_workspace_component(workspace_id: &str) -> String {
 }
 
 fn context_read_snapshot_generation(connection: &DbConnection) -> Result<u64, String> {
-    context_pack_l2_database_generation(connection)
+    context_pack_l2_database_generation(connection, None)
 }
 
-fn context_pack_l2_database_generation(connection: &DbConnection) -> Result<u64, String> {
+fn context_pack_l2_database_generation(
+    connection: &DbConnection,
+    workspace_id: Option<&str>,
+) -> Result<u64, String> {
+    if let Some(generation) = context_pack_l2_workspace_generation(connection, workspace_id)? {
+        return Ok(generation);
+    }
+
     context_pack_l2_query_generation(
         connection,
         "SELECT \
@@ -4701,6 +4712,33 @@ fn context_pack_l2_database_generation(connection: &DbConnection) -> Result<u64,
             (SELECT COUNT(*) FROM memory_links), \
             (SELECT COALESCE(MAX(created_at), '') FROM memory_links)",
     )
+}
+
+fn context_pack_l2_workspace_generation(
+    connection: &DbConnection,
+    workspace_id: Option<&str>,
+) -> Result<Option<u64>, String> {
+    let rows = if let Some(workspace_id) = workspace_id {
+        connection.query(
+            "SELECT generation FROM workspace_generations WHERE workspace_id = ?1",
+            &[SqlValue::Text(workspace_id.to_string())],
+        )
+    } else {
+        connection.query(
+            "SELECT COALESCE(MAX(generation), 0) FROM workspace_generations",
+            &[],
+        )
+    }
+    .map_err(|error| error.to_string())?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let Some(value) = row.get(0).and_then(|value| value.as_i64()) else {
+        return Ok(None);
+    };
+    u64::try_from(value)
+        .map(Some)
+        .map_err(|_| "workspace generation must fit u64".to_string())
 }
 
 fn context_pack_l2_graph_generation(connection: &DbConnection) -> Result<Option<u64>, String> {

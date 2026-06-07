@@ -22,7 +22,7 @@ const INDEX_RETAINED_SUFFIX: &str = ".previous";
 
 /// Maximum bytes inspected when reading `<workspace>/.ee/index/meta.json`.
 /// Real index metadata is a single tiny JSON object (`generation`,
-/// `lastRebuildAt`, `lastCheckError` — well under 1 KiB in practice);
+/// `sourceGeneration`, `lastRebuildAt`, `lastCheckError` — well under 1 KiB in practice);
 /// 4 MiB gives many orders of magnitude of headroom while still bounding
 /// peer-planted oversize plants on shared multi-agent checkouts.
 ///
@@ -747,9 +747,11 @@ pub fn rebuild_index(
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
 
     let db = DbConnection::open_file(&database_path)?;
-    let (_, _, db_generation) = get_db_stats(&db)?;
-
     let workspace_id = get_default_workspace_id(&db)?;
+    let (_, _, db_generation) = get_db_stats(&db)?;
+    let source_generation = db
+        .get_workspace_generation(&workspace_id)?
+        .or(db_generation);
 
     let memories = db.list_memories_for_retrieval_with_global(&workspace_id, None, false)?;
     let sessions = db.list_sessions(&workspace_id)?;
@@ -820,7 +822,7 @@ pub fn rebuild_index(
         match build_result {
             Ok(stats) => {
                 let published_generation =
-                    db_generation.unwrap_or_else(|| u64::from(documents_total));
+                    source_generation.unwrap_or_else(|| u64::from(documents_total));
                 write_index_metadata(&staging_dir, published_generation, documents_total)?;
                 publish_staged_index(&index_dir, &staging_dir)?;
 
@@ -870,6 +872,10 @@ pub fn reembed_index(
 
     let db = DbConnection::open_file(&database_path)?;
     let workspace_id = get_default_workspace_id(&db)?;
+    let (_, _, db_generation) = get_db_stats(&db)?;
+    let source_generation = db
+        .get_workspace_generation(&workspace_id)?
+        .or(db_generation);
 
     let memories = db.list_memories_for_retrieval_with_global(&workspace_id, None, false)?;
     let sessions = db.list_sessions(&workspace_id)?;
@@ -973,7 +979,9 @@ pub fn reembed_index(
         match build_result {
             Ok(stats) => {
                 db.update_search_index_job_progress(&job_id, documents_total)?;
-                write_index_metadata(&staging_dir, u64::from(documents_total), documents_total)
+                let published_generation =
+                    source_generation.unwrap_or_else(|| u64::from(documents_total));
+                write_index_metadata(&staging_dir, published_generation, documents_total)
                     .and_then(|()| publish_staged_index(&index_dir, &staging_dir))?;
                 db.complete_search_index_job(&job_id, documents_total)?;
 
@@ -1202,8 +1210,9 @@ fn process_one_index_job(
     // behind db_generation after `ee remember` wrote its audit rows, which
     // falsely tripped `search_index_stale` on the very next search even
     // though the job had already applied synchronously. (agent-UX item 5)
-    let published_generation = get_db_stats(db)?
-        .2
+    let published_generation = db
+        .get_workspace_generation(&job.workspace_id)?
+        .or(get_db_stats(db)?.2)
         .unwrap_or_else(|| u64::from(documents_total));
 
     // Acquire index publish lock to prevent concurrent publish races.
@@ -1447,6 +1456,7 @@ fn write_index_metadata(
     let metadata = serde_json::json!({
         "schema": "ee.index_metadata.v1",
         "generation": generation,
+        "sourceGeneration": generation,
         "lastRebuildAt": timestamp,
         "documentCount": documents_total,
     });
@@ -2922,7 +2932,19 @@ fn get_db_stats(db: &DbConnection) -> Result<(u32, u32, Option<u64>), DbError> {
         .and_then(|v| u64::try_from(v).ok())
         .unwrap_or(0);
 
-    let generation = Some(source_document_count.max(audit_count));
+    let workspace_generation = db
+        .query(
+            "SELECT COALESCE(MAX(generation), 0) FROM workspace_generations",
+            &[],
+        )
+        .ok()
+        .and_then(|rows| {
+            rows.first()
+                .and_then(|row| row.get(0).and_then(|v| v.as_i64()))
+        })
+        .and_then(|v| u64::try_from(v).ok());
+
+    let generation = workspace_generation.or(Some(source_document_count.max(audit_count)));
 
     Ok((memory_count, session_count, generation))
 }
@@ -2960,7 +2982,11 @@ fn read_index_metadata(index_dir: &Path) -> (Option<u64>, Option<String>, Option
         );
     }
 
-    let generation = parsed.get("generation").and_then(|v| v.as_u64());
+    let generation = parsed
+        .get("sourceGeneration")
+        .or_else(|| parsed.get("source_generation"))
+        .or_else(|| parsed.get("generation"))
+        .and_then(|v| v.as_u64());
     let last_rebuild = parsed
         .get("lastRebuildAt")
         .or_else(|| parsed.get("last_rebuild_at"))
@@ -4335,6 +4361,14 @@ mod tests {
         ensure(
             generation == Some(42),
             "metadata generation should round-trip",
+        )?;
+        let metadata_json = std::fs::read_to_string(index_dir.join(INDEX_METADATA_FILE))
+            .map_err(|e| e.to_string())?;
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json).map_err(|e| e.to_string())?;
+        ensure(
+            metadata["sourceGeneration"] == serde_json::json!(42),
+            "metadata should expose sourceGeneration",
         )?;
         ensure(
             rebuilt_at.is_some(),

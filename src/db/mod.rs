@@ -5903,6 +5903,207 @@ CREATE INDEX IF NOT EXISTS idx_memories_kind_typed_fields
     "blake3:v070_memory_typed_fields_2026_06_07",
 );
 
+pub const V071_WORKSPACE_GENERATIONS: Migration = Migration::new(
+    71,
+    "workspace_generations",
+    r#"
+CREATE TABLE workspace_generations (
+    workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0)
+);
+
+INSERT INTO workspace_generations (workspace_id, generation, updated_at)
+SELECT
+    w.id,
+    (
+        (SELECT COUNT(*) FROM memories m WHERE m.workspace_id = w.id)
+        + (SELECT COUNT(*) FROM curation_candidates c WHERE c.workspace_id = w.id)
+        + (
+            SELECT COUNT(*)
+            FROM memory_tags mt
+            JOIN memories m ON m.id = mt.memory_id
+            WHERE m.workspace_id = w.id
+        )
+        + (
+            SELECT COUNT(DISTINCT ml.id)
+            FROM memory_links ml
+            JOIN memories src ON src.id = ml.src_memory_id
+            JOIN memories dst ON dst.id = ml.dst_memory_id
+            WHERE src.workspace_id = w.id OR dst.workspace_id = w.id
+        )
+    ),
+    w.updated_at
+FROM workspaces w;
+
+CREATE TRIGGER trg_workspace_generations_workspaces_insert
+AFTER INSERT ON workspaces
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.id, 0, NEW.updated_at);
+END;
+
+CREATE TRIGGER trg_workspace_generations_memories_insert
+AFTER INSERT ON memories
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.updated_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_memories_update
+AFTER UPDATE ON memories
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.updated_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = NEW.workspace_id;
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = OLD.workspace_id
+       AND OLD.workspace_id <> NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_memories_delete
+AFTER DELETE ON memories
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id = OLD.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_memory_tags_insert
+AFTER INSERT ON memory_tags
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    SELECT m.workspace_id, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      FROM memories m
+     WHERE m.id = NEW.memory_id;
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id IN (
+        SELECT m.workspace_id
+          FROM memories m
+         WHERE m.id = NEW.memory_id
+     );
+END;
+
+CREATE TRIGGER trg_workspace_generations_memory_tags_delete
+AFTER DELETE ON memory_tags
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id IN (
+        SELECT m.workspace_id
+          FROM memories m
+         WHERE m.id = OLD.memory_id
+     );
+END;
+
+CREATE TRIGGER trg_workspace_generations_curation_candidates_insert
+AFTER INSERT ON curation_candidates
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.created_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.created_at
+     WHERE workspace_id = NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_curation_candidates_update
+AFTER UPDATE ON curation_candidates
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, COALESCE(NEW.last_action_at, NEW.reviewed_at, NEW.applied_at, NEW.created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')));
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = COALESCE(NEW.last_action_at, NEW.reviewed_at, NEW.applied_at, NEW.created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+     WHERE workspace_id = NEW.workspace_id;
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = COALESCE(NEW.last_action_at, NEW.reviewed_at, NEW.applied_at, NEW.created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+     WHERE workspace_id = OLD.workspace_id
+       AND OLD.workspace_id <> NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_curation_candidates_delete
+AFTER DELETE ON curation_candidates
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id = OLD.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_memory_links_insert
+AFTER INSERT ON memory_links
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    SELECT DISTINCT m.workspace_id, 0, NEW.created_at
+      FROM memories m
+     WHERE m.id IN (NEW.src_memory_id, NEW.dst_memory_id);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.created_at
+     WHERE workspace_id IN (
+        SELECT DISTINCT m.workspace_id
+          FROM memories m
+         WHERE m.id IN (NEW.src_memory_id, NEW.dst_memory_id)
+     );
+END;
+
+CREATE TRIGGER trg_workspace_generations_memory_links_update
+AFTER UPDATE ON memory_links
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    SELECT DISTINCT m.workspace_id, 0, COALESCE(NEW.last_reinforced_at, NEW.created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      FROM memories m
+     WHERE m.id IN (NEW.src_memory_id, NEW.dst_memory_id);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = COALESCE(NEW.last_reinforced_at, NEW.created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+     WHERE workspace_id IN (
+        SELECT DISTINCT m.workspace_id
+          FROM memories m
+         WHERE m.id IN (OLD.src_memory_id, OLD.dst_memory_id, NEW.src_memory_id, NEW.dst_memory_id)
+     );
+END;
+
+CREATE TRIGGER trg_workspace_generations_memory_links_delete
+AFTER DELETE ON memory_links
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id IN (
+        SELECT DISTINCT m.workspace_id
+          FROM memories m
+         WHERE m.id IN (OLD.src_memory_id, OLD.dst_memory_id)
+     );
+END;
+"#,
+    "blake3:v071_workspace_generations_2026_06_07",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -5975,6 +6176,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V068_OUTCOME_EVIDENCE_ROWS,
     V069_MEMORY_SENTINELS,
     V070_MEMORY_TYPED_FIELDS,
+    V071_WORKSPACE_GENERATIONS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -6321,6 +6523,17 @@ impl DbConnection {
             ],
         )?;
         Ok(affected > 0)
+    }
+
+    pub fn get_workspace_generation(&self, workspace_id: &str) -> Result<Option<u64>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT generation FROM workspace_generations WHERE workspace_id = ?1",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+        rows.first()
+            .map(|row| required_u64(row, 0, DbOperation::Query, "workspace_generation"))
+            .transpose()
     }
 }
 
@@ -22025,6 +22238,136 @@ mod tests {
             &1,
             "validation contradictions increment",
         )
+    }
+
+    fn test_memory_input(workspace_id: &str, content: &str) -> super::CreateMemoryInput {
+        super::CreateMemoryInput {
+            workspace_id: workspace_id.to_owned(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: content.to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: Some("test://workspace-generation".to_owned()),
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: None,
+            tags: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
+    fn workspace_generation(
+        connection: &DbConnection,
+        workspace_id: &str,
+    ) -> Result<u64, TestFailure> {
+        connection
+            .get_workspace_generation(workspace_id)?
+            .ok_or_else(|| {
+                TestFailure::new(format!("missing workspace generation for {workspace_id}"))
+            })
+    }
+
+    #[test]
+    fn workspace_generation_triggers_track_interleaved_source_writes() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_gen00000000000000000000000";
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/tmp/workspace-generation".to_owned(),
+                name: Some("workspace generation".to_owned()),
+            },
+        )?;
+
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &0,
+            "new workspace generation baseline",
+        )?;
+
+        connection.insert_memory(
+            "mem_gen00000000000000000000001",
+            &test_memory_input(workspace_id, "First generation source memory."),
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &1,
+            "memory insert bumps generation",
+        )?;
+
+        connection.insert_memory(
+            "mem_gen00000000000000000000002",
+            &test_memory_input(workspace_id, "Second generation source memory."),
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &2,
+            "second memory insert bumps generation",
+        )?;
+
+        connection.insert_memory_link(
+            "link_gen00000000000000000000001",
+            &super::CreateMemoryLinkInput {
+                src_memory_id: "mem_gen00000000000000000000001".to_owned(),
+                dst_memory_id: "mem_gen00000000000000000000002".to_owned(),
+                relation: super::MemoryLinkRelation::Supports,
+                weight: 1.0,
+                confidence: 0.8,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: None,
+                source: super::MemoryLinkSource::Human,
+                created_by: Some("test".to_owned()),
+                metadata_json: None,
+            },
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &3,
+            "memory link insert bumps generation",
+        )?;
+
+        connection.insert_curation_candidate(
+            "curate_gen00000000000000000000001",
+            &CreateCurationCandidateInput {
+                workspace_id: workspace_id.to_owned(),
+                candidate_type: "promote".to_owned(),
+                target_memory_id: Some("mem_gen00000000000000000000001".to_owned()),
+                proposed_content: None,
+                proposed_confidence: Some(0.7),
+                proposed_trust_class: Some("agent_assertion".to_owned()),
+                source_type: "agent_inference".to_owned(),
+                source_id: Some("workspace_generation".to_owned()),
+                reason: "exercise workspace generation".to_owned(),
+                confidence: 0.7,
+                status: Some("pending".to_owned()),
+                created_at: Some("2026-06-07T00:00:00Z".to_owned()),
+                ttl_expires_at: None,
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
+            },
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &4,
+            "curation candidate insert bumps generation",
+        )?;
+
+        ensure(
+            connection.tombstone_memory("mem_gen00000000000000000000002")?,
+            "tombstone should update the target memory",
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &5,
+            "memory tombstone bumps generation",
+        )?;
+
+        Ok(())
     }
 
     #[test]
