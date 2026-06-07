@@ -3087,6 +3087,69 @@ pub fn collect_reverted_patch_evidence(
         .collect()
 }
 
+/// Collect EXPLICIT outcome evidence from stored feedback events (bd-1n0np.2.3):
+/// `human_explicit` -> `explicit_human`, `agent_inference` -> `explicit_agent`,
+/// with the helpful/harmful signal mapped to positive/negative. Only memory-
+/// targeted events with a classifiable signal become evidence. Explicit signals
+/// are authoritative — the joiner uses them to enforce never-override — so this
+/// records them in the same ledger as the derived sources for one join input.
+#[must_use]
+pub fn collect_explicit_outcome_evidence(
+    events: &[StoredFeedbackEvent],
+) -> Vec<CreateOutcomeEvidenceInput> {
+    events
+        .iter()
+        .filter_map(|event| {
+            if event.target_type != "memory" {
+                return None;
+            }
+            let source = match event.source_type.as_str() {
+                "human_explicit" => OutcomeEvidenceSource::ExplicitHuman,
+                "agent_inference" => OutcomeEvidenceSource::ExplicitAgent,
+                _ => return None,
+            };
+            let direction = if HELPFUL_SIGNALS.contains(&event.signal.as_str()) {
+                "positive"
+            } else if HARMFUL_SIGNALS.contains(&event.signal.as_str()) {
+                "negative"
+            } else {
+                return None;
+            };
+            let observed_at = event
+                .applied_at
+                .clone()
+                .unwrap_or_else(|| event.created_at.clone());
+            let agent_id = if source == OutcomeEvidenceSource::ExplicitAgent {
+                event.source_id.clone()
+            } else {
+                None
+            };
+            Some(CreateOutcomeEvidenceInput {
+                workspace_id: event.workspace_id.clone(),
+                source,
+                signal_direction: direction.to_string(),
+                evidence_ref: event.id.clone(),
+                agent_id,
+                task_id: None,
+                run_id: None,
+                observed_at,
+            })
+        })
+        .collect()
+}
+
+/// Load explicit outcome evidence for a workspace from the feedback-event store
+/// (bd-1n0np.2.3). Pure normalization stays in [`collect_explicit_outcome_evidence`];
+/// this is the thin loader over the existing `list_feedback_events` reader. The
+/// caller persists the result through `insert_outcome_evidence_rows`.
+pub fn harvest_explicit_outcome_evidence(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> crate::db::Result<Vec<CreateOutcomeEvidenceInput>> {
+    let events = connection.list_feedback_events(workspace_id)?;
+    Ok(collect_explicit_outcome_evidence(&events))
+}
+
 /// Two-class signal taxonomy for the harvester joiner (ADR 0055, bd-1n0np.2.4):
 /// every outcome-evidence source is either an `Explicit` human/agent signal or a
 /// `Derived` signal inferred from observations `ee` already makes. The joiner
@@ -3837,6 +3900,54 @@ mod tests {
         );
         assert_eq!(rows[0].signal_direction, "negative");
         assert_eq!(rows[0].evidence_ref, "def");
+    }
+
+    #[test]
+    fn collect_explicit_outcome_evidence_maps_human_and_agent() {
+        let mk = |id: &str, source_type: &str, signal: &str| crate::db::StoredFeedbackEvent {
+            id: id.to_string(),
+            workspace_id: "wsp_x".to_string(),
+            target_type: "memory".to_string(),
+            target_id: "mem_a".to_string(),
+            signal: signal.to_string(),
+            weight: 1.0,
+            source_type: source_type.to_string(),
+            source_id: Some("agentZ".to_string()),
+            reason: None,
+            evidence_json: None,
+            session_id: None,
+            applied_at: Some("2026-06-07T01:00:00Z".to_string()),
+            created_at: "2026-06-07T00:00:00Z".to_string(),
+        };
+        let events = vec![
+            mk("fb_1", "human_explicit", "helpful"),
+            mk("fb_2", "agent_inference", "harmful"),
+            mk("fb_3", "automated_check", "helpful"), // derived source -> skipped
+            mk("fb_4", "human_explicit", "neutral"),  // unclassifiable signal -> skipped
+        ];
+        let rows = super::collect_explicit_outcome_evidence(&events);
+        assert_eq!(
+            rows.len(),
+            2,
+            "only explicit human/agent with a classifiable signal"
+        );
+        assert_eq!(
+            rows[0].source,
+            crate::db::OutcomeEvidenceSource::ExplicitHuman
+        );
+        assert_eq!(rows[0].signal_direction, "positive");
+        assert_eq!(rows[0].evidence_ref, "fb_1");
+        assert!(
+            rows[0].agent_id.is_none(),
+            "human explicit carries no agent id"
+        );
+        assert_eq!(rows[0].observed_at, "2026-06-07T01:00:00Z");
+        assert_eq!(
+            rows[1].source,
+            crate::db::OutcomeEvidenceSource::ExplicitAgent
+        );
+        assert_eq!(rows[1].signal_direction, "negative");
+        assert_eq!(rows[1].agent_id.as_deref(), Some("agentZ"));
     }
 
     #[test]
