@@ -271,6 +271,7 @@ classify_command() {
 
     local subcommand="${COMMAND[1]:-}"
     case "$subcommand" in
+        build) printf 'cargo_build' ;;
         check) printf 'cargo_check' ;;
         test) printf 'cargo_test' ;;
         bench) printf 'cargo_bench' ;;
@@ -1314,6 +1315,14 @@ is_cargo_path_dependency_version_output() {
 
 is_all_workers_preflight_failed_output() {
     grep -Eiq "all workers failed preflight checks|all workers failed preflight|no worker selected.*all workers failed preflight"
+}
+
+is_no_workers_passed_health_output() {
+    grep -Eiq "no workers passed health thresholds|no_workers_passed_health"
+}
+
+is_remote_transport_timeout_output() {
+    grep -Eiq "RCH-E104|SSH command timed out|Remote execution failed .*SSH timeout"
 }
 
 configured_workers() {
@@ -2567,6 +2576,10 @@ def blocker_kind_for(degraded_codes):
         return "worker_disk_full"
     if "rch_verify_all_workers_preflight_failed" in degraded_codes:
         return "all_workers_preflight_failed"
+    if "rch_verify_worker_health_threshold_blocked" in degraded_codes:
+        return "worker_health_threshold"
+    if "rch_verify_remote_transport_timeout" in degraded_codes:
+        return "remote_transport_timeout"
     if "rch_verify_capacity_or_timeout" in degraded_codes:
         return "capacity_or_timeout"
     if "rch_verify_topology_blocked" in degraded_codes:
@@ -2608,6 +2621,8 @@ def selector_admission_probe(proof, degraded_codes, combined_tail):
         lowered_tail = combined_tail.lower()
         if "no workers with rust installed" in lowered_tail:
             selection_failure_reason = "no_workers_with_rust_installed"
+        elif "no workers passed health thresholds" in lowered_tail or "no_workers_passed_health" in lowered_tail:
+            selection_failure_reason = "no_workers_passed_health"
         elif "rch_verify_topology_blocked" in degraded_codes or "RCH-E327" in combined_tail:
             selection_failure_reason = "topology_blocked"
         elif "rch_verify_all_workers_preflight_failed" in degraded_codes:
@@ -2637,6 +2652,7 @@ def selector_admission_probe(proof, degraded_codes, combined_tail):
             and (workers_reported or daemon_workers_reported)
             and selection_failure_reason in {
                 "no_workers_with_rust_installed",
+                "no_workers_passed_health",
                 "no_worker_selected",
                 "remote_marker_missing",
             }
@@ -2654,6 +2670,8 @@ def remediation_bead_for(blocker_kind):
         "remote_checkout_incomplete": "bd-17c65.10.17.1.3",
         "worker_disk_full": "bd-17c65.10.17",
         "all_workers_preflight_failed": "bd-17c65.10.19",
+        "worker_health_threshold": "bd-37ugy",
+        "remote_transport_timeout": "bd-37ugy",
         "capacity_or_timeout": "bd-17c65.10.17",
         "topology_blocked": "bd-17c65.10.17.1.2",
         "local_fallback_refused": "bd-17c65.10.17.1",
@@ -2934,6 +2952,8 @@ worker_state_code_set = {
     "rch_verify_retry_after_worker_disk_full",
     "rch_verify_topology_blocked",
     "rch_verify_all_workers_preflight_failed",
+    "rch_verify_worker_health_threshold_blocked",
+    "rch_verify_remote_transport_timeout",
     "rch_verify_worker_disk_full",
     "rch_verify_worker_filter_ignored",
     "rch_verify_worker_quarantine_ignored",
@@ -2992,6 +3012,8 @@ elif (
     or "rch_verify_client_daemon_version_skew" in degraded
     or "rch_verify_local_fallback_refused" in degraded
     or "rch_verify_all_workers_preflight_failed" in degraded
+    or "rch_verify_worker_health_threshold_blocked" in degraded
+    or "rch_verify_remote_transport_timeout" in degraded
     or "rch_verify_worker_disk_full" in degraded
     or "rch_verify_worker_quarantine_ignored" in degraded
     or "rch_verify_worker_filter_ignored" in degraded
@@ -3601,6 +3623,12 @@ if printf '%s' "$combined_output" | grep -q "remote required; refusing local fal
 fi
 if printf '%s' "$combined_output" | is_all_workers_preflight_failed_output; then
     degraded+=("rch_verify_all_workers_preflight_failed")
+fi
+if printf '%s' "$combined_output" | is_no_workers_passed_health_output; then
+    degraded+=("rch_verify_worker_health_threshold_blocked")
+fi
+if printf '%s' "$combined_output" | is_remote_transport_timeout_output; then
+    degraded+=("rch_verify_remote_transport_timeout")
 fi
 if [ "$exit_code" -ne 0 ] && [ -z "$worker_id" ] && printf '%s' "$combined_output" | grep -Eiq "timed out|timeout|capacity|busy|no workers|workers_healthy: 0|all_workers_offline"; then
     degraded+=("rch_verify_capacity_or_timeout")

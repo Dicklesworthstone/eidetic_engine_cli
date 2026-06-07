@@ -182,12 +182,14 @@ impl std::error::Error for ParseError {}
 
 /// Domain knowledge: which `degraded_codes` from `ee.rch.verify.v1` count
 /// as environment blockers vs surfacable code failures. The set is the
-/// subset the active swarm has actually been seeing as of 2026-05-19.
+/// subset the active swarm has actually been seeing.
 const ENVIRONMENT_BLOCKER_DEGRADED_CODES: &[&str] = &[
     "rch_verify_build_admission_unavailable",
     "rch_verify_cargo_path_dependency_version_blocked",
     "rch_verify_topology_blocked",
     "rch_verify_worker_disk_full",
+    "rch_verify_worker_health_threshold_blocked",
+    "rch_verify_remote_transport_timeout",
     "rch_verify_local_fallback_refused",
     "rch_verify_remote_marker_missing",
     "rch_verify_committed_tree_path_deps_unsupported",

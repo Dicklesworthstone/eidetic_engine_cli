@@ -77,6 +77,7 @@
           "type": "string",
           "enum": [
             "no_workers_with_rust_installed",
+            "no_workers_passed_health",
             "topology_blocked",
             "capacity_or_timeout",
             "all_workers_preflight_failed",

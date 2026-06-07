@@ -1940,6 +1940,7 @@ fn selector_admission_probe_schema_pins_required_fields_and_enums() -> TestResul
     let failure_enum = string_set_at(&schema, "/properties/selection_failure_reason/oneOf/0/enum")?;
     let expected_failures = string_set(&[
         "no_workers_with_rust_installed",
+        "no_workers_passed_health",
         "topology_blocked",
         "capacity_or_timeout",
         "all_workers_preflight_failed",
@@ -3103,6 +3104,75 @@ fn selector_admission_probe_flags_reported_workers_without_selection() -> TestRe
 }
 
 #[test]
+fn selector_admission_probe_classifies_worker_health_threshold_block() -> TestResult {
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--summary",
+            "--no-write",
+            "--",
+            "cargo",
+            "build",
+            "--bin",
+            "ee",
+        ],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "[RCH] local (no workers passed health thresholds)\n[RCH] remote required; refusing local fallback (no worker assigned)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "12"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1149989"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "vmi1149989"),
+        ],
+    )?;
+    if status.success() {
+        return Err("health-threshold selector failure should preserve non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout).map_err(|error| {
+        format!("parse health-threshold selector report: {error}\nstderr:\n{stderr}")
+    })?;
+    if report["status"] != "rch_environment_failure" {
+        return Err(format!(
+            "health-threshold refusal should be an environment failure: {report}"
+        ));
+    }
+    if report["command_kind"] != "cargo_build" {
+        return Err(format!(
+            "cargo build should be admitted as cargo_build: {report}"
+        ));
+    }
+    for expected in [
+        "rch_verify_worker_health_threshold_blocked",
+        "rch_verify_local_fallback_refused",
+        "rch_verify_capacity_or_timeout",
+        "rch_verify_remote_marker_missing",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!(
+                "missing {expected} in health-threshold proof: {report}"
+            ));
+        }
+    }
+    if !worker_degraded_contains(&report, "rch_verify_worker_health_threshold_blocked")? {
+        return Err(format!(
+            "health-threshold code should be worker-state evidence: {report}"
+        ));
+    }
+    let probe = selector_probe(&report)?;
+    if probe["status"] != "selection_failed"
+        || probe["selection_failure_reason"] != "no_workers_passed_health"
+        || probe["workers_vs_selection_contradiction"] != true
+        || probe["local_fallback_refused"] != true
+    {
+        return Err(format!(
+            "selector probe did not preserve health-threshold reason: {probe}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn synthetic_dependency_planner_ignores_requested_worker_reports_filter_ignored() -> TestResult {
     let (status, stdout, _stderr) = run_script_with_env(
         &[
@@ -3248,9 +3318,9 @@ fn synthetic_transport_failure_does_not_promote_warning_span_to_first_error() ->
     }
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse transport failure: {error}"))?;
-    if report["status"] != "remote_failure" {
+    if report["status"] != "rch_environment_failure" {
         return Err(format!(
-            "RCH transport timeout should preserve existing status: {report}"
+            "RCH transport timeout should be environment-blocked: {report}"
         ));
     }
     if report["first_error_file"] != Value::Null || report["first_error_line"] != Value::Null {
@@ -3265,6 +3335,21 @@ fn synthetic_transport_failure_does_not_promote_warning_span_to_first_error() ->
         .any(|code| code.as_str() == Some("RCH-E104"))
     {
         return Err(format!("missing RCH-E104 error code: {report}"));
+    }
+    if !degraded_contains(&report, "rch_verify_remote_transport_timeout")? {
+        return Err(format!(
+            "transport timeout missing environment degraded code: {report}"
+        ));
+    }
+    if !worker_degraded_contains(&report, "rch_verify_remote_transport_timeout")? {
+        return Err(format!(
+            "transport timeout should be worker-state evidence: {report}"
+        ));
+    }
+    if report["known_blocker"]["remediation_bead"] != "bd-37ugy" {
+        return Err(format!(
+            "transport timeout should point at the RCH blocker bead: {report}"
+        ));
     }
     if report["summary_markdown"]
         .as_str()
