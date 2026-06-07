@@ -701,7 +701,7 @@ impl VerificationRecordReport {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct VerifyProvenanceReferentOptions<'a> {
     pub workspace_path: &'a Path,
     pub database: Option<&'a DbConnection>,
