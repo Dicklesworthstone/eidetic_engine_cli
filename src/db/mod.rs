@@ -6104,6 +6104,40 @@ END;
     "blake3:v071_workspace_generations_2026_06_07",
 );
 
+/// bd-1n0np.4.3 / ADR 0057: persistable ErrorFingerprint rows (the truth store
+/// the recall surface reads). Mirrors the `ErrorFingerprint` model in
+/// `core::error_recall`: tool, canonical_code, blake3 message-template signature,
+/// masked location shape, 128-bit simhash (32-hex), optional version hints. Holds
+/// fingerprints + redacted signatures only — never raw log content (ADR 0057).
+pub const V072_ERROR_FINGERPRINTS: Migration = Migration::new(
+    72,
+    "error_fingerprints",
+    r#"
+CREATE TABLE IF NOT EXISTS error_fingerprints (
+    fingerprint_key TEXT NOT NULL CHECK (length(trim(fingerprint_key)) > 0),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    tool TEXT NOT NULL CHECK (tool IN ('cargo', 'rustc', 'ee', 'rch', 'shell')),
+    canonical_code TEXT CHECK (canonical_code IS NULL OR length(trim(canonical_code)) > 0),
+    message_template_signature TEXT NOT NULL CHECK (
+        length(message_template_signature) = 71
+        AND substr(message_template_signature, 1, 7) = 'blake3:'
+    ),
+    location_shape TEXT CHECK (location_shape IS NULL OR length(trim(location_shape)) > 0),
+    stderr_simhash TEXT NOT NULL CHECK (length(stderr_simhash) = 32),
+    version_hints TEXT CHECK (version_hints IS NULL OR length(trim(version_hints)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    PRIMARY KEY (workspace_id, fingerprint_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_error_fingerprints_tool_code
+    ON error_fingerprints(workspace_id, tool, canonical_code);
+CREATE INDEX IF NOT EXISTS idx_error_fingerprints_simhash
+    ON error_fingerprints(workspace_id, stderr_simhash);
+"#,
+    "blake3:v072_error_fingerprints_2026_06_07",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -6177,6 +6211,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V069_MEMORY_SENTINELS,
     V070_MEMORY_TYPED_FIELDS,
     V071_WORKSPACE_GENERATIONS,
+    V072_ERROR_FINGERPRINTS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
