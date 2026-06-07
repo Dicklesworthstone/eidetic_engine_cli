@@ -1,7 +1,7 @@
 {
   "schema": "ee.agent_operating_contract.v1",
   "fixture": "eidetic_engine_cli_repository",
-  "rule_count": 15,
+  "rule_count": 16,
   "rule_ids": [
     "agent.agent_mail_coordination",
     "agent.beads_bv_triage",
@@ -17,6 +17,7 @@
     "agent.no_script_based_code_changes",
     "agent.no_tokio_runtime",
     "agent.no_worktrees",
+    "agent.rch_remote_verification",
     "agent.stable_json"
   ],
   "categories": [
@@ -24,7 +25,8 @@
     "environment_fact",
     "hard_denial",
     "reporting_required",
-    "required_before_edit"
+    "required_before_edit",
+    "required_before_verify"
   ],
   "reporting_obligation_count": 7,
   "reporting_obligation_ids": [
