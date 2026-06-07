@@ -51188,9 +51188,10 @@ mod tests {
 
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction,
-        COORDINATION_FALLBACK_INGEST_SCHEMA_V1, COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command,
-        ContextPackProfile, CurateCommand, DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand,
-        DiagCommand, DiagQuarantineCommand, DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES,
+        BootstrapCommand, COORDINATION_FALLBACK_INGEST_SCHEMA_V1,
+        COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command, ContextPackProfile, CurateCommand,
+        DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand, DiagCommand,
+        DiagQuarantineCommand, DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES,
         EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand,
         GraphSnapshotCommand, HandoffCommand, HookCommand, LabCommand, LabSwarmCommand,
         LabSwarmWorkloadProfile, LearnCommand, LearnExperimentCommand, MIGRATION_REPAIR_COMMAND,
