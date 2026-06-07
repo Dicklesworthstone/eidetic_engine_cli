@@ -15,7 +15,7 @@
     "setup_commands": [
       "ee init --workspace ."
     ],
-    "invocation": "ee insights --section topMemories --workspace . --json"
+    "invocation": "ee insights --section comprehensiveRules --workspace . --json"
   },
   "expected_emission": {
     "code": "insights_section_unavailable",

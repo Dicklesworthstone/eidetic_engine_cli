@@ -122,7 +122,6 @@ Current conventions:
 | `knowledgeSkyline` | `ee insights --section knowledgeSkyline` degradation. |
 | `loadBearingMemories` | `ee insights --section loadBearingMemories` degradation. |
 | `revisionFrontiers` | `ee insights --section revisionFrontiers` degradation. |
-| `topMemories` | `ee insights --section topMemories` degradation. |
 | `context` | General `ee context` response degradation without a narrower subsystem owner. |
 | `pack` | Context pack assembly, advisory, consensus, or conflict degradation. |
 | `index_vacuum` | `ee index vacuum` derived-index preview and lock-state degradation. |

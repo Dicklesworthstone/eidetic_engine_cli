@@ -88,7 +88,7 @@
           "severity": "info",
           "message": "One or more registered insights sections do not have DB-backed evidence yet.",
           "repair": "Use sections with non-empty evidence, or implement the unavailable section builder.",
-          "sources": ["comprehensiveRules", "kCore", "kTruss", "revisionFrontiers", "topMemories"]
+          "sources": ["comprehensiveRules", "kCore", "kTruss", "revisionFrontiers"]
         }
       ]
     }
@@ -144,6 +144,20 @@
               "items": {
                 "type": "array",
                 "items": {"$ref": "#/$defs/hubItem"}
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"name": {"const": "topMemories"}},
+            "required": ["name"]
+          },
+          "then": {
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/topMemoryItem"}
               }
             }
           }
@@ -306,6 +320,55 @@
           "properties": {
             "schema": {"type": "string", "const": "ee.graph.hits.v1"},
             "algorithm": {"type": "string", "const": "hits_centrality_directed"},
+            "snapshotVersion": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "topMemoryItem": {
+      "type": "object",
+      "required": [
+        "rank",
+        "memoryId",
+        "level",
+        "kind",
+        "trustClass",
+        "confidence",
+        "utility",
+        "importance",
+        "pagerank",
+        "retrievalPosture",
+        "linkDegree",
+        "incomingLinkCount",
+        "outgoingLinkCount",
+        "createdAt",
+        "interpretation",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "rank": {"type": "integer", "minimum": 1},
+        "memoryId": {"type": "string"},
+        "level": {"type": "string"},
+        "kind": {"type": "string"},
+        "trustClass": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "utility": {"type": "number", "minimum": 0, "maximum": 1},
+        "importance": {"type": "number", "minimum": 0, "maximum": 1},
+        "pagerank": {"type": "number", "minimum": 0},
+        "retrievalPosture": {"type": "number", "minimum": 0, "maximum": 1},
+        "linkDegree": {"type": "integer", "minimum": 0},
+        "incomingLinkCount": {"type": "integer", "minimum": 0},
+        "outgoingLinkCount": {"type": "integer", "minimum": 0},
+        "createdAt": {"type": "string"},
+        "interpretation": {"type": "string", "const": "top_memory"},
+        "evidence": {
+          "type": "object",
+          "required": ["schema", "algorithm", "snapshotVersion"],
+          "additionalProperties": false,
+          "properties": {
+            "schema": {"type": "string", "const": "ee.graph.top_memory.v1"},
+            "algorithm": {"type": "string", "const": "pagerank_with_retrieval_posture_tiebreak"},
             "snapshotVersion": {"type": "integer", "minimum": 0}
           }
         }

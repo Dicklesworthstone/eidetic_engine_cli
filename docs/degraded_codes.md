@@ -6444,7 +6444,7 @@ ee init --workspace .
 **Invocation.**
 
 ```bash
-ee insights --section topMemories --workspace . --json
+ee insights --section comprehensiveRules --workspace . --json
 ```
 
 **Expected emission.** Message contains: `registered insights sections ... DB-backed evidence`

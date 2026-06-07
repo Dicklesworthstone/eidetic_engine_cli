@@ -49,6 +49,7 @@ const INSIGHTS_SECTION_UNAVAILABLE_REPAIR: &str =
     "Use sections with non-empty evidence, or implement the unavailable section builder.";
 const BRIDGE_INSIGHT_SCHEMA_V1: &str = "ee.graph.bridge_insight.v1";
 const KNOWLEDGE_GAP_SCHEMA_V1: &str = "ee.graph.knowledge_gap.v1";
+const TOP_MEMORY_INSIGHT_SCHEMA_V1: &str = "ee.graph.top_memory.v1";
 const KNOWLEDGE_GAP_THIN_EVIDENCE_MAX_SPANS: u32 = 2;
 const KNOWLEDGE_GAP_LOW_CONFIDENCE_MAX: f32 = 0.50;
 
@@ -215,6 +216,24 @@ struct KnowledgeGapInput {
 struct HitsInsightInput {
     memory_id: String,
     score: f64,
+    snapshot_version: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TopMemoryInsightInput {
+    memory_id: String,
+    level: String,
+    kind: String,
+    trust_class: String,
+    confidence: f64,
+    utility: f64,
+    importance: f64,
+    pagerank: f64,
+    retrieval_posture: f64,
+    link_degree: usize,
+    incoming_link_count: usize,
+    outgoing_link_count: usize,
+    created_at: String,
     snapshot_version: u64,
 }
 
@@ -392,13 +411,8 @@ pub fn build_insights_report_with_options(
 // "placeholder implementation" at the same time. When a real builder
 // lands for one of these names, remove it from this list in the same
 // change as the `build_registry_section` arm.
-const PLACEHOLDER_BACKED_SECTIONS: &[&str] = &[
-    "comprehensiveRules",
-    "kCore",
-    "kTruss",
-    "revisionFrontiers",
-    "topMemories",
-];
+const PLACEHOLDER_BACKED_SECTIONS: &[&str] =
+    &["comprehensiveRules", "kCore", "kTruss", "revisionFrontiers"];
 
 fn build_registry_section_with_runtime_gate(
     display_name: &'static str,
@@ -486,6 +500,10 @@ fn build_registry_section(
         "proximityHotspots" => {
             let reports = load_proximity_hotspot_reports(workspace)?;
             Ok(proximity_hotspots_section_from_reports(&reports))
+        }
+        "topMemories" => {
+            let inputs = load_top_memory_inputs(workspace)?;
+            Ok(top_memories_section_from_inputs(&inputs))
         }
         _ => Ok(builder()),
     }
@@ -688,6 +706,15 @@ fn load_knowledge_gap_inputs(
         return Ok(Vec::new());
     };
     knowledge_gap_inputs_from_graph_data(&data)
+}
+
+fn load_top_memory_inputs(
+    workspace: Option<&Path>,
+) -> Result<Vec<TopMemoryInsightInput>, DomainError> {
+    let Some(data) = load_workspace_insights_graph_data(workspace)? else {
+        return Ok(Vec::new());
+    };
+    top_memory_inputs_from_graph_data(&data)
 }
 
 fn load_knowledge_skyline(
@@ -1250,6 +1277,149 @@ fn sorted_unique_memory_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Vec<S
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn top_memory_inputs_from_graph_data(
+    data: &WorkspaceInsightsGraphData,
+) -> Result<Vec<TopMemoryInsightInput>, DomainError> {
+    if data.memories.is_empty() || data.links.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pagerank_scores = pagerank_scores_for_skyline(&data.links)?;
+    if pagerank_scores.is_empty() {
+        return Ok(Vec::new());
+    }
+    let link_counts = top_memory_link_counts(&data.links);
+    let mut inputs = data
+        .memories
+        .iter()
+        .filter_map(|memory| {
+            let pagerank = pagerank_scores.get(memory.id.as_str()).copied()?;
+            if !pagerank.is_finite() || pagerank <= 0.0 {
+                return None;
+            }
+            let retrieval_posture = retrieval_posture_score(memory);
+            let counts = link_counts
+                .get(memory.id.as_str())
+                .copied()
+                .unwrap_or_default();
+            Some(TopMemoryInsightInput {
+                memory_id: memory.id.clone(),
+                level: memory.level.clone(),
+                kind: memory.kind.clone(),
+                trust_class: memory.trust_class.clone(),
+                confidence: finite_score(memory.confidence),
+                utility: finite_score(memory.utility),
+                importance: finite_score(memory.importance),
+                pagerank,
+                retrieval_posture,
+                link_degree: counts.link_degree,
+                incoming_link_count: counts.incoming_link_count,
+                outgoing_link_count: counts.outgoing_link_count,
+                created_at: memory.created_at.clone(),
+                snapshot_version: 0,
+            })
+        })
+        .collect::<Vec<_>>();
+    sort_top_memory_inputs(&mut inputs);
+    Ok(inputs)
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TopMemoryLinkCounts {
+    link_degree: usize,
+    incoming_link_count: usize,
+    outgoing_link_count: usize,
+}
+
+fn top_memory_link_counts(links: &[StoredMemoryLink]) -> BTreeMap<String, TopMemoryLinkCounts> {
+    let mut incoming = BTreeMap::<String, usize>::new();
+    let mut outgoing = BTreeMap::<String, usize>::new();
+    let mut neighbors = BTreeMap::<String, BTreeSet<String>>::new();
+
+    for link in links {
+        if !crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref()) {
+            continue;
+        }
+        record_top_memory_link_direction(
+            &mut incoming,
+            &mut outgoing,
+            &mut neighbors,
+            &link.src_memory_id,
+            &link.dst_memory_id,
+        );
+        if !link.directed {
+            record_top_memory_link_direction(
+                &mut incoming,
+                &mut outgoing,
+                &mut neighbors,
+                &link.dst_memory_id,
+                &link.src_memory_id,
+            );
+        }
+    }
+
+    let ids = incoming
+        .keys()
+        .chain(outgoing.keys())
+        .chain(neighbors.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    ids.into_iter()
+        .map(|memory_id| {
+            let counts = TopMemoryLinkCounts {
+                link_degree: neighbors.get(&memory_id).map_or(0, BTreeSet::len),
+                incoming_link_count: incoming.get(&memory_id).copied().unwrap_or_default(),
+                outgoing_link_count: outgoing.get(&memory_id).copied().unwrap_or_default(),
+            };
+            (memory_id, counts)
+        })
+        .collect()
+}
+
+fn record_top_memory_link_direction(
+    incoming: &mut BTreeMap<String, usize>,
+    outgoing: &mut BTreeMap<String, usize>,
+    neighbors: &mut BTreeMap<String, BTreeSet<String>>,
+    source: &str,
+    target: &str,
+) {
+    *outgoing.entry(source.to_owned()).or_default() += 1;
+    *incoming.entry(target.to_owned()).or_default() += 1;
+    neighbors
+        .entry(source.to_owned())
+        .or_default()
+        .insert(target.to_owned());
+    neighbors
+        .entry(target.to_owned())
+        .or_default()
+        .insert(source.to_owned());
+}
+
+fn finite_score(score: f32) -> f64 {
+    if score.is_finite() {
+        f64::from(score).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn retrieval_posture_score(memory: &StoredMemory) -> f64 {
+    (finite_score(memory.confidence) * 0.40)
+        + (finite_score(memory.utility) * 0.35)
+        + (finite_score(memory.importance) * 0.25)
+}
+
+fn sort_top_memory_inputs(inputs: &mut [TopMemoryInsightInput]) {
+    inputs.sort_by(|left, right| {
+        right
+            .pagerank
+            .total_cmp(&left.pagerank)
+            .then_with(|| right.retrieval_posture.total_cmp(&left.retrieval_posture))
+            .then_with(|| right.link_degree.cmp(&left.link_degree))
+            .then_with(|| right.incoming_link_count.cmp(&left.incoming_link_count))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
 }
 
 fn sort_and_dedup_knowledge_gaps(gaps: &mut Vec<KnowledgeGapInput>) {
@@ -2099,13 +2269,47 @@ fn revision_frontiers_section() -> InsightsSection {
 }
 
 fn top_memories_section() -> InsightsSection {
-    placeholder_section(
-        "topMemories",
-        "Top Memories",
-        "Top-ranked memories by cached graph centrality and retrieval posture.",
-        "Top memories provide an immediate overview of the facts most likely to shape agent behavior.",
-        vec!["ee insights --section topMemories --workspace . --json"],
-    )
+    top_memories_section_from_inputs(&[])
+}
+
+fn top_memories_section_from_inputs(inputs: &[TopMemoryInsightInput]) -> InsightsSection {
+    let items = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            serde_json::json!({
+                "rank": index + 1,
+                "memoryId": &input.memory_id,
+                "level": &input.level,
+                "kind": &input.kind,
+                "trustClass": &input.trust_class,
+                "confidence": input.confidence,
+                "utility": input.utility,
+                "importance": input.importance,
+                "pagerank": input.pagerank,
+                "retrievalPosture": input.retrieval_posture,
+                "linkDegree": input.link_degree,
+                "incomingLinkCount": input.incoming_link_count,
+                "outgoingLinkCount": input.outgoing_link_count,
+                "createdAt": &input.created_at,
+                "interpretation": "top_memory",
+                "evidence": {
+                    "schema": TOP_MEMORY_INSIGHT_SCHEMA_V1,
+                    "algorithm": "pagerank_with_retrieval_posture_tiebreak",
+                    "snapshotVersion": input.snapshot_version,
+                },
+            })
+        })
+        .collect();
+
+    InsightsSection {
+        name: "topMemories",
+        title: "Top Memories",
+        summary: "Top-ranked memories by cached graph centrality and retrieval posture.",
+        why_it_matters: "Top memories provide an immediate overview of the facts most likely to shape agent behavior.",
+        items,
+        next_commands: vec!["ee insights --section topMemories --workspace . --json"],
+    }
 }
 
 fn placeholder_section(
@@ -2538,10 +2742,7 @@ mod tests {
         assert_eq!(data["pagination"]["offset"], 0);
         assert_eq!(data["pagination"]["returned"], 0);
         assert_eq!(data["pagination"]["total"], 0);
-        assert_eq!(
-            data["degradedSignals"][0]["code"],
-            INSIGHTS_SECTION_UNAVAILABLE_CODE,
-        );
+        assert_eq!(data["degradedSignals"][0]["code"], "graph.workspace_empty");
 
         Ok(())
     }
@@ -2585,10 +2786,7 @@ mod tests {
             .ok_or_else(|| "stream footer should be present".to_owned())?;
         assert_eq!(footer["schema"], INSIGHTS_JSON_STREAM_FOOTER_SCHEMA_V1);
         assert_eq!(footer["kind"], "footer");
-        assert_eq!(
-            footer["degraded"][0]["code"],
-            INSIGHTS_SECTION_UNAVAILABLE_CODE,
-        );
+        assert_eq!(footer["degraded"][0]["code"], "graph.workspace_empty");
         assert_eq!(footer["runDurationMs"], 0);
 
         Ok(())
@@ -2808,7 +3006,12 @@ mod tests {
         write_graph_feature_config(&workspace, true)?;
         seed_insights_graph_workspace(&workspace)?;
 
-        for section_name in ["bridges", "contradictionClusters", "knowledgeSkyline"] {
+        for section_name in [
+            "bridges",
+            "contradictionClusters",
+            "knowledgeSkyline",
+            "topMemories",
+        ] {
             let report = build_insights_report_with_options(
                 &InsightsArgs {
                     section: Some(section_name.to_owned()),
@@ -2861,6 +3064,21 @@ mod tests {
                         "knowledge skyline should carry community provenance"
                     );
                 }
+                "topMemories" => {
+                    assert_eq!(item["interpretation"].as_str(), Some("top_memory"));
+                    assert!(
+                        item["pagerank"].as_f64().is_some_and(|score| score > 0.0),
+                        "topMemories should carry live PageRank evidence"
+                    );
+                    assert_eq!(
+                        item["evidence"]["schema"].as_str(),
+                        Some(TOP_MEMORY_INSIGHT_SCHEMA_V1)
+                    );
+                    assert_eq!(
+                        item["evidence"]["algorithm"].as_str(),
+                        Some("pagerank_with_retrieval_posture_tiebreak")
+                    );
+                }
                 unexpected => return Err(format!("unexpected insights section {unexpected}")),
             }
         }
@@ -2870,7 +3088,12 @@ mod tests {
 
     #[test]
     fn selected_real_insight_sections_do_not_emit_placeholder_degradation() -> TestResult {
-        for section in ["bridges", "contradictionClusters", "knowledgeSkyline"] {
+        for section in [
+            "bridges",
+            "contradictionClusters",
+            "knowledgeSkyline",
+            "topMemories",
+        ] {
             let report = build_insights_report(&InsightsArgs {
                 section: Some(section.to_owned()),
                 explain: None,
@@ -3308,6 +3531,131 @@ mod tests {
         );
 
         assert_eq!(forward_section.items, reverse_section.items);
+        Ok(())
+    }
+
+    #[test]
+    fn top_memories_use_pagerank_posture_and_mesh_visibility() -> TestResult {
+        let mut anchor = stored_memory(
+            "mem_top_anchor",
+            "procedural",
+            "rule",
+            "Central release rule.",
+            0.95,
+        );
+        anchor.utility = 0.90;
+        anchor.importance = 0.85;
+        anchor.trust_class = "human_explicit".to_owned();
+        let mut support = stored_memory(
+            "mem_top_support",
+            "semantic",
+            "fact",
+            "Supporting release fact.",
+            0.80,
+        );
+        support.utility = 0.70;
+        support.importance = 0.75;
+        let private = stored_memory(
+            "mem_top_private",
+            "semantic",
+            "fact",
+            "Private memory behind hidden mesh metadata.",
+            0.99,
+        );
+        let data = WorkspaceInsightsGraphData {
+            memories: vec![
+                support,
+                private,
+                anchor,
+                stored_memory(
+                    "mem_top_neighbor",
+                    "episodic",
+                    "decision",
+                    "Neighbor decision.",
+                    0.70,
+                ),
+            ],
+            links: vec![
+                stored_memory_link_with_relation(
+                    "link_top_1",
+                    "mem_top_support",
+                    "mem_top_anchor",
+                    "supports",
+                    None,
+                ),
+                stored_memory_link_with_relation(
+                    "link_top_2",
+                    "mem_top_neighbor",
+                    "mem_top_anchor",
+                    "supports",
+                    None,
+                ),
+                stored_memory_link(
+                    "link_top_private",
+                    "mem_top_anchor",
+                    "mem_top_private",
+                    Some(denied_mesh_link_metadata()),
+                ),
+            ],
+        };
+        let reverse = WorkspaceInsightsGraphData {
+            memories: data.memories.iter().cloned().rev().collect(),
+            links: data.links.iter().cloned().rev().collect(),
+        };
+
+        let section = top_memories_section_from_inputs(
+            &top_memory_inputs_from_graph_data(&data)
+                .map_err(|error| format!("top memory input build failed: {error}"))?,
+        );
+        let reverse_section = top_memories_section_from_inputs(
+            &top_memory_inputs_from_graph_data(&reverse)
+                .map_err(|error| format!("reverse top memory input build failed: {error}"))?,
+        );
+
+        assert_eq!(section.items, reverse_section.items);
+        assert_eq!(section.name, "topMemories");
+        assert!(
+            section.items.len() >= 3,
+            "top memories should include visible linked memories"
+        );
+        assert_eq!(section.items[0]["rank"].as_u64(), Some(1));
+        assert_eq!(
+            section.items[0]["memoryId"].as_str(),
+            Some("mem_top_anchor")
+        );
+        assert_eq!(section.items[0]["level"].as_str(), Some("procedural"));
+        assert_eq!(section.items[0]["kind"].as_str(), Some("rule"));
+        assert_eq!(
+            section.items[0]["trustClass"].as_str(),
+            Some("human_explicit")
+        );
+        assert!(
+            section.items[0]["pagerank"]
+                .as_f64()
+                .is_some_and(|score| score > 0.0)
+        );
+        assert!(
+            section.items[0]["retrievalPosture"]
+                .as_f64()
+                .is_some_and(|score| score > 0.0)
+        );
+        assert_eq!(section.items[0]["linkDegree"].as_u64(), Some(2));
+        assert_eq!(
+            section.items[0]["evidence"]["schema"].as_str(),
+            Some(TOP_MEMORY_INSIGHT_SCHEMA_V1)
+        );
+        assert_eq!(
+            section.items[0]["evidence"]["algorithm"].as_str(),
+            Some("pagerank_with_retrieval_posture_tiebreak")
+        );
+        assert!(
+            section
+                .items
+                .iter()
+                .all(|item| item["memoryId"].as_str() != Some("mem_top_private")),
+            "mesh-hidden memories must not enter topMemories"
+        );
+
         Ok(())
     }
 

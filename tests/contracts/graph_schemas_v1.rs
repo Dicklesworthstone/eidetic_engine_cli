@@ -411,6 +411,75 @@ fn insights_hubs_and_authorities_schema_documents_hits_items() -> TestResult {
 }
 
 #[test]
+fn insights_top_memories_schema_documents_pagerank_items() -> TestResult {
+    let schema_path = repo_root()
+        .join("docs")
+        .join("schemas")
+        .join("ee.insights.v1.json");
+    let schema = read_json(&schema_path)?;
+    require_required_fields(
+        &schema,
+        "/$defs/topMemoryItem/required",
+        &[
+            "rank",
+            "memoryId",
+            "level",
+            "kind",
+            "trustClass",
+            "confidence",
+            "utility",
+            "importance",
+            "pagerank",
+            "retrievalPosture",
+            "linkDegree",
+            "incomingLinkCount",
+            "outgoingLinkCount",
+            "createdAt",
+            "interpretation",
+            "evidence",
+        ],
+        "$defs.topMemoryItem.required",
+    )?;
+
+    ensure_eq(
+        schema
+            .pointer("/$defs/topMemoryItem/properties/interpretation/const")
+            .and_then(Value::as_str),
+        Some("top_memory"),
+        "ee.insights.v1 topMemoryItem",
+        "interpretation.const",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/topMemoryItem/properties/evidence/properties/schema/const")
+            .and_then(Value::as_str),
+        Some("ee.graph.top_memory.v1"),
+        "ee.insights.v1 topMemoryItem",
+        "evidence.schema.const",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/topMemoryItem/properties/evidence/properties/algorithm/const")
+            .and_then(Value::as_str),
+        Some("pagerank_with_retrieval_posture_tiebreak"),
+        "ee.insights.v1 topMemoryItem",
+        "evidence.algorithm.const",
+    )?;
+
+    let section_schema = serde_json::to_string(
+        schema
+            .pointer("/$defs/section")
+            .ok_or_else(|| "ee.insights.v1 missing $defs.section".to_owned())?,
+    )
+    .map_err(|error| format!("serialize section schema: {error}"))?;
+    if !section_schema.contains("\"#/$defs/topMemoryItem\"") {
+        return Err("topMemories section items must reference $defs.topMemoryItem".to_owned());
+    }
+
+    Ok(())
+}
+
+#[test]
 fn insights_bridges_schema_documents_cluster_disconnection_items() -> TestResult {
     let schema_path = repo_root()
         .join("docs")

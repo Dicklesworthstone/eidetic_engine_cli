@@ -39,8 +39,7 @@ expression: value
         "comprehensiveRules",
         "kCore",
         "kTruss",
-        "revisionFrontiers",
-        "topMemories"
+        "revisionFrontiers"
       ]
     }
   ],
