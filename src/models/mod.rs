@@ -1,5 +1,6 @@
 use std::process::ExitCode;
 
+pub mod attestation;
 pub mod backup;
 pub mod bead_affinity;
 pub mod bead_affinity_loader;
@@ -47,6 +48,13 @@ pub mod trust;
 pub mod verification;
 pub mod why_tag;
 
+pub use attestation::{
+    ATTESTATION_BUNDLE_SCHEMA_V1, ATTESTATION_HASH_ALGORITHM, ATTESTATION_LOCAL_TRUTH_STATEMENT,
+    AttestationBundle, AttestationEvidenceManifest, AttestationEvidenceRef, AttestationHashEntry,
+    AttestationHashManifest, AttestationOmission, AttestationRedactionEntry,
+    AttestationRedactionManifest, AttestationSubject, AttestationSubjectKind,
+    AttestationTrustStatement, ParseAttestationSubjectKindError,
+};
 pub use backup::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
     BACKUP_MANIFEST_SCHEMA_V1, BACKUP_MANIFEST_SCHEMA_V2, BACKUP_RESTORE_SCHEMA_V1,
