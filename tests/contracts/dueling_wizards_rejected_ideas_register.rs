@@ -83,6 +83,10 @@ const IDEA_WIZARD_PHASE_GATES: &[(u64, &str, &str, &str)] = &[
     ),
 ];
 
+const KILLED_DECISION_MUST_CLAUSES: u64 = 8;
+const REFRAMED_DECISION_MUST_CLAUSES: u64 = 5;
+const MIN_MUST_COVERAGE_MILLI: u64 = 950;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -145,6 +149,19 @@ fn string_set(values: &[Value], context: &str) -> Result<BTreeSet<String>, Strin
 
 fn required_set(values: &[&str]) -> BTreeSet<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+fn array_row_by_id<'a>(manifest: &'a Value, pointer: &str, id: &str) -> Result<&'a Value, String> {
+    for row in array_field(manifest, pointer, MANIFEST_REL)? {
+        if row
+            .pointer("/id")
+            .and_then(Value::as_str)
+            .is_some_and(|row_id| row_id == id)
+        {
+            return Ok(row);
+        }
+    }
+    Err(format!("{MANIFEST_REL}: missing {pointer} row {id}"))
 }
 
 #[test]
@@ -446,6 +463,164 @@ fn reopen_evidence_matrix_covers_killed_ideas_and_blocks_weak_revival() -> TestR
 }
 
 #[test]
+fn decision_coverage_matrix_accounts_for_killed_and_reframed_records() -> TestResult {
+    let manifest = read_json(MANIFEST_REL)?;
+    let accepted_count = REOPEN_EVIDENCE_KINDS.len() as u64;
+    let forbidden_count = FORBIDDEN_REOPEN_EVIDENCE.len() as u64;
+    let expected_ids = KILLED_IDEAS
+        .iter()
+        .map(|(id, _, _)| (*id).to_owned())
+        .chain(REFRAMED_IDEAS.iter().map(|(id, _, _)| (*id).to_owned()))
+        .collect::<BTreeSet<_>>();
+    let mut matrix_ids = BTreeSet::new();
+
+    for (index, row) in array_field(&manifest, "/decisionCoverageMatrix", MANIFEST_REL)?
+        .iter()
+        .enumerate()
+    {
+        let context = format!("decisionCoverageMatrix[{index}]");
+        let id = string_field(row, "/id", &context)?;
+        if !matrix_ids.insert(id.to_owned()) {
+            return Err(format!("duplicate decisionCoverageMatrix row {id}"));
+        }
+
+        let must_clauses = u64_field(row, "/mustClauses", &context)?;
+        let tested = u64_field(row, "/tested", &context)?;
+        let passing = u64_field(row, "/passing", &context)?;
+        let divergent = u64_field(row, "/divergent", &context)?;
+        if tested != must_clauses || passing != must_clauses || divergent != 0 {
+            return Err(format!(
+                "{id}: coverage accounting must be complete and non-divergent"
+            ));
+        }
+        let computed_score = passing.saturating_mul(1000) / must_clauses;
+        let score_milli = u64_field(row, "/scoreMilli", &context)?;
+        if score_milli != computed_score || score_milli < MIN_MUST_COVERAGE_MILLI {
+            return Err(format!(
+                "{id}: scoreMilli must reflect complete MUST coverage"
+            ));
+        }
+        if string_field(row, "/complianceStatus", &context)? != "decision_record_conformant" {
+            return Err(format!(
+                "{id}: complianceStatus must stay decision_record_conformant"
+            ));
+        }
+
+        match string_field(row, "/decisionKind", &context)? {
+            "killed" => {
+                let killed = array_row_by_id(&manifest, "/killedIdeas", id)?;
+                let reopen = array_row_by_id(&manifest, "/reopenEvidenceMatrix", id)?;
+                if string_field(row, "/status", &context)?
+                    != string_field(killed, "/status", &format!("killedIdeas[{id}]"))?
+                {
+                    return Err(format!("{id}: status must mirror killedIdeas"));
+                }
+                if string_field(row, "/source", &context)?
+                    != string_field(killed, "/source", &format!("killedIdeas[{id}]"))?
+                {
+                    return Err(format!("{id}: source must mirror killedIdeas"));
+                }
+                if u64_field(row, "/score", &context)?
+                    != u64_field(killed, "/score", &format!("killedIdeas[{id}]"))?
+                {
+                    return Err(format!("{id}: score must mirror killedIdeas"));
+                }
+                if string_field(row, "/sourceStatus", &context)? != "preserved"
+                    || string_field(row, "/scoreStatus", &context)? != "preserved"
+                    || string_field(row, "/policyStatus", &context)? != "requires_new_evidence"
+                {
+                    return Err(format!(
+                        "{id}: killed decision source/score/policy statuses must be preserved"
+                    ));
+                }
+                if u64_field(row, "/rationaleTagCount", &context)?
+                    != array_field(killed, "/rationaleTags", &format!("killedIdeas[{id}]"))?.len()
+                        as u64
+                {
+                    return Err(format!("{id}: rationaleTagCount must mirror killedIdeas"));
+                }
+                if u64_field(row, "/acceptedEvidenceKindCount", &context)? != accepted_count
+                    || u64_field(row, "/forbiddenEvidenceKindCount", &context)? != forbidden_count
+                    || u64_field(row, "/mustClauses", &context)? != KILLED_DECISION_MUST_CLAUSES
+                {
+                    return Err(format!(
+                        "{id}: killed decision evidence counters must mirror the policy vocabulary"
+                    ));
+                }
+                if string_field(row, "/liveMutationStatus", &context)?
+                    != string_field(
+                        reopen,
+                        "/livePolicyMutation",
+                        &format!("reopenEvidenceMatrix[{id}]"),
+                    )?
+                    || string_field(row, "/beadsMutationStatus", &context)?
+                        != string_field(
+                            reopen,
+                            "/beadsMutation",
+                            &format!("reopenEvidenceMatrix[{id}]"),
+                        )?
+                    || string_field(row, "/reframeStatus", &context)? != "not_applicable"
+                {
+                    return Err(format!(
+                        "{id}: killed decision mutation statuses must mirror reopenEvidenceMatrix"
+                    ));
+                }
+            }
+            "reframed" => {
+                let reframed = array_row_by_id(&manifest, "/reframedIdeas", id)?;
+                if string_field(row, "/status", &context)?
+                    != string_field(reframed, "/status", &format!("reframedIdeas[{id}]"))?
+                {
+                    return Err(format!("{id}: status must mirror reframedIdeas"));
+                }
+                if string_field(row, "/reframedAs", &context)?
+                    != string_field(reframed, "/reframedAs", &format!("reframedIdeas[{id}]"))?
+                    || string_field(row, "/targetBead", &context)?
+                        != string_field(reframed, "/targetBead", &format!("reframedIdeas[{id}]"))?
+                {
+                    return Err(format!(
+                        "{id}: reframed decision target must mirror reframedIdeas"
+                    ));
+                }
+                if string_field(row, "/sourceStatus", &context)? != "not_applicable"
+                    || string_field(row, "/scoreStatus", &context)? != "not_applicable"
+                    || string_field(row, "/policyStatus", &context)? != "reframed_not_killed"
+                    || string_field(row, "/liveMutationStatus", &context)? != "not_applicable"
+                    || string_field(row, "/beadsMutationStatus", &context)?
+                        != "target_bead_preserved"
+                    || string_field(row, "/reframeStatus", &context)? != "target_bead_preserved"
+                {
+                    return Err(format!(
+                        "{id}: reframed decision statuses must mark killed-only fields as not applicable"
+                    ));
+                }
+                if u64_field(row, "/rationaleTagCount", &context)? != 0
+                    || u64_field(row, "/acceptedEvidenceKindCount", &context)? != 0
+                    || u64_field(row, "/forbiddenEvidenceKindCount", &context)? != 0
+                    || u64_field(row, "/mustClauses", &context)? != REFRAMED_DECISION_MUST_CLAUSES
+                {
+                    return Err(format!(
+                        "{id}: reframed decision counters must stay scoped to reframe evidence"
+                    ));
+                }
+            }
+            other => {
+                return Err(format!("{id}: unsupported decisionKind {other}"));
+            }
+        }
+    }
+
+    if matrix_ids != expected_ids {
+        return Err(format!(
+            "decisionCoverageMatrix drifted: missing={:?}, extra={:?}",
+            expected_ids.difference(&matrix_ids).collect::<Vec<_>>(),
+            matrix_ids.difference(&expected_ids).collect::<Vec<_>>()
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn reframed_ideas_keep_their_target_beads_and_not_killed_status() -> TestResult {
     let manifest = read_json(MANIFEST_REL)?;
     let mut expected = BTreeMap::new();
@@ -511,6 +686,9 @@ fn documentation_mentions_every_decision_and_guardrail() -> TestResult {
         "pack hashes",
         "ideaWizardPhaseGates",
         "reopenEvidenceMatrix",
+        "decisionCoverageMatrix",
+        "decision_record_conformant",
+        "target_bead_preserved",
         "measured_workflow_result",
         "restated_proposal",
         "forbidden_until_deterministic_proof",

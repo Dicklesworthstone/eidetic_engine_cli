@@ -38,6 +38,21 @@ The matrix explicitly rejects `restated_proposal`, `aesthetic_preference`, and
 `forbidden_until_deterministic_proof` for live policy mutation and
 `br_only_when_tracker_authoritative` for Beads mutation.
 
+## Decision Coverage Matrix
+
+The fixture also carries `decisionCoverageMatrix`, an accounting view for every
+killed and reframed decision record. Killed rows prove that the original score,
+source, rationale tags, `requires_new_evidence` policy, live mutation guard, and
+Beads mutation guard are still preserved. Reframed rows prove that the target
+bead, replacement concept, and rejected facet are still preserved while
+killed-only fields are explicitly `not_applicable`.
+
+Every row must show complete conformance through `mustClauses`, `tested`,
+`passing`, `divergent`, and `scoreMilli`. A conforming row uses
+`decision_record_conformant`; reframed rows use `target_bead_preserved` to make
+clear that the useful idea moved into an existing bead rather than creating a
+duplicate planning track.
+
 ## Idea-Wizard Phase Gates
 
 The fixture includes `ideaWizardPhaseGates` so this register remains compatible
