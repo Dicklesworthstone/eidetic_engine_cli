@@ -76,6 +76,10 @@ pub const WRITE_SPOOL_RECOVERY_STATE_SCHEMA_V1: &str = "ee.write_spool.recovery_
 /// Schema for write-immune per-source write stream statistics.
 pub const WRITE_IMMUNE_SOURCE_STATS_SCHEMA_V1: &str = "ee.write_immune.source_stats.v1";
 
+/// Schema for write-immune per-source quarantine decisions.
+pub const WRITE_IMMUNE_QUARANTINE_DECISION_SCHEMA_V1: &str =
+    "ee.write_immune.quarantine_decision.v1";
+
 /// Relative path to the durable write-spool crash-recovery state marker.
 pub const WRITE_SPOOL_RECOVERY_STATE_PATH: &str = ".ee/write-spool/recovery-state.json";
 
@@ -122,6 +126,19 @@ pub const DEFAULT_WRITE_STREAM_NEAR_DUPLICATE_HAMMING: u32 = 12;
 
 /// Default deterministic-embedding cosine floor for near-duplicate accounting.
 pub const DEFAULT_WRITE_STREAM_COSINE_FLOOR: f32 = 0.97;
+
+/// Default per-source write count threshold before advisory quarantine.
+pub const DEFAULT_WRITE_IMMUNE_WRITES_PER_WINDOW: u32 =
+    crate::curate::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR;
+
+/// Default near-duplicate ratio threshold before advisory quarantine.
+pub const DEFAULT_WRITE_IMMUNE_NEAR_DUPLICATE_RATIO: f32 = 0.80;
+
+/// Default missing-evidence ratio threshold before advisory quarantine.
+pub const DEFAULT_WRITE_IMMUNE_MISSING_EVIDENCE_RATIO: f32 = 0.80;
+
+/// Default high-trust-without-evidence threshold before advisory quarantine.
+pub const DEFAULT_WRITE_IMMUNE_HIGH_TRUST_MISSING_EVIDENCE_RATIO: f32 = 0.20;
 
 /// Maximum write observations retained by the in-process write-owner diagnostics.
 pub const DEFAULT_WRITE_STREAM_OBSERVATION_CAPACITY: usize = 4_096;
@@ -627,6 +644,8 @@ pub struct SourceWriteStats {
     pub near_duplicate_ratio: f32,
     /// Counts by requested trust class.
     pub trust_class_counts: BTreeMap<String, u32>,
+    /// Missing-evidence counts grouped by requested trust class.
+    pub evidence_missing_by_trust_class: BTreeMap<String, u32>,
     /// Writes with explicit evidence/provenance.
     pub evidence_present_count: u32,
     /// Writes missing explicit evidence/provenance.
@@ -675,6 +694,7 @@ fn source_write_stats_for_observations(
 ) -> SourceWriteStats {
     let mut seen_hashes = BTreeSet::<String>::new();
     let mut trust_class_counts = BTreeMap::<String, u32>::new();
+    let mut evidence_missing_by_trust_class = BTreeMap::<String, u32>::new();
     let mut duplicate_content_hash_count = 0_u32;
     let mut near_duplicate_count = 0_u32;
     let mut evidence_present_count = 0_u32;
@@ -714,6 +734,10 @@ fn source_write_stats_for_observations(
             .or_insert(0) += 1;
         if observation.evidence_present {
             evidence_present_count = evidence_present_count.saturating_add(1);
+        } else {
+            *evidence_missing_by_trust_class
+                .entry(observation.trust_class.clone())
+                .or_insert(0) += 1;
         }
     }
 
@@ -732,6 +756,7 @@ fn source_write_stats_for_observations(
         near_duplicate_cosine_floor: config.near_duplicate_cosine_floor,
         near_duplicate_ratio: ratio_u32(near_duplicate_count, write_count),
         trust_class_counts,
+        evidence_missing_by_trust_class,
         evidence_present_count,
         evidence_missing_count,
         evidence_presence_ratio: ratio_u32(evidence_present_count, write_count),
@@ -774,6 +799,161 @@ fn ratio_u32(numerator: u32, denominator: u32) -> f32 {
 
 fn capped_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// Threshold configuration for per-source write-immune advisory quarantine.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WriteImmuneQuarantineConfig {
+    /// Maximum writes allowed in the explicit stats window.
+    pub max_writes_per_window: u32,
+    /// Maximum allowed near-duplicate ratio.
+    pub max_near_duplicate_ratio: f32,
+    /// Maximum allowed missing-evidence ratio.
+    pub max_missing_evidence_ratio: f32,
+    /// Maximum allowed high-trust missing-evidence ratio.
+    pub max_high_trust_missing_evidence_ratio: f32,
+    /// Trust classes considered high-trust for evidence-abuse checks.
+    pub high_trust_classes: BTreeSet<String>,
+    /// Source ids allowed to bypass advisory quarantine.
+    pub source_whitelist: BTreeSet<String>,
+}
+
+impl Default for WriteImmuneQuarantineConfig {
+    fn default() -> Self {
+        Self {
+            max_writes_per_window: DEFAULT_WRITE_IMMUNE_WRITES_PER_WINDOW,
+            max_near_duplicate_ratio: DEFAULT_WRITE_IMMUNE_NEAR_DUPLICATE_RATIO,
+            max_missing_evidence_ratio: DEFAULT_WRITE_IMMUNE_MISSING_EVIDENCE_RATIO,
+            max_high_trust_missing_evidence_ratio:
+                DEFAULT_WRITE_IMMUNE_HIGH_TRUST_MISSING_EVIDENCE_RATIO,
+            high_trust_classes: ["human_explicit", "agent_validated", "cass_evidence"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            source_whitelist: BTreeSet::new(),
+        }
+    }
+}
+
+impl WriteImmuneQuarantineConfig {
+    /// Return a copy with an added orchestrator-approved source bypass.
+    #[must_use]
+    pub fn with_whitelisted_source(mut self, source_id: impl Into<String>) -> Self {
+        let source_id = source_id.into();
+        if !source_id.trim().is_empty() {
+            self.source_whitelist.insert(source_id.trim().to_owned());
+        }
+        self
+    }
+}
+
+/// A single threshold reason supporting an advisory quarantine decision.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteImmuneQuarantineReason {
+    /// Stable machine code for the reason.
+    pub code: &'static str,
+    /// Observed value for the threshold.
+    pub observed: f32,
+    /// Configured limit for the threshold.
+    pub limit: f32,
+}
+
+/// Deterministic advisory quarantine decision for one source stats row.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteImmuneQuarantineDecision {
+    /// Schema identifier for machine consumers.
+    pub schema: &'static str,
+    /// Source identity this decision applies to.
+    pub source_id: String,
+    /// `allow` or `quarantine`.
+    pub action: &'static str,
+    /// Whether an orchestrator whitelist bypassed threshold reasons.
+    pub whitelisted: bool,
+    /// Threshold reasons that would otherwise trip advisory quarantine.
+    pub reasons: Vec<WriteImmuneQuarantineReason>,
+    /// Write count observed in the explicit window.
+    pub write_count: u32,
+    /// Near-duplicate ratio observed in the explicit window.
+    pub near_duplicate_ratio: f32,
+    /// Missing-evidence ratio observed in the explicit window.
+    pub missing_evidence_ratio: f32,
+    /// High-trust missing-evidence ratio observed in the explicit window.
+    pub high_trust_missing_evidence_ratio: f32,
+}
+
+/// Decide whether one source's write stream should enter advisory quarantine.
+#[must_use]
+pub fn evaluate_write_immune_quarantine(
+    stats: &SourceWriteStats,
+    config: &WriteImmuneQuarantineConfig,
+) -> WriteImmuneQuarantineDecision {
+    let missing_evidence_ratio = ratio_u32(stats.evidence_missing_count, stats.write_count);
+    let high_trust_missing_evidence_count =
+        high_trust_missing_evidence_count(stats, &config.high_trust_classes);
+    let high_trust_missing_evidence_ratio =
+        ratio_u32(high_trust_missing_evidence_count, stats.write_count);
+
+    let mut reasons = Vec::new();
+    if stats.write_count > config.max_writes_per_window {
+        reasons.push(WriteImmuneQuarantineReason {
+            code: "writes_per_window_exceeded",
+            observed: stats.write_count as f32,
+            limit: config.max_writes_per_window as f32,
+        });
+    }
+    if stats.near_duplicate_ratio > config.max_near_duplicate_ratio {
+        reasons.push(WriteImmuneQuarantineReason {
+            code: "near_duplicate_ratio_exceeded",
+            observed: stats.near_duplicate_ratio,
+            limit: config.max_near_duplicate_ratio,
+        });
+    }
+    if missing_evidence_ratio > config.max_missing_evidence_ratio {
+        reasons.push(WriteImmuneQuarantineReason {
+            code: "missing_evidence_ratio_exceeded",
+            observed: missing_evidence_ratio,
+            limit: config.max_missing_evidence_ratio,
+        });
+    }
+    if high_trust_missing_evidence_ratio > config.max_high_trust_missing_evidence_ratio {
+        reasons.push(WriteImmuneQuarantineReason {
+            code: "high_trust_missing_evidence_ratio_exceeded",
+            observed: high_trust_missing_evidence_ratio,
+            limit: config.max_high_trust_missing_evidence_ratio,
+        });
+    }
+
+    let whitelisted = config.source_whitelist.contains(&stats.source_id);
+    let action = if reasons.is_empty() || whitelisted {
+        "allow"
+    } else {
+        "quarantine"
+    };
+
+    WriteImmuneQuarantineDecision {
+        schema: WRITE_IMMUNE_QUARANTINE_DECISION_SCHEMA_V1,
+        source_id: stats.source_id.clone(),
+        action,
+        whitelisted,
+        reasons,
+        write_count: stats.write_count,
+        near_duplicate_ratio: stats.near_duplicate_ratio,
+        missing_evidence_ratio,
+        high_trust_missing_evidence_ratio,
+    }
+}
+
+fn high_trust_missing_evidence_count(
+    stats: &SourceWriteStats,
+    high_trust_classes: &BTreeSet<String>,
+) -> u32 {
+    high_trust_classes
+        .iter()
+        .filter_map(|trust_class| stats.evidence_missing_by_trust_class.get(trust_class))
+        .copied()
+        .fold(0_u32, u32::saturating_add)
 }
 
 /// Result of a write operation.
@@ -3186,6 +3366,12 @@ mod tests {
         assert_eq!(stats[0].near_duplicate_count, 2);
         assert_eq!(stats[0].evidence_present_count, 2);
         assert_eq!(stats[0].evidence_missing_count, 1);
+        assert_eq!(
+            stats[0]
+                .evidence_missing_by_trust_class
+                .get("human_explicit"),
+            Some(&1)
+        );
         assert_eq!(stats[0].trust_class_counts.get("human_explicit"), Some(&2));
         assert_eq!(stats[0].trust_class_counts.get("agent_assertion"), Some(&1));
 
@@ -3209,6 +3395,94 @@ mod tests {
         };
 
         assert_eq!(op.write_stream_observation(), None);
+    }
+
+    #[test]
+    fn write_immune_quarantine_decision_trips_per_source_thresholds() {
+        let observations = vec![
+            WriteStreamObservation::memory_create(
+                "agent:alpha".to_owned(),
+                "Run cargo fmt before release.",
+                "agent_validated",
+                None,
+                10,
+            ),
+            WriteStreamObservation::memory_create(
+                "agent:alpha".to_owned(),
+                "Run cargo fmt before release.",
+                "agent_validated",
+                None,
+                11,
+            ),
+            WriteStreamObservation::memory_create(
+                "agent:alpha".to_owned(),
+                "Run cargo fmt before releases.",
+                "agent_validated",
+                None,
+                12,
+            ),
+        ];
+        let stats =
+            compute_source_write_stats(&observations, WriteStreamStatsConfig::new(0, 100, 128));
+
+        let decision = evaluate_write_immune_quarantine(
+            &stats[0],
+            &WriteImmuneQuarantineConfig {
+                max_writes_per_window: 2,
+                max_near_duplicate_ratio: 0.50,
+                max_missing_evidence_ratio: 0.50,
+                max_high_trust_missing_evidence_ratio: 0.10,
+                ..WriteImmuneQuarantineConfig::default()
+            },
+        );
+
+        assert_eq!(decision.action, "quarantine");
+        assert!(!decision.whitelisted);
+        let reason_codes = decision
+            .reasons
+            .iter()
+            .map(|reason| reason.code)
+            .collect::<BTreeSet<_>>();
+        assert!(reason_codes.contains("writes_per_window_exceeded"));
+        assert!(reason_codes.contains("near_duplicate_ratio_exceeded"));
+        assert!(reason_codes.contains("missing_evidence_ratio_exceeded"));
+        assert!(reason_codes.contains("high_trust_missing_evidence_ratio_exceeded"));
+    }
+
+    #[test]
+    fn write_immune_quarantine_decision_whitelist_bypasses_hold() {
+        let observations = vec![
+            WriteStreamObservation::memory_create(
+                "agent:orchestrator".to_owned(),
+                "High volume write.",
+                "agent_validated",
+                None,
+                1,
+            ),
+            WriteStreamObservation::memory_create(
+                "agent:orchestrator".to_owned(),
+                "High volume write.",
+                "agent_validated",
+                None,
+                2,
+            ),
+        ];
+        let stats =
+            compute_source_write_stats(&observations, WriteStreamStatsConfig::new(0, 10, 128));
+        let config = WriteImmuneQuarantineConfig {
+            max_writes_per_window: 1,
+            max_near_duplicate_ratio: 0.10,
+            max_missing_evidence_ratio: 0.10,
+            max_high_trust_missing_evidence_ratio: 0.10,
+            ..WriteImmuneQuarantineConfig::default()
+        }
+        .with_whitelisted_source("agent:orchestrator");
+
+        let decision = evaluate_write_immune_quarantine(&stats[0], &config);
+
+        assert_eq!(decision.action, "allow");
+        assert!(decision.whitelisted);
+        assert!(!decision.reasons.is_empty());
     }
 
     #[test]
