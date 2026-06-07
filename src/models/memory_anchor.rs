@@ -124,6 +124,17 @@ impl MemoryAnchorFreshnessState {
             _ => None,
         }
     }
+
+    /// Ordinal staleness rank: `Current` (0) < `Suspect` (1) < `Stale` (2).
+    /// A higher rank means the anchored memory is less fresh.
+    #[must_use]
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Current => 0,
+            Self::Suspect => 1,
+            Self::Stale => 2,
+        }
+    }
 }
 
 impl fmt::Display for MemoryAnchorFreshnessState {
@@ -190,6 +201,77 @@ pub struct StoredMemoryAnchor {
     pub generation: i64,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Canonical details schema for `memory.freshness_transition` audit rows,
+/// mirroring `ee.audit.memory_level_transition.v1`. Every freshness change a
+/// drift check applies is durably explained by one of these payloads.
+pub const MEMORY_ANCHOR_FRESHNESS_TRANSITION_SCHEMA_V1: &str =
+    "ee.audit.memory_anchor_freshness_transition.v1";
+
+/// One audited memory-anchor freshness transition.
+///
+/// This is the freshness-side mirror of the `memory.level_transition` audit:
+/// when a code-coupled drift check (reusing `src/core/symbol_graph.rs`)
+/// observes that an anchored symbol changed, disappeared, or could not be
+/// resolved, it records the freshness-state transition rather than silently
+/// re-ranking. It is **redaction-safe**: it carries only the anchor's
+/// domain-separated `anchor_value_hash`, never the raw anchor value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryAnchorFreshnessTransition {
+    pub memory_id: String,
+    pub anchor_kind: MemoryAnchorKind,
+    pub anchor_value_hash: String,
+    pub previous_state: MemoryAnchorFreshnessState,
+    pub new_state: MemoryAnchorFreshnessState,
+    /// Drift classification when drift-driven, e.g. `memory_drift_source_changed`,
+    /// `memory_drift_source_missing`, or `memory_drift_source_unverifiable`.
+    /// `None` for non-drift transitions such as an explicit revalidation.
+    pub drift_code: Option<String>,
+    /// Live `file:line` of the resolved symbol at detection time, when known.
+    /// Refactor ambiguity (rename/move) stays `None` — never asserted as drift.
+    pub file_line: Option<String>,
+    pub reason: String,
+    pub automatic: bool,
+    pub detected_at: String,
+}
+
+impl MemoryAnchorFreshnessTransition {
+    /// Whether this transition moves the anchor toward a less-fresh state.
+    /// Conservatism rule: drift only ever ranks a memory down, so durable
+    /// degradations are the auditable signal callers act on.
+    #[must_use]
+    pub fn is_degradation(&self) -> bool {
+        self.new_state.rank() > self.previous_state.rank()
+    }
+
+    /// Canonical, deterministic audit-details JSON with a trailing
+    /// `detailsHash` over the redaction-safe payload, mirroring
+    /// `memory.level_transition` audit rows. The same transition always
+    /// serializes to a byte-identical string.
+    #[must_use]
+    pub fn audit_details_json(&self) -> String {
+        let payload = serde_json::json!({
+            "schema": MEMORY_ANCHOR_FRESHNESS_TRANSITION_SCHEMA_V1,
+            "memoryId": self.memory_id.as_str(),
+            "anchorKind": self.anchor_kind.as_str(),
+            "anchorValueHash": self.anchor_value_hash.as_str(),
+            "previousState": self.previous_state.as_str(),
+            "newState": self.new_state.as_str(),
+            "driftCode": self.drift_code.as_deref(),
+            "fileLine": self.file_line.as_deref(),
+            "reason": self.reason.as_str(),
+            "automatic": self.automatic,
+            "detectedAt": self.detected_at.as_str(),
+        });
+        let details_hash = format!(
+            "blake3:{}",
+            blake3::hash(payload.to_string().as_bytes()).to_hex()
+        );
+        let mut payload_with_hash = payload;
+        payload_with_hash["detailsHash"] = serde_json::json!(details_hash);
+        payload_with_hash.to_string()
+    }
 }
 
 #[must_use]
@@ -719,5 +801,76 @@ mod tests {
             kinds,
             vec![MemoryAnchorKind::Path, MemoryAnchorKind::EnvVar]
         );
+    }
+
+    fn sample_freshness_transition(
+        previous: MemoryAnchorFreshnessState,
+        new: MemoryAnchorFreshnessState,
+    ) -> MemoryAnchorFreshnessTransition {
+        MemoryAnchorFreshnessTransition {
+            memory_id: "mem_01234567890123456789012345".to_owned(),
+            anchor_kind: MemoryAnchorKind::Path,
+            anchor_value_hash: memory_anchor_value_hash(MemoryAnchorKind::Path, "src/db/mod.rs"),
+            previous_state: previous,
+            new_state: new,
+            drift_code: Some("memory_drift_source_changed".to_owned()),
+            file_line: Some("src/db/mod.rs:42".to_owned()),
+            reason: "symbol content hash changed".to_owned(),
+            automatic: true,
+            detected_at: "2026-06-07T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn freshness_state_rank_orders_current_below_suspect_below_stale() {
+        assert!(
+            MemoryAnchorFreshnessState::Current.rank() < MemoryAnchorFreshnessState::Suspect.rank()
+        );
+        assert!(
+            MemoryAnchorFreshnessState::Suspect.rank() < MemoryAnchorFreshnessState::Stale.rank()
+        );
+    }
+
+    #[test]
+    fn freshness_transition_degradation_is_directional() {
+        assert!(
+            sample_freshness_transition(
+                MemoryAnchorFreshnessState::Current,
+                MemoryAnchorFreshnessState::Stale,
+            )
+            .is_degradation()
+        );
+        assert!(
+            !sample_freshness_transition(
+                MemoryAnchorFreshnessState::Stale,
+                MemoryAnchorFreshnessState::Current,
+            )
+            .is_degradation()
+        );
+        assert!(
+            !sample_freshness_transition(
+                MemoryAnchorFreshnessState::Current,
+                MemoryAnchorFreshnessState::Current,
+            )
+            .is_degradation()
+        );
+    }
+
+    #[test]
+    fn freshness_transition_audit_details_are_hashed_and_deterministic() {
+        let transition = sample_freshness_transition(
+            MemoryAnchorFreshnessState::Current,
+            MemoryAnchorFreshnessState::Stale,
+        );
+        let details = transition.audit_details_json();
+        assert!(details.contains(MEMORY_ANCHOR_FRESHNESS_TRANSITION_SCHEMA_V1));
+        assert!(details.contains("\"detailsHash\":\"blake3:"));
+        // Anchor identity is carried as a domain-separated hash, never raw.
+        assert!(details.contains("\"anchorValueHash\":\"blake3:"));
+        assert!(details.contains(&transition.anchor_value_hash));
+        // Live file:line provenance surfaces when the symbol resolved.
+        assert!(details.contains("\"fileLine\":\"src/db/mod.rs:42\""));
+        // Deterministic: identical transition -> byte-identical payload.
+        assert_eq!(details, transition.audit_details_json());
     }
 }
