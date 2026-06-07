@@ -272,6 +272,40 @@ impl MemoryAnchorFreshnessTransition {
         payload_with_hash["detailsHash"] = serde_json::json!(details_hash);
         payload_with_hash.to_string()
     }
+
+    /// Parse a `memory.freshness_transition` audit details payload (as produced
+    /// by [`Self::audit_details_json`]) back into a transition.
+    ///
+    /// Returns `None` if the payload is malformed, missing a required field, or
+    /// carries an unknown enum value. The trailing `detailsHash` is
+    /// informational and is not required to reconstruct the transition. This is
+    /// the read-back inverse the steward uses to avoid re-recording an unchanged
+    /// transition and that freshness surfacing uses to render prior drift.
+    #[must_use]
+    pub fn from_audit_details_json(details: &str) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(details).ok()?;
+        let object = value.as_object()?;
+        let required = |key: &str| object.get(key).and_then(serde_json::Value::as_str);
+        let optional = |key: &str| match object.get(key) {
+            None | Some(serde_json::Value::Null) => Some(None),
+            Some(serde_json::Value::String(text)) => Some(Some(text.clone())),
+            Some(_) => None,
+        };
+        Some(Self {
+            memory_id: required("memoryId")?.to_owned(),
+            anchor_kind: MemoryAnchorKind::parse(required("anchorKind")?)?,
+            anchor_value_hash: required("anchorValueHash")?.to_owned(),
+            previous_state: MemoryAnchorFreshnessState::parse(required("previousState")?)?,
+            new_state: MemoryAnchorFreshnessState::parse(required("newState")?)?,
+            drift_code: optional("driftCode")?,
+            file_line: optional("fileLine")?,
+            reason: required("reason")?.to_owned(),
+            automatic: object
+                .get("automatic")
+                .and_then(serde_json::Value::as_bool)?,
+            detected_at: required("detectedAt")?.to_owned(),
+        })
+    }
 }
 
 #[must_use]
@@ -872,5 +906,31 @@ mod tests {
         assert!(details.contains("\"fileLine\":\"src/db/mod.rs:42\""));
         // Deterministic: identical transition -> byte-identical payload.
         assert_eq!(details, transition.audit_details_json());
+    }
+
+    #[test]
+    fn freshness_transition_audit_details_round_trip() {
+        let original = sample_freshness_transition(
+            MemoryAnchorFreshnessState::Current,
+            MemoryAnchorFreshnessState::Stale,
+        );
+        let parsed = MemoryAnchorFreshnessTransition::from_audit_details_json(
+            &original.audit_details_json(),
+        )
+        .expect("audit details must round-trip back to a transition");
+        assert_eq!(parsed, original);
+
+        // A transition with no drift code / file line also round-trips.
+        let mut sparse = original.clone();
+        sparse.drift_code = None;
+        sparse.file_line = None;
+        let sparse_round =
+            MemoryAnchorFreshnessTransition::from_audit_details_json(&sparse.audit_details_json())
+                .expect("sparse transition must round-trip");
+        assert_eq!(sparse_round, sparse);
+
+        // Malformed input is rejected, not panicked.
+        assert!(MemoryAnchorFreshnessTransition::from_audit_details_json("not json").is_none());
+        assert!(MemoryAnchorFreshnessTransition::from_audit_details_json("{}").is_none());
     }
 }
