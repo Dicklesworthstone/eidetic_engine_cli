@@ -1827,7 +1827,8 @@ fn unsupported_result_target_storage(
 }
 
 fn redact_why_search_result_provenance_uri(value: String) -> String {
-    let secret_redacted = crate::policy::redact_secret_like_content(&value).content;
+    let path_redacted = redact_why_absolute_path_like_segments(&value);
+    let secret_redacted = crate::policy::redact_secret_like_content(&path_redacted).content;
     redact_why_absolute_path_like_segments(&secret_redacted)
 }
 
@@ -1851,7 +1852,8 @@ fn redact_why_absolute_path_like_segments(input: &str) -> String {
     let mut cursor = 0usize;
     while cursor < input.len() {
         let remaining = &input[cursor..];
-        if let Some(prefix_len) = why_path_prefix_len(remaining, UNIX_PATH_PREFIXES) {
+        let previous = input[..cursor].chars().next_back();
+        if let Some(prefix_len) = why_path_prefix_len(remaining, UNIX_PATH_PREFIXES, previous) {
             output.push_str(REDACTED_PATH);
             cursor += prefix_len;
             while cursor < input.len() {
@@ -1859,7 +1861,18 @@ fn redact_why_absolute_path_like_segments(input: &str) -> String {
                 if next.is_whitespace()
                     || matches!(
                         next,
-                        '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}' | ',' | ';' | '|'
+                        '"' | '\''
+                            | '`'
+                            | '<'
+                            | '>'
+                            | ')'
+                            | ']'
+                            | '}'
+                            | ','
+                            | ';'
+                            | '|'
+                            | '?'
+                            | '#'
                     )
                 {
                     break;
@@ -1884,16 +1897,23 @@ fn redact_why_absolute_path_like_segments(input: &str) -> String {
 /// (`C:\`, `c:\`) and both Windows separator conventions (`C:\`, `C:/`). This
 /// mirrors `search_projection_path_prefix_len` introduced by bd-gbfzk for the
 /// search-projection redactor.
-fn why_path_prefix_len(remaining: &str, unix_prefixes: &[&str]) -> Option<usize> {
+fn why_path_prefix_len(
+    remaining: &str,
+    unix_prefixes: &[&str],
+    previous: Option<char>,
+) -> Option<usize> {
     if let Some(prefix) = unix_prefixes
         .iter()
         .find(|prefix| remaining.starts_with(**prefix))
     {
-        return Some(prefix.len());
+        if previous.is_none_or(|ch| ch != ':' && !ch.is_ascii_alphanumeric()) {
+            return Some(prefix.len());
+        }
     }
 
     let bytes = remaining.as_bytes();
-    if bytes.first().is_some_and(|byte| byte.is_ascii_alphabetic())
+    if previous.is_none_or(|ch| !ch.is_ascii_alphanumeric())
+        && bytes.first().is_some_and(|byte| byte.is_ascii_alphabetic())
         && matches!(bytes.get(1), Some(b':'))
         && matches!(bytes.get(2), Some(b'\\' | b'/'))
     {
@@ -3272,8 +3292,8 @@ mod tests {
                 .ok_or("database path should have parent")?,
         )
         .map_err(|error| error.to_string())?;
-        let workspace_id = "wsp_whyhits0000000000000000";
-        let memory_id = "mem_whyhits0000000000000001";
+        let workspace_id = "wsp_00000000000000000000001001";
+        let memory_id = "mem_00000000000000000000001001";
         let connection =
             crate::db::DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
         connection.migrate().map_err(|e| e.to_string())?;
@@ -3309,7 +3329,7 @@ mod tests {
             .map_err(|e| e.to_string())?;
         connection
             .insert_graph_snapshot(
-                "gss_whyhits0000000000000001",
+                "gsnap_0000000000000000000001001",
                 &CreateGraphSnapshotInput {
                     workspace_id: workspace_id.to_owned(),
                     snapshot_version: 7,
@@ -3327,14 +3347,14 @@ mod tests {
                                 "authority": 0.2
                             },
                             {
-                                "memoryId": "mem_whyhitsauthority0000001",
+                                "memoryId": "mem_00000000000000000000001002",
                                 "pagerank": 0.8,
                                 "betweenness": 0.2,
                                 "hub": 0.1,
                                 "authority": 0.8
                             },
                             {
-                                "memoryId": "mem_whyhitsmiddle0000000001",
+                                "memoryId": "mem_00000000000000000000001003",
                                 "pagerank": 0.4,
                                 "betweenness": 0.3,
                                 "hub": 0.3,
@@ -3588,7 +3608,7 @@ mod tests {
                 .ok_or("database path should have parent")?,
         )
         .map_err(|error| error.to_string())?;
-        let memory_id = "mem_verifywhy00000000000000001";
+        let memory_id = "mem_00000000000000000000001005";
         let evidence = crate::models::sample_verification_evidence_records()
             .into_iter()
             .next()
@@ -3658,8 +3678,8 @@ mod tests {
         std::fs::create_dir_all(ledger_dir).map_err(|error| error.to_string())?;
         let conn = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         conn.migrate().map_err(|error| error.to_string())?;
-        let workspace_id = "wsp_coordfallbackwhy000000001";
-        let memory_id = "mem_coordfallbackwhy000000001";
+        let workspace_id = "wsp_00000000000000000000001004";
+        let memory_id = "mem_00000000000000000000001004";
         conn.insert_workspace(
             workspace_id,
             &CreateWorkspaceInput {
@@ -3803,7 +3823,7 @@ mod tests {
         let conn = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         conn.migrate().map_err(|error| error.to_string())?;
         conn.insert_workspace(
-            "wsp_whyredact0000000000000001",
+            "wsp_00000000000000000000001005",
             &CreateWorkspaceInput {
                 path: temp.path().display().to_string(),
                 name: Some("why-redaction".to_string()),
@@ -3811,9 +3831,9 @@ mod tests {
         )
         .map_err(|error| error.to_string())?;
         conn.insert_memory(
-            "mem_whyredact0000000000000001",
+            "mem_00000000000000000000001005",
             &crate::db::CreateMemoryInput {
-                workspace_id: "wsp_whyredact0000000000000001".to_string(),
+                workspace_id: "wsp_00000000000000000000001005".to_string(),
                 level: "procedural".to_string(),
                 kind: "rule".to_string(),
                 content: "Do not leak stored provenance in why output.".to_string(),
@@ -3840,7 +3860,7 @@ mod tests {
 
         let report = explain_memory(&WhyOptions {
             database_path: &database_path,
-            memory_id: "mem_whyredact0000000000000001",
+            memory_id: "mem_00000000000000000000001005",
             confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
         });
         let provenance = report
@@ -3883,8 +3903,8 @@ mod tests {
         .map_err(|error| error.to_string())?;
         let conn = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         conn.migrate().map_err(|error| error.to_string())?;
-        let workspace_id = "wsp_whyhist0000000000000001";
-        let memory_id = "mem_whyhist0000000000000001";
+        let workspace_id = "wsp_00000000000000000000001006";
+        let memory_id = "mem_00000000000000000000001006";
         conn.insert_workspace(
             workspace_id,
             &CreateWorkspaceInput {
@@ -4088,8 +4108,8 @@ mod tests {
             "[graph.feature.revision_dominance]\nenabled = true\n",
         )
         .map_err(|error| error.to_string())?;
-        let original_id = "mem_whyrevision000000000000001";
-        let workspace_id = "wsp_whyrevisionlineage00000000";
+        let original_id = "mem_00000000000000000000001007";
+        let workspace_id = "wsp_00000000000000000000001007";
         let connection =
             crate::db::DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
         connection.migrate().map_err(|e| e.to_string())?;
@@ -4187,8 +4207,8 @@ mod tests {
                 .ok_or("database path should have parent")?,
         )
         .map_err(|error| error.to_string())?;
-        let memory_id = "mem_whydisabledrevision0000001";
-        let workspace_id = "wsp_whydisabledrevision0000000";
+        let memory_id = "mem_00000000000000000000001008";
+        let workspace_id = "wsp_00000000000000000000001008";
         let connection =
             crate::db::DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
         connection.migrate().map_err(|e| e.to_string())?;
@@ -4267,8 +4287,8 @@ mod tests {
                 .ok_or("database path should have parent")?,
         )
         .map_err(|error| error.to_string())?;
-        let workspace_id = "wsp_whyloadbearing0000000000";
-        let memory_id = "mem_whyloadbearing0000000001";
+        let workspace_id = "wsp_00000000000000000000001009";
+        let memory_id = "mem_00000000000000000000001009";
         let connection =
             crate::db::DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
         connection.migrate().map_err(|e| e.to_string())?;
@@ -5195,8 +5215,8 @@ mod tests {
         .map_err(|error| error.to_string())?;
         let conn = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         conn.migrate().map_err(|error| error.to_string())?;
-        let workspace_id = "wsp_dedupwhy000000000000000001";
-        let memory_id = "mem_dedupwhy000000000000000001";
+        let workspace_id = "wsp_00000000000000000000001010";
+        let memory_id = "mem_00000000000000000000001010";
         conn.insert_workspace(
             workspace_id,
             &CreateWorkspaceInput {
@@ -5209,7 +5229,7 @@ mod tests {
             memory_id,
             &crate::db::CreateMemoryInput {
                 workspace_id: workspace_id.to_string(),
-                level: "rule".to_string(),
+                level: "procedural".to_string(),
                 kind: "rule".to_string(),
                 content: "memory without any dedup link".to_string(),
                 workflow_id: None,
