@@ -465,4 +465,74 @@ mod tests {
             );
         }
     }
+
+    // bd-1n0np.20.3 — bridge-exemption unit coverage over the existing
+    // articulation-point structural-decay machinery (no reimplementation).
+
+    #[test]
+    fn bridge_exemption_detects_sole_articulation_bridge() {
+        // A failure node bridged to its solution solely through one memory: that
+        // memory is the cut vertex (the load-bearing bridge to protect).
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([("failure", "bridge"), ("bridge", "solution")]);
+
+        let report = compute_articulation_points(&graph);
+
+        assert_eq!(report.memory_ids, vec!["bridge".to_string()]);
+    }
+
+    #[test]
+    fn bridge_exemption_protects_only_genuine_sole_bridges_not_leaves() {
+        // c is the sole bridge for d/e; d is a leaf. Exemption (protection
+        // multiplier < 1.0) must apply ONLY to the articulation point.
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([("a", "b"), ("b", "c"), ("c", "d"), ("c", "e")]);
+        let index = compute_structural_decay_index(&graph);
+
+        let bridge = index.adjustment("c");
+        assert!(
+            bridge.is_articulation_point,
+            "c is a sole-bridge articulation"
+        );
+        assert!(
+            bridge.structural_multiplier < 1.0,
+            "the sole bridge is protected from decay"
+        );
+
+        let leaf = index.adjustment("d");
+        assert!(
+            !leaf.is_articulation_point,
+            "a leaf is not a bridge and earns no exemption"
+        );
+    }
+
+    #[test]
+    fn bridge_exemption_skipped_in_dense_clique_no_cut_vertex() {
+        // A clique has no cut vertices: nothing is a sole bridge, so nothing is
+        // exempted (honest miss in dense graphs, not over-protection).
+        let graph = Graph::complete_graph(CompatibilityMode::Strict, 4);
+
+        let report = compute_articulation_points(&graph);
+        assert!(
+            report.memory_ids.is_empty(),
+            "a clique has no articulation points"
+        );
+
+        let index = compute_structural_decay_index(&graph);
+        let adjustment = index.adjustment("0");
+        assert!(!adjustment.is_articulation_point);
+        assert_eq!(adjustment.structural_multiplier, 1.0);
+    }
+
+    #[test]
+    fn bridge_exemption_adjustment_is_deterministic() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([("a", "b"), ("b", "c"), ("c", "d"), ("c", "e")]);
+
+        let first = compute_structural_decay_index(&graph);
+        let second = compute_structural_decay_index(&graph);
+
+        assert_eq!(first.adjustment("c"), second.adjustment("c"));
+        assert_eq!(first.adjustment("d"), second.adjustment("d"));
+    }
 }
