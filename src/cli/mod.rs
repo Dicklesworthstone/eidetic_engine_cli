@@ -65,8 +65,9 @@ use crate::core::config_surface::{
 };
 use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
-    ContextPackOutputOptions, ContextPackOutputProfile, attach_pack_dna_to_context_response,
-    explain_why_not_default, run_context_pack_with_performance,
+    ContextPackOutputOptions, ContextPackOutputProfile, ContextTaskLens,
+    attach_pack_dna_to_context_response, explain_why_not_default,
+    run_context_pack_with_performance,
 };
 use crate::core::context_delta::{
     CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE, CONTEXT_DELTA_PRIOR_UNKNOWN_CODE,
@@ -2515,6 +2516,14 @@ pub struct ContextArgs {
     #[arg(long = "coordination-stale-after-ms", value_name = "MS", default_value_t = crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS)]
     pub coordination_stale_after_ms: u64,
 
+    /// Resolved task lens metadata supplied by `ee pack` before delegating to context.
+    #[arg(skip)]
+    pub task_lens: Option<ContextTaskLens>,
+
+    /// Resolved maximum result count supplied by a task lens.
+    #[arg(skip)]
+    pub max_results: Option<u32>,
+
     /// Bead bd-17c65.5.2 (E2): include ALL degraded signals in
     /// `data.degraded[]`, even those whose category indicates they
     /// did not affect the current response. By default the array
@@ -2734,6 +2743,14 @@ pub struct PackArgs {
     #[arg(long = "coordination-stale-after-ms", value_name = "MS", default_value_t = crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS)]
     pub coordination_stale_after_ms: u64,
 
+    /// Apply a named task lens policy overlay before packing.
+    #[arg(long, value_name = "LENS")]
+    pub lens: Option<String>,
+
+    /// Disable task lens policy overlay even when a caller supplies one.
+    #[arg(long = "no-lens", action = ArgAction::SetTrue)]
+    pub no_lens: bool,
+
     /// Bead bd-17c65.5.2 (E2): include all degraded signals in
     /// `data.degraded[]` regardless of category (build-time gaps,
     /// workspace-state, affects-this-response). Default is filtered
@@ -2860,6 +2877,14 @@ pub struct PackBuildArgs {
     #[arg(long = "coordination-stale-after-ms", value_name = "MS", default_value_t = crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS)]
     pub coordination_stale_after_ms: u64,
 
+    /// Apply a named task lens policy overlay before packing.
+    #[arg(long, value_name = "LENS")]
+    pub lens: Option<String>,
+
+    /// Disable task lens policy overlay even when a caller supplies one.
+    #[arg(long = "no-lens", action = ArgAction::SetTrue)]
+    pub no_lens: bool,
+
     /// Bead bd-17c65.5.2 (E2): include all degraded signals in
     /// `data.degraded[]` regardless of category (build-time gaps,
     /// workspace-state, affects-this-response). Default is filtered
@@ -2948,6 +2973,8 @@ impl PackArgs {
             mesh_mode: self.mesh_mode,
             coordination_snapshot: self.coordination_snapshot.clone(),
             coordination_stale_after_ms: self.coordination_stale_after_ms,
+            lens: self.lens.clone(),
+            no_lens: self.no_lens,
         })
     }
 }
@@ -20677,17 +20704,156 @@ where
     }
 }
 
+#[derive(Clone, Debug)]
+struct ResolvedPackTaskLens {
+    task_lens: ContextTaskLens,
+    overlay: TaskLensOverlay,
+}
+
 fn load_task_lens_catalog(cli: &Cli) -> Result<(PathBuf, TaskLensCatalog), DomainError> {
     let workspace_root =
         resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let catalog = task_lens_catalog_for_workspace(&workspace_root)?;
+    Ok((workspace_root, catalog))
+}
+
+fn task_lens_catalog_for_workspace(workspace_root: &Path) -> Result<TaskLensCatalog, DomainError> {
     let merged = crate::core::config_surface::merged_workspace_config(&workspace_root)
         .map_err(config_surface_error_to_domain)?;
-    let catalog = TaskLensCatalog::with_workspace_overrides(merged.values.task_lens.overrides)
-        .map_err(|error| DomainError::Configuration {
+    TaskLensCatalog::with_workspace_overrides(merged.values.task_lens.overrides).map_err(|error| {
+        DomainError::Configuration {
             message: format!("Could not build task lens catalog: {error}"),
             repair: Some("Fix [task_lens.overrides] in .ee/config.toml.".to_owned()),
-        })?;
-    Ok((workspace_root, catalog))
+        }
+    })
+}
+
+fn resolve_pack_task_lens(
+    workspace_root: &Path,
+    lens: Option<&str>,
+    no_lens: bool,
+) -> Result<Option<ResolvedPackTaskLens>, DomainError> {
+    let lens = lens.map(str::trim).filter(|value| !value.is_empty());
+    if no_lens {
+        return Ok(None);
+    }
+    let Some(lens_id) = lens else {
+        return Ok(None);
+    };
+    let catalog = task_lens_catalog_for_workspace(workspace_root)?;
+    let lens = catalog.get(lens_id).ok_or_else(|| DomainError::NotFound {
+        resource: "task lens".to_owned(),
+        id: lens_id.to_owned(),
+        repair: Some("Run `ee lens list --json` to inspect available task lens ids.".to_owned()),
+    })?;
+    Ok(Some(ResolvedPackTaskLens {
+        task_lens: ContextTaskLens {
+            id: lens.id.clone(),
+            version: lens.version,
+            lens_hash: lens.lens_hash.clone(),
+        },
+        overlay: lens.overlay.clone(),
+    }))
+}
+
+fn task_lens_source_mode(
+    resolved: Option<&ResolvedPackTaskLens>,
+) -> Result<Option<SearchSourceMode>, DomainError> {
+    resolved
+        .and_then(|resolved| resolved.overlay.source_mode.as_deref())
+        .map(parse_search_source_mode_arg)
+        .transpose()
+        .map_err(|message| DomainError::Configuration {
+            message: format!("Invalid task lens source mode: {message}"),
+            repair: Some(
+                "Run `ee lens explain <id> --json` to inspect the lens overlay.".to_owned(),
+            ),
+        })
+}
+
+fn task_lens_context_profile(
+    resolved: Option<&ResolvedPackTaskLens>,
+) -> Result<Option<ContextPackProfile>, DomainError> {
+    resolved
+        .and_then(|resolved| resolved.overlay.context_profile.as_deref())
+        .map(parse_context_profile)
+        .transpose()
+        .map_err(|message| DomainError::Configuration {
+            message: format!("Invalid task lens context profile: {message}"),
+            repair: Some(
+                "Run `ee lens explain <id> --json` to inspect the lens overlay.".to_owned(),
+            ),
+        })
+}
+
+fn task_lens_pack_profile(
+    resolved: Option<&ResolvedPackTaskLens>,
+) -> Result<Option<PackOutputProfileArg>, DomainError> {
+    resolved
+        .and_then(|resolved| resolved.overlay.pack_profile.as_deref())
+        .map(
+            |value| match normalized_search_source_mode_token(value).as_str() {
+                "lean" => Ok(PackOutputProfileArg::Lean),
+                "standard" => Ok(PackOutputProfileArg::Standard),
+                "verbose" => Ok(PackOutputProfileArg::Verbose),
+                _ => Err(format!(
+                    "Invalid pack profile '{value}'. Expected lean, standard, or verbose."
+                )),
+            },
+        )
+        .transpose()
+        .map_err(|message| DomainError::Configuration {
+            message: format!("Invalid task lens pack profile: {message}"),
+            repair: Some(
+                "Run `ee lens explain <id> --json` to inspect the lens overlay.".to_owned(),
+            ),
+        })
+}
+
+fn task_lens_resource_profile(
+    resolved: Option<&ResolvedPackTaskLens>,
+) -> Result<Option<PackResourceProfile>, DomainError> {
+    resolved
+        .and_then(|resolved| resolved.overlay.resource_profile.as_deref())
+        .map(parse_pack_resource_profile_arg)
+        .transpose()
+        .map_err(|message| DomainError::Configuration {
+            message: format!("Invalid task lens resource profile: {message}"),
+            repair: Some(
+                "Run `ee lens explain <id> --json` to inspect the lens overlay.".to_owned(),
+            ),
+        })
+}
+
+fn task_lens_memory_scope(
+    resolved: Option<&ResolvedPackTaskLens>,
+) -> Result<Option<MemoryScope>, DomainError> {
+    resolved
+        .and_then(|resolved| resolved.overlay.memory_scope.as_deref())
+        .map(parse_memory_scope_arg)
+        .transpose()
+        .map_err(|message| DomainError::Configuration {
+            message: format!("Invalid task lens memory scope: {message}"),
+            repair: Some(
+                "Run `ee lens explain <id> --json` to inspect the lens overlay.".to_owned(),
+            ),
+        })
+}
+
+fn task_lens_redaction(resolved: Option<&ResolvedPackTaskLens>) -> Option<BackupRedaction> {
+    resolved
+        .and_then(|resolved| resolved.overlay.redaction)
+        .map(task_lens_backup_redaction)
+}
+
+fn task_lens_backup_redaction(level: RedactionLevel) -> BackupRedaction {
+    match level {
+        RedactionLevel::None => BackupRedaction::None,
+        RedactionLevel::Minimal => BackupRedaction::Minimal,
+        RedactionLevel::Standard => BackupRedaction::Standard,
+        RedactionLevel::Strict => BackupRedaction::Strict,
+        RedactionLevel::Paranoid | RedactionLevel::Full => BackupRedaction::Paranoid,
+    }
 }
 
 fn write_task_lens_catalog<W>(
@@ -31152,6 +31318,7 @@ where
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
             output_options,
             persist_pack: false,
         };
@@ -31465,7 +31632,7 @@ where
         profile: Some(profile),
         max_tokens: args.max_tokens,
         candidate_pool: Some(args.candidate_pool),
-        max_results: None,
+        max_results: args.max_results,
         include_tombstoned: args.include_tombstoned,
         as_of: args.as_of,
         include_expired: args.include_expired,
@@ -31481,6 +31648,7 @@ where
         pagination: None,
         coordination_snapshot_path: args.coordination_snapshot.clone(),
         coordination_stale_after_ms: args.coordination_stale_after_ms,
+        task_lens: args.task_lens.clone(),
         filters,
         output_options,
         persist_pack: !args.read_only,
@@ -34383,23 +34551,63 @@ where
             };
             return write_domain_error(&error, cli.wants_json(), stdout, stderr);
         }
+        let workspace_path = cli.resolve_workspace();
+        let resolved_lens =
+            match resolve_pack_task_lens(&workspace_path, args.lens.as_deref(), args.no_lens) {
+                Ok(resolved_lens) => resolved_lens,
+                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            };
+        let lens_source_mode = match task_lens_source_mode(resolved_lens.as_ref()) {
+            Ok(source_mode) => source_mode,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        let lens_pack_profile = match task_lens_pack_profile(resolved_lens.as_ref()) {
+            Ok(pack_profile) => pack_profile,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        let lens_resource_profile = match task_lens_resource_profile(resolved_lens.as_ref()) {
+            Ok(resource_profile) => resource_profile,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        let lens_memory_scope = match task_lens_memory_scope(resolved_lens.as_ref()) {
+            Ok(memory_scope) => memory_scope,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        let lens_overlay = resolved_lens.as_ref().map(|resolved| &resolved.overlay);
         let context_args = ContextArgs {
             query: query.clone(),
-            max_tokens: args.max_tokens,
-            candidate_pool: args.candidate_pool.unwrap_or(100),
+            max_tokens: args
+                .max_tokens
+                .or_else(|| lens_overlay.and_then(|overlay| overlay.max_tokens)),
+            candidate_pool: args
+                .candidate_pool
+                .or_else(|| lens_overlay.and_then(|overlay| overlay.candidate_pool))
+                .unwrap_or(100),
             speed: args.speed.unwrap_or(crate::search::SpeedMode::Default),
-            source_mode: args.source_mode.unwrap_or(SearchSourceMode::Hybrid),
-            strict_source_mode: args.strict_source_mode,
+            source_mode: args
+                .source_mode
+                .or(lens_source_mode)
+                .unwrap_or(SearchSourceMode::Hybrid),
+            strict_source_mode: args.strict_source_mode
+                || lens_overlay
+                    .and_then(|overlay| overlay.strict_source_mode)
+                    .unwrap_or(false),
             stream: false,
             profile: args
                 .profile
                 .clone()
+                .or_else(|| {
+                    lens_overlay.and_then(|overlay| overlay.context_profile.as_ref().cloned())
+                })
                 .unwrap_or_else(|| "balanced".to_string()),
             ppr_weight: None,
             changed_symbols: Vec::new(),
             changed_symbols_from_git: false,
-            pack_profile: args.pack_profile.unwrap_or_default(),
-            resource_profile: args.resource_profile.unwrap_or_default(),
+            pack_profile: args.pack_profile.or(lens_pack_profile).unwrap_or_default(),
+            resource_profile: args
+                .resource_profile
+                .or(lens_resource_profile)
+                .unwrap_or_default(),
             database: args.database.clone(),
             index_dir: args.index_dir.clone(),
             output: args.output.clone(),
@@ -34411,7 +34619,7 @@ where
             no_skipped: args.no_skipped,
             no_meta: args.no_meta,
             read_only: args.read_only,
-            redaction: None,
+            redaction: task_lens_redaction(resolved_lens.as_ref()),
             include_non_affecting_degradations: args.include_non_affecting_degradations,
             include_tombstoned: false,
             as_of: args.as_of,
@@ -34420,10 +34628,14 @@ where
             include_stale: args.include_stale,
             relevance_floor: None,
             mesh_mode: args.mesh_mode,
-            memory_scope: MemoryScope::Swarm,
+            memory_scope: lens_memory_scope.unwrap_or(MemoryScope::Swarm),
             strict_scope: false,
             coordination_snapshot: args.coordination_snapshot.clone(),
             coordination_stale_after_ms: args.coordination_stale_after_ms,
+            task_lens: resolved_lens
+                .as_ref()
+                .map(|resolved| resolved.task_lens.clone()),
+            max_results: lens_overlay.and_then(|overlay| overlay.max_results),
             // bd-1es1m: --since / --max-delta-bytes are only meaningful for
             // `ee context`; the `ee pack` shim passes None through and the
             // delta path stays inert.
@@ -34481,9 +34693,38 @@ where
         .clone()
         .or_else(|| request.workspace_path.take())
         .unwrap_or_else(|| PathBuf::from("."));
+    let workspace_root = resolve_cli_workspace_path(&workspace_path);
+    let resolved_lens =
+        match resolve_pack_task_lens(&workspace_root, args.lens.as_deref(), args.no_lens) {
+            Ok(resolved_lens) => resolved_lens,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    let lens_profile = match task_lens_context_profile(resolved_lens.as_ref()) {
+        Ok(profile) => profile,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let lens_source_mode = match task_lens_source_mode(resolved_lens.as_ref()) {
+        Ok(source_mode) => source_mode,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let lens_pack_profile = match task_lens_pack_profile(resolved_lens.as_ref()) {
+        Ok(pack_profile) => pack_profile,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let lens_resource_profile = match task_lens_resource_profile(resolved_lens.as_ref()) {
+        Ok(resource_profile) => resource_profile,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let lens_memory_scope = match task_lens_memory_scope(resolved_lens.as_ref()) {
+        Ok(memory_scope) => memory_scope,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let lens_overlay = resolved_lens.as_ref().map(|resolved| &resolved.overlay);
     let output_options = resolve_context_output_options(
-        args.pack_profile.unwrap_or_default(),
-        args.resource_profile.unwrap_or_default(),
+        args.pack_profile.or(lens_pack_profile).unwrap_or_default(),
+        args.resource_profile
+            .or(lens_resource_profile)
+            .unwrap_or_default(),
         args.no_coverage_fill,
         args.no_rendered_text,
         args.no_skipped,
@@ -34545,21 +34786,37 @@ where
         index_dir: args.index_dir.clone(),
         query: request.query,
         speed: args.speed.unwrap_or(request.speed),
-        source_mode: args.source_mode.unwrap_or(SearchSourceMode::Hybrid),
-        strict_source_mode: args.strict_source_mode,
+        source_mode: args
+            .source_mode
+            .or(lens_source_mode)
+            .unwrap_or(SearchSourceMode::Hybrid),
+        strict_source_mode: args.strict_source_mode
+            || lens_overlay
+                .and_then(|overlay| overlay.strict_source_mode)
+                .unwrap_or(false),
         filters,
-        profile,
-        max_tokens: args.max_tokens.or(request.max_tokens),
-        candidate_pool: args.candidate_pool.or(request.candidate_pool),
-        max_results: request.max_results,
+        profile: profile.or(lens_profile),
+        max_tokens: args
+            .max_tokens
+            .or(request.max_tokens)
+            .or_else(|| lens_overlay.and_then(|overlay| overlay.max_tokens)),
+        candidate_pool: args
+            .candidate_pool
+            .or(request.candidate_pool)
+            .or_else(|| lens_overlay.and_then(|overlay| overlay.candidate_pool)),
+        max_results: request
+            .max_results
+            .or_else(|| lens_overlay.and_then(|overlay| overlay.max_results)),
         include_tombstoned: false,
         as_of: args.as_of,
         include_expired: args.include_expired,
         include_future: args.include_future,
         include_stale: args.include_stale,
         relevance_floor: None,
-        redaction_level: BackupRedaction::Minimal.to_model(),
-        memory_scope: MemoryScope::Swarm,
+        redaction_level: task_lens_redaction(resolved_lens.as_ref())
+            .unwrap_or(BackupRedaction::Minimal)
+            .to_model(),
+        memory_scope: lens_memory_scope.unwrap_or(MemoryScope::Swarm),
         strict_scope: false,
         ppr_weight: None,
         changed_symbols: Vec::new(),
@@ -34567,6 +34824,9 @@ where
         pagination,
         coordination_snapshot_path: args.coordination_snapshot.clone(),
         coordination_stale_after_ms: args.coordination_stale_after_ms,
+        task_lens: resolved_lens
+            .as_ref()
+            .map(|resolved| resolved.task_lens.clone()),
         output_options,
         persist_pack: !args.read_only,
     };
@@ -39041,6 +39301,7 @@ where
         pagination: None,
         coordination_snapshot_path: None,
         coordination_stale_after_ms: 0,
+        task_lens: None,
         output_options: ContextPackOutputOptions::default(),
         // why-not is read-only and never persists a pack record (reverse of `ee why`).
         persist_pack: false,
@@ -51855,8 +52116,8 @@ mod tests {
     use clap::{Parser, error::ErrorKind};
 
     use super::{
-        AgentCommand, AnalyzeCommand, ArtifactCommand, AttestCommand, BackupCommand, BackupRedaction,
-        BootstrapCommand, COORDINATION_FALLBACK_INGEST_SCHEMA_V1,
+        AgentCommand, AnalyzeCommand, ArtifactCommand, AttestCommand, BackupCommand,
+        BackupRedaction, BootstrapCommand, COORDINATION_FALLBACK_INGEST_SCHEMA_V1,
         COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command, ContextPackProfile, CurateCommand,
         DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand, DiagCommand, DiagQuarantineCommand,
         DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES, EconomyCommand,
@@ -66147,6 +66408,73 @@ mod tests {
                 ensure_equal(&args.lens, &"bugfix".to_string(), "lens id")
             }
             other => Err(format!("expected lens explain command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_pack_task_lens_flags() -> TestResult {
+        let pack = Cli::try_parse_from([
+            "ee",
+            "pack",
+            "fix failing release",
+            "--lens",
+            "bugfix",
+            "--no-lens",
+        ])
+        .map_err(|e| format!("pack lens parse error: {e}"))?;
+        match pack.command {
+            Some(Command::Pack(args)) => {
+                ensure_equal(&args.lens, &Some("bugfix".to_string()), "pack lens")?;
+                ensure_equal(&args.no_lens, &true, "pack no_lens")
+            }
+            other => Err(format!("expected pack command, got {other:?}")),
+        }?;
+
+        let build = Cli::try_parse_from([
+            "ee",
+            "pack",
+            "build",
+            "--query-file",
+            "task.eeq.json",
+            "--lens",
+            "schema-contract",
+        ])
+        .map_err(|e| format!("pack build lens parse error: {e}"))?;
+        match build.command {
+            Some(Command::Pack(args)) => match args.command {
+                Some(PackCommand::Build(build_args)) => ensure_equal(
+                    &build_args.lens,
+                    &Some("schema-contract".to_string()),
+                    "pack build lens",
+                ),
+                other => Err(format!("expected pack build command, got {other:?}")),
+            },
+            other => Err(format!("expected pack command, got {other:?}")),
+        }?;
+
+        let legacy = Cli::try_parse_from([
+            "ee",
+            "pack",
+            "--query-file",
+            "task.eeq.json",
+            "--lens",
+            "coordination-handoff",
+            "--no-lens",
+        ])
+        .map_err(|e| format!("legacy pack lens parse error: {e}"))?;
+        match legacy.command {
+            Some(Command::Pack(args)) => {
+                let build_args = args
+                    .legacy_build_args()
+                    .map_err(|error| format!("legacy build args error: {error:?}"))?;
+                ensure_equal(
+                    &build_args.lens,
+                    &Some("coordination-handoff".to_string()),
+                    "legacy build lens",
+                )?;
+                ensure_equal(&build_args.no_lens, &true, "legacy build no_lens")
+            }
+            other => Err(format!("expected pack command, got {other:?}")),
         }
     }
 

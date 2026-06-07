@@ -581,6 +581,13 @@ impl CommandContext {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextTaskLens {
+    pub id: String,
+    pub version: u32,
+    pub lens_hash: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct ContextPackOptions {
     pub workspace_path: PathBuf,
@@ -610,6 +617,7 @@ pub struct ContextPackOptions {
     pub pagination: Option<ContextPagination>,
     pub coordination_snapshot_path: Option<PathBuf>,
     pub coordination_stale_after_ms: u64,
+    pub task_lens: Option<ContextTaskLens>,
     pub output_options: ContextPackOutputOptions,
     pub persist_pack: bool,
 }
@@ -2444,13 +2452,14 @@ fn run_context_pack_with_performance_inner(
     let coordination = load_coordination_snapshot(options, &mut degraded);
 
     draft.hash = Some(
-        compute_pack_hash_with_output_options_coordination_and_snapshot(
+        compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
             &request,
             &draft,
             &degraded,
             options.output_options,
             coordination.as_ref(),
             read_snapshot_generation,
+            options.task_lens.as_ref(),
         ),
     );
     if let Some(profile) = agent_profile.as_mut() {
@@ -5378,6 +5387,26 @@ fn compute_pack_hash_with_output_options_coordination_and_snapshot(
     coordination: Option<&PackCoordinationSnapshot>,
     read_snapshot_generation: Option<u64>,
 ) -> String {
+    compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
+        request,
+        draft,
+        degraded,
+        output_options,
+        coordination,
+        read_snapshot_generation,
+        None,
+    )
+}
+
+fn compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
+    request: &ContextRequest,
+    draft: &crate::pack::PackDraft,
+    degraded: &[ContextResponseDegradation],
+    output_options: ContextPackOutputOptions,
+    coordination: Option<&PackCoordinationSnapshot>,
+    read_snapshot_generation: Option<u64>,
+    task_lens: Option<&ContextTaskLens>,
+) -> String {
     let components = compute_pack_hash_components(
         request,
         draft,
@@ -5385,6 +5414,7 @@ fn compute_pack_hash_with_output_options_coordination_and_snapshot(
         output_options,
         coordination,
         read_snapshot_generation,
+        task_lens,
     );
     log_pack_hash_components(&components);
     components.composite_hash
@@ -5406,6 +5436,7 @@ fn compute_pack_hash_components(
     output_options: ContextPackOutputOptions,
     coordination: Option<&PackCoordinationSnapshot>,
     read_snapshot_generation: Option<u64>,
+    task_lens: Option<&ContextTaskLens>,
 ) -> PackHashComponents {
     use blake3::Hasher;
 
@@ -5425,6 +5456,7 @@ fn compute_pack_hash_components(
         "read_snapshot_generation",
         read_snapshot_generation,
     );
+    hash_context_task_lens(&mut request_hasher, task_lens);
 
     let mut draft_hasher = Hasher::new();
     draft_hasher.update(&draft.used_tokens.to_le_bytes());
@@ -5456,6 +5488,7 @@ fn compute_pack_hash_components(
         "read_snapshot_generation",
         read_snapshot_generation,
     );
+    hash_context_task_lens(&mut composite_hasher, task_lens);
     composite_hasher.update(&draft.used_tokens.to_le_bytes());
     if output_options.include_rendered_text {
         composite_hasher.update(rendered_text.as_bytes());
@@ -5563,6 +5596,19 @@ fn compute_pack_hash_components(
         degraded_summary_hash: finalize_blake3(degraded_hasher),
         rendered_text_hash: finalize_blake3(rendered_text_hasher),
         composite_hash: finalize_blake3(composite_hasher),
+    }
+}
+
+fn hash_context_task_lens(hasher: &mut blake3::Hasher, task_lens: Option<&ContextTaskLens>) {
+    hash_labeled_bool(hasher, "task_lens.present", task_lens.is_some());
+    if let Some(task_lens) = task_lens {
+        hash_labeled_bytes(hasher, "task_lens.id", task_lens.id.as_bytes());
+        hash_labeled_u64(hasher, "task_lens.version", u64::from(task_lens.version));
+        hash_labeled_bytes(
+            hasher,
+            "task_lens.lens_hash",
+            task_lens.lens_hash.as_bytes(),
+        );
     }
 }
 
@@ -9474,6 +9520,7 @@ mod tests {
             pagination: None,
             coordination_snapshot_path: Some(path),
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
             output_options: Default::default(),
             persist_pack: true,
         }
@@ -12068,6 +12115,7 @@ pub fn unrelated_context() -> u64 {{
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
             output_options: Default::default(),
             persist_pack: true,
         };
@@ -12232,6 +12280,7 @@ pub fn unrelated_context() -> u64 {{
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
             output_options: Default::default(),
             persist_pack: true,
         };
@@ -12393,6 +12442,7 @@ pub fn unrelated_context() -> u64 {{
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
             output_options: Default::default(),
             persist_pack: true,
         };
@@ -12521,6 +12571,7 @@ pub fn unrelated_context() -> u64 {{
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
             output_options: Default::default(),
             persist_pack: true,
         })
@@ -12634,6 +12685,7 @@ pub fn unrelated_context() -> u64 {{
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
             output_options: super::ContextPackOutputOptions::default()
                 .with_cache_json_response(true),
             persist_pack: true,
@@ -12741,6 +12793,7 @@ pub fn unrelated_context() -> u64 {{
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
             output_options: super::ContextPackOutputOptions::default()
                 .with_cache_json_response(true),
             persist_pack: true,
@@ -12848,6 +12901,7 @@ pub fn unrelated_context() -> u64 {{
                     pagination: None,
                     coordination_snapshot_path: None,
                     coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+                    task_lens: None,
                     output_options: Default::default(),
                     persist_pack: true,
                 },
@@ -12958,6 +13012,7 @@ pub fn unrelated_context() -> u64 {{
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
             output_options: Default::default(),
             persist_pack: true,
         };
@@ -13587,6 +13642,7 @@ pub fn unrelated_context() -> u64 {{
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
             output_options: Default::default(),
             persist_pack: true,
         };
@@ -13754,6 +13810,7 @@ pub fn unrelated_context() -> u64 {{
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
             output_options: Default::default(),
             persist_pack: true,
         };
@@ -14378,8 +14435,10 @@ pub fn unrelated_context() -> u64 {{
     fn pack_hash_includes_content_provenance_and_degradation() -> Result<(), String> {
         use super::{
             ContextPackOutputOptions, ContextPackOutputProfile, ContextResponseDegradation,
-            ContextResponseSeverity, compute_pack_hash, compute_pack_hash_with_output_options,
+            ContextResponseSeverity, ContextTaskLens, compute_pack_hash,
+            compute_pack_hash_with_output_options,
             compute_pack_hash_with_output_options_coordination_and_snapshot,
+            compute_pack_hash_with_output_options_coordination_snapshot_and_lens,
         };
         use crate::models::{ProvenanceUri, TrustClass, UnitScore};
         use crate::pack::{
@@ -14485,6 +14544,40 @@ pub fn unrelated_context() -> u64 {{
                 Some(1),
             ),
             "fixed read snapshot generation must reproduce"
+        );
+        let hash_task_lens_a = compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
+            &request,
+            &base_draft,
+            &base_degraded,
+            ContextPackOutputOptions::default(),
+            None,
+            None,
+            Some(&ContextTaskLens {
+                id: "bugfix".to_string(),
+                version: 1,
+                lens_hash: "blake3:task-lens-a".to_string(),
+            }),
+        );
+        let hash_task_lens_b = compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
+            &request,
+            &base_draft,
+            &base_degraded,
+            ContextPackOutputOptions::default(),
+            None,
+            None,
+            Some(&ContextTaskLens {
+                id: "bugfix".to_string(),
+                version: 2,
+                lens_hash: "blake3:task-lens-b".to_string(),
+            }),
+        );
+        assert_ne!(
+            hash_base, hash_task_lens_a,
+            "pack hash must include task lens identity"
+        );
+        assert_ne!(
+            hash_task_lens_a, hash_task_lens_b,
+            "pack hash must include task lens version and hash"
         );
         let hash_lean = compute_pack_hash_with_output_options(
             &request,
