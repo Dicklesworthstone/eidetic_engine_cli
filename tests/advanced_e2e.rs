@@ -3005,3 +3005,146 @@ fn agent_native_ux_surfaces_emit_machine_clean_json() -> TestResult {
 
     Ok(())
 }
+
+// ============================================================================
+// Impact Surface Tests (bd-1n0np.3.5) — `ee impact <surface> --json`
+// ============================================================================
+
+/// Behavioral contract for `ee impact <path> --json`: a memory anchored to a
+/// repo path surfaces as an exact-anchor hit; the response carries the stable
+/// `ee.response.v2` envelope and documented phase structure; the graph-neighbors
+/// tier degrades honestly (deferred to bd-1n0np.3.4) instead of fabricating
+/// neighbors; and a repeated identical query is deterministic.
+#[test]
+fn ee_impact_path_surface_returns_exact_anchor_hit_with_stable_json() -> TestResult {
+    let (_tempdir, workspace) = initialized_workspace()?;
+
+    // Remember a rule whose backtick code spans yield a precision Path anchor on
+    // `src/db/mod.rs` (extraction runs at insert time via insert_memory).
+    let remember = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "Always run `cargo fmt --check` before editing `src/db/mod.rs`.",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--json",
+    ])?;
+    ensure_equal(&remember.status.code(), &Some(0), "impact remember exit")?;
+    let remember_json = stdout_json(&remember)?;
+    let memory_id = remember_json
+        .pointer("/data/memory_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "remember response missing /data/memory_id".to_string())?
+        .to_owned();
+
+    // Query the path surface. `--limit 1` keeps the exact-anchor result filling
+    // the budget so the fallback search arm is skipped (no index dependency).
+    let impact_args = [
+        "--workspace",
+        workspace.as_str(),
+        "impact",
+        "src/db/mod.rs",
+        "--limit",
+        "1",
+        "--json",
+    ];
+    let impact = run_ee(&impact_args)?;
+    ensure_equal(&impact.status.code(), &Some(0), "impact exit")?;
+    let impact_json = stdout_json(&impact)?;
+
+    ensure_equal(
+        &impact_json
+            .pointer("/schema")
+            .and_then(serde_json::Value::as_str),
+        &Some("ee.response.v2"),
+        "impact envelope schema",
+    )?;
+    ensure_equal(
+        &impact_json
+            .pointer("/success")
+            .and_then(serde_json::Value::as_bool),
+        &Some(true),
+        "impact success flag",
+    )?;
+    ensure_equal(
+        &impact_json
+            .pointer("/data/command")
+            .and_then(serde_json::Value::as_str),
+        &Some("impact"),
+        "impact data.command",
+    )?;
+    ensure_equal(
+        &impact_json
+            .pointer("/data/surface/kind")
+            .and_then(serde_json::Value::as_str),
+        &Some("path"),
+        "impact surface kind",
+    )?;
+    ensure_equal(
+        &impact_json
+            .pointer("/data/phases/exactAnchor/status")
+            .and_then(serde_json::Value::as_str),
+        &Some("ok"),
+        "impact exactAnchor phase status",
+    )?;
+    ensure(
+        impact_json
+            .pointer("/data/phases/exactAnchor/resultCount")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+            >= 1,
+        "impact exactAnchor must find at least one anchor",
+    )?;
+
+    // The remembered memory must appear as an exact-anchor result.
+    let results = impact_json
+        .pointer("/data/results")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "impact response missing /data/results array".to_string())?;
+    ensure(!results.is_empty(), "impact results must be non-empty")?;
+    let hit = results
+        .iter()
+        .find(|result| {
+            result
+                .pointer("/memoryId")
+                .and_then(serde_json::Value::as_str)
+                == Some(memory_id.as_str())
+        })
+        .ok_or_else(|| format!("impact results must include remembered memory {memory_id}"))?;
+    ensure_equal(
+        &hit.pointer("/matchType")
+            .and_then(serde_json::Value::as_str),
+        &Some("exact_anchor"),
+        "impact hit matchType",
+    )?;
+
+    // Graph-neighbors tier degrades honestly (deferred to bd-1n0np.3.4).
+    ensure_equal(
+        &impact_json
+            .pointer("/data/phases/graphNeighbors/status")
+            .and_then(serde_json::Value::as_str),
+        &Some("not_available"),
+        "impact graphNeighbors honest degraded status",
+    )?;
+
+    // Determinism: a second identical query yields equal JSON once the
+    // non-deterministic elapsedMs timing field is dropped.
+    let impact_repeat = run_ee(&impact_args)?;
+    ensure_equal(&impact_repeat.status.code(), &Some(0), "impact repeat exit")?;
+    let mut first = impact_json;
+    let mut second = stdout_json(&impact_repeat)?;
+    for value in [&mut first, &mut second] {
+        if let Some(object) = value
+            .pointer_mut("/data")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            object.remove("elapsedMs");
+        }
+    }
+    ensure_equal(&first, &second, "impact JSON must be deterministic")?;
+
+    Ok(())
+}
