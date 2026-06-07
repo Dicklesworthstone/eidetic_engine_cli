@@ -13,6 +13,7 @@
 #   json_example_check — current-facing JSONC envelope examples carry a live schema id
 #   taxonomy_xcheck    — every degraded code in docs/degraded_codes.md has a
 #                        tests/fixtures/failure_modes/<code>.json fixture
+#   dependency_xcheck  — current dependency contract prose matches accepted pins
 #   summary            — counts and overall verdict
 #
 # Output:
@@ -49,6 +50,8 @@ Reads:
   docs/schemas/*.json            (canonical contracts)
   AGENTS.md, README.md, CLAUDE.md (if present)
   docs/external-derivation-operator.md, docs/agent-ux/*.md (current-facing docs)
+  COMPREHENSIVE_PLAN.md
+  docs/dependency-contract-matrix.md, docs/dependency-research-notes.md
   docs/degraded_codes.md         (degraded-code catalog)
   tests/fixtures/failure_modes/*.json (failure-mode fixtures)
 
@@ -162,7 +165,7 @@ stale_hits="[]"
 stale_count=0
 allow_marker='<!-- contract-drift-allow:'
 for doc in "${CURRENT_DOCS[@]}"; do
-  rel="${doc#${ROOT}/}"
+  rel="${doc#"${ROOT}"/}"
   while IFS= read -r hit; do
     [ -z "$hit" ] && continue
     line_no=$(printf '%s' "$hit" | awk -F: '{print $1}')
@@ -205,7 +208,7 @@ example_count=0
 example_violation_count=0
 example_skipped_legacy=0
 for doc in "${CURRENT_DOCS[@]}"; do
-  rel="${doc#${ROOT}/}"
+  rel="${doc#"${ROOT}"/}"
   # Pull fenced blocks via awk
   in_block=0
   block=""
@@ -285,8 +288,8 @@ fixture_codes=0
 if [ -f "$DEGRADED_DOC" ] && [ -d "$FIXTURE_DIR" ]; then
   # Codes from the catalog are H2 headings: '## `<code>`'
   doc_codes_tmp=$(mktemp)
-  grep -oE '^## `[a-z0-9_]+`' "$DEGRADED_DOC" \
-    | sed -E 's/^## `//; s/`$//' \
+  grep -oE "^## \`[a-z0-9_]+\`" "$DEGRADED_DOC" \
+    | sed -E "s/^## \`//; s/\`$//" \
     | sort -u >"$doc_codes_tmp"
   documented_codes=$(wc -l <"$doc_codes_tmp" | tr -d '[:space:]')
 
@@ -319,9 +322,124 @@ emit_event "taxonomy_xcheck" "$taxonomy_status" \
     '{documentedCodes: $d, fixtureCodes: $f, documentedMissingFixture: $o}')" \
   "[]"
 
-# ---- Phase 5: summary ------------------------------------------------------
+# ---- Phase 5: dependency_xcheck -------------------------------------------
 
-total_violations=$((stale_count + example_violation_count + taxonomy_orphan_count))
+# Static, intentionally narrow dependency-profile guard. This catches current
+# docs that drift from Cargo.toml and the dependency contract matrix for the
+# runtime substrate. The Cargo-backed forbidden-dependency tests remain the
+# authoritative feature-tree proof.
+DEPENDENCY_RESEARCH_DOC="${ROOT}/docs/dependency-research-notes.md"
+DEPENDENCY_MATRIX_DOC="${ROOT}/docs/dependency-contract-matrix.md"
+COMPREHENSIVE_PLAN_DOC="${ROOT}/COMPREHENSIVE_PLAN.md"
+CARGO_TOML="${ROOT}/Cargo.toml"
+accepted_asupersync_profile='asupersync = { version = "0.3.3", default-features = false, features = ["tracing-integration"] }'
+dependency_violations="[]"
+dependency_violation_count=0
+dependency_docs_checked=0
+
+append_dependency_violation() {
+  local file="$1"
+  local line="$2"
+  local code="$3"
+  local context="$4"
+  local expected="$5"
+  local obj
+  obj=$(jq -cn \
+    --arg file "$file" \
+    --arg line "$line" \
+    --arg code "$code" \
+    --arg context "$context" \
+    --arg expected "$expected" \
+    '{file: $file, line: ($line | tonumber? // 0), code: $code, context: $context, expected: $expected}')
+  dependency_violations=$(printf '%s' "$dependency_violations" | jq --argjson obj "$obj" '. + [$obj]')
+  dependency_violation_count=$((dependency_violation_count + 1))
+}
+
+if [ -f "$CARGO_TOML" ]; then
+  dependency_docs_checked=$((dependency_docs_checked + 1))
+  if ! grep -Fq "$accepted_asupersync_profile" "$CARGO_TOML"; then
+    hit=$(grep -nE '^asupersync[[:space:]]*=' "$CARGO_TOML" 2>/dev/null | head -1 || true)
+    append_dependency_violation \
+      "Cargo.toml" \
+      "$(printf '%s' "$hit" | awk -F: '{print $1}')" \
+      "dependency_profile_drift" \
+      "$(printf '%s' "$hit" | cut -d: -f2-)" \
+      "$accepted_asupersync_profile"
+  fi
+fi
+
+if [ -f "$DEPENDENCY_RESEARCH_DOC" ]; then
+  dependency_docs_checked=$((dependency_docs_checked + 1))
+  if ! grep -Fq "$accepted_asupersync_profile" "$DEPENDENCY_RESEARCH_DOC"; then
+    hit=$(grep -nF 'asupersync = {' "$DEPENDENCY_RESEARCH_DOC" 2>/dev/null | head -1 || true)
+    append_dependency_violation \
+      "docs/dependency-research-notes.md" \
+      "$(printf '%s' "$hit" | awk -F: '{print $1}')" \
+      "dependency_profile_drift" \
+      "$(printf '%s' "$hit" | cut -d: -f2-)" \
+      "$accepted_asupersync_profile"
+  fi
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    append_dependency_violation \
+      "docs/dependency-research-notes.md" \
+      "$(printf '%s' "$hit" | awk -F: '{print $1}')" \
+      "stale_dependency_profile_reference" \
+      "$(printf '%s' "$hit" | cut -d: -f2-)" \
+      "asupersync 0.3.3 with default-features=false and tracing-integration"
+  done < <(grep -nE 'asupersync[^[:cntrl:]]*(0\.3\.[12])|0\.3\.[12][^[:cntrl:]]*asupersync|leave .{0,80}asupersync.{0,80}default features|\["test-internals", "proc-macros"\]' "$DEPENDENCY_RESEARCH_DOC" 2>/dev/null || true)
+fi
+
+if [ -f "$DEPENDENCY_MATRIX_DOC" ]; then
+  dependency_docs_checked=$((dependency_docs_checked + 1))
+  matrix_line=$(grep -nE "^\| \`asupersync\` \|" "$DEPENDENCY_MATRIX_DOC" 2>/dev/null | head -1 || true)
+  if ! printf '%s' "$matrix_line" | grep -Fq "registry \`0.3.3\`" \
+    || ! printf '%s' "$matrix_line" | grep -Fq 'default-features = false' \
+    || ! printf '%s' "$matrix_line" | grep -Fq 'tracing-integration'; then
+    append_dependency_violation \
+      "docs/dependency-contract-matrix.md" \
+      "$(printf '%s' "$matrix_line" | awk -F: '{print $1}')" \
+      "dependency_profile_drift" \
+      "$(printf '%s' "$matrix_line" | cut -d: -f2-)" \
+      "asupersync matrix row includes registry \`0.3.3\`, \`default-features = false\`, and \`tracing-integration\`"
+  fi
+fi
+
+if [ -f "$COMPREHENSIVE_PLAN_DOC" ]; then
+  dependency_docs_checked=$((dependency_docs_checked + 1))
+  plan_line=$(grep -nE '^asupersync[[:space:]]*=' "$COMPREHENSIVE_PLAN_DOC" 2>/dev/null | head -1 || true)
+  if ! printf '%s' "$plan_line" | grep -Fq 'version = "0.3.3"' \
+    || ! printf '%s' "$plan_line" | grep -Fq 'default-features = false' \
+    || ! printf '%s' "$plan_line" | grep -Fq 'tracing-integration'; then
+    append_dependency_violation \
+      "COMPREHENSIVE_PLAN.md" \
+      "$(printf '%s' "$plan_line" | awk -F: '{print $1}')" \
+      "dependency_profile_drift" \
+      "$(printf '%s' "$plan_line" | cut -d: -f2-)" \
+      "$accepted_asupersync_profile"
+  fi
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    append_dependency_violation \
+      "COMPREHENSIVE_PLAN.md" \
+      "$(printf '%s' "$hit" | awk -F: '{print $1}')" \
+      "stale_dependency_profile_reference" \
+      "$(printf '%s' "$hit" | cut -d: -f2-)" \
+      "asupersync 0.3.3 with default-features=false and tracing-integration"
+  done < <(grep -nE 'asupersync[^[:cntrl:]]*(0\.3\.[12]|version = "0\.3")|features = \["proc-macros"\]' "$COMPREHENSIVE_PLAN_DOC" 2>/dev/null || true)
+fi
+
+dependency_status="ok"
+[ "$dependency_violation_count" -gt 0 ] && dependency_status="violations"
+emit_event "dependency_xcheck" "$dependency_status" \
+  "cross-checked accepted dependency profile prose against Cargo.toml" \
+  "$(jq -cn --argjson f "$dependency_docs_checked" --argjson v "$dependency_violation_count" \
+    '{dependencyDocsChecked: $f, dependencyProfileViolations: $v}')" \
+  "[]"
+
+# ---- Phase 6: summary ------------------------------------------------------
+
+total_violations=$((stale_count + example_violation_count + taxonomy_orphan_count + dependency_violation_count))
 verdict="ok"
 [ "$total_violations" -gt 0 ] && verdict="violations"
 
@@ -333,6 +451,7 @@ report=$(jq -n \
   --argjson stale "$stale_hits" \
   --argjson examples "$example_violations" \
   --argjson taxonomy "$taxonomy_orphans" \
+  --argjson dependency "$dependency_violations" \
   --argjson stale_count "$stale_count" \
   --argjson example_count "$example_count" \
   --argjson example_violation_count "$example_violation_count" \
@@ -340,6 +459,8 @@ report=$(jq -n \
   --argjson taxonomy_orphan_count "$taxonomy_orphan_count" \
   --argjson documented_codes "$documented_codes" \
   --argjson fixture_codes "$fixture_codes" \
+  --argjson dependency_docs_checked "$dependency_docs_checked" \
+  --argjson dependency_violation_count "$dependency_violation_count" \
   --argjson docs_scanned "${#CURRENT_DOCS[@]}" \
   '{
     schema: $schema,
@@ -354,13 +475,16 @@ report=$(jq -n \
       skippedLegacyExamples: $example_skipped_legacy,
       documentedCodes: $documented_codes,
       fixtureCodes: $fixture_codes,
-      documentedMissingFixture: $taxonomy_orphan_count
+      documentedMissingFixture: $taxonomy_orphan_count,
+      dependencyDocsChecked: $dependency_docs_checked,
+      dependencyProfileViolations: $dependency_violation_count
     },
     schemaInventory: $schema_ids,
     violations: {
       docsScan: $stale,
       jsonExampleCheck: $examples,
-      taxonomyXcheck: $taxonomy
+      taxonomyXcheck: $taxonomy,
+      dependencyXcheck: $dependency
     }
   }')
 
@@ -387,6 +511,8 @@ if [ "$QUIET" -ne 1 ]; then
     printf '  documented codes: %s\n' "$documented_codes"
     printf '  fixture codes: %s\n' "$fixture_codes"
     printf '  documented codes missing fixture: %s\n' "$taxonomy_orphan_count"
+    printf '  dependency docs checked: %s\n' "$dependency_docs_checked"
+    printf '  dependency profile violations: %s\n' "$dependency_violation_count"
   } >&2
 fi
 

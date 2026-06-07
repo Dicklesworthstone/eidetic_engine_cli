@@ -120,6 +120,12 @@ perf.data.*
 # remote Cargo verification.
 tests/audit_artifacts/latest_*.json
 
+# Git recovery output from `git fsck --lost-found` is not source input. It can
+# contain thousands of transient object files under .git/lost-found/ and rsync
+# can fail if those entries change while exact-closure sync is running.
+.git/lost-found/
+.git/lost-found/**
+
 # bd-1h8ji.4 — AppleDouble / macOS Finder metadata. These files are created on
 # Mac when extended attributes are stored on filesystems that don't natively
 # support them (USB drives, ExFAT, network shares). They are NOT source inputs

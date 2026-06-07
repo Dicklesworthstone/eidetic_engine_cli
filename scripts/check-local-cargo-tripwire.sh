@@ -117,10 +117,10 @@ classify_command() {
         return
     fi
 
-    # `rch diagnose` is a read-only classifier. It may quote a Cargo
-    # command as data, but it does not execute that command locally.
-    if is_rch_diagnose_command "$cmd"; then
-        printf 'allowed\trch diagnose command classifies Rust verifier payload without executing it\t-\t-\n'
+    # RCH payload-inspection commands may quote a Cargo command as data,
+    # but they do not execute that command locally.
+    if is_rch_payload_inspection_command "$cmd"; then
+        printf 'allowed\trch payload-inspection command classifies Rust verifier payload without executing it\t-\t-\n'
         return
     fi
 
@@ -128,7 +128,7 @@ classify_command() {
     # `rch exec -- cargo ...` can fall back to local Cargo when topology
     # admission fails, so the tripwire denies it and points callers at
     # scripts/rch_verify.sh or RCH_REQUIRE_REMOTE=1.
-    if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]/])rch([[:space:]]+--json)?[[:space:]]+exec([[:space:]]|--)'; then
+    if is_rch_exec_command "$cmd"; then
         if printf '%s' "$cmd" | grep -Eq "(cargo|rustc|rustdoc)[[:space:]]"; then
             if printf '%s' "$cmd" | grep -Eq 'RCH_REQUIRE_REMOTE[[:space:]]*=[[:space:]]*1'; then
                 printf 'allowed\tcargo wrapped through remote-required rch exec\t-\t-\n'
@@ -220,10 +220,24 @@ probe_processes() {
         case "$cmd" in
             *scripts/rch_verify.sh*) continue ;;
         esac
+        # Stable rch_verify re-execs itself through `bash -s -- ...`, so
+        # the wrapper process no longer has scripts/rch_verify.sh in argv.
+        # That shell is policy-compliant data plumbing, not a local Cargo
+        # process; any spawned local cargo/rustc child is still reported by
+        # its own process row.
+        if is_stable_rch_verify_wrapper_command "$cmd"; then
+            continue
+        fi
         # Skip read-only RCH diagnostics. The command line can include
         # `cargo check ...` as the payload being classified, but no local
-        # Cargo process is spawned by `rch diagnose`.
-        if is_rch_diagnose_command "$cmd"; then
+        # Cargo process is spawned by these payload-inspection commands.
+        if is_rch_payload_inspection_command "$cmd"; then
+            continue
+        fi
+        # Skip explicit SSH remote-proof launchers. Their argv can contain a
+        # Cargo payload string, but the local process is ssh; any real local
+        # cargo/rustc child remains visible as its own process row.
+        if is_ssh_remote_rust_payload_command "$cmd"; then
             continue
         fi
         local cwd="-"
@@ -239,9 +253,10 @@ probe_processes() {
             "$PWD"*) matches_repo=true ;;
         esac
         [ "$matches_repo" = true ] || continue
-        # Skip if rch exec appears anywhere in the command (this is the
-        # remote-execution local launcher process).
-        if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]/])rch[[:space:]]+exec'; then
+        # Skip if an RCH exec helper appears anywhere in the command
+        # (this is the remote-execution local launcher process). The
+        # installed helper can be versioned, such as rch-manifestfix-*.
+        if is_rch_exec_command "$cmd"; then
             continue
         fi
         local command_kind
@@ -298,8 +313,30 @@ command_mentions_rust_tool() {
     printf '%s' "$1" | grep -Eq "(^|[[:space:]/'\"(;])cargo([[:space:]]|$)|(^|[[:space:]/'\"(;])rustc([[:space:]]|$)|(^|[[:space:]/'\"(;])rustdoc([[:space:]]|$)"
 }
 
+is_stable_rch_verify_wrapper_command() {
+    printf '%s' "$1" | grep -Eq '(^|[[:space:]/])bash[[:space:]]+-s[[:space:]]+--([[:space:]]|$)' &&
+        command_mentions_rust_tool "$1"
+}
+
+is_rch_payload_inspection_command() {
+    is_rch_diagnose_command "$1" || is_rch_workers_capabilities_command "$1"
+}
+
 is_rch_diagnose_command() {
-    printf '%s' "$1" | grep -Eq '(^|[[:space:]/])rch([[:space:]]+--json)?[[:space:]]+diagnose([[:space:]]|$)'
+    printf '%s' "$1" | grep -Eq '(^|[[:space:]/])rch([._-][^[:space:]/]+)?([[:space:]]+--json)?[[:space:]]+diagnose([[:space:]]|$)'
+}
+
+is_rch_workers_capabilities_command() {
+    printf '%s' "$1" | grep -Eq '(^|[[:space:]/])rch([._-][^[:space:]/]+)?([[:space:]]+--json)?[[:space:]]+workers[[:space:]]+capabilities([[:space:]]|$)'
+}
+
+is_rch_exec_command() {
+    printf '%s' "$1" | grep -Eq '(^|[[:space:]/])rch([._-][^[:space:]/]+)?([[:space:]]+--json)?[[:space:]]+exec([[:space:]]|--)'
+}
+
+is_ssh_remote_rust_payload_command() {
+    printf '%s' "$1" | grep -Eq '(^|[[:space:]/])ssh([[:space:]]|$)' &&
+        command_mentions_rust_tool "$1"
 }
 
 command_kind_from_command() {
@@ -317,15 +354,15 @@ cargo_subcommand_from_command() {
     printf '%s\n' "$1" | awk '
         {
             for (i = 1; i <= NF; i++) {
-                token = $i
-                gsub(/^[^A-Za-z0-9_\/.-]+/, "", token)
-                gsub(/[^A-Za-z0-9_\/.-]+$/, "", token)
-                if (token == "cargo" || token ~ /\/cargo$/) {
+                word = $i
+                gsub(/^[^A-Za-z0-9_\/.-]+/, "", word)
+                gsub(/[^A-Za-z0-9_\/.-]+$/, "", word)
+                if (word == "cargo" || word ~ /\/cargo$/) {
                     if (i + 1 <= NF) {
-                        next_token = $(i + 1)
-                        gsub(/^[^A-Za-z0-9_-]+/, "", next_token)
-                        gsub(/[^A-Za-z0-9_-]+$/, "", next_token)
-                        print next_token
+                        next_word = $(i + 1)
+                        gsub(/^[^A-Za-z0-9_-]+/, "", next_word)
+                        gsub(/[^A-Za-z0-9_-]+$/, "", next_word)
+                        print next_word
                         exit
                     }
                 }
@@ -773,11 +810,23 @@ run_self_test() {
         denied*'rch_exec_without_remote_required'*) ;;
         *) printf 'self-test FAILED: bare rch exec wrapper must be denied; got %s\n' "$result" >&2; exit 1 ;;
     esac
+    # Bare versioned RCH helper can still fall back locally → DENIED.
+    result=$(classify_command "/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 exec -- env TMPDIR=/tmp cargo test --lib foo")
+    case "$result" in
+        denied*'rch_exec_without_remote_required'*) ;;
+        *) printf 'self-test FAILED: bare versioned rch helper must be denied; got %s\n' "$result" >&2; exit 1 ;;
+    esac
     # Remote-required rch exec → ALLOWED.
     result=$(classify_command "RCH_REQUIRE_REMOTE=1 rch exec -- env TMPDIR=/tmp cargo test --lib foo")
     case "$result" in
         allowed*) ;;
         *) printf 'self-test FAILED: remote-required rch exec wrapper must be allowed; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    # Remote-required versioned RCH helper → ALLOWED.
+    result=$(classify_command "RCH_REQUIRE_REMOTE=1 /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 exec -- env TMPDIR=/tmp cargo test --lib foo")
+    case "$result" in
+        allowed*) ;;
+        *) printf 'self-test FAILED: remote-required versioned rch helper must be allowed; got %s\n' "$result" >&2; exit 1 ;;
     esac
     # Wrapped through the repo verifier → ALLOWED.
     result=$(classify_command "scripts/rch_verify.sh -- cargo test --lib foo")
@@ -798,7 +847,7 @@ run_self_test() {
         *) printf 'self-test FAILED: cargo metadata must be allowed; got %s\n' "$result" >&2; exit 1 ;;
     esac
     # Absolute path wrapped remote-required rch exec → ALLOWED.
-    result=$(classify_command "RCH_REQUIRE_REMOTE=1 /Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- env TMPDIR=/tmp cargo bench --bench foo")
+    result=$(classify_command "RCH_REQUIRE_REMOTE=1 /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 exec -- env TMPDIR=/tmp cargo bench --bench foo")
     case "$result" in
         allowed*) ;;
         *) printf 'self-test FAILED: absolute-path remote-required rch exec must be allowed; got %s\n' "$result" >&2; exit 1 ;;
@@ -808,6 +857,18 @@ run_self_test() {
     case "$result" in
         allowed*) ;;
         *) printf 'self-test FAILED: rch diagnose dry-run payload must be allowed; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    # Versioned rch diagnose quotes a Cargo command as read-only data → ALLOWED.
+    result=$(classify_command "/Users/jemanuel/.local/bin/rch.20260519T213833Z.pre-1.0.24 diagnose --json cargo test --lib global -- --nocapture")
+    case "$result" in
+        allowed*) ;;
+        *) printf 'self-test FAILED: versioned rch diagnose payload must be allowed; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    # Worker capability refresh quotes a Cargo command as read-only data → ALLOWED.
+    result=$(classify_command "rch workers capabilities --refresh --command cargo test --lib lod_ -- --nocapture --json")
+    case "$result" in
+        allowed*) ;;
+        *) printf 'self-test FAILED: rch workers capabilities payload must be allowed; got %s\n' "$result" >&2; exit 1 ;;
     esac
     # Empty command → ALLOWED.
     result=$(classify_command "")
@@ -838,6 +899,8 @@ run_self_test() {
         if ! printf '%s' "$fixture_report" | jq -e '
             .count == 3
             and ([.processes[].command] | map(contains("lsd")) | any | not)
+            and ([.processes[].command] | map(contains("bash -s --")) | any | not)
+            and ([.processes[].command] | map(contains("ssh -i")) | any | not)
             and any(.detectedLocalBuilds[]; .policyStatus == "local_cargo_read_only_lock_holder" and .subcommand == "metadata" and .packageCacheLockHeld == true)
             and any(.detectedLocalBuilds[]; .policyStatus == "local_cargo_disallowed" and .subcommand == "test" and .manifestPath == "/Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml")
             and any(.detectedLocalBuilds[]; .policyStatus == "local_rust_tool_disallowed" and .commandKind == "rustc")
@@ -846,7 +909,7 @@ run_self_test() {
             exit 1
         fi
     fi
-    printf 'self-test PASSED: 17 classifier cases, JSON repair action, and process fixture produced expected outcomes\n'
+    printf 'self-test PASSED: 21 classifier cases, JSON repair action, stable-wrapper/ssh exclusion, and process fixture produced expected outcomes\n'
     exit 0
 }
 

@@ -6,7 +6,20 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+if [ "${RCH_VERIFY_STABLE_REEXEC:-0}" != "1" ]; then
+    RCH_VERIFY_ORIGINAL_SCRIPT_PATH="${RCH_VERIFY_ORIGINAL_SCRIPT_PATH:-$0}"
+    export RCH_VERIFY_ORIGINAL_SCRIPT_PATH
+    RCH_VERIFY_STABLE_REEXEC=1
+    export RCH_VERIFY_STABLE_REEXEC
+    if ! RCH_VERIFY_SCRIPT_SOURCE="$(< "$0")"; then
+        echo "rch_verify: failed to read stable script source from $0" >&2
+        exit 2
+    fi
+    exec bash -s -- "$@" <<<"$RCH_VERIFY_SCRIPT_SOURCE"
+fi
+
+SCRIPT_PATH="${RCH_VERIFY_ORIGINAL_SCRIPT_PATH:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd -P)"
 
 usage() {
     cat <<'EOF'
@@ -30,7 +43,7 @@ Options:
                             Required local free bytes for build-admission checks
   --artifact-destination <path>
                             Extra local artifact destination checked by build-admission
-  --require-clean-tree      Refuse before RCH when the git checkout is dirty
+  --require-clean-tree      Refuse before RCH when the working tree is dirty
   --committed-tree          Verify the committed --treeish from a generated source export when safe
   --treeish <ref>           Committed-tree ref to prove (default: HEAD)
   --known-blocker-store <path>
@@ -51,6 +64,8 @@ Environment:
   RCH_VERIFY_PREFLIGHT_TIMEOUT_MS  Local helper probe timeout budget (default: 10000)
   RCH_VERIFY_TAIL_BYTES          Diagnostic stdout/stderr tail size (default: 4000)
   RCH_VERIFY_TMPDIR              Retained diagnostic artifact directory (default: /tmp)
+  RCH_BUILD_TIMEOUT_SEC          Remote build timeout forwarded to rch exec
+  RCH_TEST_TIMEOUT_SEC           Remote test timeout forwarded to rch exec
 
 Accepted Cargo verifier shapes:
   cargo check ...
@@ -105,16 +120,44 @@ RCH_ATTEMPT_STDERR_FILE=""
 RCH_ATTEMPT_META_FILE=""
 RCH_RUNTIME_JSON='{"status":"not_checked","client_path":null,"client_version":null,"client_compat":null,"daemon_version":null,"daemon_compat":null,"daemon_socket_path":null,"message":null}'
 LOCAL_CARGO_PROCESSES_JSON='{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"not_run","count":0,"processes":[],"detectedLocalBuilds":[],"reason":"not requested"}'
+host_can_run_executable() {
+    local candidate="${1:-}"
+    [ -n "$candidate" ] || return 1
+    [ -x "$candidate" ] || return 1
+    command -v file >/dev/null 2>&1 || return 0
+
+    local host_kind file_info
+    host_kind="$(uname -s 2>/dev/null || printf unknown)"
+    file_info="$(file -b "$candidate" 2>/dev/null || true)"
+    case "$host_kind:$file_info" in
+        Darwin:*Mach-O*) return 0 ;;
+        Darwin:*script*|Darwin:*text*) return 0 ;;
+        Darwin:*) return 1 ;;
+        Linux:*ELF*) return 0 ;;
+        Linux:*script*|Linux:*text*) return 0 ;;
+        Linux:*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 RCH_MANIFEST_FIX_SIDECAR_BIN="/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5"
 RCH_E327_SIDECAR_BIN="/Users/jemanuel/.local/bin/rch-33720a8"
+RCH_MACOS_SOURCE_BIN="/Volumes/USBNVME16TB/temp_agent_space/rch-macos-target/debug/rch"
 DEFAULT_RCH_BIN="/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch"
-if [ -z "${RCH_BIN:-}" ] && [ -x "$RCH_MANIFEST_FIX_SIDECAR_BIN" ]; then
-    RCH_BIN="$RCH_MANIFEST_FIX_SIDECAR_BIN"
-elif [ -z "${RCH_BIN:-}" ] && [ -x "$RCH_E327_SIDECAR_BIN" ]; then
-    RCH_BIN="$RCH_E327_SIDECAR_BIN"
-elif [ -z "${RCH_BIN:-}" ] && [ -x "$DEFAULT_RCH_BIN" ]; then
-    RCH_BIN="$DEFAULT_RCH_BIN"
-elif [ -z "${RCH_BIN:-}" ]; then
+if [ -z "${RCH_BIN:-}" ]; then
+    for rch_candidate in \
+        "$RCH_MANIFEST_FIX_SIDECAR_BIN" \
+        "$RCH_E327_SIDECAR_BIN" \
+        "$RCH_MACOS_SOURCE_BIN" \
+        "$DEFAULT_RCH_BIN"
+    do
+        if host_can_run_executable "$rch_candidate"; then
+            RCH_BIN="$rch_candidate"
+            break
+        fi
+    done
+fi
+if [ -z "${RCH_BIN:-}" ]; then
     RCH_BIN="rch"
 fi
 PROJECT_ROOT="$PWD"
@@ -560,6 +603,10 @@ compute_local_cargo_processes_json() {
     fi
     if [ -n "${RCH_VERIFY_FAKE_OUTPUT:-}" ] && [ "${RCH_VERIFY_LOCAL_CARGO_SCAN:-0}" != "1" ]; then
         local_cargo_processes_not_run_json "fake RCH transcript without explicit local Cargo scan"
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ] && [ "${RCH_VERIFY_LOCAL_CARGO_SCAN:-0}" != "1" ]; then
+        local_cargo_processes_not_run_json "dry-run skips active process scan because wrapper argv contains the planned remote cargo payload"
         return 0
     fi
 
@@ -2209,11 +2256,15 @@ run_rch_invocation_once() {
         "$RCH_ATTEMPT_META_FILE" \
         "$PROJECT_ROOT" \
         env \
+        "RCH_WORKER=${RCH_WORKER:-}" \
         "RCH_WORKERS=${RCH_WORKERS:-}" \
         "RCH_COMPRESSION=${RCH_COMPRESSION:-0}" \
+        "RCH_ENV_ALLOWLIST=$(rch_env_allowlist)" \
         "RCH_REQUIRE_REMOTE=1" \
         "RCH_QUEUE_WHEN_BUSY=${RCH_QUEUE_WHEN_BUSY:-1}" \
         "RCH_TEST_SLOTS=${RCH_TEST_SLOTS:-2}" \
+        "RCH_BUILD_TIMEOUT_SEC=${RCH_BUILD_TIMEOUT_SEC:-}" \
+        "RCH_TEST_TIMEOUT_SEC=${RCH_TEST_TIMEOUT_SEC:-}" \
         "RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
         "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
         "RCH_CANONICAL_PROJECT_ROOT=${RCH_CANONICAL_PROJECT_ROOT:-$(dirname "$(dirname "$PROJECT_ROOT")")}" \
@@ -2239,11 +2290,15 @@ run_rch_invocation_retry() {
         "$RCH_ATTEMPT_META_FILE" \
         "$PROJECT_ROOT" \
         env \
+        "RCH_WORKER=" \
         "RCH_WORKERS=$preferred_workers" \
         "RCH_COMPRESSION=${RCH_COMPRESSION:-0}" \
+        "RCH_ENV_ALLOWLIST=$(rch_env_allowlist)" \
         "RCH_REQUIRE_REMOTE=1" \
         "RCH_QUEUE_WHEN_BUSY=${RCH_QUEUE_WHEN_BUSY:-1}" \
         "RCH_TEST_SLOTS=${RCH_TEST_SLOTS:-2}" \
+        "RCH_BUILD_TIMEOUT_SEC=${RCH_BUILD_TIMEOUT_SEC:-}" \
+        "RCH_TEST_TIMEOUT_SEC=${RCH_TEST_TIMEOUT_SEC:-}" \
         "RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
         "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
         "RCH_CANONICAL_PROJECT_ROOT=${RCH_CANONICAL_PROJECT_ROOT:-$(dirname "$(dirname "$PROJECT_ROOT")")}" \
@@ -2266,6 +2321,15 @@ now_iso() {
 
 now_ms() {
     python3 -c 'import time; print(int(time.time() * 1000))'
+}
+
+rch_env_allowlist() {
+    local required="CARGO_TARGET_DIR,TMPDIR"
+    if [ -n "${RCH_ENV_ALLOWLIST:-}" ]; then
+        printf '%s,%s' "$required" "$RCH_ENV_ALLOWLIST"
+    else
+        printf '%s' "$required"
+    fi
 }
 
 RUN_STARTED_AT="$(now_iso)"
@@ -2517,6 +2581,7 @@ def selector_admission_probe(proof, degraded_codes, combined_tail):
     workers_reported = [str(item) for item in proof.get("configured_workers") or []]
     daemon_workers_reported = [str(item) for item in proof.get("daemon_workers") or []]
     selected_worker = proof.get("worker_id")
+    known_blocker_active = "rch_verify_known_blocker_active" in degraded_codes
     local_fallback_refused = (
         "rch_verify_local_fallback_refused" in degraded_codes
         or "remote required; refusing local fallback" in combined_tail
@@ -2532,7 +2597,9 @@ def selector_admission_probe(proof, degraded_codes, combined_tail):
             break
 
     selection_failure_reason = None
-    if required_runtime is None:
+    if known_blocker_active or "rch_verify_dry_run" in degraded_codes:
+        status = "not_applicable"
+    elif required_runtime is None:
         status = "not_applicable"
     elif selected_worker:
         status = "selected"
@@ -2979,9 +3046,12 @@ summary_lines = [
     f"- command_hash: `{command_hash}`",
 ]
 if build_admission.get("status") not in (None, "not_run"):
+    admitted = build_admission.get("admitted")
+    if isinstance(admitted, bool):
+        admitted = str(admitted).lower()
     summary_lines.append(
         f"- build_admission: `{build_admission.get('status')}`"
-        f" admitted=`{build_admission.get('admitted')}`"
+        f" admitted=`{admitted}`"
     )
 if proof_broker:
     summary_lines.append(
@@ -3100,7 +3170,11 @@ if event_log_path:
     if fake_invocations_path:
         fake_path = Path(fake_invocations_path)
         if fake_path.exists():
-            fake_invocation_count = len(fake_path.read_text(encoding="utf-8").splitlines())
+            fake_invocation_count = sum(
+                1
+                for line in fake_path.read_text(encoding="utf-8").splitlines()
+                if "exec --" in line
+            )
 
     def artifact_path(kind):
         for artifact in proof.get("artifacts") or []:
@@ -3170,7 +3244,7 @@ REMOTE_PROJECT_ROOT="/data/projects/eidetic_engine_cli"
 REMOTE_TARGET_DIR="/tmp/ee-rch-verify-target"
 REMOTE_PROJECT_ROOT_JSON="$(json_quote "$REMOTE_PROJECT_ROOT")"
 REMOTE_TARGET_DIR_JSON="$(json_quote "$REMOTE_TARGET_DIR")"
-REQUESTED_WORKERS_CSV="${RCH_WORKERS:-}"
+REQUESTED_WORKERS_CSV="${RCH_WORKERS:-${RCH_WORKER:-}}"
 CONFIGURED_WORKERS_CSV=""
 DAEMON_WORKERS_CSV=""
 BUILD_ADMISSION_JSON="$(json_object_not_run)"
@@ -3236,7 +3310,6 @@ else
 fi
 RCH_INVOCATION=(
     "$RCH_BIN" "exec" "--"
-    "env" "TMPDIR=/tmp" "CARGO_TARGET_DIR=$REMOTE_TARGET_DIR"
     "${ENV_OVERRIDES[@]}"
     "${COMMAND[@]}"
 )
@@ -3255,6 +3328,10 @@ fi
 
 BUILD_ADMISSION_JSON="$(compute_build_admission_json)"
 BUILD_ADMISSION_STATUS="$(build_admission_status "$BUILD_ADMISSION_JSON")"
+
+CONFIGURED_WORKERS_CSV="$(configured_workers)"
+DAEMON_WORKERS_CSV="$(daemon_workers)"
+REQUESTED_WORKERS_CSV="${RCH_WORKERS:-${RCH_WORKER:-}}"
 
 if [ "$DRY_RUN" -eq 1 ]; then
     dry_run_degraded=("rch_verify_dry_run")
@@ -3280,10 +3357,6 @@ case "$BUILD_ADMISSION_STATUS" in
         build_admission_degraded+=("rch_verify_build_admission_skipped")
         ;;
 esac
-
-CONFIGURED_WORKERS_CSV="$(configured_workers)"
-DAEMON_WORKERS_CSV="$(daemon_workers)"
-REQUESTED_WORKERS_CSV="${RCH_WORKERS:-}"
 
 proof_broker_degraded=()
 if [ -n "$PROOF_BROKER_LEDGER" ]; then
@@ -3383,6 +3456,8 @@ if [ -z "${RCH_VERIFY_FAKE_OUTPUT:-}" ]; then
     prepare_attempt_artifacts "primary"
     primary_has_artifacts=1
 fi
+combined_output=""
+exit_code=127
 set +e
 combined_output="$(run_rch_invocation_once)"
 exit_code=$?
@@ -3424,6 +3499,8 @@ if [ "$exit_code" -ne 0 ] \
         retry_note="[RCH_VERIFY] worker $disk_full_worker hit disk-full transfer failure; retrying once with RCH_WORKERS=$alternate_workers"
         start_retry_ms="$(now_ms)"
         retry_has_artifacts=0
+        retry_output=""
+        retry_exit_code=127
         if [ -z "${RCH_VERIFY_FAKE_RETRY_OUTPUT:-}" ]; then
             prepare_attempt_artifacts "retry"
             retry_has_artifacts=1

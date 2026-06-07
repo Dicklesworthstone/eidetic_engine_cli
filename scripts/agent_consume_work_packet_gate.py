@@ -97,6 +97,34 @@ COMMAND_ACTION_SAFE_STRING_FIELDS = [
 STALE_CLAIM_GATE_UNEXPECTED_ARG_PATTERN = re.compile(
     r"unexpected argument [`'\"](--claim-gate|--candidate)[`'\"]"
 )
+STALE_ENVIRONMENT_ATTESTATION_UNRECOGNIZED_PATTERN = re.compile(
+    r"unrecognized subcommand [`'\"]environment-attestation[`'\"]"
+)
+AUTHORITY_DEGRADED_BLOCKER_CODES = {
+    "agent_mail_probe_mismatch",
+    "agent_mail_semantic_readiness_failed",
+    "agent_mail_unavailable",
+    "beads_command_timeout",
+    "beads_db_jsonl_count_mismatch",
+    "beads_metadata_only_stale",
+    "beads_tracker_metadata_drift",
+    "beads_tracker_stale",
+    "build_admission_blocked",
+    "bv_command_timeout",
+    "bv_no_output",
+    "bv_recommendation_stale",
+    "bv_unavailable",
+    "local_cargo_bypass_detected",
+    "reservation_evidence_stale",
+    "rch_remote_required_fallback_prevented",
+    "rch_selector_admission_contradiction",
+    "rch_unavailable",
+    "rch_verify_local_fallback_refused",
+    "rch_verify_topology_blocked",
+    "rch_worker_topology_blocked",
+    "source_authority_ambiguous",
+    "stale_binary_suspected",
+}
 MACHINE_RESPONSE_SCHEMAS = {
     "ee.error.v2",
     "ee.response.v2",
@@ -599,6 +627,17 @@ def rch_remote_verification_reason(packet):
     return None
 
 
+def candidate_status_reason(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    status = candidate.get("status")
+    if status is None:
+        return None
+    if isinstance(status, str) and status == "open":
+        return None
+    return f"candidate_status_not_open:{redact_text(status or 'unknown', 64)}"
+
+
 def count_legacy_command_strings(value):
     if isinstance(value, str):
         return 1 if redact_text(value) else 0
@@ -667,6 +706,75 @@ def degraded_summary(payload, envelope_degraded=None):
                 add(code, "rch")
     add_objects(envelope_degraded)
     return entries
+
+
+def authority_degraded_blocker_codes(payload, envelope_degraded=None):
+    codes = []
+
+    def add_code(code):
+        if not isinstance(code, str):
+            return
+        code = code.strip()
+        if code in AUTHORITY_DEGRADED_BLOCKER_CODES and code not in codes:
+            codes.append(code)
+
+    def add_degraded_codes(container, *field_names):
+        if not isinstance(container, dict):
+            return
+        for field_name in field_names:
+            for code in list_items(container.get(field_name)):
+                add_code(code)
+
+    def add_degraded_items(items):
+        for item in list_items(items):
+            if isinstance(item, dict):
+                add_code(item.get("code"))
+            else:
+                add_code(item)
+
+    add_degraded_items(envelope_degraded)
+
+    if not isinstance(payload, dict):
+        return codes
+    add_degraded_codes(payload, "degradedCodes")
+    add_degraded_items(payload.get("degraded"))
+    for source in list_items(payload.get("sourceProvenance")):
+        if not isinstance(source, dict):
+            continue
+        add_code(source.get("code"))
+        add_degraded_codes(source, "degradedCodes")
+
+    source_authority = dict_or_empty(payload.get("sourceAuthority"))
+    add_degraded_codes(source_authority, "degradedCodes", "blockerCodes")
+    tracker = dict_or_empty(payload.get("trackerIntegrity"))
+    add_degraded_codes(tracker, "degradedCodes", "blockerCodes")
+    coordination = dict_or_empty(payload.get("coordination"))
+    agent_mail = dict_or_empty(coordination.get("agentMail"))
+    add_degraded_codes(agent_mail, "degradedCodes", "blockerCodes")
+    rch = dict_or_empty(payload.get("rchProofPosture"))
+    add_degraded_codes(rch, "degradedCodes", "blockerCodes")
+    for selector in [
+        dict_or_empty(rch.get("selectorAdmissionProbe")),
+        dict_or_empty(rch.get("selector_admission_probe")),
+    ]:
+        if (
+            selector.get("workersVsSelectionContradiction") is True
+            or selector.get("workers_vs_selection_contradiction") is True
+        ):
+            add_code("rch_selector_admission_contradiction")
+    for blocker in list_items(rch.get("knownBlockers")):
+        if not isinstance(blocker, dict):
+            continue
+        add_code(blocker.get("code"))
+        add_degraded_codes(blocker, "degradedCodes")
+    return codes
+
+
+def authority_degraded_reasons(payload, prefix, envelope_degraded=None):
+    return [
+        f"{prefix}:{redact_text(code, 96)}"
+        for code in authority_degraded_blocker_codes(payload, envelope_degraded)
+    ]
 
 
 def source_summary_from_gate(gate):
@@ -963,6 +1071,7 @@ def selected_candidate(packet):
         return {
             "id": lane.get("beadId"),
             "decision": decision,
+            "status": lane.get("status"),
             "unsafeReasons": []
             if decision == "safe_to_claim"
             else lane.get("decisionReasons", []),
@@ -972,7 +1081,7 @@ def selected_candidate(packet):
     return None
 
 
-def packet_safe_to_claim(packet, candidate):
+def packet_safe_to_claim(packet, candidate, envelope_degraded=None):
     recommended = dict_or_empty(packet.get("recommendedAction"))
     raw_safe = packet.get("safeToClaim")
     if raw_safe is None:
@@ -993,10 +1102,14 @@ def packet_safe_to_claim(packet, candidate):
         and decision == "safe_to_claim"
         and not unsafe_reasons
         and not stale_reasons
+        and candidate_status_reason(candidate) is None
         and not compact_list(packet.get("doNotProceedBecause"))
         and not malformed_packet_map_reasons(packet)
         and not malformed_packet_scalar_reasons(packet)
         and not malformed_packet_command_action_reasons(packet)
+        and not authority_degraded_reasons(
+            packet, "packet_degraded_authority", envelope_degraded
+        )
         and tracker_authoritative is True
         and not agent_mail_authority_reasons(agent_mail)
         and agent_mail.get("status") != "semantic_readiness_failed"
@@ -1018,7 +1131,7 @@ def packet_action(packet, candidate, safe_to_claim):
     return "blocked_no_action"
 
 
-def packet_why_not_safe(packet, candidate, safe_to_claim):
+def packet_why_not_safe(packet, candidate, safe_to_claim, envelope_degraded=None):
     if safe_to_claim:
         return []
 
@@ -1035,6 +1148,9 @@ def packet_why_not_safe(packet, candidate, safe_to_claim):
         decision = candidate.get("decision") or "unknown"
         if decision != "safe_to_claim":
             reasons.append(f"candidate_decision:{decision}")
+        status_reason = candidate_status_reason(candidate)
+        if status_reason:
+            reasons.append(status_reason)
         reasons.extend(compact_list(candidate.get("unsafeReasons")))
         reasons.extend(compact_list(candidate.get("staleReasons")))
         if decision == "stale_but_reclaimable":
@@ -1043,6 +1159,11 @@ def packet_why_not_safe(packet, candidate, safe_to_claim):
     reasons.extend(malformed_packet_map_reasons(packet))
     reasons.extend(malformed_packet_scalar_reasons(packet))
     reasons.extend(malformed_packet_command_action_reasons(packet))
+    reasons.extend(
+        authority_degraded_reasons(
+            packet, "packet_degraded_authority", envelope_degraded
+        )
+    )
 
     tracker = dict_or_empty(packet.get("trackerIntegrity"))
     tracker_reason = tracker_not_authoritative_reason(tracker)
@@ -1066,9 +1187,14 @@ def packet_why_not_safe(packet, candidate, safe_to_claim):
     return compact_list(reasons)
 
 
-def claim_gate_consistency_reasons(gate):
+def claim_gate_consistency_reasons(gate, envelope_degraded=None):
     reasons = []
     reasons.extend(malformed_claim_gate_reasons(gate))
+    reasons.extend(
+        authority_degraded_reasons(
+            gate, "claim_gate_degraded_authority", envelope_degraded
+        )
+    )
     requested_candidate_id = gate.get("requestedCandidateId")
     if gate.get("safeToClaim") is not True:
         reasons.append("claim_gate_safe_flag_not_true")
@@ -1176,7 +1302,7 @@ def claim_gate_consistency_reasons(gate):
 
 
 def consume_claim_gate(gate, envelope_degraded=None):
-    consistency_reasons = claim_gate_consistency_reasons(gate)
+    consistency_reasons = claim_gate_consistency_reasons(gate, envelope_degraded)
     safe_to_claim = not consistency_reasons
     candidate = gate.get("selectedCandidate")
     candidate_id = None
@@ -1211,7 +1337,7 @@ def consume_claim_gate(gate, envelope_degraded=None):
 
 def consume_work_packet(packet, envelope_degraded=None):
     candidate = selected_candidate(packet)
-    safe_to_claim = packet_safe_to_claim(packet, candidate)
+    safe_to_claim = packet_safe_to_claim(packet, candidate, envelope_degraded)
     recommended = dict_or_empty(packet.get("recommendedAction"))
     candidate_id = None
     decision = "no_candidate"
@@ -1233,7 +1359,9 @@ def consume_work_packet(packet, envelope_degraded=None):
         "mutatingActionsRequireHuman": mutating_actions_require_human(
             argv_actions, safe_to_claim
         ),
-        "whyNotSafe": packet_why_not_safe(packet, candidate, safe_to_claim),
+        "whyNotSafe": packet_why_not_safe(
+            packet, candidate, safe_to_claim, envelope_degraded
+        ),
         "sourceSummary": source_summary_from_packet(packet),
         "degradedSummary": degraded_summary(packet, envelope_degraded),
         "legacyCommandStringsRefused": legacy_refused,
@@ -1272,6 +1400,8 @@ def classify_error_code(error):
 
     if stale_claim_gate_binary_error(error):
         return "stale_claim_gate_binary"
+    if stale_environment_attestation_binary_error(error):
+        return "stale_environment_attestation_binary"
 
     code = error.get("code")
     return code or "unknown_error"
@@ -1291,22 +1421,47 @@ def stale_claim_gate_binary_error(error):
     return False
 
 
+def stale_environment_attestation_binary_error(error):
+    details = dict_or_empty(error.get("details"))
+    invocation = details.get("invocation")
+    if invocation is not None and not invocation_is_diag_environment_attestation(
+        invocation
+    ):
+        return False
+    for message in [error.get("message"), details.get("message")]:
+        if (
+            isinstance(message, str)
+            and STALE_ENVIRONMENT_ATTESTATION_UNRECOGNIZED_PATTERN.search(message)
+        ):
+            return True
+    return False
+
+
 def invocation_is_swarm_work_packet(invocation):
+    command_parts = ee_command_parts_from_invocation(invocation)
+    return command_parts[:2] == ["swarm", "work-packet"]
+
+
+def invocation_is_diag_environment_attestation(invocation):
+    command_parts = ee_command_parts_from_invocation(invocation)
+    return command_parts[:2] == ["diag", "environment-attestation"]
+
+
+def ee_command_parts_from_invocation(invocation):
     if isinstance(invocation, str):
         try:
             parts = shlex.split(invocation)
         except ValueError:
-            return False
+            return []
     elif isinstance(invocation, list):
         parts = [part for part in invocation if isinstance(part, str) and part]
     else:
-        return False
+        return []
     if parts and parts[0].endswith("/ee"):
         parts[0] = "ee"
     if not parts or parts[0] != "ee":
-        return False
-    command_parts = first_ee_command_parts(parts[1:])
-    return command_parts[:2] == ["swarm", "work-packet"]
+        return []
+    return first_ee_command_parts(parts[1:])
 
 
 EE_GLOBAL_FLAGS_WITH_VALUE = {

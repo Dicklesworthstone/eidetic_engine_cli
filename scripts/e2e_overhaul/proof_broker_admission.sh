@@ -116,24 +116,40 @@ except json.JSONDecodeError:
     payload = {}
 
 data = payload.get("data") if isinstance(payload, dict) else {}
-admission = data.get("admission") if isinstance(data, dict) else {}
-matched = data.get("matchedRecord") if isinstance(data, dict) else {}
-fingerprint = data.get("fingerprint") if isinstance(data, dict) else {}
+if not isinstance(data, dict):
+    data = {}
+admission = data.get("admission") or {}
+if not isinstance(admission, dict):
+    admission = {}
+matched = data.get("matchedRecord") or {}
+if not isinstance(matched, dict):
+    matched = {}
+fingerprint = data.get("fingerprint") or {}
+if not isinstance(fingerprint, dict):
+    fingerprint = {}
 proof_fingerprint = (
     fingerprint.get("fingerprintId")
     or data.get("fingerprintId")
     or ""
 )
-evidence_refs = matched.get("evidenceRefs") if isinstance(matched, dict) else []
-first_evidence = evidence_refs[0] if evidence_refs else {}
+evidence_refs = matched.get("evidenceRefs") or []
+if not isinstance(evidence_refs, list):
+    evidence_refs = []
+first_evidence = evidence_refs[0] if evidence_refs and isinstance(evidence_refs[0], dict) else {}
 broker_verdict = admission.get("verdict") or ""
+owner_status = data.get("ownerStatus") or {}
+if not isinstance(owner_status, dict):
+    owner_status = {}
+owner = owner_status.get("owner") or {}
+if not isinstance(owner, dict):
+    owner = {}
 
 schema_ok = (
     payload.get("schema") == "ee.response.v2"
     and isinstance(data, dict)
     and data.get("schema") == "ee.proof_broker.v1"
 )
-leak_pattern = re.compile(r"/Users/jemanuel|(?i)(token|secret|password|api[_-]?key)=")
+leak_pattern = re.compile(r"(?i)/Users/jemanuel|(token|secret|password|api[_-]?key)=")
 redaction_ok = not leak_pattern.search(stdout_text + "\n" + stderr_text)
 stderr_empty = len(stderr_text) == 0
 exit_ok = int(exit_code) == 0
@@ -171,7 +187,7 @@ event = {
         "reused_proof_hash": first_evidence.get("contentHash") or "",
         "wait_owner_job_id": (
             (admission.get("waitOwner") or {}).get("rchJobId")
-            or ((data.get("ownerStatus") or {}).get("owner") or {}).get("rchJobId")
+            or owner.get("rchJobId")
             or ""
         ),
         "first_failure_diagnosis": diagnosis,
@@ -227,6 +243,40 @@ COMMON_ADMIT_ARGS=(
     "--build-admission-posture" "remote_required_no_local_fallback"
 )
 
+run_admit_case() {
+    local label="${1:?label required}"
+    local expected_verdict="${2:?expected verdict required}"
+    local command_hash="${3:?command hash required}"
+    local normalized_argv_hash="${4:?normalized argv hash required}"
+    local source_hash="${5:?source hash required}"
+    local env_fingerprint_class="${6:?env fingerprint class required}"
+    local rch_runtime_class="${7:?rch runtime class required}"
+    local local_cargo_tripwire_class="${8:?local cargo tripwire class required}"
+    local build_admission_posture="${9:?build admission posture required}"
+    local test_filter="${10:?test filter required}"
+
+    run_proof_case "$label" "$expected_verdict" \
+        "proof" "admit" \
+        "--ledger-json" "$LEDGER_JSON" \
+        "--now" "2026-06-05T18:20:00Z" \
+        "--agent-mail-status" "live" \
+        "--bead-id" "bd-1n3x1.1" \
+        "--command-class" "cargo_test" \
+        "--source-materialization" "git_worktree" \
+        "--dirty-status-hash" "blake3:dirty-status-clean" \
+        "--target-profile" "debug" \
+        "--execution-substrate" "rch" \
+        "--worker-requirement" "required_runtime:rust" \
+        "--command-hash" "$command_hash" \
+        "--normalized-argv-hash" "$normalized_argv_hash" \
+        "--source-hash" "$source_hash" \
+        "--env-fingerprint-class" "$env_fingerprint_class" \
+        "--rch-runtime-class" "$rch_runtime_class" \
+        "--local-cargo-tripwire-class" "$local_cargo_tripwire_class" \
+        "--build-admission-posture" "$build_admission_posture" \
+        "--" "cargo" "test" "--test" "rch_verify_contract" "$test_filter"
+}
+
 run_proof_case "reuse_existing_admit" "reuse_existing" \
     "${COMMON_ADMIT_ARGS[@]}" \
     "--command-hash" "blake3:rch-command" \
@@ -248,6 +298,46 @@ run_proof_case "source_state_mismatch_admit" "source_state_mismatch" \
     "--source-hash" "blake3:dirty-current-tree" \
     "--" "cargo" "test" "--test" "rch_verify_contract" "proof_broker_stale_source"
 
+run_admit_case "dispatch_allowed_admit" "dispatch_allowed" \
+    "blake3:new-command" \
+    "blake3:new-argv" \
+    "blake3:source-v2" \
+    "class:external_cargo_target" \
+    "class:rch_client_1_0_37_daemon_0_1_3" \
+    "class:tripwire_clean" \
+    "remote_required_no_local_fallback" \
+    "proof_broker_dispatch_allowed"
+
+run_admit_case "environment_blocked_admit" "environment_blocked" \
+    "blake3:env-blocked-command" \
+    "blake3:env-blocked-argv" \
+    "blake3:source" \
+    "class:external_cargo_target" \
+    "class:rch_runtime_mismatch" \
+    "class:tripwire_clean" \
+    "remote_required_no_local_fallback" \
+    "proof_broker_environment_blocked"
+
+run_admit_case "proof_unusable_admit" "proof_unusable" \
+    "blake3:local-cargo-command" \
+    "blake3:local-cargo-argv" \
+    "blake3:source" \
+    "class:external_cargo_target" \
+    "class:rch_client_1_0_37_daemon_0_1_3" \
+    "class:local_cargo_bypass_detected" \
+    "remote_required_no_local_fallback" \
+    "proof_broker_local_cargo_bypass"
+
+run_admit_case "unknown_insufficient_evidence_admit" "unknown_insufficient_evidence" \
+    "blake3:ambiguous-command" \
+    "blake3:ambiguous-argv" \
+    "class:unknown_source" \
+    "class:unknown_env" \
+    "class:unknown_rch_runtime" \
+    "class:tripwire_unknown" \
+    "remote_required_no_local_fallback" \
+    "proof_broker_unknown_evidence"
+
 run_proof_case "wait_for_inflight_status" "wait_for_inflight" \
     "proof" "status" \
     "--ledger-json" "$LEDGER_JSON" \
@@ -256,7 +346,7 @@ run_proof_case "wait_for_inflight_status" "wait_for_inflight" \
     "--fingerprint" "proof_ea208dc26b8228a65cbaae099a"
 
 custom_event_count="$(jq -sr '[.[] | select(.schema == "ee.test_event.v1" and .kind == "assert_result" and (.fields.broker_verdict // "") != "")] | length' "$EE_TEST_LOG_PATH")"
-e2e_log_assert_num "$custom_event_count" -ge 4 "proof_broker_custom_event_rows"
+e2e_log_assert_num "$custom_event_count" -ge 8 "proof_broker_custom_event_rows"
 
 jq -n \
     --arg schema "ee.e2e.proof_broker_admission.v1" \
@@ -270,16 +360,24 @@ jq -n \
         cargoExecuted: false,
         rchExecuted: false,
         publicSurfaces: ["ee proof admit", "ee proof status"],
-        coveredVerdicts: ["reuse_existing", "wait_for_inflight", "source_state_mismatch"],
+        coveredVerdicts: [
+            "reuse_existing",
+            "wait_for_inflight",
+            "source_state_mismatch",
+            "dispatch_allowed",
+            "environment_blocked",
+            "proof_unusable",
+            "unknown_insufficient_evidence"
+        ],
         customEventCount: $customEventCount
     }' > "$SUMMARY_JSON"
 
 SUMMARY_TEXT="$(cat "$SUMMARY_JSON")"
 assert_jq "$SUMMARY_TEXT" '.schema // empty' "ee.e2e.proof_broker_admission.v1" \
     "proof_broker_summary_schema"
-assert_jq "$SUMMARY_TEXT" '.cargoExecuted // true' "false" \
+assert_jq "$SUMMARY_TEXT" '.cargoExecuted | tostring' "false" \
     "proof_broker_summary_no_cargo"
-assert_jq "$SUMMARY_TEXT" '.rchExecuted // true' "false" \
+assert_jq "$SUMMARY_TEXT" '.rchExecuted | tostring' "false" \
     "proof_broker_summary_no_rch"
 e2e_log_note "proof_broker_admission_summary path=$SUMMARY_JSON"
 

@@ -713,6 +713,53 @@ class ClaimGateConsumer(unittest.TestCase):
         self.assertFalse(claim["runnable"])
         self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
 
+    def test_claim_gate_authority_degraded_codes_fail_closed(self):
+        gate = safe_gate()
+        gate["degradedCodes"] = [
+            "beads_tracker_stale",
+            "beads_metadata_only_stale",
+            "bv_recommendation_stale",
+        ]
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertTrue(decision["mutatingActionsRequireHuman"])
+        for reason in [
+            "claim_gate_degraded_authority:beads_tracker_stale",
+            "claim_gate_degraded_authority:beads_metadata_only_stale",
+            "claim_gate_degraded_authority:bv_recommendation_stale",
+        ]:
+            self.assertIn(reason, decision["whyNotSafe"])
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
+    def test_claim_gate_envelope_authority_degraded_codes_fail_closed(self):
+        decision = consumer.consume(
+            envelope(
+                safe_gate(),
+                degraded=[
+                    {"code": "beads_tracker_stale", "severity": "high"},
+                    {"code": "no_relevant_results", "severity": "info"},
+                ],
+            )
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertTrue(decision["mutatingActionsRequireHuman"])
+        self.assertIn(
+            "claim_gate_degraded_authority:beads_tracker_stale",
+            decision["whyNotSafe"],
+        )
+        self.assertNotIn(
+            "claim_gate_degraded_authority:no_relevant_results",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
     def test_candidate_decision_mismatch_fails_closed(self):
         gate = safe_gate()
         gate["selectedCandidate"]["decision"] = "blocked_by_dependency"
@@ -1107,6 +1154,33 @@ class WorkPacketConsumer(unittest.TestCase):
                     f"{relative_path} missing sources {expected_sources - sources}",
                 )
 
+    def test_envelope_degraded_fixture_blocks_optimistic_payload(self):
+        root = load_fixture(
+            "tests/fixtures/swarm_work_packet/envelope_beads_authority_degraded.json"
+        )
+        packet = consumer.get_payload(root)
+        self.assertTrue(packet["safeToClaim"])
+        self.assertTrue(packet["recommendedAction"]["safeToClaim"])
+        self.assertEqual(packet["candidates"][0]["decision"], "safe_to_claim")
+
+        decision = consumer.consume(root)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "packet_degraded_authority:beads_tracker_stale",
+            decision["whyNotSafe"],
+        )
+        self.assertNotIn(
+            "packet_degraded_authority:no_relevant_results",
+            decision["whyNotSafe"],
+        )
+        self.assertFalse(
+            any(
+                action["runnable"] and action["mutatesState"]
+                for action in decision["argvActions"]
+            )
+        )
+
     def test_healthy_fixture_is_claim_safe_positive_control(self):
         packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
         decision = consumer.consume(packet)
@@ -1116,6 +1190,214 @@ class WorkPacketConsumer(unittest.TestCase):
         self.assertEqual(decision["whyNotSafe"], [])
         self.assertEqual(decision["sourceSummary"]["reservationAuthoritative"], True)
         self.assertEqual(decision["sourceSummary"]["inboxAuthoritative"], True)
+
+    def test_work_packet_authority_degraded_codes_fail_closed(self):
+        packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        source_provenance = packet["data"]["sourceProvenance"]
+        source_provenance[0]["degradedCodes"] = ["beads_tracker_stale"]
+        source_provenance[1]["degradedCodes"] = ["bv_recommendation_stale"]
+
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "packet_degraded_authority:beads_tracker_stale",
+            decision["whyNotSafe"],
+        )
+        self.assertIn(
+            "packet_degraded_authority:bv_recommendation_stale",
+            decision["whyNotSafe"],
+        )
+        self.assertFalse(
+            any(
+                action["runnable"] and action["mutatesState"]
+                for action in decision["argvActions"]
+            )
+        )
+
+    def test_work_packet_nested_authority_blocker_codes_fail_closed(self):
+        packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        data = packet["data"]
+        data["trackerIntegrity"]["degradedCodes"] = ["beads_tracker_stale"]
+        data["coordination"]["agentMail"]["degradedCodes"] = [
+            "agent_mail_unavailable"
+        ]
+        data["rchProofPosture"] = {
+            "remoteOnlyRequired": True,
+            "safeToLaunchCargoVerification": True,
+            "blockerCodes": ["rch_verify_topology_blocked"],
+            "knownBlockers": [
+                {
+                    "code": "stale_binary_suspected",
+                    "degradedCodes": ["rch_verify_local_fallback_refused"],
+                }
+            ],
+        }
+
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        for reason in [
+            "packet_degraded_authority:beads_tracker_stale",
+            "packet_degraded_authority:agent_mail_unavailable",
+            "packet_degraded_authority:rch_verify_topology_blocked",
+            "packet_degraded_authority:stale_binary_suspected",
+            "packet_degraded_authority:rch_verify_local_fallback_refused",
+        ]:
+            self.assertIn(reason, decision["whyNotSafe"])
+        self.assertFalse(
+            any(
+                action["runnable"] and action["mutatesState"]
+                for action in decision["argvActions"]
+            )
+        )
+
+    def test_work_packet_rch_selector_contradiction_fails_closed(self):
+        packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        data = packet["data"]
+        data["recommendedAction"] = {
+            "action": "inspect_and_claim",
+            "candidateId": "bd-safe",
+            "safeToClaim": True,
+            "suggestedCommands": [],
+            "suggestedCommandActions": [
+                safe_action(
+                    "bead_claim_candidate",
+                    ["br", "update", "bd-safe", "--status", "in_progress", "--json"],
+                    mutates=True,
+                )
+            ],
+        }
+        data["rchProofPosture"] = {
+            "remoteOnlyRequired": True,
+            "safeToLaunchCargoVerification": True,
+            "blockerCodes": [],
+            "knownBlockers": [],
+            "selectorAdmissionProbe": {
+                "workersVsSelectionContradiction": True,
+                "selectionFailureReason": "no_workers_with_rust_installed",
+                "selectedWorker": None,
+            },
+        }
+
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "packet_degraded_authority:rch_selector_admission_contradiction",
+            decision["whyNotSafe"],
+        )
+        claim = decision["argvActions"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertTrue(claim["reviewRequired"])
+
+    def test_rch_selector_contradiction_fixture_blocks_optimistic_payload(self):
+        root = load_fixture(
+            "tests/fixtures/swarm_work_packet/rch_selector_contradiction.json"
+        )
+        packet = consumer.get_payload(root)
+        self.assertFalse(packet["safeToClaim"])
+        self.assertFalse(packet["recommendedAction"]["safeToClaim"])
+        self.assertEqual(packet["candidates"][0]["decision"], "safe_to_claim")
+        self.assertFalse(
+            any(
+                action["mutatesState"]
+                for action in packet["recommendedAction"]["suggestedCommandActions"]
+            )
+        )
+        self.assertIn(
+            "rch_selector_admission_contradiction",
+            packet["rchProofPosture"]["blockerCodes"],
+        )
+        self.assertFalse(
+            packet["rchProofPosture"]["safeToLaunchCargoVerification"]
+        )
+
+        decision = consumer.consume(root)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "packet_degraded_authority:rch_selector_admission_contradiction",
+            decision["whyNotSafe"],
+        )
+        self.assertFalse(
+            any(
+                action["runnable"] and action["mutatesState"]
+                for action in decision["argvActions"]
+            )
+        )
+
+    def test_work_packet_blocked_candidate_status_fails_closed(self):
+        packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        data = packet["data"]
+        data["candidateLane"]["status"] = "blocked"
+        data["recommendedAction"] = {
+            "action": "inspect_and_claim",
+            "candidateId": "bd-safe",
+            "safeToClaim": True,
+            "suggestedCommands": [],
+            "suggestedCommandActions": [
+                safe_action(
+                    "bead_claim_candidate",
+                    ["br", "update", "bd-safe", "--status", "in_progress", "--json"],
+                    mutates=True,
+                )
+            ],
+        }
+
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn("candidate_status_not_open:blocked", decision["whyNotSafe"])
+        claim = decision["argvActions"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertTrue(claim["reviewRequired"])
+
+    def test_blocked_candidate_claimable_fixture_blocks_optimistic_payload(self):
+        root = load_fixture(
+            "tests/fixtures/swarm_work_packet/blocked_candidate_claimable.json"
+        )
+        packet = consumer.get_payload(root)
+        self.assertTrue(packet["safeToClaim"])
+        self.assertTrue(packet["recommendedAction"]["safeToClaim"])
+        self.assertEqual(packet["candidates"][0]["status"], "blocked")
+        self.assertEqual(packet["candidates"][0]["decision"], "safe_to_claim")
+
+        decision = consumer.consume(root)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn("candidate_status_not_open:blocked", decision["whyNotSafe"])
+        self.assertFalse(
+            any(
+                action["runnable"] and action["mutatesState"]
+                for action in decision["argvActions"]
+            )
+        )
+
+    def test_work_packet_envelope_authority_degraded_codes_fail_closed(self):
+        packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        packet["degraded"] = [
+            {"code": "beads_tracker_stale", "severity": "high"},
+            {"code": "no_relevant_results", "severity": "info"},
+        ]
+
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "packet_degraded_authority:beads_tracker_stale",
+            decision["whyNotSafe"],
+        )
+        self.assertNotIn(
+            "packet_degraded_authority:no_relevant_results",
+            decision["whyNotSafe"],
+        )
+        self.assertFalse(
+            any(
+                action["runnable"] and action["mutatesState"]
+                for action in decision["argvActions"]
+            )
+        )
 
     def test_packet_command_actions_are_bounded(self):
         packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
@@ -2813,6 +3095,84 @@ class ErrorHandling(unittest.TestCase):
         self.assertFalse(decision["mutatingActionsRequireHuman"])
         self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
 
+    def test_stale_environment_attestation_binary_error_fails_closed(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "usage",
+                    "message": "unrecognized subcommand 'environment-attestation'",
+                    "severity": "low",
+                    "repair": "ee --help",
+                    "repairKind": "actionable",
+                    "details": {},
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["action"], "blocked_no_action")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertFalse(decision["mutatingActionsRequireHuman"])
+        self.assertIn(
+            "error:stale_environment_attestation_binary",
+            decision["whyNotSafe"],
+        )
+
+    def test_stale_environment_attestation_binary_detection_accepts_invocation(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "usage",
+                    "message": "unrecognized subcommand `environment-attestation`",
+                    "details": {
+                        "invocation": (
+                            "ee --workspace . diag environment-attestation "
+                            "--include-rch --json"
+                        )
+                    },
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertIn(
+            "error:stale_environment_attestation_binary",
+            decision["whyNotSafe"],
+        )
+
+    def test_stale_environment_attestation_binary_detection_respects_invocation_surface(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "usage",
+                    "message": "unrecognized subcommand 'environment-attestation'",
+                    "details": {
+                        "invocation": [
+                            "ee",
+                            "help",
+                            "diag",
+                            "environment-attestation",
+                        ]
+                    },
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertIn("error:usage", decision["whyNotSafe"])
+        self.assertNotIn(
+            "error:stale_environment_attestation_binary",
+            decision["whyNotSafe"],
+        )
+
 
 class ConsumerDecisionSchemaContract(unittest.TestCase):
     def test_claim_gate_consumer_constants_match_claim_gate_schema(self):
@@ -2842,9 +3202,15 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
             ],
             source_authority["required"],
         )
+        optional_source_authority_fields = {
+            "environmentVerdict",
+            "sourceTestVerdict",
+            "remoteVerificationAdmitted",
+            "localCargoFallbackObserved",
+        }
         self.assertEqual(
+            set(source_authority["required"]) | optional_source_authority_fields,
             set(source_authority["properties"]),
-            set(source_authority["required"]),
         )
         self.assertFalse(source_authority["additionalProperties"])
         self.assertEqual(
@@ -3393,6 +3759,37 @@ class WorkPacketDocsContract(unittest.TestCase):
             body = normalize_whitespace(load_text(relative_path))
             for marker in required_markers:
                 self.assertIn(marker, body, f"{relative_path} missing {marker!r}")
+
+    def test_environment_attestation_docs_pin_beads_bv_authority_stop_rule(self):
+        body = normalize_whitespace(load_text("docs/environment_attestation.md"))
+        required_markers = [
+            "Beads plus the claim gate wins",
+            "Ignore stale BV copy-paste claim commands",
+            "Known upstream Beads/BV failure signatures",
+            "source-authority evidence, not as permission to mutate the tracker",
+            "Duplicate or stale metadata witnesses",
+            "doctor.ok=true",
+            "jsonl_newer=true",
+            "br show --no-auto-import --no-auto-flush",
+            "br sync --import-only",
+            "br sync --flush-only",
+            "BV robot output can recommend blocked or dependency-blocked work",
+            "`br ready` can include `in_progress` issues",
+            "read-only evidence collection",
+            "Agent Mail coordination",
+            "upstream issue/comment",
+            "Do not claim, reopen, close, or create Beads",
+            "live tracker authority and claim gate agree",
+            "beads_rust/issues/324",
+            "beads_rust/issues/325",
+            "beads_rust/issues/330",
+            "beads_rust/issues/331",
+            "beads_rust/issues/332",
+            "beads_rust/issues/333",
+        ]
+
+        for marker in required_markers:
+            self.assertIn(marker, body, f"environment attestation docs missing {marker!r}")
 
 
 if __name__ == "__main__":
