@@ -92,6 +92,7 @@ use crate::core::disk_pressure::{
     ArtifactRetentionOptions, BuildAdmissionOptions, DiskPressureOptions, current_unix_seconds,
     gather_artifact_retention_report, gather_build_admission_report, gather_disk_pressure_report,
 };
+use crate::core::docs_bootstrap::{CompileDocsBootstrapOptions, compile_docs_bootstrap};
 use crate::core::doctor::{
     DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport, IntegrityDiagnosticsOptions,
     IntegrityDiagnosticsReport,
@@ -677,6 +678,9 @@ pub enum Command {
     /// Create, verify, and inspect local backups.
     #[command(subcommand)]
     Backup(BackupCommand),
+    /// Compile docs into reviewable bootstrap candidates.
+    #[command(subcommand)]
+    Bootstrap(BootstrapCommand),
     /// Report feature availability, commands, and subsystem status.
     Capabilities,
     /// Derived cache inspection and explicit prewarm planning.
@@ -1207,6 +1211,43 @@ pub enum BackupCommand {
     Restore(BackupRestoreArgs),
     /// Verify a backup's integrity.
     Verify(BackupVerifyArgs),
+}
+
+/// Subcommands for `ee bootstrap`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum BootstrapCommand {
+    /// Compile allowlisted workspace docs into dry-run bootstrap candidates.
+    Docs(BootstrapDocsArgs),
+    /// Apply a previously approved bootstrap run through curation.
+    Apply(BootstrapApplyArgs),
+}
+
+/// Arguments for `ee bootstrap docs`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct BootstrapDocsArgs {
+    /// Produce a no-mutation candidate report.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Maximum bytes to read from any one allowlisted source.
+    #[arg(long, value_name = "BYTES")]
+    pub max_source_bytes: Option<u64>,
+
+    /// Maximum bytes to read across all allowlisted sources.
+    #[arg(long, value_name = "BYTES")]
+    pub max_total_bytes: Option<u64>,
+}
+
+/// Arguments for `ee bootstrap apply`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct BootstrapApplyArgs {
+    /// Bootstrap run ID to apply.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+
+    /// Only apply candidates already approved through normal curation review.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub approved_only: bool,
 }
 
 /// Arguments for `ee backup create`.
@@ -10351,6 +10392,9 @@ where
         Some(Command::Backup(BackupCommand::Verify(ref args))) => {
             handle_backup_verify(&cli, args, stdout, stderr)
         }
+        Some(Command::Bootstrap(ref bootstrap_cmd)) => {
+            handle_bootstrap_command(&cli, bootstrap_cmd, stdout, stderr)
+        }
         Some(Command::Capabilities) => {
             let report = cli.workspace.as_deref().map_or_else(
                 CapabilitiesReport::gather,
@@ -16903,6 +16947,113 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             write_stdout(stdout, &(output::render_agent_docs_json(&report) + "\n"))
+        }
+    }
+}
+
+fn handle_bootstrap_command<W, E>(
+    cli: &Cli,
+    command: &BootstrapCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match command {
+        BootstrapCommand::Docs(args) => handle_bootstrap_docs(cli, args, stdout, stderr),
+        BootstrapCommand::Apply(args) => {
+            let error = DomainError::UsageWithDetails {
+                message: format!(
+                    "ee bootstrap apply {} is not enabled in this dry-run CLI slice.",
+                    args.run_id
+                ),
+                repair: Some(
+                    "Use `ee bootstrap docs --dry-run --json`; apply will route through normal curation in the next bootstrap slice."
+                        .to_owned(),
+                ),
+                details: serde_json::json!({
+                    "runId": args.run_id,
+                    "approvedOnly": args.approved_only,
+                    "durableMutation": false,
+                    "requiredNextSlice": "bootstrap_apply_via_curate",
+                }),
+            };
+            write_domain_error(&error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_bootstrap_docs<W, E>(
+    cli: &Cli,
+    args: &BootstrapDocsArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.dry_run {
+        let error = DomainError::UsageWithDetails {
+            message: "ee bootstrap docs currently requires --dry-run.".to_owned(),
+            repair: Some("Run `ee bootstrap docs --dry-run --json`.".to_owned()),
+            details: serde_json::json!({
+                "durableMutation": false,
+                "supportedMode": "dry_run",
+            }),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let workspace_path = cli.resolve_workspace();
+    let mut options = CompileDocsBootstrapOptions::for_workspace(workspace_path.as_path());
+    if let Some(max_source_bytes) = args.max_source_bytes {
+        options.max_source_bytes = max_source_bytes;
+    }
+    if let Some(max_total_bytes) = args.max_total_bytes {
+        options.max_total_bytes = max_total_bytes;
+    }
+    let run = compile_docs_bootstrap(&options);
+    write_bootstrap_docs_run(cli, &run, stdout)
+}
+
+fn write_bootstrap_docs_run<W>(
+    cli: &Cli,
+    run: &crate::core::docs_bootstrap::BootstrapRun,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &format!(
+                "Docs bootstrap dry-run\n  Run: {}\n  Sources: {}\n  Candidates: {}\n  Quarantined: {}\n  Durable mutation: {}\n",
+                run.run_id,
+                run.source_count,
+                run.candidates.len(),
+                run.curate_quarantine.len(),
+                run.durable_mutation
+            ),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&run.data_json()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let response = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": run,
+                "degraded": &run.degraded,
+            });
+            write_stdout(stdout, &(response.to_string() + "\n"))
         }
     }
 }
@@ -49474,6 +49625,7 @@ const COMMAND_NAMES: &[&str] = &[
     "artifact",
     "audit",
     "backup",
+    "bootstrap",
     "capabilities",
     "cache",
     "causal",
@@ -49549,6 +49701,7 @@ const ANALYZE_SUBCOMMANDS: &[&str] = &["science-status"];
 const ARTIFACT_SUBCOMMANDS: &[&str] = &["register", "inspect", "list"];
 const AUDIT_SUBCOMMANDS: &[&str] = &["timeline", "show", "diff", "verify"];
 const BACKUP_SUBCOMMANDS: &[&str] = &["create", "list", "inspect", "restore", "verify"];
+const BOOTSTRAP_SUBCOMMANDS: &[&str] = &["docs", "apply"];
 const CACHE_SUBCOMMANDS: &[&str] = &["prewarm"];
 const CAUSAL_SUBCOMMANDS: &[&str] = &["trace", "compare", "estimate", "promote-plan"];
 const CERTIFICATE_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
@@ -49765,6 +49918,10 @@ impl NormalizedInvocation {
                     BackupCommand::Inspect(_) => "backup inspect".to_string(),
                     BackupCommand::Restore(_) => "backup restore".to_string(),
                     BackupCommand::Verify(_) => "backup verify".to_string(),
+                },
+                Command::Bootstrap(bootstrap) => match bootstrap {
+                    BootstrapCommand::Docs(_) => "bootstrap docs".to_string(),
+                    BootstrapCommand::Apply(_) => "bootstrap apply".to_string(),
                 },
                 Command::Capabilities => "capabilities".to_string(),
                 Command::Cache(cache) => match cache {
@@ -50352,6 +50509,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "artifact" => Some(ARTIFACT_SUBCOMMANDS),
         "audit" => Some(AUDIT_SUBCOMMANDS),
         "backup" => Some(BACKUP_SUBCOMMANDS),
+        "bootstrap" => Some(BOOTSTRAP_SUBCOMMANDS),
         "cache" => Some(CACHE_SUBCOMMANDS),
         "causal" => Some(CAUSAL_SUBCOMMANDS),
         "certificate" => Some(CERTIFICATE_SUBCOMMANDS),
@@ -54401,6 +54559,45 @@ mod tests {
                 ensure_equal(&args.dry_run, &true, "dry run")
             }
             other => Err(format!("expected backup create command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_bootstrap_docs_dry_run_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "bootstrap",
+            "docs",
+            "--dry-run",
+            "--max-source-bytes",
+            "1024",
+            "--max-total-bytes",
+            "4096",
+        ])
+        .map_err(|error| format!("failed to parse bootstrap docs: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Bootstrap(BootstrapCommand::Docs(args))) => {
+                ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(&args.max_source_bytes, &Some(1024), "max source bytes")?;
+                ensure_equal(&args.max_total_bytes, &Some(4096), "max total bytes")
+            }
+            other => Err(format!("expected bootstrap docs command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_bootstrap_apply_approved_only() -> TestResult {
+        let parsed =
+            Cli::try_parse_from(["ee", "bootstrap", "apply", "boot_123", "--approved-only"])
+                .map_err(|error| format!("failed to parse bootstrap apply: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Bootstrap(BootstrapCommand::Apply(args))) => {
+                ensure_equal(&args.run_id, &"boot_123".to_string(), "run id")?;
+                ensure_equal(&args.approved_only, &true, "approved only")
+            }
+            other => Err(format!("expected bootstrap apply command, got {other:?}")),
         }
     }
 
