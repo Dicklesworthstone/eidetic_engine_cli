@@ -2562,6 +2562,50 @@ class ErrorHandling(unittest.TestCase):
         )
         self.assertEqual(decision["sourceSummary"]["sourceCount"], 1)
 
+    def test_install_check_golden_fixtures_fail_closed(self):
+        cases = [
+            (
+                "tests/fixtures/golden/install/duplicate_path_check.json.golden",
+                "install_freshness_shadowed_binary",
+                [
+                    "install_freshness:shadowed_binary",
+                    "install_finding:current_binary_shadowed",
+                    "install_finding:duplicate_path_binary",
+                ],
+            ),
+            (
+                "tests/fixtures/golden/install/permission_denied_check.json.golden",
+                "install_freshness_path_binary_missing",
+                [
+                    "install_freshness:path_binary_missing",
+                    "install_finding:binary_not_on_path",
+                    "install_finding:install_dir_not_writable",
+                ],
+            ),
+        ]
+
+        for relative_path, decision_name, required_reasons in cases:
+            with self.subTest(relative_path=relative_path):
+                decision = consumer.consume(load_fixture(relative_path))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertEqual(decision["sourceSchema"], "ee.install.check.v1")
+                self.assertEqual(decision["decision"], decision_name)
+                self.assertEqual(decision["action"], "repair_install_freshness")
+                self.assertEqual(decision["argvActions"], [])
+                self.assertFalse(decision["mutatingActionsRequireHuman"])
+                self.assertIn(
+                    "install_check_is_not_claim_gate", decision["whyNotSafe"]
+                )
+                for reason in required_reasons:
+                    self.assertIn(reason, decision["whyNotSafe"])
+                self.assertTrue(
+                    any(
+                        reason.startswith("install_repair:")
+                        for reason in decision["whyNotSafe"]
+                    )
+                )
+
     def test_install_check_missing_freshness_fails_closed(self):
         report = install_check_report()
         report.pop("freshness")
