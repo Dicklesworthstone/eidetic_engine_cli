@@ -377,6 +377,7 @@ impl CapabilitiesReport {
         unimplemented.sort_by(|left, right| left.code.cmp(right.code));
 
         let commands = vec![
+            CommandEntry::new("attest", true, "Emit local provenance attestation bundles"),
             CommandEntry::new("capabilities", true, "Report feature availability"),
             CommandEntry::new("check", true, "Quick posture summary"),
             CommandEntry::new("doctor", true, "Health checks"),

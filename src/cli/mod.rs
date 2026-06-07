@@ -680,6 +680,9 @@ pub enum Command {
     /// Register and inspect narrow coding artifacts.
     #[command(subcommand)]
     Artifact(ArtifactCommand),
+    /// Emit redaction-safe local provenance attestation bundles.
+    #[command(subcommand)]
+    Attest(AttestCommand),
     /// Create, verify, and inspect local backups.
     #[command(subcommand)]
     Backup(BackupCommand),
@@ -1085,6 +1088,49 @@ pub enum ArtifactCommand {
     List(ArtifactListArgs),
     /// Copy artifacts to an external root and write a preservation manifest.
     Relocate(ArtifactRelocateArgs),
+}
+
+/// Subcommands for `ee attest`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum AttestCommand {
+    /// Emit an attestation bundle for one stored memory.
+    Memory(AttestMemoryArgs),
+    /// Emit an attestation bundle for one stored context pack.
+    Pack(AttestPackArgs),
+    /// Emit a hash-only attestation bundle for a query string.
+    Query(AttestQueryArgs),
+}
+
+/// Arguments for `ee attest memory`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct AttestMemoryArgs {
+    /// Memory ID to attest.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee attest pack`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct AttestPackArgs {
+    /// Pack ID to attest.
+    #[arg(value_name = "PACK_ID")]
+    pub pack_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee attest query`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct AttestQueryArgs {
+    /// Query text to attest. The raw text is not exported.
+    #[arg(value_name = "QUERY")]
+    pub query: String,
 }
 
 /// Arguments for `ee artifact register`.
@@ -10405,6 +10451,9 @@ where
         }
         Some(Command::Artifact(ArtifactCommand::Relocate(ref args))) => {
             handle_artifact_relocate(&cli, args, stdout, stderr)
+        }
+        Some(Command::Attest(ref attest_cmd)) => {
+            handle_attest_command(&cli, attest_cmd, stdout, stderr)
         }
         Some(Command::Backup(BackupCommand::Create(ref args))) => {
             handle_backup_create(&cli, args, stdout, stderr)
@@ -38311,6 +38360,169 @@ where
     }
 }
 
+fn handle_attest_command<W, E>(
+    cli: &Cli,
+    command: &AttestCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let bundle_result = match command {
+        AttestCommand::Memory(args) => {
+            let connection = match open_attest_database(cli, args.database.as_deref()) {
+                Ok(connection) => connection,
+                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            };
+            match crate::core::attest::build_memory_attestation(&connection, &args.memory_id) {
+                Ok(Some(bundle)) => Ok(bundle),
+                Ok(None) => Err(DomainError::NotFound {
+                    resource: "memory".to_owned(),
+                    id: args.memory_id.clone(),
+                    repair: Some("ee memory list --workspace . --json".to_owned()),
+                }),
+                Err(error) => Err(DomainError::Storage {
+                    message: format!("Failed to build memory attestation: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                }),
+            }
+        }
+        AttestCommand::Pack(args) => {
+            let connection = match open_attest_database(cli, args.database.as_deref()) {
+                Ok(connection) => connection,
+                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            };
+            match crate::core::attest::build_pack_attestation(&connection, &args.pack_id) {
+                Ok(Some(bundle)) => Ok(bundle),
+                Ok(None) => Err(DomainError::NotFound {
+                    resource: "pack".to_owned(),
+                    id: args.pack_id.clone(),
+                    repair: Some("ee pack --workspace . --json".to_owned()),
+                }),
+                Err(error) => Err(DomainError::Storage {
+                    message: format!("Failed to build pack attestation: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                }),
+            }
+        }
+        AttestCommand::Query(args) => Ok(crate::core::attest::build_query_attestation(&args.query)),
+    };
+
+    let bundle = match bundle_result {
+        Ok(bundle) => bundle,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    write_attestation_bundle(cli, &bundle, stdout)
+}
+
+fn open_attest_database(
+    cli: &Cli,
+    database: Option<&Path>,
+) -> Result<crate::db::DbConnection, DomainError> {
+    let workspace_path = cli.resolve_workspace();
+    let database_path = database
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace . --json".to_owned()),
+        });
+    }
+    let connection = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee status --json".to_owned()),
+        }
+    })?;
+    connection.migrate().map_err(|error| DomainError::Storage {
+        message: format!("Failed to migrate database: {error}"),
+        repair: Some("ee migrate run --workspace . --json".to_owned()),
+    })?;
+    Ok(connection)
+}
+
+fn write_attestation_bundle<W>(
+    cli: &Cli,
+    bundle: &crate::models::AttestationBundle,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let response = attestation_response_json(bundle);
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &format_attestation_markdown(bundle))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
+fn attestation_response_json(bundle: &crate::models::AttestationBundle) -> serde_json::Value {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": {
+            "schema": "ee.attest.v1",
+            "subjectKind": bundle.subject.kind.as_str(),
+            "subjectId": bundle.subject.id.as_str(),
+            "bundleHash": bundle.bundle_hash(),
+            "trustStatement": bundle.trust_statement.statement.as_str(),
+            "objectiveTruthAttested": false,
+            "rawTextIncluded": false,
+            "bundle": bundle.canonical_json_value(),
+        },
+        "degraded": [],
+    })
+}
+
+fn format_attestation_markdown(bundle: &crate::models::AttestationBundle) -> String {
+    let mut output = String::new();
+    output.push_str("# Attestation Bundle\n\n");
+    output.push_str(&format!(
+        "- Subject: `{}` `{}`\n",
+        bundle.subject.kind.as_str(),
+        bundle.subject.id
+    ));
+    output.push_str(&format!("- Bundle hash: `{}`\n", bundle.bundle_hash()));
+    output.push_str(&format!(
+        "- Evidence entries: `{}`\n",
+        bundle.evidence_manifest.entries.len()
+    ));
+    output.push_str(&format!(
+        "- Redaction entries: `{}`\n",
+        bundle.redaction_manifest.entries.len()
+    ));
+    output.push_str(&format!(
+        "- Hash entries: `{}`\n",
+        bundle.hash_manifest.entries.len()
+    ));
+    output.push_str("- Objective truth attested: `false`\n");
+    output.push_str("- Raw text included: `false`\n");
+    output.push_str(&format!(
+        "- Trust statement: {}\n",
+        bundle.trust_statement.statement
+    ));
+    if !bundle.omissions.is_empty() {
+        output.push_str("\n## Omissions\n\n");
+        for omission in &bundle.omissions {
+            output.push_str(&format!("- `{}`: {}\n", omission.field, omission.reason));
+        }
+    }
+    output
+}
+
 fn handle_why<W, E>(cli: &Cli, args: &WhyArgs, stdout: &mut W, stderr: &mut E) -> ProcessExitCode
 where
     W: Write,
@@ -65023,6 +65235,62 @@ mod tests {
             }
             _ => Err("expected Rule Update command".to_string()),
         }
+    }
+
+    #[test]
+    fn attest_command_parses_memory_pack_and_query() -> TestResult {
+        let memory = Cli::try_parse_from([
+            "ee",
+            "attest",
+            "memory",
+            "mem_attest_000000000000000001",
+            "--database",
+            ".ee/ee.db",
+            "--json",
+        ])
+        .map_err(|e| format!("failed to parse attest memory: {:?}", e.kind()))?;
+        match memory.command {
+            Some(Command::Attest(AttestCommand::Memory(args))) => {
+                ensure_equal(
+                    &args.memory_id,
+                    &"mem_attest_000000000000000001".to_string(),
+                    "memory id",
+                )?;
+                ensure(
+                    args.database.as_deref() == Some(Path::new(".ee/ee.db")),
+                    "memory database",
+                )?;
+            }
+            _ => return Err("expected Attest Memory command".to_string()),
+        }
+
+        let pack = Cli::try_parse_from([
+            "ee",
+            "attest",
+            "pack",
+            "pack_attest_000000000000000001",
+            "--json",
+        ])
+        .map_err(|e| format!("failed to parse attest pack: {:?}", e.kind()))?;
+        match pack.command {
+            Some(Command::Attest(AttestCommand::Pack(args))) => ensure_equal(
+                &args.pack_id,
+                &"pack_attest_000000000000000001".to_string(),
+                "pack id",
+            )?,
+            _ => return Err("expected Attest Pack command".to_string()),
+        }
+
+        let query = Cli::try_parse_from(["ee", "attest", "query", "release token", "--json"])
+            .map_err(|e| format!("failed to parse attest query: {:?}", e.kind()))?;
+        match query.command {
+            Some(Command::Attest(AttestCommand::Query(args))) => {
+                ensure_equal(&args.query, &"release token".to_string(), "query")?;
+            }
+            _ => return Err("expected Attest Query command".to_string()),
+        }
+
+        Ok(())
     }
 
     // ========================================================================

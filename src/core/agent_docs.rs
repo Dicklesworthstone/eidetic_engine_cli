@@ -1129,6 +1129,16 @@ pub const SUPPORT_BUNDLE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
 
 pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
     AgentDocsRecipeEntry {
+        id: "local-attestation",
+        title: "Attest local provenance for memory or pack",
+        description: "Emit a redaction-safe bundle that attests local ee custody and hash consistency, not objective truth.",
+        category: "attestation",
+        command: "ee attest memory <memory-id> --workspace . --json",
+        jq: r#"{subjectKind: .data.subjectKind, bundleHash: .data.bundleHash, objectiveTruthAttested: .data.objectiveTruthAttested, trustStatement: .data.trustStatement}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.objectiveTruthAttested == false"#,
+        failure_branches: CONTEXT_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
         id: "pre-task-context",
         title: "Fetch task context before editing",
         description: "Retrieve a compact, provenance-bearing context pack for the current task.",

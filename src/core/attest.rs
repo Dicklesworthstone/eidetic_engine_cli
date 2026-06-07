@@ -67,6 +67,49 @@ pub fn build_pack_attestation(
     )))
 }
 
+/// Build an attestation bundle for a standalone query string.
+#[must_use]
+pub fn build_query_attestation(query_text: &str) -> AttestationBundle {
+    let mut redactions = Vec::new();
+
+    let query = redact_for_attestation("query.text", "query", query_text);
+    push_redaction(&mut redactions, "query.text", "query", &query);
+
+    let query_hash = query.hash.clone();
+    let query_manifest_hash = value_hash(&json!({
+        "queryHash": query_hash.as_str(),
+        "redactionPolicy": ATTESTATION_REDACTION_POLICY,
+    }));
+
+    let evidence_entries = vec![
+        AttestationEvidenceRef::new("query", query_hash.as_str())
+            .with_schema("ee.query.attestation.v1")
+            .with_content_hash(query_manifest_hash.as_str()),
+    ];
+
+    let subject = AttestationSubject::new(
+        AttestationSubjectKind::Query,
+        query_hash.as_str(),
+        vec![
+            AttestationHashEntry::blake3("query.redacted_text", query_hash.as_str()),
+            AttestationHashEntry::blake3("query.manifest", query_manifest_hash.as_str()),
+        ],
+    );
+
+    let hash_manifest = AttestationHashManifest::new(vec![
+        AttestationHashEntry::blake3("query.redacted_text", query_hash),
+        AttestationHashEntry::blake3("query.manifest", query_manifest_hash),
+    ]);
+
+    AttestationBundle::new(
+        subject,
+        AttestationEvidenceManifest::new(evidence_entries),
+        AttestationRedactionManifest::new(ATTESTATION_REDACTION_POLICY, redactions),
+        hash_manifest,
+    )
+    .with_omissions(query_omissions())
+}
+
 /// Build a memory attestation from already-loaded DB rows.
 #[must_use]
 pub fn build_memory_attestation_from_parts(
@@ -565,6 +608,13 @@ fn pack_omissions() -> Vec<AttestationOmission> {
     ]
 }
 
+fn query_omissions() -> Vec<AttestationOmission> {
+    vec![AttestationOmission::new(
+        "query.text",
+        "raw query text is omitted; only a redacted query hash is exported",
+    )]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,5 +735,18 @@ mod tests {
         assert!(canonical.contains("pack.redacted_query"));
         assert!(canonical.contains("pack_item"));
         assert!(canonical.contains("pack.query"));
+    }
+
+    #[test]
+    fn query_attestation_hashes_query_without_exporting_raw_text() {
+        let bundle =
+            build_query_attestation("find release token sk-123456789012345678901234567890");
+        let canonical = bundle.canonical_json();
+
+        assert!(!canonical.contains("sk-123456789012345678901234567890"));
+        assert!(!canonical.contains("find release token"));
+        assert!(canonical.contains("query.redacted_text"));
+        assert!(canonical.contains("query.text"));
+        assert_eq!(bundle.subject.kind, AttestationSubjectKind::Query);
     }
 }
