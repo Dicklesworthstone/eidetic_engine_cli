@@ -3445,6 +3445,118 @@ pub fn compute_calibration(observations: &[(f64, bool)], bucket_count: u32) -> C
     }
 }
 
+/// Schema id for the calibration-honesty report (bd-1n0np.13.3).
+pub const CALIBRATION_HONESTY_SCHEMA_V1: &str = "ee.calibration_honesty.v1";
+
+/// Minimum per-class sample count below which the calibration-honesty report
+/// abstains loudly instead of asserting a hit rate.
+pub const CALIBRATION_HONESTY_MIN_SAMPLES: u32 = 30;
+
+// Wilson score-interval z for a ~95% two-sided interval.
+const CALIBRATION_HONESTY_WILSON_Z: f64 = 1.959_963_984_540_054;
+
+/// Wilson score interval `(lower, upper)` for `successes`/`n`, clamped to
+/// `[0, 1]`; the maximally-wide `[0, 1]` when `n == 0`.
+fn wilson_interval(successes: u32, n: u32) -> (f64, f64) {
+    if n == 0 {
+        return (0.0, 1.0);
+    }
+    let z = CALIBRATION_HONESTY_WILSON_Z;
+    let n_f = f64::from(n);
+    let p = f64::from(successes) / n_f;
+    let z2 = z * z;
+    let denom = 1.0 + z2 / n_f;
+    let center = (p + z2 / (2.0 * n_f)) / denom;
+    let margin = (z / denom) * (p * (1.0 - p) / n_f + z2 / (4.0 * n_f * n_f)).sqrt();
+    let lower = (center - margin).clamp(0.0, 1.0);
+    let upper = (center + margin).clamp(0.0, 1.0);
+    (lower, upper)
+}
+
+/// One situation-class row of the calibration-honesty report.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CalibrationHonestyClass {
+    pub situation_class: String,
+    pub sample_count: u32,
+    pub empirical_hit_rate: f64,
+    pub interval_lower: f64,
+    pub interval_upper: f64,
+    pub abstained: bool,
+}
+
+/// The honest empirical calibration report (ADR 0055 / bd-1n0np.13.3): the
+/// reframe of conformal coverage. Per-situation-class EMPIRICAL hit rate with
+/// sample counts and WIDE Wilson intervals, abstaining loudly when n is small.
+/// It deliberately uses NO `guarantee`/`coverage` language — a coding-memory
+/// workload violates exchangeability, so a conformal guarantee would silently
+/// decay to a guarantee-shaped heuristic. The `table_hash` pins determinism.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CalibrationHonestyReport {
+    pub schema: &'static str,
+    pub min_samples: u32,
+    pub sample_count: u32,
+    pub classes: Vec<CalibrationHonestyClass>,
+    pub table_hash: String,
+}
+
+/// Build a calibration-honesty report from `(situation_class, helpful)`
+/// observations. Deterministic: classes are emitted in sorted order and the
+/// table hash pins the canonical rows. A class with `sample_count < min_samples`
+/// abstains — its interval widens to `[0, 1]` and `abstained` is set — so a thin
+/// class can never read as a confident claim.
+#[must_use]
+pub fn calibration_honesty_report(
+    observations: &[(String, bool)],
+    min_samples: u32,
+) -> CalibrationHonestyReport {
+    let mut totals: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+    for (class, helpful) in observations {
+        let entry = totals.entry(class.clone()).or_insert((0, 0));
+        entry.0 += 1;
+        if *helpful {
+            entry.1 += 1;
+        }
+    }
+
+    let mut classes = Vec::with_capacity(totals.len());
+    let mut canonical = String::new();
+    for (situation_class, counts) in &totals {
+        let n = counts.0;
+        let hits = counts.1;
+        let empirical_hit_rate = if n == 0 {
+            0.0
+        } else {
+            f64::from(hits) / f64::from(n)
+        };
+        let abstained = n < min_samples;
+        let (interval_lower, interval_upper) = if abstained {
+            (0.0, 1.0)
+        } else {
+            wilson_interval(hits, n)
+        };
+        canonical.push_str(&format!(
+            "{situation_class}|{n}|{empirical_hit_rate:.6}|{interval_lower:.6}|{interval_upper:.6}|{abstained}\n"
+        ));
+        classes.push(CalibrationHonestyClass {
+            situation_class: situation_class.clone(),
+            sample_count: n,
+            empirical_hit_rate,
+            interval_lower,
+            interval_upper,
+            abstained,
+        });
+    }
+
+    let table_hash = format!("blake3:{}", blake3::hash(canonical.as_bytes()).to_hex());
+    CalibrationHonestyReport {
+        schema: CALIBRATION_HONESTY_SCHEMA_V1,
+        min_samples,
+        sample_count: observations.len() as u32,
+        classes,
+        table_hash,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -3756,6 +3868,44 @@ mod tests {
         let second = super::compute_calibration(&obs, 5);
         assert_eq!(first, second);
         assert_eq!(first.bucket_count, 5);
+    }
+
+    #[test]
+    fn calibration_honesty_abstains_on_small_n() {
+        let obs = vec![("rust".to_string(), true), ("rust".to_string(), false)];
+        let report = super::calibration_honesty_report(&obs, 30);
+        assert_eq!(report.schema, "ee.calibration_honesty.v1");
+        assert_eq!(report.classes.len(), 1);
+        let class = &report.classes[0];
+        assert_eq!(class.situation_class, "rust");
+        assert_eq!(class.sample_count, 2);
+        assert!(class.abstained, "n=2 < 30 must abstain loudly");
+        assert!(class.interval_lower.abs() < 1e-12);
+        assert!((class.interval_upper - 1.0).abs() < 1e-12);
+        assert!((class.empirical_hit_rate - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn calibration_honesty_reports_wilson_interval_with_enough_samples() {
+        let obs: Vec<(String, bool)> = (0..40).map(|i| ("ci".to_string(), i < 30)).collect();
+        let report = super::calibration_honesty_report(&obs, 30);
+        let class = &report.classes[0];
+        assert!(!class.abstained);
+        assert!((class.empirical_hit_rate - 0.75).abs() < 1e-9);
+        // A real Wilson interval is strictly inside (0,1) and brackets the rate.
+        assert!(class.interval_lower > 0.0 && class.interval_upper < 1.0);
+        assert!(class.interval_lower < 0.75 && class.interval_upper > 0.75);
+    }
+
+    #[test]
+    fn calibration_honesty_is_deterministic_and_drops_guarantee_language() {
+        let obs = vec![("a".to_string(), true), ("b".to_string(), false)];
+        let first = super::calibration_honesty_report(&obs, 10);
+        let second = super::calibration_honesty_report(&obs, 10);
+        assert_eq!(first, second);
+        assert!(first.table_hash.starts_with("blake3:"));
+        assert!(!first.schema.contains("guarantee"));
+        assert!(!first.schema.contains("coverage"));
     }
 
     type TestResult = Result<(), String>;
