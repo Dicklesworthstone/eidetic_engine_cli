@@ -304,6 +304,44 @@ pub fn redact_diagnostic(
     }
 }
 
+/// A redaction-safe, persistable error fingerprint (bd-1n0np.4.6): the
+/// [`ErrorFingerprint`] record — which by construction stores no raw log — plus
+/// the count and reasons of secret-like spans removed before fingerprinting.
+/// This is the redaction default for what gets stored/emitted: fingerprints +
+/// redacted-span metadata, never full logs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RedactedErrorFingerprint {
+    pub fingerprint: ErrorFingerprint,
+    pub redacted_span_count: usize,
+    pub redaction_reasons: Vec<&'static str>,
+}
+
+/// Build a redaction-safe [`ErrorFingerprint`] from a RAW diagnostic
+/// (bd-1n0np.4.6): apply policy secret/PII redaction FIRST, canonicalize the
+/// redacted text, then derive the fingerprint via the shared
+/// [`ErrorFingerprint`] model. The raw log is never retained — only the
+/// fingerprint (template signature, masked shape, simhash) and the redacted-span
+/// metadata. Use this on the persistence/output path so secrets, paths, and user
+/// data in stderr never reach storage.
+#[must_use]
+pub fn redact_to_fingerprint(
+    tool: DiagnosticTool,
+    canonical_code: Option<&str>,
+    raw_message: &str,
+) -> RedactedErrorFingerprint {
+    let report = crate::policy::redact_secret_like_content(raw_message);
+    let canonical = CanonicalDiagnostic {
+        tool,
+        canonical_code: normalize_code(canonical_code),
+        message_template: canonical_message_template(&report.content),
+    };
+    RedactedErrorFingerprint {
+        fingerprint: ErrorFingerprint::from_canonical(&canonical),
+        redacted_span_count: report.matches.len(),
+        redaction_reasons: report.redacted_reasons,
+    }
+}
+
 /// The kind of downstream artifact an error fingerprint links to (bd-1n0np.4.3):
 /// the failure → repair → proof → outcome chain. Persisted in the
 /// `error_repair_links` table (V069) once the store lands; this models the
@@ -508,7 +546,7 @@ mod tests {
         CanonicalDiagnostic, DiagnosticTool, ErrorFingerprint, ErrorRepairLinkKind,
         FingerprintLayer, SIMHASH_TAIL_MAX_DISTANCE, canonical_message_template, from_cargo,
         from_ee_error, from_rch_blocker, from_rustc, from_shell, plan_error_repair_links,
-        redact_diagnostic, simhash_hamming_distance, simhash_tail_matches,
+        redact_diagnostic, redact_to_fingerprint, simhash_hamming_distance, simhash_tail_matches,
     };
 
     #[test]
@@ -797,5 +835,49 @@ mod tests {
             assert_eq!(template, canonical_message_template(&template));
             assert!(!redacted.fingerprint_key.key.is_empty());
         }
+    }
+
+    #[test]
+    fn redact_to_fingerprint_produces_redaction_safe_record() {
+        let secret = "sk-proj-ABCDEF1234567890ABCDEF1234567890";
+        let raw = format!("auth failed api_key={secret} opening /Users/alice/app/main.rs:5");
+        let red = redact_to_fingerprint(DiagnosticTool::Ee, Some("auth_rejected"), &raw);
+
+        // The persistable fingerprint + its derived document carry no raw secret
+        // or raw path anywhere -- only signatures and masked shapes.
+        let doc = red.fingerprint.derived_document_text();
+        assert!(
+            !doc.contains(secret),
+            "derived document must not carry the raw secret"
+        );
+        assert!(
+            !doc.contains("/Users/alice"),
+            "derived document must not carry a raw path"
+        );
+        assert!(!red.fingerprint.message_template_signature.contains(secret));
+        assert!(
+            red.redacted_span_count >= 1,
+            "at least one secret span redacted"
+        );
+        assert_eq!(red.fingerprint.layered_key().key, "ee:auth_rejected");
+    }
+
+    #[test]
+    fn redact_to_fingerprint_dedups_class_and_is_clean_without_secrets() {
+        // Different identifiers, same error class -> identical redaction-safe
+        // fingerprint; no secrets -> zero redacted spans.
+        let a = redact_to_fingerprint(
+            DiagnosticTool::Rustc,
+            Some("E0277"),
+            "trait bound `X: Y` not satisfied",
+        );
+        let b = redact_to_fingerprint(
+            DiagnosticTool::Rustc,
+            Some("E0277"),
+            "trait bound `Z: W` not satisfied",
+        );
+        assert_eq!(a.fingerprint, b.fingerprint);
+        assert_eq!(a.redacted_span_count, 0);
+        assert!(a.redaction_reasons.is_empty());
     }
 }
