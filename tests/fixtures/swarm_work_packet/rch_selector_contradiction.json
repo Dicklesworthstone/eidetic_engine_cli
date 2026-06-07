@@ -1,0 +1,178 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "schema": "ee.swarm.work_packet.v1",
+    "workspace": "/repo",
+    "packetId": "swarm_work_packet_rch_selector_contradiction_0001",
+    "generatedAt": "2026-06-07T14:32:00Z",
+    "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+    "determinismKey": "blake3:rch-selector-contradiction",
+    "intendedUse": "agent_preclaim_advisory",
+    "nonMutationInvariant": {
+      "claimsBeads": false,
+      "reservesFiles": false,
+      "sendsMail": false,
+      "stagesFiles": false,
+      "runsCargo": false,
+      "runsDestructiveCommands": false
+    },
+    "sourceProvenance": [
+      {
+        "source": "beads",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "br ready --json"
+      },
+      {
+        "source": "bv",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "bv --robot-triage"
+      },
+      {
+        "source": "rch",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "rch workers capabilities plus selector admission probe"
+      }
+    ],
+    "recommendedAction": {
+      "action": "prefer_static_docs_work",
+      "candidateId": "bd-rch-selector",
+      "safeToClaim": false,
+      "suggestedCommands": [],
+      "suggestedCommandActions": [
+        {
+          "commandId": "bead_show_candidate",
+          "displayCommand": "br show bd-rch-selector --json",
+          "argv": [
+            "br",
+            "show",
+            "bd-rch-selector",
+            "--json"
+          ],
+          "shellRequired": false,
+          "copySafety": "safe_structured_argv",
+          "mutatesState": false,
+          "requiredSubstrate": "beads",
+          "when": "before_claim",
+          "rationale": "Inspect the selected bead before deciding whether to claim it."
+        }
+      ]
+    },
+    "safeToClaim": false,
+    "candidates": [
+      {
+        "id": "bd-rch-selector",
+        "title": "RCH selector contradiction optimistic payload fixture",
+        "source": "beads_ready",
+        "status": "open",
+        "priority": 2,
+        "assignee": null,
+        "decision": "safe_to_claim",
+        "collisionRisk": "none",
+        "unsafeReasons": [],
+        "staleReasons": [],
+        "sourceRefs": [
+          "br://bd-rch-selector",
+          "bv://bd-rch-selector",
+          "rch://selector-admission"
+        ]
+      }
+    ],
+    "coordination": {
+      "activeReservationCount": 0,
+      "holderAgents": [],
+      "inboxUnavailable": false,
+      "unreadInboxCount": 0,
+      "ackRequiredCount": 0,
+      "agentMailHealth": "healthy",
+      "agentMail": {
+        "status": "healthy",
+        "healthLevel": "green",
+        "unreadCount": 0,
+        "ackRequiredCount": 0,
+        "degradedCodes": [],
+        "recoveryMode": "none",
+        "archiveIndexParity": "aligned",
+        "reservationAuthoritative": true,
+        "inboxAuthoritative": true,
+        "fallbackActions": [],
+        "semanticReadiness": null
+      }
+    },
+    "trackerIntegrity": {
+      "health": "ok",
+      "jsonlPath": ".beads/issues.jsonl",
+      "dbPath": ".beads/beads.db",
+      "jsonlRecordCount": 3590,
+      "dbRecordCount": 3590,
+      "pendingImportCount": 0,
+      "externalChangesPendingImport": false,
+      "dirtyIssueCount": 0,
+      "mergeArtifactPaths": [],
+      "mergeArtifactCount": 0,
+      "jsonlParseError": null,
+      "brReadsAuthoritative": true,
+      "requiresCandidateDowngrade": false,
+      "recoveryHint": null
+    },
+    "checkout": {
+      "dirtyPathCount": 0,
+      "dirtyPathsRedacted": [],
+      "collisionRisk": "none"
+    },
+    "rchProofPosture": {
+      "sourceEnabled": true,
+      "remoteOnlyRequired": true,
+      "posture": "degraded_capacity",
+      "healthyWorkerCount": 1,
+      "safeToLaunchCargoVerification": false,
+      "localFallbackPrevented": true,
+      "blockerCodes": ["rch_selector_admission_contradiction"],
+      "knownBlockers": [],
+      "retryAfter": null,
+      "selectorAdmissionProbe": {
+        "schema": "ee.rch.selector_admission_probe.v1",
+        "status": "selection_failed",
+        "requiredRuntime": "Rust",
+        "workersReported": [
+          "vmi1149989"
+        ],
+        "daemonWorkersReported": [
+          "vmi1149989"
+        ],
+        "workersReportedCount": 1,
+        "daemonWorkersReportedCount": 1,
+        "selectedWorker": null,
+        "selectionFailureReason": "no_workers_with_rust_installed",
+        "workersVsSelectionContradiction": true,
+        "pathNormalizationWarning": null,
+        "remoteRequired": true,
+        "localFallbackRefused": true
+      }
+    },
+    "verification": {
+      "remoteOnlyRequired": true,
+      "remoteOnlySafe": false,
+      "rchPosture": "degraded_capacity",
+      "blockers": ["rch_selector_admission_contradiction"],
+      "requiredCommands": [
+        {
+          "kind": "cargo_test",
+          "command": "scripts/rch_verify.sh --summary --no-write -- cargo test --lib result_path -- --nocapture",
+          "mustUseRch": true,
+          "localFallbackAllowed": false
+        }
+      ]
+    },
+    "requiredActions": [],
+    "doNotProceedBecause": [],
+    "degraded": []
+  },
+  "degraded": []
+}

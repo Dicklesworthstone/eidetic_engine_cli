@@ -98,6 +98,7 @@ fn why_not_selected_schema_pins_read_only_counterfactual_fields() -> TestResult 
         "selected",
         "retrievalStageReached",
         "primaryReason",
+        "reasonSource",
         "filtersApplied",
         "redactionScopeExclusions",
         "degraded",
@@ -121,6 +122,18 @@ fn why_not_selected_schema_pins_read_only_counterfactual_fields() -> TestResult 
     ensure(
         schema["properties"].get("content").is_none(),
         "schema must not expose raw memory content",
+    )?;
+    ensure(
+        schema["properties"]["reasonSource"]["enum"]
+            .as_array()
+            .is_some_and(|values| {
+                values.as_slice()
+                    == [
+                        Value::String("authoritative".to_string()),
+                        Value::String("reconstructed".to_string()),
+                    ]
+            }),
+        "reasonSource enum should distinguish authoritative selector facts from reconstructed retrieval misses",
     )
 }
 
@@ -153,7 +166,35 @@ fn why_not_selected_report_matches_schema_and_omits_memory_content() -> TestResu
         "token-budget fixture should explain budget omission",
     )?;
     ensure(
+        json["reasonSource"] == "authoritative",
+        "token-budget omission should be an authoritative selector reason",
+    )?;
+    ensure(
         !json.to_string().contains("why-not-contract-fixture"),
         "report JSON must not leak raw memory content",
+    )
+}
+
+#[test]
+fn why_not_selected_marks_not_retrieved_as_reconstructed() -> TestResult {
+    let selected = candidate(1, 1.0, 20, "format before release")?;
+    let target = candidate(2, 0.95, 20, "not included in candidate universe")?;
+    let report = explain_why_not_selected(WhyNotSelectedInput::new(
+        "prepare release",
+        target,
+        TokenBudget::new(120).map_err(|error| format!("{error:?}"))?,
+        ContextPackProfile::Compact,
+        vec![selected],
+    ))
+    .map_err(|error| format!("{error:?}"))?;
+    let json = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+
+    ensure(
+        json["primaryReason"] == "not_retrieved",
+        "absent target should report a retrieval miss",
+    )?;
+    ensure(
+        json["reasonSource"] == "reconstructed",
+        "retrieval misses should be explicitly reconstructed, not authoritative",
     )
 }

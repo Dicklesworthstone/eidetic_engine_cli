@@ -75,10 +75,24 @@ impl QueryFilters {
 pub enum MemoryScope {
     SelfOnly,
     Team,
+    Global,
     Workspace,
     Verified,
     #[default]
     Swarm,
+}
+
+pub const GLOBAL_MEMORY_SCOPE_TAG: &str = "global";
+pub const HOUSE_RULE_MEMORY_SCOPE_TAG: &str = "house_rule";
+
+#[must_use]
+pub fn memory_tags_include_global_scope(tags: &[String]) -> bool {
+    tags.iter().any(|tag| {
+        matches!(
+            normalized_query_token(tag).as_str(),
+            GLOBAL_MEMORY_SCOPE_TAG | HOUSE_RULE_MEMORY_SCOPE_TAG
+        )
+    })
 }
 
 impl MemoryScope {
@@ -87,6 +101,7 @@ impl MemoryScope {
         match self {
             Self::SelfOnly => "self",
             Self::Team => "team",
+            Self::Global => "global",
             Self::Workspace => "workspace",
             Self::Verified => "verified",
             Self::Swarm => "swarm",
@@ -98,6 +113,7 @@ impl MemoryScope {
         match normalized_query_token(value).as_str() {
             "self" => Some(Self::SelfOnly),
             "team" => Some(Self::Team),
+            "global" => Some(Self::Global),
             "workspace" => Some(Self::Workspace),
             "verified" => Some(Self::Verified),
             "swarm" => Some(Self::Swarm),
@@ -1621,11 +1637,19 @@ mod tests {
     #[test]
     fn memory_scope_parse_normalizes_cli_values() {
         assert_eq!(MemoryScope::parse(" Team "), Some(MemoryScope::Team));
+        assert_eq!(MemoryScope::parse("GLOBAL"), Some(MemoryScope::Global));
         assert_eq!(
             MemoryScope::parse("WORKSPACE"),
             Some(MemoryScope::Workspace)
         );
         assert_eq!(MemoryScope::parse("unknown"), None);
+    }
+
+    #[test]
+    fn global_scope_tags_accept_global_and_house_rule_variants() {
+        assert!(memory_tags_include_global_scope(&["global".to_owned()]));
+        assert!(memory_tags_include_global_scope(&["HOUSE-RULE".to_owned()]));
+        assert!(!memory_tags_include_global_scope(&["workspace".to_owned()]));
     }
 
     #[test]

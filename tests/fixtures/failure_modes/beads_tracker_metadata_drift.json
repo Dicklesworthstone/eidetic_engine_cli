@@ -9,32 +9,32 @@
     "swarm brief",
     "swarm work-packet"
   ],
-  "severity": "info",
+  "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "Swarm brief sees br sync metadata report JSONL freshness drift, then confirms with br doctor that DB and JSONL record counts match and dirty_count is zero.",
+    "description": "Swarm brief sees br sync metadata report JSONL freshness drift, then confirms with br doctor that DB and JSONL record counts match and dirty_count is zero. The record-count parity is useful diagnosis, but metadata drift still makes Beads read authority stale for claim/reopen/close decisions.",
     "setup_commands": [
       "# create a Beads workspace where br sync --status --json reports jsonl_newer=true and dirty_count=0",
-      "# ensure br doctor --json --no-db reports equal DB/JSONL counts, zero dirty issues, and no parse or merge-artifact hazards"
+      "# ensure br doctor --json --no-db reports equal DB/JSONL counts, zero dirty issues, and no parse hazards"
     ],
     "invocation": "ee swarm brief --sources beads --workspace . --json"
   },
   "expected_emission": {
     "code": "beads_tracker_metadata_drift",
-    "severity": "info",
+    "severity": "warning",
     "message_contains": [
       "Beads sync metadata reports JSONL freshness drift",
-      "br reads remain authoritative"
+      "br reads are advisory"
     ],
-    "repair_contains": "br sync --flush-only --json",
-    "repair_string": "br sync --flush-only --json",
-    "repair_command_regex": "(?<cmd>br sync --flush-only --json)",
+    "repair_contains": "br sync --import-only --json",
+    "repair_string": "br sync --import-only --json",
+    "repair_command_regex": "(?<cmd>br sync --import-only --json)",
     "repair_safety": [
       {
-        "appliesTo": "br sync --flush-only --json",
-        "command": "br sync --flush-only --json",
+        "appliesTo": "br sync --import-only --json",
+        "command": "br sync --import-only --json",
         "riskClass": "mutating_external_coordination_repair",
-        "preflightCommand": "ee preflight check --cmd 'br sync --flush-only --json' --workspace . --json",
+        "preflightCommand": "ee preflight check --cmd 'br sync --import-only --json' --workspace . --json",
         "requiresHumanApproval": false,
         "mutatesExternalState": true,
         "mutatesTrackerState": true,

@@ -156,11 +156,16 @@ fn smoke_command_is_extracted_from_real_docs() -> TestResult {
         .as_str()
         .ok_or_else(|| format!("missing command: {payload}"))?;
     ensure(
-        command.contains("scripts/rch_verify.sh --dry-run -- cargo"),
+        command.starts_with("scripts/rch_verify.sh ")
+            && command.contains(" --dry-run")
+            && command.contains(" -- cargo "),
         format!("smoke command is not the dry-run wrapper: {payload}"),
     )?;
+    let source_file = payload["source_file"]
+        .as_str()
+        .ok_or_else(|| format!("missing smoke source file: {payload}"))?;
     ensure(
-        payload["source_file"].as_str() == Some("docs/rch_verification.md"),
+        ["docs/rch_verification.md", "docs/rch_runbook.md"].contains(&source_file),
         format!("unexpected smoke source file: {payload}"),
     )?;
     ensure(

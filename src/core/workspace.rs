@@ -1930,7 +1930,7 @@ fn workspace_git_error(error: crate::core::swarm_brief::SwarmBriefCommandError) 
                 repair: Some("Run `ee workspace hygiene` inside a git checkout.".to_string()),
             }
         }
-        crate::core::swarm_brief::SwarmBriefCommandError::Failed { status, stderr } => {
+        crate::core::swarm_brief::SwarmBriefCommandError::Failed { status, stderr, .. } => {
             DomainError::Configuration {
                 message: format!(
                     "read-only git status collection failed with status {}: {}",

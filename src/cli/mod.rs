@@ -123,6 +123,9 @@ use crate::core::handoff::{
     resume_handoff, rotate_handoff_key,
 };
 use crate::core::health::{HealthReport, StructuralHealthReport};
+use crate::core::impact::{
+    ImpactError, ImpactOptions, ImpactReport, ImpactSurfaceQuery, run_impact,
+};
 use crate::core::index::{
     INDEX_PUBLISH_LOCK_CONTENTION_CODE, IndexRebuildError, IndexRebuildOptions, IndexRebuildReport,
     IndexRebuildStatus, IndexReembedOptions, IndexStatusOptions, IndexVacuumOptions,
@@ -232,9 +235,9 @@ use crate::core::subscribe::{
     SubscribeFilter, SubscribePollOptions, parse_subscribe_filter, poll_memory_deltas,
 };
 use crate::core::swarm_brief::{
-    SwarmBriefCollectOptions, SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus,
-    SystemSwarmBriefCommandRunner, all_swarm_brief_sources, collect_swarm_brief,
-    default_swarm_brief_sources,
+    DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, SwarmBriefCollectOptions, SwarmBriefReport,
+    SwarmBriefSourceKind, SwarmBriefSourceStatus, SystemSwarmBriefCommandRunner,
+    all_swarm_brief_sources, collect_swarm_brief, default_swarm_brief_sources,
 };
 use crate::core::swarm_next_action::{
     SwarmNextActionSnapshot, SwarmWorkPacket, SwarmWorkPacketClaimGate,
@@ -277,9 +280,9 @@ use crate::models::preflight::{
 use crate::models::{
     CertificateKind, CertificateStatus, DEMO_FILE_SCHEMA_V1, DEMO_RUN_RESULT_SCHEMA_V1, DemoEntry,
     DemoFile, DemoId, DemoStatus, DomainError, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
-    FilterOperator, InstallOperation, LearningObservationSignal, MemoryScope, OutputVerification,
-    ProcessExitCode, QUERY_SCHEMA_V1, RedactionLevel, Tag, is_valid_demo_artifact_path,
-    parse_demo_file_yaml,
+    FilterOperator, InstallOperation, LearningObservationSignal, MemoryAnchorKind, MemoryScope,
+    OutputVerification, ProcessExitCode, QUERY_SCHEMA_V1, RedactionLevel, Tag,
+    is_valid_demo_artifact_path, parse_demo_file_yaml,
 };
 use crate::output;
 use crate::pack::{
@@ -323,7 +326,7 @@ const HELP_PRELUDE: &str = concat!(
     "\n",
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
-    "  Inspect:        status, doctor, capabilities, insights, memory show, memory history\n",
+    "  Inspect:        status, doctor, capabilities, insights, impact, memory show, memory history\n",
     "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome\n",
     "  Curate:         curate (candidates|validate|apply), reflect, playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
@@ -778,6 +781,8 @@ pub enum Command {
     /// Import memories and evidence from external sources.
     #[command(subcommand)]
     Import(ImportCommand),
+    /// Find memories attached to a path, symbol, command, env var, or schema.
+    Impact(ImpactArgs),
     /// Agent-safe installation checks and dry-run plans.
     #[command(subcommand)]
     Install(InstallCommand),
@@ -2431,7 +2436,7 @@ pub struct ContextArgs {
     #[arg(long, value_name = "FLOAT")]
     pub relevance_floor: Option<f32>,
 
-    /// Trust lane to apply before packing memories: self, team, workspace, verified, or swarm.
+    /// Trust lane to apply before packing memories: self, team, global, workspace, verified, or swarm.
     #[arg(long, value_parser = parse_memory_scope_arg, default_value = "swarm")]
     pub memory_scope: MemoryScope,
 
@@ -2472,7 +2477,7 @@ pub struct OrientArgs {
     pub include_rch: bool,
 
     /// Timeout for external probe commands used by the swarm brief.
-    #[arg(long = "command-timeout-ms", default_value_t = 1500)]
+    #[arg(long = "command-timeout-ms", default_value_t = DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS)]
     pub command_timeout_ms: u64,
 }
 
@@ -3124,7 +3129,7 @@ pub struct DiagEnvironmentAttestationArgs {
     pub max_recent_commits: usize,
 
     /// Per-source command timeout budget in milliseconds.
-    #[arg(long, value_name = "MS", default_value_t = 1_500)]
+    #[arg(long, value_name = "MS", default_value_t = DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS)]
     pub command_timeout_ms: u64,
 
     /// Fail with exit code 6 when any selected source is unavailable, not configured, or skipped.
@@ -3505,7 +3510,7 @@ pub struct DiagSearchArgs {
     #[arg(long, value_name = "FLOAT")]
     pub relevance_floor: Option<f32>,
 
-    /// Trust lane to apply before returning memories: self, team, workspace, verified, or swarm.
+    /// Trust lane to apply before returning memories: self, team, global, workspace, verified, or swarm.
     #[arg(long, value_parser = parse_memory_scope_arg, default_value = "swarm")]
     pub memory_scope: MemoryScope,
 
@@ -7056,7 +7061,7 @@ pub struct SearchArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub strict_source_mode: bool,
 
-    /// Trust lane to apply before returning memories: self, team, workspace, verified, or swarm.
+    /// Trust lane to apply before returning memories: self, team, global, workspace, verified, or swarm.
     #[arg(long, value_parser = parse_memory_scope_arg, default_value = "swarm")]
     pub memory_scope: MemoryScope,
 
@@ -7071,6 +7076,79 @@ pub struct SearchArgs {
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
+}
+
+/// Arguments for `ee impact`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+#[command(after_help = "With --json, impact results live at data.results.")]
+pub struct ImpactArgs {
+    /// Path surface to inspect. Use one of the typed flags for non-path surfaces.
+    #[arg(value_name = "PATH")]
+    pub surface: Option<String>,
+
+    /// Explicit path surface.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<String>,
+
+    /// Symbol surface such as a function, type, or command handler name.
+    #[arg(long, value_name = "SYMBOL")]
+    pub symbol: Option<String>,
+
+    /// Command surface such as `cargo test --lib`.
+    #[arg(long, value_name = "COMMAND")]
+    pub command: Option<String>,
+
+    /// Environment-variable surface such as EE_WORKSPACE.
+    #[arg(long = "env", value_name = "EE_VAR")]
+    pub env_var: Option<String>,
+
+    /// Response, pack, fixture, or event schema surface.
+    #[arg(long = "schema-id", value_name = "SCHEMA")]
+    pub schema_surface: Option<String>,
+
+    /// Degraded or error-code surface.
+    #[arg(long = "degraded-code", value_name = "CODE")]
+    pub degraded_code: Option<String>,
+
+    /// Dependency surface such as a crate name.
+    #[arg(long, value_name = "CRATE")]
+    pub dependency: Option<String>,
+
+    /// Configuration-key surface.
+    #[arg(long = "config-key", value_name = "KEY")]
+    pub config_key: Option<String>,
+
+    /// Maximum number of results to return.
+    #[arg(long, short = 'n', default_value_t = 10)]
+    pub limit: u32,
+
+    /// Retrieval speed/quality budget for the fallback search arm.
+    #[arg(long, value_parser = parse_speed_mode_arg, default_value = "default")]
+    pub speed: crate::search::SpeedMode,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    #[arg(long, value_name = "PATH")]
+    pub index_dir: Option<PathBuf>,
+
+    /// Search arm selection for fallback diagnostics: lexical_only, semantic_only, or hybrid.
+    #[arg(long, value_parser = parse_search_source_mode_arg, default_value = "hybrid")]
+    pub source_mode: SearchSourceMode,
+
+    /// Fail the fallback search arm instead of falling back when the requested source mode is unavailable.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_source_mode: bool,
+
+    /// Trust lane to apply before returning memories: self, team, global, workspace, verified, or swarm.
+    #[arg(long, value_parser = parse_memory_scope_arg, default_value = "swarm")]
+    pub memory_scope: MemoryScope,
+
+    /// Fail closed when relevant evidence exists outside the requested memory scope.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_scope: bool,
 }
 
 /// Arguments for `ee doctor`.
@@ -9854,7 +9932,7 @@ pub struct SwarmBriefArgs {
     pub max_recent_commits: usize,
 
     /// Per-source command timeout budget in milliseconds.
-    #[arg(long, value_name = "MS", default_value_t = 1_500)]
+    #[arg(long, value_name = "MS", default_value_t = DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS)]
     pub command_timeout_ms: u64,
 
     /// Fail with exit code 6 when any selected source is unavailable, not configured, or skipped.
@@ -9890,7 +9968,7 @@ pub struct SwarmNextActionArgs {
     pub max_recent_commits: usize,
 
     /// Per-source command timeout budget in milliseconds.
-    #[arg(long, value_name = "MS", default_value_t = 1_500)]
+    #[arg(long, value_name = "MS", default_value_t = DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS)]
     pub command_timeout_ms: u64,
 
     /// Fail with exit code 6 when any selected source is unavailable, not configured, or skipped.
@@ -9934,7 +10012,7 @@ pub struct SwarmWorkPacketArgs {
     pub max_recent_commits: usize,
 
     /// Per-source command timeout budget in milliseconds.
-    #[arg(long, value_name = "MS", default_value_t = 1_500)]
+    #[arg(long, value_name = "MS", default_value_t = DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS)]
     pub command_timeout_ms: u64,
 
     /// Fail with exit code 6 when any selected source is unavailable, not configured, or skipped.
@@ -11492,6 +11570,7 @@ where
         Some(Command::Review(ReviewCommand::Workspace(ref args))) => {
             handle_review_workspace(&cli, args, stdout, stderr)
         }
+        Some(Command::Impact(ref args)) => handle_impact(&cli, args, stdout, stderr),
         Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
         Some(Command::Share(ref command)) => share::handle_share(&cli, command, stdout, stderr),
         Some(Command::Mesh(ref command)) => mesh::handle_mesh(&cli, command, stdout, stderr),
@@ -29843,7 +29922,7 @@ fn parse_search_dedup_mode_arg(value: &str) -> Result<SearchDedupMode, String> {
 fn parse_memory_scope_arg(value: &str) -> Result<MemoryScope, String> {
     MemoryScope::parse(value).ok_or_else(|| {
         format!(
-            "Invalid memory scope '{value}'. Expected self, team, workspace, verified, or swarm."
+            "Invalid memory scope '{value}'. Expected self, team, global, workspace, verified, or swarm."
         )
     })
 }
@@ -35779,6 +35858,160 @@ fn cli_performance_timing_json(name: &'static str, elapsed: Duration) -> serde_j
         );
     }
     value
+}
+
+fn handle_impact<W, E>(
+    cli: &Cli,
+    args: &ImpactArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if let Some(exit_code) = reject_unsupported_mermaid_format(cli, "impact", stdout, stderr) {
+        return exit_code;
+    }
+
+    let surface = match impact_surface_from_args(args) {
+        Ok(surface) => surface,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let options = ImpactOptions {
+        workspace_path: cli.resolve_workspace(),
+        database_path: args.database.clone(),
+        index_dir: args.index_dir.clone(),
+        surface,
+        limit: args.limit,
+        speed: args.speed,
+        source_mode: args.source_mode,
+        strict_source_mode: args.strict_source_mode,
+        memory_scope: args.memory_scope,
+        strict_scope: args.strict_scope,
+    };
+
+    match run_impact(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &format_impact_human(&report))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&format_impact_json(&report)) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(format_impact_json(&report) + "\n")),
+        },
+        Err(error) => {
+            let domain_error = impact_error_to_domain(error);
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn impact_surface_from_args(args: &ImpactArgs) -> Result<ImpactSurfaceQuery, DomainError> {
+    let mut selected = Vec::new();
+    if let Some(value) = args.surface.as_deref() {
+        selected.push((MemoryAnchorKind::Path, value));
+    }
+    if let Some(value) = args.path.as_deref() {
+        selected.push((MemoryAnchorKind::Path, value));
+    }
+    if let Some(value) = args.symbol.as_deref() {
+        selected.push((MemoryAnchorKind::Symbol, value));
+    }
+    if let Some(value) = args.command.as_deref() {
+        selected.push((MemoryAnchorKind::Command, value));
+    }
+    if let Some(value) = args.env_var.as_deref() {
+        selected.push((MemoryAnchorKind::EnvVar, value));
+    }
+    if let Some(value) = args.schema_surface.as_deref() {
+        selected.push((MemoryAnchorKind::Schema, value));
+    }
+    if let Some(value) = args.degraded_code.as_deref() {
+        selected.push((MemoryAnchorKind::DegradedCode, value));
+    }
+    if let Some(value) = args.dependency.as_deref() {
+        selected.push((MemoryAnchorKind::Dependency, value));
+    }
+    if let Some(value) = args.config_key.as_deref() {
+        selected.push((MemoryAnchorKind::ConfigKey, value));
+    }
+
+    match selected.as_slice() {
+        [(kind, value)] => Ok(ImpactSurfaceQuery {
+            kind: *kind,
+            value: value.trim().to_owned(),
+        }),
+        [] => Err(DomainError::Usage {
+            message: "Missing impact surface.".to_owned(),
+            repair: Some(
+                "Use `ee impact <path> --json` or exactly one of --symbol, --command, --env, --schema-id, --degraded-code, --dependency, or --config-key.".to_owned(),
+            ),
+        }),
+        _ => Err(DomainError::Usage {
+            message: "Impact accepts exactly one surface target.".to_owned(),
+            repair: Some(
+                "Use either the positional path or one typed surface flag, not multiple targets."
+                    .to_owned(),
+            ),
+        }),
+    }
+}
+
+fn impact_error_to_domain(error: ImpactError) -> DomainError {
+    match error {
+        ImpactError::InvalidSurface { kind } => DomainError::Usage {
+            message: format!(
+                "Surface value could not be normalized as a {} anchor.",
+                kind.as_str()
+            ),
+            repair: Some(
+                "Check the target spelling and use the flag matching the surface kind.".to_owned(),
+            ),
+        },
+        ImpactError::Storage(error) => DomainError::Storage {
+            message: error.to_string(),
+            repair: Some("ee init --workspace .".to_owned()),
+        },
+    }
+}
+
+fn format_impact_json(report: &ImpactReport) -> String {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": report.data_json(),
+    })
+    .to_string()
+}
+
+fn format_impact_human(report: &ImpactReport) -> String {
+    let mut output = String::new();
+    output.push_str(&format!(
+        "Impact results for {} {}\n\n",
+        report.surface.kind.as_str(),
+        report.surface.redacted_anchor_value
+    ));
+    for result in &report.results {
+        output.push_str(&format!(
+            "  {}. {} ({}, score: {:.4})\n",
+            result.rank,
+            result.memory_id,
+            result.match_type.as_str(),
+            result.score
+        ));
+        output.push_str(&format!("     {}\n", result.memory.content_preview));
+    }
+    if report.results.is_empty() {
+        output.push_str("  (no matches)\n");
+    }
+    output.push_str(&format!("\nElapsed: {:.1}ms\n", report.elapsed_ms));
+    output
 }
 
 fn handle_search<W, E>(
@@ -49692,6 +49925,7 @@ impl NormalizedInvocation {
                     SchemaCommand::List => "schema list".to_string(),
                     SchemaCommand::Export { .. } => "schema export".to_string(),
                 },
+                Command::Impact(_) => "impact".to_string(),
                 Command::Search(_) => "search".to_string(),
                 Command::Share(share) => match share {
                     share::ShareCommand::Preview(_) => "share preview".to_string(),
@@ -50496,19 +50730,20 @@ mod tests {
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction,
         COORDINATION_FALLBACK_INGEST_SCHEMA_V1, COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command,
-        ContextPackProfile, CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand,
-        DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES, EconomyCommand,
-        EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand, GraphSnapshotCommand,
-        HandoffCommand, HookCommand, LabCommand, LabSwarmCommand, LabSwarmWorkloadProfile,
-        LearnCommand, LearnExperimentCommand, MIGRATION_REPAIR_COMMAND, MaintenanceCommand,
-        MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat,
-        PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
-        ReflectRequestLedgerCommand, RegressCommand, RegressExplainArgs, RegressionSurfaceArg,
-        RuleCommand, ShadowMode, SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs,
-        SwarmCommand, SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand,
-        VerifyCommand, VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
-        WorkspaceHygieneMode, db_inspect_redact_source_uri,
-        diag_environment_attestation_response_json, environment_attestation_unavailable_sources,
+        ContextPackProfile, CurateCommand, DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand,
+        DiagCommand, DiagQuarantineCommand, DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES,
+        EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand,
+        GraphSnapshotCommand, HandoffCommand, HookCommand, LabCommand, LabSwarmCommand,
+        LabSwarmWorkloadProfile, LearnCommand, LearnExperimentCommand, MIGRATION_REPAIR_COMMAND,
+        MaintenanceCommand, MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode,
+        MemoryCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
+        RedactionLevelSource, ReflectCommand, ReflectRequestLedgerCommand, RegressCommand,
+        RegressExplainArgs, RegressionSurfaceArg, RuleCommand, ShadowMode, SituationCommand,
+        StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmWorkPacketArgs,
+        TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand, VerifyRchCommand,
+        WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode,
+        db_inspect_redact_source_uri, diag_environment_attestation_response_json,
+        environment_attestation_unavailable_sources, format_impact_json,
         format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
         init_report_exit_code, json_with_data_result_path, mesh, orient_next_commands,
         parse_completion_audit_evidence_input, parse_context_profile,
@@ -50518,6 +50753,10 @@ mod tests {
         read_environment_attestation_fixture_json, run, write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
+    use crate::core::impact::{
+        IMPACT_SCHEMA_V1, ImpactFallbackStatus, ImpactMatchType, ImpactMemorySummary, ImpactReport,
+        ImpactResolvedSurface, ImpactResult,
+    };
     use crate::core::index::IndexRebuildError;
     use crate::core::lab::{InterventionType, SwapRevisionMode};
     use crate::core::search::{
@@ -50533,8 +50772,8 @@ mod tests {
     };
     use crate::models::error_codes::ALL_ERROR_CODES;
     use crate::models::{
-        ALL_DEGRADATION_CODES, MemoryId, MemoryScope, MemoryScopeStats, ProcessExitCode,
-        RedactionLevel,
+        ALL_DEGRADATION_CODES, MemoryAnchorKind, MemoryId, MemoryScope, MemoryScopeStats,
+        ProcessExitCode, RedactionLevel,
     };
     use crate::output;
     use crate::pack::PackResourceProfile;
@@ -51593,6 +51832,25 @@ mod tests {
                 ensure_equal(&command_timeout_ms, &750, "command timeout")?;
                 ensure_equal(&require_sources, &true, "require sources")
             }
+            other => Err(format!("expected swarm work-packet command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_uses_swarm_source_timeout_default() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "swarm", "work-packet"]).map_err(|error| {
+            format!(
+                "failed to parse default swarm work-packet: {:?}",
+                error.kind()
+            )
+        })?;
+
+        match parsed.command {
+            Some(Command::Swarm(SwarmCommand::WorkPacket(args))) => ensure_equal(
+                &args.command_timeout_ms,
+                &DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+                "work-packet command timeout default",
+            ),
             other => Err(format!("expected swarm work-packet command, got {other:?}")),
         }
     }
@@ -61876,6 +62134,110 @@ mod tests {
             }
             _ => Err("expected Search command".to_string()),
         }
+    }
+
+    #[test]
+    fn impact_command_accepts_positional_path_and_typed_surface() -> TestResult {
+        let path = Cli::try_parse_from(["ee", "impact", "src/core/search.rs", "--limit", "3"])
+            .map_err(|e| format!("failed to parse impact path: {:?}", e.kind()))?;
+        match path.command {
+            Some(Command::Impact(ref args)) => {
+                ensure_equal(
+                    &args.surface,
+                    &Some("src/core/search.rs".to_owned()),
+                    "impact positional path",
+                )?;
+                ensure_equal(&args.limit, &3, "impact limit")?;
+            }
+            _ => return Err("expected Impact command".to_string()),
+        }
+
+        let schema = Cli::try_parse_from([
+            "ee",
+            "impact",
+            "--schema-id",
+            "ee.response.v2",
+            "--source-mode",
+            "lexical-only",
+            "--strict-source-mode",
+        ])
+        .map_err(|e| format!("failed to parse impact schema: {:?}", e.kind()))?;
+        match schema.command {
+            Some(Command::Impact(ref args)) => {
+                ensure_equal(
+                    &args.schema_surface,
+                    &Some("ee.response.v2".to_owned()),
+                    "impact schema",
+                )?;
+                ensure_equal(
+                    &args.source_mode,
+                    &SearchSourceMode::LexicalOnly,
+                    "impact source mode",
+                )?;
+                ensure_equal(&args.strict_source_mode, &true, "impact strict source mode")
+            }
+            _ => Err("expected Impact command".to_string()),
+        }
+    }
+
+    #[test]
+    fn impact_json_uses_response_v2_envelope() -> TestResult {
+        let report = ImpactReport {
+            schema: IMPACT_SCHEMA_V1,
+            surface: ImpactResolvedSurface {
+                schema: IMPACT_SCHEMA_V1,
+                kind: MemoryAnchorKind::Schema,
+                anchor_value_hash: "blake3:impacthash".to_owned(),
+                redacted_anchor_value: "schema:blake3:impact".to_owned(),
+            },
+            requested_limit: 1,
+            results: vec![ImpactResult {
+                rank: 1,
+                memory_id: "mem_impact000000000000000000001".to_owned(),
+                match_type: ImpactMatchType::ExactAnchor,
+                score: 1.0,
+                memory: ImpactMemorySummary {
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    content_preview: "Use ee impact before editing anchored surfaces.".to_owned(),
+                    provenance_uri: None,
+                    created_at: "2026-06-07T00:00:00Z".to_owned(),
+                    updated_at: "2026-06-07T00:00:00Z".to_owned(),
+                },
+                anchor: None,
+                fallback_hit: None,
+            }],
+            exact_anchor_count: 1,
+            fallback_count: 0,
+            fallback_status: ImpactFallbackStatus::SkippedLimitFilled,
+            fallback_report: None,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+            elapsed_ms: 1.0,
+        };
+
+        let json: serde_json::Value = serde_json::from_str(&format_impact_json(&report))
+            .map_err(|error| format!("impact json parses: {error}"))?;
+        ensure_equal(
+            &json["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "impact response schema",
+        )?;
+        ensure_equal(&json["success"], &serde_json::json!(true), "impact success")?;
+        ensure_equal(
+            &json["data"]["schema"],
+            &serde_json::json!(IMPACT_SCHEMA_V1),
+            "impact data schema",
+        )?;
+        ensure_equal(
+            &json["data"]["results"][0]["matchType"],
+            &serde_json::json!("exact_anchor"),
+            "impact match type",
+        )
     }
 
     #[test]

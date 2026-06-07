@@ -21,9 +21,14 @@ use sqlmodel_frankensqlite::FrankenConnection;
 
 use crate::models::{
     AGENT_PROFILE_BIAS_CAP, AgentContextProfileCounts, EMBEDDING_METADATA_SCHEMA_V1,
-    EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
+    EmbeddingMetadataRecord, GLOBAL_MEMORY_SCOPE_TAG, HOUSE_RULE_MEMORY_SCOPE_TAG,
+    ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
     RATIONALE_TRACE_SCHEMA_V1, RationaleTrace, RationaleTraceKind, RationaleTracePosture,
     RationaleTraceVisibility, RedactionStatus, validate_rationale_summary,
+};
+use crate::models::{
+    CreateMemoryAnchorInput, MemoryAnchorFreshnessState, MemoryAnchorKind, MemoryAnchorSource,
+    StoredMemoryAnchor, extract_precision_memory_anchors,
 };
 
 pub mod migrate;
@@ -5678,6 +5683,51 @@ WHERE length(content_hash) = 64
     "blake3:v065_evidence_span_content_hash_blake3_prefix_2026_06_03",
 );
 
+/// V066: Typed, redaction-safe anchors for durable memories.
+pub const V066_MEMORY_ANCHORS: Migration = Migration::new(
+    66,
+    "memory_anchors",
+    r#"
+CREATE TABLE IF NOT EXISTS memory_anchors (
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    anchor_kind TEXT NOT NULL CHECK (anchor_kind IN (
+        'path', 'symbol', 'command', 'env_var', 'schema', 'degraded_code',
+        'dependency', 'config_key'
+    )),
+    anchor_value_hash TEXT NOT NULL CHECK (
+        length(anchor_value_hash) = 71 AND substr(anchor_value_hash, 1, 7) = 'blake3:'
+    ),
+    redacted_anchor_value TEXT NOT NULL CHECK (
+        length(trim(redacted_anchor_value)) > 0
+        AND redacted_anchor_value NOT GLOB '*/*'
+        AND redacted_anchor_value NOT GLOB '* EE_*'
+    ),
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    source TEXT NOT NULL CHECK (
+        source IN ('explicit', 'remember', 'cass_import', 'curate_apply', 'index_rebuild')
+    ),
+    provenance TEXT NOT NULL CHECK (length(trim(provenance)) > 0),
+    captured_span_hash TEXT NOT NULL CHECK (
+        length(captured_span_hash) = 71 AND substr(captured_span_hash, 1, 7) = 'blake3:'
+    ),
+    freshness_state TEXT NOT NULL DEFAULT 'current' CHECK (
+        freshness_state IN ('current', 'suspect', 'stale')
+    ),
+    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS memory_id_anchor_kind_value_hash_unique
+    ON memory_anchors(memory_id, anchor_kind, anchor_value_hash);
+CREATE INDEX IF NOT EXISTS anchor_kind_value_hash_lookup
+    ON memory_anchors(anchor_kind, anchor_value_hash, memory_id);
+CREATE INDEX IF NOT EXISTS freshness_state_generation_lookup
+    ON memory_anchors(freshness_state, generation, memory_id);
+"#,
+    "blake3:v066_memory_anchors_2026_06_07",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -5745,6 +5795,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V063_REFLECTION_REQUEST_LEDGER,
     V064_REFLECTION_REQUEST_RESULT_REPLAY_HASH,
     V065_EVIDENCE_SPAN_CONTENT_HASH_BLAKE3_PREFIX,
+    V066_MEMORY_ANCHORS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -11264,6 +11315,91 @@ fn hash_text_field(hasher: &mut blake3::Hasher, field_name: &str, value: &str) {
     hasher.update(b"\n");
 }
 
+fn memory_anchor_source_for_insert(input: &CreateMemoryInput) -> MemoryAnchorSource {
+    let trust_class = input.trust_class.to_ascii_lowercase();
+    let provenance = input
+        .provenance_uri
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if trust_class == "cass_evidence" || provenance.starts_with("cass") {
+        return MemoryAnchorSource::CassImport;
+    }
+    if provenance.contains("curate")
+        || provenance.contains("curation")
+        || input
+            .tags
+            .iter()
+            .any(|tag| tag.eq_ignore_ascii_case("curate") || tag.eq_ignore_ascii_case("curation"))
+    {
+        return MemoryAnchorSource::CurateApply;
+    }
+    MemoryAnchorSource::Remember
+}
+
+fn parse_memory_anchor_kind(row_value: &str) -> Result<MemoryAnchorKind> {
+    MemoryAnchorKind::parse(row_value).ok_or_else(|| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("memory_anchors.anchor_kind has unknown value {row_value:?}"),
+    })
+}
+
+fn parse_memory_anchor_source(row_value: &str) -> Result<MemoryAnchorSource> {
+    MemoryAnchorSource::parse(row_value).ok_or_else(|| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("memory_anchors.source has unknown value {row_value:?}"),
+    })
+}
+
+fn parse_memory_anchor_freshness(row_value: &str) -> Result<MemoryAnchorFreshnessState> {
+    MemoryAnchorFreshnessState::parse(row_value).ok_or_else(|| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("memory_anchors.freshness_state has unknown value {row_value:?}"),
+    })
+}
+
+fn required_f32(row: &Row, index: usize, operation: DbOperation, column: &str) -> Result<f32> {
+    match required_value(row, index, operation, column)? {
+        Value::Double(value) => Ok(*value as f32),
+        Value::Float(value) => Ok(*value),
+        Value::BigInt(value) => Ok(*value as f32),
+        Value::Int(value) => Ok(*value as f32),
+        _ => Err(DbError::MalformedRow {
+            operation,
+            message: format!("{column} column at index {index} is not a number"),
+        }),
+    }
+}
+
+fn stored_memory_anchor_from_row(row: &Row) -> Result<StoredMemoryAnchor> {
+    let anchor_kind =
+        parse_memory_anchor_kind(required_text(row, 1, DbOperation::Query, "anchor_kind")?)?;
+    let source = parse_memory_anchor_source(required_text(row, 5, DbOperation::Query, "source")?)?;
+    let freshness_state = parse_memory_anchor_freshness(required_text(
+        row,
+        8,
+        DbOperation::Query,
+        "freshness_state",
+    )?)?;
+    Ok(StoredMemoryAnchor {
+        memory_id: required_text(row, 0, DbOperation::Query, "memory_id")?.to_string(),
+        anchor_kind,
+        anchor_value_hash: required_text(row, 2, DbOperation::Query, "anchor_value_hash")?
+            .to_string(),
+        redacted_anchor_value: required_text(row, 3, DbOperation::Query, "redacted_anchor_value")?
+            .to_string(),
+        confidence: required_f32(row, 4, DbOperation::Query, "confidence")?,
+        source,
+        provenance: required_text(row, 6, DbOperation::Query, "provenance")?.to_string(),
+        captured_span_hash: required_text(row, 7, DbOperation::Query, "captured_span_hash")?
+            .to_string(),
+        freshness_state,
+        generation: required_i64(row, 9, DbOperation::Query, "generation")?,
+        created_at: required_text(row, 10, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 11, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
 impl DbConnection {
     /// Insert a new memory and its tags.
     pub fn insert_memory(&self, id: &str, input: &CreateMemoryInput) -> Result<()> {
@@ -11347,7 +11483,83 @@ impl DbConnection {
             )?;
         }
 
+        let anchors = extract_precision_memory_anchors(
+            id,
+            &input.content,
+            memory_anchor_source_for_insert(input),
+            input.provenance_uri.as_deref(),
+        );
+        if !anchors.is_empty() {
+            self.upsert_memory_anchors(&anchors)?;
+        }
+
         Ok(())
+    }
+
+    /// Upsert typed memory anchors. Older generations cannot overwrite newer rows.
+    pub fn upsert_memory_anchors(&self, anchors: &[CreateMemoryAnchorInput]) -> Result<u64> {
+        let now = Utc::now().to_rfc3339();
+        let mut attempted = 0_u64;
+        for anchor in anchors {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO memory_anchors (memory_id, anchor_kind, anchor_value_hash, redacted_anchor_value, confidence, source, provenance, captured_span_hash, freshness_state, generation, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) ON CONFLICT(memory_id, anchor_kind, anchor_value_hash) DO UPDATE SET redacted_anchor_value = excluded.redacted_anchor_value, confidence = excluded.confidence, source = excluded.source, provenance = excluded.provenance, captured_span_hash = excluded.captured_span_hash, freshness_state = excluded.freshness_state, generation = excluded.generation, updated_at = excluded.updated_at WHERE excluded.generation >= memory_anchors.generation",
+                &[
+                    Value::Text(anchor.memory_id.clone()),
+                    Value::Text(anchor.anchor_kind.as_str().to_string()),
+                    Value::Text(anchor.anchor_value_hash.clone()),
+                    Value::Text(anchor.redacted_anchor_value.clone()),
+                    Value::Float(anchor.confidence),
+                    Value::Text(anchor.source.as_str().to_string()),
+                    Value::Text(anchor.provenance.clone()),
+                    Value::Text(anchor.captured_span_hash.clone()),
+                    Value::Text(anchor.freshness_state.as_str().to_string()),
+                    Value::BigInt(anchor.generation),
+                    Value::Text(now.clone()),
+                    Value::Text(now.clone()),
+                ],
+            )?;
+            attempted += 1;
+        }
+        Ok(attempted)
+    }
+
+    /// Rebuild anchors for one memory from index-rebuild material.
+    pub fn refresh_memory_anchors_for_memory(&self, memory_id: &str, content: &str) -> Result<u64> {
+        let anchors = extract_precision_memory_anchors(
+            memory_id,
+            content,
+            MemoryAnchorSource::IndexRebuild,
+            Some("index_rebuild"),
+        );
+        self.upsert_memory_anchors(&anchors)
+    }
+
+    /// List all anchors attached to one memory in deterministic order.
+    pub fn list_memory_anchors(&self, memory_id: &str) -> Result<Vec<StoredMemoryAnchor>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT memory_id, anchor_kind, anchor_value_hash, redacted_anchor_value, confidence, source, provenance, captured_span_hash, freshness_state, generation, created_at, updated_at FROM memory_anchors WHERE memory_id = ?1 ORDER BY anchor_kind ASC, anchor_value_hash ASC",
+            &[Value::Text(memory_id.to_string())],
+        )?;
+        rows.iter().map(stored_memory_anchor_from_row).collect()
+    }
+
+    /// Query memories by a typed anchor hash.
+    pub fn query_memory_anchors(
+        &self,
+        anchor_kind: MemoryAnchorKind,
+        anchor_value_hash: &str,
+    ) -> Result<Vec<StoredMemoryAnchor>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT memory_id, anchor_kind, anchor_value_hash, redacted_anchor_value, confidence, source, provenance, captured_span_hash, freshness_state, generation, created_at, updated_at FROM memory_anchors WHERE anchor_kind = ?1 AND anchor_value_hash = ?2 ORDER BY memory_id ASC",
+            &[
+                Value::Text(anchor_kind.as_str().to_string()),
+                Value::Text(anchor_value_hash.to_string()),
+            ],
+        )?;
+        rows.iter().map(stored_memory_anchor_from_row).collect()
     }
 
     /// Get a memory by ID.
@@ -11440,6 +11652,41 @@ impl DbConnection {
         }
 
         sql.push_str(" ORDER BY id ASC");
+
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter().map(stored_memory_from_row).collect()
+    }
+
+    /// List active-workspace retrieval memories plus tag-backed global-scope memories.
+    ///
+    /// Global scope is deliberately represented by existing tags (`global` or
+    /// `house_rule`) so this lane does not add storage. The `OR EXISTS` shape
+    /// includes same-workspace global rows only once and keeps ordering stable.
+    pub fn list_memories_for_retrieval_with_global(
+        &self,
+        workspace_id: &str,
+        level: Option<&str>,
+        include_tombstoned: bool,
+    ) -> Result<Vec<StoredMemory>> {
+        let mut sql = String::from(
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories m WHERE (m.workspace_id = ?1 OR EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id AND lower(replace(trim(mt.tag), '-', '_')) IN (?2, ?3)))",
+        );
+        let mut params: Vec<Value> = vec![
+            Value::Text(workspace_id.to_string()),
+            Value::Text(GLOBAL_MEMORY_SCOPE_TAG.to_string()),
+            Value::Text(HOUSE_RULE_MEMORY_SCOPE_TAG.to_string()),
+        ];
+
+        if let Some(lvl) = level {
+            sql.push_str(" AND m.level = ?4");
+            params.push(Value::Text(lvl.to_string()));
+        }
+
+        if !include_tombstoned {
+            sql.push_str(" AND m.tombstoned_at IS NULL");
+        }
+
+        sql.push_str(" ORDER BY m.id ASC");
 
         let rows = self.query_for(DbOperation::Query, &sql, &params)?;
         rows.iter().map(stored_memory_from_row).collect()
@@ -21473,6 +21720,10 @@ mod tests {
             "memory_tags table must exist",
         )?;
         ensure(
+            table_names.contains(&"memory_anchors"),
+            "memory_anchors table must exist",
+        )?;
+        ensure(
             table_names.contains(&"audit_log"),
             "audit_log table must exist",
         )?;
@@ -21583,6 +21834,37 @@ mod tests {
         ensure(
             table_names.contains(&"mesh_body_cache_metadata"),
             "mesh_body_cache_metadata table must exist",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn v066_migration_creates_memory_anchor_indexes() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let rows = connection.query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'memory_anchors' ORDER BY name",
+            &[],
+        )?;
+        let names = rows
+            .iter()
+            .filter_map(|row| row.get(0).and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        ensure(
+            names.contains(&"memory_id_anchor_kind_value_hash_unique"),
+            "memory anchor unique index must exist",
+        )?;
+        ensure(
+            names.contains(&"anchor_kind_value_hash_lookup"),
+            "memory anchor kind/hash lookup index must exist",
+        )?;
+        ensure(
+            names.contains(&"freshness_state_generation_lookup"),
+            "memory anchor freshness lookup index must exist",
         )?;
 
         connection.close()?;
@@ -25920,6 +26202,150 @@ mod tests {
     }
 
     #[test]
+    fn insert_memory_extracts_redacted_memory_anchors() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "procedural".to_string(),
+            kind: "rule".to_string(),
+            content: "Run `cargo fmt --check` before editing `src/db/mod.rs`; emit `ee.response.v2`; honor `EE_PACK_TRACE`; degraded code `index_stale`.".to_string(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.7,
+            importance: 0.8,
+            provenance_uri: Some("cass-session://run-1".to_string()),
+            trust_class: "cass_evidence".to_string(),
+            trust_subclass: None,
+            tags: vec![],
+            valid_from: None,
+            valid_to: None,
+        };
+
+        connection.insert_memory("mem_30000000000000000000000001", &input)?;
+        let anchors = connection.list_memory_anchors("mem_30000000000000000000000001")?;
+        let kinds = anchors
+            .iter()
+            .map(|anchor| anchor.anchor_kind)
+            .collect::<Vec<_>>();
+
+        ensure(
+            kinds.contains(&crate::models::MemoryAnchorKind::Command),
+            "command anchor extracted",
+        )?;
+        ensure(
+            kinds.contains(&crate::models::MemoryAnchorKind::Path),
+            "path anchor extracted",
+        )?;
+        ensure(
+            kinds.contains(&crate::models::MemoryAnchorKind::Schema),
+            "schema anchor extracted",
+        )?;
+        ensure(
+            kinds.contains(&crate::models::MemoryAnchorKind::EnvVar),
+            "env var anchor extracted",
+        )?;
+        ensure(
+            kinds.contains(&crate::models::MemoryAnchorKind::DegradedCode),
+            "degraded-code anchor extracted",
+        )?;
+        ensure(
+            anchors
+                .iter()
+                .all(|anchor| anchor.source == crate::models::MemoryAnchorSource::CassImport),
+            "cass evidence memory insert labels extracted anchors as cass_import",
+        )?;
+        ensure(
+            anchors.iter().all(|anchor| {
+                !anchor.redacted_anchor_value.contains("src/db/mod.rs")
+                    && !anchor.redacted_anchor_value.contains("EE_PACK_TRACE")
+            }),
+            "redacted anchor values must not store raw anchor text",
+        )?;
+
+        let path_hash = crate::models::memory_anchor_value_hash(
+            crate::models::MemoryAnchorKind::Path,
+            "src/db/mod.rs",
+        );
+        let path_matches =
+            connection.query_memory_anchors(crate::models::MemoryAnchorKind::Path, &path_hash)?;
+        ensure_equal(
+            &path_matches
+                .iter()
+                .map(|anchor| anchor.memory_id.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["mem_30000000000000000000000001"],
+            "path anchor lookup returns memory id",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn memory_anchor_upsert_preserves_newer_generation() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        connection.insert_memory(
+            "mem_30000000000000000000000002",
+            &super::CreateMemoryInput {
+                workspace_id: "wsp_01234567890123456789012345".to_string(),
+                level: "procedural".to_string(),
+                kind: "rule".to_string(),
+                content: "Anchor carrier.".to_string(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.7,
+                importance: 0.8,
+                provenance_uri: None,
+                trust_class: "human_explicit".to_string(),
+                trust_subclass: None,
+                tags: vec![],
+                valid_from: None,
+                valid_to: None,
+            },
+        )?;
+
+        let mut fresh = crate::models::CreateMemoryAnchorInput::from_raw(
+            "mem_30000000000000000000000002",
+            crate::models::MemoryAnchorKind::Path,
+            "src/models/memory.rs",
+            0.9,
+            crate::models::MemoryAnchorSource::Remember,
+            "test://fresh",
+            3,
+        )
+        .ok_or_else(|| TestFailure::new("fresh anchor should build"))?;
+        connection.upsert_memory_anchors(&[fresh.clone()])?;
+
+        fresh.confidence = 0.1;
+        fresh.source = crate::models::MemoryAnchorSource::IndexRebuild;
+        fresh.provenance = "test://stale".to_string();
+        fresh.generation = 2;
+        connection.upsert_memory_anchors(&[fresh])?;
+
+        let anchors = connection.list_memory_anchors("mem_30000000000000000000000002")?;
+        ensure_equal(&anchors.len(), &1_usize, "one anchor stored")?;
+        ensure_equal(&anchors[0].generation, &3_i64, "newer generation preserved")?;
+        ensure(
+            (anchors[0].confidence - 0.9).abs() < 0.001,
+            "stale upsert cannot lower confidence",
+        )?;
+        ensure_equal(
+            &anchors[0].source,
+            &crate::models::MemoryAnchorSource::Remember,
+            "stale upsert cannot overwrite source",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn insert_memory_with_content_simhash_populates_candidate_lookup() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
@@ -26451,6 +26877,133 @@ mod tests {
                 .iter()
                 .any(|memory| memory.id == "mem_00000000000000000000000030"),
             "retrieval list includes validity-window rows for query-time filtering",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn retrieval_with_global_unions_workspace_and_global_scope_memories() -> TestResult {
+        const GLOBAL_WORKSPACE_ID: &str = "wsp_global00000000000000000000";
+
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_global00000000000000000000', '/tmp/global', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+
+        let workspace_rule = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "procedural".to_string(),
+            kind: "rule".to_string(),
+            content: "Workspace rule content".to_string(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.7,
+            importance: 0.8,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
+            tags: vec![],
+            valid_from: None,
+            valid_to: None,
+        };
+        let global_rule = super::CreateMemoryInput {
+            workspace_id: GLOBAL_WORKSPACE_ID.to_string(),
+            content: "Global house rule content".to_string(),
+            tags: vec!["HOUSE-RULE".to_string()],
+            ..workspace_rule.clone()
+        };
+        let local_global_rule = super::CreateMemoryInput {
+            content: "Local row tagged global".to_string(),
+            tags: vec![crate::models::GLOBAL_MEMORY_SCOPE_TAG.to_string()],
+            ..workspace_rule.clone()
+        };
+        let other_workspace_rule = super::CreateMemoryInput {
+            workspace_id: GLOBAL_WORKSPACE_ID.to_string(),
+            content: "Other workspace only content".to_string(),
+            tags: vec![],
+            ..workspace_rule.clone()
+        };
+        let semantic_global = super::CreateMemoryInput {
+            workspace_id: GLOBAL_WORKSPACE_ID.to_string(),
+            level: "semantic".to_string(),
+            kind: "fact".to_string(),
+            content: "Global semantic fact".to_string(),
+            tags: vec![crate::models::GLOBAL_MEMORY_SCOPE_TAG.to_string()],
+            ..workspace_rule.clone()
+        };
+        let tombstoned_global = super::CreateMemoryInput {
+            workspace_id: GLOBAL_WORKSPACE_ID.to_string(),
+            content: "Tombstoned global rule".to_string(),
+            tags: vec![crate::models::GLOBAL_MEMORY_SCOPE_TAG.to_string()],
+            ..workspace_rule.clone()
+        };
+
+        connection.insert_memory("mem_00000000000000000000000020", &workspace_rule)?;
+        connection.insert_memory("mem_00000000000000000000000010", &global_rule)?;
+        connection.insert_memory("mem_00000000000000000000000030", &local_global_rule)?;
+        connection.insert_memory("mem_00000000000000000000000040", &other_workspace_rule)?;
+        connection.insert_memory("mem_00000000000000000000000050", &semantic_global)?;
+        connection.insert_memory("mem_00000000000000000000000060", &tombstoned_global)?;
+        ensure(
+            connection.tombstone_memory("mem_00000000000000000000000060")?,
+            "tombstone global test row",
+        )?;
+
+        let union = connection.list_memories_for_retrieval_with_global(
+            "wsp_01234567890123456789012345",
+            None,
+            false,
+        )?;
+        let union_ids = union
+            .iter()
+            .map(|memory| memory.id.as_str())
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &union_ids,
+            &vec![
+                "mem_00000000000000000000000010",
+                "mem_00000000000000000000000020",
+                "mem_00000000000000000000000030",
+                "mem_00000000000000000000000050",
+            ],
+            "workspace plus global retrieval ids are deterministic and deduped",
+        )?;
+
+        let procedural = connection.list_memories_for_retrieval_with_global(
+            "wsp_01234567890123456789012345",
+            Some("procedural"),
+            false,
+        )?;
+        let procedural_ids = procedural
+            .iter()
+            .map(|memory| memory.id.as_str())
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &procedural_ids,
+            &vec![
+                "mem_00000000000000000000000010",
+                "mem_00000000000000000000000020",
+                "mem_00000000000000000000000030",
+            ],
+            "level filter applies after workspace/global union",
+        )?;
+
+        let with_tombstoned = connection.list_memories_for_retrieval_with_global(
+            "wsp_01234567890123456789012345",
+            None,
+            true,
+        )?;
+        let with_tombstoned_ids = with_tombstoned
+            .iter()
+            .map(|memory| memory.id.as_str())
+            .collect::<Vec<_>>();
+        ensure(
+            with_tombstoned_ids.contains(&"mem_00000000000000000000000060"),
+            "include_tombstoned retains tag-backed global tombstones",
         )?;
 
         connection.close()?;

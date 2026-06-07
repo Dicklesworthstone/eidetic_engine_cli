@@ -862,6 +862,12 @@ pub const CONTRACTS: &[ContractEntry] = &[
         description: "Direct hook-safe guard response for ee preflight check/guard; intentionally not wrapped in ee.response.v2 so command hooks can branch on allowed/exitCode without envelope traversal",
         stability: "stable",
     },
+    ContractEntry {
+        name: "impact",
+        schema: crate::core::impact::IMPACT_SCHEMA_V1,
+        description: "Impact lookup payload for memories anchored to paths, symbols, commands, env vars, schemas, degraded codes, dependencies, or config keys",
+        stability: "stable",
+    },
 ];
 
 #[derive(Clone, Debug)]
@@ -890,6 +896,12 @@ pub const EXAMPLES: &[ExampleEntry] = &[
         description: "Find relevant past context",
         command: "ee search \"authentication error\" --limit 5 --json",
         category: "search",
+    },
+    ExampleEntry {
+        title: "Impact lookup",
+        description: "Find memories attached to a path or typed surface before editing it",
+        command: "ee impact src/core/search.rs --workspace . --json",
+        category: "context",
     },
     ExampleEntry {
         title: "Check system health",
@@ -1031,6 +1043,19 @@ pub const CONTRACT_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     },
 ];
 
+pub const IMPACT_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "impact lookup command returns an error envelope",
+        jq: r#".error | {code, message, repair}"#,
+        next_action: "Apply the repair command when present, then retry with the same workspace and surface.",
+    },
+    FailureBranchEntry {
+        condition: "no anchored memories are found for the surface",
+        jq: r#".data | select((.exactAnchorCount // 0) == 0 and (.fallbackCount // 0) == 0)"#,
+        next_action: "Continue with ordinary `ee search` or `ee pack`; absence of impact rows is not evidence that the surface has no relevant history.",
+    },
+];
+
 // ============================================================================
 // EE-DIST-005: Install/Update Recipe Failure Branches
 // ============================================================================
@@ -1112,6 +1137,16 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#".data.pack.items[]? | {memoryId, section, why}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: CONTEXT_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "impact-before-edit",
+        title: "Inspect surface impact before editing",
+        description: "Find anchored memories and fallback search hits for a path, symbol, command, env var, schema, degraded code, dependency, or config key.",
+        category: "context",
+        command: "ee impact <surface> --workspace . --json",
+        jq: r#".data.results[]? | {memoryId, matchType, score, preview: .memory.contentPreview}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.impact.v1""#,
+        failure_branches: IMPACT_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
         id: "workspace-health",
@@ -1506,6 +1541,24 @@ mod tests {
     }
 
     #[test]
+    fn contracts_catalog_lists_impact_schema() -> TestResult {
+        let impact_contract = CONTRACTS
+            .iter()
+            .find(|contract| contract.name == "impact")
+            .ok_or_else(|| "impact contract is documented".to_string())?;
+
+        ensure_equal(
+            &impact_contract.schema,
+            &crate::core::impact::IMPACT_SCHEMA_V1,
+            "impact contract schema",
+        )?;
+        ensure(
+            impact_contract.description.contains("paths"),
+            "impact docs mention path anchors",
+        )
+    }
+
+    #[test]
     fn examples_are_non_empty() -> TestResult {
         ensure(!EXAMPLES.is_empty(), "examples exist")?;
         for example in EXAMPLES {
@@ -1540,6 +1593,33 @@ mod tests {
         ensure(
             preflight_example.description.contains("git status"),
             "preflight example names the encoded command",
+        )
+    }
+
+    #[test]
+    fn examples_and_recipes_include_impact_lookup() -> TestResult {
+        let impact_example = EXAMPLES
+            .iter()
+            .find(|example| example.title == "Impact lookup")
+            .ok_or_else(|| "impact example is documented".to_string())?;
+        ensure(
+            impact_example.command.starts_with("ee impact "),
+            "impact example uses impact command",
+        )?;
+
+        let impact_recipe = AGENT_DOC_RECIPES
+            .iter()
+            .find(|recipe| recipe.id == "impact-before-edit")
+            .ok_or_else(|| "impact recipe is documented".to_string())?;
+        ensure(
+            impact_recipe.jq.contains("matchType"),
+            "impact recipe exposes stable result match type",
+        )?;
+        ensure(
+            impact_recipe
+                .success_check
+                .contains(crate::core::impact::IMPACT_SCHEMA_V1),
+            "impact recipe checks the impact data schema",
         )
     }
 

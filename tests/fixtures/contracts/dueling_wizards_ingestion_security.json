@@ -1,0 +1,235 @@
+{
+  "schema": "ee.dueling_wizards.ingestion_security.v1",
+  "initiativeBead": "bd-1n0np",
+  "gateBead": "bd-1n0np.23.3",
+  "manifestOwner": "tests/contracts/dueling_wizards_ingestion_security.rs",
+  "doc": "docs/agent-ux/dueling-wizards-ingestion-security.md",
+  "policySource": "src/policy/mod.rs",
+  "curateSource": "src/curate/mod.rs",
+  "outcomeSource": "src/core/outcome.rs",
+  "policy": {
+    "externalTextDefault": "untrusted_until_guarded",
+    "rawExternalTextStorage": "forbidden_by_default",
+    "flaggedInputBehavior": "quarantine_not_store",
+    "secretRedactionOrder": "before_prompt_guard_and_before_storage",
+    "promptInjectionOrder": "after_redaction_before_storage",
+    "auditEventRequired": true,
+    "localCargoProof": "invalid",
+    "rchProofRequiredForRustTests": true
+  },
+  "requiredPipeline": [
+    "source_classification",
+    "secret_redaction",
+    "prompt_injection_guard",
+    "quarantine_not_store",
+    "audit_event",
+    "regression_corpus"
+  ],
+  "guardOrderMatrix": [
+    {
+      "surface": "docs_bootstrap",
+      "orderedPipeline": [
+        "source_classification",
+        "secret_redaction",
+        "prompt_injection_guard",
+        "quarantine_not_store",
+        "audit_event",
+        "regression_corpus"
+      ],
+      "redactionBeforePromptGuard": true,
+      "promptGuardBeforeStorage": true,
+      "rawStorageBeforeGuards": "forbidden",
+      "flaggedStorageDisposition": "quarantine_not_store",
+      "auditAfterDisposition": true
+    },
+    {
+      "surface": "error_log_diagnosis",
+      "orderedPipeline": [
+        "source_classification",
+        "secret_redaction",
+        "prompt_injection_guard",
+        "quarantine_not_store",
+        "audit_event",
+        "regression_corpus"
+      ],
+      "redactionBeforePromptGuard": true,
+      "promptGuardBeforeStorage": true,
+      "rawStorageBeforeGuards": "forbidden",
+      "flaggedStorageDisposition": "quarantine_not_store",
+      "auditAfterDisposition": true
+    },
+    {
+      "surface": "sandbox_import",
+      "orderedPipeline": [
+        "source_classification",
+        "secret_redaction",
+        "prompt_injection_guard",
+        "quarantine_not_store",
+        "audit_event",
+        "regression_corpus"
+      ],
+      "redactionBeforePromptGuard": true,
+      "promptGuardBeforeStorage": true,
+      "rawStorageBeforeGuards": "forbidden",
+      "flaggedStorageDisposition": "quarantine_not_store",
+      "auditAfterDisposition": true
+    }
+  ],
+  "regressionPayloadClasses": [
+    "role_markup",
+    "ignore_previous_instructions",
+    "destructive_command_coercion",
+    "secret_like_token",
+    "mixed_benign_and_malicious"
+  ],
+  "regressionPayloadExamples": [
+    {
+      "payloadClass": "role_markup",
+      "sampleName": "chat_role_block",
+      "sourceSurface": "docs_bootstrap",
+      "mustRedactSecrets": false,
+      "mustRunPromptInjectionGuard": true,
+      "mustQuarantineWhenFlagged": true,
+      "rawStorage": "forbidden",
+      "expectedAuditEvent": "docs_bootstrap_ingestion_security"
+    },
+    {
+      "payloadClass": "ignore_previous_instructions",
+      "sampleName": "ignore_previous_instructions",
+      "sourceSurface": "docs_bootstrap",
+      "mustRedactSecrets": false,
+      "mustRunPromptInjectionGuard": true,
+      "mustQuarantineWhenFlagged": true,
+      "rawStorage": "forbidden",
+      "expectedAuditEvent": "docs_bootstrap_ingestion_security"
+    },
+    {
+      "payloadClass": "destructive_command_coercion",
+      "sampleName": "rm_rf_instruction",
+      "sourceSurface": "sandbox_import",
+      "mustRedactSecrets": false,
+      "mustRunPromptInjectionGuard": true,
+      "mustQuarantineWhenFlagged": true,
+      "rawStorage": "forbidden",
+      "expectedAuditEvent": "sandbox_import_ingestion_security"
+    },
+    {
+      "payloadClass": "secret_like_token",
+      "sampleName": "api_key_literal",
+      "sourceSurface": "error_log_diagnosis",
+      "mustRedactSecrets": true,
+      "mustRunPromptInjectionGuard": true,
+      "mustQuarantineWhenFlagged": true,
+      "rawStorage": "forbidden",
+      "expectedAuditEvent": "error_log_ingestion_security"
+    },
+    {
+      "payloadClass": "mixed_benign_and_malicious",
+      "sampleName": "build_error_plus_instruction",
+      "sourceSurface": "error_log_diagnosis",
+      "mustRedactSecrets": true,
+      "mustRunPromptInjectionGuard": true,
+      "mustQuarantineWhenFlagged": true,
+      "rawStorage": "forbidden",
+      "expectedAuditEvent": "error_log_ingestion_security"
+    }
+  ],
+  "sourceAnchors": {
+    "policy": [
+      "detect_instruction_like_content",
+      "redact_secret_like_content",
+      "InstructionLikeReport",
+      "SecretRedactionReport"
+    ],
+    "curate": [
+      "validate_candidate",
+      "PromptInjectionFlagged",
+      "redact_secret_like_content",
+      "detect_instruction_like_content"
+    ],
+    "outcome": [
+      "outcome_prompt_injection_guarded_memory",
+      "Review or quarantine the memory before recording outcome feedback."
+    ]
+  },
+  "surfaces": [
+    {
+      "surface": "docs_bootstrap",
+      "ownerBead": "bd-1n0np.23.3",
+      "externalText": true,
+      "requiredPipeline": [
+        "source_classification",
+        "secret_redaction",
+        "prompt_injection_guard",
+        "quarantine_not_store",
+        "audit_event",
+        "regression_corpus"
+      ],
+      "sourceClassifier": "docs_bootstrap_source",
+      "redaction": "crate::policy::redact_secret_like_content",
+      "promptInjectionGuard": "crate::policy::detect_instruction_like_content",
+      "flaggedBehavior": "quarantine_not_store",
+      "rawStorage": "forbidden",
+      "auditEvent": "docs_bootstrap_ingestion_security",
+      "requiredRegressionPayloadClasses": [
+        "role_markup",
+        "ignore_previous_instructions",
+        "destructive_command_coercion",
+        "secret_like_token",
+        "mixed_benign_and_malicious"
+      ]
+    },
+    {
+      "surface": "error_log_diagnosis",
+      "ownerBead": "bd-1n0np.23.3",
+      "externalText": true,
+      "requiredPipeline": [
+        "source_classification",
+        "secret_redaction",
+        "prompt_injection_guard",
+        "quarantine_not_store",
+        "audit_event",
+        "regression_corpus"
+      ],
+      "sourceClassifier": "error_log_source",
+      "redaction": "crate::policy::redact_secret_like_content",
+      "promptInjectionGuard": "crate::policy::detect_instruction_like_content",
+      "flaggedBehavior": "quarantine_not_store",
+      "rawStorage": "forbidden",
+      "auditEvent": "error_log_ingestion_security",
+      "requiredRegressionPayloadClasses": [
+        "role_markup",
+        "ignore_previous_instructions",
+        "destructive_command_coercion",
+        "secret_like_token",
+        "mixed_benign_and_malicious"
+      ]
+    },
+    {
+      "surface": "sandbox_import",
+      "ownerBead": "bd-1n0np.23.3",
+      "externalText": true,
+      "requiredPipeline": [
+        "source_classification",
+        "secret_redaction",
+        "prompt_injection_guard",
+        "quarantine_not_store",
+        "audit_event",
+        "regression_corpus"
+      ],
+      "sourceClassifier": "sandbox_artifact_source",
+      "redaction": "crate::policy::redact_secret_like_content",
+      "promptInjectionGuard": "crate::policy::detect_instruction_like_content",
+      "flaggedBehavior": "quarantine_not_store",
+      "rawStorage": "forbidden",
+      "auditEvent": "sandbox_import_ingestion_security",
+      "requiredRegressionPayloadClasses": [
+        "role_markup",
+        "ignore_previous_instructions",
+        "destructive_command_coercion",
+        "secret_like_token",
+        "mixed_benign_and_malicious"
+      ]
+    }
+  ]
+}

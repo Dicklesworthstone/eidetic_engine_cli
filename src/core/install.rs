@@ -11,6 +11,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::core::build_info;
+use crate::models::install::{
+    INSTALL_FRESHNESS_SCHEMA_V1, InstallFreshnessReport, InstallFreshnessVerdict,
+    InstallVersionEvidence,
+};
 use crate::models::{
     INSTALL_CHECK_SCHEMA_V1, INSTALL_PLAN_SCHEMA_V1, InstallArtifactSelection, InstallCheckReport,
     InstallFinding, InstallFindingCode, InstallOperation, InstallPathAnalysis, InstallPathStatus,
@@ -20,6 +24,7 @@ use crate::models::{
     ReleaseVerificationSeverity, UPDATE_PLAN_SCHEMA_V1, UpdateSourcePosture, compare_versions,
     is_safe_install_path, is_safe_release_artifact_path, is_supported_release_target,
 };
+use toml_edit::DocumentMut;
 
 const TRUSTED_TAR_PATHS: &[&str] = &["/usr/bin/tar", "/bin/tar"];
 const TRUSTED_INSTALL_TOOL_PATH: &str = "/usr/bin:/bin";
@@ -27,6 +32,10 @@ const EXTRACT_TEMP_PREFIX: &str = "ee-extract-";
 const MAX_BACKUP_PATH_ATTEMPTS: usize = 1000;
 const PATH_BINARY_VERSION_TIMEOUT: Duration = Duration::from_millis(750);
 const PATH_BINARY_VERSION_STDOUT_MAX_BYTES: u64 = 4096;
+const CARGO_TOML_MAX_BYTES: u64 = 1024 * 1024;
+const INSTALL_FRESHNESS_DEFAULT_REQUIRED_SURFACES: &[&str] = &["install_check"];
+const INSTALL_FRESHNESS_SUPPORTED_SURFACES: &[&str] =
+    &["install_check", "claim_gate_install_freshness", "version"];
 
 /// Hard upper bound on the byte length of a release manifest read from a
 /// user-supplied `--manifest <path>`. Realistic manifests are on the order
@@ -236,19 +245,31 @@ pub fn check_install(options: &InstallCheckOptions) -> InstallCheckReport {
         ));
     }
 
+    let source_version = detect_install_source_version(options.manifest.as_deref());
+    let current_binary = crate::models::CurrentBinary {
+        path: current_binary.as_deref().map(normalize_path),
+        version: info.version.to_owned(),
+        source: "running_process".to_owned(),
+    };
+    let freshness = evaluate_install_freshness(
+        source_version,
+        &current_binary,
+        &path,
+        &findings,
+        INSTALL_FRESHNESS_DEFAULT_REQUIRED_SURFACES,
+    );
+    findings.extend(install_freshness_findings(&freshness));
+
     InstallCheckReport {
         command: "install check".to_owned(),
         schema: INSTALL_CHECK_SCHEMA_V1.to_owned(),
         version: info.version.to_owned(),
-        current_binary: crate::models::CurrentBinary {
-            path: current_binary.as_deref().map(normalize_path),
-            version: info.version.to_owned(),
-            source: "running_process".to_owned(),
-        },
+        current_binary,
         target,
         path,
         permissions,
         update_source,
+        freshness,
         findings,
     }
 }
@@ -529,6 +550,312 @@ pub fn install_idempotency_key(
     input.push_str(artifact_id.unwrap_or("none"));
     let hash = blake3::hash(input.as_bytes()).to_hex().to_string();
     format!("install_{}", &hash[..24])
+}
+
+#[must_use]
+pub fn evaluate_install_freshness(
+    source_version: InstallVersionEvidence,
+    current_binary: &crate::models::CurrentBinary,
+    path: &InstallPathAnalysis,
+    _findings: &[InstallFinding],
+    required_surfaces: &[&str],
+) -> InstallFreshnessReport {
+    let required_surfaces = required_surfaces
+        .iter()
+        .map(|surface| (*surface).to_owned())
+        .collect::<Vec<_>>();
+    let missing_required_surfaces = required_surfaces
+        .iter()
+        .filter(|surface| !INSTALL_FRESHNESS_SUPPORTED_SURFACES.contains(&surface.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let installed_version = InstallVersionEvidence {
+        version: if current_binary.version.trim().is_empty() {
+            None
+        } else {
+            Some(current_binary.version.clone())
+        },
+        source: current_binary.source.clone(),
+        status: if current_binary.version.trim().is_empty() {
+            "missing".to_owned()
+        } else {
+            "reported".to_owned()
+        },
+        path: current_binary.path.clone(),
+        path_class: current_binary
+            .path
+            .as_ref()
+            .map(|_| "host_local_path".to_owned()),
+    };
+    let comparison = install_version_comparison(
+        installed_version.version.as_deref(),
+        source_version.version.as_deref(),
+    );
+    let shadowed = current_binary
+        .path
+        .as_deref()
+        .zip(path.first_binary.as_deref())
+        .is_some_and(|(current, first)| current != first);
+
+    let verdict = if !missing_required_surfaces.is_empty() {
+        InstallFreshnessVerdict::MissingRequiredSurface
+    } else if source_version.version.is_none() {
+        InstallFreshnessVerdict::UnknownSourceVersion
+    } else if installed_version.version.is_none() {
+        InstallFreshnessVerdict::UnknownInstalledVersion
+    } else if shadowed {
+        InstallFreshnessVerdict::ShadowedBinary
+    } else if !path.current_binary_on_path {
+        InstallFreshnessVerdict::PathBinaryMissing
+    } else if comparison != "equal" {
+        InstallFreshnessVerdict::Stale
+    } else {
+        InstallFreshnessVerdict::Fresh
+    };
+
+    let mut blocking_findings = Vec::new();
+    match verdict {
+        InstallFreshnessVerdict::Fresh => {}
+        InstallFreshnessVerdict::Stale => {
+            blocking_findings.push(InstallFindingCode::InstalledBinaryStale);
+        }
+        InstallFreshnessVerdict::UnknownSourceVersion => {
+            blocking_findings.push(InstallFindingCode::SourceVersionUnknown);
+        }
+        InstallFreshnessVerdict::UnknownInstalledVersion => {
+            blocking_findings.push(InstallFindingCode::InstalledVersionUnknown);
+        }
+        InstallFreshnessVerdict::MissingRequiredSurface => {
+            blocking_findings.push(InstallFindingCode::RequiredSurfaceMissing);
+        }
+        InstallFreshnessVerdict::PathBinaryMissing => {
+            blocking_findings.push(InstallFindingCode::BinaryNotOnPath);
+        }
+        InstallFreshnessVerdict::ShadowedBinary => {
+            blocking_findings.push(InstallFindingCode::CurrentBinaryShadowed);
+        }
+    }
+
+    InstallFreshnessReport {
+        schema: INSTALL_FRESHNESS_SCHEMA_V1.to_owned(),
+        verdict,
+        authoritative: verdict == InstallFreshnessVerdict::Fresh,
+        comparison,
+        source_version,
+        installed_version,
+        path_status: path.status,
+        required_surfaces,
+        missing_required_surfaces,
+        blocking_findings,
+        repair: install_freshness_repair(verdict).to_owned(),
+    }
+}
+
+fn install_version_comparison(installed: Option<&str>, source: Option<&str>) -> String {
+    match (installed, source) {
+        (Some(installed), Some(source)) => match compare_versions(installed, source) {
+            Ordering::Equal => "equal",
+            Ordering::Less => "installed_older_than_source",
+            Ordering::Greater => "installed_newer_than_source",
+        },
+        _ => "unknown",
+    }
+    .to_owned()
+}
+
+fn install_freshness_repair(verdict: InstallFreshnessVerdict) -> &'static str {
+    match verdict {
+        InstallFreshnessVerdict::Fresh => "No freshness repair required.",
+        InstallFreshnessVerdict::Stale => {
+            "Rebuild and reinstall ee from the current source checkout before trusting agent automation."
+        }
+        InstallFreshnessVerdict::UnknownSourceVersion => {
+            "Run the check from the eidetic-engine source checkout or pass a release manifest with a source version."
+        }
+        InstallFreshnessVerdict::UnknownInstalledVersion => {
+            "Run a normal ee binary with build version metadata before trusting install freshness."
+        }
+        InstallFreshnessVerdict::MissingRequiredSurface => {
+            "Upgrade or rebuild ee so it supports every required automation surface."
+        }
+        InstallFreshnessVerdict::PathBinaryMissing => {
+            "Install ee into PATH or run the PATH-resolved ee binary before trusting agent automation."
+        }
+        InstallFreshnessVerdict::ShadowedBinary => {
+            "Run the first ee binary found in PATH or fix PATH ordering before trusting agent automation."
+        }
+    }
+}
+
+fn install_freshness_findings(freshness: &InstallFreshnessReport) -> Vec<InstallFinding> {
+    match freshness.verdict {
+        InstallFreshnessVerdict::Fresh => Vec::new(),
+        InstallFreshnessVerdict::Stale => vec![InstallFinding::error(
+            InstallFindingCode::InstalledBinaryStale,
+            install_freshness_stale_message(freshness),
+            freshness.repair.clone(),
+        )],
+        InstallFreshnessVerdict::UnknownSourceVersion => vec![InstallFinding::error(
+            InstallFindingCode::SourceVersionUnknown,
+            "source package version could not be established from Cargo.toml or a release manifest",
+            freshness.repair.clone(),
+        )],
+        InstallFreshnessVerdict::UnknownInstalledVersion => vec![InstallFinding::error(
+            InstallFindingCode::InstalledVersionUnknown,
+            "running ee binary did not report usable build version metadata",
+            freshness.repair.clone(),
+        )],
+        InstallFreshnessVerdict::MissingRequiredSurface => vec![InstallFinding::error(
+            InstallFindingCode::RequiredSurfaceMissing,
+            format!(
+                "installed ee is missing required surface(s): {}",
+                freshness.missing_required_surfaces.join(", ")
+            ),
+            freshness.repair.clone(),
+        )],
+        InstallFreshnessVerdict::PathBinaryMissing => vec![InstallFinding::error(
+            InstallFindingCode::BinaryNotOnPath,
+            "running ee binary is not available through PATH",
+            freshness.repair.clone(),
+        )],
+        InstallFreshnessVerdict::ShadowedBinary => vec![InstallFinding::error(
+            InstallFindingCode::CurrentBinaryShadowed,
+            "running ee binary is not the first ee binary found in PATH",
+            freshness.repair.clone(),
+        )],
+    }
+}
+
+fn install_freshness_stale_message(freshness: &InstallFreshnessReport) -> String {
+    format!(
+        "running ee version '{}' does not match source version '{}'",
+        freshness
+            .installed_version
+            .version
+            .as_deref()
+            .unwrap_or("unknown"),
+        freshness
+            .source_version
+            .version
+            .as_deref()
+            .unwrap_or("unknown")
+    )
+}
+
+fn detect_install_source_version(manifest: Option<&Path>) -> InstallVersionEvidence {
+    if let Some(evidence) = detect_cargo_toml_source_version() {
+        return evidence;
+    }
+    if let Some(manifest) = manifest {
+        return read_release_manifest_version(manifest);
+    }
+    unknown_source_version("no_source_evidence", None)
+}
+
+fn detect_cargo_toml_source_version() -> Option<InstallVersionEvidence> {
+    let mut current = env::current_dir().ok()?;
+    loop {
+        let candidate = current.join("Cargo.toml");
+        if candidate.is_file() {
+            let evidence = read_cargo_toml_version(&candidate);
+            if evidence.status != "not_eidetic_package" {
+                return Some(evidence);
+            }
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn read_cargo_toml_version(path: &Path) -> InstallVersionEvidence {
+    let path_string = normalize_path(path);
+    let Some(raw) = read_bounded_regular_text(path, CARGO_TOML_MAX_BYTES) else {
+        return unknown_source_version("cargo_toml_unreadable", Some(path_string));
+    };
+    let Ok(document) = raw.parse::<DocumentMut>() else {
+        return unknown_source_version("cargo_toml_invalid", Some(path_string));
+    };
+    let Some(package) = document.get("package").and_then(toml_edit::Item::as_table) else {
+        return unknown_source_version("not_eidetic_package", Some(path_string));
+    };
+    let package_name = package
+        .get("name")
+        .and_then(toml_edit::Item::as_str)
+        .unwrap_or_default();
+    if package_name != "eidetic-engine" {
+        return unknown_source_version("not_eidetic_package", Some(path_string));
+    }
+    let Some(version) = package.get("version").and_then(toml_edit::Item::as_str) else {
+        return unknown_source_version("cargo_toml_missing_version", Some(path_string));
+    };
+    version_evidence(Some(version.to_owned()), "cargo_toml", "ok", None)
+}
+
+fn read_release_manifest_version(path: &Path) -> InstallVersionEvidence {
+    let path_string = normalize_path(path);
+    let Some(raw) = read_bounded_regular_text(path, RELEASE_MANIFEST_MAX_BYTES) else {
+        return unknown_source_version("release_manifest_unreadable", Some(path_string));
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return unknown_source_version("release_manifest_invalid_json", Some(path_string));
+    };
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some(RELEASE_MANIFEST_SCHEMA_V1) {
+        return unknown_source_version("release_manifest_invalid_schema", Some(path_string));
+    }
+    let version = value
+        .get("releaseVersion")
+        .or_else(|| value.get("release_version"))
+        .or_else(|| value.get("version"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    if version.is_none() {
+        return unknown_source_version("release_manifest_missing_version", Some(path_string));
+    }
+    version_evidence(version, "release_manifest", "ok", Some(path_string))
+}
+
+fn read_bounded_regular_text(path: &Path, max_bytes: u64) -> Option<String> {
+    if install_path_has_symlink_component(path)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return None;
+    }
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > max_bytes {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if u64::try_from(bytes.len()).ok()? > max_bytes {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn unknown_source_version(status: &str, path: Option<String>) -> InstallVersionEvidence {
+    version_evidence(None, "unknown", status, path)
+}
+
+fn version_evidence(
+    version: Option<String>,
+    source: &str,
+    status: &str,
+    path: Option<String>,
+) -> InstallVersionEvidence {
+    InstallVersionEvidence {
+        version,
+        source: source.to_owned(),
+        status: status.to_owned(),
+        path_class: path.as_ref().map(|_| "host_local_path".to_owned()),
+        path,
+    }
 }
 
 fn install_target(target_triple: &str, install_dir: &Path) -> InstallTarget {
@@ -2044,6 +2371,45 @@ mod tests {
         }
     }
 
+    fn freshness_source(version: Option<&str>) -> InstallVersionEvidence {
+        InstallVersionEvidence {
+            version: version.map(str::to_owned),
+            source: "test".to_owned(),
+            status: if version.is_some() { "ok" } else { "missing" }.to_owned(),
+            path: None,
+            path_class: None,
+        }
+    }
+
+    fn current_binary(path: &str, version: &str) -> crate::models::CurrentBinary {
+        crate::models::CurrentBinary {
+            path: Some(path.to_owned()),
+            version: version.to_owned(),
+            source: "running_process".to_owned(),
+        }
+    }
+
+    fn path_analysis(first_binary: &str, current_binary: &str) -> InstallPathAnalysis {
+        InstallPathAnalysis {
+            status: if first_binary == current_binary {
+                InstallPathStatus::Ok
+            } else {
+                InstallPathStatus::Shadowed
+            },
+            path_entries: vec!["/usr/local/bin".to_owned()],
+            binaries: vec![PathBinary {
+                path: first_binary.to_owned(),
+                ordinal: 0,
+                is_current_binary: first_binary == current_binary,
+                version: None,
+                version_status: None,
+            }],
+            first_binary: Some(first_binary.to_owned()),
+            current_binary_on_path: first_binary == current_binary,
+            duplicate_count: 1,
+        }
+    }
+
     #[test]
     fn idempotency_key_is_stable_for_same_inputs() -> TestResult {
         let left = install_idempotency_key(
@@ -2061,6 +2427,124 @@ mod tests {
             Some("artifact"),
         );
         ensure_equal(left, right, "stable key")
+    }
+
+    #[test]
+    fn install_freshness_marks_stale_running_binary() -> TestResult {
+        let current = current_binary("/usr/local/bin/ee", "0.5.0");
+        let path = path_analysis("/usr/local/bin/ee", "/usr/local/bin/ee");
+        let report = evaluate_install_freshness(
+            freshness_source(Some("0.6.0")),
+            &current,
+            &path,
+            &[],
+            &["install_check"],
+        );
+
+        ensure_equal(
+            report.verdict,
+            InstallFreshnessVerdict::Stale,
+            "freshness verdict",
+        )?;
+        ensure(!report.authoritative, "stale binary fails closed")?;
+        ensure_equal(
+            report.comparison.as_str(),
+            "installed_older_than_source",
+            "version comparison",
+        )?;
+        ensure(
+            report
+                .blocking_findings
+                .contains(&InstallFindingCode::InstalledBinaryStale),
+            "stale finding code",
+        )
+    }
+
+    #[test]
+    fn install_freshness_marks_shadowed_binary() -> TestResult {
+        let current = current_binary("/opt/ee/ee", "0.6.0");
+        let path = path_analysis("/usr/local/bin/ee", "/opt/ee/ee");
+        let report = evaluate_install_freshness(
+            freshness_source(Some("0.6.0")),
+            &current,
+            &path,
+            &[],
+            &["install_check"],
+        );
+
+        ensure_equal(
+            report.verdict,
+            InstallFreshnessVerdict::ShadowedBinary,
+            "freshness verdict",
+        )?;
+        ensure(!report.authoritative, "shadowed binary fails closed")?;
+        ensure(
+            report
+                .blocking_findings
+                .contains(&InstallFindingCode::CurrentBinaryShadowed),
+            "shadowed finding code",
+        )
+    }
+
+    #[test]
+    fn install_freshness_marks_missing_required_surface() -> TestResult {
+        let current = current_binary("/usr/local/bin/ee", "0.6.0");
+        let path = path_analysis("/usr/local/bin/ee", "/usr/local/bin/ee");
+        let report = evaluate_install_freshness(
+            freshness_source(Some("0.6.0")),
+            &current,
+            &path,
+            &[],
+            &["claim_gate_install_freshness", "future_surface"],
+        );
+
+        ensure_equal(
+            report.verdict,
+            InstallFreshnessVerdict::MissingRequiredSurface,
+            "freshness verdict",
+        )?;
+        ensure_equal(
+            report.missing_required_surfaces,
+            vec!["future_surface".to_owned()],
+            "missing surfaces",
+        )?;
+        ensure(
+            report
+                .blocking_findings
+                .contains(&InstallFindingCode::RequiredSurfaceMissing),
+            "missing-surface finding code",
+        )
+    }
+
+    #[test]
+    fn install_freshness_marks_missing_path_binary() -> TestResult {
+        let current = current_binary("/opt/ee/ee", "0.6.0");
+        let mut path = path_analysis("/usr/local/bin/ee", "/opt/ee/ee");
+        path.binaries.clear();
+        path.first_binary = None;
+        path.current_binary_on_path = false;
+        path.duplicate_count = 0;
+        path.status = InstallPathStatus::Missing;
+        let report = evaluate_install_freshness(
+            freshness_source(Some("0.6.0")),
+            &current,
+            &path,
+            &[],
+            &["install_check"],
+        );
+
+        ensure_equal(
+            report.verdict,
+            InstallFreshnessVerdict::PathBinaryMissing,
+            "freshness verdict",
+        )?;
+        ensure(!report.authoritative, "PATH-missing binary fails closed")?;
+        ensure(
+            report
+                .blocking_findings
+                .contains(&InstallFindingCode::BinaryNotOnPath),
+            "PATH-missing finding code",
+        )
     }
 
     #[test]

@@ -389,10 +389,76 @@ impl Drop for ArenaScope {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackLodBudgetShares {
+    pub full_basis_points: u16,
+    pub truncated_preview_basis_points: u16,
+    pub link_only_basis_points: u16,
+}
+
+impl PackLodBudgetShares {
+    #[must_use]
+    pub const fn new(
+        full_basis_points: u16,
+        truncated_preview_basis_points: u16,
+        link_only_basis_points: u16,
+    ) -> Self {
+        Self {
+            full_basis_points,
+            truncated_preview_basis_points,
+            link_only_basis_points,
+        }
+    }
+
+    #[must_use]
+    pub const fn default_70_20_10() -> Self {
+        Self::new(7_000, 2_000, 1_000)
+    }
+
+    fn limits(self, budget: TokenBudget) -> PackLodBudgetLimits {
+        let total = u32::from(self.full_basis_points)
+            .saturating_add(u32::from(self.truncated_preview_basis_points))
+            .saturating_add(u32::from(self.link_only_basis_points));
+        if total == 0 {
+            return PackLodBudgetLimits::full_only(budget.max_tokens());
+        }
+
+        let max_tokens = budget.max_tokens();
+        let full = lod_share_tokens(max_tokens, self.full_basis_points, total).min(max_tokens);
+        let remaining_after_full = max_tokens.saturating_sub(full);
+        let truncated_preview =
+            lod_share_tokens(max_tokens, self.truncated_preview_basis_points, total)
+                .min(remaining_after_full);
+        let remaining_after_preview = remaining_after_full.saturating_sub(truncated_preview);
+        let link_only = lod_share_tokens(max_tokens, self.link_only_basis_points, total)
+            .min(remaining_after_preview);
+
+        PackLodBudgetLimits {
+            full,
+            truncated_preview,
+            link_only,
+        }
+    }
+}
+
+impl Default for PackLodBudgetShares {
+    fn default() -> Self {
+        Self::default_70_20_10()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackAssemblyOptions {
     pub include_coverage_fill: bool,
     pub output_redaction_enabled: bool,
     pub redaction_level: RedactionLevel,
+    /// Budget shares for level-of-detail pack rendering.
+    ///
+    /// `Some` enables the default bd-1n0np.5.1 behavior: selected
+    /// candidates first consume full-content budget, then deterministic
+    /// preview budget, then compact link-only budget. `None` preserves
+    /// the pre-LOD single-tier budget policy for tests that need an
+    /// exact historical baseline.
+    pub lod_budget_shares: Option<PackLodBudgetShares>,
     /// bd-1prrl.7.3: Arena allocation strategy for scratch buffers.
     /// Defaults to [`ArenaMode::Disabled`] so existing public output
     /// is unchanged. Does not participate in `compute_pack_hash`
@@ -408,6 +474,7 @@ impl Default for PackAssemblyOptions {
             include_coverage_fill: true,
             output_redaction_enabled: true,
             redaction_level: RedactionLevel::Minimal,
+            lod_budget_shares: Some(PackLodBudgetShares::default()),
             arena_mode: ArenaMode::Disabled,
         }
     }
@@ -1051,7 +1118,7 @@ pub fn estimate_tokens(content: &str, strategy: TokenEstimationStrategy) -> u32 
     }
 }
 
-/// Estimate tokens using the default character heuristic strategy.
+/// Estimate tokens using the default tokenizer-backed strategy.
 #[must_use]
 pub fn estimate_tokens_default(content: &str) -> u32 {
     estimate_tokens(content, TokenEstimationStrategy::default())
@@ -2159,6 +2226,7 @@ pub struct WhyNotSelectedReport {
     pub selected: bool,
     pub retrieval_stage_reached: String,
     pub primary_reason: String,
+    pub reason_source: String,
     pub filters_applied: Vec<WhyNotSelectionFilterReport>,
     pub redaction_scope_exclusions: Vec<WhyNotSelectionExclusionReport>,
     pub degraded: Vec<WhyNotSelectionDegradationReport>,
@@ -2299,6 +2367,7 @@ pub fn explain_why_not_selected(
     let selected = selected_item.is_some();
     let primary_reason =
         why_not_primary_reason(target_present, selected, omission, &exclusions, &degraded);
+    let reason_source = why_not_reason_source(&primary_reason);
     let stage = why_not_stage(target_present, selected, omission, &exclusions, &degraded);
     let token_frontier = why_not_token_frontier(input.budget, &target, draft.as_ref(), omission);
     let scores = why_not_scores(&target, last_included);
@@ -2333,6 +2402,7 @@ pub fn explain_why_not_selected(
         selected,
         retrieval_stage_reached: stage,
         primary_reason,
+        reason_source,
         filters_applied: filters,
         redaction_scope_exclusions: exclusion_reports,
         degraded: degradation_reports,
@@ -2348,6 +2418,14 @@ pub fn explain_why_not_selected(
             .map(PackProvenance::rendered)
             .collect(),
     })
+}
+
+fn why_not_reason_source(primary_reason: &str) -> String {
+    match primary_reason {
+        "not_retrieved" | "not_retrieved_due_to_degraded_index" => "reconstructed",
+        _ => "authoritative",
+    }
+    .to_string()
 }
 
 fn why_not_primary_reason(
@@ -5238,6 +5316,7 @@ fn assemble_mmr_draft(
 
     let mut used_tokens = 0_u32;
     let mut section_usage = SectionTokenUsage::default();
+    let mut lod_usage = PackLodBudgetState::from_options(options, budget);
     let mut next_rank = 1_u32;
     let mut scratch = MmrAssemblyScratch::with_candidate_capacity(candidate_count);
     let mut objective_value = 0.0_f32;
@@ -5264,14 +5343,16 @@ fn assemble_mmr_draft(
 
         let section_used = section_usage.tokens_for(selection.candidate.section);
 
-        if facility_candidate_is_feasible(
+        if let Some(plan) = pack_lod_candidate_plan(
             &selection.candidate,
             used_tokens,
             budget,
             &quotas,
             &section_usage,
+            &lod_usage,
         ) {
-            match used_tokens.checked_add(selection.candidate.estimated_tokens) {
+            let PackLodCandidatePlan { tier, candidate } = plan;
+            match used_tokens.checked_add(candidate.estimated_tokens) {
                 Some(total) => {
                     let rank = next_rank;
                     next_rank = next_rank
@@ -5280,17 +5361,17 @@ fn assemble_mmr_draft(
                     objective_value += marginal_gain.max(0.0);
                     scratch.draft.steps.push(PackSelectionStep {
                         rank,
-                        memory_id: selection.candidate.memory_id,
+                        memory_id: candidate.memory_id,
                         marginal_gain,
                         objective_value,
-                        token_cost: selection.candidate.estimated_tokens,
+                        token_cost: candidate.estimated_tokens,
                         feasible: true,
-                        covered_features: certificate_features(&selection.candidate),
+                        covered_features: certificate_features(&candidate),
                     });
                     used_tokens = total;
-                    let candidate = selection.candidate;
                     let redactions = selection.redactions;
                     section_usage.add_candidate(&candidate);
+                    lod_usage.add(tier, candidate.estimated_tokens);
                     let selected_signature = selection.signature.clone();
                     scratch.selected_signatures.push(selection.signature);
                     update_mmr_max_similarities(
@@ -5389,14 +5470,16 @@ fn assemble_mmr_draft(
             }
 
             let section_used = section_usage.tokens_for(selection.candidate.section);
-            if facility_candidate_is_feasible(
+            if let Some(plan) = pack_lod_candidate_plan(
                 &selection.candidate,
                 used_tokens,
                 budget,
                 &quotas,
                 &section_usage,
+                &lod_usage,
             ) {
-                match used_tokens.checked_add(selection.candidate.estimated_tokens) {
+                let PackLodCandidatePlan { tier, candidate } = plan;
+                match used_tokens.checked_add(candidate.estimated_tokens) {
                     Some(total) => {
                         let rank = next_rank;
                         next_rank = next_rank
@@ -5406,17 +5489,17 @@ fn assemble_mmr_draft(
                             strict_mmr_marginal_gain(&selection, &scratch.selected_signatures);
                         scratch.draft.steps.push(PackSelectionStep {
                             rank,
-                            memory_id: selection.candidate.memory_id,
+                            memory_id: candidate.memory_id,
                             marginal_gain,
                             objective_value,
-                            token_cost: selection.candidate.estimated_tokens,
+                            token_cost: candidate.estimated_tokens,
                             feasible: true,
-                            covered_features: certificate_features(&selection.candidate),
+                            covered_features: certificate_features(&candidate),
                         });
                         used_tokens = total;
-                        let candidate = selection.candidate;
                         let redactions = selection.redactions;
                         section_usage.add_candidate(&candidate);
+                        lod_usage.add(tier, candidate.estimated_tokens);
                         scratch.selected_signatures.push(selection.signature);
                         coverage_fill_count = coverage_fill_count.saturating_add(1);
                         scratch
@@ -5543,6 +5626,7 @@ fn assemble_mmr_draft_reusing_workspace(
 
     let mut used_tokens = 0_u32;
     let mut section_usage = SectionTokenUsage::default();
+    let mut lod_usage = PackLodBudgetState::from_options(options, budget);
     let mut next_rank = 1_u32;
     let mut objective_value = 0.0_f32;
 
@@ -5562,14 +5646,16 @@ fn assemble_mmr_draft_reusing_workspace(
 
         let section_used = section_usage.tokens_for(selection.candidate.section);
 
-        if facility_candidate_is_feasible(
+        if let Some(plan) = pack_lod_candidate_plan(
             &selection.candidate,
             used_tokens,
             budget,
             &quotas,
             &section_usage,
+            &lod_usage,
         ) {
-            match used_tokens.checked_add(selection.candidate.estimated_tokens) {
+            let PackLodCandidatePlan { tier, candidate } = plan;
+            match used_tokens.checked_add(candidate.estimated_tokens) {
                 Some(total) => {
                     let rank = next_rank;
                     next_rank = next_rank
@@ -5578,17 +5664,17 @@ fn assemble_mmr_draft_reusing_workspace(
                     objective_value += marginal_gain.max(0.0);
                     scratch.draft.steps.push(PackSelectionStep {
                         rank,
-                        memory_id: selection.candidate.memory_id,
+                        memory_id: candidate.memory_id,
                         marginal_gain,
                         objective_value,
-                        token_cost: selection.candidate.estimated_tokens,
+                        token_cost: candidate.estimated_tokens,
                         feasible: true,
-                        covered_features: certificate_features(&selection.candidate),
+                        covered_features: certificate_features(&candidate),
                     });
                     used_tokens = total;
-                    let candidate = selection.candidate;
                     let redactions = selection.redactions;
                     section_usage.add_candidate(&candidate);
+                    lod_usage.add(tier, candidate.estimated_tokens);
                     let selected_signature = selection.signature.clone();
                     scratch.selected_signatures.push(selection.signature);
                     update_mmr_max_similarities(
@@ -5677,14 +5763,16 @@ fn assemble_mmr_draft_reusing_workspace(
             }
 
             let section_used = section_usage.tokens_for(selection.candidate.section);
-            if facility_candidate_is_feasible(
+            if let Some(plan) = pack_lod_candidate_plan(
                 &selection.candidate,
                 used_tokens,
                 budget,
                 &quotas,
                 &section_usage,
+                &lod_usage,
             ) {
-                match used_tokens.checked_add(selection.candidate.estimated_tokens) {
+                let PackLodCandidatePlan { tier, candidate } = plan;
+                match used_tokens.checked_add(candidate.estimated_tokens) {
                     Some(total) => {
                         let rank = next_rank;
                         next_rank = next_rank
@@ -5694,17 +5782,17 @@ fn assemble_mmr_draft_reusing_workspace(
                             strict_mmr_marginal_gain(&selection, &scratch.selected_signatures);
                         scratch.draft.steps.push(PackSelectionStep {
                             rank,
-                            memory_id: selection.candidate.memory_id,
+                            memory_id: candidate.memory_id,
                             marginal_gain,
                             objective_value,
-                            token_cost: selection.candidate.estimated_tokens,
+                            token_cost: candidate.estimated_tokens,
                             feasible: true,
-                            covered_features: certificate_features(&selection.candidate),
+                            covered_features: certificate_features(&candidate),
                         });
                         used_tokens = total;
-                        let candidate = selection.candidate;
                         let redactions = selection.redactions;
                         section_usage.add_candidate(&candidate);
+                        lod_usage.add(tier, candidate.estimated_tokens);
                         scratch.selected_signatures.push(selection.signature);
                         coverage_fill_count = coverage_fill_count.saturating_add(1);
                         scratch
@@ -5824,6 +5912,7 @@ fn assemble_facility_location_draft(
 
     let mut used_tokens = 0_u32;
     let mut section_usage = SectionTokenUsage::default();
+    let mut lod_usage = PackLodBudgetState::from_options(options, budget);
     let mut next_rank = 1_u32;
     let mut scratch = PackDraftScratch::with_candidate_capacity(candidate_count);
     let mut objective_value = 0.0_f32;
@@ -5837,6 +5926,7 @@ fn assemble_facility_location_draft(
             budget,
             &quotas,
             &section_usage,
+            &lod_usage,
         ) else {
             scratch.omitted.extend(active.iter().enumerate().filter_map(
                 |(profile_index, &is_active)| {
@@ -5882,13 +5972,35 @@ fn assemble_facility_location_draft(
         }
         active[profile_index] = false;
         remaining_count = remaining_count.saturating_sub(1);
-        let Some(profile) = candidates.get_mut(profile_index) else {
+        let Some(candidate_profile) = candidates.get_mut(profile_index) else {
             continue;
         };
-        let Some(candidate) = profile.candidate.take() else {
+        let Some(candidate) = candidate_profile.candidate.take() else {
             continue;
         };
-        let redactions = std::mem::take(&mut profile.redactions);
+        let redactions = std::mem::take(&mut candidate_profile.redactions);
+        let Some(plan) = pack_lod_candidate_plan(
+            &candidate,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+            &lod_usage,
+        ) else {
+            scratch.omitted.push(PackOmission::from_candidate(
+                &candidate,
+                PackOmissionReason::TokenBudgetExceeded,
+                Some(minimal_budget_for_candidate(
+                    profile,
+                    used_tokens,
+                    section_usage.tokens_for(candidate.section),
+                    candidate.section,
+                    candidate.estimated_tokens,
+                )),
+            ));
+            continue;
+        };
+        let PackLodCandidatePlan { tier, candidate } = plan;
         let rank = next_rank;
         next_rank = next_rank
             .checked_add(1)
@@ -5905,6 +6017,7 @@ fn assemble_facility_location_draft(
             .checked_add(candidate.estimated_tokens)
             .ok_or(PackValidationError::CandidateRankOverflow)?;
         section_usage.add_candidate(&candidate);
+        lod_usage.add(tier, candidate.estimated_tokens);
         objective_value = update_facility_coverages_cached(
             &candidates,
             &mut current_coverages,
@@ -6004,6 +6117,7 @@ fn assemble_facility_location_draft_reusing_workspace(
 
     let mut used_tokens = 0_u32;
     let mut section_usage = SectionTokenUsage::default();
+    let mut lod_usage = PackLodBudgetState::from_options(options, budget);
     let mut next_rank = 1_u32;
     let mut objective_value = 0.0_f32;
 
@@ -6016,6 +6130,7 @@ fn assemble_facility_location_draft_reusing_workspace(
             budget,
             &quotas,
             &section_usage,
+            &lod_usage,
         ) else {
             scratch.omitted.extend(active.iter().enumerate().filter_map(
                 |(profile_index, &is_active)| {
@@ -6061,13 +6176,35 @@ fn assemble_facility_location_draft_reusing_workspace(
         }
         active[profile_index] = false;
         remaining_count = remaining_count.saturating_sub(1);
-        let Some(profile) = candidates.get_mut(profile_index) else {
+        let Some(candidate_profile) = candidates.get_mut(profile_index) else {
             continue;
         };
-        let Some(candidate) = profile.candidate.take() else {
+        let Some(candidate) = candidate_profile.candidate.take() else {
             continue;
         };
-        let redactions = std::mem::take(&mut profile.redactions);
+        let redactions = std::mem::take(&mut candidate_profile.redactions);
+        let Some(plan) = pack_lod_candidate_plan(
+            &candidate,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+            &lod_usage,
+        ) else {
+            scratch.omitted.push(PackOmission::from_candidate(
+                &candidate,
+                PackOmissionReason::TokenBudgetExceeded,
+                Some(minimal_budget_for_candidate(
+                    profile,
+                    used_tokens,
+                    section_usage.tokens_for(candidate.section),
+                    candidate.section,
+                    candidate.estimated_tokens,
+                )),
+            ));
+            continue;
+        };
+        let PackLodCandidatePlan { tier, candidate } = plan;
         let rank = next_rank;
         next_rank = next_rank
             .checked_add(1)
@@ -6076,6 +6213,7 @@ fn assemble_facility_location_draft_reusing_workspace(
             .checked_add(candidate.estimated_tokens)
             .ok_or(PackValidationError::CandidateRankOverflow)?;
         section_usage.add_candidate(&candidate);
+        lod_usage.add(tier, candidate.estimated_tokens);
         objective_value = update_facility_coverages_cached(
             &candidates,
             &mut current_coverages,
@@ -6339,7 +6477,21 @@ impl FacilitySelectionQueue {
         budget: TokenBudget,
         quotas: &SectionQuotas,
         section_usage: &SectionTokenUsage,
+        lod_usage: &PackLodBudgetState,
     ) -> Option<(usize, f32)> {
+        if lod_usage.has_compressed_tiers() {
+            return select_facility_lod_candidate_index(
+                universe,
+                current_coverages,
+                similarity_cache,
+                used_tokens,
+                budget,
+                quotas,
+                section_usage,
+                lod_usage,
+            );
+        }
+
         while let Some(entry) = self.heap.pop() {
             let profile_index = entry.profile_index;
             let Some(profile) = universe.get(profile_index) else {
@@ -6348,13 +6500,16 @@ impl FacilitySelectionQueue {
             let Some(candidate) = profile.candidate.as_ref() else {
                 continue;
             };
-            if !facility_candidate_is_feasible(
+            if pack_lod_candidate_plan(
                 candidate,
                 used_tokens,
                 budget,
                 quotas,
                 section_usage,
-            ) {
+                lod_usage,
+            )
+            .is_none()
+            {
                 continue;
             }
             if entry.generation == self.generation {
@@ -6456,6 +6611,58 @@ fn facility_queue_entry(
     })
 }
 
+fn select_facility_lod_candidate_index(
+    universe: &[FacilityCandidateProfile],
+    current_coverages: &[f32],
+    similarity_cache: &FacilitySimilarityCache,
+    used_tokens: u32,
+    budget: TokenBudget,
+    quotas: &SectionQuotas,
+    section_usage: &SectionTokenUsage,
+    lod_usage: &PackLodBudgetState,
+) -> Option<(usize, f32)> {
+    let mut best: Option<(usize, f32, f32)> = None;
+    for (profile_index, profile) in universe.iter().enumerate() {
+        let Some(candidate) = profile.candidate.as_ref() else {
+            continue;
+        };
+        let Some(plan) = pack_lod_candidate_plan(
+            candidate,
+            used_tokens,
+            budget,
+            quotas,
+            section_usage,
+            lod_usage,
+        ) else {
+            continue;
+        };
+        if plan.candidate.estimated_tokens == 0 {
+            continue;
+        }
+        let marginal_gain = facility_marginal_gain_cached(
+            profile_index,
+            universe,
+            current_coverages,
+            similarity_cache,
+        );
+        let gain_ratio = marginal_gain / plan.candidate.estimated_tokens as f32;
+        match best {
+            None => best = Some((profile_index, marginal_gain, gain_ratio)),
+            Some((best_profile_index, best_marginal_gain, best_gain_ratio)) => {
+                if gain_ratio
+                    .total_cmp(&best_gain_ratio)
+                    .then_with(|| marginal_gain.total_cmp(&best_marginal_gain))
+                    .then_with(|| best_profile_index.cmp(&profile_index))
+                    == Ordering::Greater
+                {
+                    best = Some((profile_index, marginal_gain, gain_ratio));
+                }
+            }
+        }
+    }
+    best.map(|(profile_index, marginal_gain, _)| (profile_index, marginal_gain))
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct SectionTokenUsage {
     used: [u32; 5],
@@ -6470,6 +6677,195 @@ impl SectionTokenUsage {
         let used = &mut self.used[candidate.section as usize];
         *used = used.saturating_add(candidate.estimated_tokens);
     }
+}
+
+fn lod_share_tokens(max_tokens: u32, basis_points: u16, total_basis_points: u32) -> u32 {
+    if basis_points == 0 || max_tokens == 0 || total_basis_points == 0 {
+        return 0;
+    }
+    let tokens = (u64::from(max_tokens) * u64::from(basis_points)) / u64::from(total_basis_points);
+    u32::try_from(tokens).unwrap_or(u32::MAX).max(1)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PackLodBudgetLimits {
+    full: u32,
+    truncated_preview: u32,
+    link_only: u32,
+}
+
+impl PackLodBudgetLimits {
+    const fn full_only(max_tokens: u32) -> Self {
+        Self {
+            full: max_tokens,
+            truncated_preview: 0,
+            link_only: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PackLodTier {
+    Full,
+    TruncatedPreview,
+    LinkOnly,
+}
+
+impl PackLodTier {
+    const fn index(self) -> usize {
+        match self {
+            Self::Full => 0,
+            Self::TruncatedPreview => 1,
+            Self::LinkOnly => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PackLodBudgetState {
+    limits: PackLodBudgetLimits,
+    used: [u32; 3],
+}
+
+impl PackLodBudgetState {
+    fn from_options(options: PackAssemblyOptions, budget: TokenBudget) -> Self {
+        let limits = options.lod_budget_shares.map_or(
+            PackLodBudgetLimits {
+                full: budget.max_tokens(),
+                truncated_preview: 0,
+                link_only: 0,
+            },
+            |shares| shares.limits(budget),
+        );
+        Self {
+            limits,
+            used: [0; 3],
+        }
+    }
+
+    fn remaining(self, tier: PackLodTier) -> u32 {
+        match tier {
+            PackLodTier::Full => self.limits.full,
+            PackLodTier::TruncatedPreview => self.limits.truncated_preview,
+            PackLodTier::LinkOnly => self.limits.link_only,
+        }
+        .saturating_sub(self.used[tier.index()])
+    }
+
+    fn add(&mut self, tier: PackLodTier, tokens: u32) {
+        let used = &mut self.used[tier.index()];
+        *used = used.saturating_add(tokens);
+    }
+
+    fn has_compressed_tiers(self) -> bool {
+        self.limits.truncated_preview > 0 || self.limits.link_only > 0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PackLodCandidatePlan {
+    tier: PackLodTier,
+    candidate: PackCandidate,
+}
+
+fn pack_lod_candidate_plan(
+    candidate: &PackCandidate,
+    used_tokens: u32,
+    budget: TokenBudget,
+    quotas: &SectionQuotas,
+    section_usage: &SectionTokenUsage,
+    lod_usage: &PackLodBudgetState,
+) -> Option<PackLodCandidatePlan> {
+    for tier in [
+        PackLodTier::Full,
+        PackLodTier::TruncatedPreview,
+        PackLodTier::LinkOnly,
+    ] {
+        let remaining = lod_usage.remaining(tier);
+        if remaining == 0 {
+            continue;
+        }
+        let Some(rendered_candidate) = candidate_for_lod_tier(candidate, tier, remaining) else {
+            continue;
+        };
+        if rendered_candidate.estimated_tokens > remaining {
+            continue;
+        }
+        if facility_candidate_is_feasible(
+            &rendered_candidate,
+            used_tokens,
+            budget,
+            quotas,
+            section_usage,
+        ) {
+            return Some(PackLodCandidatePlan {
+                tier,
+                candidate: rendered_candidate,
+            });
+        }
+    }
+    None
+}
+
+fn candidate_for_lod_tier(
+    candidate: &PackCandidate,
+    tier: PackLodTier,
+    token_limit: u32,
+) -> Option<PackCandidate> {
+    match tier {
+        PackLodTier::Full => (candidate.estimated_tokens <= token_limit).then(|| candidate.clone()),
+        PackLodTier::TruncatedPreview => preview_lod_candidate(candidate, token_limit),
+        PackLodTier::LinkOnly => link_only_lod_candidate(candidate, token_limit),
+    }
+}
+
+fn preview_lod_candidate(candidate: &PackCandidate, token_limit: u32) -> Option<PackCandidate> {
+    let content = truncated_preview_content(&candidate.content, token_limit)?;
+    let estimated_tokens = estimate_tokens_default(&content).max(1);
+    if estimated_tokens > token_limit {
+        return None;
+    }
+    let mut preview = candidate.clone();
+    preview.content = content;
+    preview.estimated_tokens = estimated_tokens;
+    Some(preview)
+}
+
+fn truncated_preview_content(content: &str, token_limit: u32) -> Option<String> {
+    if token_limit == 0 {
+        return None;
+    }
+    let words = content.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
+        return None;
+    }
+    let max_take_count = words.len().checked_sub(1)?;
+    for take_count in (1..=max_take_count).rev() {
+        let mut preview = words[..take_count].join(" ");
+        if take_count < words.len() {
+            preview.push_str(" ...");
+        }
+        if estimate_tokens_default(&preview) <= token_limit {
+            return Some(preview);
+        }
+    }
+    None
+}
+
+fn link_only_lod_candidate(candidate: &PackCandidate, token_limit: u32) -> Option<PackCandidate> {
+    let candidates = [
+        Some(format!("Memory {}", candidate.memory_id)),
+        Some(candidate.memory_id.to_string()),
+    ];
+    let content = candidates
+        .into_iter()
+        .flatten()
+        .find(|content| estimate_tokens_default(content) <= token_limit)?;
+    let estimated_tokens = estimate_tokens_default(&content).max(1);
+    let mut link_only = candidate.clone();
+    link_only.content = content;
+    link_only.estimated_tokens = estimated_tokens;
+    Some(link_only)
 }
 
 fn facility_candidate_is_feasible(
@@ -7955,6 +8351,24 @@ mod tests {
             why: format!("selected because memory {seed} matches the task"),
         })
         .map_err(|error| format!("test candidate rejected: {error:?}"))
+    }
+
+    fn repeated_lod_content(prefix: &str, count: usize) -> String {
+        (0..count)
+            .map(|index| format!("{prefix}{index}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn selected_item_for_memory(
+        draft: &PackDraft,
+        memory_id: MemoryId,
+    ) -> Result<&PackDraftItem, String> {
+        draft
+            .items
+            .iter()
+            .find(|item| item.memory_id == memory_id)
+            .ok_or_else(|| format!("expected selected item for memory {memory_id}"))
     }
 
     #[test]
@@ -10516,6 +10930,390 @@ mod tests {
     }
 
     #[test]
+    fn lod_budget_shares_default_to_seventy_twenty_ten() -> TestResult {
+        let budget =
+            TokenBudget::new(1_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let limits = super::PackLodBudgetShares::default_70_20_10().limits(budget);
+
+        ensure_equal(&limits.full, &700, "full tier share")?;
+        ensure_equal(
+            &limits.truncated_preview,
+            &200,
+            "truncated preview tier share",
+        )?;
+        ensure_equal(&limits.link_only, &100, "link-only tier share")
+    }
+
+    #[test]
+    fn lod_budget_shares_all_zero_degrade_to_full_budget() -> TestResult {
+        let budget =
+            TokenBudget::new(1_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let limits = super::PackLodBudgetShares::new(0, 0, 0).limits(budget);
+
+        ensure_equal(
+            &limits.full,
+            &1_000,
+            "all-zero shares should keep full-tier selection available",
+        )?;
+        ensure_equal(
+            &limits.truncated_preview,
+            &0,
+            "all-zero shares should not synthesize preview capacity",
+        )?;
+        ensure_equal(
+            &limits.link_only,
+            &0,
+            "all-zero shares should not synthesize link-only capacity",
+        )
+    }
+
+    #[test]
+    fn lod_candidate_plan_fills_full_preview_and_link_tiers() -> TestResult {
+        let budget =
+            TokenBudget::new(300).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let quotas = SectionQuotas::unlimited();
+        let section_usage = super::SectionTokenUsage::default();
+        let mut lod_usage =
+            super::PackLodBudgetState::from_options(PackAssemblyOptions::default(), budget);
+
+        let full_candidate = candidate_with_content(1, 1.0, 0.8, 210, "full detail survives")?;
+        let full_plan = super::pack_lod_candidate_plan(
+            &full_candidate,
+            0,
+            budget,
+            &quotas,
+            &section_usage,
+            &lod_usage,
+        )
+        .ok_or_else(|| "expected full-tier candidate plan".to_string())?;
+        ensure_equal(
+            &full_plan.tier,
+            &super::PackLodTier::Full,
+            "first candidate consumes full tier",
+        )?;
+        ensure_equal(
+            &full_plan.candidate.content,
+            &full_candidate.content,
+            "full tier preserves content",
+        )?;
+        lod_usage.add(full_plan.tier, full_plan.candidate.estimated_tokens);
+
+        let preview_source = repeated_lod_content("preview", 160);
+        let preview_candidate = candidate_with_content(2, 0.9, 0.8, 200, preview_source.clone())?;
+        let preview_plan = super::pack_lod_candidate_plan(
+            &preview_candidate,
+            210,
+            budget,
+            &quotas,
+            &section_usage,
+            &lod_usage,
+        )
+        .ok_or_else(|| "expected preview-tier candidate plan".to_string())?;
+        ensure_equal(
+            &preview_plan.tier,
+            &super::PackLodTier::TruncatedPreview,
+            "full-tier overflow falls back to preview tier",
+        )?;
+        ensure(
+            preview_plan.candidate.estimated_tokens <= 60,
+            "preview tier must stay within the 20% share",
+        )?;
+        ensure(
+            preview_plan.candidate.content.ends_with(" ..."),
+            "preview tier should emit deterministic truncated content",
+        )?;
+        ensure(
+            preview_plan.candidate.content != preview_source,
+            "preview tier must not preserve full content",
+        )?;
+        lod_usage.add(preview_plan.tier, preview_plan.candidate.estimated_tokens);
+        let preview_remaining = lod_usage.remaining(super::PackLodTier::TruncatedPreview);
+        lod_usage.add(super::PackLodTier::TruncatedPreview, preview_remaining);
+
+        let link_candidate =
+            candidate_with_content(3, 0.8, 0.8, 200, repeated_lod_content("link", 160))?;
+        let link_plan = super::pack_lod_candidate_plan(
+            &link_candidate,
+            270,
+            budget,
+            &quotas,
+            &section_usage,
+            &lod_usage,
+        )
+        .ok_or_else(|| "expected link-only candidate plan".to_string())?;
+        ensure_equal(
+            &link_plan.tier,
+            &super::PackLodTier::LinkOnly,
+            "preview overflow falls back to link-only tier",
+        )?;
+        ensure(
+            link_plan.candidate.estimated_tokens <= 30,
+            "link-only tier must stay within the 10% share",
+        )?;
+        ensure_contains(
+            &link_plan.candidate.content,
+            &link_candidate.memory_id.to_string(),
+            "link-only tier points at the source memory",
+        )?;
+        ensure(
+            !link_plan.candidate.content.contains("file://AGENTS.md"),
+            "link-only tier should not duplicate provenance URI into content",
+        )
+    }
+
+    #[test]
+    fn preview_lod_respects_candidate_token_estimate_when_heuristic_is_short() -> TestResult {
+        let candidate = candidate_with_content(
+            4,
+            0.9,
+            0.8,
+            200,
+            "compact wording whose authoritative estimate is still oversized",
+        )?;
+
+        let preview =
+            super::candidate_for_lod_tier(&candidate, super::PackLodTier::TruncatedPreview, 100)
+                .ok_or_else(|| "expected truncated preview candidate".to_string())?;
+
+        ensure(
+            preview.content.ends_with(" ..."),
+            "preview tier must visibly truncate when authoritative token estimate is over limit",
+        )?;
+        ensure(
+            preview.content != candidate.content,
+            "preview tier must not preserve complete oversized content",
+        )?;
+        ensure(
+            preview.estimated_tokens <= 100,
+            "preview stays within tier limit after truncation",
+        )
+    }
+
+    #[test]
+    fn preview_lod_rejects_single_word_oversized_content() -> TestResult {
+        let candidate = candidate_with_content(5, 0.9, 0.8, 200, "singleword")?;
+
+        let preview =
+            super::candidate_for_lod_tier(&candidate, super::PackLodTier::TruncatedPreview, 100);
+
+        ensure(
+            preview.is_none(),
+            "single-word oversized content should fall through to link-only instead of preview",
+        )
+    }
+
+    #[test]
+    fn assemble_draft_default_lod_renders_full_preview_and_link_items() -> TestResult {
+        let budget =
+            TokenBudget::new(1_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let procedural_content = repeated_lod_content("procedural-full", 48);
+        let decision_content = repeated_lod_content("decision-full", 32);
+        let failure_content = repeated_lod_content("failure-full", 32);
+        let preview_source = repeated_lod_content("preview", 160);
+        let link_source = "link".repeat(1_000);
+        let preview_memory_id = memory_id(4);
+        let link_memory_id = memory_id(5);
+
+        let draft = assemble_draft(
+            "prepare release with LOD",
+            budget,
+            vec![
+                candidate_in_section(
+                    1,
+                    PackSection::ProceduralRules,
+                    1.0,
+                    0.9,
+                    300,
+                    procedural_content.clone(),
+                )?,
+                candidate_in_section(
+                    2,
+                    PackSection::Decisions,
+                    0.99,
+                    0.9,
+                    200,
+                    decision_content.clone(),
+                )?,
+                candidate_in_section(
+                    3,
+                    PackSection::Failures,
+                    0.98,
+                    0.9,
+                    200,
+                    failure_content.clone(),
+                )?,
+                candidate_in_section(
+                    4,
+                    PackSection::Evidence,
+                    0.4,
+                    0.4,
+                    200,
+                    preview_source.clone(),
+                )?,
+                candidate_in_section(5, PackSection::Artifacts, 0.3, 0.3, 150, link_source)?,
+            ],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        ensure_equal(
+            &draft.items.len(),
+            &5,
+            "LOD assembly selected every feasible tier",
+        )?;
+        ensure_equal(
+            &selected_item_for_memory(&draft, memory_id(1))?.content,
+            &procedural_content,
+            "procedural item stays full detail",
+        )?;
+        ensure_equal(
+            &selected_item_for_memory(&draft, memory_id(2))?.content,
+            &decision_content,
+            "decision item stays full detail",
+        )?;
+        ensure_equal(
+            &selected_item_for_memory(&draft, memory_id(3))?.content,
+            &failure_content,
+            "failure item stays full detail",
+        )?;
+        let preview_item = selected_item_for_memory(&draft, preview_memory_id)?;
+        ensure(
+            preview_item.content.ends_with(" ..."),
+            "preview item becomes a deterministic preview",
+        )?;
+        ensure(
+            preview_item.content != preview_source,
+            "preview item must not retain full source content",
+        )?;
+        ensure(
+            preview_item.estimated_tokens <= 200,
+            "preview item stays within the 20% budget share",
+        )?;
+        let link_item = selected_item_for_memory(&draft, link_memory_id)?;
+        ensure_contains(
+            &link_item.content,
+            &link_memory_id.to_string(),
+            "link item becomes a link-only pointer",
+        )?;
+        ensure(
+            link_item.estimated_tokens <= 100,
+            "link-only item stays within the 10% budget share",
+        )
+    }
+
+    #[test]
+    fn submodular_draft_default_lod_renders_full_preview_and_link_items() -> TestResult {
+        let budget =
+            TokenBudget::new(1_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let evidence_content = repeated_lod_content("submodular-evidence", 40);
+        let procedural_content = repeated_lod_content("submodular-procedural", 32);
+        let decision_content = repeated_lod_content("submodular-decision", 32);
+        let artifact_content = repeated_lod_content("submodular-artifact", 8);
+        let preview_source = repeated_lod_content("submodular-preview", 160);
+        let link_source = "submodular-link".repeat(1_000);
+        let preview_memory_id = memory_id(14);
+        let link_memory_id = memory_id(15);
+
+        let draft = assemble_draft_with_profile(
+            ContextPackProfile::Submodular,
+            "prepare release with facility LOD",
+            budget,
+            vec![
+                candidate_in_section(
+                    10,
+                    PackSection::Evidence,
+                    1.0,
+                    0.9,
+                    250,
+                    evidence_content.clone(),
+                )?,
+                candidate_in_section(
+                    11,
+                    PackSection::ProceduralRules,
+                    0.99,
+                    0.9,
+                    200,
+                    procedural_content.clone(),
+                )?,
+                candidate_in_section(
+                    12,
+                    PackSection::Decisions,
+                    0.98,
+                    0.9,
+                    200,
+                    decision_content.clone(),
+                )?,
+                candidate_in_section(
+                    13,
+                    PackSection::Artifacts,
+                    0.97,
+                    0.9,
+                    50,
+                    artifact_content.clone(),
+                )?,
+                candidate_in_section(
+                    14,
+                    PackSection::Failures,
+                    0.3,
+                    0.3,
+                    200,
+                    preview_source.clone(),
+                )?,
+                candidate_in_section(15, PackSection::Artifacts, 0.2, 0.2, 200, link_source)?,
+            ],
+        )
+        .map_err(|error| format!("submodular draft rejected: {error:?}"))?;
+
+        ensure_equal(
+            &draft.items.len(),
+            &6,
+            "submodular LOD assembly selected every feasible tier",
+        )?;
+        ensure_equal(
+            &selected_item_for_memory(&draft, memory_id(10))?.content,
+            &evidence_content,
+            "evidence item stays full detail",
+        )?;
+        ensure_equal(
+            &selected_item_for_memory(&draft, memory_id(11))?.content,
+            &procedural_content,
+            "procedural item stays full detail",
+        )?;
+        ensure_equal(
+            &selected_item_for_memory(&draft, memory_id(12))?.content,
+            &decision_content,
+            "decision item stays full detail",
+        )?;
+        ensure_equal(
+            &selected_item_for_memory(&draft, memory_id(13))?.content,
+            &artifact_content,
+            "artifact item stays full detail",
+        )?;
+        let preview_item = selected_item_for_memory(&draft, preview_memory_id)?;
+        ensure(
+            preview_item.content.ends_with(" ..."),
+            "submodular preview item becomes a deterministic preview",
+        )?;
+        ensure(
+            preview_item.content != preview_source,
+            "submodular preview item must not retain full source content",
+        )?;
+        ensure(
+            preview_item.estimated_tokens <= 200,
+            "submodular preview item stays within the 20% budget share",
+        )?;
+        let link_item = selected_item_for_memory(&draft, link_memory_id)?;
+        ensure_contains(
+            &link_item.content,
+            &link_memory_id.to_string(),
+            "submodular link item becomes a link-only pointer",
+        )?;
+        ensure(
+            link_item.estimated_tokens <= 100,
+            "submodular link item stays within the 10% budget share",
+        )
+    }
+
+    #[test]
     fn mmr_similarity_cache_matches_full_selected_scan() -> TestResult {
         let selected = [
             candidate_with_content(1, 1.0, 0.5, 10, "Run cargo fmt --check before release.")?
@@ -10857,6 +11655,8 @@ mod tests {
         let similarity_cache = super::FacilitySimilarityCache::new(&universe);
         let mut selector =
             super::FacilitySelectionQueue::new(&universe, &current_coverages, &similarity_cache);
+        let lod_usage =
+            super::PackLodBudgetState::from_options(PackAssemblyOptions::default(), budget);
 
         let selection = selector.select(
             &universe,
@@ -10866,10 +11666,50 @@ mod tests {
             budget,
             &quotas,
             &super::SectionTokenUsage::default(),
+            &lod_usage,
         );
         ensure(
             selection.is_none(),
             "selector should skip zero-token candidates instead of computing infinite gain ratios",
+        )
+    }
+
+    #[test]
+    fn facility_location_selector_ranks_lod_candidates_by_rendered_token_cost() -> TestResult {
+        let oversized_high_value = candidate_with_content(1, 1.0, 1.0, 900, "singlewordoversized")?;
+        let compact_lower_value =
+            candidate_with_content(2, 0.2, 0.2, 20, "compact lower value memory")?;
+        let universe = vec![
+            super::FacilityCandidateProfile::from(oversized_high_value),
+            super::FacilityCandidateProfile::from(compact_lower_value),
+        ];
+        let current_coverages = vec![0.0_f32; universe.len()];
+        let similarity_cache = super::FacilitySimilarityCache::new(&universe);
+        let mut selector =
+            super::FacilitySelectionQueue::new(&universe, &current_coverages, &similarity_cache);
+        let budget =
+            TokenBudget::new(1_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let quotas = super::SectionQuotas::unlimited();
+        let lod_usage =
+            super::PackLodBudgetState::from_options(PackAssemblyOptions::default(), budget);
+
+        let (profile_index, _) = selector
+            .select(
+                &universe,
+                &current_coverages,
+                &similarity_cache,
+                0,
+                budget,
+                &quotas,
+                &super::SectionTokenUsage::default(),
+                &lod_usage,
+            )
+            .ok_or_else(|| "expected selector to admit a candidate".to_string())?;
+
+        ensure_equal(
+            &profile_index,
+            &0,
+            "LOD selector should rank by compressed link-only token cost, not full source cost",
         )
     }
 

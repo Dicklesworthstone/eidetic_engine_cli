@@ -1035,7 +1035,7 @@ fn workspace_git_snapshot_provider_degrades_read_only_outside_git_repo() -> Test
         "provider must not mutate files when git rev-parse fails"
     );
     match error {
-        SwarmBriefCommandError::Failed { status, stderr } => {
+        SwarmBriefCommandError::Failed { status, stderr, .. } => {
             assert_ne!(status, Some(0));
             assert!(
                 stderr.contains("not a git repository")

@@ -776,7 +776,7 @@ fn bare_rch_exec_rust_verifier_payload_halts_without_remote_required() {
             "builtin:local_rust_compiler_verification",
         ),
         (
-            "/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- rustdoc --test src/lib.rs",
+            "/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 exec -- rustdoc --test src/lib.rs",
             "builtin:local_rust_compiler_verification",
         ),
     ] {

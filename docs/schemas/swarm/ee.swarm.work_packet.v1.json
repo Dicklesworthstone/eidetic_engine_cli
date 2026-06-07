@@ -546,7 +546,63 @@
           "type": "array",
           "items": {"$ref": "#/definitions/knownBlocker"}
         },
-        "retryAfter": {"type": ["string", "null"]}
+        "retryAfter": {"type": ["string", "null"]},
+        "selectorAdmissionProbe": {
+          "anyOf": [
+            {"$ref": "#/definitions/rchSelectorAdmissionProbe"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "rchSelectorAdmissionProbe": {
+      "type": "object",
+      "description": "Bounded, redaction-safe selector/admission probe copied from ee.rch.selector_admission_probe.v1 evidence. When workersVsSelectionContradiction is true, work-packet producers must fail closed for Cargo launch and Beads claim advice.",
+      "required": [
+        "schema",
+        "status",
+        "requiredRuntime",
+        "workersReported",
+        "daemonWorkersReported",
+        "workersReportedCount",
+        "daemonWorkersReportedCount",
+        "selectedWorker",
+        "selectionFailureReason",
+        "workersVsSelectionContradiction",
+        "pathNormalizationWarning",
+        "remoteRequired",
+        "localFallbackRefused"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.rch.selector_admission_probe.v1"},
+        "status": {
+          "type": ["string", "null"],
+          "enum": ["selected", "selection_failed", "not_applicable", null]
+        },
+        "requiredRuntime": {"type": ["string", "null"]},
+        "workersReported": {"$ref": "#/definitions/stringArray"},
+        "daemonWorkersReported": {"$ref": "#/definitions/stringArray"},
+        "workersReportedCount": {"type": "integer", "minimum": 0},
+        "daemonWorkersReportedCount": {"type": "integer", "minimum": 0},
+        "selectedWorker": {"type": ["string", "null"]},
+        "selectionFailureReason": {
+          "type": ["string", "null"],
+          "enum": [
+            "no_workers_with_rust_installed",
+            "topology_blocked",
+            "capacity_or_timeout",
+            "all_workers_preflight_failed",
+            "command_not_offloaded",
+            "remote_marker_missing",
+            "no_worker_selected",
+            null
+          ]
+        },
+        "workersVsSelectionContradiction": {"type": "boolean"},
+        "pathNormalizationWarning": {"type": ["string", "null"]},
+        "remoteRequired": {"type": "boolean"},
+        "localFallbackRefused": {"type": "boolean"}
       }
     },
     "knownBlocker": {

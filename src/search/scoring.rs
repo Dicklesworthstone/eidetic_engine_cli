@@ -3,7 +3,8 @@
 //! Frankensearch owns candidate retrieval and fused base scores. This module
 //! only applies the project-specific, explainable multipliers from the ee
 //! retrieval contract: freshness, confidence, utility, maturity, harmful
-//! feedback, scope, graph centrality, redundancy, and opt-in bead affinity.
+//! feedback, scope, graph centrality, redundancy, opt-in anchor matches, and
+//! opt-in bead affinity.
 
 use std::collections::BTreeSet;
 
@@ -25,6 +26,8 @@ pub const DEFAULT_GRAPH_CENTRALITY_WEIGHT: f32 = 0.10;
 pub const DEFAULT_REDUNDANCY_LAMBDA: f32 = 0.7;
 /// Default hard cap for bead-aware additive retrieval bias.
 pub const DEFAULT_BEAD_AFFINITY_BIAS_CAP: f32 = 0.05;
+/// Default hard cap for exact memory-anchor additive retrieval bias.
+pub const DEFAULT_ANCHOR_MATCH_BIAS_CAP: f32 = 0.08;
 
 /// Scoring constants normally sourced from the `[scoring]` config block.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,6 +40,7 @@ pub struct SearchScoringConfig {
     pub scope_match_bonus: f32,
     pub graph_centrality_weight: f32,
     pub redundancy_lambda: f32,
+    pub anchor_match_bias_cap: f32,
     pub bead_affinity_bias_cap: f32,
 }
 
@@ -51,8 +55,77 @@ impl Default for SearchScoringConfig {
             scope_match_bonus: DEFAULT_SCOPE_MATCH_BONUS,
             graph_centrality_weight: DEFAULT_GRAPH_CENTRALITY_WEIGHT,
             redundancy_lambda: DEFAULT_REDUNDANCY_LAMBDA,
+            anchor_match_bias_cap: DEFAULT_ANCHOR_MATCH_BIAS_CAP,
             bead_affinity_bias_cap: DEFAULT_BEAD_AFFINITY_BIAS_CAP,
         }
+    }
+}
+
+/// Redaction-safe anchor query context for deterministic exact-match boosts.
+///
+/// Entries are `(anchor_kind, anchor_value_hash)`. Callers must pass hashes or
+/// redacted-safe values only; raw paths, symbols, commands, or schema values do
+/// not belong in this scoring primitive.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AnchorMatchContext {
+    pub anchors: BTreeSet<(String, String)>,
+}
+
+impl AnchorMatchContext {
+    #[must_use]
+    pub fn new<K, H, I>(anchors: I) -> Self
+    where
+        K: Into<String>,
+        H: Into<String>,
+        I: IntoIterator<Item = (K, H)>,
+    {
+        Self {
+            anchors: normalize_anchor_pairs(anchors),
+        }
+    }
+
+    #[must_use]
+    pub fn is_cold_start(&self) -> bool {
+        self.anchors.is_empty()
+    }
+}
+
+/// Candidate-side redaction-safe anchor signals.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AnchorMatchCandidateSignals {
+    pub anchors: BTreeSet<(String, String)>,
+}
+
+impl AnchorMatchCandidateSignals {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_anchors<K, H, I>(mut self, anchors: I) -> Self
+    where
+        K: Into<String>,
+        H: Into<String>,
+        I: IntoIterator<Item = (K, H)>,
+    {
+        self.anchors = normalize_anchor_pairs(anchors);
+        self
+    }
+}
+
+/// Explanation for exact-anchor additive score.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AnchorMatchScore {
+    pub value: f32,
+    pub exact_matches: usize,
+    pub capped: bool,
+}
+
+impl AnchorMatchScore {
+    #[must_use]
+    pub fn applied(self) -> bool {
+        self.value > 0.0
     }
 }
 
@@ -289,6 +362,7 @@ pub struct SearchScoringSignals {
     pub scope_match: bool,
     pub graph_centrality: Option<f32>,
     pub redundancy: Option<f32>,
+    pub anchor_match: Option<f32>,
     pub bead_affinity: Option<f32>,
 }
 
@@ -305,6 +379,7 @@ impl SearchScoringSignals {
             scope_match: false,
             graph_centrality: None,
             redundancy: None,
+            anchor_match: None,
             bead_affinity: None,
         }
     }
@@ -322,6 +397,7 @@ pub struct SearchScoreComponents {
     pub scope_match: f32,
     pub graph_centrality: f32,
     pub redundancy: f32,
+    pub anchor_match: f32,
     pub bead_affinity: f32,
     pub final_score: f32,
 }
@@ -364,10 +440,13 @@ impl SearchScoreComponents {
             * scope_match
             * graph_centrality
             * redundancy;
+        let anchor_match_cap = finite_nonnegative(config.anchor_match_bias_cap.abs());
+        let anchor_match = finite_signed(signals.anchor_match.unwrap_or(0.0))
+            .clamp(-anchor_match_cap, anchor_match_cap);
         let bead_affinity_cap = finite_nonnegative(config.bead_affinity_bias_cap.abs());
         let bead_affinity = finite_signed(signals.bead_affinity.unwrap_or(0.0))
             .clamp(-bead_affinity_cap, bead_affinity_cap);
-        let final_score = finite_nonnegative(multiplicative_score + bead_affinity);
+        let final_score = finite_nonnegative(multiplicative_score + anchor_match + bead_affinity);
 
         SearchScoreComponents {
             base,
@@ -379,9 +458,35 @@ impl SearchScoreComponents {
             scope_match,
             graph_centrality,
             redundancy,
+            anchor_match,
             bead_affinity,
             final_score,
         }
+    }
+}
+
+/// Score exact anchor overlap as a deterministic additive boost capped to the
+/// configured magnitude. This preserves Frankensearch as candidate/ranking
+/// owner while letting ee nudge already-retrieved candidates with matching
+/// hash-only anchors.
+#[must_use]
+pub fn anchor_match_score(
+    context: &AnchorMatchContext,
+    candidate: &AnchorMatchCandidateSignals,
+    max_abs_bias: f32,
+) -> AnchorMatchScore {
+    if context.is_cold_start() || candidate.anchors.is_empty() {
+        return AnchorMatchScore::default();
+    }
+
+    let exact_matches = context.anchors.intersection(&candidate.anchors).count();
+    let raw = exact_matches as f32 * 0.04;
+    let cap = finite_nonnegative(max_abs_bias).min(DEFAULT_ANCHOR_MATCH_BIAS_CAP);
+    let value = raw.min(cap);
+    AnchorMatchScore {
+        value,
+        exact_matches,
+        capped: raw > cap,
     }
 }
 
@@ -515,6 +620,22 @@ fn normalize_label_set(values: impl IntoIterator<Item = impl Into<String>>) -> B
         .collect()
 }
 
+fn normalize_anchor_pairs<K, H, I>(anchors: I) -> BTreeSet<(String, String)>
+where
+    K: Into<String>,
+    H: Into<String>,
+    I: IntoIterator<Item = (K, H)>,
+{
+    anchors
+        .into_iter()
+        .filter_map(|(kind, hash)| {
+            let kind = kind.into().trim().to_ascii_lowercase();
+            let hash = hash.into().trim().to_ascii_lowercase();
+            (!kind.is_empty() && !hash.is_empty()).then_some((kind, hash))
+        })
+        .collect()
+}
+
 fn intersection_count(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
     left.intersection(right).count()
 }
@@ -550,10 +671,11 @@ fn link_ref_mentions_bead(link_ref: &str, bead_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        BeadAffinityCandidateSignals, BeadAffinityContext, DEFAULT_BEAD_AFFINITY_BIAS_CAP,
+        AnchorMatchCandidateSignals, AnchorMatchContext, BeadAffinityCandidateSignals,
+        BeadAffinityContext, DEFAULT_ANCHOR_MATCH_BIAS_CAP, DEFAULT_BEAD_AFFINITY_BIAS_CAP,
         DEFAULT_GRAPH_CENTRALITY_WEIGHT, DEFAULT_RECENCY_TAU_DAYS, RetrievalMaturity,
         SearchScoreComponents, SearchScoringConfig, SearchScoringSignals, SpeedMode,
-        bead_affinity_score, final_score,
+        anchor_match_score, bead_affinity_score, final_score,
     };
 
     fn assert_close(actual: f32, expected: f32) {
@@ -660,6 +782,7 @@ mod tests {
             scope_match: true,
             graph_centrality: Some(0.5),
             redundancy: Some(0.25),
+            anchor_match: Some(0.04),
             bead_affinity: Some(0.03),
         };
 
@@ -676,6 +799,7 @@ mod tests {
             1.0 + DEFAULT_GRAPH_CENTRALITY_WEIGHT * 0.5,
         );
         assert_close(components.redundancy, 0.925);
+        assert_close(components.anchor_match, 0.04);
         assert_close(components.bead_affinity, 0.03);
         assert_close(components.final_score, final_score(signals, config));
     }
@@ -691,6 +815,7 @@ mod tests {
             scope_match_bonus: -3.0,
             graph_centrality_weight: f32::NAN,
             redundancy_lambda: 2.0,
+            anchor_match_bias_cap: DEFAULT_ANCHOR_MATCH_BIAS_CAP,
             bead_affinity_bias_cap: DEFAULT_BEAD_AFFINITY_BIAS_CAP,
         };
         let components = SearchScoreComponents::from_signals(
@@ -704,6 +829,7 @@ mod tests {
                 scope_match: true,
                 graph_centrality: Some(7.0),
                 redundancy: Some(9.0),
+                anchor_match: Some(f32::NAN),
                 bead_affinity: Some(f32::NAN),
             },
             config,
@@ -717,6 +843,7 @@ mod tests {
         assert_close(components.scope_match, 0.0);
         assert_close(components.graph_centrality, 1.0);
         assert_close(components.redundancy, 1.0);
+        assert_close(components.anchor_match, 0.0);
         assert_close(components.final_score, 0.0);
     }
 
@@ -751,6 +878,7 @@ mod tests {
             scope_match_bonus: f32::INFINITY,
             graph_centrality_weight: f32::INFINITY,
             redundancy_lambda: f32::NEG_INFINITY,
+            anchor_match_bias_cap: f32::NAN,
             bead_affinity_bias_cap: f32::NAN,
         };
         let components = SearchScoreComponents::from_signals(
@@ -764,6 +892,7 @@ mod tests {
                 scope_match: true,
                 graph_centrality: Some(1.0),
                 redundancy: Some(1.0),
+                anchor_match: Some(DEFAULT_ANCHOR_MATCH_BIAS_CAP),
                 bead_affinity: Some(DEFAULT_BEAD_AFFINITY_BIAS_CAP),
             },
             config,
@@ -775,12 +904,61 @@ mod tests {
         assert_close(components.scope_match, 0.0);
         assert_close(components.graph_centrality, 1.0);
         assert_close(components.redundancy, 1.0);
+        assert_close(components.anchor_match, 0.0);
         assert_close(components.bead_affinity, 0.0);
         assert!(
             components.final_score.is_finite(),
             "final score must stay finite for malformed scoring config"
         );
         assert_close(components.final_score, 0.0);
+    }
+
+    #[test]
+    fn anchor_match_scores_exact_kind_hash_overlap_under_cap() {
+        let context =
+            AnchorMatchContext::new([("path", "blake3:aaaabbbb"), ("schema", "blake3:ccccdddd")]);
+        let candidate = AnchorMatchCandidateSignals::new()
+            .with_anchors([("schema", "BLAKE3:CCCCDDDD"), ("path", "blake3:eeeeffff")]);
+
+        let score = anchor_match_score(&context, &candidate, DEFAULT_ANCHOR_MATCH_BIAS_CAP);
+
+        assert!(score.applied());
+        assert_eq!(score.exact_matches, 1);
+        assert_close(score.value, 0.04);
+        assert!(!score.capped);
+    }
+
+    #[test]
+    fn anchor_match_cold_start_and_non_matches_are_zero() {
+        let cold = AnchorMatchContext::default();
+        let candidate =
+            AnchorMatchCandidateSignals::new().with_anchors([("path", "blake3:aaaabbbb")]);
+        assert_eq!(
+            anchor_match_score(&cold, &candidate, DEFAULT_ANCHOR_MATCH_BIAS_CAP).value,
+            0.0
+        );
+
+        let context = AnchorMatchContext::new([("schema", "blake3:ccccdddd")]);
+        assert_eq!(
+            anchor_match_score(&context, &candidate, DEFAULT_ANCHOR_MATCH_BIAS_CAP).value,
+            0.0
+        );
+    }
+
+    #[test]
+    fn anchor_match_is_additive_and_clamped_in_final_score() {
+        let config = SearchScoringConfig::default();
+        let base = SearchScoringSignals::new(0.50, RetrievalMaturity::Semantic);
+        let boosted = SearchScoreComponents::from_signals(
+            SearchScoringSignals {
+                anchor_match: Some(1.0),
+                ..base
+            },
+            config,
+        );
+
+        assert_close(boosted.anchor_match, DEFAULT_ANCHOR_MATCH_BIAS_CAP);
+        assert_close(boosted.final_score, 0.58);
     }
 
     #[test]

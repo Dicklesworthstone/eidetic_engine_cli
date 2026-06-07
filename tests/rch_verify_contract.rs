@@ -231,6 +231,22 @@ fn write_fake_rch(name: &str, body: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn read_invocation_lines(path: &Path) -> Result<Vec<String>, String> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let invocations =
+        fs::read_to_string(path).map_err(|error| format!("read invocation log: {error}"))?;
+    Ok(invocations.lines().map(str::to_owned).collect())
+}
+
+fn remote_exec_invocation_lines(path: &Path) -> Result<Vec<String>, String> {
+    Ok(read_invocation_lines(path)?
+        .into_iter()
+        .filter(|line| line.contains("exec --"))
+        .collect())
+}
+
 fn write_fake_build_admission_ee(name: &str, admitted: bool) -> Result<PathBuf, String> {
     let status = if admitted { "true" } else { "false" };
     let degraded = if admitted {
@@ -448,7 +464,7 @@ fn script_body_avoids_forbidden_git_and_cleanup_operations() -> TestResult {
 }
 
 #[test]
-fn dry_run_accepts_focused_cargo_test_and_builds_remote_env() -> TestResult {
+fn dry_run_accepts_focused_cargo_test_and_builds_cargo_argv() -> TestResult {
     let report = run_json(&[
         "--dry-run",
         "--",
@@ -480,11 +496,67 @@ fn dry_run_accepts_focused_cargo_test_and_builds_remote_env() -> TestResult {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>()
         .join(" ");
-    if !invocation_text.contains("rch exec -- env TMPDIR=/tmp") {
+    if !invocation_text.contains("rch exec -- cargo test --lib output::streaming") {
         return Err(format!("unexpected invocation: {invocation_text}"));
+    }
+    if invocation_text.contains("rch exec -- env ") {
+        return Err(format!(
+            "RCH selector requires cargo to remain the command argv: {invocation_text}"
+        ));
     }
     if invocation_text.contains("/Volumes/USBNVME16TB") {
         return Err("dry-run remote invocation leaked Mac-only USB path".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn dry_run_reports_worker_inventory_without_selector_failure() -> TestResult {
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--dry-run",
+            "--summary",
+            "--no-write",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+        ],
+        &[
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1149989"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "vmi1149989"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "dry-run worker inventory proof failed with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code()
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse dry-run inventory report: {error}"))?;
+    if report["configured_workers"] != serde_json::json!(["vmi1149989"])
+        || report["daemon_workers"] != serde_json::json!(["vmi1149989"])
+    {
+        return Err(format!("dry-run proof lost worker inventory: {report}"));
+    }
+    let probe = selector_probe(&report)?;
+    if probe["status"] != "not_applicable"
+        || probe["required_runtime"] != "Rust"
+        || !probe["selected_worker"].is_null()
+        || !probe["selection_failure_reason"].is_null()
+        || probe["workers_vs_selection_contradiction"] != false
+    {
+        return Err(format!(
+            "dry-run selector probe should not report a real selection failure: {probe}"
+        ));
+    }
+    if !stdout.contains("configured_workers: `vmi1149989`")
+        || !stdout.contains("daemon_workers: `vmi1149989`")
+    {
+        return Err(format!(
+            "summary omitted dry-run worker inventory:\n{stdout}"
+        ));
     }
     Ok(())
 }
@@ -736,11 +808,11 @@ printf '[RCH] remote trj (0.1s)\n'
             ));
         }
     }
-    let invocations = fs::read_to_string(&invocation_log)
-        .map_err(|error| format!("read dirty invocation log: {error}"))?;
-    if invocations.lines().count() != 1 {
+    let invocations = read_invocation_lines(&invocation_log)?;
+    let remote_invocations = remote_exec_invocation_lines(&invocation_log)?;
+    if remote_invocations.len() != 1 {
         return Err(format!(
-            "dirty non-strict run should invoke fake RCH once: {invocations:?}"
+            "dirty non-strict run should invoke fake RCH exec once: {invocations:?}"
         ));
     }
     Ok(())
@@ -993,17 +1065,23 @@ printf '[RCH] remote trj (0.1s)\n'
     {
         return Err(format!("unexpected strict clean fake-RCH report: {report}"));
     }
-    let invocations = fs::read_to_string(&invocation_log)
-        .map_err(|error| format!("read invocation log: {error}"))?;
-    let lines = invocations.lines().collect::<Vec<_>>();
+    let lines = remote_exec_invocation_lines(&invocation_log)?;
     if lines.len() != 1 {
+        let invocations = read_invocation_lines(&invocation_log)?;
         return Err(format!(
-            "strict clean-tree should invoke fake RCH once, got {}: {lines:?}",
+            "strict clean-tree should invoke fake RCH exec once, got {}: {invocations:?}",
             lines.len()
         ));
     }
-    if !lines[0].contains("exec -- env TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/ee-rch-verify-target cargo test --lib strict_clean_tree_fake_rch_smoke") {
-        return Err(format!("fake RCH invocation did not preserve explicit remote command: {lines:?}"));
+    if !lines[0].contains("exec -- cargo test --lib strict_clean_tree_fake_rch_smoke") {
+        return Err(format!(
+            "fake RCH invocation did not preserve cargo argv: {lines:?}"
+        ));
+    }
+    if lines[0].contains("exec -- env ") {
+        return Err(format!(
+            "fake RCH invocation should not hide cargo behind env: {lines:?}"
+        ));
     }
     Ok(())
 }
@@ -1309,11 +1387,11 @@ printf '[RCH] remote trj (0.1s)\n'
             "committed-tree mode should run from the generated source export\nstdout:\n{stdout}\nstderr:\n{stderr}"
         ));
     }
-    let invocations = fs::read_to_string(&invocation_log)
-        .map_err(|error| format!("read committed-tree invocation log: {error}"))?;
-    if invocations.lines().count() != 1 {
+    let invocations = read_invocation_lines(&invocation_log)?;
+    let remote_invocations = remote_exec_invocation_lines(&invocation_log)?;
+    if remote_invocations.len() != 1 {
         return Err(format!(
-            "committed-tree mode should invoke fake RCH once: {invocations:?}"
+            "committed-tree mode should invoke fake RCH exec once: {invocations:?}"
         ));
     }
     let report: Value = serde_json::from_str(&stdout)
@@ -1460,11 +1538,11 @@ printf '[RCH] remote trj (0.1s)\n'
             "committed-tree event-log run should succeed from the generated source export\nstdout:\n{stdout}\nstderr:\n{stderr}"
         ));
     }
-    let invocations = fs::read_to_string(&invocation_log)
-        .map_err(|error| format!("read committed-tree event invocation log: {error}"))?;
-    if invocations.lines().count() != 1 {
+    let invocations = read_invocation_lines(&invocation_log)?;
+    let remote_invocations = remote_exec_invocation_lines(&invocation_log)?;
+    if remote_invocations.len() != 1 {
         return Err(format!(
-            "committed-tree event-log mode should invoke fake RCH once: {invocations:?}"
+            "committed-tree event-log mode should invoke fake RCH exec once: {invocations:?}"
         ));
     }
     let report: Value = serde_json::from_str(&stdout)
@@ -1652,7 +1730,13 @@ fn first_remote_invocation_passes_requested_workers() -> TestResult {
         "fake-rch-workers.sh",
         r#"#!/usr/bin/env bash
 set -euo pipefail
+printf 'RCH_WORKER=%s\n' "${RCH_WORKER:-}"
 printf 'RCH_WORKERS=%s\n' "${RCH_WORKERS:-}"
+printf 'RCH_SOCKET_PATH=%s\n' "${RCH_SOCKET_PATH:-}"
+printf 'RCH_BUILD_TIMEOUT_SEC=%s\n' "${RCH_BUILD_TIMEOUT_SEC:-}"
+printf 'RCH_TEST_TIMEOUT_SEC=%s\n' "${RCH_TEST_TIMEOUT_SEC:-}"
+printf 'RCH_CANONICAL_PROJECT_ROOT=%s\n' "${RCH_CANONICAL_PROJECT_ROOT:-}"
+printf 'RCH_ALIAS_PROJECT_ROOT=%s\n' "${RCH_ALIAS_PROJECT_ROOT:-}"
 printf '[RCH] remote trj (0.1s)\n'
 "#,
     )?;
@@ -1670,7 +1754,10 @@ printf '[RCH] remote trj (0.1s)\n'
             "graph::algorithms::run_with_budget_emits_algorithm_compute_telemetry",
         ],
         &[
-            ("RCH_WORKERS", "trj"),
+            ("RCH_WORKER", "trj"),
+            ("RCH_SOCKET_PATH", "/tmp/rch-alt-test.sock"),
+            ("RCH_BUILD_TIMEOUT_SEC", "1200"),
+            ("RCH_TEST_TIMEOUT_SEC", "1500"),
             ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
             ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
         ],
@@ -1691,9 +1778,41 @@ printf '[RCH] remote trj (0.1s)\n'
     let stdout_tail = report["stdout_tail"]
         .as_str()
         .ok_or_else(|| "missing stdout_tail".to_owned())?;
-    if !stdout_tail.contains("RCH_WORKERS=trj") {
+    if !stdout_tail.contains("RCH_WORKER=trj") {
         return Err(format!(
-            "first invocation did not receive RCH_WORKERS: {report}"
+            "first invocation did not receive RCH_WORKER: {report}"
+        ));
+    }
+    if !stdout_tail.contains("RCH_SOCKET_PATH=/tmp/rch-alt-test.sock") {
+        return Err(format!(
+            "first invocation did not receive RCH_SOCKET_PATH: {report}"
+        ));
+    }
+    if !stdout_tail.contains("RCH_BUILD_TIMEOUT_SEC=1200") {
+        return Err(format!(
+            "first invocation did not receive RCH_BUILD_TIMEOUT_SEC: {report}"
+        ));
+    }
+    if !stdout_tail.contains("RCH_TEST_TIMEOUT_SEC=1500") {
+        return Err(format!(
+            "first invocation did not receive RCH_TEST_TIMEOUT_SEC: {report}"
+        ));
+    }
+    let expected_canonical_root = repo_root()
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| "repo root has no parent".to_owned())?
+        .display()
+        .to_string();
+    let expected_canonical_line = format!("RCH_CANONICAL_PROJECT_ROOT={expected_canonical_root}");
+    if !stdout_tail.contains(&expected_canonical_line) {
+        return Err(format!(
+            "first invocation did not receive project-root topology: {report}"
+        ));
+    }
+    if !stdout_tail.contains("RCH_ALIAS_PROJECT_ROOT=/data") {
+        return Err(format!(
+            "first invocation did not receive worker alias topology: {report}"
         ));
     }
     if degraded_contains(&report, "rch_verify_worker_filter_ignored")? {
@@ -2051,11 +2170,11 @@ printf '[RCH] remote css (1.0s)\n'
         return Err("build-admission denial should refuse before RCH".to_owned());
     }
     if invocation_log.exists() {
-        let invocations = fs::read_to_string(&invocation_log)
-            .map_err(|error| format!("read invocation log: {error}"))?;
-        if !invocations.is_empty() {
+        let invocations = read_invocation_lines(&invocation_log)?;
+        let remote_invocations = remote_exec_invocation_lines(&invocation_log)?;
+        if !remote_invocations.is_empty() {
             return Err(format!(
-                "build-admission denial invoked fake RCH: {invocations:?}"
+                "build-admission denial invoked fake RCH exec: {invocations:?}"
             ));
         }
     }
@@ -2125,8 +2244,15 @@ printf '[RCH] remote css (1.0s)\n'
     }
     let invocations = fs::read_to_string(&invocation_log)
         .map_err(|error| format!("read invocation log: {error}"))?;
-    if !invocations.contains("exec -- env TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/ee-rch-verify-target cargo test --lib admission_pass_smoke") {
-        return Err(format!("fake RCH did not receive expected invocation: {invocations}"));
+    if !invocations.contains("exec -- cargo test --lib admission_pass_smoke") {
+        return Err(format!(
+            "fake RCH did not receive expected invocation: {invocations}"
+        ));
+    }
+    if invocations.contains("exec -- env ") {
+        return Err(format!(
+            "fake RCH invocation should not hide cargo behind env: {invocations}"
+        ));
     }
     let report: Value =
         serde_json::from_str(&stdout).map_err(|error| format!("parse admission pass: {error}"))?;
@@ -3824,6 +3950,16 @@ exit 2
     {
         return Err(format!(
             "known-blocker refusal missing degraded evidence: {second}"
+        ));
+    }
+    let second_probe = selector_probe(&second)?;
+    if second_probe["status"] != "not_applicable"
+        || !second_probe["selected_worker"].is_null()
+        || !second_probe["selection_failure_reason"].is_null()
+        || second_probe["workers_vs_selection_contradiction"] != false
+    {
+        return Err(format!(
+            "known-blocker refusal should not report a selector contradiction: {second_probe}"
         ));
     }
     let invocations = fs::read_to_string(&invocation_log)

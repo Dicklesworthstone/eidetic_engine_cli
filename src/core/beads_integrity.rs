@@ -32,11 +32,12 @@
 //! - [`BeadsIntegrityHealth::ExternalChangesPendingImport`] — JSONL has
 //!   more rows than the DB, or sync metadata still reports pending
 //!   external changes. A specific case worth surfacing separately so the
-//!   collector can suggest `br sync` rather than `br doctor --repair`.
+//!   collector can suggest `br sync`, but not authoritative enough for
+//!   Beads claim/reopen/close mutations.
 //! - [`BeadsIntegrityHealth::MergeArtifactsWarn`] — merge conflict
 //!   artifacts (`.orig`, `.rej`, `.merge_artifact*`) are sitting next
 //!   to `issues.jsonl`. JSONL may parse, but a recent merge may not
-//!   have settled.
+//!   have settled, so tracker reads are advisory only.
 //!
 //! When more than one condition is true at once the *most severe* one
 //! is reported (parse error > count mismatch > merge warn). Pending
@@ -92,12 +93,12 @@ impl BeadsIntegrityHealth {
     }
 
     /// Whether the work-packet must refuse to recommend candidate
-    /// claims while the tracker is in this state. Parse errors and
-    /// mismatches make `br ready` non-authoritative; merge artifacts
-    /// and pending import are warnings only.
+    /// claims while the tracker is in this state. Any non-ok state
+    /// means the source of truth may disagree with the local read
+    /// surface, so `br ready` is advisory until repaired.
     #[must_use]
     pub const fn requires_candidate_downgrade(self) -> bool {
-        matches!(self, Self::JsonlParseError | Self::DbJsonlCountMismatch)
+        !matches!(self, Self::Ok)
     }
 
     /// Short, agent-facing recovery hint. Returns `None` for
@@ -487,17 +488,10 @@ pub fn classify_health(
 
 fn br_reads_authoritative_for_health(
     health: BeadsIntegrityHealth,
-    pending_import_count: u64,
-    dirty_issue_count: u64,
+    _pending_import_count: u64,
+    _dirty_issue_count: u64,
 ) -> bool {
-    match health {
-        BeadsIntegrityHealth::Ok => true,
-        BeadsIntegrityHealth::MergeArtifactsWarn => true,
-        BeadsIntegrityHealth::ExternalChangesPendingImport => {
-            pending_import_count == 0 && dirty_issue_count == 0
-        }
-        BeadsIntegrityHealth::DbJsonlCountMismatch | BeadsIntegrityHealth::JsonlParseError => false,
-    }
+    matches!(health, BeadsIntegrityHealth::Ok)
 }
 
 fn find_doctor_check<'a>(
@@ -714,13 +708,13 @@ mod tests {
         )?;
         ensure_equal(
             &report.requires_candidate_downgrade,
-            &false,
-            "merge warn must not downgrade candidate safety",
+            &true,
+            "merge warn must downgrade candidate safety",
         )?;
         ensure_equal(
             &report.br_reads_authoritative,
-            &true,
-            "merge artifacts are warning-only for br read authority",
+            &false,
+            "merge artifacts make br read authority advisory only",
         )?;
         ensure(
             report.recovery_hint.is_some(),
@@ -745,8 +739,13 @@ mod tests {
         )?;
         ensure_equal(
             &report.requires_candidate_downgrade,
+            &true,
+            "pending import must downgrade candidate safety",
+        )?;
+        ensure_equal(
+            &report.br_reads_authoritative,
             &false,
-            "pending import is a warning, not a hard downgrade",
+            "pending import makes br reads advisory",
         )?;
         ensure_equal(&report.pending_import_count, &5, "pending=5")
     }
@@ -847,8 +846,8 @@ mod tests {
         ensure_equal(&report.dirty_issue_count, &2, "dirty issues")?;
         ensure_equal(
             &report.requires_candidate_downgrade,
-            &false,
-            "metadata-only pending import remains a warning",
+            &true,
+            "metadata-only pending import still downgrades candidates",
         )?;
         ensure_equal(
             &report.br_reads_authoritative,
@@ -858,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_only_external_pending_import_keeps_br_reads_authoritative() -> TestResult {
+    fn metadata_only_external_pending_import_makes_br_reads_advisory() -> TestResult {
         let inputs = BeadsIntegrityInputs {
             external_changes_pending_import: true,
             dirty_issue_count: 0,
@@ -878,18 +877,18 @@ mod tests {
         )?;
         ensure_equal(
             &report.requires_candidate_downgrade,
-            &false,
-            "metadata-only pending import must not downgrade candidates",
+            &true,
+            "metadata-only pending import must downgrade candidates",
         )?;
         ensure_equal(
             &report.br_reads_authoritative,
-            &true,
-            "metadata-only pending import keeps br reads authoritative",
+            &false,
+            "metadata-only pending import makes br reads advisory",
         )
     }
 
     #[test]
-    fn br_doctor_json_metadata_only_pending_import_keeps_br_reads_authoritative() -> TestResult {
+    fn br_doctor_json_metadata_only_pending_import_makes_br_reads_advisory() -> TestResult {
         let raw = doctor_payload(serde_json::json!([
             {
                 "name": "jsonl.merge_artifacts",
@@ -942,8 +941,13 @@ mod tests {
         )?;
         ensure_equal(
             &report.br_reads_authoritative,
+            &false,
+            "metadata-only pending import makes br reads advisory",
+        )?;
+        ensure_equal(
+            &report.requires_candidate_downgrade,
             &true,
-            "metadata-only pending import keeps br reads authoritative",
+            "metadata-only pending import downgrades candidates",
         )
     }
 

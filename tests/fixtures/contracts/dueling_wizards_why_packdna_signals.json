@@ -1,0 +1,148 @@
+{
+  "schema": "ee.dueling_wizards.why_packdna_signals.v1",
+  "initiativeBead": "bd-1n0np",
+  "gateBead": "bd-1n0np.23.5",
+  "manifestOwner": "tests/contracts/dueling_wizards_why_packdna_signals.rs",
+  "doc": "docs/agent-ux/dueling-wizards-why-packdna-signals.md",
+  "implementationState": "planned_contract",
+  "whySchema": "docs/schemas/ee.why.v1.json",
+  "packDnaSchema": "docs/schemas/ee.context.pack_dna.v1.json",
+  "causalWhySchema": "docs/schemas/ee.why.causal.v1.json",
+  "whySource": "src/core/why.rs",
+  "packDnaSource": "src/graph/pack_dna.rs",
+  "policy": {
+    "whyEnvelopeCompatibility": "stable_additive",
+    "packDnaCompatibility": "stable_additive",
+    "missingSignalBehavior": "degraded_not_silent",
+    "redactionDefault": "redaction_safe_no_raw_bodies",
+    "goldensUpdatedCoordinately": true,
+    "localCargoProof": "invalid",
+    "rchProofRequiredForRuntimeTests": true
+  },
+  "requiredSignals": [
+    {
+      "id": "freshness_symbol_drift",
+      "ownerBeads": ["bd-1n0np.3.8", "bd-1n0np.23.5"],
+      "sourceFeature": "anchors_freshness",
+      "whyFields": ["freshness.symbolDrift", "freshness.driftReason", "freshness.anchorHash"],
+      "packDnaFields": ["signals.freshness.symbolDrift", "signals.freshness.anchorHash"],
+      "schemaRefs": ["ee.why.v1", "ee.context.pack_dna.v1"],
+      "reasonSource": "authoritative_when_anchor_generation_matches",
+      "redaction": "hash_anchor_values",
+      "degradedHandling": "symbol_drift_unavailable",
+      "followupCommand": "ee why <memory-id> --json",
+      "agentQuestion": "Did source movement make this memory stale?",
+      "decisionImpact": "rank_down_or_reverify_stale_memory"
+    },
+    {
+      "id": "contradiction_suppressed",
+      "ownerBeads": ["bd-1n0np.7.5", "bd-1n0np.23.5"],
+      "sourceFeature": "contradiction_resolution",
+      "whyFields": [
+        "contradictions.suppressed",
+        "contradictions.winningEvidence",
+        "contradictions.nextAction"
+      ],
+      "packDnaFields": ["signals.contradictions.suppressed"],
+      "schemaRefs": ["ee.why.v1", "ee.context.pack_dna.v1"],
+      "reasonSource": "authoritative_from_contradiction_guard",
+      "redaction": "redact_evidence_text_keep_hashes",
+      "degradedHandling": "contradiction_signal_unavailable",
+      "followupCommand": "ee why <memory-id> --json",
+      "agentQuestion": "Was this memory suppressed by stronger contradictory evidence?",
+      "decisionImpact": "inspect_winning_evidence_before_reusing_memory"
+    },
+    {
+      "id": "sentinel_state",
+      "ownerBeads": ["bd-1n0np.16.4", "bd-1n0np.23.5"],
+      "sourceFeature": "memory_sentinels",
+      "whyFields": [
+        "sentinels.state",
+        "sentinels.lastVerifiedAt",
+        "sentinels.lastResultHash"
+      ],
+      "packDnaFields": ["signals.sentinels.state", "signals.sentinels.lastVerifiedAt"],
+      "schemaRefs": ["ee.why.v1", "ee.context.pack_dna.v1"],
+      "reasonSource": "authoritative_from_sentinel_result_generation",
+      "redaction": "hash_sentinel_specs_and_result_values",
+      "degradedHandling": "sentinel_state_unavailable",
+      "followupCommand": "ee sentinel check --json",
+      "agentQuestion": "Did the latest sentinel check pass for this memory?",
+      "decisionImpact": "trust_verified_memory_or_schedule_check"
+    },
+    {
+      "id": "task_lens",
+      "ownerBeads": ["bd-1n0np.17.3", "bd-1n0np.23.5"],
+      "sourceFeature": "task_lens",
+      "whyFields": ["taskLens.id", "taskLens.hash", "taskLens.reason"],
+      "packDnaFields": ["signals.taskLens.id", "signals.taskLens.hash"],
+      "schemaRefs": ["ee.why.v1", "ee.context.pack_dna.v1"],
+      "reasonSource": "authoritative_from_pack_record_lens_hash",
+      "redaction": "hash_lens_definition_keep_id",
+      "degradedHandling": "task_lens_unavailable",
+      "followupCommand": "ee lens explain <lens-id> --json",
+      "agentQuestion": "Which task lens shaped this pack selection?",
+      "decisionImpact": "explain_pack_lens_and_compare_alternatives"
+    },
+    {
+      "id": "anchor_file_line_provenance",
+      "ownerBeads": ["bd-1n0np.3.2", "bd-1n0np.23.5"],
+      "sourceFeature": "anchors_freshness",
+      "whyFields": ["anchors.fileLine", "anchors.anchorHash", "anchors.provenanceKind"],
+      "packDnaFields": ["signals.anchors.fileLine", "signals.anchors.anchorHash"],
+      "schemaRefs": ["ee.why.v1", "ee.context.pack_dna.v1"],
+      "reasonSource": "authoritative_from_memory_anchor_row",
+      "redaction": "redact_or_hash_paths_keep_line_numbers",
+      "degradedHandling": "anchor_provenance_unavailable",
+      "followupCommand": "ee memory anchors <memory-id> --json",
+      "agentQuestion": "Which source anchor connected this memory to code?",
+      "decisionImpact": "jump_to_redacted_source_anchor"
+    },
+    {
+      "id": "causal_ancestry_path",
+      "ownerBeads": ["bd-1n0np.19.2", "bd-1n0np.23.5"],
+      "sourceFeature": "causal_ancestry",
+      "whyFields": ["causal.paths", "causal.minCut", "causal.degraded"],
+      "packDnaFields": ["signals.causal.ancestryPath", "signals.causal.pathHash"],
+      "schemaRefs": ["ee.why.v1", "ee.why.causal.v1", "ee.context.pack_dna.v1"],
+      "reasonSource": "authoritative_when_causal_snapshot_generation_matches",
+      "redaction": "hash_path_payload_keep_memory_ids",
+      "degradedHandling": "causal_ancestry_unavailable",
+      "followupCommand": "ee why <memory-id> --causal-explain --json",
+      "agentQuestion": "Which causal path made this memory relevant?",
+      "decisionImpact": "inspect_causal_path_before_accepting_relevance"
+    }
+  ],
+  "signalCoverageMatrix": [
+    {"signal": "freshness_symbol_drift", "sourceFeature": "anchors_freshness", "ownerBeadCount": 2, "whyFieldCount": 3, "packDnaFieldCount": 2, "schemaRefCount": 2, "staticAssertions": 12, "mustClauses": 12, "tested": 12, "passing": 12, "divergent": 0, "scoreMilli": 1000, "compatibility": "stable_additive", "redactionStatus": "redaction_safe", "degradedHandlingStatus": "degraded_not_silent", "agentQuestionStatus": "concrete_question", "decisionImpactStatus": "concrete_decision", "runtimeProofPolicy": "rch_required_local_invalid", "complianceStatus": "planned_conformant"},
+    {"signal": "contradiction_suppressed", "sourceFeature": "contradiction_resolution", "ownerBeadCount": 2, "whyFieldCount": 3, "packDnaFieldCount": 1, "schemaRefCount": 2, "staticAssertions": 12, "mustClauses": 12, "tested": 12, "passing": 12, "divergent": 0, "scoreMilli": 1000, "compatibility": "stable_additive", "redactionStatus": "redaction_safe", "degradedHandlingStatus": "degraded_not_silent", "agentQuestionStatus": "concrete_question", "decisionImpactStatus": "concrete_decision", "runtimeProofPolicy": "rch_required_local_invalid", "complianceStatus": "planned_conformant"},
+    {"signal": "sentinel_state", "sourceFeature": "memory_sentinels", "ownerBeadCount": 2, "whyFieldCount": 3, "packDnaFieldCount": 2, "schemaRefCount": 2, "staticAssertions": 12, "mustClauses": 12, "tested": 12, "passing": 12, "divergent": 0, "scoreMilli": 1000, "compatibility": "stable_additive", "redactionStatus": "redaction_safe", "degradedHandlingStatus": "degraded_not_silent", "agentQuestionStatus": "concrete_question", "decisionImpactStatus": "concrete_decision", "runtimeProofPolicy": "rch_required_local_invalid", "complianceStatus": "planned_conformant"},
+    {"signal": "task_lens", "sourceFeature": "task_lens", "ownerBeadCount": 2, "whyFieldCount": 3, "packDnaFieldCount": 2, "schemaRefCount": 2, "staticAssertions": 12, "mustClauses": 12, "tested": 12, "passing": 12, "divergent": 0, "scoreMilli": 1000, "compatibility": "stable_additive", "redactionStatus": "redaction_safe", "degradedHandlingStatus": "degraded_not_silent", "agentQuestionStatus": "concrete_question", "decisionImpactStatus": "concrete_decision", "runtimeProofPolicy": "rch_required_local_invalid", "complianceStatus": "planned_conformant"},
+    {"signal": "anchor_file_line_provenance", "sourceFeature": "anchors_freshness", "ownerBeadCount": 2, "whyFieldCount": 3, "packDnaFieldCount": 2, "schemaRefCount": 2, "staticAssertions": 12, "mustClauses": 12, "tested": 12, "passing": 12, "divergent": 0, "scoreMilli": 1000, "compatibility": "stable_additive", "redactionStatus": "redaction_safe", "degradedHandlingStatus": "degraded_not_silent", "agentQuestionStatus": "concrete_question", "decisionImpactStatus": "concrete_decision", "runtimeProofPolicy": "rch_required_local_invalid", "complianceStatus": "planned_conformant"},
+    {"signal": "causal_ancestry_path", "sourceFeature": "causal_ancestry", "ownerBeadCount": 2, "whyFieldCount": 3, "packDnaFieldCount": 2, "schemaRefCount": 3, "staticAssertions": 12, "mustClauses": 12, "tested": 12, "passing": 12, "divergent": 0, "scoreMilli": 1000, "compatibility": "stable_additive", "redactionStatus": "redaction_safe", "degradedHandlingStatus": "degraded_not_silent", "agentQuestionStatus": "concrete_question", "decisionImpactStatus": "concrete_decision", "runtimeProofPolicy": "rch_required_local_invalid", "complianceStatus": "planned_conformant"}
+  ],
+  "runtimeAnchors": [
+    {
+      "source": "src/core/why.rs",
+      "needles": ["EvidenceFreshness", "GraphRetrievalExplanation", "SelectionExplanation"]
+    },
+    {
+      "source": "src/graph/pack_dna.rs",
+      "needles": ["PackDna", "PACK_DNA_SCHEMA_V1", "ppr_neighbors", "degraded"]
+    }
+  ],
+  "schemaAnchors": [
+    {
+      "source": "docs/schemas/ee.why.v1.json",
+      "needles": ["ee.why.v1", "revisionLineage", "graph"]
+    },
+    {
+      "source": "docs/schemas/ee.context.pack_dna.v1.json",
+      "needles": ["ee.context.pack_dna.v1", "voronoiDominator", "pprNeighbors", "degraded"]
+    },
+    {
+      "source": "docs/schemas/ee.why.causal.v1.json",
+      "needles": ["ee.why.causal.v1", "paths", "minCut", "degraded"]
+    }
+  ]
+}

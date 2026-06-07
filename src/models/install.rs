@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 /// Schema for `ee install check --json`.
 pub const INSTALL_CHECK_SCHEMA_V1: &str = "ee.install.check.v1";
 
+/// Schema for the source-vs-installed freshness block in `ee install check`.
+pub const INSTALL_FRESHNESS_SCHEMA_V1: &str = "ee.install.freshness.v1";
+
 /// Schema for `ee install plan --json`.
 pub const INSTALL_PLAN_SCHEMA_V1: &str = "ee.install.plan.v1";
 
@@ -30,7 +33,10 @@ pub enum InstallFindingCode {
     CurrentBinaryShadowed,
     DuplicatePathBinary,
     ExistingUnknownFile,
+    InstalledBinaryStale,
+    InstalledVersionUnknown,
     PathBinaryVersionMismatch,
+    RequiredSurfaceMissing,
     InstallDirMissing,
     InstallDirNotWritable,
     DuplicateTarget,
@@ -40,6 +46,7 @@ pub enum InstallFindingCode {
     NoUpdateSourceConfigured,
     OfflineNoManifest,
     SignatureMissing,
+    SourceVersionUnknown,
     TargetMismatch,
     UnsupportedTarget,
     UnsafeArtifact,
@@ -59,7 +66,10 @@ impl InstallFindingCode {
             Self::CurrentBinaryShadowed => "current_binary_shadowed",
             Self::DuplicatePathBinary => "duplicate_path_binary",
             Self::ExistingUnknownFile => "existing_unknown_file",
+            Self::InstalledBinaryStale => "installed_binary_stale",
+            Self::InstalledVersionUnknown => "installed_version_unknown",
             Self::PathBinaryVersionMismatch => "path_binary_version_mismatch",
+            Self::RequiredSurfaceMissing => "required_surface_missing",
             Self::InstallDirMissing => "install_dir_missing",
             Self::InstallDirNotWritable => "install_dir_not_writable",
             Self::DuplicateTarget => "duplicate_target",
@@ -69,6 +79,7 @@ impl InstallFindingCode {
             Self::NoUpdateSourceConfigured => "no_update_source_configured",
             Self::OfflineNoManifest => "offline_no_manifest",
             Self::SignatureMissing => "signature_missing",
+            Self::SourceVersionUnknown => "source_version_unknown",
             Self::TargetMismatch => "target_mismatch",
             Self::UnsupportedTarget => "unsupported_target",
             Self::UnsafeArtifact => "unsafe_artifact",
@@ -310,6 +321,65 @@ pub struct UpdateSourcePosture {
     pub status: String,
 }
 
+/// Freshness verdict for deciding whether a running `ee` can authoritatively
+/// represent the current source checkout for agent automation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallFreshnessVerdict {
+    Fresh,
+    Stale,
+    UnknownSourceVersion,
+    UnknownInstalledVersion,
+    MissingRequiredSurface,
+    PathBinaryMissing,
+    ShadowedBinary,
+}
+
+impl InstallFreshnessVerdict {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Stale => "stale",
+            Self::UnknownSourceVersion => "unknown_source_version",
+            Self::UnknownInstalledVersion => "unknown_installed_version",
+            Self::MissingRequiredSurface => "missing_required_surface",
+            Self::PathBinaryMissing => "path_binary_missing",
+            Self::ShadowedBinary => "shadowed_binary",
+        }
+    }
+}
+
+/// One version input used by the freshness authority model.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallVersionEvidence {
+    pub version: Option<String>,
+    pub source: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_class: Option<String>,
+}
+
+/// Derived source-vs-installed freshness report.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallFreshnessReport {
+    pub schema: String,
+    pub verdict: InstallFreshnessVerdict,
+    pub authoritative: bool,
+    pub comparison: String,
+    pub source_version: InstallVersionEvidence,
+    pub installed_version: InstallVersionEvidence,
+    pub path_status: InstallPathStatus,
+    pub required_surfaces: Vec<String>,
+    pub missing_required_surfaces: Vec<String>,
+    pub blocking_findings: Vec<InstallFindingCode>,
+    pub repair: String,
+}
+
 /// Report emitted by `ee install check`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -322,6 +392,7 @@ pub struct InstallCheckReport {
     pub path: InstallPathAnalysis,
     pub permissions: InstallPermissionCheck,
     pub update_source: UpdateSourcePosture,
+    pub freshness: InstallFreshnessReport,
     pub findings: Vec<InstallFinding>,
 }
 

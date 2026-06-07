@@ -83,6 +83,7 @@ const AGENT_MAIL_HEALTH_PROBE_TIMEOUT_MS: u64 = 75;
 pub const AGENT_MAIL_SNAPSHOT_TEMPLATE_AGENT: &str = "<AGENT_NAME>";
 pub const AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH: &str = "/private/tmp/ee-agent-mail-snapshot.json";
 pub const AGENT_MAIL_SNAPSHOT_PRODUCER_COMMAND: &str = "scripts/agent_mail_snapshot.sh --project . --agent <AGENT_NAME> --json --output /private/tmp/ee-agent-mail-snapshot.json";
+pub const DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS: u64 = 35_000;
 const MEMORY_DRIFT_UNAVAILABLE_CODE: &str = "memory_drift_source_unverifiable";
 const RCH_UNAVAILABLE_CODE: &str = "rch_unavailable";
 const RCH_WORKER_TOPOLOGY_BLOCKED_CODE: &str = "rch_worker_topology_blocked";
@@ -128,7 +129,7 @@ impl SwarmBriefCollectOptions {
             enabled_sources: default_swarm_brief_sources(),
             agent_mail_snapshot_path: None,
             agent_inventory_only_connectors: None,
-            command_timeout_ms: 1_500,
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         }
     }
 }
@@ -896,7 +897,7 @@ impl WorkspaceGitSnapshotOptions {
     pub fn for_workspace(workspace: impl Into<PathBuf>) -> Self {
         Self {
             workspace: workspace.into(),
-            command_timeout_ms: 1_500,
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
             large_file_threshold_bytes: 1024 * 1024,
         }
     }
@@ -974,8 +975,14 @@ pub struct WorkspaceGitOperationMarker {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SwarmBriefCommandError {
     Unavailable(String),
-    Failed { status: Option<i32>, stderr: String },
-    TimedOut { timeout_ms: u64 },
+    Failed {
+        status: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
+    TimedOut {
+        timeout_ms: u64,
+    },
     InvalidUtf8(String),
 }
 
@@ -988,7 +995,7 @@ impl SwarmBriefCommandError {
     ) -> SwarmBriefDegradation {
         let message = match self {
             Self::Unavailable(message) => message.clone(),
-            Self::Failed { status, stderr } => {
+            Self::Failed { status, stderr, .. } => {
                 let status = status
                     .map(|code| code.to_string())
                     .unwrap_or_else(|| "terminated_by_signal".to_string());
@@ -1155,6 +1162,7 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
         } else {
             Err(SwarmBriefCommandError::Failed {
                 status: status.code(),
+                stdout,
                 stderr,
             })
         }
@@ -1232,6 +1240,7 @@ fn translate_source_run_evidence(
         SourceRunStatus::Passed => Ok(SwarmBriefCommandOutput { stdout, stderr }),
         SourceRunStatus::Failed => Err(SwarmBriefCommandError::Failed {
             status: evidence.exit.exit_code,
+            stdout,
             stderr,
         }),
         SourceRunStatus::TimedOut => Err(SwarmBriefCommandError::TimedOut {
@@ -1672,18 +1681,17 @@ fn beads_sync_status_is_metadata_only_drift<R: SwarmBriefCommandRunner>(
         report.health == BeadsIntegrityHealth::ExternalChangesPendingImport
             && report.pending_import_count == 0
             && report.dirty_issue_count == 0
-            && report.br_reads_authoritative
             && report.jsonl_parse_error.is_none()
             && report.jsonl_record_count == report.db_record_count
     })
 }
 
 fn beads_tracker_metadata_drift_degradation() -> SwarmBriefDegradation {
-    SwarmBriefDegradation::info(
+    SwarmBriefDegradation::warning(
         SwarmBriefSourceKind::Beads,
         BEADS_TRACKER_METADATA_DRIFT_CODE,
-        "Beads sync metadata reports JSONL freshness drift, but br doctor reports DB/JSONL content parity and zero dirty issues; br reads remain authoritative.",
-        Some("br sync --flush-only --json".to_string()),
+        "Beads sync metadata reports JSONL freshness drift, but br doctor reports DB/JSONL content parity and zero dirty issues; br reads are advisory until import-only sync reconciles metadata.",
+        Some("br sync --import-only --json".to_string()),
     )
 }
 
@@ -8851,6 +8859,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
+    use crate::testing::{TestResult, ensure_equal};
 
     #[derive(Default)]
     struct FakeRunner {
@@ -11506,7 +11515,7 @@ mod tests {
 
         let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
 
-        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Ready);
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Degraded);
         assert_eq!(output.snapshot.freshness.state, "current");
         assert!(
             output
@@ -11522,11 +11531,12 @@ mod tests {
             .degraded
             .iter()
             .find(|item| item.code == BEADS_TRACKER_METADATA_DRIFT_CODE)
-            .expect("metadata-only drift should emit an info diagnostic");
-        assert_eq!(metadata_drift.severity, "info");
+            .expect("metadata-only drift should emit a warning diagnostic");
+        assert_eq!(metadata_drift.severity, "warning");
+        assert!(metadata_drift.message.contains("br reads are advisory"));
         assert_eq!(
             metadata_drift.repair.as_deref(),
-            Some("br sync --flush-only --json")
+            Some("br sync --import-only --json")
         );
         match output.contribution {
             SwarmBriefContribution::Beads(summary) => assert_eq!(summary.ready.len(), 1),
@@ -12393,6 +12403,7 @@ mod tests {
     fn rch_command_error_maps_e327_to_worker_topology_blocked() {
         let error = SwarmBriefCommandError::Failed {
             status: Some(1),
+            stdout: String::new(),
             stderr:
                 "RCH-E327: worker=css path topology could not map /Users/project to /data/project"
                     .to_string(),
@@ -12418,6 +12429,7 @@ mod tests {
     fn rch_command_error_distinguishes_remote_required_fallback_prevented() {
         let error = SwarmBriefCommandError::Failed {
             status: Some(1),
+            stdout: String::new(),
             stderr: "RCH_REQUIRE_REMOTE is set; remote required fallback prevented local execution"
                 .to_string(),
         };
@@ -12463,6 +12475,7 @@ mod tests {
     fn command_error_maps_to_stable_degradation_without_raw_secret() {
         let error = SwarmBriefCommandError::Failed {
             status: Some(1),
+            stdout: String::new(),
             stderr: "token=ghp_abcdefghijklmnopqrstuvwxyz123456".to_string(),
         };
         let degradation = error.to_degradation(
@@ -12558,6 +12571,22 @@ mod tests {
             SwarmBriefContribution::None => {}
             _ => panic!("empty bv stdout must not contribute a healthy summary"),
         }
+    }
+
+    #[test]
+    fn swarm_source_timeout_defaults_allow_live_bv_triage_budget() -> TestResult {
+        let options = SwarmBriefCollectOptions::for_workspace(".");
+        ensure_equal(
+            &options.command_timeout_ms,
+            &DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            "swarm brief command timeout default",
+        )?;
+        let git_options = WorkspaceGitSnapshotOptions::for_workspace(".");
+        ensure_equal(
+            &git_options.command_timeout_ms,
+            &DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            "workspace git command timeout default",
+        )
     }
 
     #[test]
@@ -12701,8 +12730,13 @@ mod source_run_adapter_tests {
             },
         );
         match result {
-            Err(SwarmBriefCommandError::Failed { status, stderr }) => {
+            Err(SwarmBriefCommandError::Failed {
+                status,
+                stdout,
+                stderr,
+            }) => {
                 assert_eq!(status, Some(2));
+                assert!(stdout.is_empty());
                 assert!(stderr.contains("storage error"));
             }
             other => panic!("expected Failed; got {other:?}"),

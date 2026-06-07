@@ -10,7 +10,7 @@ use crate::config::{
     read_env_var,
 };
 use crate::db::StoredMemory;
-use crate::models::{MemoryScope, MemoryScopeStats, TrustClass};
+use crate::models::{MemoryScope, MemoryScopeStats, TrustClass, memory_tags_include_global_scope};
 
 fn normalized_mesh_token(input: &str) -> String {
     let mut normalized = String::with_capacity(input.len());
@@ -1140,8 +1140,14 @@ impl MemoryScopeContext {
 
     #[must_use]
     pub fn memory_in_scope(&self, memory: &StoredMemory) -> bool {
+        self.memory_in_scope_with_tags(memory, &[])
+    }
+
+    #[must_use]
+    pub fn memory_in_scope_with_tags(&self, memory: &StoredMemory, tags: &[String]) -> bool {
         match self.scope {
             MemoryScope::Swarm | MemoryScope::Workspace => true,
+            MemoryScope::Global => memory_tags_include_global_scope(tags),
             MemoryScope::Verified => is_verified_memory(memory),
             MemoryScope::SelfOnly => self
                 .current_agent
@@ -1865,6 +1871,22 @@ mod tests {
             TrustClass::HumanExplicit,
             Some("agent=RedStone")
         )));
+    }
+
+    #[test]
+    fn global_scope_requires_global_or_house_rule_tag() {
+        let context = MemoryScopeContext {
+            scope: MemoryScope::Global,
+            strict_scope: false,
+            current_agent: None,
+            team_members: BTreeSet::new(),
+        };
+        let memory = memory_with_scope(TrustClass::AgentAssertion, Some("agent=RedStone"));
+
+        assert!(!context.memory_in_scope(&memory));
+        assert!(context.memory_in_scope_with_tags(&memory, &["global".to_owned()]));
+        assert!(context.memory_in_scope_with_tags(&memory, &["house-rule".to_owned()]));
+        assert!(!context.memory_in_scope_with_tags(&memory, &["workspace".to_owned()]));
     }
 
     #[test]

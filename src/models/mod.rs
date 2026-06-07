@@ -19,6 +19,7 @@ pub mod install;
 pub mod jsonl;
 pub mod learn;
 pub mod memory;
+pub mod memory_anchor;
 pub mod model_registry;
 pub mod mutation;
 pub mod perf_artifact;
@@ -164,6 +165,11 @@ pub use memory::{
     Confidence, Importance, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES, MemoryContent,
     MemoryKind, MemoryLevel, MemoryValidationError, Tag, UnitScore, Utility,
 };
+pub use memory_anchor::{
+    CreateMemoryAnchorInput, MEMORY_ANCHOR_SCHEMA_V1, MemoryAnchorFreshnessState, MemoryAnchorKind,
+    MemoryAnchorSource, StoredMemoryAnchor, extract_precision_memory_anchors,
+    memory_anchor_value_hash,
+};
 pub use model_registry::{
     EMBEDDING_METADATA_SCHEMA_V1, EmbeddingMetadataFieldSchema, EmbeddingMetadataObjectSchema,
     EmbeddingMetadataRecord, EmbeddingMetadataValidationError, EmbeddingPooling,
@@ -213,11 +219,13 @@ pub use progress::{
 };
 pub use provenance::{LineSpan, ProvenanceUri, ProvenanceUriError};
 pub use query::{
-    FilterOperator, FilterPredicate, FilterValue, MemoryScope, MemoryScopeStats, PaginationCursor,
+    FilterOperator, FilterPredicate, FilterValue, GLOBAL_MEMORY_SCOPE_TAG,
+    HOUSE_RULE_MEMORY_SCOPE_TAG, MemoryScope, MemoryScopeStats, PaginationCursor,
     PaginationCursorError, QueryFilter, QueryFilters, QueryGraphHints, QueryGraphTraversal,
     QueryPagination, QueryTemporalFilters, QueryTemporalValidity, QueryTemporalValidityPosture,
-    RedactionFilters, TagFilters, TrustFilters, compute_query_shape_hash, parse_filters,
-    parse_pagination, parse_redaction, parse_tags, parse_trust, posture_for_trust_class,
+    RedactionFilters, TagFilters, TrustFilters, compute_query_shape_hash,
+    memory_tags_include_global_scope, parse_filters, parse_pagination, parse_redaction, parse_tags,
+    parse_trust, posture_for_trust_class,
 };
 pub use recorder::{
     IMPORT_CURSOR_SCHEMA_V1, ImportCursor, ImportSourceType, ParseImportSourceTypeError,

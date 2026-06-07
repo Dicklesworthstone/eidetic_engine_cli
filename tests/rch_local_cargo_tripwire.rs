@@ -193,7 +193,7 @@ fn remote_required_rch_exec_wrapper_is_allowed() -> TestResult {
 #[test]
 fn absolute_path_rch_exec_wrapper_is_allowed() -> TestResult {
     let (code, report) = classify(
-        "RCH_REQUIRE_REMOTE=1 /Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- env TMPDIR=/tmp cargo bench --bench foo",
+        "RCH_REQUIRE_REMOTE=1 /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 exec -- env TMPDIR=/tmp cargo bench --bench foo",
     )?;
     if code != 0 || report["allowed"].as_str() != Some("allowed") {
         return Err(format!(
@@ -331,6 +331,52 @@ fn process_probe_ignores_rch_diagnose_dry_run_payloads() -> TestResult {
         .as_array()
         .ok_or_else(|| format!("missing processes array: {report}"))?;
     if processes.len() != 1 || processes[0]["pid"] != "55382" {
+        return Err(format!(
+            "expected only direct cargo to be reported, got {processes:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn process_probe_ignores_stable_rch_verify_shell_without_rch_exec_child() -> TestResult {
+    let fixture = "\
+ 839 69255 00:00 bash -s -- --summary --no-write --known-blocker-override -- cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml -- --nocapture
+ 990 1 00:03 cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+";
+    let (code, report) = probe_with_ps_fixture(fixture, "")?;
+    if code != 1 {
+        return Err(format!(
+            "expected probe exit 1 from the real local cargo process only; got {code}: {report}"
+        ));
+    }
+    let processes = report["processes"]
+        .as_array()
+        .ok_or_else(|| format!("missing processes array: {report}"))?;
+    if processes.len() != 1 || processes[0]["pid"] != "990" {
+        return Err(format!(
+            "expected only direct cargo to be reported, got {processes:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn process_probe_ignores_ssh_remote_cargo_payload_launcher() -> TestResult {
+    let fixture = "\
+ 90391 1694 00:51 ssh -i /Users/jemanuel/.ssh/contabo_vps_ed25519 -o BatchMode=yes ubuntu@212.90.121.76 cd /data/projects/eidetic_engine_cli_manual_turquoise-20260607T152024Z && mkdir -p .manual-target-data && TMPDIR=/tmp CARGO_TARGET_DIR=/data/projects/eidetic_engine_cli_manual_turquoise-20260607T152024Z/.manual-target-data cargo test --lib global_memory_scope -- --nocapture
+ 990 1 00:03 cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+";
+    let (code, report) = probe_with_ps_fixture(fixture, "")?;
+    if code != 1 {
+        return Err(format!(
+            "expected probe exit 1 from the real local cargo process only; got {code}: {report}"
+        ));
+    }
+    let processes = report["processes"]
+        .as_array()
+        .ok_or_else(|| format!("missing processes array: {report}"))?;
+    if processes.len() != 1 || processes[0]["pid"] != "990" {
         return Err(format!(
             "expected only direct cargo to be reported, got {processes:?}"
         ));

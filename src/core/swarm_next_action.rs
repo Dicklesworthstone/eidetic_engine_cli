@@ -25,9 +25,9 @@ use crate::core::environment_attestation::{
 };
 use crate::core::preflight_guard::classify_repair_command_for_preflight;
 use crate::core::swarm_brief::{
-    SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandRunner, SwarmBriefCommit,
-    SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefReport, SwarmBriefSourceKind,
-    SwarmBriefSourceStatus, SwarmBriefThreadSummary,
+    SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandError, SwarmBriefCommandRunner,
+    SwarmBriefCommit, SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefReport,
+    SwarmBriefSourceKind, SwarmBriefSourceStatus, SwarmBriefThreadSummary,
     agent_mail_snapshot_brief_retry_command_template,
     agent_mail_snapshot_producer_command_template, collect_swarm_brief,
 };
@@ -231,6 +231,8 @@ pub struct SwarmNextActionRecentFirstError {
     pub retry_after: Option<String>,
     #[serde(skip)]
     pub known_blocker: Option<SwarmWorkPacketKnownBlocker>,
+    #[serde(skip)]
+    pub selector_admission_probe: Option<SwarmWorkPacketRchSelectorAdmissionProbe>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -841,6 +843,26 @@ pub struct SwarmWorkPacketRchProofPosture {
     pub blocker_codes: Vec<String>,
     pub known_blockers: Vec<SwarmWorkPacketKnownBlocker>,
     pub retry_after: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector_admission_probe: Option<SwarmWorkPacketRchSelectorAdmissionProbe>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketRchSelectorAdmissionProbe {
+    pub schema: &'static str,
+    pub status: Option<String>,
+    pub required_runtime: Option<String>,
+    pub workers_reported: Vec<String>,
+    pub daemon_workers_reported: Vec<String>,
+    pub workers_reported_count: u64,
+    pub daemon_workers_reported_count: u64,
+    pub selected_worker: Option<String>,
+    pub selection_failure_reason: Option<String>,
+    pub workers_vs_selection_contradiction: bool,
+    pub path_normalization_warning: Option<String>,
+    pub remote_required: bool,
+    pub local_fallback_refused: bool,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -985,24 +1007,30 @@ fn collect_work_packet_tracker_integrity(
         return fallback_work_packet_tracker_integrity(brief, true);
     }
 
-    runner
-        .run(
-            "br",
-            &["doctor", "--json", "--no-db"],
-            &options.workspace,
-            options.command_timeout_ms,
-        )
-        .ok()
-        .and_then(|output| {
-            compose_integrity_report_from_br_doctor_json(
-                &output.stdout,
-                ".beads/issues.jsonl",
-                ".beads/beads.db",
-                true,
-            )
-            .ok()
-        })
-        .unwrap_or_else(|| fallback_work_packet_tracker_integrity(brief, true))
+    match runner.run(
+        "br",
+        &["doctor", "--json", "--no-db"],
+        &options.workspace,
+        options.command_timeout_ms,
+    ) {
+        Ok(output) => work_packet_tracker_integrity_from_doctor_stdout(&output.stdout)
+            .unwrap_or_else(|| fallback_work_packet_tracker_integrity(brief, true)),
+        Err(crate::core::swarm_brief::SwarmBriefCommandError::Failed { stdout, .. }) => {
+            work_packet_tracker_integrity_from_doctor_stdout(&stdout)
+                .unwrap_or_else(|| fallback_work_packet_tracker_integrity(brief, true))
+        }
+        Err(_) => fallback_work_packet_tracker_integrity(brief, true),
+    }
+}
+
+fn work_packet_tracker_integrity_from_doctor_stdout(stdout: &str) -> Option<BeadsIntegrityReport> {
+    compose_integrity_report_from_br_doctor_json(
+        stdout,
+        ".beads/issues.jsonl",
+        ".beads/beads.db",
+        true,
+    )
+    .ok()
 }
 
 fn default_work_packet_tracker_integrity(brief: &SwarmBriefReport) -> BeadsIntegrityReport {
@@ -1853,7 +1881,9 @@ fn work_packet_candidate_decision(
     }
     match candidate.status.as_str() {
         "blocked" => return "blocked_by_dependency",
+        "closed" => return "skip",
         "deferred" => return "external_state_required",
+        "in_progress" => return "already_owned",
         _ => {}
     }
     if !candidate_release_operator_reasons(candidate).is_empty() {
@@ -2561,6 +2591,8 @@ fn work_packet_rch_proof_posture(
     degraded: &[SwarmWorkPacketDegradation],
 ) -> SwarmWorkPacketRchProofPosture {
     let known_blockers = work_packet_known_blockers(&snapshot.verification.verifier_evidence);
+    let selector_admission_probe =
+        work_packet_selector_admission_probe(&snapshot.verification.verifier_evidence);
     let mut blocker_codes = degraded
         .iter()
         .filter(|degradation| degradation.source == "rch")
@@ -2573,6 +2605,9 @@ fn work_packet_rch_proof_posture(
     let topology_blocked = blocker_codes
         .iter()
         .any(|code| code == "rch_worker_topology_blocked");
+    let selector_admission_contradiction = selector_admission_probe
+        .as_ref()
+        .is_some_and(|probe| probe.workers_vs_selection_contradiction);
     let remote_only_required = snapshot.verification.remote_only_required
         || known_blockers.iter().any(|blocker| blocker.remote_required);
     let local_fallback_prevented = remote_only_required
@@ -2595,6 +2630,8 @@ fn work_packet_rch_proof_posture(
         "unavailable"
     } else if topology_blocked {
         "topology_blocked"
+    } else if selector_admission_contradiction {
+        "degraded_capacity"
     } else if snapshot.verification.remote_only_safe == Some(true) {
         "remote_ready"
     } else if snapshot.verification.remote_only_safe == Some(false)
@@ -2632,7 +2669,23 @@ fn work_packet_rch_proof_posture(
         blocker_codes,
         known_blockers,
         retry_after,
+        selector_admission_probe,
     }
+}
+
+fn work_packet_selector_admission_probe(
+    verifier_evidence: &[SwarmNextActionRecentFirstError],
+) -> Option<SwarmWorkPacketRchSelectorAdmissionProbe> {
+    verifier_evidence
+        .iter()
+        .filter_map(|evidence| evidence.selector_admission_probe.clone())
+        .find(|probe| probe.workers_vs_selection_contradiction)
+        .or_else(|| {
+            verifier_evidence
+                .iter()
+                .filter_map(|evidence| evidence.selector_admission_probe.clone())
+                .next()
+        })
 }
 
 fn work_packet_known_blockers(
@@ -2666,6 +2719,13 @@ fn normalized_rch_blocker_codes_from_evidence(
             .any(|code| code == "rch_verify_local_fallback_refused")
     {
         codes.insert("rch_remote_required_fallback_prevented".to_owned());
+    }
+    if evidence
+        .selector_admission_probe
+        .as_ref()
+        .is_some_and(|probe| probe.workers_vs_selection_contradiction)
+    {
+        codes.insert("rch_selector_admission_contradiction".to_owned());
     }
     codes.into_iter().collect()
 }
@@ -3305,6 +3365,7 @@ fn verifier_evidence_from_ledger_blocker(
         local_fallback_refused,
         retry_after: run.retry_after.clone(),
         known_blocker,
+        selector_admission_probe: None,
     }
 }
 
@@ -3361,6 +3422,10 @@ fn verifier_evidence_item(value: &Value) -> Option<SwarmNextActionRecentFirstErr
     );
     let error_codes = string_array_from_keys(object, &["error_codes", "errorCodes"]);
     let status = string_value_from_keys(object, &["status", "result", "outcome"]);
+    let selector_admission_probe = selector_admission_probe_from_evidence_object(object);
+    let selector_admission_contradiction = selector_admission_probe
+        .as_ref()
+        .is_some_and(|probe| probe.workers_vs_selection_contradiction);
     let failure_like = status.as_deref().is_some_and(|status| {
         matches!(
             status,
@@ -3375,7 +3440,8 @@ fn verifier_evidence_item(value: &Value) -> Option<SwarmNextActionRecentFirstErr
         || degraded_codes
             .iter()
             .any(|code| code == "rch_verify_remote_command_failed")
-        || degraded_codes_are_environment_blockers(&degraded_codes);
+        || degraded_codes_are_environment_blockers(&degraded_codes)
+        || selector_admission_contradiction;
     if !failure_like {
         return None;
     }
@@ -3391,8 +3457,16 @@ fn verifier_evidence_item(value: &Value) -> Option<SwarmNextActionRecentFirstErr
         });
     let local_fallback_refused = degraded_codes
         .iter()
-        .any(|code| code == "rch_verify_local_fallback_refused");
-    let remote_required = bool_value_from_keys(object, &["remote_required", "remoteRequired"]);
+        .any(|code| code == "rch_verify_local_fallback_refused")
+        || selector_admission_probe
+            .as_ref()
+            .is_some_and(|probe| probe.local_fallback_refused);
+    let remote_required = bool_value_from_keys(object, &["remote_required", "remoteRequired"])
+        .or_else(|| {
+            selector_admission_probe
+                .as_ref()
+                .map(|probe| probe.remote_required)
+        });
     let command_hash = string_value_from_keys(object, &["command_hash", "commandHash"]);
     let retry_after = string_value_from_keys(object, &["retry_after", "retryAfter"]);
     let command_kind = string_value_from_keys(object, &["command_kind", "commandKind"]);
@@ -3426,6 +3500,7 @@ fn verifier_evidence_item(value: &Value) -> Option<SwarmNextActionRecentFirstErr
         local_fallback_refused,
         retry_after,
         known_blocker,
+        selector_admission_probe,
     })
 }
 
@@ -3510,6 +3585,10 @@ fn verifier_evidence_is_environment_blocked(evidence: &SwarmNextActionRecentFirs
         )
     }) || evidence.error_codes.iter().any(|code| code == "RCH-E327")
         || degraded_codes_are_environment_blockers(&evidence.degraded_codes)
+        || evidence
+            .selector_admission_probe
+            .as_ref()
+            .is_some_and(|probe| probe.workers_vs_selection_contradiction)
 }
 
 fn degraded_codes_are_environment_blockers(codes: &[String]) -> bool {
@@ -3541,6 +3620,12 @@ fn bool_value_from_keys(object: &serde_json::Map<String, Value>, keys: &[&str]) 
         .find_map(Value::as_bool)
 }
 
+fn u64_value_from_keys(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .filter_map(|key| value_from_object_or_fields(object, key))
+        .find_map(Value::as_u64)
+}
+
 fn value_from_object_or_fields<'a>(
     object: &'a serde_json::Map<String, Value>,
     key: &str,
@@ -3564,6 +3649,66 @@ fn string_array_from_keys(object: &serde_json::Map<String, Value>, keys: &[&str]
     strings.sort();
     strings.dedup();
     strings
+}
+
+fn selector_admission_probe_from_evidence_object(
+    object: &serde_json::Map<String, Value>,
+) -> Option<SwarmWorkPacketRchSelectorAdmissionProbe> {
+    let probe = value_from_object_or_fields(object, "selector_admission_probe")
+        .or_else(|| value_from_object_or_fields(object, "selectorAdmissionProbe"))?
+        .as_object()?;
+    let schema = string_value_from_keys(probe, &["schema"])?;
+    if schema != crate::models::verification::RCH_SELECTOR_ADMISSION_PROBE_SCHEMA_V1 {
+        return None;
+    }
+    let workers_reported = string_array_from_keys(probe, &["workers_reported", "workersReported"]);
+    let daemon_workers_reported =
+        string_array_from_keys(probe, &["daemon_workers_reported", "daemonWorkersReported"]);
+    let workers_reported_count =
+        u64_value_from_keys(probe, &["workers_reported_count", "workersReportedCount"])
+            .unwrap_or_else(|| u64::try_from(workers_reported.len()).unwrap_or(u64::MAX));
+    let daemon_workers_reported_count = u64_value_from_keys(
+        probe,
+        &[
+            "daemon_workers_reported_count",
+            "daemonWorkersReportedCount",
+        ],
+    )
+    .unwrap_or_else(|| u64::try_from(daemon_workers_reported.len()).unwrap_or(u64::MAX));
+
+    Some(SwarmWorkPacketRchSelectorAdmissionProbe {
+        schema: crate::models::verification::RCH_SELECTOR_ADMISSION_PROBE_SCHEMA_V1,
+        status: string_value_from_keys(probe, &["status"]),
+        required_runtime: string_value_from_keys(probe, &["required_runtime", "requiredRuntime"]),
+        workers_reported,
+        daemon_workers_reported,
+        workers_reported_count,
+        daemon_workers_reported_count,
+        selected_worker: string_value_from_keys(probe, &["selected_worker", "selectedWorker"]),
+        selection_failure_reason: string_value_from_keys(
+            probe,
+            &["selection_failure_reason", "selectionFailureReason"],
+        ),
+        workers_vs_selection_contradiction: bool_value_from_keys(
+            probe,
+            &[
+                "workers_vs_selection_contradiction",
+                "workersVsSelectionContradiction",
+            ],
+        )
+        .unwrap_or(false),
+        path_normalization_warning: string_value_from_keys(
+            probe,
+            &["path_normalization_warning", "pathNormalizationWarning"],
+        ),
+        remote_required: bool_value_from_keys(probe, &["remote_required", "remoteRequired"])
+            .unwrap_or(false),
+        local_fallback_refused: bool_value_from_keys(
+            probe,
+            &["local_fallback_refused", "localFallbackRefused"],
+        )
+        .unwrap_or(false),
+    })
 }
 
 fn command_from_array_field(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
@@ -4351,6 +4496,9 @@ fn do_not_take_reasons_for_candidate(
     }
     if let Some(assignee) = &candidate.assignee {
         reasons.insert(format!("candidate_assigned_to:{assignee}"));
+    }
+    if !matches!(candidate.status.as_str(), "open" | "unknown") {
+        reasons.insert(format!("candidate_status:{}", candidate.status));
     }
     if blocked_by_owner {
         reasons.insert("active_owner_or_compile_health_blocker_present".to_owned());
@@ -5449,6 +5597,7 @@ mod tests {
             local_fallback_refused: false,
             retry_after: None,
             known_blocker: None,
+            selector_admission_probe: None,
         }];
 
         let snapshot =
@@ -5914,6 +6063,7 @@ mod tests {
             local_fallback_refused: false,
             retry_after: None,
             known_blocker: None,
+            selector_admission_probe: None,
         }];
 
         let snapshot =
@@ -6188,6 +6338,66 @@ mod tests {
             gate.unsafe_reasons
                 .contains(&"rch_remote_verification_required".to_owned())
         );
+    }
+
+    #[test]
+    fn work_packet_tracker_integrity_uses_failed_doctor_stdout_when_parseable() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let options = SwarmBriefCollectOptions::for_workspace("/tmp/project");
+        let runner = FailedDoctorJsonRunner {
+            stdout: serde_json::json!({
+                "ok": false,
+                "workspace_health": "recoverable",
+                "checks": [
+                    {
+                        "name": "jsonl.merge_artifacts",
+                        "status": "ok",
+                        "message": "No merge artifacts",
+                        "details": { "files": [] }
+                    },
+                    {
+                        "name": "base_jsonl",
+                        "status": "warn",
+                        "message": "Merge anchor is older than the live JSONL",
+                        "details": { "kind": "stale" }
+                    },
+                    {
+                        "name": "write_lock",
+                        "status": "warn",
+                        "message": ".beads/.write.lock looks orphaned",
+                        "details": { "reason": "stale_mtime" }
+                    },
+                    {
+                        "name": "jsonl.parse",
+                        "status": "ok",
+                        "message": "Parsed 3590 records",
+                        "details": { "records": 3590 }
+                    },
+                    {
+                        "name": "counts.db_vs_jsonl",
+                        "status": "ok",
+                        "message": "Both have 3590 records",
+                        "details": { "db": 3590, "jsonl": 3590 }
+                    },
+                    {
+                        "name": "sync.metadata",
+                        "status": "ok",
+                        "message": "Database and JSONL are in sync",
+                        "details": { "dirty_issues": 0 }
+                    }
+                ]
+            })
+            .to_string(),
+        };
+
+        let report = collect_work_packet_tracker_integrity(&options, &runner, &brief);
+
+        assert_eq!(report.health, BeadsIntegrityHealth::Ok);
+        assert!(report.br_reads_authoritative);
+        assert!(!report.external_changes_pending_import);
+        assert_eq!(report.jsonl_record_count, 3590);
+        assert_eq!(report.db_record_count, 3590);
+        assert_eq!(report.merge_artifact_count, 0);
     }
 
     #[test]
@@ -6788,6 +6998,79 @@ mod tests {
                 .recommended_action
                 .proof_obligations
                 .contains(&"do_not_run_local_cargo_fallback".to_owned())
+        );
+    }
+
+    #[test]
+    fn work_packet_blocks_selector_admission_contradiction() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.beads.ready = vec![bead("bd-selector", "Needs selector admission proof", 2)];
+        let evidence = verifier_evidence_from_json(&serde_json::json!({
+            "schema": "ee.rch.verify.v1",
+            "status": "remote_ready",
+            "command_text": "cargo test --test contracts why_not_selected -- --nocapture",
+            "command_kind": "cargo_test",
+            "command_hash": "selector-contradiction",
+            "remote_required": true,
+            "selector_admission_probe": {
+                "schema": "ee.rch.selector_admission_probe.v1",
+                "status": "selection_failed",
+                "required_runtime": "Rust",
+                "workers_reported": ["vmi1149989"],
+                "daemon_workers_reported": ["vmi1149989"],
+                "workers_reported_count": 1,
+                "daemon_workers_reported_count": 1,
+                "selected_worker": null,
+                "selection_failure_reason": "no_workers_with_rust_installed",
+                "workers_vs_selection_contradiction": true,
+                "path_normalization_warning": null,
+                "remote_required": true,
+                "local_fallback_refused": true
+            }
+        }));
+
+        assert_eq!(evidence.len(), 1);
+        let packet = SwarmWorkPacket::from_swarm_brief_with_verifier_evidence(&brief, &evidence);
+
+        assert_eq!(packet.rch_proof_posture.posture, "degraded_capacity");
+        assert_eq!(
+            packet.rch_proof_posture.safe_to_launch_cargo_verification,
+            Some(false)
+        );
+        assert!(packet.rch_proof_posture.local_fallback_prevented);
+        assert!(
+            packet
+                .rch_proof_posture
+                .blocker_codes
+                .contains(&"rch_selector_admission_contradiction".to_owned())
+        );
+        let selector = packet
+            .rch_proof_posture
+            .selector_admission_probe
+            .as_ref()
+            .expect("selector admission probe should be preserved");
+        assert!(selector.workers_vs_selection_contradiction);
+        assert_eq!(
+            selector.selection_failure_reason.as_deref(),
+            Some("no_workers_with_rust_installed")
+        );
+        assert_eq!(packet.recommended_action.action, "prefer_static_docs_work");
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+        assert!(
+            packet
+                .recommended_action
+                .reasons
+                .contains(&"rch_remote_verification_blocked".to_owned())
+        );
+
+        let gate = packet.claim_gate(Some("bd-selector"));
+
+        assert_eq!(gate.verdict, "blocked_by_verification");
+        assert!(!gate.safe_to_claim);
+        assert!(gate.claim_command_action.is_none());
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"rch_remote_verification_blocked".to_owned())
         );
     }
 
@@ -7462,11 +7745,11 @@ mod tests {
     }
 
     #[test]
-    fn work_packet_keeps_metadata_only_pending_import_claimable() {
+    fn work_packet_keeps_metadata_only_pending_import_unclaimable() {
         let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
         let snapshot = snapshot_with_candidates(vec![candidate(
             "bd-metadata-only",
-            "Metadata-only stale marker should not block claims",
+            "Metadata-only stale marker must block claims",
             "beads_ready",
             Some(1),
         )]);
@@ -7494,18 +7777,20 @@ mod tests {
             packet.tracker_integrity.health,
             BeadsIntegrityHealth::ExternalChangesPendingImport
         );
-        assert!(packet.tracker_integrity.br_reads_authoritative);
-        assert_eq!(packet.candidates[0].decision, "safe_to_claim");
-        assert!(
-            !packet.candidates[0]
-                .unsafe_reasons
-                .iter()
-                .any(|reason| reason.starts_with("beads_tracker_not_authoritative:"))
-        );
-        assert_eq!(gate.source_authority.tracker_authoritative, true);
-        assert_eq!(gate.verdict, "safe_to_claim");
-        assert!(gate.safe_to_claim);
-        assert!(gate.claim_command_action.is_some());
+        assert!(!packet.tracker_integrity.br_reads_authoritative);
+        assert_eq!(packet.candidates[0].decision, "external_state_required");
+        assert!(packet.candidates[0].unsafe_reasons.contains(
+            &"beads_tracker_not_authoritative:external_changes_pending_import".to_owned()
+        ));
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+        assert_eq!(packet.recommended_action.action, "blocked_no_action");
+        assert_eq!(gate.source_authority.tracker_authoritative, false);
+        assert_eq!(gate.verdict, "external_state_required");
+        assert!(!gate.safe_to_claim);
+        assert!(gate.claim_command_action.is_none());
+        assert!(gate.unsafe_reasons.contains(
+            &"beads_tracker_not_authoritative:external_changes_pending_import".to_owned()
+        ));
     }
 
     #[test]
@@ -7580,6 +7865,106 @@ mod tests {
         assert!(packet.recommended_action.suggested_commands.iter().any(
             |command| command == "br --no-auto-import --allow-stale show bd-owned-ready --json"
         ));
+    }
+
+    #[test]
+    fn work_packet_keeps_unassigned_in_progress_ready_rows_unclaimable() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut active_ready_row = candidate(
+            "bd-unassigned-active",
+            "Ready source row already in progress without assignee",
+            "beads_ready",
+            Some(1),
+        );
+        active_ready_row.status = "in_progress".to_owned();
+        let snapshot = snapshot_with_candidates(vec![active_ready_row]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let candidate = &packet.candidates[0];
+
+        assert!(packet.tracker_integrity.br_reads_authoritative);
+        assert_eq!(candidate.status, "in_progress");
+        assert_eq!(candidate.assignee, None);
+        assert_eq!(candidate.decision, "already_owned");
+        assert!(
+            candidate
+                .unsafe_reasons
+                .contains(&"candidate_status:in_progress".to_owned())
+        );
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+        assert_eq!(packet.recommended_action.action, "coordinate_before_claim");
+        assert!(
+            packet
+                .recommended_action
+                .suggested_command_actions
+                .iter()
+                .all(|action| action.command_id != "bead_claim_candidate")
+        );
+
+        let gate = packet.claim_gate(Some("bd-unassigned-active"));
+
+        assert_eq!(gate.verdict, "already_owned");
+        assert!(!gate.safe_to_claim);
+        assert_eq!(gate.recommended_safe_to_claim, Some(false));
+        assert!(gate.claim_command_action.is_none());
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"candidate_status:in_progress".to_owned())
+        );
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"candidate_decision:already_owned".to_owned())
+        );
+    }
+
+    #[test]
+    fn work_packet_keeps_closed_ready_rows_unclaimable() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut closed_ready_row = candidate(
+            "bd-closed-ready",
+            "Ready source row already closed",
+            "beads_ready",
+            Some(1),
+        );
+        closed_ready_row.status = "closed".to_owned();
+        let snapshot = snapshot_with_candidates(vec![closed_ready_row]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let candidate = &packet.candidates[0];
+
+        assert!(packet.tracker_integrity.br_reads_authoritative);
+        assert_eq!(candidate.status, "closed");
+        assert_eq!(candidate.assignee, None);
+        assert_eq!(candidate.decision, "skip");
+        assert!(
+            candidate
+                .unsafe_reasons
+                .contains(&"candidate_status:closed".to_owned())
+        );
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+        assert_eq!(packet.recommended_action.action, "blocked_no_action");
+        assert!(
+            packet
+                .recommended_action
+                .suggested_command_actions
+                .iter()
+                .all(|action| action.command_id != "bead_claim_candidate")
+        );
+
+        let gate = packet.claim_gate(Some("bd-closed-ready"));
+
+        assert_eq!(gate.verdict, "skip");
+        assert!(!gate.safe_to_claim);
+        assert_eq!(gate.recommended_safe_to_claim, Some(false));
+        assert!(gate.claim_command_action.is_none());
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"candidate_status:closed".to_owned())
+        );
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"candidate_decision:skip".to_owned())
+        );
     }
 
     #[test]
@@ -8044,6 +8429,29 @@ mod tests {
                 disk_pressure_hint_count: 0,
             },
             degraded: Vec::new(),
+        }
+    }
+
+    struct FailedDoctorJsonRunner {
+        stdout: String,
+    }
+
+    impl SwarmBriefCommandRunner for FailedDoctorJsonRunner {
+        fn run(
+            &self,
+            program: &str,
+            args: &[&str],
+            _cwd: &Path,
+            _timeout_ms: u64,
+        ) -> Result<crate::core::swarm_brief::SwarmBriefCommandOutput, SwarmBriefCommandError>
+        {
+            assert_eq!(program, "br");
+            assert_eq!(args, ["doctor", "--json", "--no-db"]);
+            Err(SwarmBriefCommandError::Failed {
+                status: Some(1),
+                stdout: self.stdout.clone(),
+                stderr: "recoverable doctor warnings".to_owned(),
+            })
         }
     }
 

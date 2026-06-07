@@ -11,6 +11,7 @@
     "selected",
     "retrievalStageReached",
     "primaryReason",
+    "reasonSource",
     "filtersApplied",
     "redactionScopeExclusions",
     "degraded",
@@ -52,6 +53,10 @@
         "excluded_by_filter",
         "not_ranked"
       ]
+    },
+    "reasonSource": {
+      "type": "string",
+      "enum": ["authoritative", "reconstructed"]
     },
     "filtersApplied": {
       "type": "array",

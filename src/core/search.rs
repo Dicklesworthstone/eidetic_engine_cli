@@ -6927,6 +6927,15 @@ fn apply_memory_scope_visibility_with_connection(
             Ok(memories) => (memories, None),
             Err(error) => (BTreeMap::new(), Some(error.to_string())),
         };
+    let (scope_tags, tag_read_error): (BTreeMap<String, Vec<String>>, Option<String>) =
+        if matches!(scope_context.scope, MemoryScope::Global) {
+            match connection.get_memory_tags_batch(&hit_doc_refs) {
+                Ok(tags) => (tags, None),
+                Err(error) => (BTreeMap::new(), Some(error.to_string())),
+            }
+        } else {
+            (BTreeMap::new(), None)
+        };
     if let Some(preloaded) = preloaded_memories.as_deref_mut() {
         for (memory_id, memory) in &scope_memories {
             preloaded
@@ -6939,7 +6948,11 @@ fn apply_memory_scope_visibility_with_connection(
     for mut hit in hits {
         match scope_memories.get(&hit.doc_id) {
             Some(memory) => {
-                let in_scope = scope_context.memory_in_scope(memory);
+                let tags = scope_tags
+                    .get(&hit.doc_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let in_scope = scope_context.memory_in_scope_with_tags(memory, tags);
                 stats.record_candidate_id(in_scope, Some(&hit.doc_id));
                 if in_scope {
                     mark_hit_scope(&mut hit, options.memory_scope, memory);
@@ -6956,6 +6969,9 @@ fn apply_memory_scope_visibility_with_connection(
     }
 
     if let Some(error) = read_error {
+        degraded.push(SearchDegradation::scope_metadata_unavailable(&error));
+    }
+    if let Some(error) = tag_read_error {
         degraded.push(SearchDegradation::scope_metadata_unavailable(&error));
     }
 
@@ -11241,6 +11257,96 @@ mod tests {
             EMBED_MODEL_UNAVAILABLE_FEATURE_FLAG
         );
         assert_eq!(rendered[0]["details"]["lexicalAvailable"], true);
+    }
+
+    #[test]
+    fn global_memory_scope_filters_hits_by_global_tags() -> TestResult {
+        let workspace = tempfile::Builder::new()
+            .prefix("ee-search-global-scope")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_01234567890123456789012345";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: Some("global-scope-search".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let base_memory = CreateMemoryInput {
+            workspace_id: workspace_id.to_owned(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: "Base rule".to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.7,
+            importance: 0.8,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_owned(),
+            trust_subclass: None,
+            tags: vec![],
+            valid_from: None,
+            valid_to: None,
+        };
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000001",
+                &CreateMemoryInput {
+                    content: "Global rule".to_owned(),
+                    tags: vec![crate::models::GLOBAL_MEMORY_SCOPE_TAG.to_owned()],
+                    ..base_memory.clone()
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000002",
+                &CreateMemoryInput {
+                    content: "Workspace-only rule".to_owned(),
+                    ..base_memory
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+        options.workspace_path = workspace.path().to_path_buf();
+        options.memory_scope = MemoryScope::Global;
+        let hits = vec![
+            synthetic_hit("mem_00000000000000000000000001", 0.9),
+            synthetic_hit("mem_00000000000000000000000002", 0.8),
+        ];
+        let mut degraded = Vec::new();
+
+        let (scoped, stats) = apply_memory_scope_visibility_with_metadata_mode(
+            &options,
+            hits,
+            &mut degraded,
+            Some(&connection),
+            true,
+        );
+
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].doc_id, "mem_00000000000000000000000001");
+        assert_eq!(
+            scoped[0].metadata.as_ref().unwrap()["memory_scope"],
+            "global"
+        );
+        assert_eq!(stats.candidates_total, 2);
+        assert_eq!(stats.candidates_in_scope, 1);
+        assert_eq!(stats.candidates_excluded_by_scope, 1);
+        assert!(
+            degraded
+                .iter()
+                .any(|entry| entry.code == "scope_excluded_evidence")
+        );
+
+        connection.close().map_err(|error| error.to_string())
     }
 
     // ========================================================================

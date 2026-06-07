@@ -1,0 +1,183 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "schema": "ee.swarm.work_packet.v1",
+    "workspace": "/repo",
+    "packetId": "swarm_work_packet_envelope_beads_authority_degraded_0001",
+    "generatedAt": "2026-06-07T14:20:00Z",
+    "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+    "determinismKey": "blake3:envelope-beads-authority-degraded",
+    "intendedUse": "agent_preclaim_advisory",
+    "nonMutationInvariant": {
+      "claimsBeads": false,
+      "reservesFiles": false,
+      "sendsMail": false,
+      "stagesFiles": false,
+      "runsCargo": false,
+      "runsDestructiveCommands": false
+    },
+    "sourceProvenance": [
+      {
+        "source": "beads",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "br ready --json"
+      },
+      {
+        "source": "bv",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "bv --robot-triage"
+      },
+      {
+        "source": "agent_mail",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "redacted Agent Mail snapshot"
+      }
+    ],
+    "recommendedAction": {
+      "action": "inspect_and_claim",
+      "candidateId": "bd-envelope-stale",
+      "safeToClaim": true,
+      "suggestedCommands": [],
+      "suggestedCommandActions": [
+        {
+          "commandId": "bead_show_candidate",
+          "displayCommand": "br show bd-envelope-stale --json",
+          "argv": [
+            "br",
+            "show",
+            "bd-envelope-stale",
+            "--json"
+          ],
+          "shellRequired": false,
+          "copySafety": "safe_structured_argv",
+          "mutatesState": false,
+          "requiredSubstrate": "beads",
+          "when": "before_claim",
+          "rationale": "Inspect the selected bead before deciding whether to claim it."
+        },
+        {
+          "commandId": "bead_claim_candidate",
+          "displayCommand": "br update bd-envelope-stale --status in_progress --json",
+          "argv": [
+            "br",
+            "update",
+            "bd-envelope-stale",
+            "--status",
+            "in_progress",
+            "--json"
+          ],
+          "shellRequired": false,
+          "copySafety": "safe_structured_argv",
+          "mutatesState": true,
+          "requiredSubstrate": "beads",
+          "when": "after_gate",
+          "rationale": "Fixture claim action must remain non-runnable while envelope authority is degraded."
+        }
+      ]
+    },
+    "safeToClaim": true,
+    "candidates": [
+      {
+        "id": "bd-envelope-stale",
+        "title": "Envelope authority degraded optimistic payload fixture",
+        "source": "beads_ready",
+        "status": "open",
+        "priority": 2,
+        "assignee": null,
+        "decision": "safe_to_claim",
+        "collisionRisk": "none",
+        "unsafeReasons": [],
+        "staleReasons": [],
+        "sourceRefs": [
+          "br://bd-envelope-stale",
+          "bv://bd-envelope-stale",
+          "agent-mail://snapshot"
+        ]
+      }
+    ],
+    "coordination": {
+      "activeReservationCount": 0,
+      "holderAgents": [],
+      "inboxUnavailable": false,
+      "unreadInboxCount": 0,
+      "ackRequiredCount": 0,
+      "agentMailHealth": "healthy",
+      "agentMail": {
+        "status": "healthy",
+        "healthLevel": "green",
+        "unreadCount": 0,
+        "ackRequiredCount": 0,
+        "degradedCodes": [],
+        "recoveryMode": "none",
+        "archiveIndexParity": "aligned",
+        "reservationAuthoritative": true,
+        "inboxAuthoritative": true,
+        "fallbackActions": [],
+        "semanticReadiness": null
+      }
+    },
+    "trackerIntegrity": {
+      "health": "ok",
+      "jsonlPath": ".beads/issues.jsonl",
+      "dbPath": ".beads/beads.db",
+      "jsonlRecordCount": 3590,
+      "dbRecordCount": 3590,
+      "pendingImportCount": 0,
+      "externalChangesPendingImport": false,
+      "dirtyIssueCount": 0,
+      "mergeArtifactPaths": [],
+      "mergeArtifactCount": 0,
+      "jsonlParseError": null,
+      "brReadsAuthoritative": true,
+      "requiresCandidateDowngrade": false,
+      "recoveryHint": null
+    },
+    "checkout": {
+      "dirtyPathCount": 0,
+      "dirtyPathsRedacted": [],
+      "collisionRisk": "none"
+    },
+    "rchProofPosture": {
+      "sourceEnabled": true,
+      "remoteOnlyRequired": false,
+      "posture": "not_required",
+      "safeToLaunchCargoVerification": true,
+      "localFallbackPrevented": false,
+      "blockerCodes": [],
+      "knownBlockers": []
+    },
+    "verification": {
+      "remoteOnlyRequired": false,
+      "remoteOnlySafe": true,
+      "rchPosture": "not_required",
+      "blockers": [],
+      "requiredCommands": []
+    },
+    "requiredActions": [],
+    "doNotProceedBecause": [],
+    "degraded": []
+  },
+  "degraded": [
+    {
+      "code": "beads_tracker_stale",
+      "source": "beads",
+      "severity": "high",
+      "message": "Response envelope authority says the Beads tracker is stale despite optimistic payload fields.",
+      "repair": "Refresh tracker authority before allowing a claim command."
+    },
+    {
+      "code": "no_relevant_results",
+      "source": "search",
+      "severity": "info",
+      "message": "Diagnostic degraded code that must not become an authority fail-closed reason.",
+      "repair": "Narrow the query if this were a search surface."
+    }
+  ]
+}

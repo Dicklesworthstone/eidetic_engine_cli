@@ -113,7 +113,7 @@ fn host_probe_degradations(
         degraded.push(HostProbeDegradation::warning(
             "memory_probe_unavailable",
             "Host memory totals could not be inspected.",
-            "Run on a platform with /proc/meminfo or provide explicit profile config.",
+            "Run on a platform with /proc/meminfo or sysctl hw.memsize, or provide explicit profile config.",
         ));
     }
     for path in paths {
@@ -2684,19 +2684,24 @@ impl MemoryProbe {
     #[must_use]
     pub fn gather() -> Self {
         let meminfo = fs::read_to_string("/proc/meminfo").ok();
-        let (total_bytes, available_bytes) = meminfo
-            .as_deref()
-            .map(parse_proc_meminfo_bytes)
-            .unwrap_or((None, None));
+        let platform_total = if meminfo.is_none() {
+            gather_platform_memory_total_bytes()
+        } else {
+            None
+        };
+        let (total_bytes, available_bytes, source) = if let Some(meminfo) = meminfo.as_deref() {
+            let (total, available) = parse_proc_meminfo_bytes(meminfo);
+            (total, available, "proc_meminfo")
+        } else if let Some((source, total)) = platform_total {
+            (Some(total), None, source)
+        } else {
+            (None, None, "unavailable")
+        };
         Self {
             total_bytes,
             available_bytes,
             cgroup_limit_bytes: read_cgroup_memory_limit_bytes(),
-            source: if meminfo.is_some() {
-                "proc_meminfo"
-            } else {
-                "unavailable"
-            },
+            source,
         }
     }
 }
@@ -3096,6 +3101,37 @@ fn parse_meminfo_kib(line: &str, key: &str) -> Option<u64> {
     }
 }
 
+fn gather_platform_memory_total_bytes() -> Option<(&'static str, u64)> {
+    #[cfg(target_os = "macos")]
+    {
+        read_macos_hw_memsize_bytes().map(|bytes| ("sysctl_hw_memsize", bytes))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_hw_memsize_bytes() -> Option<u64> {
+    let output = std::process::Command::new("/usr/sbin/sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    parse_sysctl_memsize_bytes(stdout)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn parse_sysctl_memsize_bytes(input: &str) -> Option<u64> {
+    let value = input.trim().parse::<u64>().ok()?;
+    if value == 0 { None } else { Some(value) }
+}
+
 fn read_cgroup_memory_limit_bytes() -> Option<u64> {
     let value = fs::read_to_string("/sys/fs/cgroup/memory.max").ok()?;
     let trimmed = value.trim();
@@ -3176,6 +3212,25 @@ mod tests {
 
         ensure(total, None, "unknown total unit rejected")?;
         ensure(available, Some(524_288), "available kB parsed")
+    }
+
+    #[test]
+    fn sysctl_memsize_parser_extracts_positive_bytes() -> TestResult {
+        ensure(
+            parse_sysctl_memsize_bytes("274877906944\n"),
+            Some(274_877_906_944),
+            "sysctl byte count",
+        )
+    }
+
+    #[test]
+    fn sysctl_memsize_parser_rejects_zero_and_noise() -> TestResult {
+        ensure(parse_sysctl_memsize_bytes("0\n"), None, "zero rejected")?;
+        ensure(
+            parse_sysctl_memsize_bytes("hw.memsize: 274877906944\n"),
+            None,
+            "non numeric output rejected",
+        )
     }
 
     #[test]
@@ -3836,7 +3891,7 @@ mod tests {
         ensure(degraded[1].severity, "warning", "memory severity")?;
         ensure(
             degraded[1].repair,
-            "Run on a platform with /proc/meminfo or provide explicit profile config.",
+            "Run on a platform with /proc/meminfo or sysctl hw.memsize, or provide explicit profile config.",
             "memory repair hint",
         )?;
         ensure(

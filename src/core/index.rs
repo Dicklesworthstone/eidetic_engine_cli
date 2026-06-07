@@ -11,7 +11,7 @@ use crate::db::{
 use crate::models::MemoryId;
 use crate::search::{
     CanonicalSearchDocument, Embedder, EmbedderStack, HashEmbedder, IndexBuilder,
-    artifact_to_document, memory_to_document, session_to_document,
+    artifact_to_document, memory_to_document_with_context_and_anchors, session_to_document,
 };
 use sqlmodel_core::Value as SqlValue;
 
@@ -751,12 +751,11 @@ pub fn rebuild_index(
 
     let workspace_id = get_default_workspace_id(&db)?;
 
-    let memories = db.list_memories_for_retrieval(&workspace_id, None, false)?;
+    let memories = db.list_memories_for_retrieval_with_global(&workspace_id, None, false)?;
     let sessions = db.list_sessions(&workspace_id)?;
     let artifacts = db.list_artifacts(&workspace_id, None)?;
 
-    let memory_docs: Vec<CanonicalSearchDocument> =
-        memories.iter().map(memory_to_document).collect();
+    let memory_docs = memory_documents_with_anchors(&db, &memories)?;
     let session_docs: Vec<CanonicalSearchDocument> =
         sessions.iter().map(session_to_document).collect();
     let artifact_docs: Vec<CanonicalSearchDocument> =
@@ -872,13 +871,12 @@ pub fn reembed_index(
     let db = DbConnection::open_file(&database_path)?;
     let workspace_id = get_default_workspace_id(&db)?;
 
-    let memories = db.list_memories_for_retrieval(&workspace_id, None, false)?;
+    let memories = db.list_memories_for_retrieval_with_global(&workspace_id, None, false)?;
     let sessions = db.list_sessions(&workspace_id)?;
     let artifacts = db.list_artifacts(&workspace_id, None)?;
     let embedding = reembed_embedding_summary(&db, &workspace_id)?;
 
-    let memory_docs: Vec<CanonicalSearchDocument> =
-        memories.iter().map(memory_to_document).collect();
+    let memory_docs = memory_documents_with_anchors(&db, &memories)?;
     let session_docs: Vec<CanonicalSearchDocument> =
         sessions.iter().map(session_to_document).collect();
     let artifact_docs: Vec<CanonicalSearchDocument> =
@@ -1278,11 +1276,10 @@ fn collect_workspace_indexable_documents(
     db: &DbConnection,
     workspace_id: &str,
 ) -> Result<(u32, u32, u32, Vec<crate::search::IndexableDocument>), IndexRebuildError> {
-    let memories = db.list_memories_for_retrieval(workspace_id, None, false)?;
+    let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false)?;
     let sessions = db.list_sessions(workspace_id)?;
     let artifacts = db.list_artifacts(workspace_id, None)?;
-    let memory_docs: Vec<CanonicalSearchDocument> =
-        memories.iter().map(memory_to_document).collect();
+    let memory_docs = memory_documents_with_anchors(db, &memories)?;
     let session_docs: Vec<CanonicalSearchDocument> =
         sessions.iter().map(session_to_document).collect();
     let artifact_docs: Vec<CanonicalSearchDocument> =
@@ -1301,6 +1298,24 @@ fn collect_workspace_indexable_documents(
         documents_total,
         indexable_docs,
     ))
+}
+
+fn memory_documents_with_anchors(
+    db: &DbConnection,
+    memories: &[crate::db::StoredMemory],
+) -> Result<Vec<CanonicalSearchDocument>, IndexRebuildError> {
+    memories
+        .iter()
+        .map(|memory| {
+            let anchors = db.list_memory_anchors(&memory.id)?;
+            Ok(memory_to_document_with_context_and_anchors(
+                memory,
+                None,
+                &[],
+                &anchors,
+            ))
+        })
+        .collect()
 }
 
 fn processing_mode_for_job(job: &StoredSearchIndexJob) -> &'static str {

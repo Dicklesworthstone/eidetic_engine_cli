@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::cache::{CacheBudget, MemoryPressure, assess_pressure};
 use crate::models::{
-    CapabilityStatus, INDEX_MANIFEST_SCHEMA_V1, SEARCH_DOCUMENT_SCHEMA_V1, SEARCH_MODULE_SCHEMA_V1,
+    CapabilityStatus, INDEX_MANIFEST_SCHEMA_V1, MEMORY_ANCHOR_SCHEMA_V1, SEARCH_DOCUMENT_SCHEMA_V1,
+    SEARCH_MODULE_SCHEMA_V1, StoredMemoryAnchor,
 };
 
 pub mod bloom_prefilter;
@@ -24,13 +25,21 @@ pub use frankensearch::{
 pub use frankensearch::{LexicalSearch, TantivyIndex};
 pub use query::{ParsedSearchQuery, SearchQueryClause, parse_search_query};
 pub use scoring::{
+    AnchorMatchCandidateSignals, AnchorMatchContext, AnchorMatchScore,
     BeadAffinityCandidateSignals, BeadAffinityContext, BeadAffinityScore,
-    DEFAULT_BEAD_AFFINITY_BIAS_CAP, ParseSpeedModeError, RetrievalMaturity, SearchScoreComponents,
-    SearchScoringConfig, SearchScoringSignals, SpeedMode, bead_affinity_score, final_score,
+    DEFAULT_ANCHOR_MATCH_BIAS_CAP, DEFAULT_BEAD_AFFINITY_BIAS_CAP, ParseSpeedModeError,
+    RetrievalMaturity, SearchScoreComponents, SearchScoringConfig, SearchScoringSignals, SpeedMode,
+    anchor_match_score, bead_affinity_score, final_score,
 };
 
 pub const SUBSYSTEM: &str = "search";
 pub const CANONICAL_DOCUMENT_SCHEMA: &str = SEARCH_DOCUMENT_SCHEMA_V1;
+pub const MEMORY_ANCHOR_SCHEMA_METADATA_KEY: &str = "memory_anchor_schema";
+pub const MEMORY_ANCHOR_COUNT_METADATA_KEY: &str = "memory_anchor_count";
+pub const MEMORY_ANCHOR_KINDS_METADATA_KEY: &str = "memory_anchor_kinds";
+pub const MEMORY_ANCHOR_HASHES_METADATA_KEY: &str = "memory_anchor_hashes";
+pub const MEMORY_ANCHOR_REDACTED_VALUES_METADATA_KEY: &str = "memory_anchor_redacted_values";
+pub const MEMORY_ANCHOR_FRESHNESS_METADATA_KEY: &str = "memory_anchor_freshness";
 
 /// Emit a standard tracing checkpoint for the radix-ULID tie-breaker surface.
 ///
@@ -241,6 +250,7 @@ fn push_optional_labeled_line(lines: &mut Vec<String>, label: &str, value: Optio
 pub struct MemoryDocumentBuilder {
     workspace_path: Option<String>,
     tags: Vec<String>,
+    anchors: Vec<StoredMemoryAnchor>,
 }
 
 impl MemoryDocumentBuilder {
@@ -250,6 +260,7 @@ impl MemoryDocumentBuilder {
         Self {
             workspace_path: None,
             tags: Vec::new(),
+            anchors: Vec::new(),
         }
     }
 
@@ -264,6 +275,13 @@ impl MemoryDocumentBuilder {
     #[must_use]
     pub fn with_tags(mut self, tags: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.tags = tags.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Attach hash/redacted memory-anchor metadata to the document.
+    #[must_use]
+    pub fn with_anchors(mut self, anchors: impl IntoIterator<Item = StoredMemoryAnchor>) -> Self {
+        self.anchors = anchors.into_iter().collect();
         self
     }
 
@@ -314,6 +332,8 @@ impl MemoryDocumentBuilder {
         if !self.tags.is_empty() {
             doc = doc.with_tags(self.tags);
         }
+
+        doc = attach_memory_anchor_metadata(doc, &self.anchors);
 
         doc
     }
@@ -379,6 +399,84 @@ pub fn memory_to_document_with_context(
     }
 
     builder.build(memory)
+}
+
+/// Convert a stored memory with workspace, tags, and anchor metadata.
+///
+/// Anchor metadata is hash/redacted only and is deterministic, so derived
+/// Frankensearch documents can be rebuilt without exposing raw code anchors.
+#[must_use]
+pub fn memory_to_document_with_context_and_anchors(
+    memory: &crate::db::StoredMemory,
+    workspace_path: Option<&str>,
+    tags: &[String],
+    anchors: &[StoredMemoryAnchor],
+) -> CanonicalSearchDocument {
+    let mut builder = MemoryDocumentBuilder::new();
+
+    if let Some(path) = workspace_path {
+        builder = builder.with_workspace_path(path);
+    }
+
+    if !tags.is_empty() {
+        builder = builder.with_tags(tags.iter().cloned());
+    }
+
+    if !anchors.is_empty() {
+        builder = builder.with_anchors(anchors.iter().cloned());
+    }
+
+    builder.build(memory)
+}
+
+fn attach_memory_anchor_metadata(
+    mut doc: CanonicalSearchDocument,
+    anchors: &[StoredMemoryAnchor],
+) -> CanonicalSearchDocument {
+    if anchors.is_empty() {
+        return doc;
+    }
+
+    let mut anchors = anchors.to_vec();
+    anchors.sort_by(|left, right| {
+        left.anchor_kind
+            .cmp(&right.anchor_kind)
+            .then_with(|| left.anchor_value_hash.cmp(&right.anchor_value_hash))
+    });
+
+    let mut kinds = Vec::new();
+    let mut hashes = Vec::new();
+    let mut redacted_values = Vec::new();
+    let mut freshness = Vec::new();
+    let mut last_kind = None;
+
+    for anchor in &anchors {
+        let kind = anchor.anchor_kind.as_str();
+        if last_kind != Some(kind) {
+            kinds.push(kind.to_owned());
+            last_kind = Some(kind);
+        }
+        hashes.push(format!("{kind}:{}", anchor.anchor_value_hash));
+        redacted_values.push(anchor.redacted_anchor_value.clone());
+        freshness.push(format!(
+            "{kind}:{}:{}:{}",
+            anchor.anchor_value_hash,
+            anchor.freshness_state.as_str(),
+            anchor.generation
+        ));
+    }
+
+    doc = doc
+        .with_metadata_entry(MEMORY_ANCHOR_SCHEMA_METADATA_KEY, MEMORY_ANCHOR_SCHEMA_V1)
+        .with_metadata_entry(MEMORY_ANCHOR_COUNT_METADATA_KEY, anchors.len().to_string())
+        .with_metadata_entry(MEMORY_ANCHOR_KINDS_METADATA_KEY, kinds.join(","))
+        .with_metadata_entry(MEMORY_ANCHOR_HASHES_METADATA_KEY, hashes.join(","))
+        .with_metadata_entry(
+            MEMORY_ANCHOR_REDACTED_VALUES_METADATA_KEY,
+            redacted_values.join(","),
+        )
+        .with_metadata_entry(MEMORY_ANCHOR_FRESHNESS_METADATA_KEY, freshness.join(","));
+    doc
 }
 
 /// Builder for converting imported CASS sessions to canonical search documents.
@@ -2910,14 +3008,20 @@ fn rounded_f64(value: f64) -> f64 {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        CanonicalSearchDocument, DocumentSource, Embedder, HashEmbedder, REQUIRED_RETRIEVAL_ENGINE,
-        ScoreComponentSource, ScoreSource, ScoredResult, SearchCacheGovernor, SearchCacheStatus,
-        SearchCapabilityName, SearchHotset, SearchHotsetEntry, SearchHotsetEntryKind,
-        SearchSurface, explain_scored_result, module_readiness, prewarm_search_hotset,
-        score_source_name, subsystem_name,
+        CanonicalSearchDocument, DocumentSource, Embedder, HashEmbedder,
+        MEMORY_ANCHOR_COUNT_METADATA_KEY, MEMORY_ANCHOR_FRESHNESS_METADATA_KEY,
+        MEMORY_ANCHOR_HASHES_METADATA_KEY, MEMORY_ANCHOR_KINDS_METADATA_KEY,
+        MEMORY_ANCHOR_REDACTED_VALUES_METADATA_KEY, MEMORY_ANCHOR_SCHEMA_METADATA_KEY,
+        REQUIRED_RETRIEVAL_ENGINE, ScoreComponentSource, ScoreSource, ScoredResult,
+        SearchCacheGovernor, SearchCacheStatus, SearchCapabilityName, SearchHotset,
+        SearchHotsetEntry, SearchHotsetEntryKind, SearchSurface, explain_scored_result,
+        module_readiness, prewarm_search_hotset, score_source_name, subsystem_name,
     };
     use crate::cache::{CacheBudget, MemoryPressure};
-    use crate::models::CapabilityStatus;
+    use crate::models::{
+        CapabilityStatus, MEMORY_ANCHOR_SCHEMA_V1, MemoryAnchorFreshnessState, MemoryAnchorKind,
+        MemoryAnchorSource, StoredMemoryAnchor,
+    };
     use serde_json::json;
 
     #[test]
@@ -3312,6 +3416,23 @@ mod tests {
         }
     }
 
+    fn make_test_anchor(kind: MemoryAnchorKind, hash: &str, redacted: &str) -> StoredMemoryAnchor {
+        StoredMemoryAnchor {
+            memory_id: "mem_01234567890123456789012345".to_string(),
+            anchor_kind: kind,
+            anchor_value_hash: hash.to_string(),
+            redacted_anchor_value: redacted.to_string(),
+            confidence: 0.95,
+            source: MemoryAnchorSource::IndexRebuild,
+            provenance: "index_rebuild".to_string(),
+            captured_span_hash: "blake3:captured-span".to_string(),
+            freshness_state: MemoryAnchorFreshnessState::Current,
+            generation: 66,
+            created_at: "2026-06-07T16:00:00Z".to_string(),
+            updated_at: "2026-06-07T16:00:00Z".to_string(),
+        }
+    }
+
     fn make_test_session() -> crate::db::StoredSession {
         crate::db::StoredSession {
             id: "sess_01234567890123456789012345".to_string(),
@@ -3487,6 +3608,82 @@ mod tests {
             indexable.metadata.get("tags"),
             Some(&"cargo,formatting".to_owned())
         );
+    }
+
+    #[test]
+    fn memory_document_builder_attaches_hash_redacted_anchor_metadata() {
+        let memory = make_test_memory();
+        let anchors = vec![
+            make_test_anchor(
+                MemoryAnchorKind::Schema,
+                "blake3:schemahash",
+                "schema:blake3:schemahash",
+            ),
+            make_test_anchor(
+                MemoryAnchorKind::Path,
+                "blake3:pathhash",
+                "path:blake3:pathhash",
+            ),
+        ];
+
+        let indexable = super::memory_to_document_with_context_and_anchors(
+            &memory,
+            Some("/home/user/project"),
+            &[],
+            &anchors,
+        )
+        .into_indexable();
+
+        assert_eq!(
+            indexable.metadata.get(MEMORY_ANCHOR_SCHEMA_METADATA_KEY),
+            Some(&MEMORY_ANCHOR_SCHEMA_V1.to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get(MEMORY_ANCHOR_COUNT_METADATA_KEY),
+            Some(&"2".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get(MEMORY_ANCHOR_KINDS_METADATA_KEY),
+            Some(&"path,schema".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get(MEMORY_ANCHOR_HASHES_METADATA_KEY),
+            Some(&"path:blake3:pathhash,schema:blake3:schemahash".to_owned())
+        );
+        assert_eq!(
+            indexable
+                .metadata
+                .get(MEMORY_ANCHOR_REDACTED_VALUES_METADATA_KEY),
+            Some(&"path:blake3:pathhash,schema:blake3:schemahash".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get(MEMORY_ANCHOR_FRESHNESS_METADATA_KEY),
+            Some(&"path:blake3:pathhash:current:66,schema:blake3:schemahash:current:66".to_owned())
+        );
+    }
+
+    #[test]
+    fn memory_anchor_metadata_does_not_include_raw_anchor_values() {
+        let memory = make_test_memory();
+        let anchors = [make_test_anchor(
+            MemoryAnchorKind::Path,
+            "blake3:srcdbhash",
+            "path:blake3:srcdbhash",
+        )];
+
+        let indexable =
+            super::memory_to_document_with_context_and_anchors(&memory, None, &[], &anchors)
+                .into_indexable();
+        let metadata_text = indexable
+            .metadata
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!metadata_text.contains("src/db/mod.rs"));
+        assert!(!metadata_text.contains("ee.search.v1"));
+        assert!(metadata_text.contains("blake3:srcdbhash"));
     }
 
     #[test]

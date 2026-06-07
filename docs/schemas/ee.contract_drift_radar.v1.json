@@ -38,7 +38,9 @@
         "skippedLegacyExamples": { "type": "integer", "minimum": 0 },
         "documentedCodes": { "type": "integer", "minimum": 0 },
         "fixtureCodes": { "type": "integer", "minimum": 0 },
-        "documentedMissingFixture": { "type": "integer", "minimum": 0 }
+        "documentedMissingFixture": { "type": "integer", "minimum": 0 },
+        "dependencyDocsChecked": { "type": "integer", "minimum": 0 },
+        "dependencyProfileViolations": { "type": "integer", "minimum": 0 }
       }
     },
     "schemaInventory": {
@@ -48,7 +50,7 @@
     },
     "violations": {
       "type": "object",
-      "required": ["docsScan", "jsonExampleCheck", "taxonomyXcheck"],
+      "required": ["docsScan", "jsonExampleCheck", "taxonomyXcheck", "dependencyXcheck"],
       "additionalProperties": false,
       "properties": {
         "docsScan": {
@@ -86,6 +88,25 @@
             "properties": {
               "code": { "const": "documented_code_missing_fixture" },
               "degradedCode": { "type": "string" }
+            }
+          }
+        },
+        "dependencyXcheck": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["file", "line", "code", "context", "expected"],
+            "properties": {
+              "file": { "type": "string" },
+              "line": { "type": "integer", "minimum": 0 },
+              "code": {
+                "enum": [
+                  "dependency_profile_drift",
+                  "stale_dependency_profile_reference"
+                ]
+              },
+              "context": { "type": "string" },
+              "expected": { "type": "string" }
             }
           }
         }

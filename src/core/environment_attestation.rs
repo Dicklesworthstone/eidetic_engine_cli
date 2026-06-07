@@ -1242,7 +1242,7 @@ fn snapshot_authority(
     degraded_codes: &[EnvironmentAttestationDegradedCode],
 ) -> EnvironmentAttestationAuthority {
     if degraded_codes.contains(&EnvironmentAttestationDegradedCode::BeadsMetadataOnlyStale) {
-        return EnvironmentAttestationAuthority::Authoritative;
+        return EnvironmentAttestationAuthority::Stale;
     }
     if degraded_codes.contains(&EnvironmentAttestationDegradedCode::BeadsTrackerStale) {
         return EnvironmentAttestationAuthority::Stale;
@@ -1339,12 +1339,11 @@ fn recovery_action_for_degradation(
             EnvironmentAttestationRecoveryAction {
                 priority,
                 kind: EnvironmentAttestationRecoveryKind::Sync,
-                command: command_action("br sync --flush-only --json"),
+                command: command_action("br sync --import-only --json"),
                 mutates_state: true,
                 required_substrate: EnvironmentAttestationSubstrate::Beads,
-                rationale:
-                    "Refresh Beads export metadata while preserving metadata-only read authority."
-                        .to_owned(),
+                rationale: "Import pending tracker metadata before using Beads as claim authority."
+                    .to_owned(),
             }
         }
         EnvironmentAttestationDegradedCode::BeadsTrackerStale => {
@@ -1630,7 +1629,7 @@ fn repair_for_degraded_code(code: EnvironmentAttestationDegradedCode) -> Option<
             Some("br sync --import-only".to_owned())
         }
         EnvironmentAttestationDegradedCode::BeadsMetadataOnlyStale => {
-            Some("br sync --flush-only --json".to_owned())
+            Some("br sync --import-only --json".to_owned())
         }
         EnvironmentAttestationDegradedCode::BvRecommendationStale => {
             Some("br --no-auto-import --allow-stale ready --json".to_owned())
@@ -1927,27 +1926,24 @@ mod tests {
     }
 
     #[test]
-    fn metadata_only_beads_drift_keeps_authority_and_precise_repair() {
+    fn metadata_only_beads_drift_is_stale_with_precise_repair() {
         let brief = report_with_sources(vec![SwarmBriefSourceSnapshot {
             source: SwarmBriefSourceKind::Beads,
             status: SwarmBriefSourceStatus::Ready,
             freshness: SwarmBriefSourceFreshness::current(),
             provenance: SwarmBriefSourceProvenance::command("br", &["sync", "--status", "--json"]),
             item_count: 6,
-            degraded: vec![SwarmBriefDegradation::info(
+            degraded: vec![SwarmBriefDegradation::warning(
                 SwarmBriefSourceKind::Beads,
                 "beads_tracker_metadata_drift",
                 "metadata-only drift",
-                Some("br sync --flush-only --json".to_owned()),
+                Some("br sync --import-only --json".to_owned()),
             )],
         }]);
         let attestation = environment_attestation_from_swarm_brief(&brief, fixed_time());
         let beads = entry(&attestation, EnvironmentAttestationSourceKind::BeadsTracker);
 
-        assert_eq!(
-            beads.authority,
-            EnvironmentAttestationAuthority::Authoritative
-        );
+        assert_eq!(beads.authority, EnvironmentAttestationAuthority::Stale);
         assert_eq!(beads.status, EnvironmentAttestationSourceStatus::Stale);
         assert_eq!(
             beads.degraded_codes,
@@ -1957,7 +1953,7 @@ mod tests {
             action
                 .command
                 .as_ref()
-                .is_some_and(|command| command.display_command == "br sync --flush-only --json")
+                .is_some_and(|command| command.display_command == "br sync --import-only --json")
         }));
     }
 

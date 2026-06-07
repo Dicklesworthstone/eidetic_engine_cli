@@ -1,0 +1,189 @@
+{
+  "schema": "ee.dueling_wizards.rejected_ideas_register.v1",
+  "initiativeBead": "bd-1n0np",
+  "gateBead": "bd-1n0np.14",
+  "manifestOwner": "tests/contracts/dueling_wizards_rejected_ideas_register.rs",
+  "doc": "docs/agent-ux/dueling-wizards-rejected-ideas-register.md",
+  "implementationState": "decision_record",
+  "policy": {
+    "recordType": "rejected_ideas_register",
+    "reopenPolicy": "requires_new_evidence",
+    "liveMutationDefault": "forbidden",
+    "salvagePath": "explicit_lab_or_eval_mode",
+    "candidateBeforeMutation": true,
+    "determinismRequiredBeforeLiveUse": true
+  },
+  "requiredGuardrails": [
+    "reopen_requires_new_evidence",
+    "lab_mode_before_live_policy",
+    "candidate_not_auto_mutation",
+    "determinism_preserved"
+  ],
+  "reopenEvidenceKinds": [
+    "measured_workflow_result",
+    "regression",
+    "benchmark",
+    "corpus_finding"
+  ],
+  "forbiddenReopenEvidence": [
+    "restated_proposal",
+    "aesthetic_preference",
+    "unmeasured_opinion"
+  ],
+  "ideaWizardPhaseGates": [
+    {
+      "phase": 2,
+      "name": "generate_and_winnow",
+      "requiredAction": "preserve_scores_sources_and_rationales",
+      "beadsMutation": "forbidden"
+    },
+    {
+      "phase": 3,
+      "name": "expand_next_ten",
+      "requiredAction": "record_reframed_or_killed_disposition",
+      "beadsMutation": "forbidden"
+    },
+    {
+      "phase": 4,
+      "name": "overlap_check",
+      "requiredAction": "merge_before_duplicate",
+      "beadsMutation": "forbidden"
+    },
+    {
+      "phase": 5,
+      "name": "create_beads",
+      "requiredAction": "blocked_until_tracker_authoritative",
+      "beadsMutation": "br_only_when_tracker_authoritative"
+    },
+    {
+      "phase": 6,
+      "name": "refine_plan_space",
+      "requiredAction": "repeat_four_to_five_passes_with_tests",
+      "beadsMutation": "br_only_when_tracker_authoritative"
+    }
+  ],
+  "killedIdeas": [
+    {
+      "id": "stochastic_ab_packing",
+      "source": "Gemini #5",
+      "score": 458,
+      "status": "killed",
+      "reopenPolicy": "requires_new_evidence",
+      "salvageMode": "explicit_lab_or_eval_mode",
+      "rationaleTags": [
+        "degrades_live_agent_work",
+        "outcome_density_required",
+        "determinism_friction"
+      ]
+    },
+    {
+      "id": "outcome_aligned_local_projection",
+      "source": "Gemini #1",
+      "score": 521,
+      "status": "killed",
+      "reopenPolicy": "requires_new_evidence",
+      "salvageMode": "versioned_eval_only",
+      "rationaleTags": [
+        "needs_dense_triplets",
+        "overfit_risk",
+        "pack_hash_drift"
+      ]
+    },
+    {
+      "id": "cross_harness_bayesian_prior_calibration",
+      "source": "Gemini #10",
+      "score": 538,
+      "status": "killed",
+      "reopenPolicy": "requires_new_evidence",
+      "salvageMode": "small_tie_breaker_only",
+      "rationaleTags": [
+        "sparse_agent_tag_cells",
+        "schema_bloat",
+        "overlaps_per_agent_bias"
+      ]
+    },
+    {
+      "id": "concept_drift_radar_auto_demote",
+      "source": "Gemini #3",
+      "score": 600,
+      "status": "killed",
+      "reopenPolicy": "requires_new_evidence",
+      "salvageMode": "curation_candidate_only",
+      "rationaleTags": [
+        "noisy_embedding_proxy",
+        "auto_mutation_forbidden",
+        "covered_by_freshness_and_regime_shift"
+      ]
+    }
+  ],
+  "reopenEvidenceMatrix": [
+    {
+      "id": "stochastic_ab_packing",
+      "source": "Gemini #5",
+      "score": 458,
+      "status": "killed",
+      "reopenPolicy": "requires_new_evidence",
+      "minimumEvidenceCount": 1,
+      "acceptedEvidenceKinds": ["measured_workflow_result", "regression", "benchmark", "corpus_finding"],
+      "forbiddenEvidenceKinds": ["restated_proposal", "aesthetic_preference", "unmeasured_opinion"],
+      "firstAllowedDisposition": "explicit_lab_or_eval_mode",
+      "livePolicyMutation": "forbidden_until_deterministic_proof",
+      "beadsMutation": "br_only_when_tracker_authoritative"
+    },
+    {
+      "id": "outcome_aligned_local_projection",
+      "source": "Gemini #1",
+      "score": 521,
+      "status": "killed",
+      "reopenPolicy": "requires_new_evidence",
+      "minimumEvidenceCount": 1,
+      "acceptedEvidenceKinds": ["measured_workflow_result", "regression", "benchmark", "corpus_finding"],
+      "forbiddenEvidenceKinds": ["restated_proposal", "aesthetic_preference", "unmeasured_opinion"],
+      "firstAllowedDisposition": "explicit_lab_or_eval_mode",
+      "livePolicyMutation": "forbidden_until_deterministic_proof",
+      "beadsMutation": "br_only_when_tracker_authoritative"
+    },
+    {
+      "id": "cross_harness_bayesian_prior_calibration",
+      "source": "Gemini #10",
+      "score": 538,
+      "status": "killed",
+      "reopenPolicy": "requires_new_evidence",
+      "minimumEvidenceCount": 1,
+      "acceptedEvidenceKinds": ["measured_workflow_result", "regression", "benchmark", "corpus_finding"],
+      "forbiddenEvidenceKinds": ["restated_proposal", "aesthetic_preference", "unmeasured_opinion"],
+      "firstAllowedDisposition": "explicit_lab_or_eval_mode",
+      "livePolicyMutation": "forbidden_until_deterministic_proof",
+      "beadsMutation": "br_only_when_tracker_authoritative"
+    },
+    {
+      "id": "concept_drift_radar_auto_demote",
+      "source": "Gemini #3",
+      "score": 600,
+      "status": "killed",
+      "reopenPolicy": "requires_new_evidence",
+      "minimumEvidenceCount": 1,
+      "acceptedEvidenceKinds": ["measured_workflow_result", "regression", "benchmark", "corpus_finding"],
+      "forbiddenEvidenceKinds": ["restated_proposal", "aesthetic_preference", "unmeasured_opinion"],
+      "firstAllowedDisposition": "explicit_lab_or_eval_mode",
+      "livePolicyMutation": "forbidden_until_deterministic_proof",
+      "beadsMutation": "br_only_when_tracker_authoritative"
+    }
+  ],
+  "reframedIdeas": [
+    {
+      "id": "conformal_pack_coverage",
+      "status": "reframed_not_killed",
+      "reframedAs": "calibration_honesty_report",
+      "targetBead": "bd-1n0np.13",
+      "rejectedFacet": "exchangeability_claim"
+    },
+    {
+      "id": "coverage_radar",
+      "status": "reframed_not_killed",
+      "reframedAs": "gap_honesty_coverage_gaps",
+      "targetBead": "bd-1n0np.6",
+      "rejectedFacet": "standalone_static_facet_decomposer"
+    }
+  ]
+}

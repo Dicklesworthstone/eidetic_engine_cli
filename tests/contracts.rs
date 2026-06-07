@@ -463,6 +463,36 @@ mod closeout_audit_schema;
 #[path = "contracts/mcp_parity_required_coverage.rs"]
 mod mcp_parity_required_coverage;
 
+#[path = "contracts/dueling_wizards_surface_contract.rs"]
+mod dueling_wizards_surface_contract;
+
+#[path = "contracts/dueling_wizards_migration_registry.rs"]
+mod dueling_wizards_migration_registry;
+
+#[path = "contracts/dueling_wizards_backup_coverage.rs"]
+mod dueling_wizards_backup_coverage;
+
+#[path = "contracts/dueling_wizards_ingestion_security.rs"]
+mod dueling_wizards_ingestion_security;
+
+#[path = "contracts/dueling_wizards_mesh_redaction.rs"]
+mod dueling_wizards_mesh_redaction;
+
+#[path = "contracts/dueling_wizards_why_packdna_signals.rs"]
+mod dueling_wizards_why_packdna_signals;
+
+#[path = "contracts/dueling_wizards_observability_no_silent_cap.rs"]
+mod dueling_wizards_observability_no_silent_cap;
+
+#[path = "contracts/dueling_wizards_determinism_gate.rs"]
+mod dueling_wizards_determinism_gate;
+
+#[path = "contracts/dueling_wizards_verify_wiring.rs"]
+mod dueling_wizards_verify_wiring;
+
+#[path = "contracts/dueling_wizards_rejected_ideas_register.rs"]
+mod dueling_wizards_rejected_ideas_register;
+
 #[path = "contracts/graph_hits_perf_budget.rs"]
 mod graph_hits_perf_budget;
 

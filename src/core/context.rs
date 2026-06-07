@@ -2115,6 +2115,7 @@ fn run_context_pack_with_performance_inner(
             // `RequestScoped` lands with bd-1prrl.7.4 once the
             // golden harness proves byte-identical output.
             arena_mode: crate::pack::ArenaMode::Disabled,
+            ..crate::pack::PackAssemblyOptions::default()
         },
         determinism,
     )
@@ -3084,7 +3085,11 @@ fn fallback_memories_for_workspace(
     let mut malformed_filtered = 0usize;
     let mut total_seen = 0usize;
     for workspace_id in context_workspace_ids(connection, workspace_path, degraded) {
-        match connection.list_memories_for_retrieval(&workspace_id, None, include_tombstoned) {
+        match connection.list_memories_for_retrieval_with_global(
+            &workspace_id,
+            None,
+            include_tombstoned,
+        ) {
             Ok(rows) => {
                 for memory in rows {
                     total_seen = total_seen.saturating_add(1);
@@ -7659,13 +7664,23 @@ fn filter_candidates_by_memory_scope(
             Ok(memories) => (memories, None),
             Err(error) => (BTreeMap::new(), Some(error.to_string())),
         };
+    let (scope_tags, tag_read_error): (BTreeMap<String, Vec<String>>, Option<String>) =
+        if matches!(scope_context.scope, MemoryScope::Global) {
+            match connection.get_memory_tags_batch(&candidate_memory_refs) {
+                Ok(tags) => (tags, None),
+                Err(error) => (BTreeMap::new(), Some(error.to_string())),
+            }
+        } else {
+            (BTreeMap::new(), None)
+        };
 
     let mut scoped = Vec::with_capacity(candidates.len());
     for candidate in std::mem::take(candidates) {
         let memory_id = candidate.memory_id.to_string();
         match scope_memories.get(&memory_id) {
             Some(memory) => {
-                let in_scope = scope_context.memory_in_scope(memory);
+                let tags = scope_tags.get(&memory_id).map(Vec::as_slice).unwrap_or(&[]);
+                let in_scope = scope_context.memory_in_scope_with_tags(memory, tags);
                 stats.record_candidate_id(in_scope, Some(&memory_id));
                 if in_scope {
                     scoped.push(candidate);
@@ -7683,6 +7698,15 @@ fn filter_candidates_by_memory_scope(
             "scope_metadata_unavailable",
             ContextResponseSeverity::Medium,
             format!("Context could not verify memory scope against the memory database: {error}"),
+            Some("ee doctor --json".to_string()),
+        );
+    }
+    if let Some(error) = tag_read_error {
+        push_degradation(
+            degraded,
+            "scope_metadata_unavailable",
+            ContextResponseSeverity::Medium,
+            format!("Context could not verify global memory scope tags: {error}"),
             Some("ee doctor --json".to_string()),
         );
     }

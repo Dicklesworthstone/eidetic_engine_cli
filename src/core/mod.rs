@@ -61,6 +61,7 @@ pub mod health;
 pub mod hygiene_beads_state;
 pub mod hygiene_classifier;
 pub mod hygiene_coordination;
+pub mod impact;
 pub mod index;
 pub mod influence;
 pub mod init;

@@ -382,6 +382,11 @@ impl CapabilitiesReport {
             CommandEntry::new("doctor", true, "Health checks"),
             CommandEntry::new("eval", true, "Evaluation scenarios"),
             CommandEntry::new("help", true, "Command help"),
+            CommandEntry::new(
+                "impact",
+                true,
+                "Find memories attached to a path or typed surface",
+            ),
             CommandEntry::new("import", true, "Import from external sources"),
             CommandEntry::new("remember", true, "Store memories"),
             CommandEntry::new("rule", true, "Manage procedural rules"),
@@ -617,6 +622,25 @@ mod tests {
             .find(|c| c.name == "capabilities")
             .unwrap_or_else(|| panic!("capabilities command must exist")); // ubs:ignore
         ensure(cmd.available, true, "capabilities command is available")
+    }
+
+    #[test]
+    fn capabilities_report_includes_impact_command() -> TestResult {
+        let report = CapabilitiesReport::gather();
+
+        let cmd = report
+            .commands
+            .iter()
+            .find(|c| c.name == "impact")
+            .unwrap_or_else(|| panic!("impact command must exist")); // ubs:ignore
+        ensure(cmd.available, true, "impact command is available")?;
+        if !cmd.description.contains("path") || !cmd.description.contains("surface") {
+            return Err(format!(
+                "impact command description should mention paths and typed surfaces; got {:?}",
+                cmd.description
+            ));
+        }
+        Ok(())
     }
 
     #[test]
