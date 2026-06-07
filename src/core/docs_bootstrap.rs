@@ -14,6 +14,9 @@ pub const DOCS_BOOTSTRAP_RUN_SCHEMA_V1: &str = "ee.bootstrap.docs.run.v1";
 pub const DOCS_BOOTSTRAP_PARSER_VERSION: &str = "docs-bootstrap-v1";
 pub const DOCS_BOOTSTRAP_DEFAULT_MAX_SOURCE_BYTES: u64 = 512 * 1024;
 pub const DOCS_BOOTSTRAP_DEFAULT_MAX_TOTAL_BYTES: u64 = 4 * 1024 * 1024;
+const BOOTSTRAP_COMMAND_PREFIXES: &[&str] = &[
+    "br", "bv", "cargo", "cass", "ee", "gh", "git", "jq", "rch", "rustfmt",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapSourceKind {
@@ -193,7 +196,8 @@ pub fn compile_docs_bootstrap(options: &CompileDocsBootstrapOptions<'_>) -> Boot
         }
     }
 
-    let run_id = bootstrap_run_id(options.workspace_path, &sources, &degraded);
+    let candidates = extract_bootstrap_candidates(&sources);
+    let run_id = bootstrap_run_id(options.workspace_path, &sources, &candidates, &degraded);
     BootstrapRun {
         schema: DOCS_BOOTSTRAP_RUN_SCHEMA_V1,
         parser_version: DOCS_BOOTSTRAP_PARSER_VERSION,
@@ -204,7 +208,7 @@ pub fn compile_docs_bootstrap(options: &CompileDocsBootstrapOptions<'_>) -> Boot
         max_source_bytes: options.max_source_bytes,
         max_total_bytes: options.max_total_bytes,
         sources,
-        candidates: Vec::new(),
+        candidates,
         degraded,
         durable_mutation: false,
     }
@@ -467,9 +471,450 @@ fn read_allowed_source(
     })
 }
 
+#[derive(Clone, Copy)]
+struct SourceLine<'a> {
+    number: usize,
+    start_byte: usize,
+    end_byte: usize,
+    text: &'a str,
+}
+
+struct StructuralCandidateInput<'a> {
+    line: SourceLine<'a>,
+    discriminator: &'a str,
+    proposed_content: &'a str,
+    level: &'a str,
+    kind: &'a str,
+    tags: Vec<String>,
+    anchors: Vec<BootstrapAnchor>,
+}
+
+fn extract_bootstrap_candidates(sources: &[BootstrapSourceDocument]) -> Vec<BootstrapCandidate> {
+    let mut candidates = Vec::new();
+    for source in sources {
+        extract_line_structures(source, &mut candidates);
+        if source.source_kind == BootstrapSourceKind::FailureModeFixture.as_str() {
+            extract_failure_mode_fixture_code(source, &mut candidates);
+        }
+    }
+    candidates.sort_by(|left, right| {
+        (
+            left.source_path.as_str(),
+            left.source_span.start_line,
+            left.candidate_id.as_str(),
+        )
+            .cmp(&(
+                right.source_path.as_str(),
+                right.source_span.start_line,
+                right.candidate_id.as_str(),
+            ))
+    });
+    candidates.dedup_by(|left, right| left.candidate_id == right.candidate_id);
+    candidates
+}
+
+fn extract_line_structures(
+    source: &BootstrapSourceDocument,
+    candidates: &mut Vec<BootstrapCandidate>,
+) {
+    let mut in_fence = false;
+    for line in source_lines(source.content.as_str()) {
+        let trimmed = line.text.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if in_fence && looks_like_command_line(trimmed) {
+            push_structural_candidate(
+                candidates,
+                source,
+                StructuralCandidateInput {
+                    line,
+                    discriminator: "fenced_command",
+                    proposed_content: trimmed,
+                    level: "procedural",
+                    kind: "rule",
+                    tags: vec!["bootstrap".to_owned(), "command".to_owned()],
+                    anchors: vec![BootstrapAnchor {
+                        anchor_type: "command".to_owned(),
+                        value: first_token(trimmed),
+                    }],
+                },
+            );
+            continue;
+        }
+
+        if let Some(heading) = markdown_heading(trimmed) {
+            push_structural_candidate(
+                candidates,
+                source,
+                StructuralCandidateInput {
+                    line,
+                    discriminator: "heading",
+                    proposed_content: heading,
+                    level: "semantic",
+                    kind: "fact",
+                    tags: vec!["bootstrap".to_owned(), "heading".to_owned()],
+                    anchors: vec![BootstrapAnchor {
+                        anchor_type: "heading".to_owned(),
+                        value: heading.to_owned(),
+                    }],
+                },
+            );
+        }
+
+        if is_structural_table_row(trimmed) {
+            push_structural_candidate(
+                candidates,
+                source,
+                StructuralCandidateInput {
+                    line,
+                    discriminator: "table_row",
+                    proposed_content: trimmed,
+                    level: "semantic",
+                    kind: "fact",
+                    tags: vec!["bootstrap".to_owned(), "table".to_owned()],
+                    anchors: vec![BootstrapAnchor {
+                        anchor_type: "table_row".to_owned(),
+                        value: source.relative_path.clone(),
+                    }],
+                },
+            );
+        }
+
+        if is_explicit_policy_line(trimmed) {
+            push_structural_candidate(
+                candidates,
+                source,
+                StructuralCandidateInput {
+                    line,
+                    discriminator: "explicit_policy",
+                    proposed_content: trimmed,
+                    level: "procedural",
+                    kind: "rule",
+                    tags: vec!["bootstrap".to_owned(), "policy".to_owned()],
+                    anchors: vec![BootstrapAnchor {
+                        anchor_type: "policy_language".to_owned(),
+                        value: policy_anchor(trimmed),
+                    }],
+                },
+            );
+        }
+
+        for schema_id in structural_tokens(trimmed).into_iter().filter(|token| {
+            is_schema_id(token.as_str()) && token.as_str() != DOCS_BOOTSTRAP_RUN_SCHEMA_V1
+        }) {
+            push_token_candidate(
+                candidates,
+                source,
+                line,
+                "schema_id",
+                &schema_id,
+                "schema_id",
+            );
+        }
+        for env_var in structural_tokens(trimmed)
+            .into_iter()
+            .filter(|token| is_env_var(token.as_str()))
+        {
+            push_token_candidate(candidates, source, line, "env_var", &env_var, "env_var");
+        }
+        for degraded_code in structural_tokens(trimmed)
+            .into_iter()
+            .filter(|token| is_degraded_code_context(trimmed, token.as_str()))
+        {
+            push_token_candidate(
+                candidates,
+                source,
+                line,
+                "degraded_code",
+                &degraded_code,
+                "degraded_code",
+            );
+        }
+    }
+}
+
+fn extract_failure_mode_fixture_code(
+    source: &BootstrapSourceDocument,
+    candidates: &mut Vec<BootstrapCandidate>,
+) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(source.content.as_str()) else {
+        return;
+    };
+    let Some(code) = value.get("code").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    let Some(line) = source_lines(source.content.as_str()).into_iter().next() else {
+        return;
+    };
+    push_token_candidate(
+        candidates,
+        source,
+        line,
+        "degraded_code",
+        code,
+        "degraded_code",
+    );
+}
+
+fn push_token_candidate(
+    candidates: &mut Vec<BootstrapCandidate>,
+    source: &BootstrapSourceDocument,
+    line: SourceLine<'_>,
+    discriminator: &str,
+    token: &str,
+    anchor_type: &str,
+) {
+    push_structural_candidate(
+        candidates,
+        source,
+        StructuralCandidateInput {
+            line,
+            discriminator,
+            proposed_content: token,
+            level: "semantic",
+            kind: "fact",
+            tags: vec!["bootstrap".to_owned(), anchor_type.to_owned()],
+            anchors: vec![BootstrapAnchor {
+                anchor_type: anchor_type.to_owned(),
+                value: token.to_owned(),
+            }],
+        },
+    );
+}
+
+fn push_structural_candidate(
+    candidates: &mut Vec<BootstrapCandidate>,
+    source: &BootstrapSourceDocument,
+    input: StructuralCandidateInput<'_>,
+) {
+    let source_span = BootstrapSourceSpan {
+        start_line: input.line.number,
+        end_line: input.line.number,
+        start_byte: input.line.start_byte,
+        end_byte: input.line.end_byte,
+    };
+    let candidate_id = bootstrap_candidate_id(
+        source,
+        &source_span,
+        input.discriminator,
+        input.proposed_content,
+    );
+    let specificity = candidate_specificity(input.proposed_content, input.anchors.as_slice());
+    candidates.push(BootstrapCandidate {
+        candidate_id,
+        source_path: source.relative_path.clone(),
+        source_hash: source.content_hash.clone(),
+        source_span,
+        proposed_content: input.proposed_content.to_owned(),
+        level: input.level.to_owned(),
+        kind: input.kind.to_owned(),
+        tags: input.tags,
+        anchors: input.anchors,
+        specificity,
+        trust_class: trust_class_for(source, input.discriminator).as_str(),
+        rationale: format!(
+            "Extracted explicit `{}` structure from allowlisted docs.",
+            input.discriminator
+        ),
+    });
+}
+
+fn source_lines(content: &str) -> Vec<SourceLine<'_>> {
+    let mut lines = Vec::new();
+    let mut start_byte = 0_usize;
+    for (index, segment) in content.split_inclusive('\n').enumerate() {
+        let end_byte = start_byte.saturating_add(segment.len());
+        lines.push(SourceLine {
+            number: index + 1,
+            start_byte,
+            end_byte,
+            text: segment.trim_end_matches(|character| matches!(character, '\r' | '\n')),
+        });
+        start_byte = end_byte;
+    }
+    if content.is_empty() {
+        return lines;
+    }
+    if !content.ends_with('\n') && lines.is_empty() {
+        lines.push(SourceLine {
+            number: 1,
+            start_byte: 0,
+            end_byte: content.len(),
+            text: content,
+        });
+    }
+    lines
+}
+
+fn markdown_heading(trimmed: &str) -> Option<&str> {
+    let hash_count = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+    if hash_count == 0 || hash_count > 6 {
+        return None;
+    }
+    let rest = trimmed.get(hash_count..)?.trim();
+    if rest.is_empty() { None } else { Some(rest) }
+}
+
+fn looks_like_command_line(trimmed: &str) -> bool {
+    let command = first_token(trimmed);
+    BOOTSTRAP_COMMAND_PREFIXES
+        .iter()
+        .any(|prefix| command == *prefix)
+}
+
+fn first_token(input: &str) -> String {
+    input
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('$')
+        .to_owned()
+}
+
+fn is_structural_table_row(trimmed: &str) -> bool {
+    if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+        return false;
+    }
+    let body = trimmed.trim_matches('|').trim();
+    !body.is_empty()
+        && !body
+            .chars()
+            .all(|character| matches!(character, '-' | ':' | '|' | ' '))
+}
+
+fn is_explicit_policy_line(trimmed: &str) -> bool {
+    let upper = trimmed.to_ascii_uppercase();
+    upper.contains("MUST")
+        || upper.contains("NEVER")
+        || upper.contains("DO NOT")
+        || upper.contains("FORBIDDEN")
+}
+
+fn policy_anchor(trimmed: &str) -> String {
+    let upper = trimmed.to_ascii_uppercase();
+    for marker in ["MUST", "NEVER", "DO NOT", "FORBIDDEN"] {
+        if upper.contains(marker) {
+            return marker.to_ascii_lowercase().replace(' ', "_");
+        }
+    }
+    "policy".to_owned()
+}
+
+fn structural_tokens(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for character in input.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ':' | '/') {
+            current.push(character);
+        } else if !current.is_empty() {
+            tokens.push(normalize_structural_token(&current));
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(normalize_structural_token(&current));
+    }
+    tokens.retain(|token| !token.is_empty());
+    tokens
+}
+
+fn normalize_structural_token(token: &str) -> String {
+    token
+        .trim_matches(|character: char| {
+            matches!(
+                character,
+                '.' | ',' | ';' | ':' | ')' | '(' | ']' | '[' | '}' | '{' | '"' | '\''
+            )
+        })
+        .to_owned()
+}
+
+fn is_schema_id(token: &str) -> bool {
+    let Some((prefix, version)) = token.rsplit_once(".v") else {
+        return false;
+    };
+    prefix.starts_with("ee.")
+        && !prefix.trim().is_empty()
+        && !version.is_empty()
+        && version.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_env_var(token: &str) -> bool {
+    token.starts_with("EE_")
+        && token.len() > 3
+        && token
+            .bytes()
+            .all(|byte| matches!(byte, b'A'..=b'Z' | b'0'..=b'9' | b'_'))
+}
+
+fn is_degraded_code_context(line: &str, token: &str) -> bool {
+    if !token.contains('_') {
+        return false;
+    }
+    let lower = line.to_ascii_lowercase();
+    let context_mentions_codes =
+        lower.contains("degraded") || lower.contains("failure") || lower.contains("code");
+    context_mentions_codes
+        && token
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
+}
+
+fn candidate_specificity(content: &str, anchors: &[BootstrapAnchor]) -> u32 {
+    let token_bonus = content.split_whitespace().take(8).count() as u32 * 4;
+    let anchor_bonus = anchors.len() as u32 * 12;
+    40_u32
+        .saturating_add(token_bonus)
+        .saturating_add(anchor_bonus)
+        .min(100)
+}
+
+fn trust_class_for(source: &BootstrapSourceDocument, discriminator: &str) -> BootstrapTrustClass {
+    if matches!(
+        source.source_kind,
+        "root_policy" | "readme" | "adr" | "schema" | "env_vars"
+    ) && matches!(
+        discriminator,
+        "explicit_policy" | "schema_id" | "env_var" | "heading" | "table_row"
+    ) {
+        BootstrapTrustClass::HumanExplicit
+    } else {
+        BootstrapTrustClass::AgentAssertion
+    }
+}
+
+fn bootstrap_candidate_id(
+    source: &BootstrapSourceDocument,
+    span: &BootstrapSourceSpan,
+    discriminator: &str,
+    proposed_content: &str,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(DOCS_BOOTSTRAP_PARSER_VERSION.as_bytes());
+    hasher.update(b"\0candidate\0");
+    hasher.update(source.relative_path.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(source.content_hash.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(span.start_line.to_string().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(discriminator.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(proposed_content.as_bytes());
+    let digest = hasher.finalize().to_hex().to_string();
+    format!("bootcand_{}", &digest[..26])
+}
+
 fn bootstrap_run_id(
     workspace_path: &Path,
     sources: &[BootstrapSourceDocument],
+    candidates: &[BootstrapCandidate],
     degraded: &[BootstrapDegradation],
 ) -> String {
     let mut hasher = blake3::Hasher::new();
@@ -483,6 +928,10 @@ fn bootstrap_run_id(
         hasher.update(source.content_hash.as_bytes());
         hasher.update(b"\0");
         hasher.update(source.byte_count.to_string().as_bytes());
+    }
+    for candidate in candidates {
+        hasher.update(b"\0candidate\0");
+        hasher.update(candidate.candidate_id.as_bytes());
     }
     for degradation in degraded {
         hasher.update(b"\0degraded\0");
@@ -563,7 +1012,7 @@ mod tests {
         assert_eq!(first.schema, DOCS_BOOTSTRAP_RUN_SCHEMA_V1);
         assert_eq!(first.parser_version, DOCS_BOOTSTRAP_PARSER_VERSION);
         assert!(!first.durable_mutation);
-        assert!(first.candidates.is_empty());
+        assert!(!first.candidates.is_empty());
         assert!(first.degraded.is_empty());
         assert_eq!(
             first
@@ -591,6 +1040,68 @@ mod tests {
                 .sources
                 .iter()
                 .all(|source| source.relative_path != "docs/private.md")
+        );
+        assert!(first.candidates.iter().any(|candidate| {
+            candidate.proposed_content == "Never delete files."
+                && candidate.anchors.iter().any(|anchor| {
+                    anchor.anchor_type == "policy_language" && anchor.value == "never"
+                })
+        }));
+        assert!(first.candidates.iter().any(|candidate| {
+            candidate.proposed_content == "EE_TEST"
+                && candidate
+                    .anchors
+                    .iter()
+                    .any(|anchor| anchor.anchor_type == "env_var")
+        }));
+        assert!(first.candidates.iter().any(|candidate| {
+            candidate.proposed_content == "ee.example.v1"
+                && candidate
+                    .anchors
+                    .iter()
+                    .any(|anchor| anchor.anchor_type == "schema_id")
+        }));
+        assert!(first.candidates.iter().any(|candidate| {
+            candidate.proposed_content == "no_relevant_results"
+                && candidate
+                    .anchors
+                    .iter()
+                    .any(|anchor| anchor.anchor_type == "degraded_code")
+        }));
+        assert!(first.candidates.iter().all(|candidate| {
+            candidate.source_hash.starts_with("blake3:") && candidate.source_span.start_line > 0
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn docs_bootstrap_extracts_fenced_commands_and_tables_without_summarizing() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        write_file(
+            tempdir.path(),
+            "AGENTS.md",
+            "# Agent rules\n\n```bash\ncargo check --all-targets\n```\n\n| Crate | Reason |\n| --- | --- |\n| tokio | forbidden runtime |\n",
+        )?;
+        write_file(tempdir.path(), "README.md", "# Readme\n")?;
+
+        let run =
+            compile_docs_bootstrap(&CompileDocsBootstrapOptions::for_workspace(tempdir.path()));
+
+        assert!(run.candidates.iter().any(|candidate| {
+            candidate.proposed_content == "cargo check --all-targets"
+                && candidate
+                    .anchors
+                    .iter()
+                    .any(|anchor| anchor.anchor_type == "command" && anchor.value == "cargo")
+        }));
+        assert!(run.candidates.iter().any(|candidate| {
+            candidate.proposed_content == "| tokio | forbidden runtime |"
+                && candidate.tags.iter().any(|tag| tag == "table")
+        }));
+        assert!(
+            run.candidates
+                .iter()
+                .all(|candidate| !candidate.rationale.contains("summary"))
         );
         Ok(())
     }
@@ -674,7 +1185,6 @@ mod tests {
         let json = run.data_json();
 
         assert!(json.contains(DOCS_BOOTSTRAP_RUN_SCHEMA_V1));
-        assert!(!json.contains("Never delete files."));
         assert!(!json.contains("not allowlisted"));
         Ok(())
     }
