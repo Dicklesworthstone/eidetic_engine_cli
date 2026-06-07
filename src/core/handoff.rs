@@ -1978,20 +1978,34 @@ fn verify_capsule_integrity_with_audit(
     match verify_capsule_integrity(capsule, workspace, machine_salt_path_override) {
         Ok(()) => Ok(()),
         Err(error) => {
-            let audit_id = record_handoff_hmac_verify_failure_audit(
+            let audit_id_result = record_handoff_hmac_verify_failure_audit(
                 workspace,
                 capsule_path,
                 capsule_bytes,
                 capsule_id,
                 &error,
-            )?;
-            tracing::error!(
-                event = "handoff_hmac_verify_failed",
-                capsule_id = %capsule_id,
-                audit_entry_id = %audit_id,
-                error_code = error.code(),
-                "handoff capsule HMAC verification failed"
             );
+            match audit_id_result {
+                Ok(audit_id) => {
+                    tracing::error!(
+                        event = "handoff_hmac_verify_failed",
+                        capsule_id = %capsule_id,
+                        audit_entry_id = %audit_id,
+                        error_code = error.code(),
+                        "handoff capsule HMAC verification failed"
+                    );
+                }
+                Err(audit_error) => {
+                    tracing::error!(
+                        event = "handoff_hmac_verify_failed",
+                        capsule_id = %capsule_id,
+                        audit_error_code = audit_error.code(),
+                        audit_error = %audit_error.message(),
+                        error_code = error.code(),
+                        "handoff capsule HMAC verification failed before audit recording completed"
+                    );
+                }
+            }
             Err(error)
         }
     }

@@ -1348,6 +1348,12 @@ fn completion_verdict(
     {
         return CompletionVerdict::Blocked;
     }
+    let has_non_direct_evidence = evidence
+        .iter()
+        .any(|item| item.support != RequirementSupport::Direct);
+    if !has_non_direct_evidence && contradictions.is_empty() {
+        return CompletionVerdict::Complete;
+    }
     if !checklist.unknown_clauses.is_empty()
         || contradictions
             .iter()
@@ -1355,9 +1361,7 @@ fn completion_verdict(
     {
         return CompletionVerdict::Unknown;
     }
-    if evidence
-        .iter()
-        .any(|item| item.support != RequirementSupport::Direct)
+    if has_non_direct_evidence
         || contradictions.iter().any(|contradiction| {
             !matches!(
                 contradiction.kind,
