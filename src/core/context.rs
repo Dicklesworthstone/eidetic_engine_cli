@@ -2368,6 +2368,13 @@ fn run_context_pack_with_performance_inner(
             redaction_level: options.redaction_level,
             include_coverage_fill: options.output_options.include_coverage_fill,
             output_redaction_enabled,
+            // bd-1n0np.5.2: apply the [pack.lod_*] tier-ratio config override when
+            // all three basis points are configured (and fit u16); otherwise keep
+            // the in-code default so existing pack goldens stay byte-identical.
+            lod_budget_shares: match context_lod_budget_shares(&options.workspace_path) {
+                Ok(Some(shares)) => Some(shares),
+                _ => crate::pack::PackAssemblyOptions::default().lod_budget_shares,
+            },
             // bd-1prrl.7.3: arena mode is plumbed through the
             // `PackAssemblyOptions` surface. Context orchestration
             // selects `Disabled` for now — the parity-gated swap to
@@ -6266,6 +6273,36 @@ fn context_memory_tier_admission_enabled(workspace_path: &Path) -> Result<bool, 
     Ok(config
         .and_then(|config| config.pack.memory_tier_admission)
         .unwrap_or(false))
+}
+
+/// Read the `[pack]` telescoping-LOD tier ratios (bd-1n0np.5.2). Returns an
+/// override only when all three basis points are configured AND fit `u16`;
+/// otherwise `None`, so the caller keeps the in-code 70/20/10 default.
+fn context_lod_budget_shares(
+    workspace_path: &Path,
+) -> Result<Option<crate::pack::PackLodBudgetShares>, String> {
+    let Some(config) = context_workspace_config(workspace_path, "Pack LOD tier ratios")? else {
+        return Ok(None);
+    };
+    let (Some(full), Some(preview), Some(link)) = (
+        config.pack.lod_full_basis_points,
+        config.pack.lod_truncated_preview_basis_points,
+        config.pack.lod_link_only_basis_points,
+    ) else {
+        return Ok(None);
+    };
+    // Basis points are bounded to u16; out-of-range config falls back to the
+    // in-code default rather than silently truncating.
+    match (
+        u16::try_from(full),
+        u16::try_from(preview),
+        u16::try_from(link),
+    ) {
+        (Ok(full), Ok(preview), Ok(link)) => Ok(Some(crate::pack::PackLodBudgetShares::new(
+            full, preview, link,
+        ))),
+        _ => Ok(None),
+    }
 }
 
 fn adaptive_budget_decision_for_context(
