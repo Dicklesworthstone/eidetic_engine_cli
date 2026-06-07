@@ -650,6 +650,12 @@ fn remember_memory_inner(
         .as_ref()
         .map(|_| generate_memory_link_id());
     let audit_details = remember_audit_details(&memory_id, &memory_input, policy_bypass.as_ref());
+    let typed_fields_json = crate::models::memory::extract_typed_memory_fields_json_with_redactor(
+        &prepared.kind,
+        &prepared.content,
+        |value| crate::policy::redact_secret_like_content(value).content,
+    )
+    .map_err(|error| remember_usage_error(format!("typed field extraction failed: {error}")))?;
 
     store_remembered_memory_with_retry(
         &connection,
@@ -657,6 +663,7 @@ fn remember_memory_inner(
         &audit_id,
         &index_job_id,
         &memory_input,
+        typed_fields_json.as_deref(),
         &embed_dedup_decision,
         embed_dedup_link_id.as_deref(),
         &audit_details,
@@ -2673,6 +2680,7 @@ fn store_remembered_memory_with_retry(
     audit_id: &str,
     index_job_id: &str,
     memory_input: &CreateMemoryInput,
+    typed_fields_json: Option<&str>,
     embed_dedup_decision: &RememberEmbedDedupDecision,
     embed_dedup_link_id: Option<&str>,
     audit_details: &str,
@@ -2689,6 +2697,9 @@ fn store_remembered_memory_with_retry(
                     content_simhash,
                 )?,
                 None => connection.insert_memory(memory_id, memory_input)?,
+            }
+            if let Some(typed_fields_json) = typed_fields_json {
+                connection.set_memory_typed_fields_json(memory_id, Some(typed_fields_json))?;
             }
             if let (Some(link), Some(link_id)) =
                 (embed_dedup_decision.link.as_ref(), embed_dedup_link_id)
@@ -7727,6 +7738,7 @@ mod tests {
             audit_id,
             index_job_id,
             &memory_input,
+            None,
             &RememberEmbedDedupDecision::disabled(),
             None,
             "{}",
@@ -7866,6 +7878,7 @@ mod tests {
             audit_id,
             index_job_id,
             &memory_input,
+            None,
             &decision,
             Some("link_embeddedupnew0000000000000"),
             "{}",
@@ -9016,6 +9029,73 @@ mod tests {
             true,
             "index metadata published",
         )
+    }
+
+    #[test]
+    fn remember_memory_populates_typed_fields_sidecar_from_body() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let report = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Tried page-level cache prefetch. Result: -8% on small-N reads. Reverted at SHA 9af3c21. Family: aggressive prefetch, third failure in this family. Cause: cache pollution. Regression surface: small-N reads.",
+            workflow_id: None,
+            level: "episodic",
+            kind: "failure",
+            tags: Some("negative-evidence,prefetch"),
+            confidence: 0.8,
+            source: Some("file://README.md#negative-evidence-ledger"),
+            allow_secret_mention: false,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: false,
+            propose_candidates: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let connection = crate::db::DbConnection::open_file(&report.database_path)
+            .map_err(|error| error.to_string())?;
+        let typed_fields = connection
+            .get_memory_typed_fields_json(&report.memory_id.to_string())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "typed fields sidecar missing".to_owned())?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&typed_fields).map_err(|error| error.to_string())?;
+
+        ensure(
+            parsed["schema"].as_str(),
+            Some(crate::models::TYPED_MEMORY_FIELDS_SCHEMA_V1),
+            "typed fields schema",
+        )?;
+        ensure(
+            parsed["kind"].as_str(),
+            Some("failure"),
+            "typed fields kind",
+        )?;
+        ensure(
+            parsed["fields"]["cause"].as_str(),
+            Some("cache pollution"),
+            "typed cause",
+        )?;
+        ensure(
+            parsed["fields"]["family"].as_str(),
+            Some("aggressive prefetch"),
+            "typed family",
+        )?;
+        ensure(
+            parsed["fields"]["regression_surface"].as_str(),
+            Some("small-N reads"),
+            "typed regression surface",
+        )?;
+        ensure(
+            parsed["fields"]["reverted_at_sha"].as_str(),
+            Some("9af3c21"),
+            "typed reverted SHA",
+        )?;
+
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]

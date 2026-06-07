@@ -480,6 +480,294 @@ fn validate_typed_memory_field_value_len(
     Ok(())
 }
 
+/// Extract kind-specific typed fields from the freeform memory body.
+///
+/// The body stays authoritative. This helper only recognizes lightweight
+/// conventions that agents already write naturally, including README negative
+/// evidence ledger prefixes (`family-*`, `cause-*`, `regression-*`,
+/// `reverted-at-*`) and simple labeled clauses (`Family:`, `Cause:`,
+/// `Options:`, `Chosen:`, `Command:`, `Exit meaning:`, etc.).
+pub fn extract_typed_memory_fields_json_with_redactor<F>(
+    kind: &MemoryKind,
+    content: &str,
+    redact: F,
+) -> Result<Option<String>, MemoryValidationError>
+where
+    F: FnMut(&str) -> String,
+{
+    let fields = match kind {
+        MemoryKind::Failure => extract_failure_typed_memory_fields(content),
+        MemoryKind::Decision => extract_decision_typed_memory_fields(content),
+        MemoryKind::Command => extract_command_typed_memory_fields(content),
+        MemoryKind::Risk | MemoryKind::AntiPattern => extract_risk_typed_memory_fields(content),
+        MemoryKind::Rule
+        | MemoryKind::Fact
+        | MemoryKind::Convention
+        | MemoryKind::PlaybookStep
+        | MemoryKind::Custom(_) => return Ok(None),
+    };
+    if fields.is_empty() {
+        return Ok(None);
+    }
+    let raw_json = serde_json::to_string(&fields).map_err(|error| {
+        MemoryValidationError::InvalidTypedFieldsJson {
+            message: error.to_string(),
+        }
+    })?;
+    canonicalize_typed_memory_fields_json_with_redactor(kind, &raw_json, redact).map(Some)
+}
+
+fn extract_failure_typed_memory_fields(content: &str) -> BTreeMap<String, JsonValue> {
+    let mut fields = BTreeMap::new();
+    insert_text_field(
+        &mut fields,
+        "cause",
+        extract_prefixed_token(content, "cause-")
+            .or_else(|| extract_labeled_value(content, &["cause:", "cause=", "root cause:"])),
+    );
+    insert_text_field(
+        &mut fields,
+        "regression_surface",
+        extract_prefixed_token(content, "regression-").or_else(|| {
+            extract_labeled_value(content, &["regression:", "regression surface:", "lost on:"])
+        }),
+    );
+    insert_text_field(
+        &mut fields,
+        "reverted_at_sha",
+        extract_prefixed_token(content, "reverted-at-")
+            .or_else(|| extract_sha_after_any(content, &["reverted at sha", "reverted at"])),
+    );
+    insert_text_field(
+        &mut fields,
+        "family",
+        extract_prefixed_token(content, "family-")
+            .or_else(|| extract_labeled_value(content, &["family:", "family="])),
+    );
+    fields
+}
+
+fn extract_decision_typed_memory_fields(content: &str) -> BTreeMap<String, JsonValue> {
+    let mut fields = BTreeMap::new();
+    if let Some(options) = extract_labeled_value_allowing_commas(content, &["options:", "options="])
+    {
+        let options = split_text_list(&options);
+        if !options.is_empty() {
+            fields.insert(
+                "options".to_owned(),
+                JsonValue::Array(options.into_iter().map(JsonValue::String).collect()),
+            );
+        }
+    }
+    insert_text_field(
+        &mut fields,
+        "chosen",
+        extract_labeled_value(content, &["chosen:", "chosen=", "decision:", "selected:"]),
+    );
+    insert_text_field(
+        &mut fields,
+        "rationale",
+        extract_labeled_value(content, &["rationale:", "because:", "why:"]),
+    );
+    insert_text_field(
+        &mut fields,
+        "supersedes",
+        extract_labeled_value(content, &["supersedes:", "supersedes="]),
+    );
+    fields
+}
+
+fn extract_command_typed_memory_fields(content: &str) -> BTreeMap<String, JsonValue> {
+    let mut fields = BTreeMap::new();
+    insert_text_field(
+        &mut fields,
+        "command",
+        extract_labeled_line_value(content, &["command:", "cmd:"]).or_else(|| {
+            extract_first_backtick_segment(content).filter(|value| looks_like_command(value))
+        }),
+    );
+    insert_text_field(
+        &mut fields,
+        "when_to_use",
+        extract_labeled_value(content, &["when to use:", "use when:", "when:"]),
+    );
+    insert_text_field(
+        &mut fields,
+        "exit_meaning",
+        extract_labeled_value(content, &["exit meaning:", "exit codes:", "exit code:"])
+            .or_else(|| extract_exit_meaning_clause(content)),
+    );
+    fields
+}
+
+fn extract_risk_typed_memory_fields(content: &str) -> BTreeMap<String, JsonValue> {
+    let mut fields = BTreeMap::new();
+    insert_text_field(
+        &mut fields,
+        "trigger",
+        extract_labeled_value(content, &["trigger:", "trigger=", "when:"]),
+    );
+    insert_text_field(
+        &mut fields,
+        "blast_radius",
+        extract_labeled_value(content, &["blast radius:", "impact:", "risk:"]),
+    );
+    insert_text_field(
+        &mut fields,
+        "safer_alternative",
+        extract_labeled_value(
+            content,
+            &["safer alternative:", "safer:", "mitigation:", "instead:"],
+        ),
+    );
+    fields
+}
+
+fn insert_text_field(fields: &mut BTreeMap<String, JsonValue>, field: &str, value: Option<String>) {
+    if let Some(value) = value.and_then(|value| clean_typed_extracted_value(&value)) {
+        fields.insert(field.to_owned(), JsonValue::String(value));
+    }
+}
+
+fn extract_labeled_value(content: &str, labels: &[&str]) -> Option<String> {
+    extract_labeled_value_with(content, labels, extract_clause_value)
+}
+
+fn extract_labeled_value_allowing_commas(content: &str, labels: &[&str]) -> Option<String> {
+    extract_labeled_value_with(content, labels, extract_clause_value_allowing_commas)
+}
+
+fn extract_labeled_line_value(content: &str, labels: &[&str]) -> Option<String> {
+    extract_labeled_value_with(content, labels, extract_line_value)
+}
+
+fn extract_labeled_value_with(
+    content: &str,
+    labels: &[&str],
+    extractor: fn(&str) -> Option<String>,
+) -> Option<String> {
+    let lower = content.to_ascii_lowercase();
+    for label in labels {
+        let label = label.to_ascii_lowercase();
+        if let Some(start) = lower.find(&label) {
+            let value_start = start + label.len();
+            return extractor(&content[value_start..]);
+        }
+    }
+    None
+}
+
+fn extract_prefixed_token(content: &str, prefix: &str) -> Option<String> {
+    let lower = content.to_ascii_lowercase();
+    let start = lower.find(prefix)?;
+    let token_start = start + prefix.len();
+    let token = content[token_start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        .collect::<String>();
+    clean_typed_extracted_value(&token).map(|value| value.replace('_', "-"))
+}
+
+fn extract_sha_after_any(content: &str, phrases: &[&str]) -> Option<String> {
+    let lower = content.to_ascii_lowercase();
+    for phrase in phrases {
+        let phrase = phrase.to_ascii_lowercase();
+        if let Some(start) = lower.find(&phrase) {
+            let tail = &content[start + phrase.len()..];
+            if let Some(sha) = first_hexish_token(tail) {
+                return Some(sha);
+            }
+        }
+    }
+    None
+}
+
+fn first_hexish_token(content: &str) -> Option<String> {
+    for raw in content.split(|ch: char| !ch.is_ascii_hexdigit()) {
+        if (7..=64).contains(&raw.len()) && raw.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Some(raw.to_ascii_lowercase());
+        }
+    }
+    None
+}
+
+fn extract_exit_meaning_clause(content: &str) -> Option<String> {
+    let lower = content.to_ascii_lowercase();
+    let start = lower.find("exit code ").or_else(|| lower.find("exit "))?;
+    extract_clause_value(&content[start..])
+}
+
+fn extract_first_backtick_segment(content: &str) -> Option<String> {
+    let start = content.find('`')?;
+    let tail = &content[start + 1..];
+    let end = tail.find('`')?;
+    clean_typed_extracted_value(&tail[..end])
+}
+
+fn looks_like_command(value: &str) -> bool {
+    value.contains(' ') || value.contains("--") || value.contains('/')
+}
+
+fn extract_clause_value(content: &str) -> Option<String> {
+    extract_clause_value_inner(content, false)
+}
+
+fn extract_clause_value_allowing_commas(content: &str) -> Option<String> {
+    extract_clause_value_inner(content, true)
+}
+
+fn extract_line_value(content: &str) -> Option<String> {
+    let trimmed = content
+        .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, '-' | '=' | ':' | '>'));
+    let mut value = String::new();
+    for ch in trimmed.chars() {
+        if matches!(ch, '\n' | '\r' | ';') {
+            break;
+        }
+        value.push(ch);
+    }
+    clean_typed_extracted_value(&value)
+}
+
+fn extract_clause_value_inner(content: &str, allow_commas: bool) -> Option<String> {
+    let trimmed = content
+        .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, '-' | '=' | ':' | '>'));
+    let mut value = String::new();
+    for ch in trimmed.chars() {
+        if matches!(ch, '\n' | '\r' | ';' | '.') {
+            break;
+        }
+        if ch == ',' && !allow_commas && !value.trim().is_empty() {
+            break;
+        }
+        value.push(ch);
+    }
+    clean_typed_extracted_value(&value)
+}
+
+fn split_text_list(value: &str) -> Vec<String> {
+    value
+        .replace(" vs ", ",")
+        .replace(" or ", ",")
+        .replace('|', ",")
+        .split(',')
+        .filter_map(clean_typed_extracted_value)
+        .take(MAX_TYPED_MEMORY_FIELD_LIST_ITEMS)
+        .collect()
+}
+
+fn clean_typed_extracted_value(value: &str) -> Option<String> {
+    let cleaned = value
+        .trim()
+        .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | '[' | ']' | '(' | ')' | ':'))
+        .trim();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.to_owned())
+    }
+}
+
 impl MemoryKind {
     /// Stable lowercase wire form.
     #[must_use]
@@ -928,6 +1216,7 @@ mod tests {
         MemoryKind, MemoryLevel, MemoryValidationError, TYPED_MEMORY_FIELDS_SCHEMA_V1, Tag,
         UnitScore, canonicalize_typed_memory_fields_json,
         canonicalize_typed_memory_fields_json_with_redactor,
+        extract_typed_memory_fields_json_with_redactor,
     };
 
     #[test]
@@ -1082,6 +1371,75 @@ mod tests {
             err,
             MemoryValidationError::TypedFieldNotAllowed { .. }
         ));
+    }
+
+    #[test]
+    fn typed_memory_fields_extract_failure_patterns_from_body() {
+        let canonical = extract_typed_memory_fields_json_with_redactor(
+            &MemoryKind::Failure,
+            "Tried page-level cache prefetch. Result: -8% on small-N reads. Reverted at SHA 9af3c21. Family: aggressive prefetch, third failure in this family. Cause: cache pollution. Regression surface: small-N reads.",
+            str::to_owned,
+        )
+        .expect("failure body extracts")
+        .expect("failure body has typed fields");
+        let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("canonical JSON");
+
+        assert_eq!(parsed["schema"], TYPED_MEMORY_FIELDS_SCHEMA_V1);
+        assert_eq!(parsed["kind"], "failure");
+        assert_eq!(parsed["fields"]["cause"], "cache pollution");
+        assert_eq!(parsed["fields"]["family"], "aggressive prefetch");
+        assert_eq!(parsed["fields"]["regression_surface"], "small-N reads");
+        assert_eq!(parsed["fields"]["reverted_at_sha"], "9af3c21");
+    }
+
+    #[test]
+    fn typed_memory_fields_extract_decision_options_from_body() {
+        let canonical = extract_typed_memory_fields_json_with_redactor(
+            &MemoryKind::Decision,
+            "Options: local cache, RCH remote or no-op. Chosen: RCH remote. Rationale: avoids local Cargo. Supersedes: bd-old.",
+            str::to_owned,
+        )
+        .expect("decision body extracts")
+        .expect("decision body has typed fields");
+        let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("canonical JSON");
+
+        assert_eq!(parsed["fields"]["options"][0], "local cache");
+        assert_eq!(parsed["fields"]["options"][1], "RCH remote");
+        assert_eq!(parsed["fields"]["options"][2], "no-op");
+        assert_eq!(parsed["fields"]["chosen"], "RCH remote");
+        assert_eq!(parsed["fields"]["rationale"], "avoids local Cargo");
+        assert_eq!(parsed["fields"]["supersedes"], "bd-old");
+    }
+
+    #[test]
+    fn typed_memory_fields_extract_command_without_rewriting_literal() {
+        let canonical = extract_typed_memory_fields_json_with_redactor(
+            &MemoryKind::Command,
+            "Command: ./scripts/check_local_cargo_tripwire.sh --json\nWhen to use: before remote proof\nExit code: 7 means policy denied",
+            str::to_owned,
+        )
+        .expect("command body extracts")
+        .expect("command body has typed fields");
+        let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("canonical JSON");
+
+        assert_eq!(
+            parsed["fields"]["command"],
+            "./scripts/check_local_cargo_tripwire.sh --json"
+        );
+        assert_eq!(parsed["fields"]["when_to_use"], "before remote proof");
+        assert_eq!(parsed["fields"]["exit_meaning"], "7 means policy denied");
+    }
+
+    #[test]
+    fn typed_memory_fields_extract_returns_none_for_unsupported_kind() {
+        let extracted = extract_typed_memory_fields_json_with_redactor(
+            &MemoryKind::Rule,
+            "Family: aggressive prefetch. Cause: cache pollution.",
+            str::to_owned,
+        )
+        .expect("unsupported kind is accepted");
+
+        assert!(extracted.is_none());
     }
 
     #[test]
