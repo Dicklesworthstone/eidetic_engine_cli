@@ -66,7 +66,7 @@ use crate::core::config_surface::{
 use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
     ContextPackOutputOptions, ContextPackOutputProfile, attach_pack_dna_to_context_response,
-    run_context_pack_with_performance,
+    explain_why_not_default, run_context_pack_with_performance,
 };
 use crate::core::context_delta::{
     CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE, CONTEXT_DELTA_PRIOR_UNKNOWN_CODE,
@@ -923,6 +923,8 @@ pub enum Command {
     Workflow(WorkflowCommand),
     /// Explain why a memory was stored, retrieved, or selected.
     Why(WhyArgs),
+    /// Explain why a memory was NOT selected for a task's context pack.
+    WhyNot(WhyNotArgs),
 }
 
 /// Subcommands for `ee cache`.
@@ -8473,6 +8475,38 @@ pub struct WhyArgs {
     pub mesh_mode: MeshCommandMode,
 }
 
+/// Arguments for `ee why-not` — the counterfactual reverse of `ee why`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct WhyNotArgs {
+    /// Memory ID to explain the exclusion of.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Task/query the context pack would be built for.
+    #[arg(long, value_name = "TASK")]
+    pub task: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Retrieval profile (compact, balanced, grounding, orientation, thorough, submodular).
+    #[arg(long, value_name = "PROFILE")]
+    pub profile: Option<String>,
+
+    /// Maximum token budget for the hypothetical pack.
+    #[arg(long, value_name = "N")]
+    pub max_tokens: Option<u32>,
+
+    /// Candidate pool size for retrieval.
+    #[arg(long, value_name = "N")]
+    pub candidate_pool: Option<u32>,
+
+    /// Mesh command mode: off, cache, revisable, or blocking.
+    #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
+    pub mesh_mode: MeshCommandMode,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum ImportCommand {
     /// Import sessions and evidence from coding_agent_session_search.
@@ -11786,6 +11820,7 @@ where
         }
         Some(Command::Update(ref args)) => handle_update(&cli, args, stdout, stderr),
         Some(Command::Why(ref args)) => handle_why(&cli, args, stdout, stderr),
+        Some(Command::WhyNot(ref args)) => handle_why_not(&cli, args, stdout, stderr),
     }
 }
 
@@ -38048,6 +38083,199 @@ where
     }
 }
 
+fn handle_why_not<W, E>(
+    cli: &Cli,
+    args: &WhyNotArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let profile = match args.profile.as_deref() {
+        Some(profile) => match parse_context_profile(profile) {
+            Ok(profile) => Some(profile),
+            Err(message) => {
+                let domain_error = DomainError::Usage {
+                    message,
+                    repair: Some(
+                        "ee why-not <memory-id> --task \"<task>\" --profile balanced".to_string(),
+                    ),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        },
+        None => None,
+    };
+
+    let memory_id = match args.memory_id.parse::<crate::models::MemoryId>() {
+        Ok(id) => id,
+        Err(_) => {
+            let domain_error = DomainError::Usage {
+                message: format!("Invalid memory id: {}", args.memory_id),
+                repair: Some("ee memory list --workspace . --json".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let options = ContextPackOptions {
+        workspace_path,
+        database_path: Some(database_path),
+        index_dir: None,
+        query: args.task.clone(),
+        speed: crate::search::SpeedMode::default(),
+        source_mode: SearchSourceMode::Hybrid,
+        strict_source_mode: false,
+        filters: crate::models::QueryFilters::default(),
+        profile,
+        max_tokens: args.max_tokens,
+        candidate_pool: args.candidate_pool,
+        max_results: None,
+        include_tombstoned: false,
+        as_of: None,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
+        relevance_floor: None,
+        redaction_level: BackupRedaction::Minimal.to_model(),
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        ppr_weight: None,
+        changed_symbols: Vec::new(),
+        changed_symbols_from_git: false,
+        pagination: None,
+        coordination_snapshot_path: None,
+        coordination_stale_after_ms: 0,
+        output_options: ContextPackOutputOptions::default(),
+        // why-not is read-only and never persists a pack record (reverse of `ee why`).
+        persist_pack: false,
+    };
+
+    let report = match explain_why_not_default(&options, memory_id) {
+        Ok(report) => report,
+        Err(error) => {
+            let domain_error = context_error_to_domain(&error);
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human => write_stdout(stdout, &format_why_not_human(&report)),
+        output::Renderer::Markdown => write_stdout(stdout, &format_why_not_markdown(&report)),
+        output::Renderer::Toon => {
+            let output = output::render_toon_from_json(&format_why_not_json(&report));
+            write_stdout(stdout, &(output + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(format_why_not_json(&report) + "\n")),
+    }
+}
+
+/// Render a `WhyNotSelectedReport` as an `ee.response.v2` envelope whose
+/// `data` is the `ee.why_not_selected.v1` report (camelCase fields).
+fn format_why_not_json(report: &crate::pack::WhyNotSelectedReport) -> String {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": report,
+    })
+    .to_string()
+}
+
+fn format_why_not_markdown(report: &crate::pack::WhyNotSelectedReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# Why not: {}\n\n", report.memory_id));
+    out.push_str(&format!("- selected: {}\n", report.selected));
+    out.push_str(&format!("- primary reason: {}\n", report.primary_reason));
+    out.push_str(&format!("- reason source: {}\n", report.reason_source));
+    out.push_str(&format!(
+        "- retrieval stage reached: {}\n",
+        report.retrieval_stage_reached
+    ));
+    out.push_str(&format!(
+        "- target composite score: {:.4} (relevance {:.4}, utility {:.4})\n",
+        report.scores.target_composite,
+        report.scores.target_relevance,
+        report.scores.target_utility
+    ));
+    if let Some(last) = &report.scores.last_included_memory_id {
+        out.push_str(&format!(
+            "- last included memory: {} (composite {:.4})\n",
+            last,
+            report.scores.last_included_composite.unwrap_or(0.0)
+        ));
+    }
+    if let Some(delta) = report.score_delta_to_last_included {
+        out.push_str(&format!("- score delta to last included: {delta:.4}\n"));
+    }
+    out.push_str(&format!(
+        "- token budget: {} used / {} max (target needs {} tokens)\n",
+        report.token_budget_frontier.used_tokens,
+        report.token_budget_frontier.max_tokens,
+        report.token_budget_frontier.target_estimated_tokens
+    ));
+    if !report.counterfactual_hints.is_empty() {
+        out.push_str("\n## Minimal change to include\n\n");
+        for hint in &report.counterfactual_hints {
+            out.push_str(&format!(
+                "- **{}**: {} — {}\n",
+                hint.kind, hint.action, hint.rationale
+            ));
+        }
+    }
+    out
+}
+
+fn format_why_not_human(report: &crate::pack::WhyNotSelectedReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("why-not {}\n", report.memory_id));
+    out.push_str(&format!(
+        "  selected: {}  ({}, source={})\n",
+        report.selected, report.primary_reason, report.reason_source
+    ));
+    out.push_str(&format!(
+        "  stage reached: {}\n",
+        report.retrieval_stage_reached
+    ));
+    out.push_str(&format!(
+        "  scores: composite {:.4} (relevance {:.4}, utility {:.4})\n",
+        report.scores.target_composite,
+        report.scores.target_relevance,
+        report.scores.target_utility
+    ));
+    if let Some(delta) = report.score_delta_to_last_included {
+        out.push_str(&format!("  delta to last included: {delta:.4}\n"));
+    }
+    out.push_str(&format!(
+        "  tokens: {} used / {} max (target needs {})\n",
+        report.token_budget_frontier.used_tokens,
+        report.token_budget_frontier.max_tokens,
+        report.token_budget_frontier.target_estimated_tokens
+    ));
+    for hint in &report.counterfactual_hints {
+        out.push_str(&format!("  hint [{}]: {}\n", hint.kind, hint.action));
+    }
+    out
+}
+
 fn why_causal_explanation_json(database_path: &Path, memory_id: &str) -> serde_json::Value {
     let connection = match crate::db::DbConnection::open_file(database_path) {
         Ok(connection) => connection,
@@ -50043,6 +50271,7 @@ impl NormalizedInvocation {
                 Command::Update(_) => "update".to_string(),
                 Command::Version => "version".to_string(),
                 Command::Why(_) => "why".to_string(),
+                Command::WhyNot(_) => "why-not".to_string(),
             },
         }
     }

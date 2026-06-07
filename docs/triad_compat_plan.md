@@ -100,6 +100,7 @@ Verbose commands stay available for explicit workflows, debugging, audit, and hu
 | `ee workspace` | kept | Workspace identity management remains explicit. |
 | `ee workflow` | kept | Workflow lifecycle groups remain explicit. |
 | `ee why <id>` | canonical | Keep the same command name; promoted output includes storage, retrieval, history, and links. |
+| `ee why-not <id> --task "<task>"` | new | Counterfactual reverse of `ee why`: explains why a memory was not selected for a task's context pack (read-only, no pack record persisted). |
 
 ## Adjacent Detail Surfaces
 

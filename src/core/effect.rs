@@ -1424,6 +1424,7 @@ impl EffectManifest {
             CommandEffect::read_only("workspace list", "List workspace aliases"),
             CommandEffect::read_only("workspace resolve", "Resolve workspace identity"),
             CommandEffect::read_only_db("why", "Explain memory selection"),
+            CommandEffect::read_only_db("why-not", "Explain why a memory was not selected"),
         ]
     }
 

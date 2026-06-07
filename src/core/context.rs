@@ -91,9 +91,11 @@ use crate::pack::{
     ContextResponseSeverity, PackAdmissionPosture, PackAssemblySlo, PackAssemblySloActuals,
     PackCandidate, PackCandidateInput, PackCoordinationSnapshot, PackDraft, PackItemLifecycle,
     PackProvenance, PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal,
+    TokenBudget, WhyNotSelectedInput, WhyNotSelectedReport,
     assemble_draft_with_profile_and_options_seeded,
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
-    estimate_tokens_default, pack_item_provenance_json, redact_pack_provenance_text,
+    estimate_tokens_default, explain_why_not_selected, pack_item_provenance_json,
+    redact_pack_provenance_text,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
@@ -1472,6 +1474,223 @@ pub fn run_context_pack_with_performance_seeded(
 enum PackRecordPersistence<'a> {
     Ambient,
     Seeded(&'a Deterministic<Seed>),
+}
+
+/// Explain why a target memory was (or was not) selected for a context pack.
+///
+/// This is the read-only counterfactual of [`run_context_pack_with_performance`]
+/// (`ee why-not`, the reverse of `ee why`). It resolves the exact candidate
+/// universe the task+workspace would trigger, locates the target memory among
+/// those candidates (or reconstructs a not-retrieved candidate when the memory
+/// never reached the candidate pool), and delegates to
+/// [`crate::pack::explain_why_not_selected`]. The cost is one `ee pack`-shaped
+/// retrieval; nothing is persisted, mutated, or cached.
+///
+/// When the target is in the candidate pool the report's `reason_source` is
+/// `authoritative`; for a reconstructed not-retrieved candidate it is
+/// `reconstructed` (E1.4 — handled by the library's `reason_source` mapping).
+///
+/// # Errors
+///
+/// Returns [`ContextPackError`] when the database is missing, the search
+/// backend fails, the target memory does not exist, or the report cannot be
+/// assembled.
+pub fn explain_why_not(
+    options: &ContextPackOptions,
+    target_memory_id: MemoryId,
+    determinism: &Deterministic<Seed>,
+) -> Result<WhyNotSelectedReport, ContextPackError> {
+    let database_path = options
+        .database_path
+        .clone()
+        .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        return Err(ContextPackError::Storage(format!(
+            "Database not found at {}",
+            database_path.display()
+        )));
+    }
+
+    let mut effective_filters = options.filters.clone();
+    if effective_filters.temporal.as_of.is_none() {
+        effective_filters.temporal.as_of = options.as_of;
+    }
+
+    let mut degraded = Vec::new();
+    let (read_pool_config, pin_snapshot) =
+        context_read_pool_config(&options.workspace_path, &mut degraded);
+    let read_pool = registered_process_read_pool(
+        DatabaseConfig::file(database_path.clone()),
+        read_pool_config,
+    );
+
+    let request = ContextRequest::new(ContextRequestInput {
+        query: options.query.clone(),
+        profile: options.profile,
+        max_tokens: options.max_tokens,
+        candidate_pool: options.candidate_pool,
+        max_results: options.max_results,
+        sections: Vec::new(),
+    })
+    .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+
+    let read_snapshot = if pin_snapshot {
+        read_pool.pin_snapshot_with_metadata(context_snapshot_pin_metadata(&request))
+    } else {
+        read_pool.acquire_snapshot(false)
+    }
+    .map_err(|error| ContextPackError::Storage(format!("Failed to open database: {error}")))?;
+
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+    let mut search_preloaded_memories = BTreeMap::new();
+    let search_report = match run_context_search_with_preloaded_memories(
+        &SearchOptions {
+            workspace_path: options.workspace_path.clone(),
+            database_path: Some(database_path.clone()),
+            index_dir: options.index_dir.clone(),
+            query: request.query.clone(),
+            limit: request.candidate_pool,
+            speed: options.speed,
+            explain: false,
+            as_of: context_validity_reference_time(options, &effective_filters),
+            include_tombstoned: options.include_tombstoned,
+            include_expired: context_include_expired(options, &effective_filters),
+            include_future: context_include_future(options, &effective_filters),
+            include_stale: context_include_stale(options, &effective_filters),
+            relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
+            dedup_mode: crate::core::search::SearchDedupMode::DocId,
+            source_mode: options.source_mode,
+            strict_source_mode: options.strict_source_mode,
+            memory_scope: options.memory_scope,
+            strict_scope: options.strict_scope,
+        },
+        read_connection,
+        None,
+        determinism,
+    ) {
+        Ok(context_search) => {
+            search_preloaded_memories = context_search.preloaded_memories;
+            context_search.report
+        }
+        Err(SearchError::NoIndex) => missing_index_search_report(
+            &request.query,
+            request.candidate_pool,
+            runtime_profile_for_workspace(&options.workspace_path),
+        ),
+        Err(error) => return Err(ContextPackError::Search(error)),
+    };
+
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+    let (candidates, _candidate_metrics) = candidates_from_search_with_metrics(
+        read_connection,
+        &options.workspace_path,
+        &search_report,
+        &effective_filters,
+        options.include_tombstoned,
+        &mut degraded,
+        Some(&search_preloaded_memories),
+    );
+
+    let profile = options.profile.unwrap_or(ContextPackProfile::Balanced);
+    let budget = match options.max_tokens {
+        Some(max_tokens) => TokenBudget::new(max_tokens)
+            .map_err(|error| ContextPackError::Pack(error.to_string()))?,
+        None => TokenBudget::default_context(),
+    };
+
+    // Locate the target among the real candidate pool (authoritative path). When
+    // it never reached the pool, reconstruct a not-retrieved candidate so scores
+    // still render and the library reports reason_source=reconstructed.
+    let target = match candidates
+        .iter()
+        .find(|candidate| candidate.memory_id == target_memory_id)
+        .cloned()
+    {
+        Some(candidate) => candidate,
+        None => {
+            let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+            reconstruct_not_retrieved_candidate(
+                read_connection,
+                &options.workspace_path,
+                target_memory_id,
+                &mut degraded,
+            )?
+        }
+    };
+
+    let input =
+        WhyNotSelectedInput::new(options.query.clone(), target, budget, profile, candidates);
+    explain_why_not_selected(input).map_err(|error| ContextPackError::Pack(error.to_string()))
+}
+
+/// CLI-facing convenience wrapper for [`explain_why_not`] that uses the same
+/// fixed determinism seed as [`run_context_pack_with_performance`], so the
+/// counterfactual reflects the exact selection the default `ee pack` would make.
+///
+/// # Errors
+///
+/// Propagates every [`ContextPackError`] from [`explain_why_not`].
+pub fn explain_why_not_default(
+    options: &ContextPackOptions,
+    target_memory_id: MemoryId,
+) -> Result<WhyNotSelectedReport, ContextPackError> {
+    let determinism = Deterministic::from_seed(0);
+    explain_why_not(options, target_memory_id, &determinism)
+}
+
+/// Build a `PackCandidate` for a memory that did not appear in the retrieved
+/// candidate pool, so `ee why-not` can still render its scores and provenance.
+///
+/// The candidate is intentionally kept out of the candidate list passed to
+/// [`crate::pack::explain_why_not_selected`]; its absence drives the
+/// `not_retrieved` primary reason and `reconstructed` reason source.
+fn reconstruct_not_retrieved_candidate(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    memory_id: MemoryId,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Result<PackCandidate, ContextPackError> {
+    let memory = connection
+        .get_memory(&memory_id.to_string())
+        .map_err(|error| ContextPackError::Storage(error.to_string()))?
+        .ok_or_else(|| {
+            ContextPackError::Pack(format!(
+                "Memory {memory_id} not found; cannot explain why it was not selected."
+            ))
+        })?;
+    let tags = connection.get_memory_tags(&memory.id).unwrap_or_default();
+    let mut provenance = Vec::new();
+    if let Some(memory_provenance) =
+        provenance_for_memory(&memory, memory_id, workspace_path, degraded)
+    {
+        provenance.push(memory_provenance);
+    }
+    let relevance = unit_score(0.0)
+        .ok_or_else(|| ContextPackError::Pack("invalid relevance score".to_string()))?;
+    let utility = unit_score(memory.utility)
+        .ok_or_else(|| ContextPackError::Pack("invalid utility score".to_string()))?;
+    let candidate = PackCandidate::new(PackCandidateInput {
+        memory_id,
+        section: section_for_memory(&memory),
+        content: memory.content.clone(),
+        estimated_tokens: estimate_tokens_default(&memory.content),
+        relevance,
+        utility,
+        provenance,
+        why: format!(
+            "Reconstructed candidate: memory {memory_id} was not in the retrieved candidate pool for this task."
+        ),
+    })
+    .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    let candidate = candidate
+        .with_diversity_key(diversity_key_for_memory(&memory, &tags))
+        .with_trust_signal(trust_signal_for_memory(&memory, memory_id, degraded))
+        .with_lifecycle(pack_lifecycle_for_memory(&memory, None));
+    let candidate = match memory.tombstoned_at.as_ref() {
+        Some(tombstoned_at) => candidate.with_tombstoned_at(tombstoned_at.clone()),
+        None => candidate,
+    };
+    Ok(candidate)
 }
 
 #[allow(clippy::expect_used)]
