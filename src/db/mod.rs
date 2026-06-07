@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use sqlmodel_core::{IsolationLevel, Row, Value};
 use sqlmodel_frankensqlite::FrankenConnection;
 
+use crate::models::memory_anchor::MemoryAnchorFreshnessTransition;
 use crate::models::{
     AGENT_PROFILE_BIAS_CAP, AgentContextProfileCounts, EMBEDDING_METADATA_SCHEMA_V1,
     EmbeddingMetadataRecord, GLOBAL_MEMORY_SCOPE_TAG, HOUSE_RULE_MEMORY_SCOPE_TAG,
@@ -83,6 +84,11 @@ pub mod audit_actions {
     /// caller's reason string.
     pub const MEMORY_REVISE: &str = "memory.revise";
     pub const MEMORY_LEVEL_TRANSITION: &str = "memory.level_transition";
+    /// Code-coupled freshness transition for an anchored memory (ADR 0056,
+    /// bd-1n0np.3.7). Details carry the `MemoryAnchorFreshnessTransition`
+    /// payload: anchor kind + hash, previous/new freshness state, drift code,
+    /// and the live `file:line` when the symbol resolved.
+    pub const MEMORY_FRESHNESS_TRANSITION: &str = "memory.freshness_transition";
     pub const MEMORY_TOMBSTONE: &str = "memory.tombstone";
     pub const MEMORY_UNTOMBSTONE: &str = "memory.untombstone";
     pub const MEMORY_DECAY_DEMOTE: &str = "memory.decay_demote";
@@ -11841,7 +11847,8 @@ impl DbConnection {
                 Value::Text(now.clone()),
                 Value::Text(now),
             ],
-        )
+        )?;
+        Ok(())
     }
 
     /// Upsert sentinel specs attached to memories, returning attempted row count.
@@ -11869,7 +11876,8 @@ impl DbConnection {
                 optional_u64_value(result.stale_threshold_seconds, "stale_threshold_seconds")?,
                 Value::Text(now),
             ],
-        )
+        )?;
+        Ok(())
     }
 
     /// List sentinel specs attached to one memory in deterministic order.
@@ -13602,6 +13610,35 @@ impl DbConnection {
                 target_type: Some("memory".to_string()),
                 target_id: Some(input.memory_id.clone()),
                 details: Some(memory_level_transition_audit_details(input)),
+            },
+        )?;
+        Ok(audit_id)
+    }
+
+    /// Record one `memory.freshness_transition` audit row from a code-coupled
+    /// drift observation (ADR 0056, bd-1n0np.3.7).
+    ///
+    /// Mirrors [`Self::insert_memory_level_transition_audit`]: `workspace_id`
+    /// and `actor` scope the audit, while the redaction-safe
+    /// [`MemoryAnchorFreshnessTransition`] supplies the deterministic details
+    /// payload (anchor hash + freshness-state transition + drift code +
+    /// live `file:line`). The bounded steward drift check is the caller.
+    pub fn insert_memory_freshness_transition_audit(
+        &self,
+        workspace_id: &str,
+        actor: Option<&str>,
+        transition: &MemoryAnchorFreshnessTransition,
+    ) -> Result<String> {
+        let audit_id = generate_audit_id();
+        self.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_string()),
+                actor: actor.map(str::to_string),
+                action: audit_actions::MEMORY_FRESHNESS_TRANSITION.to_string(),
+                target_type: Some("memory".to_string()),
+                target_id: Some(transition.memory_id.clone()),
+                details: Some(transition.audit_details_json()),
             },
         )?;
         Ok(audit_id)
@@ -27257,6 +27294,73 @@ mod tests {
                 .collect::<Vec<_>>(),
             &vec!["mem_30000000000000000000000001"],
             "path anchor lookup returns memory id",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_memory_freshness_transition_audit_records_redacted_row() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let transition = MemoryAnchorFreshnessTransition {
+            memory_id: "mem_30000000000000000000000001".to_string(),
+            anchor_kind: MemoryAnchorKind::Path,
+            anchor_value_hash: crate::models::memory_anchor_value_hash(
+                MemoryAnchorKind::Path,
+                "src/db/mod.rs",
+            ),
+            previous_state: MemoryAnchorFreshnessState::Current,
+            new_state: MemoryAnchorFreshnessState::Stale,
+            drift_code: Some("memory_drift_source_changed".to_string()),
+            file_line: Some("src/db/mod.rs:42".to_string()),
+            reason: "source_evidence_changed".to_string(),
+            automatic: true,
+            detected_at: "2026-06-07T00:00:00Z".to_string(),
+        };
+
+        let audit_id = connection.insert_memory_freshness_transition_audit(
+            "wsp_01234567890123456789012345",
+            Some("steward"),
+            &transition,
+        )?;
+        ensure(!audit_id.is_empty(), "freshness audit id must be non-empty")?;
+
+        let rows = connection
+            .list_audit_by_action(super::audit_actions::MEMORY_FRESHNESS_TRANSITION, None)?;
+        ensure_equal(
+            &rows.len(),
+            &1,
+            "exactly one freshness transition audit row",
+        )?;
+        let row = &rows[0];
+        ensure_equal(
+            &row.target_id.as_deref(),
+            &Some("mem_30000000000000000000000001"),
+            "freshness audit targets the memory",
+        )?;
+        ensure_equal(
+            &row.actor.as_deref(),
+            &Some("steward"),
+            "freshness audit records the actor",
+        )?;
+        let details = row.details.as_deref().unwrap_or_default();
+        ensure(
+            details.contains(
+                crate::models::memory_anchor::MEMORY_ANCHOR_FRESHNESS_TRANSITION_SCHEMA_V1,
+            ),
+            "freshness audit details carry the transition schema",
+        )?;
+        ensure(
+            details.contains("memory_drift_source_changed"),
+            "freshness audit details carry the drift code",
+        )?;
+        ensure(
+            details.contains(&transition.anchor_value_hash),
+            "freshness audit details carry the hashed anchor identity",
         )?;
 
         connection.close()?;
