@@ -38,8 +38,8 @@ workspace root; individual crates may declare their own.
 
 | Crate | Version | Location | Notes |
 | --- | --- | --- | --- |
-| `asupersync` | 0.3.1 | `/dp/asupersync/asupersync` (root) | Public API: `Cx`, `Scope`, `LabRuntime`, `LabConfig` (re-exported from `asupersync-core`). |
-| `asupersync-macros` | 0.3.1 | `/dp/asupersync/asupersync-macros` | Proc-macros for `scope!`, `spawn!`, `join!`, `race!`. |
+| `asupersync` | 0.3.3 | `/dp/asupersync/asupersync` (root) | Public API: `Cx`, `Scope`, `LabRuntime`, `LabConfig` (re-exported from `asupersync-core`). |
+| `asupersync-macros` | 0.3.3 | `/dp/asupersync/asupersync-macros` | Proc-macros for `scope!`, `spawn!`, `join!`, `race!`. |
 | `asupersync-tokio-compat` | (see crate `Cargo.toml`) | `/dp/asupersync/asupersync-tokio-compat` | Quarantine adapter. **Not for `ee` core** — pulls `tokio`. |
 
 **Default features (root `asupersync` crate):**

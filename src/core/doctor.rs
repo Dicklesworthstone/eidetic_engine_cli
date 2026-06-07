@@ -3104,7 +3104,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "registry",
-            version: "0.3.1",
+            version: "0.3.3",
             path: "/dp/asupersync/asupersync",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3130,7 +3130,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
             "runtime.async_boundary",
         ],
         diagnostic_command: "ee status --json",
-        release_pin_decision: "Registry version 0.3.1 is accepted; /dp/asupersync remains the local source reference for API checks.",
+        release_pin_decision: "Registry version 0.3.3 is accepted; /dp/asupersync remains the local source reference for API checks.",
     },
     DependencyContractEntry {
         name: "frankensqlite",

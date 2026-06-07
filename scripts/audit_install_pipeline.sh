@@ -144,7 +144,7 @@ dependency_resolution_inventory() {
             }')"
         results="$(jq -c --argjson item "$item" '. + [$item]' <<<"$results")"
     done <<'EOF'
-asupersync|0.3.1|direct|Cargo.toml dependencies|must_be_published
+asupersync|0.3.3|direct|Cargo.toml dependencies|must_be_published
 franken-agent-detection|0.1.3|direct|Cargo.toml dependencies|must_be_published
 frankensearch|0.3.0|direct|Cargo.toml dependencies|must_be_published
 fnx-algorithms|0.1.0|direct|Cargo.toml dependencies|graph_feature_or_publish

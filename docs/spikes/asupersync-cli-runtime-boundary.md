@@ -37,7 +37,7 @@ test-only APIs.
 
 Concrete guidance:
 
-- Keep `asupersync = { version = "0.3.1", default-features = false, features = ["tracing-integration"] }`.
+- Keep `asupersync = { version = "0.3.3", default-features = false, features = ["tracing-integration"] }`.
 - Do not enable `asupersync/default`, `test-internals`, `sqlite`, `tower`,
   `cli`, `kafka`, `tls`, `http3`, `quic`, or the Tokio compatibility crate in
   `ee` default builds.
@@ -78,7 +78,7 @@ future compile or test verification must use `rch exec -- cargo ...`.
 `Cargo.toml` already declares:
 
 ```toml
-asupersync = { version = "0.3.1", default-features = false, features = ["tracing-integration"] }
+asupersync = { version = "0.3.3", default-features = false, features = ["tracing-integration"] }
 ```
 
 That is the right starting point. It avoids Asupersync's default
@@ -357,7 +357,7 @@ test showing cancellation, stdout/stderr behavior, and shutdown semantics.
 Recommended production dependency:
 
 ```toml
-asupersync = { version = "0.3.1", default-features = false, features = ["tracing-integration"] }
+asupersync = { version = "0.3.3", default-features = false, features = ["tracing-integration"] }
 ```
 
 Feature decisions:

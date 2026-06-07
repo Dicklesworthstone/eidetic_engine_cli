@@ -148,7 +148,7 @@ Do not select:
 - `fnp-python`: PyO3 plus Python extension behavior is outside the local CLI
   default and would introduce packaging/runtime concerns that EE does not need.
 - `fnp-conformance`: it depends on the full FrankenNumPy surface and
-  `asupersync = { version = "0.3.1" }` with default features, which is not the
+  `asupersync = { version = "0.3.3" }` with default features, which is not the
   feature policy EE wants.
 - `fnp-io`: `bytemuck` and `flate2` are acceptable in isolation, but NPY/NPZ
   import/export is not needed for the first science analytics slice.
@@ -183,7 +183,7 @@ The top-level workspace contains:
 The top-level FrankenSciPy workspace has:
 
 ```toml
-asupersync = { version = "0.3.1", default-features = false, features = ["test-internals"] }
+asupersync = { version = "0.3.3", default-features = false, features = ["test-internals"] }
 ftui = { version = "0.3.1", default-features = false }
 ```
 
