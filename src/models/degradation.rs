@@ -247,9 +247,7 @@ pub const SNAPSHOT_PIN_EXPIRED: DegradationCode = DegradationCode {
     description: "Read snapshot pin exceeded its configured lifetime",
     behavior_change: "The stale read snapshot is poisoned so later reads fail cleanly",
     auto_recoverable: true,
-    repair: Some(
-        "reduce concurrent read duration or increase storage.read_pool.max_pin_duration_seconds",
-    ),
+    repair: Some("ee config set storage.read_pool.max_pin_duration_seconds 1"),
 };
 
 pub const SNAPSHOT_RELEASE_FAILED: DegradationCode = DegradationCode {
@@ -269,7 +267,9 @@ pub const SNAPSHOT_PIN_FORCE_RELEASED: DegradationCode = DegradationCode {
     description: "Read snapshot pin was force-released during workspace close",
     behavior_change: "The remaining pinned reader is poisoned so shutdown can complete without leaking WAL frames",
     auto_recoverable: true,
-    repair: Some("retry the read workflow after workspace close completes"),
+    repair: Some(
+        "ee status --workspace . --json # retry the read workflow after workspace close completes",
+    ),
 };
 
 /// Response degraded code for advisory lock acquisition timeout.
@@ -411,7 +411,7 @@ pub const PACK_BUDGET_TOO_SMALL: DegradationCode = DegradationCode {
     description: "Pack budget too small",
     behavior_change: "Context pack has matching candidates but cannot fit any candidate within the requested token budget",
     auto_recoverable: true,
-    repair: Some("Raise --max-tokens, use --profile compact, or broaden the query/filter set"),
+    repair: None,
 };
 
 // Curate degradations (D500 - D599)
