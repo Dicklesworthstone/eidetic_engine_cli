@@ -718,6 +718,176 @@ pub struct SearchHit {
     pub explanation: Option<ScoreExplanation>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypedMemoryFieldFilter {
+    pub field: String,
+    pub value: String,
+}
+
+impl TypedMemoryFieldFilter {
+    /// Parse `field=value` search filter syntax.
+    ///
+    /// Field names normalize `-` to `_` so CLI callers can use either
+    /// `reverted-at-sha=...` or `reverted_at_sha=...`.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let Some((field, value)) = raw.split_once('=') else {
+            return Err("typed memory field filters must use NAME=VALUE".to_owned());
+        };
+        let field = normalize_typed_memory_filter_field(field)?;
+        let value = value.trim();
+        if value.is_empty() {
+            return Err("typed memory field filter value must not be empty".to_owned());
+        }
+        Ok(Self {
+            field,
+            value: value.to_owned(),
+        })
+    }
+}
+
+fn normalize_typed_memory_filter_field(raw: &str) -> Result<String, String> {
+    let field = raw.trim().replace('-', "_");
+    if field.is_empty() {
+        return Err("typed memory field filter name must not be empty".to_owned());
+    }
+    if field
+        .bytes()
+        .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
+    {
+        Ok(field)
+    } else {
+        Err(format!(
+            "typed memory field filter name `{}` must be lowercase snake_case",
+            raw.trim()
+        ))
+    }
+}
+
+pub fn normalize_memory_kind_filter(raw: &str) -> Result<String, String> {
+    let kind = crate::models::MemoryKind::from_str(raw).map_err(|error| error.to_string())?;
+    Ok(kind.as_str().to_owned())
+}
+
+pub fn apply_memory_kind_and_typed_field_filters_to_report(
+    options: &SearchOptions,
+    report: &mut SearchReport,
+    kind_filter: Option<&str>,
+    typed_field_filters: &[TypedMemoryFieldFilter],
+) -> Result<(), SearchError> {
+    if kind_filter.is_none() && typed_field_filters.is_empty() {
+        return Ok(());
+    }
+
+    let database_path = options.resolve_database_path();
+    let connection = DbConnection::open_file(&database_path).map_err(|error| {
+        SearchError::Index(format!(
+            "Failed to open database for typed memory filters: {error}"
+        ))
+    })?;
+    let result = apply_memory_kind_and_typed_field_filters_to_report_with_connection(
+        &connection,
+        report,
+        kind_filter,
+        typed_field_filters,
+    );
+    if let Err(error) = connection.close() {
+        tracing::warn!(
+            target: "ee::search",
+            event = "typed_memory_filter_connection_close_failed",
+            database_path = %database_path.display(),
+            error = %error,
+        );
+    }
+    result
+}
+
+fn apply_memory_kind_and_typed_field_filters_to_report_with_connection(
+    connection: &DbConnection,
+    report: &mut SearchReport,
+    kind_filter: Option<&str>,
+    typed_field_filters: &[TypedMemoryFieldFilter],
+) -> Result<(), SearchError> {
+    let mut filtered = Vec::with_capacity(report.results.len());
+    for hit in std::mem::take(&mut report.results) {
+        if typed_memory_hit_matches(connection, &hit, kind_filter, typed_field_filters)? {
+            filtered.push(hit);
+        }
+    }
+    report.results = filtered;
+    if report.results.is_empty() && report.status == SearchStatus::Success {
+        report.status = SearchStatus::NoResults;
+    }
+    Ok(())
+}
+
+fn typed_memory_hit_matches(
+    connection: &DbConnection,
+    hit: &SearchHit,
+    kind_filter: Option<&str>,
+    typed_field_filters: &[TypedMemoryFieldFilter],
+) -> Result<bool, SearchError> {
+    if !hit.doc_id.starts_with("mem_") {
+        return Ok(false);
+    }
+    let Some(memory) = connection.get_memory(&hit.doc_id).map_err(|error| {
+        SearchError::Index(format!(
+            "Failed to load memory for typed search filter: {error}"
+        ))
+    })?
+    else {
+        return Ok(false);
+    };
+    if let Some(kind_filter) = kind_filter
+        && memory.kind != kind_filter
+    {
+        return Ok(false);
+    }
+    if typed_field_filters.is_empty() {
+        return Ok(true);
+    }
+    let typed_fields_json = connection
+        .get_memory_typed_fields_json(&hit.doc_id)
+        .map_err(|error| {
+            SearchError::Index(format!(
+                "Failed to load typed memory fields for search filter: {error}"
+            ))
+        })?;
+    Ok(typed_fields_match_filters(
+        typed_fields_json.as_deref(),
+        typed_field_filters,
+    ))
+}
+
+fn typed_fields_match_filters(
+    typed_fields_json: Option<&str>,
+    filters: &[TypedMemoryFieldFilter],
+) -> bool {
+    let Some(typed_fields_json) = typed_fields_json else {
+        return filters.is_empty();
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(typed_fields_json) else {
+        return false;
+    };
+    let Some(fields) = parsed.get("fields").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    filters.iter().all(|filter| {
+        fields
+            .get(&filter.field)
+            .is_some_and(|value| typed_field_value_matches(value, &filter.value))
+    })
+}
+
+fn typed_field_value_matches(value: &serde_json::Value, expected: &str) -> bool {
+    match value {
+        serde_json::Value::String(actual) => actual == expected,
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|item| item.as_str().is_some_and(|actual| actual == expected)),
+        _ => false,
+    }
+}
+
 /// Read-only search-side dedup-link projection helper (bd-1iltv.3).
 ///
 /// Mirrors [`crate::core::audit::audit_entry_dedup_link`] for the search
@@ -11457,6 +11627,160 @@ mod tests {
                 .iter()
                 .any(|entry| entry.code == "scope_excluded_evidence")
         );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn typed_memory_field_filter_parse_normalizes_hyphenated_fields() -> TestResult {
+        let filter = TypedMemoryFieldFilter::parse(" reverted-at-sha = 9af3c21 ")?;
+        assert_eq!(filter.field, "reverted_at_sha");
+        assert_eq!(filter.value, "9af3c21");
+
+        assert_eq!(normalize_memory_kind_filter(" failure ")?, "failure");
+        assert!(TypedMemoryFieldFilter::parse("Family=cache").is_err());
+        assert!(TypedMemoryFieldFilter::parse("family=").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn typed_memory_filters_use_db_kind_and_sidecar_fields() -> TestResult {
+        let workspace = tempfile::Builder::new()
+            .prefix("ee-search-typed-fields")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_11234567890123456789012345";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: Some("typed-field-search".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let base_memory = CreateMemoryInput {
+            workspace_id: workspace_id.to_owned(),
+            level: "episodic".to_owned(),
+            kind: "failure".to_owned(),
+            content: "Failure family was reverted.".to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.7,
+            importance: 0.8,
+            provenance_uri: None,
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: None,
+            tags: vec![],
+            valid_from: None,
+            valid_to: None,
+        };
+        connection
+            .insert_memory(
+                "mem_11000000000000000000000001",
+                &CreateMemoryInput {
+                    content: "Aggressive prefetch regressed small-N reads.".to_owned(),
+                    ..base_memory.clone()
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .set_memory_typed_fields_json(
+                "mem_11000000000000000000000001",
+                Some(r#"{"family":"aggressive prefetch","reverted_at_sha":"9af3c21"}"#),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_11000000000000000000000002",
+                &CreateMemoryInput {
+                    content: "Branch predictor attempt regressed tail latency.".to_owned(),
+                    ..base_memory.clone()
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .set_memory_typed_fields_json(
+                "mem_11000000000000000000000002",
+                Some(r#"{"family":"branch predictor","reverted_at_sha":"abc1234"}"#),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_11000000000000000000000003",
+                &CreateMemoryInput {
+                    kind: "decision".to_owned(),
+                    content: "Chose the simpler cache invalidation path.".to_owned(),
+                    ..base_memory
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut report = SearchReport {
+            status: SearchStatus::Success,
+            query: "prefetch regression".to_owned(),
+            requested_limit: 10,
+            results: vec![
+                synthetic_hit("mem_11000000000000000000000001", 0.9),
+                synthetic_hit("mem_11000000000000000000000002", 0.8),
+                synthetic_hit("mem_11000000000000000000000003", 0.7),
+            ],
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+        let filters = [TypedMemoryFieldFilter::parse("family=aggressive prefetch")?];
+        apply_memory_kind_and_typed_field_filters_to_report_with_connection(
+            &connection,
+            &mut report,
+            Some("failure"),
+            &filters,
+        )?;
+        assert_eq!(report.status, SearchStatus::Success);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].doc_id, "mem_11000000000000000000000001");
+
+        let mut empty_report = SearchReport {
+            status: SearchStatus::Success,
+            query: "missing family".to_owned(),
+            requested_limit: 10,
+            results: vec![synthetic_hit("mem_11000000000000000000000001", 0.9)],
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+        let filters = [TypedMemoryFieldFilter::parse("family=missing")?];
+        apply_memory_kind_and_typed_field_filters_to_report_with_connection(
+            &connection,
+            &mut empty_report,
+            Some("failure"),
+            &filters,
+        )?;
+        assert_eq!(empty_report.status, SearchStatus::NoResults);
+        assert!(empty_report.results.is_empty());
 
         connection.close().map_err(|error| error.to_string())
     }

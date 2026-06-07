@@ -228,8 +228,10 @@ use crate::core::rule::{
 };
 use crate::core::search::{
     SearchDedupMode, SearchDegradation, SearchOptions, SearchReport,
-    SearchScoreRecalibrationReport, SearchSourceMode, elapsed_timing_json,
-    recalibrate_search_score_calibration, run_diag_search, run_search, run_search_with_performance,
+    SearchScoreRecalibrationReport, SearchSourceMode, TypedMemoryFieldFilter,
+    apply_memory_kind_and_typed_field_filters_to_report, elapsed_timing_json,
+    normalize_memory_kind_filter, recalibrate_search_score_calibration, run_diag_search,
+    run_search, run_search_with_performance,
 };
 use crate::core::status::{
     StatusOptions, StatusReport, StatusSkylineReport, WalStatusReport,
@@ -7099,6 +7101,14 @@ pub struct SearchArgs {
     /// Include memories marked with stale validity status when present in index metadata.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_stale: bool,
+
+    /// Restrict results to one memory kind, such as failure or decision.
+    #[arg(long, value_name = "KIND")]
+    pub kind: Option<String>,
+
+    /// Restrict results to a typed memory sidecar field value (`name=value`).
+    #[arg(long = "field", value_name = "NAME=VALUE")]
+    pub fields: Vec<String>,
 
     /// Emit a redaction-safe query performance report instead of search hits.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -36343,14 +36353,81 @@ where
         "command::optionsBuild",
         options_start.elapsed(),
     ));
+    let filter_parse_start = Instant::now();
+    let kind_filter = match args
+        .kind
+        .as_deref()
+        .map(normalize_memory_kind_filter)
+        .transpose()
+    {
+        Ok(kind_filter) => kind_filter,
+        Err(message) => {
+            let error = DomainError::Usage {
+                message,
+                repair: Some(
+                    "Use `ee search <query> --kind failure --field family=value --json`."
+                        .to_owned(),
+                ),
+            };
+            return write_domain_error(
+                &error,
+                cli.wants_json() || args.explain_performance,
+                stdout,
+                stderr,
+            );
+        }
+    };
+    let typed_field_filters = match args
+        .fields
+        .iter()
+        .map(|raw| TypedMemoryFieldFilter::parse(raw))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(filters) => filters,
+        Err(message) => {
+            let error = DomainError::Usage {
+                message,
+                repair: Some(
+                    "Use `ee search <query> --field family=aggressive-prefetch --json`.".to_owned(),
+                ),
+            };
+            return write_domain_error(
+                &error,
+                cli.wants_json() || args.explain_performance,
+                stdout,
+                stderr,
+            );
+        }
+    };
+    command_timings.push(cli_performance_timing_json(
+        "command::typedFilterParse",
+        filter_parse_start.elapsed(),
+    ));
 
     if args.explain_performance {
         let core_search_start = Instant::now();
         return match run_search_with_performance(&options) {
-            Ok(run) => {
+            Ok(mut run) => {
                 command_timings.push(cli_performance_timing_json(
                     "command::coreSearch",
                     core_search_start.elapsed(),
+                ));
+                let typed_filter_start = Instant::now();
+                if let Err(error) = apply_memory_kind_and_typed_field_filters_to_report(
+                    &options,
+                    &mut run.report,
+                    kind_filter.as_deref(),
+                    &typed_field_filters,
+                ) {
+                    let domain_error = DomainError::SearchIndex {
+                        message: error.to_string(),
+                        repair: error.repair_hint().map(str::to_string),
+                    };
+                    return write_domain_error(&domain_error, true, stdout, stderr);
+                }
+                command_timings.push(cli_performance_timing_json(
+                    "command::typedFilterApply",
+                    typed_filter_start.elapsed(),
                 ));
                 let payload_start = Instant::now();
                 let mut payload = run.report.performance_explain_json_with_trace(
@@ -36388,27 +36465,46 @@ where
     }
 
     match run_search(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
+        Ok(mut report) => {
+            if let Err(error) = apply_memory_kind_and_typed_field_filters_to_report(
+                &options,
+                &mut report,
+                kind_filter.as_deref(),
+                &typed_field_filters,
+            ) {
+                let domain_error = DomainError::SearchIndex {
+                    message: error.to_string(),
+                    repair: error.repair_hint().map(str::to_string),
+                };
+                return write_domain_error(
+                    &domain_error,
+                    cli.wants_json() || args.explain_performance,
+                    stdout,
+                    stderr,
+                );
             }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(format_search_toon_with_mesh(&report, args.mesh_mode) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(format_search_json_with_mesh_and_recalibration(
-                    &report,
-                    args.mesh_mode,
-                    recalibration.as_ref(),
-                    args.explain.then_some("data.results"),
-                ) + "\n"),
-            ),
-        },
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &report.human_summary())
+                }
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &(format_search_toon_with_mesh(&report, args.mesh_mode) + "\n"),
+                ),
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => write_stdout(
+                    stdout,
+                    &(format_search_json_with_mesh_and_recalibration(
+                        &report,
+                        args.mesh_mode,
+                        recalibration.as_ref(),
+                        args.explain.then_some("data.results"),
+                    ) + "\n"),
+                ),
+            }
+        }
         Err(error) => {
             let domain_error = DomainError::SearchIndex {
                 message: error.to_string(),
@@ -51190,23 +51286,22 @@ mod tests {
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction,
         BootstrapCommand, COORDINATION_FALLBACK_INGEST_SCHEMA_V1,
         COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command, ContextPackProfile, CurateCommand,
-        DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand, DiagCommand,
-        DiagQuarantineCommand, DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES,
-        EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand,
-        GraphSnapshotCommand, HandoffCommand, HookCommand, LabCommand, LabSwarmCommand,
-        LabSwarmWorkloadProfile, LearnCommand, LearnExperimentCommand, MIGRATION_REPAIR_COMMAND,
-        MaintenanceCommand, MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode,
-        MemoryCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
-        RedactionLevelSource, ReflectCommand, ReflectRequestLedgerCommand, RegressCommand,
-        RegressExplainArgs, RegressionSurfaceArg, RuleCommand, ShadowMode, SituationCommand,
-        StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmWorkPacketArgs,
-        TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand, VerifyRchCommand,
-        WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode,
-        db_inspect_redact_source_uri, diag_environment_attestation_response_json,
-        environment_attestation_unavailable_sources, format_impact_json,
-        format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
-        init_report_exit_code, json_with_data_result_path, mesh, orient_next_commands,
-        parse_completion_audit_evidence_input, parse_context_profile,
+        DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand, DiagCommand, DiagQuarantineCommand,
+        DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES, EconomyCommand,
+        EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand, GraphSnapshotCommand,
+        HandoffCommand, HookCommand, LabCommand, LabSwarmCommand, LabSwarmWorkloadProfile,
+        LearnCommand, LearnExperimentCommand, MIGRATION_REPAIR_COMMAND, MaintenanceCommand,
+        MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat,
+        PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
+        ReflectRequestLedgerCommand, RegressCommand, RegressExplainArgs, RegressionSurfaceArg,
+        RuleCommand, ShadowMode, SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs,
+        SwarmCommand, SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand,
+        VerifyCommand, VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
+        WorkspaceHygieneMode, db_inspect_redact_source_uri,
+        diag_environment_attestation_response_json, environment_attestation_unavailable_sources,
+        format_impact_json, format_search_json_with_mesh_and_recalibration,
+        hook_git_readiness_response_json, init_report_exit_code, json_with_data_result_path, mesh,
+        orient_next_commands, parse_completion_audit_evidence_input, parse_context_profile,
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json,
@@ -62452,6 +62547,46 @@ mod tests {
         match parsed.command {
             Some(Command::Search(ref args)) => {
                 ensure_equal(&args.recalibrate_now, &true, "search recalibrate now")
+            }
+            _ => Err("expected Search command".to_string()),
+        }
+    }
+
+    #[test]
+    fn search_command_accepts_kind_and_typed_field_filters() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "search",
+            "prefetch",
+            "--kind",
+            "failure",
+            "--field",
+            "family=aggressive prefetch",
+            "--field",
+            "reverted-at-sha=9af3c21",
+        ])
+        .map_err(|e| {
+            format!(
+                "failed to parse search with typed memory filters: {:?}",
+                e.kind()
+            )
+        })?;
+
+        match parsed.command {
+            Some(Command::Search(ref args)) => {
+                ensure_equal(
+                    &args.kind,
+                    &Some("failure".to_owned()),
+                    "search kind filter",
+                )?;
+                ensure_equal(
+                    &args.fields,
+                    &vec![
+                        "family=aggressive prefetch".to_owned(),
+                        "reverted-at-sha=9af3c21".to_owned(),
+                    ],
+                    "search typed field filters",
+                )
             }
             _ => Err("expected Search command".to_string()),
         }
