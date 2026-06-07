@@ -193,3 +193,42 @@ fn why_not_missing_memory_id_errors() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn why_not_is_deterministic_across_runs() -> TestResult {
+    // Same DB + options + target must produce byte-identical why-not JSON
+    // (the determinism contract; explain_why_not_default uses a fixed seed).
+    let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
+    let workspace_path = temp_dir.path().to_path_buf();
+    let database_path = db_path(&workspace_path);
+    fs::create_dir_all(database_path.parent().ok_or("missing db parent")?)
+        .map_err(|error| error.to_string())?;
+
+    let memory_id_raw = remember_fixture(
+        &workspace_path,
+        &database_path,
+        "Run cargo fmt --check before the release verification step.",
+    )?;
+    let memory_id = MemoryId::from_str(&memory_id_raw).map_err(|error| format!("{error:?}"))?;
+    let task = "prepare release verification";
+
+    let first = explain_why_not_default(
+        &why_not_options(&workspace_path, &database_path, task),
+        memory_id,
+    )
+    .map_err(|error| format!("first run failed: {error:?}"))?;
+    let second = explain_why_not_default(
+        &why_not_options(&workspace_path, &database_path, task),
+        memory_id,
+    )
+    .map_err(|error| format!("second run failed: {error:?}"))?;
+
+    let first_json = serde_json::to_string(&first).map_err(|error| error.to_string())?;
+    let second_json = serde_json::to_string(&second).map_err(|error| error.to_string())?;
+    if first_json != second_json {
+        return Err(format!(
+            "why-not output is not deterministic:\nfirst:  {first_json}\nsecond: {second_json}"
+        ));
+    }
+    Ok(())
+}
