@@ -42,13 +42,14 @@ use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
     ApplyProcedureFeedbackInput, AuditedFeedbackEventInput, CreateAuditInput,
     CreateCurationCandidateInput, CreateFeedbackEventInput, CreateFeedbackQuarantineInput,
-    DbConnection, FeedbackCounts, StoredFeedbackEvent, StoredFeedbackQuarantine,
-    UpsertAgentContextProfileInput, audit_actions, feedback_scoring, generate_audit_id,
-    generate_audit_id_seeded,
+    CreateOutcomeEvidenceInput, DbConnection, FeedbackCounts, OutcomeEvidenceSource,
+    StoredFeedbackEvent, StoredFeedbackQuarantine, UpsertAgentContextProfileInput, audit_actions,
+    feedback_scoring, generate_audit_id, generate_audit_id_seeded,
 };
 use crate::models::degradation::HARMFUL_BURST_QUARANTINE_CODE;
 use crate::models::{
     AgentContextProfileCounts, DomainError, ProcessExitCode, RecoveryKind, TrustClass,
+    VerificationEvidenceRecord,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
 
@@ -2952,6 +2953,47 @@ fn rounded_f64_json_value(value: f64) -> serde_json::Value {
     serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
 }
 
+// --- Evidence Harvester: outcome-evidence collectors (ADR 0055, bd-1n0np.2.3) ---
+//
+// These are pure, deterministic adapters that normalize observations `ee`
+// already makes into `CreateOutcomeEvidenceInput` rows. They never collect new
+// data and never mutate; the caller persists results through the single
+// write-owner via `DbConnection::insert_outcome_evidence_rows`, and the joiner
+// (bd-1n0np.2.4) applies the ≥2-corroboration and never-override-explicit
+// invariants. Collection from beads close/reopen, reverted commits, and the
+// recorder chain land as sibling collectors.
+
+/// Collect derived `verifier_success` outcome evidence from verification
+/// evidence records. Only authoritative passes (real remote/local pass, not a
+/// refused fallback) that carry an explicit `finished_at` timestamp become
+/// evidence, so the joiner stays deterministic over explicit windows (never
+/// `Date::now`). Each row is weighted by the source-reliability taxonomy.
+#[must_use]
+pub fn collect_verifier_success_evidence(
+    workspace_id: &str,
+    records: &[VerificationEvidenceRecord],
+) -> Vec<CreateOutcomeEvidenceInput> {
+    let source = OutcomeEvidenceSource::VerifierSuccess;
+    let direction = source.default_direction().unwrap_or("positive").to_string();
+    records
+        .iter()
+        .filter(|record| record.is_authoritative_pass())
+        .filter_map(|record| {
+            let observed_at = record.finished_at.clone()?;
+            Some(CreateOutcomeEvidenceInput {
+                workspace_id: workspace_id.to_string(),
+                source,
+                signal_direction: direction.clone(),
+                evidence_ref: record.verification_id.clone(),
+                agent_id: None,
+                task_id: record.bead_id.clone(),
+                run_id: None,
+                observed_at,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -2979,6 +3021,30 @@ mod tests {
     };
     use crate::models::{DomainError, ProcessExitCode};
     use crate::runtime::determinism::Deterministic;
+
+    #[test]
+    fn collect_verifier_success_evidence_keeps_only_authoritative_passes() {
+        let records = crate::models::sample_verification_evidence_records();
+        let evidence = super::collect_verifier_success_evidence("wsp_demo", &records);
+        assert_eq!(
+            evidence.len(),
+            1,
+            "only the single authoritative pass becomes verifier_success evidence"
+        );
+        let row = &evidence[0];
+        assert_eq!(
+            row.source,
+            crate::db::OutcomeEvidenceSource::VerifierSuccess
+        );
+        assert_eq!(row.signal_direction, "positive");
+        assert_eq!(row.evidence_ref, "ver_pass_00000000000000000001");
+        assert_eq!(row.task_id.as_deref(), Some("bd-example"));
+        // observed_at is taken from the record's explicit finished_at, never Date::now.
+        assert_eq!(row.observed_at, "2026-05-13T00:00:01Z");
+        assert_eq!(row.workspace_id, "wsp_demo");
+        assert!(row.agent_id.is_none());
+        assert!(row.run_id.is_none());
+    }
 
     type TestResult = Result<(), String>;
 
