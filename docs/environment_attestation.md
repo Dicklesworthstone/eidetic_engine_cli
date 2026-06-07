@@ -110,9 +110,9 @@ coordination step, or `null` when the next action requires human judgment.
 | --- | --- | --- | --- |
 | `agent_mail_unavailable` | warning | Agent Mail evidence could not be observed. | Coordinate out of band or provide a redacted snapshot; do not treat missing Mail evidence as no reservations. |
 | `agent_mail_probe_mismatch` | warning | Agent Mail probe and semantic readiness evidence disagree. | Inspect the probe/snapshot source and coordinate before claim. |
-| `beads_tracker_stale` | warning | Beads DB/JSONL tracker content may be stale. | Structured repair may name `br sync --import-only`; it mutates Beads coordination state and requires coordination. |
-| `beads_metadata_only_stale` | warning | Beads metadata is stale while content remains synchronized. | Treat as degraded context and refresh metadata when safe. |
-| `bv_recommendation_stale` | warning | BV recommendation evidence is stale, timed out, or unavailable. | Prefer bounded Beads fallback such as `br --no-auto-import --allow-stale ready --json`; BV cannot override Beads. |
+| `beads_tracker_stale` | warning | Beads DB/JSONL tracker content may be stale. | Structured repair may name `br sync --import-only`; it mutates Beads coordination state and requires coordination. If the repair no-ops and `jsonl_newer` remains true, stop and preserve the blocker instead of looping. |
+| `beads_metadata_only_stale` | warning | Beads metadata is stale while content remains synchronized. | Treat as degraded context and refresh metadata when safe. If duplicate or stale metadata witnesses are suspected, report that as an upstream Beads repair issue before claiming. |
+| `bv_recommendation_stale` | warning | BV recommendation evidence is stale, timed out, or unavailable. | Prefer bounded Beads fallback such as `br --no-auto-import --allow-stale ready --json`; BV cannot override Beads or the claim gate. |
 | `rch_unavailable` | warning | RCH readiness evidence was not collected or unavailable. | Inspect RCH posture before treating remote proof as admitted. |
 | `rch_worker_topology_blocked` | high | RCH topology blocked before Cargo. | Run read-only RCH inspection such as `rch status --json`; report the blocker as environment-readiness failure. |
 | `rch_source_materialization_blocked` | high | RCH could not materialize the source for remote verification. | Fix the remote proof environment; do not mark source compile/test failed. |
@@ -338,6 +338,33 @@ RCH blockers, or a false `safeToClaim`.
 
 Action: Beads plus the claim gate wins. Ignore stale BV copy-paste claim
 commands until a fresh Beads read and claim gate agree.
+
+Known upstream Beads/BV failure signatures should be treated as source-authority
+evidence, not as permission to mutate the tracker:
+
+- The cross-tool automation contract for tracker authority and per-issue
+  claimability is tracked in
+  [beads_rust#334](https://github.com/Dicklesworthstone/beads_rust/issues/334).
+  Treat this as the umbrella issue when `br`, `bv`, and the claim gate disagree.
+- Duplicate or stale metadata witnesses can make `sync --status` and `doctor`
+  read old sync state even when counts match
+  ([beads_rust#324](https://github.com/Dicklesworthstone/beads_rust/issues/324)).
+- `doctor.ok=true` can coexist with `jsonl_newer=true` and read-only
+  `br show --no-auto-import --no-auto-flush` refusal
+  ([beads_rust#330](https://github.com/Dicklesworthstone/beads_rust/issues/330)).
+- `br sync --import-only` or `br sync --flush-only` can report success/no-op
+  while the JSONL-newer blocker remains
+  ([beads_rust#333](https://github.com/Dicklesworthstone/beads_rust/issues/333)).
+- BV robot output can recommend blocked or dependency-blocked work as claimable,
+  and `br ready` can include `in_progress` issues
+  ([beads_rust#325](https://github.com/Dicklesworthstone/beads_rust/issues/325),
+  [#331](https://github.com/Dicklesworthstone/beads_rust/issues/331),
+  [#332](https://github.com/Dicklesworthstone/beads_rust/issues/332)).
+
+When any of these signatures appears, the next useful step is read-only
+evidence collection, Agent Mail coordination, or an upstream issue/comment. Do
+not claim, reopen, close, or create Beads until the live tracker authority and
+claim gate agree.
 
 ### RCH environment blocker
 

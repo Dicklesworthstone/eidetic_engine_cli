@@ -1,8 +1,13 @@
 # RCH Verification Wrapper
 
 Use `scripts/rch_verify.sh` for focused Rust verification in this repository.
-It always builds an explicit `rch exec -- env TMPDIR=/tmp ...` invocation and
-emits a JSON proof that can be copied into a Beads comment.
+It always builds an explicit `rch exec -- cargo ...` invocation and emits a JSON
+proof that can be copied into a Beads comment.
+
+At startup, the wrapper re-execs once from an in-memory copy of its own source.
+That keeps long-running RCH proofs stable even if another coordinated agent edits
+`scripts/rch_verify.sh` in the checkout while the proof is waiting for remote
+Cargo to finish.
 
 Examples:
 
@@ -27,11 +32,16 @@ The wrapper sets these remote-safe defaults:
 - `RCH_REQUIRE_REMOTE=1`
 - `RCH_QUEUE_WHEN_BUSY=1`
 - `RCH_COMPRESSION=0`
-- RCH binary `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5` when present, then `/Users/jemanuel/.local/bin/rch-33720a8`, then `/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch`, then `rch`
+- `RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,...` so RCH can rewrite worker
+  target/tmp paths without hiding `cargo` behind a leading `env` argv
+- RCH binary `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5` when present, then `/Users/jemanuel/.local/bin/rch-33720a8`, then `/Volumes/USBNVME16TB/temp_agent_space/rch-macos-target/debug/rch`, then any host-runnable source-built fallback, then `rch`
 - `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel`
 - `RCH_ALIAS_PROJECT_ROOT=/data`
-- remote command `TMPDIR=/tmp`
-- remote command `CARGO_TARGET_DIR=/tmp/ee-rch-verify-target`
+- `RCH_WORKER`, `RCH_WORKERS`, and `RCH_SOCKET_PATH` are verifier control-plane
+  inputs when set; use `RCH_WORKER=<id>` for a singular worker override and
+  `RCH_SOCKET_PATH=<path>` for an alternate local daemon socket.
+- remote `TMPDIR` and `CARGO_TARGET_DIR` are worker-scoped by RCH env
+  forwarding/rewrite logic
 - local build-admission preflight enabled when a host-runnable `ee` binary is
   available from `--build-admission-ee-bin`, `RCH_VERIFY_EE_BIN`, `EE_BIN`,
   `EE_BINARY`, or the current target directory. Automatic target-directory
@@ -96,7 +106,7 @@ cargo test -p rch manifest_rewrite_rules --quiet -- --nocapture
 [RCH] remote vmi1264463 (513.9s)
 
 RCH_BUILD_TIMEOUT_SEC=1200 ... rch-manifestfix-20260605-5 exec -- \
-  env TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/ee-rch-verify-target cargo check --lib --quiet
+  cargo check --lib --quiet
 [RCH] remote vmi1264463 (839.6s)
 ```
 
@@ -130,11 +140,15 @@ future replay ledgers. Its standalone contract fixture is
   `command_not_offloaded`, `remote_marker_missing`, or
   `no_worker_selected`.
 - `workers_vs_selection_contradiction`: true when workers were reported but no
-  worker was selected for a Rust command.
+  worker was selected for an applicable Rust command.
 - `path_normalization_warning`: a redacted transcript line when RCH reports a
   project-root, alias-root, or path-normalization warning.
 - `remote_required` and `local_fallback_refused`: policy posture flags. A true
   `local_fallback_refused` means no local Cargo fallback was accepted.
+
+Known-blocker refusals still include the probe for schema stability, but set
+`status=not_applicable`, `selection_failure_reason=null`, and
+`workers_vs_selection_contradiction=false` because RCH selection was not run.
 
 Rust consumers that ingest `ee.rch.verify.v1` through
 `verification_evidence_record_from_rch_verify` expose this block as
@@ -438,6 +452,10 @@ environment failures. It is not an implementation proof. When a prior remote
 proof has already failed for the same worker/topology condition, a later matching
 invocation may refuse before launching RCH and emit `status=known_blocker_refused`
 with `verification_attribution=not_run_known_blocker`.
+
+On this fail-fast path, `selector_admission_probe.status` is `not_applicable`;
+the wrapper has not run RCH selection, so no selector failure or worker-selection
+contradiction should be inferred from the cached blocker.
 
 The repo wrapper keeps this cache in verifier evidence state, defaulting to
 `.ee/derived/rch/known_blockers.jsonl` under the final `--project-root` for real

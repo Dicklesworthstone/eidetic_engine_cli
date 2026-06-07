@@ -1797,19 +1797,22 @@ Performance and resource posture commands:
 ### Codex RCH Workaround
 
 Some Mac Codex sessions may still find an older `rch` on `PATH` or report the
-Codex hook as not installed. Until that local installation is upgraded, invoke
-the current RCH client by absolute path and fail closed to remote execution:
+Codex hook as not installed. Until that local installation is upgraded, keep
+using the repo wrapper and pass the current RCH client as the wrapper binary:
 
 ```bash
-RCH_REQUIRE_REMOTE=1 \
-TMPDIR=/tmp \
+TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp \
 RCH_VISIBILITY=summary \
 RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects \
 RCH_ALIAS_PROJECT_ROOT=/data/projects \
-/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- \
-  env TMPDIR=/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target \
+scripts/rch_verify.sh --summary --no-write \
+  --rch-bin /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 -- \
   cargo test --lib search_sync_attaches_rebuilt_lexical_index_for_literal_queries -- --nocapture
 ```
+
+Do not use `/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch`
+directly from this Mac; that path can contain a Linux worker artifact and fail
+with `exec format error`.
 
 RCH rewrites the local USB-NVMe `CARGO_TARGET_DIR` to a worker-local target path
 for remote execution, so the external-drive setting is safe for both local

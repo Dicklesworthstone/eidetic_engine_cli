@@ -1200,21 +1200,25 @@ RCH offloads `cargo build`, `cargo test`, `cargo clippy`, and other compilation 
 
 **RCH is installed at `~/.local/bin/rch` and is hooked into Claude Code's PreToolUse automatically.** Most of the time you don't need to do anything if you are Claude Code — builds are intercepted and offloaded transparently.
 
-To manually offload a build from this Mac, use the current RCH binary, fail
-closed to remote execution, and set `TMPDIR=/tmp` both for the RCH client and
-for the remote Cargo process. Do not run bare `rch exec -- cargo ...` from
-Codex; it can inherit the Mac USB `TMPDIR` and can fall back to local Cargo.
+To manually offload a build from this Mac, use the repo wrapper. It fails closed
+to remote execution and avoids direct `rch exec -- cargo ...` fallback paths
+that can inherit the Mac USB `TMPDIR` or run local Cargo.
 
 ```bash
-TMPDIR=/tmp \
-RCH_REQUIRE_REMOTE=1 \
+TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp \
 RCH_VISIBILITY=summary \
 RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects \
 RCH_ALIAS_PROJECT_ROOT=/data/projects \
-/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- \
-  env TMPDIR=/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target \
+scripts/rch_verify.sh --summary --no-write \
+  --rch-bin /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 -- \
   cargo test --lib
 ```
+
+Do not call `/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch`
+directly from this Mac; that path can contain a Linux worker artifact and fail
+with `exec format error`. Prefer `scripts/rch_verify.sh -- cargo ...`, or the
+current Mach-O sidecar above when a low-level RCH incident/debug command is
+needed.
 
 Quick commands:
 ```bash

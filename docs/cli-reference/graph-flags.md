@@ -51,6 +51,7 @@ context-diagnostic flags that have not been promoted to `ee pack`, including
 | `ee context`, `ee pack`, `ee pack build` | `--resource-profile <PROFILE>` | `lean`, `standard`, `swarm_heavy` | `standard` for `context`; query-file/default for `pack` | Selects pack assembly SLOs and resource assumptions. |
 | `ee context`, `ee pack`, `ee pack build` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Reads the source-of-truth memory and graph-link tables. |
 | `ee context`, `ee pack`, `ee pack build` | `--index-dir <PATH>` | filesystem path | `<workspace>/.ee/index/` | Reads derived search indexes before graph-aware packing. |
+| `ee context`, `ee pack`, `ee pack build`, `ee search` | `--memory-scope <SCOPE>` | `self`, `team`, `global`, `workspace`, `verified`, `swarm` | `swarm` | Filters memory evidence by trust lane. `global` is tag-backed: only memories tagged `global` or `house-rule` / `house_rule` are visible across workspaces. |
 | `ee context`, `ee pack`, `ee pack build`, `ee search` | `--explain-performance` | boolean | false | Emits a redaction-safe query or pack performance report instead of normal hits or pack output. |
 | `ee context`, `ee pack`, `ee pack build` | `--explain` | boolean | false | Adds pack explanation metadata to JSON output, including Pack DNA when available. |
 | `ee context`, `ee pack` | `--no-pack-dna` | boolean | false | Suppresses `data.pack.packDna` even when `--explain` is set. |
@@ -364,7 +365,7 @@ bead or runs an RCH-gated verification.
 | `ee swarm next-action`, `ee swarm work-packet` | `--verifier-evidence <PATH>` | `ee.rch.verify.v1` proof JSON path | omitted | Includes recent compile-health evidence for work-allocation and work-packet preflight. |
 | `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--agent-inventory-only <SLUGS>` | comma-separated connector slugs | omitted | Limits agent inventory inspection to selected connectors when inventory is enabled. |
 | `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--max-recent-commits <N>` | integer | `8` | Caps recent git commits included by the git source. |
-| `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--command-timeout-ms <MS>` | integer milliseconds | `1500` | Sets the timeout budget for each selected source probe. |
+| `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--command-timeout-ms <MS>` | integer milliseconds | `35000` | Sets the timeout budget for each selected source probe. |
 | `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--require-sources` | boolean | false | Exits 6 when any selected source is unavailable, unconfigured, or skipped. |
 | `ee diag host-profile` | `--full-paths` | boolean | false | Includes absolute host paths in path probes; omit for redacted labels. |
 | `ee profile config plan` | `--profile <PROFILE>` | `constrained`, `portable`, `workstation`, `swarm` | host-adaptive recommendation | Plans exact `.ee/config.toml` profile changes without writing. |
@@ -379,7 +380,7 @@ ee swarm brief --workspace . \
   --sources git,beads,bv,agent-mail --require-sources --json
 ee swarm brief --workspace . --sources host-profile,agent-inventory \
   --agent-inventory-only codex,claude --max-recent-commits 4 \
-  --command-timeout-ms 750 --json
+  --command-timeout-ms 35000 --json
 ee swarm next-action --workspace . --sources default,host-profile \
   --verifier-evidence proof.json --include-rch --json
 ee diag host-profile --workspace . --full-paths --json

@@ -378,7 +378,7 @@ sqlmodel-pool        = "0.2"
 sqlmodel-frankensqlite = "0.2"
 
 # --- Async / IO (forbidden: tokio, async-std, smol, hyper, axum, reqwest) ---
-asupersync           = { version = "0.3", default-features = false, features = ["proc-macros"] }
+asupersync           = { version = "0.3.3", default-features = false, features = ["tracing-integration"] }
 
 # --- Search ------------------------------------------------------------------
 # Use frankensearch's default features as configured by Jeffrey. Do NOT specify
@@ -437,7 +437,7 @@ A CI gate runs `cargo tree -e features --workspace -i <forbidden>` for each name
 **Why every line is what it is.**
 - `fsqlite` is the user's required SQLite. The `fts5` and `json` extensions are feature-gated because the FrankenSQLite README flags them as still in active wiring. We can fall back to a minimal inverted-index helper in `ee-db` if FTS5 isn't ready — see §13.
 - `sqlmodel-frankensqlite` is the bridge: its `FrankenConnection` wraps the sync `fsqlite::Connection` in `Arc<Mutex<>>` and reports `Dialect::Sqlite` so query macros emit `?1, ?2`-style placeholders.
-- `asupersync` with `default-features = false` keeps us off the optional SQLite feature (which could pull `rusqlite`) and gives us only what we explicitly opt into.
+- `asupersync` uses the accepted registry `0.3.3` profile with `default-features = false` and `tracing-integration`, keeping optional SQLite/Tokio-adjacent adapter surfaces out of the default tree while preserving structured runtime diagnostics.
 - `frankensearch` is depended on with default features. Jeffrey already chose the best CPU-friendly embedding models inside frankensearch; `ee` does not override them.
 - `fnx-*` are native Rust crates from `/dp/franken_networkx/crates/`, including `fnx-runtime` (with an `asupersync-integration` feature), `fnx-cgse` (deterministic tie-breaking), and `fnx-algorithms` (PageRank, betweenness, Louvain, k-core, articulation points, HITS, shortest paths, etc.). They're path-deps until published.
 - `ulid` for public IDs (`mem_<ulid>`, `rule_<ulid>`, etc.) — sortable, URL-safe, 26 chars. Internal row IDs may still be `INTEGER PRIMARY KEY` for performance; ULIDs are the *public* identifier surface.

@@ -42,8 +42,15 @@ workspace root; individual crates may declare their own.
 | `asupersync-macros` | 0.3.3 | `/dp/asupersync/asupersync-macros` | Proc-macros for `scope!`, `spawn!`, `join!`, `race!`. |
 | `asupersync-tokio-compat` | (see crate `Cargo.toml`) | `/dp/asupersync/asupersync-tokio-compat` | Quarantine adapter. **Not for `ee` core** — pulls `tokio`. |
 
-**Default features (root `asupersync` crate):**
-`["test-internals", "proc-macros"]`.
+**Upstream default features (root `asupersync` crate):**
+`["proc-macros"]` as of `0.3.3`. `test-internals` is an explicit
+non-default feature.
+
+**EE accepted profile:**
+`asupersync = { version = "0.3.3", default-features = false, features = ["tracing-integration"] }`.
+This matches `Cargo.toml`, the dependency contract matrix, and the doctor
+franken-health golden. Do not enable upstream defaults in `ee` unless a future
+ADR updates the dependency contract.
 
 **Feature flags (selected, ~40 declared in total):**
 `messaging-fabric`, `waker-profiling`, `wasm-browser-preview`, `wasm-runtime`,
@@ -64,10 +71,13 @@ workspace root; individual crates may declare their own.
 - `petgraph`, `hyper`, `axum`, `reqwest`: not pulled in by default.
 
 **EE wiring guidance (research only):**
-- For EE-001, the minimal default profile is what the AGENTS.md `default`
-  feature set implies — leave `asupersync` at default features.
-- If structured tracing in tests is desired, opt into `tracing-integration`.
-- For deterministic LabRuntime tests, `deterministic-mode` is the relevant flag.
+- For EE-001, the accepted profile is the no-default `0.3.3` registry pin plus
+  `tracing-integration`.
+- `deterministic-mode` and `test-internals` are explicit test-only or
+  diagnostics-only choices; they are not part of the default `ee` release
+  profile.
+- Do not enable `sqlite`, `tokio-compat`, or adapter features that can expose
+  forbidden runtime/storage stacks in `ee` core.
 
 ### 2. frankensqlite (`/dp/frankensqlite`)
 

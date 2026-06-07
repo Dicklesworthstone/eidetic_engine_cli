@@ -71,6 +71,69 @@ The fixture-driven consumer check is:
 python3 scripts/agent_consume_work_packet_gate_test.py
 ```
 
+## No-Local-Cargo Install Freshness
+
+When an agent sees a stale or missing `ee` command surface, it needs an
+install-freshness decision before trusting PATH, claim gates, or compact
+automation flags. This inspection path is read-only and must not be replaced by
+`cargo install`, `cargo build --release`, copying from `target/`, or overwriting
+`/Users/jemanuel/.local/bin/ee`.
+
+Start with the binary agents will actually run:
+
+```bash
+command -v ee
+ee --version
+ee install check --json --offline
+```
+
+Treat the check as trusted only when it returns `schema=ee.response.v2`,
+`success=true`, `data.schema=ee.install.check.v1`, and
+`data.freshness.schema=ee.install.freshness.v1`. A missing `data.freshness`
+block means the installed binary is older than the install-freshness contract;
+that is a blocked/stale surface, not a pass. If `data.freshness.verdict` is
+anything other than `fresh`, stop at inspection and preserve the finding codes
+such as `current_binary_shadowed`, `path_binary_version_mismatch`,
+`installed_binary_stale`, `binary_not_on_path`, or
+`required_surface_missing`.
+
+If a macOS release manifest and artifact directory are available, plan the
+adoption without mutation:
+
+```bash
+ee install check --json --offline --manifest <release-manifest.json>
+ee install plan --json --offline \
+  --manifest <release-manifest.json> \
+  --artifact-root <release-artifact-dir> \
+  --install-dir "$HOME/.local/bin" \
+  --target aarch64-apple-darwin
+```
+
+The plan is only adoptable when `data.schema=ee.install.plan.v1`,
+`data.status` is `ready` or `idempotent`, the selected artifact target matches
+the host, and `data.verification.checksumStatus=verified`. A plan with
+`checksumStatus=planned`, `manifestStatus=missing`, `targetStatus` other than
+`matched`, or any error finding is evidence for a blocked state.
+
+Applying a plan is a mutating install action. Agents may report the exact
+operator command, but must not run it unless the user explicitly approves the
+overwrite path and artifact source:
+
+```bash
+ee update \
+  --manifest <release-manifest.json> \
+  --artifact-root <release-artifact-dir> \
+  --install-dir "$HOME/.local/bin" \
+  --target aarch64-apple-darwin
+```
+
+RCH Linux proof and macOS install freshness are different claims. A remote RCH
+test can prove source behavior, but it does not create or authenticate a macOS
+binary for PATH. If no no-local-Cargo macOS artifact exists, send an operator
+exception request with `command -v ee`, `ee --version`, the `install check` or
+`install plan` JSON finding codes, and the reason a local build would violate
+the RCH-only policy. Do not silently build locally to unblock agent automation.
+
 For shared-checkout commit readiness, see
 [`docs/agent-ux/workspace-hygiene.md`](agent-ux/workspace-hygiene.md). The
 workspace hygiene surface is read-only and explains dirty-path buckets,

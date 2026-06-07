@@ -108,6 +108,31 @@ runnable `claimCommandAction`. If `unsafeReasons` or `staleReasons` still name
 reservation collisions, stale tracker state, Beads/BV disagreement, or RCH
 blockers, coordinate instead of claiming.
 
+## Authority-Degraded Conformance Cases
+
+Authority-degraded fixtures prove that a claim gate fails closed until every
+source needed for the claim is both fresh and positive. Adding or updating one
+of these fixtures requires harness assertions for all of the following:
+
+- `safeToClaim=false` and a non-`safe_to_claim` verdict.
+- No runnable mutating claim path: no executable `claimCommandAction`, no
+  `inspect_and_claim` action, and no shell-safe mutating argv in the consumer
+  output.
+- `whyNotSafe` includes `claim_gate_degraded_authority:<code>` for claim-gate
+  inputs or `packet_degraded_authority:<code>` for packet-only inputs.
+- Stale Beads cases keep `sourceAuthority.trackerAuthoritative=false` and
+  include tracker evidence such as `beads_tracker_stale`, `jsonl_newer=true`,
+  merge artifacts, or pending external changes.
+- A fresh Agent Mail snapshot only clears the Mail unknown. It must not make a
+  candidate claimable while stale tracker state, `bv_command_timeout`, missing
+  RCH proof, or local Cargo fallback evidence remains.
+- Remote-required Rust verification fails closed when
+  `sourceAuthority.rchRemoteOnlyRequired=true` and positive remote proof is
+  absent or `sourceAuthority.rchSafeToLaunchCargoVerification=false`.
+- The no-mutation smoke still records zero Beads, Cargo, and RCH mutations for
+  the fixture path and emits an `ee.test_event.v1` summary with the unsafe
+  decision, degraded codes, and consumer exit status.
+
 ## Copy-Pastable Runs
 
 Healthy checkout:

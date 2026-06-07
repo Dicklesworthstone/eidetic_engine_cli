@@ -12,10 +12,32 @@
 > Cargo tripwire, and the bd-1h8ji.4 portability diagnostic all enforce this
 > contract.
 
-## TL;DR — the one canonical command shape
+## TL;DR - the canonical agent command
 
-For any focused Rust verification, use this exact env recipe (proven by every
-RCH-verified close in the bd-1h8ji.* and bd-3usjw.* families this week):
+For focused Rust verification, use the repo wrapper. It builds the remote-only
+RCH invocation, re-execs from an in-memory copy so long proofs keep running
+even if the checkout script changes, and emits an `ee.rch.verify.v1` JSON proof:
+
+```bash
+scripts/rch_verify.sh --bead-id bd-XXXX --summary -- \
+  cargo test --lib my_focused_unit_test -- --nocapture
+```
+
+Do not bypass this with a bare or hand-written `rch exec` command from the
+shared checkout. Raw RCH can fall back to local Cargo when topology admission is
+wrong unless every fail-closed guard is present, and local Cargo output is
+contaminated evidence in this repo.
+
+If you are debugging RCH itself and must inspect the low-level shape, start with
+`--dry-run`:
+
+```bash
+scripts/rch_verify.sh --dry-run --skip-build-admission --summary -- \
+  cargo test --lib my_focused_unit_test -- --nocapture
+```
+
+Only then compare against an explicit remote-required low-level command. This
+shape is incident evidence, not the normal agent workflow:
 
 ```bash
 TMPDIR=/tmp \
@@ -29,20 +51,13 @@ RCH_ALIAS_PROJECT_ROOT=/data \
 RCH_VISIBILITY=summary \
 RCH_COMPRESSION=0 \
 RCH_BUILD_TIMEOUT_SEC=1200 \
-/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 exec --json -- \
-  env TMPDIR=/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR \
+/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 exec -- \
   cargo <your-cargo-subcommand-here> -- --nocapture
 ```
 
-Or, for everyday focused verification: prefer the wrapper that builds this
-shape for you:
-
-```bash
-scripts/rch_verify.sh --bead-id bd-XXXX -- cargo test --lib my_focused_unit_test -- --nocapture
-```
-
-The wrapper emits an `ee.rch.verify.v1` JSON proof to stdout, which you paste
-into the Beads comment for closure evidence.
+If RCH prints that it is `running locally`, stop immediately, report the exact
+path-normalization or topology line, and do not count any Cargo output as proof.
 
 Before a real remote run, the wrapper also attempts a read-only
 `ee diag build-admission --json` preflight when it can find a usable `ee`
@@ -83,7 +98,7 @@ response to an ambiguous proof is coordination, not mutation.
 
 | Env var | Why |
 |---|---|
-| `TMPDIR=/tmp` (outer + inner) | Mac `~/.zshenv` points TMPDIR at `/Volumes/USBNVME16TB/...`. That path does not exist on Linux workers; Rust's `tempfile::tempdir()` inherits it and panics with `os error 2`. The inner `env TMPDIR=/tmp` ensures the remote cargo invocation overrides whatever RCH happens to pass through. |
+| `TMPDIR=/tmp` / `RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR` | Mac `~/.zshenv` points TMPDIR at `/Volumes/USBNVME16TB/...`. That path does not exist on Linux workers; Rust's `tempfile::tempdir()` inherits it and panics with `os error 2`. The wrapper lets RCH rewrite target/tmp values for the worker instead of hiding Cargo behind a leading `env` argv. |
 | `RCH_REQUIRE_REMOTE=1` | Fail-closed when topology preflight fails. Bare `rch exec -- cargo ...` can fall back to **local** Cargo, which burns the Mac SSD and produces unsafe evidence. The repo tripwire denies bare `rch exec` Cargo commands unless this env var is present. |
 | `RCH_QUEUE_WHEN_BUSY=1` | Wait when all workers are busy rather than refusing. |
 | `RCH_TEST_SLOTS=2` | Bound concurrent test slots so heavy benches don't starve focused tests. |
@@ -92,8 +107,8 @@ response to an ambiguous proof is coordination, not mutation.
 | `RCH_BUILD_TIMEOUT_SEC=1200` | Large `cargo check` proofs can exceed the default 300s build timeout after remote Cargo starts. The bd-3tmeg proof passed with 1200s; the 300s run failed closed with `RCH-E104` and no local fallback. |
 | `RCH_VISIBILITY=summary` | Less log noise; full transcripts when something goes wrong. |
 | `RCH_COMPRESSION=0` | Compression on the sync pipe occasionally corrupts the manifest header during topology preflight. Disabling has zero throughput cost on the local-network workers. |
-| Absolute RCH binary path | `~/.local/bin/rch` may be stale (missing the `exec` subcommand). The `target-local/release/rch` is always the live build. |
-| Inner `CARGO_TARGET_DIR` | RCH rewrites this to a worker-scoped path automatically; the outer value is only used by RCH to know which artifacts to pull back. |
+| Absolute RCH binary path | `~/.local/bin/rch` may be stale. The wrapper prefers `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5`, then newer sidecars or source-built clients known to handle this checkout's path topology. |
+| Worker-scoped `CARGO_TARGET_DIR` | RCH rewrites this to a worker-scoped path automatically; agents should not bake `/Volumes/USBNVME16TB/...` into remote command argv. |
 | Build-admission preflight | Stops before RCH when local workspace/target/tmp/artifact paths are below threshold. This is why an external `CARGO_TARGET_DIR` is necessary but not sufficient when `/System/Volumes/Data` is critically full. |
 
 ## Allowed Cargo subcommands and their wrapper variants
@@ -167,6 +182,13 @@ command and show the JSON `repairActions[]`; it does not rewrite the command.
 The `--probe-processes` mode is read-only incident evidence for support bundles,
 completion audits, and Beads comments. It reports local `cargo`/`rustc`/`rustdoc`
 processes targeting this checkout, but never kills or cleans anything.
+
+The live scan knows about the stable wrapper re-exec shape. A
+`bash -s -- ... cargo ...` wrapper shell is treated as compliant data plumbing,
+not as local Cargo; any spawned local `cargo`, `rustc`, or `rustdoc` child still
+appears as its own process row. The planned-command classifier remains stricter:
+a standalone `bash -s -- ... cargo ...` command string is still denied because
+it has no visible remote-required RCH launcher.
 
 Command-bearing Beads or Agent Mail updates need the same care as verifier
 commands. Do not place verifier commands inside shell command substitution when

@@ -8,7 +8,7 @@
 
 ## 1. What the radar detects
 
-The radar protects four contract surfaces from silent drift:
+The radar protects five contract surfaces from silent drift:
 
 | Surface | Stored in | How the radar checks it |
 |---|---|---|
@@ -16,6 +16,7 @@ The radar protects four contract surfaces from silent drift:
 | Agent-facing documentation references | `AGENTS.md`, `README.md`, `CLAUDE.md`, `docs/agent-ux/**/*.md`, `docs/external-derivation-operator.md`, `docs/agent_integration.md`, `docs/contract-drift-radar.md`, `docs/migration-guide.md` | Greps for stale envelope versions (`ee.response.v1`, `ee.error.v1`) when v2 ships, with allow-marker overrides for legacy prose. |
 | Embedded JSONC envelope examples | Same docs as above | Extracts ```json / ```jsonc fenced blocks containing `"schema":"ee.…"` and verifies the pinned schema id exists in the inventory. |
 | Degraded-code taxonomy | `docs/degraded_codes.md` vs `tests/fixtures/failure_modes/*.json` | Cross-checks every H2-headed code in the catalog against a per-code fixture. |
+| Dependency profile prose | `Cargo.toml`, `COMPREHENSIVE_PLAN.md`, `docs/dependency-contract-matrix.md`, `docs/dependency-research-notes.md` | Checks that current docs keep the accepted asupersync `0.3.3`, `default-features = false`, `tracing-integration` profile and do not revive stale `0.3.1`/`0.3.2` or default-feature guidance. |
 
 It does **not** replicate full JSON-schema validation — that is the
 Cargo-backed contract test
@@ -30,6 +31,9 @@ Run the radar after editing any of these surfaces:
 - A `docs/schemas/ee.*.json` schema file (added, renamed, bumped, or removed).
 - A current-facing doc that pins a schema id in a fenced JSON/JSONC example.
 - `docs/degraded_codes.md` or any `tests/fixtures/failure_modes/<code>.json`.
+- `COMPREHENSIVE_PLAN.md`, `docs/dependency-contract-matrix.md`, or
+  `docs/dependency-research-notes.md` when dependency pins, feature profiles,
+  or franken-stack guidance changes.
 - An `AGENTS.md` / `README.md` / `CLAUDE.md` block that describes envelope
   shape, exit codes, or schema versions.
 - `docs/migration-guide.md` when the migration plan changes.
@@ -72,13 +76,16 @@ Report shape (schema `ee.contract_drift_radar.v1`):
     "schemaIdViolations": 2,
     "documentedCodes": 419,
     "fixtureCodes": 419,
-    "documentedMissingFixture": 0
+    "documentedMissingFixture": 0,
+    "dependencyDocsChecked": 4,
+    "dependencyProfileViolations": 0
   },
   "schemaInventory": ["ee.response.v2", "ee.error.v2", "..."],
   "violations": {
     "docsScan": [],                 // stale_envelope_version_reference[]
     "jsonExampleCheck": [],         // json_example_schema_id_unknown[]
-    "taxonomyXcheck": []            // documented_code_missing_fixture[]
+    "taxonomyXcheck": [],           // documented_code_missing_fixture[]
+    "dependencyXcheck": []          // dependency_profile_drift[] | stale_dependency_profile_reference[]
   }
 }
 ```
@@ -86,7 +93,8 @@ Report shape (schema `ee.contract_drift_radar.v1`):
 Per-phase JSONL on stderr (also `--events-out`) uses
 `schema = "ee.test_event.v1"`, `surface = "contract_drift_radar"`,
 `beadId = "bd-31nul.5"`, and phases
-`inventory_load → docs_scan → json_example_check → taxonomy_xcheck → summary`.
+`inventory_load → docs_scan → json_example_check → taxonomy_xcheck →
+dependency_xcheck → summary`.
 
 ## 4. Interpreting violations
 
@@ -150,6 +158,44 @@ same PR.
 
 The reverse direction (fixture present but no doc) is checked by
 `tests/contracts/failure_mode_fixtures.rs`, not by this radar.
+
+### 4.4 `dependency_profile_drift`
+
+Triggered when a current dependency-contract source does not carry the accepted
+asupersync runtime profile:
+
+```toml
+asupersync = { version = "0.3.3", default-features = false, features = ["tracing-integration"] }
+```
+
+The static radar checks the `Cargo.toml` dependency line,
+`COMPREHENSIVE_PLAN.md`, the `docs/dependency-contract-matrix.md` row, and the
+`docs/dependency-research-notes.md` accepted-profile note. This is
+intentionally narrow: it catches the stale runtime-profile prose that agents use
+during dependency work, while Cargo-backed forbidden-dependency tests still
+prove the actual feature tree.
+
+**Fixes:**
+
+1. If `Cargo.toml` changed intentionally, update the dependency contract matrix
+   and research notes in the same change.
+2. If docs drifted, update the prose to match the accepted profile.
+3. If the accepted profile should change, land the ADR/golden/source update
+   together rather than changing only one surface.
+
+### 4.5 `stale_dependency_profile_reference`
+
+Triggered when current dependency guidance revives known-stale asupersync
+profile facts, such as `0.3.1`/`0.3.2`, `["test-internals", "proc-macros"]` as
+the default feature set, or prose telling agents to leave asupersync at default
+features.
+
+**Fixes:**
+
+1. Replace the stale statement with the accepted `0.3.3` no-default
+   `tracing-integration` profile.
+2. If the stale text is deliberately historical, move it to `docs/archive/` or
+   make the historical context explicit in a non-current-facing document.
 
 ## 5. Cargo-backed proof (RCH-only)
 
