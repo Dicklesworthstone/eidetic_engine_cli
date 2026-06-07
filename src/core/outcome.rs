@@ -4156,6 +4156,16 @@ mod tests {
     }
 
     #[test]
+    fn token_roi_cold_start_empty_is_inert() {
+        // No outcome data yet -> empty, inert report (no buckets, no influence).
+        let report = super::compute_token_roi(&[], 10);
+        assert_eq!(report.schema, "ee.token_roi.v1");
+        assert_eq!(report.bucket_count, 0);
+        assert!(report.buckets.is_empty());
+        assert!(report.table_hash.starts_with("blake3:"));
+    }
+
+    #[test]
     fn regime_shift_proposes_demotion_when_recent_window_flips_harmful() {
         use crate::core::sprt::SprtObservation::{Harmful, Helpful};
         // Long helpful history, then a recent harmful streak (post-upgrade flip).
