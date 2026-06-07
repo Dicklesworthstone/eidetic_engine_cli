@@ -69,6 +69,7 @@ pub const SEARCH_REVISION_TOKEN_SCHEMA_V1: &str = "ee.search.revision_token.v1";
 pub const SEARCH_SCORE_INTERVAL_SCHEMA_V1: &str = "ee.search.score_interval.v1";
 pub const SEARCH_SCORE_CALIBRATION_SCHEMA_V1: &str = "ee.search.score_calibration.v1";
 pub const SEARCH_SCORE_RECALIBRATION_SCHEMA_V1: &str = "ee.search.score_recalibration.v1";
+const SEARCH_QUERY_MISS_AUDIT_SCHEMA_V1: &str = "ee.search.query_miss.v1";
 const INDEX_STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 const SEARCH_SCORE_COVERAGE_GUARANTEE: f32 = 0.95;
 const MIN_SEARCH_SCORE_CALIBRATION_SAMPLES: usize = 20;
@@ -90,6 +91,8 @@ const HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON: &str =
     "active embedder source frankensearch_hash_fallback reports semantic=false";
 const SEARCH_MI_DEDUP_MIN_COSINE_SIMILARITY: f64 = 0.85;
 const SEARCH_MI_DEDUP_MIN_NORMALIZED_MI: f64 = 0.72;
+const QUERY_MISS_AUDIT_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
+const QUERY_MISS_AUDIT_SAMPLE_RATE: f64 = 1.0;
 
 /// Character cap for the top-level `contentPreview` field added to each search
 /// result. Agents previously had to dig into `metadata.content` (or make an
@@ -4375,10 +4378,91 @@ impl SearchAuditIdSource {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SearchQueryMissReason {
+    NoRelevantResults,
+    WeakQueryRecall,
+    LowRecallAfterFloor,
+}
+
+impl SearchQueryMissReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoRelevantResults => "no_relevant_results",
+            Self::WeakQueryRecall => "weak_query_recall",
+            Self::LowRecallAfterFloor => "low_recall_after_floor",
+        }
+    }
+}
+
+fn classify_search_query_miss(
+    kept: usize,
+    considered: usize,
+    floor: f32,
+    top_score_after_floor: Option<f32>,
+) -> Option<SearchQueryMissReason> {
+    if kept == 0 && considered > 0 {
+        return Some(SearchQueryMissReason::NoRelevantResults);
+    }
+    if let Some(top) = top_score_after_floor
+        && top.is_finite()
+        && top >= floor
+        && top < floor * 2.0
+    {
+        return Some(SearchQueryMissReason::WeakQueryRecall);
+    }
+    if considered >= 3 && (kept * 10) < (considered * 3) {
+        return Some(SearchQueryMissReason::LowRecallAfterFloor);
+    }
+    None
+}
+
+struct SearchQueryMissAuditDetails<'a> {
+    query_hash: &'a str,
+    reason: SearchQueryMissReason,
+    status: SearchStatus,
+    kept: usize,
+    considered: usize,
+    dropped_below_floor: usize,
+    floor: f32,
+    top_score_before_floor: Option<f32>,
+    top_score_after_floor: Option<f32>,
+}
+
+fn search_query_miss_audit_details(details: SearchQueryMissAuditDetails<'_>) -> String {
+    serde_json::json!({
+        "schema": SEARCH_QUERY_MISS_AUDIT_SCHEMA_V1,
+        "queryHash": details.query_hash,
+        "reason": details.reason.as_str(),
+        "status": details.status.as_str(),
+        "resultCount": details.kept,
+        "candidateCount": details.considered,
+        "droppedBelowFloor": details.dropped_below_floor,
+        "relevanceFloor": round_metric_f32(details.floor),
+        "topScoreBeforeFloor": optional_score_json(details.top_score_before_floor),
+        "topScoreAfterFloor": optional_score_json(details.top_score_after_floor),
+        "ttlSeconds": QUERY_MISS_AUDIT_TTL_SECONDS,
+        "sampling": {
+            "strategy": "all_low_utility_searches_v1",
+            "sampleRate": QUERY_MISS_AUDIT_SAMPLE_RATE,
+            "sampled": true,
+            "maxRowsPerSearch": 1,
+        },
+        "redaction": {
+            "strategy": "query_hash_only_v1",
+            "rawQueryStored": false,
+            "queryTextStored": false,
+            "queryVectorStored": false,
+        },
+    })
+    .to_string()
+}
+
 /// bd-21gya: per-search audit batch.
 ///
-/// Buffers `search.executed` / `search.returned_mem` / `redact_at_output`
-/// rows so the hot read path opens exactly one DbConnection and writes a
+/// Buffers `search.executed` / `search.miss_recorded` /
+/// `search.returned_mem` / `redact_at_output` rows so the hot read path opens
+/// exactly one DbConnection and writes a
 /// single transaction, instead of `1 + R + R*P` separate opens (one per
 /// returned hit and per redaction pattern).
 struct SearchAuditBatch {
@@ -4908,9 +4992,10 @@ fn run_search_inner_with_performance(
                 // bd-21gya: buffer audit rows and flush in one connection +
                 // one transaction instead of opening DbConnection per row.
                 // Capacity hint sized for the worst case (1 executed + 1
-                // returned_mem per hit + redaction overhead).
+                // optional miss row + 1 returned_mem per hit + redaction
+                // overhead).
                 let mut audit_batch =
-                    SearchAuditBatch::new(1 + above_floor.len().saturating_mul(2));
+                    SearchAuditBatch::new(2 + above_floor.len().saturating_mul(2));
                 audit_batch.push(
                     audit_ids,
                     Some(&workspace_id),
@@ -4919,6 +5004,33 @@ fn run_search_inner_with_performance(
                     Some(&workspace_id),
                     Some(executed_details),
                 );
+                if let Some(miss_reason) = classify_search_query_miss(
+                    kept,
+                    pre_floor_count,
+                    floor,
+                    above_floor.first().map(|hit| hit.score),
+                ) {
+                    let miss_details =
+                        search_query_miss_audit_details(SearchQueryMissAuditDetails {
+                            query_hash: &q_hash,
+                            reason: miss_reason,
+                            status,
+                            kept,
+                            considered: pre_floor_count,
+                            dropped_below_floor: dropped,
+                            floor,
+                            top_score_before_floor: pre_floor_top_score,
+                            top_score_after_floor: above_floor.first().map(|hit| hit.score),
+                        });
+                    audit_batch.push(
+                        audit_ids,
+                        Some(&workspace_id),
+                        audit_actions::SEARCH_MISS_RECORDED,
+                        Some("query_hash"),
+                        Some(&q_hash),
+                        Some(miss_details),
+                    );
+                }
                 for (rank, hit) in above_floor.iter().enumerate() {
                     let returned_details = serde_json::json!({
                         "queryHash": &q_hash,
@@ -11758,6 +11870,67 @@ mod tests {
         assert_eq!(json["code"], "no_relevant_results");
         assert_eq!(json["severity"], "medium");
         assert!(json["repair"].is_string());
+    }
+
+    #[test]
+    fn search_query_miss_classifies_no_relevant_results_first() {
+        assert_eq!(
+            classify_search_query_miss(0, 5, 0.05, None),
+            Some(SearchQueryMissReason::NoRelevantResults)
+        );
+    }
+
+    #[test]
+    fn search_query_miss_classifies_weak_recall_above_floor() {
+        assert_eq!(
+            classify_search_query_miss(2, 10, 0.05, Some(0.07)),
+            Some(SearchQueryMissReason::WeakQueryRecall)
+        );
+    }
+
+    #[test]
+    fn search_query_miss_classifies_low_recall_after_floor() {
+        assert_eq!(
+            classify_search_query_miss(2, 10, 0.05, Some(0.30)),
+            Some(SearchQueryMissReason::LowRecallAfterFloor)
+        );
+        assert_eq!(classify_search_query_miss(2, 6, 0.05, Some(0.30)), None);
+    }
+
+    #[test]
+    fn search_query_miss_audit_details_are_hash_only_and_ttl_bounded() -> TestResult {
+        let details = search_query_miss_audit_details(SearchQueryMissAuditDetails {
+            query_hash: "blake3:abcdef1234567890",
+            reason: SearchQueryMissReason::NoRelevantResults,
+            status: SearchStatus::NoResults,
+            kept: 0,
+            considered: 4,
+            dropped_below_floor: 4,
+            floor: 0.05,
+            top_score_before_floor: Some(0.01),
+            top_score_after_floor: None,
+        });
+        let value: serde_json::Value =
+            serde_json::from_str(&details).map_err(|error| error.to_string())?;
+
+        assert_eq!(value["schema"], SEARCH_QUERY_MISS_AUDIT_SCHEMA_V1);
+        assert_eq!(value["queryHash"], "blake3:abcdef1234567890");
+        assert_eq!(value["reason"], "no_relevant_results");
+        assert_eq!(value["status"], "no_results");
+        assert_eq!(value["resultCount"], 0);
+        assert_eq!(value["candidateCount"], 4);
+        assert_eq!(value["droppedBelowFloor"], 4);
+        assert_eq!(value["ttlSeconds"], QUERY_MISS_AUDIT_TTL_SECONDS);
+        assert_eq!(value["sampling"]["sampled"], true);
+        assert_eq!(value["sampling"]["maxRowsPerSearch"], 1);
+        assert_eq!(value["redaction"]["rawQueryStored"], false);
+        assert_eq!(value["redaction"]["queryTextStored"], false);
+        assert_eq!(value["redaction"]["queryVectorStored"], false);
+        assert!(
+            !details.contains("secret project name"),
+            "audit details must not contain raw query text"
+        );
+        Ok(())
     }
 
     // ========================================================================

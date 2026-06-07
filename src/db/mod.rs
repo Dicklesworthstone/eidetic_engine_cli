@@ -151,6 +151,8 @@ pub mod audit_actions {
 
     /// `ee search` executed against a workspace's index. One row per call.
     pub const SEARCH_EXECUTED: &str = "search.executed";
+    /// `ee search` produced a sampled, hash-only low-utility miss signal.
+    pub const SEARCH_MISS_RECORDED: &str = "search.miss_recorded";
     /// `ee search` returned a specific memory in its result set.
     pub const SEARCH_RETURNED_MEM: &str = "search.returned_mem";
     /// `ee context` assembled a pack. One row per call.
