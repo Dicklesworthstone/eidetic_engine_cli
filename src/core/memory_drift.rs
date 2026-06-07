@@ -7,9 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use super::workspace::stable_workspace_id;
 use crate::db::{DbConnection, StoredMemory};
-use crate::models::{
-    DomainError, MemoryAnchorFreshnessState, MemoryAnchorFreshnessTransition, StoredMemoryAnchor,
-};
+use crate::models::memory_anchor::MemoryAnchorFreshnessTransition;
+use crate::models::{DomainError, MemoryAnchorFreshnessState, StoredMemoryAnchor};
 
 pub const MEMORY_DRIFT_SNAPSHOT_SCHEMA_V1: &str = "ee.memory_drift.snapshot.v1";
 pub const MEMORY_DRIFT_QUEUE_SCHEMA_V1: &str = "ee.memory_drift.queue.v1";
