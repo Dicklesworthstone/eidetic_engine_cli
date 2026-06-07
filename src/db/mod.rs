@@ -5728,6 +5728,46 @@ CREATE INDEX IF NOT EXISTS freshness_state_generation_lookup
     "blake3:v066_memory_anchors_2026_06_07",
 );
 
+pub const V067_PACK_CANDIDATE_IMPRESSIONS: Migration = Migration::new(
+    67,
+    "pack_candidate_impressions",
+    r#"
+CREATE TABLE IF NOT EXISTS pack_candidate_impressions (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    query_hash TEXT NOT NULL CHECK (
+        length(query_hash) = 71 AND substr(query_hash, 1, 7) = 'blake3:'
+    ),
+    lens_hash TEXT NOT NULL CHECK (
+        length(lens_hash) = 71 AND substr(lens_hash, 1, 7) = 'blake3:'
+    ),
+    rank INTEGER CHECK (rank IS NULL OR rank >= 0),
+    section TEXT CHECK (section IS NULL OR length(trim(section)) > 0),
+    token_estimate INTEGER NOT NULL CHECK (token_estimate >= 0),
+    selected INTEGER NOT NULL CHECK (selected IN (0, 1)),
+    omission_reason TEXT CHECK (omission_reason IS NULL OR length(trim(omission_reason)) > 0),
+    db_generation INTEGER NOT NULL CHECK (db_generation >= 0),
+    index_generation INTEGER CHECK (index_generation IS NULL OR index_generation >= 0),
+    graph_generation INTEGER CHECK (graph_generation IS NULL OR graph_generation >= 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    PRIMARY KEY (pack_id, memory_id),
+    CHECK (
+        (selected = 1 AND rank IS NOT NULL AND section IS NOT NULL AND omission_reason IS NULL)
+        OR (selected = 0 AND rank IS NULL AND section IS NULL AND omission_reason IS NOT NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_pack_candidate_impressions_memory
+    ON pack_candidate_impressions(memory_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_pack_candidate_impressions_workspace
+    ON pack_candidate_impressions(workspace_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_pack_candidate_impressions_query_lens
+    ON pack_candidate_impressions(query_hash, lens_hash, memory_id);
+"#,
+    "blake3:v067_pack_candidate_impressions_2026_06_07",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -5796,6 +5836,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V064_REFLECTION_REQUEST_RESULT_REPLAY_HASH,
     V065_EVIDENCE_SPAN_CONTENT_HASH_BLAKE3_PREFIX,
     V066_MEMORY_ANCHORS,
+    V067_PACK_CANDIDATE_IMPRESSIONS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -15564,6 +15605,56 @@ pub struct StoredPackOmission {
     pub reason: String,
 }
 
+/// Input for recording one pack-selection impression row (ADR 0055,
+/// bd-1n0np.2.2). An impression captures that a candidate memory was seen by a
+/// pack assembly — whether it was selected into the pack or omitted — along with
+/// the join keys (`pack_id`, `query_hash`, `lens_hash`) and the derived-asset
+/// generations in play. Impressions are the passive substrate the Evidence
+/// Harvester joiner (bd-1n0np.2.4) later links to outcome evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateImpressionInput {
+    pub pack_id: String,
+    pub memory_id: String,
+    pub workspace_id: String,
+    pub query_hash: String,
+    pub lens_hash: String,
+    /// Selection rank within the pack; `None` for omitted candidates.
+    pub rank: Option<u32>,
+    /// Pack section the memory landed in; `None` for omitted candidates.
+    pub section: Option<String>,
+    pub token_estimate: u32,
+    pub selected: bool,
+    /// Omission reason; `Some` exactly when `selected` is false.
+    pub omission_reason: Option<String>,
+    /// Database schema generation in play when the impression was recorded.
+    pub db_generation: u32,
+    /// Search-index generation in play, when recorded.
+    pub index_generation: Option<u32>,
+    /// Graph-snapshot generation in play, when recorded.
+    pub graph_generation: Option<u32>,
+    /// RFC3339 timestamp the impression was recorded (shared with the pack record).
+    pub created_at: String,
+}
+
+/// A stored `impressions` row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredImpression {
+    pub pack_id: String,
+    pub memory_id: String,
+    pub workspace_id: String,
+    pub query_hash: String,
+    pub lens_hash: String,
+    pub rank: Option<u32>,
+    pub section: Option<String>,
+    pub token_estimate: u32,
+    pub selected: bool,
+    pub omission_reason: Option<String>,
+    pub db_generation: u32,
+    pub index_generation: Option<u32>,
+    pub graph_generation: Option<u32>,
+    pub created_at: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackSelectionLedgerCore {
@@ -15703,6 +15794,9 @@ const PACK_ITEM_INSERT_BATCH_ROWS: usize =
     PACK_INSERT_MAX_BIND_PARAMS / PACK_ITEM_INSERT_VALUE_COUNT;
 const PACK_OMISSION_INSERT_BATCH_ROWS: usize =
     PACK_INSERT_MAX_BIND_PARAMS / PACK_OMISSION_INSERT_VALUE_COUNT;
+const IMPRESSION_INSERT_VALUE_COUNT: usize = 14;
+const IMPRESSION_INSERT_BATCH_ROWS: usize =
+    PACK_INSERT_MAX_BIND_PARAMS / IMPRESSION_INSERT_VALUE_COUNT;
 const PACK_REPLAY_LEDGER_COMPRESSION_LEVEL: i32 = 3;
 const PACK_REPLAY_LEDGER_COMPRESSION_MIN_BYTES: usize = 4 * 1024;
 
@@ -15760,9 +15854,15 @@ impl DbConnection {
             timings.item_writes = item_start.elapsed();
 
             let omission_start = Instant::now();
-            self.insert_pack_omissions(omissions).map(|()| {
-                timings.omission_writes = omission_start.elapsed();
-            })
+            self.insert_pack_omissions(omissions)?;
+            timings.omission_writes = omission_start.elapsed();
+
+            // Record one passive impression row per packed/omitted candidate
+            // (ADR 0055, bd-1n0np.2.2). This rides the same persistence
+            // chokepoint as the pack record, so it inherits read-only /
+            // no-persist gating for free.
+            let impressions = build_impression_inputs(id, input, items, omissions, &now);
+            self.insert_impressions(&impressions)
         })?;
         timings.transaction = transaction_start.elapsed();
         Ok(timings)
@@ -15858,6 +15958,99 @@ impl DbConnection {
         Ok(())
     }
 
+    /// Insert pack-selection impression rows (ADR 0055, bd-1n0np.2.2).
+    ///
+    /// Called inside the pack-record transaction so impressions land exactly
+    /// when a pack is persisted. `INSERT OR IGNORE` keeps the call idempotent
+    /// against the `(pack_id, memory_id)` primary key if a candidate appears
+    /// more than once in the input slices.
+    pub fn insert_impressions(&self, impressions: &[CreateImpressionInput]) -> Result<()> {
+        for chunk in impressions.chunks(IMPRESSION_INSERT_BATCH_ROWS) {
+            let mut sql = String::from(
+                "INSERT OR IGNORE INTO pack_candidate_impressions (pack_id, memory_id, workspace_id, query_hash, lens_hash, rank, section, token_estimate, selected, omission_reason, db_generation, index_generation, graph_generation, created_at) VALUES ",
+            );
+            append_multi_row_placeholders(&mut sql, chunk.len(), IMPRESSION_INSERT_VALUE_COUNT);
+
+            let mut params = Vec::with_capacity(chunk.len() * IMPRESSION_INSERT_VALUE_COUNT);
+            for impression in chunk {
+                params.push(Value::Text(impression.pack_id.clone()));
+                params.push(Value::Text(impression.memory_id.clone()));
+                params.push(Value::Text(impression.workspace_id.clone()));
+                params.push(Value::Text(impression.query_hash.clone()));
+                params.push(Value::Text(impression.lens_hash.clone()));
+                params.push(
+                    impression
+                        .rank
+                        .map_or(Value::Null, |rank| Value::BigInt(i64::from(rank))),
+                );
+                params.push(
+                    impression
+                        .section
+                        .as_ref()
+                        .map_or(Value::Null, |section| Value::Text(section.clone())),
+                );
+                params.push(Value::BigInt(i64::from(impression.token_estimate)));
+                params.push(Value::BigInt(i64::from(impression.selected)));
+                params.push(
+                    impression
+                        .omission_reason
+                        .as_ref()
+                        .map_or(Value::Null, |reason| Value::Text(reason.clone())),
+                );
+                params.push(Value::BigInt(i64::from(impression.db_generation)));
+                params.push(
+                    impression
+                        .index_generation
+                        .map_or(Value::Null, |generation| {
+                            Value::BigInt(i64::from(generation))
+                        }),
+                );
+                params.push(
+                    impression
+                        .graph_generation
+                        .map_or(Value::Null, |generation| {
+                            Value::BigInt(i64::from(generation))
+                        }),
+                );
+                params.push(Value::Text(impression.created_at.clone()));
+            }
+
+            self.execute_for(DbOperation::Execute, &sql, &params)?;
+        }
+
+        Ok(())
+    }
+
+    /// List impressions recorded for a pack, in deterministic order.
+    pub fn list_impressions_for_pack(&self, pack_id: &str) -> Result<Vec<StoredImpression>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT pack_id, memory_id, workspace_id, query_hash, lens_hash, rank, section, token_estimate, selected, omission_reason, db_generation, index_generation, graph_generation, created_at FROM pack_candidate_impressions WHERE pack_id = ?1 ORDER BY selected DESC, rank ASC, memory_id ASC",
+            &[Value::Text(pack_id.to_string())],
+        )?;
+
+        rows.iter().map(stored_impression_from_row).collect()
+    }
+
+    /// List the most recent impressions referencing a memory (for the harvester
+    /// joiner and `ee why`), newest first.
+    pub fn list_impressions_for_memory(
+        &self,
+        memory_id: &str,
+        limit: u32,
+    ) -> Result<Vec<StoredImpression>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT pack_id, memory_id, workspace_id, query_hash, lens_hash, rank, section, token_estimate, selected, omission_reason, db_generation, index_generation, graph_generation, created_at FROM pack_candidate_impressions WHERE memory_id = ?1 ORDER BY created_at DESC, pack_id DESC LIMIT ?2",
+            &[
+                Value::Text(memory_id.to_string()),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?;
+
+        rows.iter().map(stored_impression_from_row).collect()
+    }
+
     /// Get a pack record by ID.
     pub fn get_pack_record(&self, id: &str) -> Result<Option<StoredPackRecord>> {
         let rows = self.query_for(
@@ -15942,6 +16135,102 @@ impl DbConnection {
             })
             .collect()
     }
+}
+
+/// Deterministic query-join hash for an impression (ADR 0055). Matches an
+/// impression to the exact query text its pack served.
+fn impression_query_hash(query: &str) -> String {
+    blake3_text_hash(query)
+}
+
+/// Deterministic lens/profile-join hash for an impression. The lens is the
+/// retrieval shape (profile + token budget) the pack was assembled under.
+fn impression_lens_hash(profile: &str, max_tokens: u32) -> String {
+    blake3_text_hash(&format!("{profile}\u{0}{max_tokens}"))
+}
+
+/// Build one impression row per packed/omitted candidate from the same inputs
+/// used to persist a pack record. Selected items are emitted first so that, on
+/// the `(pack_id, memory_id)` primary key, a selection takes precedence over a
+/// duplicate omission via `INSERT OR IGNORE`.
+fn build_impression_inputs(
+    id: &str,
+    input: &CreatePackRecordInput,
+    items: &[CreatePackItemInput],
+    omissions: &[CreatePackOmissionInput],
+    created_at: &str,
+) -> Vec<CreateImpressionInput> {
+    let query_hash = impression_query_hash(&input.query);
+    let lens_hash = impression_lens_hash(&input.profile, input.max_tokens);
+    let db_generation = latest_schema_version();
+    let mut impressions = Vec::with_capacity(items.len().saturating_add(omissions.len()));
+    for item in items {
+        impressions.push(CreateImpressionInput {
+            pack_id: id.to_string(),
+            memory_id: item.memory_id.clone(),
+            workspace_id: input.workspace_id.clone(),
+            query_hash: query_hash.clone(),
+            lens_hash: lens_hash.clone(),
+            rank: Some(item.rank),
+            section: Some(item.section.clone()),
+            token_estimate: item.estimated_tokens,
+            selected: true,
+            omission_reason: None,
+            db_generation,
+            index_generation: None,
+            graph_generation: None,
+            created_at: created_at.to_string(),
+        });
+    }
+    for omission in omissions {
+        impressions.push(CreateImpressionInput {
+            pack_id: id.to_string(),
+            memory_id: omission.memory_id.clone(),
+            workspace_id: input.workspace_id.clone(),
+            query_hash: query_hash.clone(),
+            lens_hash: lens_hash.clone(),
+            rank: None,
+            section: None,
+            token_estimate: omission.estimated_tokens,
+            selected: false,
+            omission_reason: Some(omission.reason.clone()),
+            db_generation,
+            index_generation: None,
+            graph_generation: None,
+            created_at: created_at.to_string(),
+        });
+    }
+    impressions
+}
+
+fn optional_u32_column(row: &Row, index: usize, column: &str) -> Result<Option<u32>> {
+    optional_i64(row, index, DbOperation::Query, column)?
+        .map(|value| {
+            u32::try_from(value).map_err(|_| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: format!("{column} column at index {index} must fit u32"),
+            })
+        })
+        .transpose()
+}
+
+fn stored_impression_from_row(row: &Row) -> Result<StoredImpression> {
+    Ok(StoredImpression {
+        pack_id: required_text(row, 0, DbOperation::Query, "pack_id")?.to_string(),
+        memory_id: required_text(row, 1, DbOperation::Query, "memory_id")?.to_string(),
+        workspace_id: required_text(row, 2, DbOperation::Query, "workspace_id")?.to_string(),
+        query_hash: required_text(row, 3, DbOperation::Query, "query_hash")?.to_string(),
+        lens_hash: required_text(row, 4, DbOperation::Query, "lens_hash")?.to_string(),
+        rank: optional_u32_column(row, 5, "rank")?,
+        section: optional_text(row, 6)?.map(str::to_string),
+        token_estimate: required_u32(row, 7, DbOperation::Query, "token_estimate")?,
+        selected: required_i64(row, 8, DbOperation::Query, "selected")? != 0,
+        omission_reason: optional_text(row, 9)?.map(str::to_string),
+        db_generation: required_u32(row, 10, DbOperation::Query, "db_generation")?,
+        index_generation: optional_u32_column(row, 11, "index_generation")?,
+        graph_generation: optional_u32_column(row, 12, "graph_generation")?,
+        created_at: required_text(row, 13, DbOperation::Query, "created_at")?.to_string(),
+    })
 }
 
 fn build_pack_selection_ledger(
@@ -30565,6 +30854,154 @@ mod tests {
         )?;
 
         connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn pack_persist_records_impressions_for_selected_and_omitted() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_pack_test_memory(&connection)?;
+
+        let pack_id = "pack_000000000000000000000imp01";
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: "cargo formatting".to_string(),
+            profile: "balanced".to_string(),
+            max_tokens: 4000,
+            used_tokens: 150,
+            item_count: 1,
+            omitted_count: 1,
+            pack_hash: "blake3:impr-pack".to_string(),
+            degraded_json: None,
+            created_by: Some("ee context".to_string()),
+        };
+        let items = vec![pack_item_input(
+            pack_id,
+            "mem_00000000000000000000pack01",
+            1,
+        )];
+        let omissions = vec![pack_omission_input(
+            pack_id,
+            "mem_00000000000000000000pack02",
+        )];
+
+        connection.insert_pack_record(pack_id, &input, &items, &omissions)?;
+
+        let impressions = connection.list_impressions_for_pack(pack_id)?;
+        ensure_equal(&impressions.len(), &2_usize, "impression row count")?;
+
+        // Ordered selected-first by list_impressions_for_pack.
+        let selected = &impressions[0];
+        ensure_equal(&selected.selected, &true, "first impression selected flag")?;
+        ensure_equal(
+            &selected.memory_id,
+            &"mem_00000000000000000000pack01".to_string(),
+            "selected impression memory",
+        )?;
+        ensure_equal(&selected.rank, &Some(1_u32), "selected impression rank")?;
+        ensure_equal(
+            &selected.section,
+            &Some("procedural_rules".to_string()),
+            "selected impression section",
+        )?;
+        ensure_equal(
+            &selected.omission_reason,
+            &None,
+            "selected impression has no omission reason",
+        )?;
+        ensure_equal(
+            &selected.db_generation,
+            &super::latest_schema_version(),
+            "selected impression db generation",
+        )?;
+
+        let omitted = &impressions[1];
+        ensure_equal(&omitted.selected, &false, "second impression omitted flag")?;
+        ensure_equal(&omitted.rank, &None, "omitted impression rank")?;
+        ensure_equal(&omitted.section, &None, "omitted impression section")?;
+        ensure_equal(
+            &omitted.omission_reason,
+            &Some("token_budget_exceeded".to_string()),
+            "omitted impression reason",
+        )?;
+
+        // Join keys are stable blake3:-prefixed hashes shared across the pack.
+        ensure_equal(
+            &selected.query_hash,
+            &omitted.query_hash,
+            "query hash shared across pack",
+        )?;
+        ensure_equal(
+            &selected.lens_hash,
+            &omitted.lens_hash,
+            "lens hash shared across pack",
+        )?;
+        ensure_equal(&selected.query_hash.len(), &71_usize, "query hash length")?;
+        ensure_equal(
+            &selected.query_hash.starts_with("blake3:"),
+            &true,
+            "query hash prefix",
+        )?;
+
+        let by_memory =
+            connection.list_impressions_for_memory("mem_00000000000000000000pack01", 10)?;
+        ensure_equal(&by_memory.len(), &1_usize, "impressions for memory")?;
+        ensure_equal(
+            &by_memory[0].pack_id,
+            &pack_id.to_string(),
+            "memory impression pack id",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn impression_join_hashes_are_deterministic_and_query_sensitive() -> TestResult {
+        let pack_id = "pack_000000000000000000000imp02";
+        let base = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: "cargo verification".to_string(),
+            profile: "balanced".to_string(),
+            max_tokens: 4000,
+            used_tokens: 100,
+            item_count: 1,
+            omitted_count: 0,
+            pack_hash: "blake3:impr-det".to_string(),
+            degraded_json: None,
+            created_by: Some("ee context".to_string()),
+        };
+        let items = vec![pack_item_input(
+            pack_id,
+            "mem_00000000000000000000pack01",
+            1,
+        )];
+        let created_at = "2026-06-07T01:00:00Z";
+
+        let first = super::build_impression_inputs(pack_id, &base, &items, &[], created_at);
+        let second = super::build_impression_inputs(pack_id, &base, &items, &[], created_at);
+        ensure_equal(&first, &second, "deterministic impression inputs")?;
+
+        let mut different_query = base.clone();
+        different_query.query = "cargo formatting".to_string();
+        let other =
+            super::build_impression_inputs(pack_id, &different_query, &items, &[], created_at);
+        ensure_equal(
+            &(first[0].query_hash == other[0].query_hash),
+            &false,
+            "query hash changes with query text",
+        )?;
+
+        let mut different_lens = base.clone();
+        different_lens.profile = "thorough".to_string();
+        let lens_other =
+            super::build_impression_inputs(pack_id, &different_lens, &items, &[], created_at);
+        ensure_equal(
+            &(first[0].lens_hash == lens_other[0].lens_hash),
+            &false,
+            "lens hash changes with profile",
+        )?;
         Ok(())
     }
 
