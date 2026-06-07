@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -47,6 +48,7 @@ const INSIGHTS_SECTION_UNAVAILABLE_MESSAGE: &str =
     "One or more registered insights sections do not have DB-backed evidence yet.";
 const INSIGHTS_SECTION_UNAVAILABLE_REPAIR: &str =
     "Use sections with non-empty evidence, or implement the unavailable section builder.";
+const BLIND_SPOT_SCHEMA_V1: &str = "ee.insights.blind_spots.v1";
 const BRIDGE_INSIGHT_SCHEMA_V1: &str = "ee.graph.bridge_insight.v1";
 const KNOWLEDGE_GAP_SCHEMA_V1: &str = "ee.graph.knowledge_gap.v1";
 const TOP_MEMORY_INSIGHT_SCHEMA_V1: &str = "ee.graph.top_memory.v1";
@@ -60,7 +62,7 @@ type SectionRegistryEntry = (&'static str, &'static str, SectionBuilder);
 pub struct InsightsArgs {
     /// Emit only one insight section by name. Names are case-insensitive and
     /// accept both lowercase and canonical-camelCase form. Available:
-    /// authorities, bridges, causalBottlenecks, comprehensiveRules,
+    /// authorities, blindSpots, bridges, causalBottlenecks, comprehensiveRules,
     /// contradictionClusters, hubs, kCore, kTruss, knowledgeGaps,
     /// knowledgeSkyline, loadBearingMemories, proximityHotspots, revisionFrontiers,
     /// topMemories.
@@ -203,6 +205,43 @@ struct BridgeInsightInput {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct BlindSpotInput {
+    symbol_id: String,
+    path: String,
+    canonical_name: String,
+    symbol_kind: &'static str,
+    start_line: u32,
+    end_line: u32,
+    snapshot_hash: String,
+    total_node_count: usize,
+    covered_node_count: usize,
+    coverage_ratio: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct BlindSpotCoverageIndex {
+    file_provenance_paths: BTreeSet<String>,
+    lexical_corpus: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BlindSpotCoverageSource {
+    FileProvenance,
+    LexicalPathMention,
+    LexicalSymbolMention,
+}
+
+impl BlindSpotCoverageSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::FileProvenance => "file_provenance",
+            Self::LexicalPathMention => "lexical_path_mention",
+            Self::LexicalSymbolMention => "lexical_symbol_mention",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct KnowledgeGapInput {
     category: &'static str,
     source_memory_ids: Vec<String>,
@@ -270,6 +309,7 @@ pub struct InsightsBuildOptions<'a> {
 fn section_registry() -> Vec<SectionRegistryEntry> {
     vec![
         ("authorities", "authorities", authorities_section),
+        ("blindspots", "blindSpots", blind_spots_section),
         ("bridges", "bridges", bridges_section),
         (
             "causalbottlenecks",
@@ -468,6 +508,10 @@ fn build_registry_section(
         "authorities" => {
             let scores = load_hits_scores(workspace)?;
             Ok(authorities_section_from_scores(&scores))
+        }
+        "blindSpots" => {
+            let inputs = load_blind_spot_inputs(workspace)?;
+            Ok(blind_spots_section_from_inputs(&inputs))
         }
         "causalBottlenecks" => {
             let reports = load_causal_bottleneck_reports(workspace)?;
@@ -688,6 +732,26 @@ fn load_bridge_inputs(workspace: Option<&Path>) -> Result<Vec<BridgeInsightInput
         return Ok(Vec::new());
     };
     bridge_inputs_from_links(&data.links)
+}
+
+fn load_blind_spot_inputs(workspace: Option<&Path>) -> Result<Vec<BlindSpotInput>, DomainError> {
+    let Some(workspace) = workspace else {
+        return Ok(Vec::new());
+    };
+    let rust_paths = collect_rust_source_paths(workspace)?;
+    if rust_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let snapshot = crate::core::symbol_graph::SymbolGraphExtractor::default()
+        .extract_paths(workspace, rust_paths);
+    let memories = load_workspace_insights_graph_data(Some(workspace))?
+        .map(|data| data.memories)
+        .unwrap_or_default();
+    Ok(blind_spot_inputs_from_symbol_snapshot(
+        &snapshot,
+        &memories,
+        Some(workspace),
+    ))
 }
 
 fn load_contradiction_clusters(
@@ -1063,6 +1127,229 @@ fn contradiction_clusters_from_links(
     }
     let graph = proximity_graph_from_links(&contradiction_links)?;
     Ok(crate::graph::health::detect_contradiction_clusters(&graph))
+}
+
+fn collect_rust_source_paths(workspace: &Path) -> Result<Vec<PathBuf>, DomainError> {
+    let mut paths = Vec::new();
+    collect_rust_source_paths_inner(workspace, workspace, &mut paths)?;
+    paths.sort_by_key(|path| normalize_path_for_insights_order(workspace, path));
+    Ok(paths)
+}
+
+fn collect_rust_source_paths_inner(
+    workspace: &Path,
+    dir: &Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), DomainError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if dir == workspace && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Failed to read Rust source directory `{}`: {error}",
+                    dir.display()
+                ),
+                repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            });
+        }
+    };
+    let mut entries =
+        entries
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to enumerate Rust source directory `{}`: {error}",
+                    dir.display()
+                ),
+                repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            })?;
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if should_skip_blind_spot_dir(&file_name) {
+            continue;
+        }
+        let metadata = entry.metadata().map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to inspect Rust source path `{}`: {error}",
+                path.display()
+            ),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })?;
+        if metadata.is_dir() {
+            collect_rust_source_paths_inner(workspace, &path, paths)?;
+        } else if metadata.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension == std::ffi::OsStr::new("rs"))
+        {
+            paths.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn should_skip_blind_spot_dir(file_name: &str) -> bool {
+    matches!(
+        file_name,
+        ".git" | ".hg" | ".svn" | ".ee" | ".beads" | "target" | "node_modules"
+    )
+}
+
+fn normalize_path_for_insights_order(workspace: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(workspace).unwrap_or(path);
+    normalize_insights_path(&relative.to_string_lossy())
+}
+
+fn blind_spot_inputs_from_symbol_snapshot(
+    snapshot: &crate::models::SymbolSnapshot,
+    memories: &[StoredMemory],
+    workspace: Option<&Path>,
+) -> Vec<BlindSpotInput> {
+    if snapshot.symbols.is_empty() {
+        return Vec::new();
+    }
+    let coverage = blind_spot_coverage_index(memories, workspace);
+    let total_node_count = snapshot.symbols.len();
+    let mut covered_node_count = 0usize;
+    let mut uncovered = Vec::new();
+
+    let mut symbols = snapshot.symbols.iter().collect::<Vec<_>>();
+    symbols.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.range.start_line.cmp(&right.range.start_line))
+            .then_with(|| left.canonical_name.cmp(&right.canonical_name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    for symbol in symbols {
+        if coverage.source_for(symbol).is_some() {
+            covered_node_count += 1;
+            continue;
+        }
+        uncovered.push(symbol);
+    }
+
+    let coverage_ratio = if total_node_count == 0 {
+        1.0
+    } else {
+        covered_node_count as f64 / total_node_count as f64
+    };
+
+    uncovered
+        .into_iter()
+        .map(|symbol| BlindSpotInput {
+            symbol_id: symbol.id.clone(),
+            path: symbol.path.clone(),
+            canonical_name: symbol.canonical_name.clone(),
+            symbol_kind: symbol.kind.as_str(),
+            start_line: symbol.range.start_line,
+            end_line: symbol.range.end_line,
+            snapshot_hash: snapshot.snapshot_hash.clone(),
+            total_node_count,
+            covered_node_count,
+            coverage_ratio,
+        })
+        .collect()
+}
+
+fn blind_spot_coverage_index(
+    memories: &[StoredMemory],
+    workspace: Option<&Path>,
+) -> BlindSpotCoverageIndex {
+    let mut index = BlindSpotCoverageIndex::default();
+    for memory in memories {
+        if let Some(provenance_uri) = memory.provenance_uri.as_deref() {
+            if let Some(path) = file_provenance_path_for_blind_spots(provenance_uri, workspace) {
+                index.file_provenance_paths.insert(path.clone());
+                index.lexical_corpus.push(' ');
+                index.lexical_corpus.push_str(&path.to_ascii_lowercase());
+            }
+        }
+        index.lexical_corpus.push(' ');
+        index
+            .lexical_corpus
+            .push_str(&memory.content.to_ascii_lowercase());
+    }
+    index
+}
+
+impl BlindSpotCoverageIndex {
+    fn source_for(&self, symbol: &crate::models::SymbolRecord) -> Option<BlindSpotCoverageSource> {
+        if self.file_provenance_paths.contains(&symbol.path) {
+            return Some(BlindSpotCoverageSource::FileProvenance);
+        }
+        let path = symbol.path.to_ascii_lowercase();
+        if !path.is_empty() && self.lexical_corpus.contains(&path) {
+            return Some(BlindSpotCoverageSource::LexicalPathMention);
+        }
+        if contains_identifier_mention(&self.lexical_corpus, &symbol.canonical_name) {
+            return Some(BlindSpotCoverageSource::LexicalSymbolMention);
+        }
+        symbol
+            .canonical_name
+            .rsplit("::")
+            .next()
+            .filter(|short_name| *short_name != symbol.canonical_name)
+            .and_then(|short_name| {
+                contains_identifier_mention(&self.lexical_corpus, short_name)
+                    .then_some(BlindSpotCoverageSource::LexicalSymbolMention)
+            })
+    }
+}
+
+fn file_provenance_path_for_blind_spots(
+    provenance_uri: &str,
+    workspace: Option<&Path>,
+) -> Option<String> {
+    let path = provenance_uri.strip_prefix("file://")?;
+    let path = path.split('#').next().unwrap_or(path);
+    if path.trim().is_empty() {
+        return None;
+    }
+    let path = Path::new(path);
+    let relative = workspace.and_then(|workspace| path.strip_prefix(workspace).ok());
+    let normalized = relative.unwrap_or(path).to_string_lossy();
+    Some(normalize_insights_path(&normalized))
+}
+
+fn normalize_insights_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_owned()
+}
+
+fn contains_identifier_mention(corpus: &str, needle: &str) -> bool {
+    let needle = needle.to_ascii_lowercase();
+    if needle.len() < 4 {
+        return false;
+    }
+    let mut search_from = 0usize;
+    while let Some(offset) = corpus[search_from..].find(&needle) {
+        let start = search_from + offset;
+        let end = start + needle.len();
+        let before = corpus[..start].chars().next_back();
+        let after = corpus[end..].chars().next();
+        if before.is_none_or(|character| !is_identifier_char(character))
+            && after.is_none_or(|character| !is_identifier_char(character))
+        {
+            return true;
+        }
+        search_from = end;
+    }
+    false
+}
+
+fn is_identifier_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
 }
 
 fn knowledge_gap_inputs_from_graph_data(
@@ -1823,6 +2110,75 @@ fn authorities_section_from_scores(scores: &HitsScores) -> InsightsSection {
 
 fn bridges_section() -> InsightsSection {
     bridges_section_from_inputs(&[])
+}
+
+fn blind_spots_section() -> InsightsSection {
+    blind_spots_section_from_inputs(&[])
+}
+
+fn blind_spots_section_from_inputs(inputs: &[BlindSpotInput]) -> InsightsSection {
+    let mut inputs = inputs.to_vec();
+    sort_blind_spot_inputs(&mut inputs);
+    let items = inputs
+        .into_iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let blind_spot_id = blind_spot_id(&input.symbol_id);
+            serde_json::json!({
+                "rank": index + 1,
+                "blindSpotId": blind_spot_id,
+                "path": input.path,
+                "symbolId": input.symbol_id,
+                "canonicalName": input.canonical_name,
+                "symbolKind": input.symbol_kind,
+                "coverageStatus": "uncovered",
+                "coverageRatio": input.coverage_ratio,
+                "coveredNodeCount": input.covered_node_count,
+                "totalNodeCount": input.total_node_count,
+                "sourceRange": {
+                    "startLine": input.start_line,
+                    "endLine": input.end_line,
+                },
+                "explanation": "No current memory file provenance, lexical path mention, or lexical symbol mention covers this code-graph node.",
+                "evidence": {
+                    "schema": BLIND_SPOT_SCHEMA_V1,
+                    "signal": "code_graph_memory_coverage_complement",
+                    "algorithm": "symbol_snapshot_minus_memory_file_or_lexical_mentions",
+                    "snapshotHash": input.snapshot_hash,
+                    "anchorTableRequired": false,
+                    "coverageSources": [
+                        BlindSpotCoverageSource::FileProvenance.as_str(),
+                        BlindSpotCoverageSource::LexicalPathMention.as_str(),
+                        BlindSpotCoverageSource::LexicalSymbolMention.as_str(),
+                    ],
+                },
+            })
+        })
+        .collect();
+
+    InsightsSection {
+        name: "blindSpots",
+        title: "Blind Spots",
+        summary: "Code-graph nodes with no matching memory file provenance, path mention, or symbol mention.",
+        why_it_matters: "Blind spots give agents a calibrated caution signal before they rely on memory for code areas the store does not cover.",
+        items,
+        next_commands: vec!["ee insights --section blindSpots --workspace . --json"],
+    }
+}
+
+fn sort_blind_spot_inputs(inputs: &mut [BlindSpotInput]) {
+    inputs.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.start_line.cmp(&right.start_line))
+            .then_with(|| left.canonical_name.cmp(&right.canonical_name))
+            .then_with(|| left.symbol_id.cmp(&right.symbol_id))
+    });
+}
+
+fn blind_spot_id(symbol_id: &str) -> String {
+    let digest = blake3::hash(symbol_id.as_bytes()).to_hex();
+    format!("bs_{}", &digest[..16])
 }
 
 fn bridges_section_from_inputs(inputs: &[BridgeInsightInput]) -> InsightsSection {
@@ -2646,6 +3002,7 @@ mod tests {
             report.available_sections,
             vec![
                 "authorities",
+                "blindSpots",
                 "bridges",
                 "causalBottlenecks",
                 "comprehensiveRules",
@@ -3531,6 +3888,106 @@ mod tests {
         );
 
         assert_eq!(forward_section.items, reverse_section.items);
+        Ok(())
+    }
+
+    #[test]
+    fn blind_spots_use_symbol_graph_minus_memory_coverage_without_anchors() -> TestResult {
+        let snapshot = crate::core::symbol_graph::extract_rust_symbol_snapshot_from_sources(&[
+            crate::core::symbol_graph::RustSourceInput::new(
+                "src/covered.rs",
+                "pub fn covered_by_file() {}\n",
+            ),
+            crate::core::symbol_graph::RustSourceInput::new(
+                "src/mixed.rs",
+                "pub fn mentioned_symbol() {}\npub fn uncovered_symbol() {}\n",
+            ),
+        ]);
+        let mut file_memory = stored_memory(
+            "mem_file_coverage",
+            "semantic",
+            "fact",
+            "A memory with direct file provenance.",
+            0.9,
+        );
+        file_memory.provenance_uri = Some("file://src/covered.rs#L1".to_owned());
+        let symbol_memory = stored_memory(
+            "mem_symbol_coverage",
+            "semantic",
+            "fact",
+            "The mentioned_symbol function carries the contract.",
+            0.9,
+        );
+
+        let inputs =
+            blind_spot_inputs_from_symbol_snapshot(&snapshot, &[file_memory, symbol_memory], None);
+        let section = blind_spots_section_from_inputs(&inputs);
+        let item = section
+            .items
+            .first()
+            .ok_or_else(|| "blindSpots should include the uncovered symbol".to_owned())?;
+
+        assert_eq!(section.name, "blindSpots");
+        assert_eq!(section.items.len(), 1);
+        assert_eq!(item["canonicalName"].as_str(), Some("uncovered_symbol"));
+        assert_eq!(item["path"].as_str(), Some("src/mixed.rs"));
+        assert_eq!(item["coverageStatus"].as_str(), Some("uncovered"));
+        assert_eq!(item["coveredNodeCount"].as_u64(), Some(2));
+        assert_eq!(item["totalNodeCount"].as_u64(), Some(3));
+        assert_eq!(
+            item["evidence"]["schema"].as_str(),
+            Some(BLIND_SPOT_SCHEMA_V1)
+        );
+        assert_eq!(
+            item["evidence"]["anchorTableRequired"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            item["evidence"]["algorithm"].as_str(),
+            Some("symbol_snapshot_minus_memory_file_or_lexical_mentions")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn blind_spots_are_deterministic_across_fixture_order() -> TestResult {
+        let forward = crate::core::symbol_graph::extract_rust_symbol_snapshot_from_sources(&[
+            crate::core::symbol_graph::RustSourceInput::new(
+                "src/beta.rs",
+                "pub fn beta_gap() {}\n",
+            ),
+            crate::core::symbol_graph::RustSourceInput::new(
+                "src/alpha.rs",
+                "pub fn alpha_gap() {}\n",
+            ),
+        ]);
+        let reverse = crate::core::symbol_graph::extract_rust_symbol_snapshot_from_sources(&[
+            crate::core::symbol_graph::RustSourceInput::new(
+                "src/alpha.rs",
+                "pub fn alpha_gap() {}\n",
+            ),
+            crate::core::symbol_graph::RustSourceInput::new(
+                "src/beta.rs",
+                "pub fn beta_gap() {}\n",
+            ),
+        ]);
+
+        let forward_section = blind_spots_section_from_inputs(
+            &blind_spot_inputs_from_symbol_snapshot(&forward, &[], None),
+        );
+        let reverse_section = blind_spots_section_from_inputs(
+            &blind_spot_inputs_from_symbol_snapshot(&reverse, &[], None),
+        );
+
+        assert_eq!(forward_section.items, reverse_section.items);
+        assert_eq!(
+            forward_section
+                .items
+                .iter()
+                .map(|item| item["canonicalName"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["alpha_gap", "beta_gap"]
+        );
         Ok(())
     }
 

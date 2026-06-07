@@ -45,6 +45,7 @@
       "pagination": null,
       "availableSections": [
         "authorities",
+        "blindSpots",
         "bridges",
         "causalBottlenecks",
         "comprehensiveRules",
@@ -61,6 +62,7 @@
       ],
       "sections": [
         {"name": "authorities", "title": "Authority Memories", "summary": "HITS authority scores for memories that ground claims from many hubs.", "whyItMatters": "Authority memories help agents distinguish grounded evidence from navigational references.", "items": [], "nextCommands": ["ee insights --section authorities --workspace . --json"]},
+        {"name": "blindSpots", "title": "Blind Spots", "summary": "Code-graph nodes with no matching memory file provenance, path mention, or symbol mention.", "whyItMatters": "Blind spots give agents a calibrated caution signal before they rely on memory for code areas the store does not cover.", "items": [], "nextCommands": ["ee insights --section blindSpots --workspace . --json"]},
         {"name": "bridges", "title": "Bridge Memories", "summary": "Top articulation-point memories ranked by cluster-disconnection-magnitude.", "whyItMatters": "Bridge memories deserve careful decay and review because removing them can disconnect useful context.", "items": [], "nextCommands": ["ee insights --section bridges --workspace . --json"]},
         {"name": "causalBottlenecks", "title": "Causal Bottlenecks", "summary": "High-betweenness memories in causal-evidence subgraphs.", "whyItMatters": "Causal bottlenecks show which facts carry the most explanatory load for failures and repairs.", "items": [], "nextCommands": ["ee insights --section causalBottlenecks --workspace . --json"]},
         {"name": "comprehensiveRules", "title": "Comprehensive Rules", "summary": "Rule memories with broad provenance coverage and high reuse potential.", "whyItMatters": "Comprehensive rules are candidates for promotion because they generalize across repeated work.", "items": [], "nextCommands": ["ee curate candidates --workspace . --json"]},
@@ -130,6 +132,20 @@
               "items": {
                 "type": "array",
                 "items": {"$ref": "#/$defs/bridgeItem"}
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"name": {"const": "blindSpots"}},
+            "required": ["name"]
+          },
+          "then": {
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/blindSpotItem"}
               }
             }
           }
@@ -262,6 +278,78 @@
             "schema": {"type": "string", "const": "ee.graph.hits.v1"},
             "algorithm": {"type": "string", "const": "hits_centrality_directed"},
             "snapshotVersion": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "blindSpotItem": {
+      "type": "object",
+      "required": [
+        "rank",
+        "blindSpotId",
+        "path",
+        "symbolId",
+        "canonicalName",
+        "symbolKind",
+        "coverageStatus",
+        "coverageRatio",
+        "coveredNodeCount",
+        "totalNodeCount",
+        "sourceRange",
+        "explanation",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "rank": {"type": "integer", "minimum": 1},
+        "blindSpotId": {"type": "string"},
+        "path": {"type": "string"},
+        "symbolId": {"type": "string"},
+        "canonicalName": {"type": "string"},
+        "symbolKind": {"type": "string"},
+        "coverageStatus": {"type": "string", "const": "uncovered"},
+        "coverageRatio": {"type": "number", "minimum": 0, "maximum": 1},
+        "coveredNodeCount": {"type": "integer", "minimum": 0},
+        "totalNodeCount": {"type": "integer", "minimum": 1},
+        "sourceRange": {
+          "type": "object",
+          "required": ["startLine", "endLine"],
+          "additionalProperties": false,
+          "properties": {
+            "startLine": {"type": "integer", "minimum": 1},
+            "endLine": {"type": "integer", "minimum": 1}
+          }
+        },
+        "explanation": {"type": "string"},
+        "evidence": {
+          "type": "object",
+          "required": [
+            "schema",
+            "signal",
+            "algorithm",
+            "snapshotHash",
+            "anchorTableRequired",
+            "coverageSources"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "schema": {"type": "string", "const": "ee.insights.blind_spots.v1"},
+            "signal": {"type": "string", "const": "code_graph_memory_coverage_complement"},
+            "algorithm": {"type": "string", "const": "symbol_snapshot_minus_memory_file_or_lexical_mentions"},
+            "snapshotHash": {"type": "string"},
+            "anchorTableRequired": {"type": "boolean", "const": false},
+            "coverageSources": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "file_provenance",
+                  "lexical_path_mention",
+                  "lexical_symbol_mention"
+                ]
+              },
+              "minItems": 3
+            }
           }
         }
       }
