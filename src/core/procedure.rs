@@ -2128,7 +2128,24 @@ fn inspect_filesystem_verification_source(
                     source_id,
                 ));
             }
-            Ok(false) => {}
+            Ok(false) => match procedure_path_exists(&path) {
+                Ok(true) => {
+                    return Some(inspect_verification_json_file(
+                        &path,
+                        source_kind,
+                        source_id,
+                    ));
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    return Some(procedure_source_path_failure(
+                        &path,
+                        source_kind,
+                        source_id,
+                        error,
+                    ));
+                }
+            },
             Err(error) => {
                 return Some(procedure_source_path_failure(
                     &path,
@@ -2981,6 +2998,22 @@ fn procedure_path_is_dir(path: &Path) -> Result<bool, std::io::Error> {
     ensure_no_procedure_path_symlink_components(path, "inspect verification source")?;
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(metadata.file_type().is_dir()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn procedure_path_exists(path: &Path) -> Result<bool, std::io::Error> {
+    ensure_no_procedure_path_symlink_components(path, "inspect verification source")?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
         Err(error)
             if matches!(
                 error.kind(),

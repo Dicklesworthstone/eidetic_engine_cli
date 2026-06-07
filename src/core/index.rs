@@ -3032,12 +3032,12 @@ fn determine_health(
     index_generation: Option<u64>,
     metadata_corrupt: bool,
 ) -> IndexHealth {
-    if !index_exists || index_file_count == 0 {
-        return IndexHealth::Missing;
-    }
-
     if metadata_corrupt {
         return IndexHealth::Corrupt;
+    }
+
+    if !index_exists || index_file_count == 0 {
+        return IndexHealth::Missing;
     }
 
     match (db_generation, index_generation) {

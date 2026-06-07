@@ -278,7 +278,7 @@ fn path_without_trailing_separators(path: &Path) -> PathBuf {
 /// final symlink remains refused unless `--allow-symlink` is explicit.
 fn canonicalize_init_workspace_for_no_follow(path: &Path, allow_symlink: bool) -> PathBuf {
     if allow_symlink {
-        return path.to_path_buf();
+        return path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     }
 
     let final_component_path = path_without_trailing_separators(path);
