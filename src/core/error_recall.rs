@@ -730,4 +730,72 @@ mod tests {
         let fingerprint = ErrorFingerprint::from_canonical(&canonical).with_location_shape("   ");
         assert!(fingerprint.location_shape.is_none());
     }
+
+    #[test]
+    fn canonicalization_is_idempotent() {
+        // ADR 0057 verification: re-canonicalizing an already-masked template is a
+        // fixed point, so re-ingesting stored material can never drift the class.
+        for message in [
+            "cannot find value `foo` in path /a/b/c.rs:12:5",
+            "Segmentation fault at 0xDEADBEEF after 4096 bytes",
+            "mismatched types expected `Vec<u8>` found `String`",
+            "",
+            "   ",
+        ] {
+            let once = canonical_message_template(message);
+            let twice = canonical_message_template(&once);
+            assert_eq!(
+                once, twice,
+                "canonicalization must be idempotent for {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn distinct_codes_do_not_collide() {
+        // ADR 0057 verification: the exact (tool, canonical_code) layer must keep
+        // distinct codes and distinct tools in distinct keys (no dedup collision).
+        let keys = [
+            from_rustc(Some("E0277"), "a").layered_key().key,
+            from_rustc(Some("E0382"), "a").layered_key().key,
+            from_cargo(Some("E0277"), "a").layered_key().key,
+            from_ee_error("auth_rejected", "a").layered_key().key,
+            from_rch_blocker("capacity_or_timeout", "selection", "a")
+                .layered_key()
+                .key,
+        ];
+        let mut unique = keys.to_vec();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            keys.len(),
+            "distinct (tool, code) fingerprints must not collide: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn canonicalizer_does_not_panic_on_adversarial_input() {
+        // ADR 0057 verification (fuzz-lite): the canonicalizer + redaction must be
+        // total over hostile text — no panics on empty/unicode/control/unbalanced
+        // backtick/very-long inputs.
+        let long = "x ".repeat(10_000);
+        for raw in [
+            "",
+            "   \t\n  ",
+            "`unbalanced backtick start",
+            "café ☃ 𝕏 \u{0007}\u{0000} control",
+            "0x 0xZZ /a/b ::: ---",
+            long.as_str(),
+        ] {
+            let template = canonical_message_template(raw);
+            // Re-run through the keying + redaction paths to exercise the chain.
+            let _ = from_rustc(Some("E0277"), raw).layered_key();
+            let _ = from_shell(1, raw).layered_key();
+            let redacted = redact_diagnostic(DiagnosticTool::Ee, None, raw);
+            // Idempotent even for hostile input.
+            assert_eq!(template, canonical_message_template(&template));
+            assert!(!redacted.fingerprint_key.key.is_empty());
+        }
+    }
 }
