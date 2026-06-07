@@ -396,13 +396,119 @@ pub fn plan_error_repair_links(
     links
 }
 
+/// Persistable error-fingerprint row model (bd-1n0np.4.1/4.3, ADR 0057). The
+/// canonical projection of a [`CanonicalDiagnostic`] that the fingerprint store
+/// (V069) persists as truth and indexes as a derived Frankensearch document.
+///
+/// Pure value type: derived deterministically from a canonicalized diagnostic,
+/// carrying signatures/codes only (never raw log content) per the ADR 0057
+/// redaction-by-default rule. The migration + repo (bd-1n0np.4.3 / V069) build
+/// on this; the model and its derivation stay verifiable without the migration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErrorFingerprint {
+    pub tool: DiagnosticTool,
+    /// Stable structured code when one exists (rustc `E0277`, an `ee.error.v2`
+    /// code, an RCH `kind:stage`); `None` for code-less failures.
+    pub canonical_code: Option<String>,
+    /// `blake3:`-prefixed signature of the variable-masked message template — the
+    /// stable error-class identifier (never the raw message).
+    pub message_template_signature: String,
+    /// Masked location shape (e.g. `<path>:<num>:<num>`) when known; `None`
+    /// otherwise. Variable-masked so it cannot fragment a class or leak a path.
+    pub location_shape: Option<String>,
+    /// 128-bit Charikar simhash of the message template — the fuzzy long-tail key.
+    pub stderr_simhash: u128,
+    /// Optional tool/version hints (e.g. `rustc 1.x`). Deduplicated and sorted.
+    pub version_hints: Vec<String>,
+}
+
+impl ErrorFingerprint {
+    /// Derive the persistable fingerprint from a canonicalized diagnostic.
+    #[must_use]
+    pub fn from_canonical(canonical: &CanonicalDiagnostic) -> Self {
+        Self {
+            tool: canonical.tool,
+            canonical_code: canonical.canonical_code.clone(),
+            message_template_signature: blake3_prefixed(&canonical.message_template),
+            location_shape: None,
+            stderr_simhash: canonical.simhash_tail(),
+            version_hints: Vec::new(),
+        }
+    }
+
+    /// Attach a masked location shape; blank shapes are dropped.
+    #[must_use]
+    pub fn with_location_shape(mut self, shape: impl Into<String>) -> Self {
+        let shape = shape.into();
+        let trimmed = shape.trim();
+        self.location_shape = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        self
+    }
+
+    /// Attach tool/version hints; blanks dropped, result deduped and sorted so
+    /// the fingerprint stays deterministic regardless of input order.
+    #[must_use]
+    pub fn with_version_hints(mut self, hints: Vec<String>) -> Self {
+        let mut cleaned: Vec<String> = hints
+            .into_iter()
+            .map(|hint| hint.trim().to_string())
+            .filter(|hint| !hint.is_empty())
+            .collect();
+        cleaned.sort();
+        cleaned.dedup();
+        self.version_hints = cleaned;
+        self
+    }
+
+    /// Layered key for this fingerprint, consistent with
+    /// [`CanonicalDiagnostic::layered_key`]: exact `(tool, canonical_code)` when a
+    /// code exists, else the `tool:tmpl:<signature>` message-template layer.
+    #[must_use]
+    pub fn layered_key(&self) -> FingerprintKey {
+        match self.canonical_code.as_deref() {
+            Some(code) if !code.is_empty() => FingerprintKey {
+                layer: FingerprintLayer::CanonicalCode,
+                key: format!("{}:{}", self.tool.as_str(), code),
+            },
+            _ => FingerprintKey {
+                layer: FingerprintLayer::MessageTemplate,
+                key: format!(
+                    "{}:tmpl:{}",
+                    self.tool.as_str(),
+                    self.message_template_signature
+                ),
+            },
+        }
+    }
+
+    /// Deterministic text for the derived Frankensearch document (bd-1n0np.4.3).
+    /// Composed only of tool, canonical code, template signature, masked location,
+    /// simhash, and version hints — contains no raw log content (ADR 0057).
+    #[must_use]
+    pub fn derived_document_text(&self) -> String {
+        let mut parts = vec![format!("tool:{}", self.tool.as_str())];
+        if let Some(code) = &self.canonical_code {
+            parts.push(format!("code:{code}"));
+        }
+        parts.push(format!("template:{}", self.message_template_signature));
+        if let Some(location) = &self.location_shape {
+            parts.push(format!("location:{location}"));
+        }
+        parts.push(format!("simhash:{:032x}", self.stderr_simhash));
+        for hint in &self.version_hints {
+            parts.push(format!("version:{hint}"));
+        }
+        parts.join(" ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagnosticTool, ErrorRepairLinkKind, FingerprintLayer, SIMHASH_TAIL_MAX_DISTANCE,
-        canonical_message_template, from_cargo, from_ee_error, from_rch_blocker, from_rustc,
-        from_shell, plan_error_repair_links, redact_diagnostic, simhash_hamming_distance,
-        simhash_tail_matches,
+        CanonicalDiagnostic, DiagnosticTool, ErrorFingerprint, ErrorRepairLinkKind,
+        FingerprintLayer, SIMHASH_TAIL_MAX_DISTANCE, canonical_message_template, from_cargo,
+        from_ee_error, from_rch_blocker, from_rustc, from_shell, plan_error_repair_links,
+        redact_diagnostic, simhash_hamming_distance, simhash_tail_matches,
     };
 
     #[test]
@@ -553,5 +659,75 @@ mod tests {
             assert_eq!(ErrorRepairLinkKind::parse(kind.as_str()), Some(kind));
         }
         assert_eq!(ErrorRepairLinkKind::parse("nope"), None);
+    }
+
+    #[test]
+    fn error_fingerprint_derives_from_canonical_diagnostic() {
+        let canonical = from_rustc(Some("E0277"), "the trait bound `Foo: Bar` is not satisfied");
+        let fingerprint = ErrorFingerprint::from_canonical(&canonical);
+        assert_eq!(fingerprint.tool, DiagnosticTool::Rustc);
+        assert_eq!(fingerprint.canonical_code.as_deref(), Some("E0277"));
+        assert!(
+            fingerprint
+                .message_template_signature
+                .starts_with("blake3:")
+        );
+        assert_eq!(fingerprint.stderr_simhash, canonical.simhash_tail());
+        assert!(fingerprint.location_shape.is_none());
+        assert!(fingerprint.version_hints.is_empty());
+    }
+
+    #[test]
+    fn error_fingerprint_layered_key_matches_canonical() {
+        let coded = from_rustc(Some("E0277"), "trait bound not satisfied");
+        assert_eq!(
+            ErrorFingerprint::from_canonical(&coded).layered_key(),
+            coded.layered_key(),
+            "coded fingerprint key must match the canonical layered key",
+        );
+        let codeless = from_shell(1, "permission denied opening `/etc/secret`");
+        assert_eq!(
+            ErrorFingerprint::from_canonical(&codeless).layered_key(),
+            codeless.layered_key(),
+            "code-less fingerprint key must match the canonical template key",
+        );
+    }
+
+    #[test]
+    fn error_fingerprint_derived_document_is_deterministic_and_redacted() {
+        let canonical = from_rustc(Some("E0277"), "cannot find value `secret_val` in scope");
+        let fingerprint = ErrorFingerprint::from_canonical(&canonical)
+            .with_location_shape("<path>:<num>:<num>")
+            .with_version_hints(vec![
+                "rustc 1.x".to_string(),
+                " rustc 1.x ".to_string(),
+                String::new(),
+            ]);
+        let doc_first = fingerprint.derived_document_text();
+        let doc_second = fingerprint.derived_document_text();
+        assert_eq!(
+            doc_first, doc_second,
+            "derived document text must be deterministic"
+        );
+        assert!(doc_first.contains("tool:rustc"));
+        assert!(doc_first.contains("code:E0277"));
+        assert!(doc_first.contains("template:blake3:"));
+        assert!(doc_first.contains("location:<path>:<num>:<num>"));
+        assert!(
+            !doc_first.contains("secret_val"),
+            "derived document must carry signatures only, never raw content",
+        );
+        assert_eq!(
+            fingerprint.version_hints,
+            vec!["rustc 1.x".to_string()],
+            "version hints must be trimmed, deduplicated, and sorted",
+        );
+    }
+
+    #[test]
+    fn error_fingerprint_blank_location_is_dropped() {
+        let canonical = from_cargo(Some("E0277"), "trait bound not satisfied");
+        let fingerprint = ErrorFingerprint::from_canonical(&canonical).with_location_shape("   ");
+        assert!(fingerprint.location_shape.is_none());
     }
 }
