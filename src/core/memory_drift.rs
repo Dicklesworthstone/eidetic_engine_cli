@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use super::workspace::stable_workspace_id;
 use crate::db::{DbConnection, StoredMemory};
-use crate::models::DomainError;
+use crate::models::{
+    DomainError, MemoryAnchorFreshnessState, MemoryAnchorFreshnessTransition, StoredMemoryAnchor,
+};
 
 pub const MEMORY_DRIFT_SNAPSHOT_SCHEMA_V1: &str = "ee.memory_drift.snapshot.v1";
 pub const MEMORY_DRIFT_QUEUE_SCHEMA_V1: &str = "ee.memory_drift.queue.v1";
@@ -466,6 +468,63 @@ impl MemoryDriftStatus {
             Self::MissingSource => 700_000,
         }
     }
+}
+
+/// Map a drift observation to the freshness state an anchored memory should
+/// hold once that drift is applied.
+///
+/// Conservatism rule (ADR 0056, part B): only a resolved symbol's content
+/// change (`Changed`), exact disappearance (`MissingSource`), or already-stale
+/// anchor (`StaleAnchor`) becomes `Stale`. An `Unverifiable` result — including
+/// refactor ambiguity such as a rename/move that `src/core/symbol_graph.rs`
+/// could not resolve exactly — is only `Suspect` (advisory), never silently
+/// `Stale`. `Current` and `Suppressed` keep the anchor `Current`.
+#[must_use]
+pub const fn freshness_state_for_drift(status: MemoryDriftStatus) -> MemoryAnchorFreshnessState {
+    match status {
+        MemoryDriftStatus::Current | MemoryDriftStatus::Suppressed => {
+            MemoryAnchorFreshnessState::Current
+        }
+        MemoryDriftStatus::Unverifiable => MemoryAnchorFreshnessState::Suspect,
+        MemoryDriftStatus::Changed
+        | MemoryDriftStatus::MissingSource
+        | MemoryDriftStatus::StaleAnchor => MemoryAnchorFreshnessState::Stale,
+    }
+}
+
+/// Build the audited `memory.freshness_transition` row for an anchor whose
+/// bounded drift check produced `status`.
+///
+/// Returns `None` when the resulting freshness state equals `previous_state`
+/// (no transition to record). The drift `status` itself is produced upstream by
+/// the symbol-graph-backed resolution (`src/core/symbol_graph.rs`); this bridges
+/// that resolution to the durable, redaction-safe audit model. `file_line`
+/// carries the live symbol location when it resolved, and stays `None` under
+/// ambiguity.
+#[must_use]
+pub fn freshness_transition_for_drift(
+    anchor: &StoredMemoryAnchor,
+    status: MemoryDriftStatus,
+    previous_state: MemoryAnchorFreshnessState,
+    file_line: Option<String>,
+    detected_at: impl Into<String>,
+) -> Option<MemoryAnchorFreshnessTransition> {
+    let new_state = freshness_state_for_drift(status);
+    if new_state == previous_state {
+        return None;
+    }
+    Some(MemoryAnchorFreshnessTransition {
+        memory_id: anchor.memory_id.clone(),
+        anchor_kind: anchor.anchor_kind,
+        anchor_value_hash: anchor.anchor_value_hash.clone(),
+        previous_state,
+        new_state,
+        drift_code: status.degraded_code().map(str::to_owned),
+        file_line,
+        reason: status.default_reason().to_owned(),
+        automatic: true,
+        detected_at: detected_at.into(),
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -2407,5 +2466,91 @@ mod tests {
         );
         connection.close().map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    fn sample_stored_anchor() -> StoredMemoryAnchor {
+        StoredMemoryAnchor {
+            memory_id: "mem_01234567890123456789012345".to_owned(),
+            anchor_kind: crate::models::MemoryAnchorKind::Symbol,
+            anchor_value_hash:
+                "blake3:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            redacted_anchor_value: "symbol:blake3:000000000000".to_owned(),
+            confidence: 0.9,
+            source: crate::models::MemoryAnchorSource::Remember,
+            provenance: "test".to_owned(),
+            captured_span_hash:
+                "blake3:1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+            freshness_state: MemoryAnchorFreshnessState::Current,
+            generation: 0,
+            created_at: "2026-06-07T00:00:00Z".to_owned(),
+            updated_at: "2026-06-07T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn freshness_state_for_drift_is_conservative() {
+        assert_eq!(
+            freshness_state_for_drift(MemoryDriftStatus::Current),
+            MemoryAnchorFreshnessState::Current
+        );
+        assert_eq!(
+            freshness_state_for_drift(MemoryDriftStatus::Suppressed),
+            MemoryAnchorFreshnessState::Current
+        );
+        // Ambiguity (incl. unresolved rename/move) -> advisory Suspect, never Stale.
+        assert_eq!(
+            freshness_state_for_drift(MemoryDriftStatus::Unverifiable),
+            MemoryAnchorFreshnessState::Suspect
+        );
+        // Resolved content change / disappearance -> Stale.
+        assert_eq!(
+            freshness_state_for_drift(MemoryDriftStatus::Changed),
+            MemoryAnchorFreshnessState::Stale
+        );
+        assert_eq!(
+            freshness_state_for_drift(MemoryDriftStatus::MissingSource),
+            MemoryAnchorFreshnessState::Stale
+        );
+        assert_eq!(
+            freshness_state_for_drift(MemoryDriftStatus::StaleAnchor),
+            MemoryAnchorFreshnessState::Stale
+        );
+    }
+
+    #[test]
+    fn freshness_transition_for_drift_records_only_real_changes() {
+        let anchor = sample_stored_anchor();
+        // No state change -> no audit row.
+        assert!(
+            freshness_transition_for_drift(
+                &anchor,
+                MemoryDriftStatus::Current,
+                MemoryAnchorFreshnessState::Current,
+                None,
+                "2026-06-07T00:00:00Z",
+            )
+            .is_none()
+        );
+        // Resolved content change -> Current -> Stale, carrying drift code + file:line.
+        let transition = freshness_transition_for_drift(
+            &anchor,
+            MemoryDriftStatus::Changed,
+            MemoryAnchorFreshnessState::Current,
+            Some("src/db/mod.rs:42".to_owned()),
+            "2026-06-07T00:00:00Z",
+        )
+        .expect("content change must record a transition");
+        assert_eq!(
+            transition.previous_state,
+            MemoryAnchorFreshnessState::Current
+        );
+        assert_eq!(transition.new_state, MemoryAnchorFreshnessState::Stale);
+        assert_eq!(
+            transition.drift_code.as_deref(),
+            Some("memory_drift_source_changed")
+        );
+        assert_eq!(transition.file_line.as_deref(), Some("src/db/mod.rs:42"));
+        assert!(transition.is_degradation());
+        assert_eq!(transition.anchor_value_hash, anchor.anchor_value_hash);
     }
 }
