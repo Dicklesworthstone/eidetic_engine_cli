@@ -5,10 +5,11 @@ This registry is the human-facing companion to
 owned by `bd-1n0np.23.1` and enforced by
 `tests/contracts/dueling_wizards_migration_registry.rs`.
 
-The current compiled migration tail in `src/db/mod.rs` is `V066`. Every
-dueling-wizards schema task must allocate from the registry before adding a
-runtime migration, then keep the runtime `MIGRATIONS` array contiguous. The
-registry is a plan artifact, not a substitute for the real migration constants.
+The current compiled migration tail in `src/db/mod.rs` is `V068`. The next
+planned allocation starts at `V069`. Every dueling-wizards schema task must
+allocate from the registry before adding a runtime migration, then keep the
+runtime `MIGRATIONS` array contiguous. The registry is a plan artifact, not a
+substitute for the real migration constants.
 
 ## Policy
 
@@ -18,7 +19,7 @@ rollback must never be required for ordinary repair. A task that adds durable
 or derived storage must also name the backup/export/restore asset class and the
 boundary migration coverage path before source work starts.
 
-Do not reuse migration numbers. If the compiled tail moves past `V066`, update
+Do not reuse migration numbers. If the compiled tail moves past `V068`, update
 this registry in the same change that adds the runtime migration.
 
 ## Planned Allocations
@@ -41,10 +42,14 @@ this registry in the same change that adds the runtime migration.
 
 The manifest's `transitionMatrix` mirrors the allocation table one-for-one.
 This is the implementation gate: `implemented` rows must name the compiled
-migration constant and stay at or behind the current compiled tail (`V066` at
+migration constant and stay at or behind the current compiled tail (`V068` at
 the time of this registry). `planned` rows must stay ahead of the compiled tail
 and keep `migrationConstant`, `boundaryMigrationEvidence`, and
 `backupCoverageEvidence` set to `required_before_implemented`.
+
+The implemented constants currently covered by the registry are
+`V066_MEMORY_ANCHORS`, `V067_PACK_CANDIDATE_IMPRESSIONS`, and
+`V068_OUTCOME_EVIDENCE_ROWS`.
 
 All transition rows use `proofPosture: rch_only_no_local_fallback`. Moving an
 allocation from `planned` to `implemented` requires the runtime migration,

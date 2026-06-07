@@ -75,6 +75,10 @@ planned. `packHashStatus=pack_hash_required` applies only to
 `runtimeProofPolicy=rch_required_local_invalid` records that RCH is required
 and Local Cargo fallback is invalid proof.
 
+The shared assertion ids are `byte_identical_json`,
+`volatile_fields_explicit`, `stable_ordering`,
+`stderr_or_artifact_diagnostics`, `pack_hash_reproducible`, and
+`pack_hash_absence_is_failure_not_skip`.
 Each row currently carries `mustClauses=9`, `tested=9`, `passing=9`,
 `divergent=0`, `scoreMilli=1000`, and
 `complianceStatus=declared_conformant`. Future additions should make any

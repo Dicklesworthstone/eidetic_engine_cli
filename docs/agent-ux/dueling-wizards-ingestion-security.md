@@ -110,5 +110,4 @@ content, forbid raw storage, and emit the audit event for its source surface.
 | `secret_like_token` | `api_key_literal` | `error_log_diagnosis` | yes | `error_log_ingestion_security` |
 | `mixed_benign_and_malicious` | `build_error_plus_instruction` | `error_log_diagnosis` | yes | `error_log_ingestion_security` |
 
-Tests should prove quarantine-not-store behavior. Local Cargo fallback is not
-valid proof; any Rust test proof must run through RCH.
+Tests should prove quarantine-not-store behavior. Local Cargo fallback is not valid proof; any Rust test proof must run through RCH.

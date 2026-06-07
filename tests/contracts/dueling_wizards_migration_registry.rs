@@ -520,17 +520,45 @@ fn memory_anchor_allocation_declares_schema_privacy_and_indexes() -> TestResult 
 
 #[test]
 fn registry_doc_names_manifest_tail_versions_and_owner_beads() -> TestResult {
+    let manifest = read_json(MANIFEST_REL)?;
     let doc = read_text(DOC_REL)?;
     for needle in [
         MANIFEST_REL,
         "bd-1n0np.23.1",
-        "V066",
-        "V067",
         "scripts/e2e_boundary_migration.sh",
         "Local Cargo fallback is not valid proof",
     ] {
         if !doc.contains(needle) {
             return Err(format!("{DOC_REL} must mention {needle:?}"));
+        }
+    }
+
+    let registered_tail = u64_field(&manifest, "/currentLastCompiledMigration", MANIFEST_REL)?;
+    let next_planned = u64_field(&manifest, "/nextPlannedMigration", MANIFEST_REL)?;
+    let tail_label = format!("V{registered_tail:03}");
+    let next_label = format!("V{next_planned:03}");
+    for needle in [
+        format!("current compiled migration tail in `src/db/mod.rs` is `{tail_label}`"),
+        format!("planned allocation starts at `{next_label}`"),
+        format!("If the compiled tail moves past `{tail_label}`"),
+        format!("the current compiled tail (`{tail_label}`"),
+    ] {
+        if !doc.contains(&needle) {
+            return Err(format!(
+                "{DOC_REL} must document manifest-derived tail phrase {needle:?}"
+            ));
+        }
+    }
+
+    for transition in array_field(&manifest, "/transitionMatrix", MANIFEST_REL)? {
+        if string_field(transition, "/status", "transitionMatrix")? == "implemented" {
+            let migration_constant =
+                string_field(transition, "/migrationConstant", "transitionMatrix")?;
+            if !doc.contains(migration_constant) {
+                return Err(format!(
+                    "{DOC_REL} must document implemented migration constant {migration_constant}"
+                ));
+            }
         }
     }
 
