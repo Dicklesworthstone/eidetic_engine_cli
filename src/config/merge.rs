@@ -60,6 +60,10 @@ pub const PACK_ADAPTIVE_BUDGET_KEY: &str = "pack.adaptive_budget";
 pub const PACK_MMR_LAMBDA_KEY: &str = "pack.mmr_lambda";
 pub const PACK_CANDIDATE_POOL_KEY: &str = "pack.candidate_pool";
 pub const PACK_MEMORY_TIER_ADMISSION_KEY: &str = "pack.memory_tier_admission";
+pub const PACK_LOD_FULL_BASIS_POINTS_KEY: &str = "pack.lod_full_basis_points";
+pub const PACK_LOD_TRUNCATED_PREVIEW_BASIS_POINTS_KEY: &str =
+    "pack.lod_truncated_preview_basis_points";
+pub const PACK_LOD_LINK_ONLY_BASIS_POINTS_KEY: &str = "pack.lod_link_only_basis_points";
 pub const CACHE_PACK_L2_ENABLED_KEY: &str = "cache.pack_l2.enabled";
 pub const CACHE_PACK_L2_DIRECTORY_KEY: &str = "cache.pack_l2.directory";
 pub const CACHE_PACK_L2_MAX_BYTES_KEY: &str = "cache.pack_l2.max_bytes";
@@ -996,6 +1000,11 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             mmr_lambda: Some(0.7),
             candidate_pool: Some(100),
             memory_tier_admission: Some(false),
+            // Unset: the pack falls back to the in-code 70/20/10 LOD default,
+            // keeping existing pack goldens byte-identical (bd-1n0np.5.2).
+            lod_full_basis_points: None,
+            lod_truncated_preview_basis_points: None,
+            lod_link_only_basis_points: None,
         },
         task_lens: TaskLensConfig::default(),
         handoff: HandoffConfig::default(),
@@ -1239,6 +1248,10 @@ pub fn config_from_env(
             mmr_lambda: None,
             candidate_pool: None,
             memory_tier_admission: None,
+            // No environment variables drive LOD tier ratios.
+            lod_full_basis_points: None,
+            lod_truncated_preview_basis_points: None,
+            lod_link_only_basis_points: None,
         },
         task_lens: TaskLensConfig::default(),
         curation: CurationConfig::default(),
@@ -1595,6 +1608,33 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.pack.memory_tier_admission,
                 &layers.user.pack.memory_tier_admission,
                 &layers.defaults.pack.memory_tier_admission,
+            ),
+            lod_full_basis_points: pick_field(
+                &mut sources,
+                PACK_LOD_FULL_BASIS_POINTS_KEY,
+                &layers.cli.pack.lod_full_basis_points,
+                &layers.environment.pack.lod_full_basis_points,
+                &layers.project.pack.lod_full_basis_points,
+                &layers.user.pack.lod_full_basis_points,
+                &layers.defaults.pack.lod_full_basis_points,
+            ),
+            lod_truncated_preview_basis_points: pick_field(
+                &mut sources,
+                PACK_LOD_TRUNCATED_PREVIEW_BASIS_POINTS_KEY,
+                &layers.cli.pack.lod_truncated_preview_basis_points,
+                &layers.environment.pack.lod_truncated_preview_basis_points,
+                &layers.project.pack.lod_truncated_preview_basis_points,
+                &layers.user.pack.lod_truncated_preview_basis_points,
+                &layers.defaults.pack.lod_truncated_preview_basis_points,
+            ),
+            lod_link_only_basis_points: pick_field(
+                &mut sources,
+                PACK_LOD_LINK_ONLY_BASIS_POINTS_KEY,
+                &layers.cli.pack.lod_link_only_basis_points,
+                &layers.environment.pack.lod_link_only_basis_points,
+                &layers.project.pack.lod_link_only_basis_points,
+                &layers.user.pack.lod_link_only_basis_points,
+                &layers.defaults.pack.lod_link_only_basis_points,
             ),
         },
         task_lens: merge_task_lens_config(layers),

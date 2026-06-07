@@ -296,6 +296,13 @@ pub struct PackConfig {
     pub mmr_lambda: Option<f64>,
     pub candidate_pool: Option<u64>,
     pub memory_tier_admission: Option<bool>,
+    /// Telescoping-LOD tier budget shares as basis points of the token budget
+    /// (bd-1n0np.5.2): full / truncated-preview / link-only. When all three are
+    /// absent the pack uses the in-code default of 70/20/10 (7000/2000/1000 bp),
+    /// keeping existing pack goldens byte-identical.
+    pub lod_full_basis_points: Option<u64>,
+    pub lod_truncated_preview_basis_points: Option<u64>,
+    pub lod_link_only_basis_points: Option<u64>,
 }
 
 impl PackConfig {
@@ -308,6 +315,17 @@ impl PackConfig {
             mmr_lambda: optional_unit_float(document, "pack", "mmr_lambda")?,
             candidate_pool: optional_u64(document, "pack", "candidate_pool")?,
             memory_tier_admission: optional_bool(document, "pack", "memory_tier_admission")?,
+            lod_full_basis_points: optional_u64(document, "pack", "lod_full_basis_points")?,
+            lod_truncated_preview_basis_points: optional_u64(
+                document,
+                "pack",
+                "lod_truncated_preview_basis_points",
+            )?,
+            lod_link_only_basis_points: optional_u64(
+                document,
+                "pack",
+                "lod_link_only_basis_points",
+            )?,
         })
     }
 }
