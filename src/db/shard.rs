@@ -1033,7 +1033,16 @@ pub fn execute_peer_shard_read_attach_plan(
             continue;
         };
 
-        match connection.execute_read_snapshot_raw(super::DbOperation::Execute, attach_sql) {
+        let attach_result = connection.execute_raw(attach_sql).or_else(|error| {
+            if let Some(shard_path) = target.shard_path.as_deref().filter(|_| target.shard_exists) {
+                let fallback_sql = sqlite_path_attach_sql(shard_path, &target.attach_alias);
+                connection.execute_raw(&fallback_sql)
+            } else {
+                Err(error)
+            }
+        });
+
+        match attach_result {
             Ok(()) => {
                 attached_count = checked_add_peer_attach_count(attached_count, "attached_count");
                 targets.push(PeerShardAttachExecutionTarget {
@@ -1264,6 +1273,15 @@ fn sqlite_read_only_file_uri(path: &Path) -> String {
 
 fn sqlite_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn sqlite_path_attach_sql(path: &Path, alias: &str) -> String {
+    let path = path.to_string_lossy();
+    format!(
+        "ATTACH DATABASE {} AS {}",
+        sqlite_string_literal(path.as_ref()),
+        sqlite_identifier(alias)
+    )
 }
 
 fn sqlite_identifier(value: &str) -> String {

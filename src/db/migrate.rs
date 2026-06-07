@@ -601,28 +601,31 @@ fn workspace_row_counts(
         })?;
         let count = rows
             .first()
-            .and_then(|row| {
-                row.get(0).and_then(|value| {
-                    value
-                        .as_i64()
-                        .or_else(|| value.as_str().and_then(|raw| raw.parse::<i64>().ok()))
-                })
-            })
+            .and_then(|row| row.get(0).and_then(sql_count_value_to_u64))
             .ok_or_else(|| {
                 storage_error(
                     format!("Failed to read {table} row count for workspace {workspace_id}"),
                     None,
                 )
             })?;
-        let count = u64::try_from(count).map_err(|_| {
-            storage_error(
-                format!("{table} row count for workspace {workspace_id} must fit u64"),
-                None,
-            )
-        })?;
         counts.insert(table, count);
     }
     Ok(counts)
+}
+
+fn sql_count_value_to_u64(value: &Value) -> Option<u64> {
+    value
+        .as_i64()
+        .and_then(|count| u64::try_from(count).ok())
+        .or_else(|| value.as_str().and_then(|raw| raw.parse::<u64>().ok()))
+        .or_else(|| {
+            let count = value.as_f64()?;
+            if count.is_finite() && count >= 0.0 && count.fract() == 0.0 {
+                format!("{count:.0}").parse::<u64>().ok()
+            } else {
+                None
+            }
+        })
 }
 
 fn apply_schema_migrations_deterministically(conn: &DbConnection) -> Result<(), DomainError> {
