@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::models::RedactionLevel;
+use crate::models::{RedactionLevel, TaskLens};
 
 use super::env_registry::EnvVar;
 use super::file::{
@@ -24,7 +24,7 @@ use super::file::{
     MeshConfig, OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig, PrivacyConfig,
     ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig, RuntimeConfig, SearchConfig,
     SearchLexicalRamTierConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
-    SwarmAdaptiveConfig, SwarmConfig, TrustConfig,
+    SwarmAdaptiveConfig, SwarmConfig, TaskLensConfig, TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -997,6 +997,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             candidate_pool: Some(100),
             memory_tier_admission: Some(false),
         },
+        task_lens: TaskLensConfig::default(),
         handoff: HandoffConfig::default(),
         cache: CacheConfig {
             pack_l2: PackL2CacheConfig {
@@ -1239,6 +1240,7 @@ pub fn config_from_env(
             candidate_pool: None,
             memory_tier_admission: None,
         },
+        task_lens: TaskLensConfig::default(),
         curation: CurationConfig::default(),
         learn: LearnConfig::default(),
         feedback: FeedbackConfig {
@@ -1595,6 +1597,7 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.defaults.pack.memory_tier_admission,
             ),
         },
+        task_lens: merge_task_lens_config(layers),
         handoff: HandoffConfig::default(),
         cache: CacheConfig {
             pack_l2: PackL2CacheConfig {
@@ -2313,6 +2316,27 @@ fn pick_field<T: Clone>(
     })
 }
 
+fn merge_task_lens_config(layers: &ConfigLayers) -> TaskLensConfig {
+    let mut overrides = Vec::new();
+    merge_task_lens_overrides(&mut overrides, &layers.defaults.task_lens.overrides);
+    merge_task_lens_overrides(&mut overrides, &layers.user.task_lens.overrides);
+    merge_task_lens_overrides(&mut overrides, &layers.project.task_lens.overrides);
+    merge_task_lens_overrides(&mut overrides, &layers.environment.task_lens.overrides);
+    merge_task_lens_overrides(&mut overrides, &layers.cli.task_lens.overrides);
+    overrides.sort_by(|left, right| left.id.cmp(&right.id));
+    TaskLensConfig { overrides }
+}
+
+fn merge_task_lens_overrides(merged: &mut Vec<TaskLens>, layer: &[TaskLens]) {
+    for lens in layer {
+        if let Some(existing) = merged.iter_mut().find(|existing| existing.id == lens.id) {
+            *existing = lens.clone();
+        } else {
+            merged.push(lens.clone());
+        }
+    }
+}
+
 fn optional_env_string(
     env: &BTreeMap<String, OsString>,
     variable: &'static str,
@@ -2432,6 +2456,7 @@ mod tests {
         SWARM_ADAPTIVE_PREFETCH_BUDGET_MS_KEY, SWARM_ADAPTIVE_PREFETCH_TOP_K_KEY,
         SWARM_ADAPTIVE_SIMILARITY_THRESHOLD_KEY, built_in_config, config_from_env, merge_config,
     };
+    use crate::config::file::TaskLensConfig;
     use crate::config::{
         CacheConfig, ConfigFile, CurationConfig, GraphConfig, GraphCurateConfig,
         GraphFeatureFlagsConfig, GraphGomoryHuConfig, GraphHealthConfig, GraphMemoryConfig,
@@ -2440,6 +2465,7 @@ mod tests {
         SearchLexicalRamTierConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
         SwarmAdaptiveConfig, SwarmConfig,
     };
+    use crate::models::{TaskLens, TaskLensInput, TaskLensOverlay};
 
     type TestResult = Result<(), String>;
 
@@ -2456,6 +2482,16 @@ mod tests {
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn task_lens_override(id: &str, version: u32, description: &str) -> Result<TaskLens, String> {
+        TaskLens::new(TaskLensInput {
+            id: id.to_string(),
+            version,
+            description: description.to_string(),
+            overlay: TaskLensOverlay::default(),
+        })
+        .map_err(|error| error.to_string())
     }
 
     fn ensure_graph_feature_flags_default_disabled(config: &GraphFeatureFlagsConfig) -> TestResult {
@@ -2941,6 +2977,9 @@ mod tests {
     fn merge_uses_cli_environment_project_user_default_order() -> TestResult {
         let defaults =
             built_in_config(&expander()).map_err(|error| format!("defaults failed: {error}"))?;
+        let user_bugfix = task_lens_override("bugfix", 1, "User bugfix lens.")?;
+        let user_custom = task_lens_override("local-review", 1, "User local review lens.")?;
+        let project_bugfix = task_lens_override("bugfix", 2, "Project bugfix lens.")?;
         let user = ConfigFile {
             storage: StorageConfig {
                 database_path: Some(PathBuf::from("/user/ee.db")),
@@ -2949,6 +2988,9 @@ mod tests {
             search: SearchConfig {
                 default_speed: Some(SearchSpeed::Fast),
                 ..SearchConfig::default()
+            },
+            task_lens: TaskLensConfig {
+                overrides: vec![user_bugfix, user_custom.clone()],
             },
             ..ConfigFile::default()
         };
@@ -3023,6 +3065,9 @@ mod tests {
                     ..SecretDetectorConfig::default()
                 },
                 ..PolicyConfig::default()
+            },
+            task_lens: TaskLensConfig {
+                overrides: vec![project_bugfix.clone()],
             },
             ..ConfigFile::default()
         };
@@ -3240,6 +3285,42 @@ mod tests {
             &merged.source(PACK_MEMORY_TIER_ADMISSION_KEY),
             &Some(ConfigValueSource::Project),
             "memory tier admission source",
+        )?;
+        let task_lens_ids: Vec<&str> = merged
+            .values
+            .task_lens
+            .overrides
+            .iter()
+            .map(|lens| lens.id.as_str())
+            .collect();
+        ensure_equal(
+            &task_lens_ids,
+            &vec!["bugfix", "local-review"],
+            "merged task lens ids",
+        )?;
+        let merged_bugfix = merged
+            .values
+            .task_lens
+            .overrides
+            .iter()
+            .find(|lens| lens.id == "bugfix")
+            .ok_or_else(|| "merged bugfix task lens missing".to_string())?;
+        ensure_equal(
+            &merged_bugfix.lens_hash,
+            &project_bugfix.lens_hash,
+            "project task lens replaces user lens with same id",
+        )?;
+        let merged_custom = merged
+            .values
+            .task_lens
+            .overrides
+            .iter()
+            .find(|lens| lens.id == "local-review")
+            .ok_or_else(|| "merged custom task lens missing".to_string())?;
+        ensure_equal(
+            &merged_custom.lens_hash,
+            &user_custom.lens_hash,
+            "user custom task lens is preserved",
         )?;
         ensure_equal(
             &merged.values.cache.pack_l2.max_bytes,

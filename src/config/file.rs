@@ -12,7 +12,10 @@ use std::str::FromStr;
 use regex_lite::Regex;
 use toml_edit::{DocumentMut, Item, Table, Value};
 
-use crate::models::{RedactionLevel, TrustClass};
+use crate::models::{
+    MAX_WORKSPACE_TASK_LENSES, RedactionLevel, TASK_LENS_VERSION, TaskLens, TaskLensInput,
+    TaskLensOverlay, TrustClass,
+};
 
 use super::path::{PathExpander, PathExpansionError};
 
@@ -53,6 +56,7 @@ pub struct ConfigFile {
     pub cass: CassConfig,
     pub search: SearchConfig,
     pub pack: PackConfig,
+    pub task_lens: TaskLensConfig,
     pub handoff: HandoffConfig,
     pub cache: CacheConfig,
     pub mesh: MeshConfig,
@@ -108,6 +112,7 @@ impl ConfigFile {
             cass: CassConfig::parse(&document)?,
             search: SearchConfig::parse(&document)?,
             pack: PackConfig::parse(&document)?,
+            task_lens: TaskLensConfig::parse(&document)?,
             handoff: HandoffConfig::parse(&document)?,
             cache: CacheConfig::parse(&document, expander)?,
             mesh: MeshConfig::parse(&document)?,
@@ -303,6 +308,19 @@ impl PackConfig {
             mmr_lambda: optional_unit_float(document, "pack", "mmr_lambda")?,
             candidate_pool: optional_u64(document, "pack", "candidate_pool")?,
             memory_tier_admission: optional_bool(document, "pack", "memory_tier_admission")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TaskLensConfig {
+    pub overrides: Vec<TaskLens>,
+}
+
+impl TaskLensConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            overrides: optional_task_lens_overrides(document)?,
         })
     }
 }
@@ -1695,6 +1713,68 @@ fn optional_string_array_path(
     Ok(Some(out))
 }
 
+fn optional_task_lens_overrides(document: &DocumentMut) -> Result<Vec<TaskLens>, ConfigParseError> {
+    let Some(item) = item_path(document, &["task_lens"], "overrides") else {
+        return Ok(Vec::new());
+    };
+    let Some(tables) = item.as_array_of_tables() else {
+        return Err(ConfigParseError::InvalidType {
+            key: "task_lens.overrides".to_string(),
+            expected: "an array of tables",
+        });
+    };
+    if tables.len() > MAX_WORKSPACE_TASK_LENSES {
+        return Err(ConfigParseError::InvalidValue {
+            key: "task_lens.overrides".to_string(),
+            value: tables.len().to_string(),
+            message: format!("expected at most {MAX_WORKSPACE_TASK_LENSES} task lens overrides"),
+        });
+    }
+
+    let mut overrides = Vec::with_capacity(tables.len());
+    for (index, table) in tables.iter().enumerate() {
+        overrides.push(parse_task_lens_override(table, index)?);
+    }
+    Ok(overrides)
+}
+
+fn parse_task_lens_override(table: &Table, index: usize) -> Result<TaskLens, ConfigParseError> {
+    let prefix = format!("task_lens.overrides[{index}]");
+    let id = required_table_string(table, &prefix, "id")?;
+    let version = optional_table_u32(table, &prefix, "version")?.unwrap_or(TASK_LENS_VERSION);
+    let description = required_table_string(table, &prefix, "description")?;
+    let overlay = TaskLensOverlay {
+        context_profile: optional_table_string(table, &prefix, "context_profile")?,
+        source_mode: optional_table_string(table, &prefix, "source_mode")?,
+        strict_source_mode: optional_table_bool(table, &prefix, "strict_source_mode")?,
+        pack_profile: optional_table_string(table, &prefix, "pack_profile")?,
+        resource_profile: optional_table_string(table, &prefix, "resource_profile")?,
+        redaction: optional_table_redaction_level(table, &prefix, "redaction")?,
+        memory_scope: optional_table_string(table, &prefix, "memory_scope")?,
+        max_tokens: optional_table_u32(table, &prefix, "max_tokens")?,
+        candidate_pool: optional_table_u32(table, &prefix, "candidate_pool")?,
+        max_results: optional_table_u32(table, &prefix, "max_results")?,
+        coverage_facets: optional_table_string_array(table, &prefix, "coverage_facets")?
+            .unwrap_or_default(),
+        allowed_kinds: optional_table_string_array(table, &prefix, "allowed_kinds")?
+            .unwrap_or_default(),
+        deprioritized_kinds: optional_table_string_array(table, &prefix, "deprioritized_kinds")?
+            .unwrap_or_default(),
+    };
+
+    TaskLens::new(TaskLensInput {
+        id: id.clone(),
+        version,
+        description,
+        overlay,
+    })
+    .map_err(|error| ConfigParseError::InvalidValue {
+        key: prefix,
+        value: id,
+        message: error.to_string(),
+    })
+}
+
 fn optional_peer_group_bindings(
     document: &DocumentMut,
 ) -> Result<Option<Vec<MeshPeerGroupBinding>>, ConfigParseError> {
@@ -1924,6 +2004,64 @@ fn required_table_bool(table: &Table, prefix: &str, key: &str) -> Result<bool, C
             expected: "a boolean",
         }),
     }
+}
+
+fn optional_table_bool(
+    table: &Table,
+    prefix: &str,
+    key: &str,
+) -> Result<Option<bool>, ConfigParseError> {
+    match table.get(key) {
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| ConfigParseError::InvalidType {
+                key: format!("{prefix}.{key}"),
+                expected: "a boolean",
+            }),
+        None => Ok(None),
+    }
+}
+
+fn optional_table_u32(
+    table: &Table,
+    prefix: &str,
+    key: &str,
+) -> Result<Option<u32>, ConfigParseError> {
+    let Some(value) = table.get(key) else {
+        return Ok(None);
+    };
+    let Some(integer) = value.as_integer() else {
+        return Err(ConfigParseError::InvalidType {
+            key: format!("{prefix}.{key}"),
+            expected: "a non-negative integer",
+        });
+    };
+    u32::try_from(integer)
+        .map(Some)
+        .map_err(|_| ConfigParseError::InvalidValue {
+            key: format!("{prefix}.{key}"),
+            value: integer.to_string(),
+            message: "expected a non-negative integer no larger than u32::MAX".to_string(),
+        })
+}
+
+fn optional_table_redaction_level(
+    table: &Table,
+    prefix: &str,
+    key: &str,
+) -> Result<Option<RedactionLevel>, ConfigParseError> {
+    let Some(value) = optional_table_string(table, prefix, key)? else {
+        return Ok(None);
+    };
+    value
+        .parse::<RedactionLevel>()
+        .map(Some)
+        .map_err(|error| ConfigParseError::InvalidValue {
+            key: format!("{prefix}.{key}"),
+            value: error.invalid,
+            message: "expected one of: none, minimal, standard, strict, paranoid".to_string(),
+        })
 }
 
 fn optional_table_usize(
@@ -2836,6 +2974,7 @@ prompt_injection_guard = true
             &None,
             "pack L2 cache max age",
         )?;
+        ensure_equal(&config.task_lens.overrides.len(), &0, "task lens overrides")?;
         ensure_equal(&config.graph.ppr.alpha, &None, "graph ppr alpha")?;
         ensure_equal(&config.mesh.enabled, &None, "mesh enabled")?;
         ensure_equal(&config.mesh.command_mode, &None, "mesh command mode")?;
@@ -2888,6 +3027,83 @@ prompt_injection_guard = true
             &config.privacy.redaction_classes,
             &None,
             "redaction classes",
+        )
+    }
+
+    #[test]
+    fn parses_task_lens_workspace_override() -> TestResult {
+        let config = ConfigFile::parse(
+            r#"
+[[task_lens.overrides]]
+id = "BugFix"
+version = 2
+description = "Local bugfix lens for a small checkout."
+context_profile = "compact"
+source_mode = "lexical-only"
+strict_source_mode = true
+pack_profile = "lean"
+resource_profile = "lean"
+redaction = "strict"
+memory_scope = "workspace"
+max_tokens = 3000
+candidate_pool = 80
+max_results = 20
+coverage_facets = ["root-cause", "verification"]
+allowed_kinds = ["failure", "risk"]
+deprioritized_kinds = ["fact"]
+"#,
+        )
+        .map_err(|error| format!("task lens override should parse: {error}"))?;
+
+        ensure_equal(&config.task_lens.overrides.len(), &1, "override count")?;
+        let lens = &config.task_lens.overrides[0];
+        ensure_equal(&lens.id.as_str(), &"bugfix", "normalized id")?;
+        ensure_equal(&lens.version, &2, "version")?;
+        ensure_equal(
+            &lens.overlay.context_profile.as_deref(),
+            &Some("compact"),
+            "context profile",
+        )?;
+        ensure_equal(
+            &lens.overlay.source_mode.as_deref(),
+            &Some("lexical_only"),
+            "source mode",
+        )?;
+        ensure_equal(
+            &lens.overlay.strict_source_mode,
+            &Some(true),
+            "strict source mode",
+        )?;
+        ensure_equal(
+            &lens.overlay.redaction,
+            &Some(RedactionLevel::Strict),
+            "redaction",
+        )?;
+        ensure(
+            lens.lens_hash.starts_with("blake3:"),
+            "lens hash should use stable blake3 prefix",
+        )
+    }
+
+    #[test]
+    fn rejects_bad_task_lens_workspace_override() -> TestResult {
+        let error = expect_config_error(
+            r#"
+[[task_lens.overrides]]
+id = "bad lens"
+version = 1
+description = "Bad lens."
+source_mode = "random"
+"#,
+        )?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::InvalidValue { ref key, ref value, .. }
+                    if key == "task_lens.overrides[0]" && value == "bad lens"
+            ),
+            format!("unexpected error: {error:?}"),
         )
     }
 
