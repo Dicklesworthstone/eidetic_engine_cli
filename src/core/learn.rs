@@ -4053,7 +4053,7 @@ mod tests {
     fn learn_experiment_proposals_preserve_peer_evidence_provenance() -> TestResult {
         let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-peer-propose")?;
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
-        let memory_id = "mem_peerlearn0000000000000001";
+        let memory_id = "mem_00000000000000000000002001";
         seed_memory(
             &connection,
             &workspace_id,

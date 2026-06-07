@@ -5524,7 +5524,7 @@ mod tests {
         ensure(report.runtime.profile, "current_thread", "runtime profile")?;
         ensure(
             report.derived_assets.len(),
-            2,
+            3,
             "derived assets should be reported",
         )?;
         Ok(())
@@ -5968,8 +5968,8 @@ mod tests {
     #[cfg(feature = "graph")]
     #[test]
     fn status_skyline_report_populates_rows_when_enabled() -> TestResult {
-        const MEMORY_A: &str = "mem_status_skyline_enabled_a";
-        const MEMORY_B: &str = "mem_status_skyline_enabled_b";
+        const MEMORY_A: &str = "mem_00000000000000000000002003";
+        const MEMORY_B: &str = "mem_00000000000000000000002004";
 
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let config_dir = temp.path().join(".ee");
@@ -6022,7 +6022,7 @@ mod tests {
         }
         connection
             .insert_memory_link(
-                "link_status_skyline_enabled_0001",
+                "link_00000000000000000000002005",
                 &crate::db::CreateMemoryLinkInput {
                     src_memory_id: MEMORY_A.to_owned(),
                     dst_memory_id: MEMORY_B.to_owned(),
@@ -6580,7 +6580,7 @@ mod tests {
                     memory_id,
                     &crate::db::CreateMemoryInput {
                         workspace_id: workspace_id.clone(),
-                        level: "operational".to_owned(),
+                        level: "semantic".to_owned(),
                         kind: "note".to_owned(),
                         content: content.to_owned(),
                         workflow_id: None,

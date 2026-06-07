@@ -10002,7 +10002,7 @@ pub fn unrelated_context() -> u64 {{
             source_mode_applied: crate::core::search::SearchSourceMode::LexicalOnly,
             source_mode_fallback: true,
             strict_source_mode: false,
-            memory_scope: MemoryScope::Swarm,
+            memory_scope: MemoryScope::Workspace,
             strict_scope: false,
             scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
         }
@@ -12201,7 +12201,7 @@ pub fn unrelated_context() -> u64 {{
             include_stale: false,
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
-            memory_scope: MemoryScope::Swarm,
+            memory_scope: MemoryScope::Workspace,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
