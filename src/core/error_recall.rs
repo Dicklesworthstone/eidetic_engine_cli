@@ -42,6 +42,10 @@ pub enum FingerprintLayer {
     CanonicalCode,
     /// Variable-masked message template — used when no canonical code exists.
     MessageTemplate,
+    /// Fuzzy simhash neighborhood of the template — the long-tail fallback for
+    /// near-duplicate code-less messages (matched by Hamming distance, not by
+    /// exact key equality).
+    SimhashTail,
 }
 
 impl FingerprintLayer {
@@ -50,6 +54,7 @@ impl FingerprintLayer {
         match self {
             Self::CanonicalCode => "canonical_code",
             Self::MessageTemplate => "message_template",
+            Self::SimhashTail => "simhash_tail",
         }
     }
 }
@@ -228,11 +233,83 @@ pub fn from_shell(exit_code: i32, first_line: &str) -> CanonicalDiagnostic {
     }
 }
 
+/// Maximum Hamming distance (of 128 bits) for two message-template simhashes to
+/// count as the same long-tail error class (bd-1n0np.4.2). Conservative so the
+/// fuzzy tail never collapses genuinely distinct failures.
+pub const SIMHASH_TAIL_MAX_DISTANCE: u32 = 6;
+
+impl CanonicalDiagnostic {
+    /// 128-bit Charikar simhash of the message template — the fuzzy tail
+    /// fingerprint for code-less near-duplicates. Reuses the shared
+    /// `search::simhash` so this matches the rest of the store.
+    #[must_use]
+    pub fn simhash_tail(&self) -> u128 {
+        crate::search::simhash::simhash_128(&self.message_template).to_u128()
+    }
+}
+
+/// Hamming distance between two template simhashes (count of differing bits).
+#[must_use]
+pub fn simhash_hamming_distance(left: u128, right: u128) -> u32 {
+    (left ^ right).count_ones()
+}
+
+/// True when two template simhashes are within `max_distance` bits — i.e. the
+/// same long-tail class. Use only as the weakest layer, after exact code and
+/// exact template lookups miss.
+#[must_use]
+pub fn simhash_tail_matches(left: u128, right: u128, max_distance: u32) -> bool {
+    simhash_hamming_distance(left, right) <= max_distance
+}
+
+/// A redaction-safe diagnostic record (bd-1n0np.4.6). Stores the fingerprint and
+/// a policy-redacted message — never the raw log. The fingerprint is derived
+/// from the *redacted* text, so no secret can leak into a key or a stored span.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RedactedDiagnostic {
+    pub canonical: CanonicalDiagnostic,
+    pub fingerprint_key: FingerprintKey,
+    /// Secret/PII-redacted message, safe to persist and display.
+    pub redacted_message: String,
+    /// Number of secret-like spans removed before persistence.
+    pub redacted_span_count: usize,
+    /// Stable reasons for each redaction class applied.
+    pub redaction_reasons: Vec<&'static str>,
+}
+
+/// Apply policy redaction to a raw diagnostic BEFORE it becomes fingerprint or
+/// stored material (bd-1n0np.4.6): redact secrets/PII first, derive the
+/// canonical fingerprint and message template from the redacted text, and return
+/// the redacted message + span metadata. The raw log is never retained — store
+/// fingerprints + redacted spans by default, never full logs.
+#[must_use]
+pub fn redact_diagnostic(
+    tool: DiagnosticTool,
+    canonical_code: Option<&str>,
+    raw_message: &str,
+) -> RedactedDiagnostic {
+    let report = crate::policy::redact_secret_like_content(raw_message);
+    let canonical = CanonicalDiagnostic {
+        tool,
+        canonical_code: normalize_code(canonical_code),
+        message_template: canonical_message_template(&report.content),
+    };
+    let fingerprint_key = canonical.layered_key();
+    RedactedDiagnostic {
+        canonical,
+        fingerprint_key,
+        redacted_message: report.content,
+        redacted_span_count: report.matches.len(),
+        redaction_reasons: report.redacted_reasons,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagnosticTool, FingerprintLayer, canonical_message_template, from_cargo, from_ee_error,
-        from_rch_blocker, from_rustc, from_shell,
+        DiagnosticTool, FingerprintLayer, SIMHASH_TAIL_MAX_DISTANCE, canonical_message_template,
+        from_cargo, from_ee_error, from_rch_blocker, from_rustc, from_shell, redact_diagnostic,
+        simhash_hamming_distance, simhash_tail_matches,
     };
 
     #[test]
@@ -299,5 +376,49 @@ mod tests {
         assert_eq!(diag.layered_key().key, "rch:capacity_or_timeout:execute");
         let kind_only = from_rch_blocker("path_dep_missing", "", "frankensearch not materialized");
         assert_eq!(kind_only.layered_key().key, "rch:path_dep_missing");
+    }
+
+    #[test]
+    fn simhash_tail_groups_near_duplicate_codeless_messages() {
+        // Numbers are masked, so these two collapse to one template -> identical
+        // simhash (the long-tail layer treats them as the same class).
+        let a = from_shell(1, "connection refused after 3 retries on port 8080").simhash_tail();
+        let b = from_shell(1, "connection refused after 9 retries on port 9090").simhash_tail();
+        assert_eq!(simhash_hamming_distance(a, b), 0);
+        assert!(simhash_tail_matches(a, b, SIMHASH_TAIL_MAX_DISTANCE));
+
+        // A genuinely different failure stays outside the tail distance.
+        let c =
+            from_shell(1, "out of memory while allocating a large buffer region").simhash_tail();
+        assert!(!simhash_tail_matches(a, c, SIMHASH_TAIL_MAX_DISTANCE));
+    }
+
+    #[test]
+    fn redact_diagnostic_strips_secrets_and_never_keys_on_raw() {
+        let secret = "sk-proj-ABCDEF1234567890ABCDEF1234567890";
+        let raw = format!("auth failed api_key={secret} opening /Users/alice/app/main.rs:5");
+        let red = redact_diagnostic(DiagnosticTool::Ee, Some("auth_rejected"), &raw);
+        assert!(
+            !red.redacted_message.contains(secret),
+            "raw secret must not survive into the stored message"
+        );
+        assert!(
+            !red.fingerprint_key.key.contains(secret),
+            "raw secret must not leak into the fingerprint key"
+        );
+        assert!(
+            red.redacted_span_count >= 1,
+            "at least one secret span redacted"
+        );
+        assert_eq!(red.fingerprint_key.key, "ee:auth_rejected");
+    }
+
+    #[test]
+    fn redact_diagnostic_is_clean_when_no_secrets() {
+        let red = redact_diagnostic(DiagnosticTool::Rustc, Some("E0382"), "use of moved value x");
+        assert_eq!(red.redacted_span_count, 0);
+        assert_eq!(red.fingerprint_key.layer, FingerprintLayer::CanonicalCode);
+        assert_eq!(red.fingerprint_key.key, "rustc:E0382");
+        assert_eq!(red.redacted_message, "use of moved value x");
     }
 }
