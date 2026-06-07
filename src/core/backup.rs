@@ -22,9 +22,9 @@ use crate::db::shard::{
 };
 use crate::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
-    DatabaseConfig, DbConnection, GraphSnapshotType, MeshStorageStatus, StoredAuditEntry,
-    StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness, StoredGraphSnapshot, StoredMemory,
-    StoredMemoryLink, StoredTaskEpisode, audit_actions,
+    CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType, MeshStorageStatus,
+    StoredAuditEntry, StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness, StoredGraphSnapshot,
+    StoredMemory, StoredMemoryLink, StoredTaskEpisode, audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
@@ -1898,7 +1898,7 @@ fn restore_graph_cache_assets(
             "inspect restored records.jsonl and retry with a fresh --side-path".to_owned(),
         ),
     })?;
-    let restored_workspace_id = connection
+    let restored_workspace_id = match connection
         .list_workspaces()
         .map_err(|error| DomainError::Import {
             message: format!("failed reading restored workspace for graph cache restore: {error}"),
@@ -1908,13 +1908,14 @@ fn restore_graph_cache_assets(
         })?
         .into_iter()
         .next()
-        .map(|workspace| workspace.id)
-        .ok_or_else(|| DomainError::Import {
-            message: "restored database has no workspace row for graph cache restore".to_owned(),
-            repair: Some(
-                "inspect restored records.jsonl and retry with a fresh --side-path".to_owned(),
-            ),
-        })?;
+    {
+        Some(workspace) => workspace.id,
+        None => restore_graph_cache_workspace_from_assets(
+            &connection,
+            restored_database_path,
+            restored_derived,
+        )?,
+    };
 
     let mut restored_rows = 0u32;
     for asset in restored_derived
@@ -1942,6 +1943,52 @@ fn restore_graph_cache_assets(
         restored_rows = restored_rows.saturating_add(1);
     }
     Ok(restored_rows)
+}
+
+fn restore_graph_cache_workspace_from_assets(
+    connection: &DbConnection,
+    restored_database_path: &Path,
+    restored_derived: &[BackupRestoredDerivedAssetReport],
+) -> Result<String, DomainError> {
+    let workspace_id = restored_derived
+        .iter()
+        .filter(|asset| asset.kind.starts_with("graph_"))
+        .find_map(|asset| {
+            read_restored_derived_json(asset)
+                .ok()
+                .and_then(|value| json_string(&value, "workspaceId"))
+        })
+        .ok_or_else(|| DomainError::Import {
+            message: "restored database has no workspace row or graph-cache workspace id"
+                .to_owned(),
+            repair: Some(
+                "inspect restored graph cache assets and retry with a fresh --side-path".to_owned(),
+            ),
+        })?;
+    let restored_workspace_path = restored_database_path
+        .parent()
+        .and_then(Path::parent)
+        .map_or_else(
+            || restored_database_path.display().to_string(),
+            |path| path.display().to_string(),
+        );
+    connection
+        .insert_workspace(
+            &workspace_id,
+            &CreateWorkspaceInput {
+                path: restored_workspace_path,
+                name: Some("restored backup".to_owned()),
+            },
+        )
+        .map_err(|error| DomainError::Import {
+            message: format!(
+                "failed creating restored workspace row for graph cache restore: {error}"
+            ),
+            repair: Some(
+                "inspect restored graph cache assets and retry with a fresh --side-path".to_owned(),
+            ),
+        })?;
+    Ok(workspace_id)
 }
 
 fn read_restored_derived_json(
