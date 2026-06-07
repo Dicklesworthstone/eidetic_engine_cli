@@ -47,6 +47,7 @@ consumer_decision="$artifact_root/consumer_decision.json"
 consumer_stderr="$artifact_root/consumer_decision.stderr"
 consumer_summary="$artifact_root/consumer_summary.json"
 fixture_matrix_dir="${EE_PACKET_NO_MUTATION_FIXTURE_DIR:-$REPO_ROOT/tests/fixtures/swarm_work_packet}"
+install_fixture_matrix_dir="${EE_PACKET_NO_MUTATION_INSTALL_FIXTURE_DIR:-$REPO_ROOT/tests/fixtures/golden/install}"
 fixture_matrix_root="$artifact_root/fixture_matrix"
 fixture_matrix_summary="$artifact_root/fixture_matrix_summary.json"
 git_index_before="$artifact_root/git_index_before.txt"
@@ -582,8 +583,8 @@ PY
 }
 
 run_consumer_fixture_matrix() {
-    python3 - "$fixture_matrix_dir" "$fixture_matrix_root" "$fixture_matrix_summary" \
-        "$REPO_ROOT/scripts/agent_consume_work_packet_gate.py" <<'PY'
+    python3 - "$fixture_matrix_dir" "$install_fixture_matrix_dir" "$fixture_matrix_root" \
+        "$fixture_matrix_summary" "$REPO_ROOT/scripts/agent_consume_work_packet_gate.py" <<'PY'
 import json
 import os
 import pathlib
@@ -591,9 +592,10 @@ import subprocess
 import sys
 
 fixture_dir = pathlib.Path(sys.argv[1])
-matrix_root = pathlib.Path(sys.argv[2])
-summary_path = pathlib.Path(sys.argv[3])
-consumer = pathlib.Path(sys.argv[4])
+install_fixture_dir = pathlib.Path(sys.argv[2])
+matrix_root = pathlib.Path(sys.argv[3])
+summary_path = pathlib.Path(sys.argv[4])
+consumer = pathlib.Path(sys.argv[5])
 
 failures = []
 assertions = []
@@ -606,16 +608,30 @@ def check(name, passed, detail=""):
 
 
 check("fixture_matrix_dir_exists", fixture_dir.is_dir(), str(fixture_dir))
-fixtures = sorted(fixture_dir.glob("*.json")) if fixture_dir.is_dir() else []
-check("fixture_matrix_non_empty", bool(fixtures))
+swarm_fixtures = sorted(fixture_dir.glob("*.json")) if fixture_dir.is_dir() else []
+check("fixture_matrix_non_empty", bool(swarm_fixtures))
+check("install_fixture_matrix_dir_exists", install_fixture_dir.is_dir(), str(install_fixture_dir))
+install_fixtures = (
+    sorted(install_fixture_dir.glob("*_check.json.golden"))
+    if install_fixture_dir.is_dir()
+    else []
+)
+check("install_fixture_matrix_non_empty", bool(install_fixtures))
+fixtures = [(fixture, "swarm") for fixture in swarm_fixtures] + [
+    (fixture, "install_check") for fixture in install_fixtures
+]
 
 env = os.environ.copy()
 env["PYTHONDONTWRITEBYTECODE"] = "1"
 rows = []
 
-for fixture in fixtures:
-    decision_path = matrix_root / f"{fixture.stem}.decision.json"
-    stderr_path = matrix_root / f"{fixture.stem}.stderr"
+for fixture, fixture_kind in fixtures:
+    fixture_key = "".join(
+        char if char.isalnum() or char in "-_" else "_"
+        for char in f"{fixture_kind}_{fixture.name}"
+    )
+    decision_path = matrix_root / f"{fixture_key}.decision.json"
+    stderr_path = matrix_root / f"{fixture_key}.stderr"
     proc = subprocess.run(
         [sys.executable, "-B", str(consumer)],
         input=fixture.read_bytes(),
@@ -638,7 +654,7 @@ for fixture in fixtures:
             f"line_{error.lineno}_column_{error.colno}",
         )
 
-    expected_safe = fixture.name == "healthy_small.json"
+    expected_safe = fixture_kind == "swarm" and fixture.name == "healthy_small.json"
     expected_exit = 0 if expected_safe else 3
     safe_to_claim = decision.get("safeToClaim")
     argv_actions = decision.get("argvActions")
@@ -724,6 +740,7 @@ for fixture in fixtures:
     rows.append(
         {
             "fixture": fixture.name,
+            "fixture_kind": fixture_kind,
             "exit_code": proc.returncode,
             "safe_to_claim": safe_to_claim,
             "decision": decision_name,
@@ -742,16 +759,23 @@ for fixture in fixtures:
 
 safe_count = sum(1 for row in rows if row["safe_to_claim"] is True)
 unsafe_count = sum(1 for row in rows if row["safe_to_claim"] is False)
+install_count = sum(1 for row in rows if row["fixture_kind"] == "install_check")
 check("fixture_matrix_single_safe_fixture", safe_count == 1, str(safe_count))
 check("fixture_matrix_unsafe_remainder", unsafe_count == max(len(rows) - 1, 0), str(unsafe_count))
+check("install_fixture_matrix_all_unsafe", install_count > 0 and install_count <= unsafe_count, str(install_count))
 
 summary = {
     "fixture_count": len(rows),
+    "swarm_fixture_count": len(swarm_fixtures),
+    "install_fixture_count": install_count,
     "safe_fixture_count": safe_count,
     "unsafe_fixture_count": unsafe_count,
     "fixture_names": ",".join(row["fixture"] for row in rows),
+    "install_fixture_names": ",".join(
+        row["fixture"] for row in rows if row["fixture_kind"] == "install_check"
+    ),
     "decision_summary": ",".join(
-        f"{row['fixture']}:{row['decision']}:{str(row['safe_to_claim']).lower()}:{row['exit_code']}"
+        f"{row['fixture_kind']}:{row['fixture']}:{row['decision']}:{str(row['safe_to_claim']).lower()}:{row['exit_code']}"
         for row in rows
     ),
     "max_why_not_safe_count": max(
@@ -949,9 +973,11 @@ if run_consumer_fixture_matrix; then
     emit_phase "fixture_matrix_consumer" \
         "summary_hash" "$(_e2e_hash_file "$fixture_matrix_summary")" \
         "fixture_count" "$(json_field "$fixture_matrix_summary" "/fixture_count")" \
+        "install_fixture_count" "$(json_field "$fixture_matrix_summary" "/install_fixture_count")" \
         "safe_fixture_count" "$(json_field "$fixture_matrix_summary" "/safe_fixture_count")" \
         "unsafe_fixture_count" "$(json_field "$fixture_matrix_summary" "/unsafe_fixture_count")" \
         "fixture_names" "$(json_field "$fixture_matrix_summary" "/fixture_names")" \
+        "install_fixture_names" "$(json_field "$fixture_matrix_summary" "/install_fixture_names")" \
         "decision_summary" "$(json_field "$fixture_matrix_summary" "/decision_summary")" \
         "max_why_not_safe_count" "$(json_field "$fixture_matrix_summary" "/max_why_not_safe_count")" \
         "max_degraded_summary_count" "$(json_field "$fixture_matrix_summary" "/max_degraded_summary_count")" \
@@ -1078,9 +1104,11 @@ payload = {
     "consumer_argv_action_count": as_int(consumer.get("argv_action_count")),
     "consumer_max_argv_part_count": as_int(consumer.get("max_argv_part_count")),
     "fixture_count": as_int(fixture_matrix.get("fixture_count")),
+    "install_fixture_count": as_int(fixture_matrix.get("install_fixture_count")),
     "safe_fixture_count": as_int(fixture_matrix.get("safe_fixture_count")),
     "unsafe_fixture_count": as_int(fixture_matrix.get("unsafe_fixture_count")),
     "fixture_names": fixture_matrix.get("fixture_names") or "",
+    "install_fixture_names": fixture_matrix.get("install_fixture_names") or "",
     "fixture_decision_summary": fixture_matrix.get("decision_summary") or "",
     "fixture_max_why_not_safe_count": as_int(
         fixture_matrix.get("max_why_not_safe_count")

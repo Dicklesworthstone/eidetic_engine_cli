@@ -216,16 +216,18 @@ non-empty `whyNotSafe` and must not expose runnable mutating or claim actions.
 
 The same run also executes the reference consumer against every
 `tests/fixtures/swarm_work_packet/*.json` fixture and logs
-`fixture_matrix_consumer`. The current matrix expects exactly one claim-safe
-fixture, `healthy_small.json`; crowded-checkout, degraded-Mail,
-tracker-mismatch, rollup, BV-timeout, Beads-timeout, and RCH-blocked fixtures
-must fail closed with consumer exit `3`.
+`fixture_matrix_consumer`. It also runs the consumer against the real
+install-check golden envelopes in `tests/fixtures/golden/install/*_check.json.golden`.
+The current matrix expects exactly one claim-safe swarm fixture,
+`healthy_small.json`; crowded-checkout, degraded-Mail, tracker-mismatch,
+rollup, BV-timeout, Beads-timeout, RCH-blocked, duplicate-PATH install, and
+missing-PATH install fixtures must fail closed with consumer exit `3`.
 
 The compact `summary.jsonl` mirrors the same proof surface for closeout tools:
 it includes Beads/Cargo/RCH call counts, the generated packet consumer
 decision, unsafe-reason, degraded-summary, command-action, and max argv-part
-counts, fixture-matrix safe/unsafe counts, and the per-fixture decision
-summary.
+counts, fixture-matrix safe/unsafe counts, `install_fixture_count`, and the
+per-fixture decision summary.
 
 ## Required Guarantees
 
