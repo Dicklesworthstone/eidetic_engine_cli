@@ -30,6 +30,11 @@ use crate::models::{
     CreateMemoryAnchorInput, MemoryAnchorFreshnessState, MemoryAnchorKind, MemoryAnchorSource,
     StoredMemoryAnchor, extract_precision_memory_anchors,
 };
+use crate::models::{
+    MemorySentinelKind, MemorySentinelResult, MemorySentinelResultStatus,
+    MemorySentinelSafetyClass, MemorySentinelSpec, StoredMemorySentinelResult,
+    StoredMemorySentinelSpec,
+};
 
 pub mod migrate;
 pub mod read_pool;
@@ -11507,6 +11512,38 @@ fn parse_memory_anchor_freshness(row_value: &str) -> Result<MemoryAnchorFreshnes
     })
 }
 
+fn parse_memory_sentinel_kind(row_value: &str) -> Result<MemorySentinelKind> {
+    MemorySentinelKind::parse(row_value).ok_or_else(|| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("memory_sentinel_specs.sentinel_kind has unknown value {row_value:?}"),
+    })
+}
+
+fn parse_memory_sentinel_safety_class(row_value: &str) -> Result<MemorySentinelSafetyClass> {
+    MemorySentinelSafetyClass::parse(row_value).ok_or_else(|| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("memory_sentinel_specs.safety_class has unknown value {row_value:?}"),
+    })
+}
+
+fn parse_memory_sentinel_result_status(row_value: &str) -> Result<MemorySentinelResultStatus> {
+    MemorySentinelResultStatus::parse(row_value).ok_or_else(|| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("memory_sentinel_results.status has unknown value {row_value:?}"),
+    })
+}
+
+fn optional_u64_value(value: Option<u64>, column: &'static str) -> Result<Value> {
+    value.map_or(Ok(Value::Null), |value| {
+        i64::try_from(value)
+            .map(Value::BigInt)
+            .map_err(|_| DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!("{column} must fit i64"),
+            })
+    })
+}
+
 fn required_f32(row: &Row, index: usize, operation: DbOperation, column: &str) -> Result<f32> {
     match required_value(row, index, operation, column)? {
         Value::Double(value) => Ok(*value as f32),
@@ -11546,6 +11583,55 @@ fn stored_memory_anchor_from_row(row: &Row) -> Result<StoredMemoryAnchor> {
         generation: required_i64(row, 9, DbOperation::Query, "generation")?,
         created_at: required_text(row, 10, DbOperation::Query, "created_at")?.to_string(),
         updated_at: required_text(row, 11, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+fn stored_memory_sentinel_spec_from_row(row: &Row) -> Result<StoredMemorySentinelSpec> {
+    let sentinel_kind =
+        parse_memory_sentinel_kind(required_text(row, 2, DbOperation::Query, "sentinel_kind")?)?;
+    let safety_class = parse_memory_sentinel_safety_class(required_text(
+        row,
+        5,
+        DbOperation::Query,
+        "safety_class",
+    )?)?;
+    Ok(StoredMemorySentinelSpec {
+        spec_hash: required_text(row, 0, DbOperation::Query, "spec_hash")?.to_string(),
+        memory_id: required_text(row, 1, DbOperation::Query, "memory_id")?.to_string(),
+        sentinel_kind,
+        target: required_text(row, 3, DbOperation::Query, "target")?.to_string(),
+        expected_predicate: required_text(row, 4, DbOperation::Query, "expected_predicate")?
+            .to_string(),
+        safety_class,
+        provenance: required_text(row, 6, DbOperation::Query, "provenance")?.to_string(),
+        stale_threshold_seconds: optional_u64(
+            row,
+            7,
+            DbOperation::Query,
+            "stale_threshold_seconds",
+        )?,
+        created_at: required_text(row, 8, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 9, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+fn stored_memory_sentinel_result_from_row(row: &Row) -> Result<StoredMemorySentinelResult> {
+    let status =
+        parse_memory_sentinel_result_status(required_text(row, 2, DbOperation::Query, "status")?)?;
+    Ok(StoredMemorySentinelResult {
+        result_hash: required_text(row, 0, DbOperation::Query, "result_hash")?.to_string(),
+        spec_hash: required_text(row, 1, DbOperation::Query, "spec_hash")?.to_string(),
+        status,
+        checked_at: required_text(row, 3, DbOperation::Query, "checked_at")?.to_string(),
+        evidence_summary: required_text(row, 4, DbOperation::Query, "evidence_summary")?
+            .to_string(),
+        stale_threshold_seconds: optional_u64(
+            row,
+            5,
+            DbOperation::Query,
+            "stale_threshold_seconds",
+        )?,
+        created_at: required_text(row, 6, DbOperation::Query, "created_at")?.to_string(),
     })
 }
 
@@ -11709,6 +11795,85 @@ impl DbConnection {
             ],
         )?;
         rows.iter().map(stored_memory_anchor_from_row).collect()
+    }
+
+    /// Upsert a sentinel spec attached to one memory.
+    pub fn upsert_memory_sentinel_spec(&self, spec: &MemorySentinelSpec) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO memory_sentinel_specs (spec_hash, memory_id, sentinel_kind, target, expected_predicate, safety_class, provenance, stale_threshold_seconds, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT(spec_hash) DO UPDATE SET target = excluded.target, expected_predicate = excluded.expected_predicate, safety_class = excluded.safety_class, provenance = excluded.provenance, stale_threshold_seconds = excluded.stale_threshold_seconds, updated_at = excluded.updated_at",
+            &[
+                Value::Text(spec.spec_hash.clone()),
+                Value::Text(spec.memory_id.clone()),
+                Value::Text(spec.sentinel_kind.as_str().to_string()),
+                Value::Text(spec.target.clone()),
+                Value::Text(spec.expected_predicate.clone()),
+                Value::Text(spec.safety_class.as_str().to_string()),
+                Value::Text(spec.provenance.clone()),
+                optional_u64_value(spec.stale_threshold_seconds, "stale_threshold_seconds")?,
+                Value::Text(now.clone()),
+                Value::Text(now),
+            ],
+        )
+    }
+
+    /// Upsert sentinel specs attached to memories, returning attempted row count.
+    pub fn upsert_memory_sentinel_specs(&self, specs: &[MemorySentinelSpec]) -> Result<u64> {
+        let mut attempted = 0_u64;
+        for spec in specs {
+            self.upsert_memory_sentinel_spec(spec)?;
+            attempted += 1;
+        }
+        Ok(attempted)
+    }
+
+    /// Insert an immutable sentinel check result. Duplicate result hashes are idempotent.
+    pub fn insert_memory_sentinel_result(&self, result: &MemorySentinelResult) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT OR IGNORE INTO memory_sentinel_results (result_hash, spec_hash, status, checked_at, evidence_summary, stale_threshold_seconds, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            &[
+                Value::Text(result.result_hash.clone()),
+                Value::Text(result.spec_hash.clone()),
+                Value::Text(result.status.as_str().to_string()),
+                Value::Text(result.checked_at.clone()),
+                Value::Text(result.evidence_summary.clone()),
+                optional_u64_value(result.stale_threshold_seconds, "stale_threshold_seconds")?,
+                Value::Text(now),
+            ],
+        )
+    }
+
+    /// List sentinel specs attached to one memory in deterministic order.
+    pub fn list_memory_sentinel_specs(
+        &self,
+        memory_id: &str,
+    ) -> Result<Vec<StoredMemorySentinelSpec>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT spec_hash, memory_id, sentinel_kind, target, expected_predicate, safety_class, provenance, stale_threshold_seconds, created_at, updated_at FROM memory_sentinel_specs WHERE memory_id = ?1 ORDER BY sentinel_kind ASC, target ASC, expected_predicate ASC, spec_hash ASC",
+            &[Value::Text(memory_id.to_string())],
+        )?;
+        rows.iter()
+            .map(stored_memory_sentinel_spec_from_row)
+            .collect()
+    }
+
+    /// Return the latest stored result for one sentinel spec, if any.
+    pub fn latest_memory_sentinel_result(
+        &self,
+        spec_hash: &str,
+    ) -> Result<Option<StoredMemorySentinelResult>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT result_hash, spec_hash, status, checked_at, evidence_summary, stale_threshold_seconds, created_at FROM memory_sentinel_results WHERE spec_hash = ?1 ORDER BY checked_at DESC, created_at DESC, result_hash ASC LIMIT 1",
+            &[Value::Text(spec_hash.to_string())],
+        )?;
+        rows.first()
+            .map(stored_memory_sentinel_result_from_row)
+            .transpose()
     }
 
     /// Get a memory by ID.
