@@ -9,6 +9,9 @@ use std::fmt;
 use std::iter::Peekable;
 use std::str::Chars;
 
+use super::scoring::AnchorMatchContext;
+use crate::models::{MemoryAnchorSource, extract_precision_memory_anchors};
+
 /// Parsed search query with deterministic clause ordering.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ParsedSearchQuery {
@@ -245,9 +248,37 @@ fn write_printable_unquoted(value: &str, formatter: &mut fmt::Formatter<'_>) -> 
     Ok(())
 }
 
+/// Build the redaction-safe anchor-match context for a search query
+/// (bd-1n0np.3.3).
+///
+/// Runs the same precision anchor extraction used at ingest over the query
+/// string and projects each anchor to a `(kind, hash)` pair. The result feeds
+/// [`anchor_match_score`](super::scoring::anchor_match_score): a query that
+/// names exact code surfaces (`src/db/mod.rs`, schema `ee.response.v2`,
+/// `EE_PACK_TRACE`, `cargo fmt --check`, …) can additively boost already-
+/// retrieved candidates carrying the same hashed anchors, while Frankensearch
+/// keeps ownership of candidate selection and base ranking. Only hashes cross
+/// this boundary — raw query surfaces are never compared or stored. Prose with
+/// no exact code surface yields a cold-start context (no boost).
+#[must_use]
+pub fn query_anchor_match_context(query: &str) -> AnchorMatchContext {
+    let anchors = extract_precision_memory_anchors(
+        "mem_searchquery00000000000000000",
+        query,
+        MemoryAnchorSource::Explicit,
+        Some("search.query"),
+    );
+    AnchorMatchContext::new(anchors.into_iter().map(|anchor| {
+        (
+            anchor.anchor_kind.as_str().to_owned(),
+            anchor.anchor_value_hash,
+        )
+    }))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SearchQueryClause, parse_search_query};
+    use super::{SearchQueryClause, parse_search_query, query_anchor_match_context};
 
     #[test]
     fn search_query_parser_normalizes_terms_phrases_and_exclusions() {
@@ -473,5 +504,27 @@ mod tests {
             SearchQueryClause::ExcludedTerm("gamma\u{001f}delta".to_string()).to_string(),
             "-gamma delta"
         );
+    }
+
+    #[test]
+    fn query_anchor_match_context_extracts_hashed_surfaces() {
+        let context = query_anchor_match_context("Edit `src/db/mod.rs` and honor `EE_PACK_TRACE`");
+        assert!(!context.is_cold_start());
+        // The query's path surface is carried as its canonical anchor hash,
+        // matching what extraction stored for the same path.
+        let path_hash = crate::models::memory_anchor_value_hash(
+            crate::models::MemoryAnchorKind::Path,
+            "src/db/mod.rs",
+        );
+        assert!(context.anchors.contains(&("path".to_owned(), path_hash)));
+        // No raw surface string leaks into the context.
+        assert!(
+            context
+                .anchors
+                .iter()
+                .all(|(_, hash)| hash.starts_with("blake3:") && !hash.contains("src/db/mod.rs"))
+        );
+        // Prose with no exact code surface yields a cold-start context (no boost).
+        assert!(query_anchor_match_context("just ordinary prose words").is_cold_start());
     }
 }
