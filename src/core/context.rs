@@ -1543,7 +1543,7 @@ pub fn explain_why_not(
 
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut search_preloaded_memories = BTreeMap::new();
-    let search_report = match run_context_search_with_preloaded_memories(
+    let mut search_report = match run_context_search_with_preloaded_memories(
         &SearchOptions {
             workspace_path: options.workspace_path.clone(),
             database_path: Some(database_path.clone()),
@@ -1579,6 +1579,37 @@ pub fn explain_why_not(
         ),
         Err(error) => return Err(ContextPackError::Search(error)),
     };
+
+    // Mirror the production pack path: when the derived index is missing or
+    // errored, resolve candidates from a deterministic lexical memory fallback so
+    // why-not reflects the same candidate universe `ee pack` would actually use
+    // (otherwise a memory the pack would include via fallback is misreported as
+    // not_retrieved/reconstructed).
+    push_search_degradations(&mut degraded, &search_report.degraded);
+    if matches!(
+        search_report.status,
+        SearchStatus::IndexError | SearchStatus::IndexNotFound
+    ) {
+        let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+        let fallback_hits = lexical_memory_fallback_hits(
+            read_connection,
+            &options.workspace_path,
+            &request.query,
+            request.candidate_pool,
+            options.include_tombstoned,
+            context_validity_reference_time(options, &effective_filters),
+            context_include_expired(options, &effective_filters),
+            context_include_future(options, &effective_filters),
+            context_include_stale(options, &effective_filters),
+            &mut degraded,
+        );
+        search_report.results = fallback_hits;
+        search_report.status = if search_report.results.is_empty() {
+            SearchStatus::NoResults
+        } else {
+            SearchStatus::Success
+        };
+    }
 
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let (candidates, _candidate_metrics) = candidates_from_search_with_metrics(
