@@ -27,8 +27,11 @@
 //! `Tag` lowercases incoming identifiers so the canonical wire form
 //! matches the canonical Rust form.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
+
+use serde_json::{Map as JsonMap, Value as JsonValue};
 
 fn normalized_memory_level_token(input: &str) -> String {
     input.trim().to_ascii_lowercase()
@@ -171,6 +174,311 @@ pub const KNOWN_MEMORY_KINDS: &[&str] = &[
     "risk",
     "playbook-step",
 ];
+
+pub const TYPED_MEMORY_FIELDS_SCHEMA_V1: &str = "ee.memory.typed_fields.v1";
+pub const MAX_TYPED_MEMORY_FIELDS: usize = 4;
+pub const MAX_TYPED_MEMORY_FIELD_VALUE_BYTES: usize = 4096;
+pub const MAX_TYPED_MEMORY_FIELD_LIST_ITEMS: usize = 8;
+pub const MAX_TYPED_MEMORY_FIELDS_JSON_BYTES: usize = 16 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypedMemoryFieldShape {
+    Text,
+    TextList,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TypedMemoryFieldSpec {
+    name: &'static str,
+    shape: TypedMemoryFieldShape,
+}
+
+const FAILURE_TYPED_MEMORY_FIELDS: &[TypedMemoryFieldSpec] = &[
+    TypedMemoryFieldSpec {
+        name: "cause",
+        shape: TypedMemoryFieldShape::Text,
+    },
+    TypedMemoryFieldSpec {
+        name: "regression_surface",
+        shape: TypedMemoryFieldShape::Text,
+    },
+    TypedMemoryFieldSpec {
+        name: "reverted_at_sha",
+        shape: TypedMemoryFieldShape::Text,
+    },
+    TypedMemoryFieldSpec {
+        name: "family",
+        shape: TypedMemoryFieldShape::Text,
+    },
+];
+
+const DECISION_TYPED_MEMORY_FIELDS: &[TypedMemoryFieldSpec] = &[
+    TypedMemoryFieldSpec {
+        name: "options",
+        shape: TypedMemoryFieldShape::TextList,
+    },
+    TypedMemoryFieldSpec {
+        name: "chosen",
+        shape: TypedMemoryFieldShape::Text,
+    },
+    TypedMemoryFieldSpec {
+        name: "rationale",
+        shape: TypedMemoryFieldShape::Text,
+    },
+    TypedMemoryFieldSpec {
+        name: "supersedes",
+        shape: TypedMemoryFieldShape::Text,
+    },
+];
+
+const COMMAND_TYPED_MEMORY_FIELDS: &[TypedMemoryFieldSpec] = &[
+    TypedMemoryFieldSpec {
+        name: "command",
+        shape: TypedMemoryFieldShape::Text,
+    },
+    TypedMemoryFieldSpec {
+        name: "when_to_use",
+        shape: TypedMemoryFieldShape::Text,
+    },
+    TypedMemoryFieldSpec {
+        name: "exit_meaning",
+        shape: TypedMemoryFieldShape::Text,
+    },
+];
+
+const RISK_TYPED_MEMORY_FIELDS: &[TypedMemoryFieldSpec] = &[
+    TypedMemoryFieldSpec {
+        name: "trigger",
+        shape: TypedMemoryFieldShape::Text,
+    },
+    TypedMemoryFieldSpec {
+        name: "blast_radius",
+        shape: TypedMemoryFieldShape::Text,
+    },
+    TypedMemoryFieldSpec {
+        name: "safer_alternative",
+        shape: TypedMemoryFieldShape::Text,
+    },
+];
+
+fn typed_memory_field_specs(kind: &MemoryKind) -> Option<&'static [TypedMemoryFieldSpec]> {
+    match kind {
+        MemoryKind::Failure => Some(FAILURE_TYPED_MEMORY_FIELDS),
+        MemoryKind::Decision => Some(DECISION_TYPED_MEMORY_FIELDS),
+        MemoryKind::Command => Some(COMMAND_TYPED_MEMORY_FIELDS),
+        MemoryKind::Risk | MemoryKind::AntiPattern => Some(RISK_TYPED_MEMORY_FIELDS),
+        MemoryKind::Rule
+        | MemoryKind::Fact
+        | MemoryKind::Convention
+        | MemoryKind::PlaybookStep
+        | MemoryKind::Custom(_) => None,
+    }
+}
+
+fn typed_memory_field_spec(
+    specs: &[TypedMemoryFieldSpec],
+    field: &str,
+) -> Option<TypedMemoryFieldSpec> {
+    specs.iter().copied().find(|spec| spec.name == field)
+}
+
+/// Canonicalize validated typed memory fields without changing values.
+///
+/// This is intended for already-redacted inputs. Ingestion paths that accept
+/// raw external material should call
+/// [`canonicalize_typed_memory_fields_json_with_redactor`] and pass the
+/// project redaction pipeline for every string field value.
+pub fn canonicalize_typed_memory_fields_json(
+    kind: &MemoryKind,
+    raw_json: &str,
+) -> Result<String, MemoryValidationError> {
+    canonicalize_typed_memory_fields_json_with_redactor(kind, raw_json, str::to_owned)
+}
+
+/// Canonicalize validated typed memory fields after applying `redact` to each
+/// string field value.
+pub fn canonicalize_typed_memory_fields_json_with_redactor<F>(
+    kind: &MemoryKind,
+    raw_json: &str,
+    mut redact: F,
+) -> Result<String, MemoryValidationError>
+where
+    F: FnMut(&str) -> String,
+{
+    if raw_json.len() > MAX_TYPED_MEMORY_FIELDS_JSON_BYTES {
+        return Err(MemoryValidationError::TypedFieldsJsonTooLarge {
+            bytes: raw_json.len(),
+            limit: MAX_TYPED_MEMORY_FIELDS_JSON_BYTES,
+        });
+    }
+
+    let parsed: JsonValue = serde_json::from_str(raw_json).map_err(|error| {
+        MemoryValidationError::InvalidTypedFieldsJson {
+            message: error.to_string(),
+        }
+    })?;
+    let fields = typed_memory_fields_object(kind, &parsed)?;
+    let specs = typed_memory_field_specs(kind).ok_or_else(|| {
+        MemoryValidationError::TypedFieldsUnsupportedKind {
+            kind: kind.as_str().to_owned(),
+        }
+    })?;
+
+    let mut canonical_fields = BTreeMap::<String, JsonValue>::new();
+    for (field, value) in fields {
+        if value.is_null() {
+            continue;
+        }
+        let Some(spec) = typed_memory_field_spec(specs, field) else {
+            return Err(MemoryValidationError::TypedFieldNotAllowed {
+                kind: kind.as_str().to_owned(),
+                field: field.to_owned(),
+            });
+        };
+        match spec.shape {
+            TypedMemoryFieldShape::Text => {
+                let text =
+                    value
+                        .as_str()
+                        .ok_or_else(|| MemoryValidationError::TypedFieldWrongType {
+                            field: field.to_owned(),
+                            expected: "string",
+                        })?;
+                let text = redact(text).trim().to_owned();
+                if text.is_empty() {
+                    continue;
+                }
+                validate_typed_memory_field_value_len(field, &text)?;
+                canonical_fields.insert(field.to_owned(), JsonValue::String(text));
+            }
+            TypedMemoryFieldShape::TextList => {
+                let values =
+                    value
+                        .as_array()
+                        .ok_or_else(|| MemoryValidationError::TypedFieldWrongType {
+                            field: field.to_owned(),
+                            expected: "array of strings",
+                        })?;
+                if values.len() > MAX_TYPED_MEMORY_FIELD_LIST_ITEMS {
+                    return Err(MemoryValidationError::TypedFieldListTooLong {
+                        field: field.to_owned(),
+                        count: values.len(),
+                        limit: MAX_TYPED_MEMORY_FIELD_LIST_ITEMS,
+                    });
+                }
+                let mut canonical_values = Vec::new();
+                for item in values {
+                    let text = item.as_str().ok_or_else(|| {
+                        MemoryValidationError::TypedFieldWrongType {
+                            field: field.to_owned(),
+                            expected: "array of strings",
+                        }
+                    })?;
+                    let text = redact(text).trim().to_owned();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    validate_typed_memory_field_value_len(field, &text)?;
+                    canonical_values.push(JsonValue::String(text));
+                }
+                if !canonical_values.is_empty() {
+                    canonical_fields.insert(field.to_owned(), JsonValue::Array(canonical_values));
+                }
+            }
+        }
+    }
+
+    if canonical_fields.len() > MAX_TYPED_MEMORY_FIELDS {
+        return Err(MemoryValidationError::TypedFieldsTooMany {
+            count: canonical_fields.len(),
+            limit: MAX_TYPED_MEMORY_FIELDS,
+        });
+    }
+
+    let fields: JsonMap<String, JsonValue> = canonical_fields.into_iter().collect();
+    let mut envelope = JsonMap::new();
+    envelope.insert(
+        "schema".to_owned(),
+        JsonValue::String(TYPED_MEMORY_FIELDS_SCHEMA_V1.to_owned()),
+    );
+    envelope.insert(
+        "kind".to_owned(),
+        JsonValue::String(kind.as_str().to_owned()),
+    );
+    envelope.insert("fields".to_owned(), JsonValue::Object(fields));
+    serde_json::to_string(&JsonValue::Object(envelope)).map_err(|error| {
+        MemoryValidationError::InvalidTypedFieldsJson {
+            message: error.to_string(),
+        }
+    })
+}
+
+fn typed_memory_fields_object<'a>(
+    kind: &MemoryKind,
+    parsed: &'a JsonValue,
+) -> Result<&'a JsonMap<String, JsonValue>, MemoryValidationError> {
+    let object =
+        parsed
+            .as_object()
+            .ok_or_else(|| MemoryValidationError::InvalidTypedFieldsJson {
+                message: "typed fields must be a JSON object".to_owned(),
+            })?;
+
+    if let Some(fields) = object.get("fields") {
+        if let Some(schema) = object.get("schema") {
+            let schema =
+                schema
+                    .as_str()
+                    .ok_or_else(|| MemoryValidationError::TypedFieldWrongType {
+                        field: "schema".to_owned(),
+                        expected: "string",
+                    })?;
+            if schema != TYPED_MEMORY_FIELDS_SCHEMA_V1 {
+                return Err(MemoryValidationError::InvalidTypedFieldsJson {
+                    message: format!("typed fields schema `{schema}` is unsupported"),
+                });
+            }
+        }
+        if let Some(actual_kind) = object.get("kind") {
+            let actual_kind =
+                actual_kind
+                    .as_str()
+                    .ok_or_else(|| MemoryValidationError::TypedFieldWrongType {
+                        field: "kind".to_owned(),
+                        expected: "string",
+                    })?;
+            let actual_kind = MemoryKind::from_str(actual_kind)?;
+            if actual_kind != *kind {
+                return Err(MemoryValidationError::TypedFieldsKindMismatch {
+                    expected: kind.as_str().to_owned(),
+                    actual: actual_kind.as_str().to_owned(),
+                });
+            }
+        }
+        return fields
+            .as_object()
+            .ok_or_else(|| MemoryValidationError::TypedFieldWrongType {
+                field: "fields".to_owned(),
+                expected: "object",
+            });
+    }
+
+    Ok(object)
+}
+
+fn validate_typed_memory_field_value_len(
+    field: &str,
+    value: &str,
+) -> Result<(), MemoryValidationError> {
+    if value.len() > MAX_TYPED_MEMORY_FIELD_VALUE_BYTES {
+        return Err(MemoryValidationError::TypedFieldTooLong {
+            field: field.to_owned(),
+            bytes: value.len(),
+            limit: MAX_TYPED_MEMORY_FIELD_VALUE_BYTES,
+        });
+    }
+    Ok(())
+}
 
 impl MemoryKind {
     /// Stable lowercase wire form.
@@ -429,15 +737,65 @@ pub type Importance = UnitScore;
 /// formal `Eq` is intentionally not implied.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MemoryValidationError {
-    UnknownLevel { input: String },
+    UnknownLevel {
+        input: String,
+    },
     EmptyKind,
-    InvalidKind { input: String },
+    InvalidKind {
+        input: String,
+    },
     EmptyTag,
-    TagTooLong { input: String, limit: usize },
-    InvalidTag { input: String },
+    TagTooLong {
+        input: String,
+        limit: usize,
+    },
+    InvalidTag {
+        input: String,
+    },
     EmptyContent,
-    ContentTooLarge { bytes: usize, limit: usize },
-    ScoreOutOfRange { value: f32 },
+    ContentTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
+    ScoreOutOfRange {
+        value: f32,
+    },
+    TypedFieldsUnsupportedKind {
+        kind: String,
+    },
+    TypedFieldsJsonTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
+    InvalidTypedFieldsJson {
+        message: String,
+    },
+    TypedFieldNotAllowed {
+        kind: String,
+        field: String,
+    },
+    TypedFieldWrongType {
+        field: String,
+        expected: &'static str,
+    },
+    TypedFieldTooLong {
+        field: String,
+        bytes: usize,
+        limit: usize,
+    },
+    TypedFieldListTooLong {
+        field: String,
+        count: usize,
+        limit: usize,
+    },
+    TypedFieldsTooMany {
+        count: usize,
+        limit: usize,
+    },
+    TypedFieldsKindMismatch {
+        expected: String,
+        actual: String,
+    },
 }
 
 impl fmt::Display for MemoryValidationError {
@@ -470,6 +828,48 @@ impl fmt::Display for MemoryValidationError {
             Self::ScoreOutOfRange { value } => write!(
                 formatter,
                 "score {value} is outside the unit interval [0.0, 1.0]"
+            ),
+            Self::TypedFieldsUnsupportedKind { kind } => write!(
+                formatter,
+                "memory kind `{kind}` does not support typed fields"
+            ),
+            Self::TypedFieldsJsonTooLarge { bytes, limit } => write!(
+                formatter,
+                "typed memory fields JSON is {bytes} bytes; limit is {limit}"
+            ),
+            Self::InvalidTypedFieldsJson { message } => {
+                write!(formatter, "typed memory fields JSON is invalid: {message}")
+            }
+            Self::TypedFieldNotAllowed { kind, field } => write!(
+                formatter,
+                "typed memory field `{field}` is not allowed for kind `{kind}`"
+            ),
+            Self::TypedFieldWrongType { field, expected } => {
+                write!(formatter, "typed memory field `{field}` must be {expected}")
+            }
+            Self::TypedFieldTooLong {
+                field,
+                bytes,
+                limit,
+            } => write!(
+                formatter,
+                "typed memory field `{field}` is {bytes} bytes; limit is {limit}"
+            ),
+            Self::TypedFieldListTooLong {
+                field,
+                count,
+                limit,
+            } => write!(
+                formatter,
+                "typed memory field `{field}` has {count} items; limit is {limit}"
+            ),
+            Self::TypedFieldsTooMany { count, limit } => write!(
+                formatter,
+                "typed memory fields contain {count} populated fields; limit is {limit}"
+            ),
+            Self::TypedFieldsKindMismatch { expected, actual } => write!(
+                formatter,
+                "typed memory fields kind `{actual}` does not match memory kind `{expected}`"
             ),
         }
     }
@@ -525,7 +925,9 @@ mod tests {
 
     use super::{
         Confidence, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES, MemoryContent,
-        MemoryKind, MemoryLevel, MemoryValidationError, Tag, UnitScore,
+        MemoryKind, MemoryLevel, MemoryValidationError, TYPED_MEMORY_FIELDS_SCHEMA_V1, Tag,
+        UnitScore, canonicalize_typed_memory_fields_json,
+        canonicalize_typed_memory_fields_json_with_redactor,
     };
 
     #[test]
@@ -634,6 +1036,52 @@ mod tests {
                 "wrong variant for `{input}`: {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn typed_memory_fields_canonicalize_failure_fields() {
+        let canonical = canonicalize_typed_memory_fields_json(
+            &MemoryKind::Failure,
+            r#"{"family":"aggressive-prefetch","cause":" stale cache ","regression_surface":null}"#,
+        )
+        .expect("failure fields canonicalize");
+        let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("canonical JSON");
+        assert_eq!(parsed["schema"], TYPED_MEMORY_FIELDS_SCHEMA_V1);
+        assert_eq!(parsed["kind"], "failure");
+        assert_eq!(parsed["fields"]["cause"], "stale cache");
+        assert_eq!(parsed["fields"]["family"], "aggressive-prefetch");
+        assert!(parsed["fields"].get("regression_surface").is_none());
+    }
+
+    #[test]
+    fn typed_memory_fields_redact_every_string_value() {
+        let canonical = canonicalize_typed_memory_fields_json_with_redactor(
+            &MemoryKind::Decision,
+            r#"{"options":["use API_KEY=secret-value"," keep local "],"chosen":"API_KEY=secret-value"}"#,
+            |value| value.replace("secret-value", "[REDACTED:test]"),
+        )
+        .expect("decision fields canonicalize");
+        assert!(!canonical.contains("secret-value"));
+        let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("canonical JSON");
+        assert_eq!(
+            parsed["fields"]["options"][0],
+            "use API_KEY=[REDACTED:test]"
+        );
+        assert_eq!(parsed["fields"]["options"][1], "keep local");
+        assert_eq!(parsed["fields"]["chosen"], "API_KEY=[REDACTED:test]");
+    }
+
+    #[test]
+    fn typed_memory_fields_reject_unknown_field_for_kind() {
+        let err = canonicalize_typed_memory_fields_json(
+            &MemoryKind::Command,
+            r#"{"cause":"wrong shape"}"#,
+        )
+        .expect_err("wrong command field rejected");
+        assert!(matches!(
+            err,
+            MemoryValidationError::TypedFieldNotAllowed { .. }
+        ));
     }
 
     #[test]

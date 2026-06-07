@@ -30,6 +30,7 @@ use crate::models::{
     CreateMemoryAnchorInput, MemoryAnchorFreshnessState, MemoryAnchorKind, MemoryAnchorSource,
     StoredMemoryAnchor, extract_precision_memory_anchors,
 };
+use crate::models::{MemoryKind, MemoryValidationError, canonicalize_typed_memory_fields_json};
 use crate::models::{
     MemorySentinelKind, MemorySentinelResult, MemorySentinelResultStatus,
     MemorySentinelSafetyClass, MemorySentinelSpec, StoredMemorySentinelResult,
@@ -5879,6 +5880,23 @@ CREATE INDEX IF NOT EXISTS idx_memory_sentinel_results_status
     "blake3:v069_memory_sentinels_2026_06_07",
 );
 
+pub const V070_MEMORY_TYPED_FIELDS: Migration = Migration::new(
+    70,
+    "memory_typed_fields",
+    r#"
+ALTER TABLE memories
+ADD COLUMN typed_fields_json TEXT CHECK (
+    typed_fields_json IS NULL
+    OR (length(trim(typed_fields_json)) > 0 AND json_valid(typed_fields_json))
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_kind_typed_fields
+    ON memories(kind)
+    WHERE typed_fields_json IS NOT NULL;
+"#,
+    "blake3:v070_memory_typed_fields_2026_06_07",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -5950,6 +5968,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V067_PACK_CANDIDATE_IMPRESSIONS,
     V068_OUTCOME_EVIDENCE_ROWS,
     V069_MEMORY_SENTINELS,
+    V070_MEMORY_TYPED_FIELDS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -11544,6 +11563,13 @@ fn optional_u64_value(value: Option<u64>, column: &'static str) -> Result<Value>
     })
 }
 
+fn typed_memory_fields_error(operation: DbOperation, error: MemoryValidationError) -> DbError {
+    DbError::MalformedRow {
+        operation,
+        message: format!("typed_fields_json validation failed: {error}"),
+    }
+}
+
 fn required_f32(row: &Row, index: usize, operation: DbOperation, column: &str) -> Result<f32> {
     match required_value(row, index, operation, column)? {
         Value::Double(value) => Ok(*value as f32),
@@ -12066,6 +12092,59 @@ impl DbConnection {
             ],
         )?;
         rows.iter().map(stored_memory_from_row).collect()
+    }
+
+    /// Return the validated typed-field sidecar JSON for one memory.
+    pub fn get_memory_typed_fields_json(&self, id: &str) -> Result<Option<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT typed_fields_json FROM memories WHERE id = ?1 ORDER BY id ASC LIMIT 1",
+            &[Value::Text(id.to_string())],
+        )?;
+        rows.first()
+            .map(|row| optional_text(row, 0).map(|value| value.map(str::to_string)))
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    /// Validate and store a memory kind-specific typed-field sidecar.
+    ///
+    /// Passing `None` clears the sidecar. Passing raw JSON stores the
+    /// canonical `ee.memory.typed_fields.v1` envelope for the memory's current
+    /// kind.
+    pub fn set_memory_typed_fields_json(
+        &self,
+        id: &str,
+        typed_fields_json: Option<&str>,
+    ) -> Result<bool> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT kind FROM memories WHERE id = ?1 ORDER BY id ASC LIMIT 1",
+            &[Value::Text(id.to_string())],
+        )?;
+        let Some(row) = rows.first() else {
+            return Ok(false);
+        };
+        let kind = required_text(row, 0, DbOperation::Query, "kind")?;
+        let kind = MemoryKind::from_str(kind)
+            .map_err(|error| typed_memory_fields_error(DbOperation::Query, error))?;
+        let canonical_json = typed_fields_json
+            .map(|raw| {
+                canonicalize_typed_memory_fields_json(&kind, raw)
+                    .map_err(|error| typed_memory_fields_error(DbOperation::Execute, error))
+            })
+            .transpose()?;
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET typed_fields_json = ?1, updated_at = ?2 WHERE id = ?3 AND tombstoned_at IS NULL",
+            &[
+                canonical_json.map_or(Value::Null, Value::Text),
+                Value::Text(now),
+                Value::Text(id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
     }
 
     /// Tombstone a memory (soft delete).
@@ -27010,6 +27089,91 @@ mod tests {
             &tags,
             &vec!["cargo".to_string(), "formatting".to_string()],
             "tags",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn memory_typed_fields_json_round_trips_through_sidecar() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "episodic".to_string(),
+            kind: "failure".to_string(),
+            content: "Failure family aggressive-prefetch was reverted.".to_string(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.7,
+            importance: 0.8,
+            provenance_uri: Some("test://typed-fields".to_string()),
+            trust_class: "human_explicit".to_string(),
+            trust_subclass: None,
+            tags: vec![],
+            valid_from: None,
+            valid_to: None,
+        };
+        let memory_id = "mem_typedfields000000000000001";
+        connection.insert_memory(memory_id, &input)?;
+
+        let changed = connection.set_memory_typed_fields_json(
+            memory_id,
+            Some(
+                r#"{"family":"aggressive-prefetch","cause":" stale cache ","regression_surface":null}"#,
+            ),
+        )?;
+        ensure(changed, "typed fields update should affect the row")?;
+
+        let stored = connection
+            .get_memory_typed_fields_json(memory_id)?
+            .ok_or_else(|| TestFailure::new("typed fields sidecar missing"))?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stored).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &parsed["schema"],
+            &serde_json::json!(crate::models::TYPED_MEMORY_FIELDS_SCHEMA_V1),
+            "typed fields schema",
+        )?;
+        ensure_equal(
+            &parsed["kind"],
+            &serde_json::json!("failure"),
+            "typed fields kind",
+        )?;
+        ensure_equal(
+            &parsed["fields"]["cause"],
+            &serde_json::json!("stale cache"),
+            "typed cause",
+        )?;
+        ensure_equal(
+            &parsed["fields"]["family"],
+            &serde_json::json!("aggressive-prefetch"),
+            "typed family",
+        )?;
+
+        let invalid =
+            connection.set_memory_typed_fields_json(memory_id, Some(r#"{"chosen":"decision"}"#));
+        ensure(
+            matches!(
+                invalid,
+                Err(super::DbError::MalformedRow {
+                    operation: super::DbOperation::Execute,
+                    ..
+                })
+            ),
+            "invalid field for failure kind should be rejected before storage",
+        )?;
+
+        let cleared = connection.set_memory_typed_fields_json(memory_id, None)?;
+        ensure(cleared, "clearing typed fields should affect the row")?;
+        ensure(
+            connection
+                .get_memory_typed_fields_json(memory_id)?
+                .is_none(),
+            "cleared sidecar should read back as None",
         )?;
 
         connection.close()?;
