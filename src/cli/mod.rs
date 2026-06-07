@@ -333,7 +333,7 @@ const HELP_PRELUDE: &str = concat!(
     "\n",
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
-    "  Inspect:        status, doctor, capabilities, insights, impact, memory show, memory history\n",
+    "  Inspect:        status, doctor, capabilities, insights, impact, why-not, memory show, memory history\n",
     "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome\n",
     "  Curate:         curate (candidates|validate|apply), reflect, playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
