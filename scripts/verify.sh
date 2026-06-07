@@ -65,6 +65,7 @@ set -euo pipefail
 #   6.07 Why-Not E2E          - scripts/e2e_why_not.sh
 #   6.08 Cross-Cutting E2E     - scripts/e2e_cross_cutting.sh
 #   6.09 Evidence Harvester E2E - scripts/e2e_evidence_harvester.sh
+#   6.10 LOD Packing E2E       - scripts/e2e_lod_packing.sh
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
@@ -871,6 +872,11 @@ run_stage "Dueling Wizards Cross-Cutting Static E2E" "./scripts/e2e_cross_cuttin
 # no-Cargo: the script self-guards (log_drop) when the harvest/calibration CLI
 # is not yet built into the binary, so it never false-fails the gate.
 run_stage "Dueling Wizards Evidence Harvester E2E" "./scripts/e2e_evidence_harvester.sh"
+
+# Gate 6.10: Dueling Wizards LOD packing real-binary E2E. Real-binary, no-Cargo:
+# hard-asserts pack budget + hash determinism; condition-guards (log_drop) the
+# peripheral-index/link-only tier and the cli-gated --no-lod parity.
+run_stage "Dueling Wizards LOD Packing E2E" "./scripts/e2e_lod_packing.sh"
 
 # Heavy gate block: skipped under --ci-smoke for fast swarm-CI / agent
 # pre-push runs. bd-2dgn0.5: see docs/operator-swarm-slo.md for which
