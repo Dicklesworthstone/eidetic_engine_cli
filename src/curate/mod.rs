@@ -6316,6 +6316,7 @@ pub struct SpecificityWeights {
     pub branch_or_tag: f32,
     pub provenance_uri: f32,
     pub technology_name: f32,
+    pub typed_memory_field: f32,
     pub concrete_token_density: f32,
 }
 
@@ -6330,6 +6331,7 @@ impl Default for SpecificityWeights {
             branch_or_tag: 0.08,
             provenance_uri: 0.08,
             technology_name: 0.12,
+            typed_memory_field: 0.32,
             concrete_token_density: 0.18,
         }
     }
@@ -6361,6 +6363,7 @@ pub enum SpecificityTokenKind {
     ProvenanceUri,
     RedactedConcrete,
     TechnologyName,
+    TypedMemoryField,
 }
 
 impl SpecificityTokenKind {
@@ -6375,6 +6378,7 @@ impl SpecificityTokenKind {
             Self::ProvenanceUri => "provenance_uri",
             Self::RedactedConcrete => "redacted_concrete",
             Self::TechnologyName => "technology_name",
+            Self::TypedMemoryField => "typed_memory_field",
         }
     }
 }
@@ -6416,6 +6420,7 @@ pub struct SpecificityStructuralSignals {
     pub has_branch_or_tag: bool,
     pub has_provenance_uri: bool,
     pub has_technology_name: bool,
+    pub has_typed_memory_field: bool,
     pub has_instruction_like_content: bool,
 }
 
@@ -6430,6 +6435,7 @@ impl SpecificityStructuralSignals {
             || self.has_branch_or_tag
             || self.has_provenance_uri
             || self.has_technology_name
+            || self.has_typed_memory_field
     }
 }
 
@@ -6746,6 +6752,9 @@ fn specificity_weighted_sum(
     if signals.has_technology_name {
         score += weights.technology_name;
     }
+    if signals.has_typed_memory_field {
+        score += weights.typed_memory_field;
+    }
 
     let density = (scoring_token_count as f32 / 4.0).min(1.0);
     score += weights.concrete_token_density * density;
@@ -6799,6 +6808,7 @@ fn collect_specificity_tokens(input: &str) -> Vec<SpecificityToken> {
     }
     collect_inline_code_tokens(token_input, &mut tokens);
     collect_fenced_command_tokens(token_input, &mut tokens);
+    collect_typed_memory_field_tokens(token_input, &mut tokens);
     collect_lexical_concrete_tokens(&lexical_tokens, &mut tokens);
     tokens
 }
@@ -6901,6 +6911,95 @@ fn collect_fenced_command_tokens(input: &str, tokens: &mut Vec<SpecificityToken>
     }
 }
 
+fn collect_typed_memory_field_tokens(input: &str, tokens: &mut Vec<SpecificityToken>) {
+    const LABELS: &[(&str, &str)] = &[
+        ("family", "family"),
+        ("cause", "cause"),
+        ("regression surface", "regression_surface"),
+        ("regression_surface", "regression_surface"),
+        ("reverted at sha", "reverted_at_sha"),
+        ("reverted_at_sha", "reverted_at_sha"),
+        ("supersedes", "supersedes"),
+        ("options", "options"),
+        ("chosen", "chosen"),
+        ("rationale", "rationale"),
+        ("command", "command"),
+        ("risk", "risk"),
+        ("mitigation", "mitigation"),
+    ];
+    const PREFIXES: &[&str] = &[
+        "family-",
+        "cause-",
+        "regression-",
+        "reverted-at-",
+        "supersedes-",
+        "chosen-",
+        "risk-",
+        "mitigation-",
+    ];
+
+    for line in input.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        for (label, canonical) in LABELS {
+            let Some(rest) = lower.strip_prefix(label) else {
+                continue;
+            };
+            let value = if label.contains(' ') {
+                typed_label_value_after_optional_delimiter(trimmed, label.len(), true)
+            } else if rest.trim_start().starts_with(':') || rest.trim_start().starts_with('=') {
+                typed_label_value_after_optional_delimiter(trimmed, label.len(), false)
+            } else {
+                None
+            };
+            let Some(value) = value else {
+                continue;
+            };
+            let token = format!("{canonical}={value}");
+            push_specificity_token(tokens, SpecificityTokenKind::TypedMemoryField, &token);
+        }
+    }
+
+    for token in lexical_tokens(input) {
+        let lower = token.to_ascii_lowercase();
+        if PREFIXES.iter().any(|prefix| lower.starts_with(prefix)) {
+            push_specificity_token(tokens, SpecificityTokenKind::TypedMemoryField, &lower);
+        }
+    }
+}
+
+fn typed_label_value_after_optional_delimiter(
+    line: &str,
+    label_len: usize,
+    allow_whitespace_delimiter: bool,
+) -> Option<String> {
+    let rest = line.get(label_len..)?.trim_start();
+    let value = match rest.chars().next() {
+        Some(':') | Some('=') => rest.get(1..)?.trim(),
+        Some(_) if allow_whitespace_delimiter => rest,
+        _ => return None,
+    };
+    let cleaned = typed_memory_field_value_preview(value);
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn typed_memory_field_value_preview(value: &str) -> String {
+    value
+        .split_whitespace()
+        .take(6)
+        .map(trim_token)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn collect_lexical_concrete_tokens(lexical_tokens: &[String], tokens: &mut Vec<SpecificityToken>) {
     for (index, token) in lexical_tokens.iter().enumerate() {
         let lower = token.to_ascii_lowercase();
@@ -6980,6 +7079,9 @@ fn structural_signals(
         has_technology_name: tokens
             .iter()
             .any(|token| matches!(token.kind, SpecificityTokenKind::TechnologyName)),
+        has_typed_memory_field: tokens
+            .iter()
+            .any(|token| matches!(token.kind, SpecificityTokenKind::TypedMemoryField)),
         has_instruction_like_content,
     }
 }
@@ -9407,6 +9509,33 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
         assert!(report.structural_signals.has_branch_or_tag);
         assert!(report.structural_signals.has_provenance_uri);
         assert_eq!(report.platform, Some(SpecificityPlatform::Linux));
+    }
+
+    #[test]
+    fn specificity_score_credits_typed_memory_fields() {
+        let report = specificity_score(
+            "\
+Family: aggressive prefetch
+Cause: cache pollution
+Reverted at SHA 9af3c21",
+        );
+
+        assert!(report.passes_threshold, "{report:?}");
+        assert!(report.structural_signals.has_typed_memory_field);
+        assert!(
+            report
+                .concrete_tokens
+                .iter()
+                .any(|token| token.kind == SpecificityTokenKind::TypedMemoryField
+                    && token.value == "family=aggressive prefetch")
+        );
+        assert!(
+            report
+                .concrete_tokens
+                .iter()
+                .any(|token| token.kind == SpecificityTokenKind::TypedMemoryField
+                    && token.value == "reverted_at_sha=9af3c21")
+        );
     }
 
     #[test]
