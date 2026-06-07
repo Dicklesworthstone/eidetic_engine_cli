@@ -11100,6 +11100,40 @@ mod tests {
     }
 
     #[test]
+    fn lod_link_only_candidate_is_deterministic_and_within_budget() -> TestResult {
+        // bd-1n0np.5.2/5.3: the link-only peripheral-index tier must be a
+        // deterministic, budget-bounded stub that points at the source memory
+        // and drops the full body — the data the 5.3 peripheral-vision index
+        // renders so an agent can drill in via `ee memory show <id>`.
+        let candidate =
+            candidate_with_content(7, 0.9, 0.8, 500, repeated_lod_content("body", 200))?;
+        let memory_id = candidate.memory_id.to_string();
+
+        for limit in [4_u32, 8, 32, 64] {
+            let first = super::link_only_lod_candidate(&candidate, limit);
+            let second = super::link_only_lod_candidate(&candidate, limit);
+            ensure_equal(&first, &second, "link-only rendering must be deterministic")?;
+
+            let Some(link) = first else {
+                continue;
+            };
+            ensure(
+                super::estimate_tokens_default(&link.content) <= limit,
+                "link-only content must stay within the tier limit",
+            )?;
+            ensure(
+                link.content.contains(&memory_id),
+                "link-only content must point at the source memory id",
+            )?;
+            ensure(
+                !link.content.contains("body0"),
+                "link-only tier must drop the full body content",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn preview_lod_respects_candidate_token_estimate_when_heuristic_is_short() -> TestResult {
         let candidate = candidate_with_content(
             4,
