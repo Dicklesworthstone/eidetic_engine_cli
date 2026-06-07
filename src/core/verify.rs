@@ -20,9 +20,10 @@
 //! - Golden test outputs regenerated on demand, versioned
 
 use std::fmt;
-use std::io::Read;
-use std::path::Path;
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -35,10 +36,10 @@ use crate::db::{
     generate_audit_id,
 };
 use crate::models::{
-    DomainError, ProducerMetadata, RESPONSE_SCHEMA_V2, VERIFICATION_EVIDENCE_SCHEMA_V1,
-    VerificationClosureGuidance, VerificationEvidenceRecord, VerificationGateRequirement,
-    VerificationStatus, rch_cargo_closure_requirements, verification_closure_guidance,
-    verification_evidence_beads_summary,
+    DomainError, LineSpan, ProducerMetadata, ProvenanceUri, RESPONSE_SCHEMA_V2,
+    VERIFICATION_EVIDENCE_SCHEMA_V1, VerificationClosureGuidance, VerificationEvidenceRecord,
+    VerificationGateRequirement, VerificationStatus, rch_cargo_closure_requirements,
+    verification_closure_guidance, verification_evidence_beads_summary,
 };
 
 // ============================================================================
@@ -49,12 +50,15 @@ use crate::models::{
 pub const VERIFY_REPORT_SCHEMA_V1: &str = "ee.verify.report.v1";
 pub const VERIFY_RECORD_REPORT_SCHEMA_V1: &str = "ee.verify.record_report.v1";
 pub const VERIFY_CLOSURE_GUIDANCE_REPORT_SCHEMA_V1: &str = "ee.verify.closure_guidance_report.v1";
+pub const VERIFY_PROVENANCE_REFERENT_SCHEMA_V1: &str = "ee.verify.provenance_referent.v1";
 pub const VERIFICATION_LEDGER_ENTRY_SCHEMA_V1: &str = "ee.verification.ledger_entry.v1";
 pub const VERIFICATION_POSTURE_SCHEMA_V1: &str = "ee.verification.posture.v1";
 const LEGACY_VERIFICATION_RECORD_ACTION: &str = "verification.record";
 const VERIFICATION_POSTURE_WINDOW_HOURS: u32 = 24;
 const VERIFY_STEP_TIMEOUT: Duration = Duration::from_secs(60);
 const VERIFY_STEP_OUTPUT_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+const VERIFY_PROVENANCE_FILE_SCAN_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+const VERIFY_PROVENANCE_GIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Schema for artifact policy.
 pub const ARTIFACT_POLICY_SCHEMA_V1: &str = "ee.artifact_policy.v1";
@@ -697,6 +701,59 @@ impl VerificationRecordReport {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct VerifyProvenanceReferentOptions<'a> {
+    pub workspace_path: &'a Path,
+    pub database: Option<&'a DbConnection>,
+    pub allow_network: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VerifyProvenanceReferentStatus {
+    Verified,
+    EvidenceMissing,
+    EvidenceDrift,
+    Unverifiable,
+}
+
+impl VerifyProvenanceReferentStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::EvidenceMissing => "evidence_missing",
+            Self::EvidenceDrift => "evidence_drift",
+            Self::Unverifiable => "unverifiable",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifyProvenanceReferentReport {
+    pub schema: &'static str,
+    pub uri: String,
+    pub scheme: String,
+    pub status: VerifyProvenanceReferentStatus,
+    pub reason: String,
+    pub referent_hash: Option<String>,
+    pub repair: Option<String>,
+}
+
+impl VerifyProvenanceReferentReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": self.schema,
+            "uri": self.uri,
+            "scheme": self.scheme,
+            "status": self.status.as_str(),
+            "reason": self.reason,
+            "referentHash": self.referent_hash,
+            "repair": self.repair,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerificationClosureGuidanceReport {
     pub schema: &'static str,
@@ -740,6 +797,405 @@ pub struct VerificationClosureGuidanceOptions<'a> {
     pub database_path: &'a Path,
     pub bead_id: Option<&'a str>,
     pub requirements: Vec<VerificationGateRequirement>,
+}
+
+/// Re-resolve one provenance URI without mutating memories or evidence.
+#[must_use]
+pub fn verify_provenance_referent(
+    raw_uri: &str,
+    options: &VerifyProvenanceReferentOptions<'_>,
+) -> VerifyProvenanceReferentReport {
+    match ProvenanceUri::from_str(raw_uri) {
+        Ok(uri) => verify_parsed_provenance_referent(&uri, options),
+        Err(error) => provenance_referent_report(
+            raw_uri.trim(),
+            "unknown",
+            VerifyProvenanceReferentStatus::Unverifiable,
+            format!("invalid_provenance_uri: {error}"),
+            None,
+            Some("Fix or replace the provenance URI before re-verifying the referent.".to_owned()),
+        ),
+    }
+}
+
+#[must_use]
+pub fn verify_parsed_provenance_referent(
+    uri: &ProvenanceUri,
+    options: &VerifyProvenanceReferentOptions<'_>,
+) -> VerifyProvenanceReferentReport {
+    match uri {
+        ProvenanceUri::File { path, span } => {
+            verify_file_provenance_referent(uri, options.workspace_path, path, *span)
+        }
+        ProvenanceUri::EeMemory(memory_id) => {
+            let memory_id = memory_id.to_string();
+            verify_ee_memory_provenance_referent(uri, options.database, &memory_id)
+        }
+        ProvenanceUri::External { scheme, body } if scheme == "git-sha" => {
+            verify_git_sha_provenance_referent(uri, options.workspace_path, body)
+        }
+        ProvenanceUri::External { scheme, body }
+            if scheme == "bench-run" || scheme == "flamegraph" =>
+        {
+            verify_artifact_provenance_referent(uri, options.workspace_path, scheme, body)
+        }
+        ProvenanceUri::Web { .. } => verify_web_provenance_referent(uri, options.allow_network),
+        ProvenanceUri::CassSession { .. } => provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::Unverifiable,
+            "cass_recheck_requires_cass_contract".to_owned(),
+            None,
+            Some("Retry after the CASS session/span resolver is available.".to_owned()),
+        ),
+        ProvenanceUri::AgentMail { .. } => provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::Unverifiable,
+            "agent_mail_recheck_requires_mail_resolver".to_owned(),
+            None,
+            Some("Retry from a command path with Agent Mail lookup capability.".to_owned()),
+        ),
+        ProvenanceUri::External { scheme, .. } if scheme == "manual" => provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::Unverifiable,
+            "manual_provenance_has_no_re_resolvable_referent".to_owned(),
+            None,
+            None,
+        ),
+        ProvenanceUri::External { .. } => provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::Unverifiable,
+            "external_scheme_not_re_resolvable".to_owned(),
+            None,
+            Some("Register a scheme-specific provenance resolver before treating this evidence as verified.".to_owned()),
+        ),
+    }
+}
+
+fn verify_file_provenance_referent(
+    uri: &ProvenanceUri,
+    workspace_path: &Path,
+    raw_path: &str,
+    span: Option<LineSpan>,
+) -> VerifyProvenanceReferentReport {
+    let path = provenance_workspace_path(workspace_path, raw_path);
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::EvidenceMissing,
+            "file_referent_missing".to_owned(),
+            None,
+            Some(format!("Restore or update {}", path.display())),
+        );
+    };
+    if !metadata.is_file() {
+        return provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::EvidenceMissing,
+            "file_referent_not_regular_file".to_owned(),
+            None,
+            Some(format!(
+                "Point the provenance URI at a regular file, not {}",
+                path.display()
+            )),
+        );
+    }
+
+    match span {
+        Some(span) => verify_file_span_provenance_referent(uri, &path, span),
+        None => {
+            let hash = if metadata.len()
+                <= u64::try_from(VERIFY_PROVENANCE_FILE_SCAN_LIMIT_BYTES).unwrap_or(u64::MAX)
+            {
+                std::fs::read(&path)
+                    .ok()
+                    .map(|bytes| format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+            } else {
+                None
+            };
+            provenance_referent_report(
+                &uri.to_string(),
+                uri.scheme(),
+                VerifyProvenanceReferentStatus::Verified,
+                "file_referent_present".to_owned(),
+                hash,
+                None,
+            )
+        }
+    }
+}
+
+fn verify_file_span_provenance_referent(
+    uri: &ProvenanceUri,
+    path: &Path,
+    span: LineSpan,
+) -> VerifyProvenanceReferentReport {
+    let end = span.end.unwrap_or(span.start);
+    let Ok(file) = std::fs::File::open(path) else {
+        return provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::EvidenceMissing,
+            "file_referent_missing".to_owned(),
+            None,
+            Some(format!("Restore or update {}", path.display())),
+        );
+    };
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let mut line_number = 0_u64;
+    let mut bytes_seen = 0_usize;
+    let mut selected = Vec::<u8>::new();
+
+    loop {
+        line.clear();
+        let read = match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) => {
+                return provenance_referent_report(
+                    &uri.to_string(),
+                    uri.scheme(),
+                    VerifyProvenanceReferentStatus::Unverifiable,
+                    format!("file_span_read_error: {error}"),
+                    None,
+                    Some("Retry after the file can be read cleanly.".to_owned()),
+                );
+            }
+        };
+        bytes_seen = bytes_seen.saturating_add(read);
+        if bytes_seen > VERIFY_PROVENANCE_FILE_SCAN_LIMIT_BYTES {
+            return provenance_referent_report(
+                &uri.to_string(),
+                uri.scheme(),
+                VerifyProvenanceReferentStatus::Unverifiable,
+                "file_span_scan_limit_exceeded".to_owned(),
+                None,
+                Some("Narrow the provenance span or raise the verifier scan limit.".to_owned()),
+            );
+        }
+        line_number = line_number.saturating_add(1);
+        if line_number >= span.start && line_number <= end {
+            selected.extend_from_slice(line.as_bytes());
+        }
+        if line_number >= end {
+            break;
+        }
+    }
+
+    if line_number < end {
+        return provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::EvidenceDrift,
+            format!("file_span_missing: expected_through_line_{end}, observed_{line_number}"),
+            None,
+            Some("Update the file provenance line span or revalidate the memory.".to_owned()),
+        );
+    }
+
+    provenance_referent_report(
+        &uri.to_string(),
+        uri.scheme(),
+        VerifyProvenanceReferentStatus::Verified,
+        "file_span_present".to_owned(),
+        Some(format!("blake3:{}", blake3::hash(&selected).to_hex())),
+        None,
+    )
+}
+
+fn verify_ee_memory_provenance_referent(
+    uri: &ProvenanceUri,
+    database: Option<&DbConnection>,
+    memory_id: &str,
+) -> VerifyProvenanceReferentReport {
+    let Some(database) = database else {
+        return provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::Unverifiable,
+            "ee_memory_recheck_requires_database".to_owned(),
+            None,
+            Some("Run provenance verification from an initialized workspace database.".to_owned()),
+        );
+    };
+    match database.get_memory(memory_id) {
+        Ok(Some(memory)) if memory.tombstoned_at.is_none() && memory.valid_to.is_none() => {
+            provenance_referent_report(
+                &uri.to_string(),
+                uri.scheme(),
+                VerifyProvenanceReferentStatus::Verified,
+                "ee_memory_referent_present".to_owned(),
+                memory.provenance_chain_hash,
+                None,
+            )
+        }
+        Ok(Some(_)) => provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::EvidenceDrift,
+            "ee_memory_referent_no_longer_live".to_owned(),
+            None,
+            Some(
+                "Review the superseded or tombstoned memory before trusting this evidence."
+                    .to_owned(),
+            ),
+        ),
+        Ok(None) => provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::EvidenceMissing,
+            "ee_memory_referent_missing".to_owned(),
+            None,
+            Some("Restore the memory or replace the provenance URI.".to_owned()),
+        ),
+        Err(error) => provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::Unverifiable,
+            format!("ee_memory_lookup_error: {error}"),
+            None,
+            Some("Run ee doctor before retrying provenance verification.".to_owned()),
+        ),
+    }
+}
+
+fn verify_git_sha_provenance_referent(
+    uri: &ProvenanceUri,
+    workspace_path: &Path,
+    revision: &str,
+) -> VerifyProvenanceReferentReport {
+    let commit_ref = format!("{revision}^{{commit}}");
+    match run_bounded_verify_step_command(
+        "git",
+        &["cat-file", "-e", &commit_ref],
+        workspace_path,
+        VERIFY_PROVENANCE_GIT_TIMEOUT,
+        VERIFY_STEP_OUTPUT_LIMIT_BYTES,
+    ) {
+        Ok(output) if output.status.success() => provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::Verified,
+            "git_commit_reachable".to_owned(),
+            None,
+            None,
+        ),
+        Ok(_) => provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::EvidenceMissing,
+            "git_commit_unreachable".to_owned(),
+            None,
+            Some("Fetch the missing commit or revalidate memories that cite it.".to_owned()),
+        ),
+        Err(error) => provenance_referent_report(
+            &uri.to_string(),
+            uri.scheme(),
+            VerifyProvenanceReferentStatus::Unverifiable,
+            format!("git_recheck_error: {}", error.message),
+            None,
+            Some("Retry after git is available for the workspace.".to_owned()),
+        ),
+    }
+}
+
+fn verify_artifact_provenance_referent(
+    uri: &ProvenanceUri,
+    workspace_path: &Path,
+    scheme: &str,
+    body: &str,
+) -> VerifyProvenanceReferentReport {
+    let path = provenance_workspace_path(workspace_path, body);
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => provenance_referent_report(
+            &uri.to_string(),
+            scheme,
+            VerifyProvenanceReferentStatus::Verified,
+            "artifact_referent_present".to_owned(),
+            if metadata.len()
+                <= u64::try_from(VERIFY_PROVENANCE_FILE_SCAN_LIMIT_BYTES).unwrap_or(u64::MAX)
+            {
+                std::fs::read(&path)
+                    .ok()
+                    .map(|bytes| format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+            } else {
+                None
+            },
+            None,
+        ),
+        Ok(_) => provenance_referent_report(
+            &uri.to_string(),
+            scheme,
+            VerifyProvenanceReferentStatus::EvidenceMissing,
+            "artifact_referent_not_regular_file".to_owned(),
+            None,
+            Some(format!(
+                "Point the provenance URI at a regular artifact file, not {}",
+                path.display()
+            )),
+        ),
+        Err(_) => provenance_referent_report(
+            &uri.to_string(),
+            scheme,
+            VerifyProvenanceReferentStatus::EvidenceMissing,
+            "artifact_referent_missing".to_owned(),
+            None,
+            Some(format!("Restore or update {}", path.display())),
+        ),
+    }
+}
+
+fn verify_web_provenance_referent(
+    uri: &ProvenanceUri,
+    allow_network: bool,
+) -> VerifyProvenanceReferentReport {
+    let reason = if allow_network {
+        "network_recheck_not_implemented"
+    } else {
+        "network_recheck_disabled"
+    };
+    provenance_referent_report(
+        &uri.to_string(),
+        uri.scheme(),
+        VerifyProvenanceReferentStatus::Unverifiable,
+        reason.to_owned(),
+        None,
+        Some("Network provenance rechecks are opt-in and require a network resolver.".to_owned()),
+    )
+}
+
+fn provenance_workspace_path(workspace_path: &Path, raw_path: &str) -> PathBuf {
+    let path = Path::new(raw_path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_path.join(path)
+    }
+}
+
+fn provenance_referent_report(
+    uri: &str,
+    scheme: &str,
+    status: VerifyProvenanceReferentStatus,
+    reason: String,
+    referent_hash: Option<String>,
+    repair: Option<String>,
+) -> VerifyProvenanceReferentReport {
+    VerifyProvenanceReferentReport {
+        schema: VERIFY_PROVENANCE_REFERENT_SCHEMA_V1,
+        uri: uri.to_owned(),
+        scheme: scheme.to_owned(),
+        status,
+        reason,
+        referent_hash,
+        repair,
+    }
 }
 
 // ============================================================================
@@ -1709,6 +2165,124 @@ mod tests {
         ensure(output.status.success(), "command succeeds")?;
         ensure_equal(&output.stdout, &"abc".to_string(), "stdout capped")?;
         ensure_equal(&output.stderr, &"ghi".to_string(), "stderr capped")
+    }
+
+    #[test]
+    fn provenance_referent_verifies_file_span_and_hashes_selected_lines() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(temp.path().join("notes.md"), "alpha\nbravo\ncharlie\n")
+            .map_err(|error| error.to_string())?;
+
+        let report = verify_provenance_referent(
+            "file://notes.md#L2-3",
+            &VerifyProvenanceReferentOptions {
+                workspace_path: temp.path(),
+                database: None,
+                allow_network: false,
+            },
+        );
+
+        ensure_equal(
+            &report.status,
+            &VerifyProvenanceReferentStatus::Verified,
+            "file span verified",
+        )?;
+        ensure_equal(
+            &report.reason.as_str(),
+            &"file_span_present",
+            "file span reason",
+        )?;
+        let expected_hash = format!("blake3:{}", blake3::hash(b"bravo\ncharlie\n").to_hex());
+        ensure_equal(
+            &report.referent_hash.as_deref(),
+            &Some(expected_hash.as_str()),
+            "selected span hash",
+        )
+    }
+
+    #[test]
+    fn provenance_referent_marks_missing_file_as_evidence_missing() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+
+        let report = verify_provenance_referent(
+            "file://missing.md#L1",
+            &VerifyProvenanceReferentOptions {
+                workspace_path: temp.path(),
+                database: None,
+                allow_network: false,
+            },
+        );
+
+        ensure_equal(
+            &report.status,
+            &VerifyProvenanceReferentStatus::EvidenceMissing,
+            "missing file status",
+        )?;
+        ensure_equal(
+            &report.reason.as_str(),
+            &"file_referent_missing",
+            "missing file reason",
+        )
+    }
+
+    #[test]
+    fn provenance_referent_marks_missing_file_span_as_drift() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(temp.path().join("notes.md"), "alpha\n")
+            .map_err(|error| error.to_string())?;
+
+        let report = verify_provenance_referent(
+            "file://notes.md#L2-3",
+            &VerifyProvenanceReferentOptions {
+                workspace_path: temp.path(),
+                database: None,
+                allow_network: false,
+            },
+        );
+
+        ensure_equal(
+            &report.status,
+            &VerifyProvenanceReferentStatus::EvidenceDrift,
+            "missing span status",
+        )?;
+        ensure(
+            report.reason.contains("file_span_missing"),
+            "missing span reason",
+        )
+    }
+
+    #[test]
+    fn provenance_referent_keeps_web_checks_opt_in() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+
+        let report = verify_provenance_referent(
+            "https://example.com/evidence",
+            &VerifyProvenanceReferentOptions {
+                workspace_path: temp.path(),
+                database: None,
+                allow_network: false,
+            },
+        );
+        let json = report.data_json();
+
+        ensure_equal(
+            &report.status,
+            &VerifyProvenanceReferentStatus::Unverifiable,
+            "web status",
+        )?;
+        ensure_equal(
+            &report.reason.as_str(),
+            &"network_recheck_disabled",
+            "web reason",
+        )?;
+        ensure_equal(
+            &json
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("json status")?,
+            &"unverifiable",
+            "json status",
+        )
     }
 
     #[test]
