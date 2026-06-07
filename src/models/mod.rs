@@ -41,6 +41,7 @@ pub mod schema;
 pub mod singleflight;
 pub mod situation;
 pub mod symbol;
+pub mod task_lens;
 pub mod timing;
 pub mod trust;
 pub mod verification;
@@ -316,6 +317,13 @@ pub use symbol::{
     SymbolGraphDegradationCode, SymbolGraphDegradationSeverity, SymbolKind, SymbolParserKind,
     SymbolRecord, SymbolSnapshot, SymbolSourceFile, SymbolSourceLanguage, SymbolSourceRange,
     SymbolVisibility,
+};
+pub use task_lens::{
+    BUILTIN_TASK_LENS_IDS, MAX_TASK_LENS_CANDIDATE_POOL, MAX_TASK_LENS_DESCRIPTION_BYTES,
+    MAX_TASK_LENS_FACETS, MAX_TASK_LENS_ID_BYTES, MAX_TASK_LENS_KINDS, MAX_TASK_LENS_RESULTS,
+    MAX_TASK_LENS_TOKENS, MAX_WORKSPACE_TASK_LENSES, TASK_LENS_SCHEMA_V1, TASK_LENS_VERSION,
+    TaskLens, TaskLensCatalog, TaskLensInput, TaskLensOverlay, TaskLensValidationError,
+    builtin_task_lens, builtin_task_lenses,
 };
 pub use timing::{DiagnosticTiming, TimingCapture, TimingPhase};
 pub use trust::{ParseTrustClassError, TrustClass};
