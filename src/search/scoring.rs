@@ -8,8 +8,14 @@
 
 use std::collections::BTreeSet;
 
+use crate::models::MemoryAnchorFreshnessState;
+
 /// Default recency time constant from the retrieval contract.
 pub const DEFAULT_RECENCY_TAU_DAYS: f32 = 30.0;
+/// Default floor for the code-coupled freshness drift penalty (ADR 0056,
+/// bd-1n0np.3.7). A drifted anchor ranks DOWN but never vanishes: the
+/// multiplier is clamped to `[floor, 1.0]`.
+pub const DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR: f32 = 0.4;
 /// Default confidence floor from the retrieval contract.
 pub const DEFAULT_CONFIDENCE_FLOOR: f32 = 0.1;
 /// Default lower bound for the utility multiplier.
@@ -538,6 +544,31 @@ pub fn bead_affinity_score(
 #[must_use]
 pub fn final_score(signals: SearchScoringSignals, config: SearchScoringConfig) -> f32 {
     SearchScoreComponents::from_signals(signals, config).final_score
+}
+
+/// Rank-down multiplier for an anchored memory's code-coupled freshness state
+/// (ADR 0056, bd-1n0np.3.7). Multiply this into the recency/freshness term so a
+/// memory whose anchored symbol drifted falls in rank without disappearing.
+///
+/// - `Current` (or unanchored): neutral `1.0`.
+/// - `Suspect` (ambiguous drift, e.g. an unresolved rename): a partial penalty
+///   halfway between `floor` and `1.0`.
+/// - `Stale` (resolved content change or disappearance): the full penalty down
+///   to `floor`.
+///
+/// The result is clamped to `[floor, 1.0]` (with `floor` itself clamped to the
+/// unit interval), so a drifted memory ranks down but never vanishes. Mirrors
+/// the standalone, deterministic shape of [`anchor_match_score`] /
+/// [`bead_affinity_score`]; the live ranking path multiplies it in once the
+/// scoring pipeline is wired into retrieval.
+#[must_use]
+pub fn freshness_drift_multiplier(state: MemoryAnchorFreshnessState, floor: f32) -> f32 {
+    let floor = finite_unit(floor);
+    match state {
+        MemoryAnchorFreshnessState::Current => 1.0,
+        MemoryAnchorFreshnessState::Suspect => ((1.0 + floor) / 2.0).clamp(floor, 1.0),
+        MemoryAnchorFreshnessState::Stale => floor,
+    }
 }
 
 fn recency_multiplier(age_days: Option<f32>, tau_days: f32) -> f32 {
@@ -1122,5 +1153,35 @@ mod tests {
     #[test]
     fn speed_mode_default() {
         assert_eq!(SpeedMode::default(), SpeedMode::Default);
+    }
+
+    #[test]
+    fn freshness_drift_multiplier_ranks_down_without_vanishing() {
+        let floor = DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR;
+        let current = freshness_drift_multiplier(MemoryAnchorFreshnessState::Current, floor);
+        let suspect = freshness_drift_multiplier(MemoryAnchorFreshnessState::Suspect, floor);
+        let stale = freshness_drift_multiplier(MemoryAnchorFreshnessState::Stale, floor);
+
+        assert_eq!(current, 1.0, "current freshness is neutral");
+        assert_eq!(
+            stale, floor,
+            "stale takes the full penalty down to the floor"
+        );
+        assert!(stale > 0.0, "a stale memory ranks down but never vanishes");
+        assert!(
+            stale < suspect && suspect < current,
+            "suspect penalty is partial: between stale floor and neutral"
+        );
+    }
+
+    #[test]
+    fn freshness_drift_multiplier_clamps_floor_to_unit_interval() {
+        // A negative or >1 floor cannot make a memory vanish or boost it.
+        assert_eq!(
+            freshness_drift_multiplier(MemoryAnchorFreshnessState::Stale, 2.0),
+            1.0
+        );
+        let stale_neg = freshness_drift_multiplier(MemoryAnchorFreshnessState::Stale, -1.0);
+        assert!((0.0..=1.0).contains(&stale_neg));
     }
 }
