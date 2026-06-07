@@ -20,6 +20,7 @@ pub mod jsonl;
 pub mod learn;
 pub mod memory;
 pub mod memory_anchor;
+pub mod memory_sentinel;
 pub mod model_registry;
 pub mod mutation;
 pub mod perf_artifact;
@@ -169,6 +170,17 @@ pub use memory_anchor::{
     CreateMemoryAnchorInput, MEMORY_ANCHOR_SCHEMA_V1, MemoryAnchorFreshnessState, MemoryAnchorKind,
     MemoryAnchorSource, StoredMemoryAnchor, extract_precision_memory_anchors,
     memory_anchor_value_hash,
+};
+pub use memory_sentinel::{
+    CreateMemorySentinelSpecInput, MAX_MEMORY_SENTINEL_EVIDENCE_BYTES,
+    MAX_MEMORY_SENTINEL_PREDICATE_BYTES, MAX_MEMORY_SENTINEL_PROVENANCE_BYTES,
+    MAX_MEMORY_SENTINEL_TARGET_BYTES, MEMORY_SENTINEL_RESULT_HASH_SCHEMA_V1,
+    MEMORY_SENTINEL_RESULT_SCHEMA_V1, MEMORY_SENTINEL_SPEC_HASH_SCHEMA_V1,
+    MEMORY_SENTINEL_SPEC_SCHEMA_V1, MemorySentinelKind, MemorySentinelResult,
+    MemorySentinelResultInput, MemorySentinelResultStatus, MemorySentinelSafetyClass,
+    MemorySentinelSpec, MemorySentinelValidationError, ParsedMemorySentinelSpec,
+    StoredMemorySentinelResult, StoredMemorySentinelSpec, memory_sentinel_spec_repair_hint,
+    parse_memory_sentinel_spec,
 };
 pub use model_registry::{
     EMBEDDING_METADATA_SCHEMA_V1, EmbeddingMetadataFieldSchema, EmbeddingMetadataObjectSchema,

@@ -5814,6 +5814,66 @@ CREATE INDEX IF NOT EXISTS idx_outcome_evidence_rows_run
     "blake3:v068_outcome_evidence_rows_2026_06_07",
 );
 
+pub const V069_MEMORY_SENTINELS: Migration = Migration::new(
+    69,
+    "memory_sentinels",
+    r#"
+CREATE TABLE IF NOT EXISTS memory_sentinel_specs (
+    spec_hash TEXT PRIMARY KEY CHECK (
+        length(spec_hash) = 71 AND substr(spec_hash, 1, 7) = 'blake3:'
+    ),
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    sentinel_kind TEXT NOT NULL CHECK (sentinel_kind IN (
+        'path_exists',
+        'file_hash_or_marker',
+        'json_schema_contains_field',
+        'config_key_exists',
+        'env_var_registered',
+        'degraded_code_fixture_exists',
+        'dependency_capability_present',
+        'command_help_contains_flag'
+    )),
+    target TEXT NOT NULL CHECK (length(trim(target)) > 0),
+    expected_predicate TEXT NOT NULL CHECK (length(trim(expected_predicate)) > 0),
+    safety_class TEXT NOT NULL CHECK (safety_class IN (
+        'pure_predicate',
+        'allowlisted_introspection'
+    )),
+    provenance TEXT NOT NULL CHECK (length(trim(provenance)) > 0),
+    stale_threshold_seconds INTEGER CHECK (
+        stale_threshold_seconds IS NULL OR stale_threshold_seconds > 0
+    ),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    UNIQUE (memory_id, sentinel_kind, target, expected_predicate)
+);
+
+CREATE TABLE IF NOT EXISTS memory_sentinel_results (
+    result_hash TEXT PRIMARY KEY CHECK (
+        length(result_hash) = 71 AND substr(result_hash, 1, 7) = 'blake3:'
+    ),
+    spec_hash TEXT NOT NULL REFERENCES memory_sentinel_specs(spec_hash) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('pass', 'fail', 'unknown', 'degraded')),
+    checked_at TEXT NOT NULL CHECK (length(trim(checked_at)) > 0),
+    evidence_summary TEXT NOT NULL CHECK (length(trim(evidence_summary)) > 0),
+    stale_threshold_seconds INTEGER CHECK (
+        stale_threshold_seconds IS NULL OR stale_threshold_seconds > 0
+    ),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_sentinel_specs_memory
+    ON memory_sentinel_specs(memory_id, sentinel_kind);
+CREATE INDEX IF NOT EXISTS idx_memory_sentinel_specs_safety
+    ON memory_sentinel_specs(safety_class, sentinel_kind);
+CREATE INDEX IF NOT EXISTS idx_memory_sentinel_results_spec_checked
+    ON memory_sentinel_results(spec_hash, checked_at);
+CREATE INDEX IF NOT EXISTS idx_memory_sentinel_results_status
+    ON memory_sentinel_results(status, checked_at);
+"#,
+    "blake3:v069_memory_sentinels_2026_06_07",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -5884,6 +5944,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V066_MEMORY_ANCHORS,
     V067_PACK_CANDIDATE_IMPRESSIONS,
     V068_OUTCOME_EVIDENCE_ROWS,
+    V069_MEMORY_SENTINELS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
