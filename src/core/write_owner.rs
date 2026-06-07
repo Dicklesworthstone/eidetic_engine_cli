@@ -38,7 +38,7 @@
 //! - If cancelled after reserve: permit drop aborts cleanly
 //! - Response arrives via oneshot channel
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
@@ -56,6 +56,7 @@ use serde::Serialize;
 use super::duration_millis_saturating;
 
 use crate::models::DomainError;
+use crate::search::HashEmbedder;
 
 /// Schema for write owner status response.
 pub const WRITE_OWNER_STATUS_SCHEMA_V1: &str = "ee.write_owner.status.v1";
@@ -71,6 +72,9 @@ pub const WRITE_SPOOL_BACKPRESSURE_SCHEMA_V1: &str = "ee.write_spool.backpressur
 
 /// Schema for the durable write-spool crash-recovery state marker.
 pub const WRITE_SPOOL_RECOVERY_STATE_SCHEMA_V1: &str = "ee.write_spool.recovery_state.v1";
+
+/// Schema for write-immune per-source write stream statistics.
+pub const WRITE_IMMUNE_SOURCE_STATS_SCHEMA_V1: &str = "ee.write_immune.source_stats.v1";
 
 /// Relative path to the durable write-spool crash-recovery state marker.
 pub const WRITE_SPOOL_RECOVERY_STATE_PATH: &str = ".ee/write-spool/recovery-state.json";
@@ -109,6 +113,18 @@ pub const DEFAULT_SPOOL_MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
 
 /// Default queue age budget before callers receive backpressure.
 pub const DEFAULT_SPOOL_QUEUE_TIMEOUT_MS: u64 = 30_000;
+
+/// Default rolling window for write-immune source statistics.
+pub const DEFAULT_WRITE_STREAM_WINDOW_MS: u64 = 60 * 60 * 1_000;
+
+/// Default SimHash Hamming threshold for cheap near-duplicate accounting.
+pub const DEFAULT_WRITE_STREAM_NEAR_DUPLICATE_HAMMING: u32 = 12;
+
+/// Default deterministic-embedding cosine floor for near-duplicate accounting.
+pub const DEFAULT_WRITE_STREAM_COSINE_FLOOR: f32 = 0.97;
+
+/// Maximum write observations retained by the in-process write-owner diagnostics.
+pub const DEFAULT_WRITE_STREAM_OBSERVATION_CAPACITY: usize = 4_096;
 
 /// Default wait-free write-hot-path enqueue capacity.
 pub const DEFAULT_WRITE_HOT_PATH_V2_QUEUE_CAPACITY: usize = DEFAULT_SPOOL_MAX_PENDING;
@@ -428,6 +444,14 @@ pub enum WriteOperation {
         level: String,
         kind: String,
         tags: Vec<String>,
+        /// Per-source identity for write-immune rolling statistics.
+        source_id: Option<String>,
+        /// Trust class requested for this write.
+        trust_class: String,
+        /// Provenance/evidence URI supplied with this write, when present.
+        provenance_uri: Option<String>,
+        /// Deterministic observation timestamp supplied by the caller.
+        observed_at_ms: u64,
     },
     /// Create a memory link.
     LinkCreate {
@@ -461,6 +485,295 @@ impl WriteOperation {
             Self::Custom { .. } => "custom",
         }
     }
+
+    /// Extract the write-immune observation carried by a memory-create request.
+    #[must_use]
+    pub fn write_stream_observation(&self) -> Option<WriteStreamObservation> {
+        match self {
+            Self::MemoryCreate {
+                content,
+                source_id,
+                trust_class,
+                provenance_uri,
+                observed_at_ms,
+                ..
+            } => {
+                let source_id = normalized_write_source_id(source_id.as_deref())?;
+                Some(WriteStreamObservation::memory_create(
+                    source_id,
+                    content,
+                    trust_class,
+                    provenance_uri.as_deref(),
+                    *observed_at_ms,
+                ))
+            }
+            Self::LinkCreate { .. } | Self::OutcomeRecord { .. } | Self::Custom { .. } => None,
+        }
+    }
+}
+
+/// One deterministic write-owner observation used by the write-immune layer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WriteStreamObservation {
+    /// Source identity: agent, import batch, or mesh peer.
+    pub source_id: String,
+    /// Stable exact-content hash for collision/duplicate accounting.
+    pub content_hash: String,
+    /// Stable SimHash fingerprint for cheap near-duplicate accounting.
+    pub content_simhash: crate::search::simhash::SimHash128,
+    /// Deterministic hash embedding for cosine confirmation after SimHash match.
+    pub content_embedding: Vec<f32>,
+    /// Trust class requested for the write.
+    pub trust_class: String,
+    /// Whether this write included explicit evidence/provenance.
+    pub evidence_present: bool,
+    /// Deterministic observation timestamp supplied by the caller.
+    pub observed_at_ms: u64,
+}
+
+impl WriteStreamObservation {
+    /// Build a memory-create observation from caller-supplied write metadata.
+    #[must_use]
+    pub fn memory_create(
+        source_id: String,
+        content: &str,
+        trust_class: &str,
+        provenance_uri: Option<&str>,
+        observed_at_ms: u64,
+    ) -> Self {
+        Self {
+            source_id,
+            content_hash: write_stream_content_hash(content),
+            content_simhash: crate::search::simhash::simhash_128(content),
+            content_embedding: HashEmbedder::default_256().embed_sync(content),
+            trust_class: normalized_write_trust_class(trust_class),
+            evidence_present: provenance_uri.is_some_and(|value| !value.trim().is_empty()),
+            observed_at_ms,
+        }
+    }
+}
+
+/// Explicit rolling-window settings for source write statistics.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WriteStreamStatsConfig {
+    /// Inclusive lower bound for observations.
+    pub window_start_ms: u64,
+    /// Inclusive upper bound for observations.
+    pub window_end_ms: u64,
+    /// SimHash distance at or below this value is counted as near-duplicate.
+    pub near_duplicate_hamming: u32,
+    /// Cosine similarity floor required to confirm a SimHash near-duplicate.
+    pub near_duplicate_cosine_floor: f32,
+}
+
+impl WriteStreamStatsConfig {
+    /// Create an explicit rolling window.
+    #[must_use]
+    pub const fn new(
+        window_start_ms: u64,
+        window_end_ms: u64,
+        near_duplicate_hamming: u32,
+    ) -> Self {
+        Self {
+            window_start_ms,
+            window_end_ms,
+            near_duplicate_hamming,
+            near_duplicate_cosine_floor: DEFAULT_WRITE_STREAM_COSINE_FLOOR,
+        }
+    }
+
+    /// Override the deterministic-embedding cosine floor.
+    #[must_use]
+    pub const fn with_cosine_floor(mut self, near_duplicate_cosine_floor: f32) -> Self {
+        self.near_duplicate_cosine_floor = near_duplicate_cosine_floor;
+        self
+    }
+
+    /// Build the default one-hour rolling window ending at `window_end_ms`.
+    #[must_use]
+    pub const fn one_hour_ending_at(window_end_ms: u64) -> Self {
+        Self {
+            window_start_ms: window_end_ms.saturating_sub(DEFAULT_WRITE_STREAM_WINDOW_MS),
+            window_end_ms,
+            near_duplicate_hamming: DEFAULT_WRITE_STREAM_NEAR_DUPLICATE_HAMMING,
+            near_duplicate_cosine_floor: DEFAULT_WRITE_STREAM_COSINE_FLOOR,
+        }
+    }
+}
+
+/// Deterministic per-source write stream statistics.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceWriteStats {
+    /// Schema identifier for machine consumers.
+    pub schema: &'static str,
+    /// Source identity these stats describe.
+    pub source_id: String,
+    /// Window lower bound used for the calculation.
+    pub window_start_ms: u64,
+    /// Window upper bound used for the calculation.
+    pub window_end_ms: u64,
+    /// Number of writes seen in the window.
+    pub write_count: u32,
+    /// Writes whose exact content hash repeated a prior write in the window.
+    pub duplicate_content_hash_count: u32,
+    /// Writes that repeated exact content or matched a prior SimHash near-duplicate.
+    pub near_duplicate_count: u32,
+    /// SimHash Hamming threshold used for candidate selection.
+    pub near_duplicate_hamming: u32,
+    /// Hash-embedding cosine floor used to confirm SimHash candidates.
+    pub near_duplicate_cosine_floor: f32,
+    /// `near_duplicate_count / write_count`.
+    pub near_duplicate_ratio: f32,
+    /// Counts by requested trust class.
+    pub trust_class_counts: BTreeMap<String, u32>,
+    /// Writes with explicit evidence/provenance.
+    pub evidence_present_count: u32,
+    /// Writes missing explicit evidence/provenance.
+    pub evidence_missing_count: u32,
+    /// `evidence_present_count / write_count`.
+    pub evidence_presence_ratio: f32,
+}
+
+/// Compute deterministic per-source rolling write statistics.
+#[must_use]
+pub fn compute_source_write_stats<'a>(
+    observations: impl IntoIterator<Item = &'a WriteStreamObservation>,
+    config: WriteStreamStatsConfig,
+) -> Vec<SourceWriteStats> {
+    let mut by_source = BTreeMap::<String, Vec<WriteStreamObservation>>::new();
+    for observation in observations {
+        if observation.observed_at_ms < config.window_start_ms
+            || observation.observed_at_ms > config.window_end_ms
+        {
+            continue;
+        }
+        by_source
+            .entry(observation.source_id.clone())
+            .or_default()
+            .push(observation.clone());
+    }
+
+    by_source
+        .into_iter()
+        .map(|(source_id, mut observations)| {
+            observations.sort_by(|left, right| {
+                left.observed_at_ms
+                    .cmp(&right.observed_at_ms)
+                    .then_with(|| left.content_hash.cmp(&right.content_hash))
+                    .then_with(|| left.trust_class.cmp(&right.trust_class))
+            });
+            source_write_stats_for_observations(source_id, observations, config)
+        })
+        .collect()
+}
+
+fn source_write_stats_for_observations(
+    source_id: String,
+    observations: Vec<WriteStreamObservation>,
+    config: WriteStreamStatsConfig,
+) -> SourceWriteStats {
+    let mut seen_hashes = BTreeSet::<String>::new();
+    let mut trust_class_counts = BTreeMap::<String, u32>::new();
+    let mut duplicate_content_hash_count = 0_u32;
+    let mut near_duplicate_count = 0_u32;
+    let mut evidence_present_count = 0_u32;
+    let mut prior_embeddings = Vec::<PriorWriteEmbedding>::new();
+
+    for observation in &observations {
+        let duplicate_hash = !seen_hashes.insert(observation.content_hash.clone());
+        if duplicate_hash {
+            duplicate_content_hash_count = duplicate_content_hash_count.saturating_add(1);
+        }
+        let confirmed_near_duplicate = !duplicate_hash
+            && crate::search::simhash::first_confirmed_simhash_candidate(
+                observation.content_simhash,
+                &observation.content_embedding,
+                prior_embeddings.iter().map(|prior| {
+                    (
+                        prior.candidate_id.as_str(),
+                        prior.content_simhash,
+                        prior.content_embedding.as_slice(),
+                    )
+                }),
+                config.near_duplicate_hamming,
+                config.near_duplicate_cosine_floor,
+            )
+            .is_some();
+        if duplicate_hash || confirmed_near_duplicate {
+            near_duplicate_count = near_duplicate_count.saturating_add(1);
+        }
+        prior_embeddings.push(PriorWriteEmbedding {
+            candidate_id: observation.content_hash.clone(),
+            content_simhash: observation.content_simhash,
+            content_embedding: observation.content_embedding.clone(),
+        });
+
+        *trust_class_counts
+            .entry(observation.trust_class.clone())
+            .or_insert(0) += 1;
+        if observation.evidence_present {
+            evidence_present_count = evidence_present_count.saturating_add(1);
+        }
+    }
+
+    let write_count = capped_u32(observations.len());
+    let evidence_missing_count = write_count.saturating_sub(evidence_present_count);
+
+    SourceWriteStats {
+        schema: WRITE_IMMUNE_SOURCE_STATS_SCHEMA_V1,
+        source_id,
+        window_start_ms: config.window_start_ms,
+        window_end_ms: config.window_end_ms,
+        write_count,
+        duplicate_content_hash_count,
+        near_duplicate_count,
+        near_duplicate_hamming: config.near_duplicate_hamming,
+        near_duplicate_cosine_floor: config.near_duplicate_cosine_floor,
+        near_duplicate_ratio: ratio_u32(near_duplicate_count, write_count),
+        trust_class_counts,
+        evidence_present_count,
+        evidence_missing_count,
+        evidence_presence_ratio: ratio_u32(evidence_present_count, write_count),
+    }
+}
+
+struct PriorWriteEmbedding {
+    candidate_id: String,
+    content_simhash: crate::search::simhash::SimHash128,
+    content_embedding: Vec<f32>,
+}
+
+fn write_stream_content_hash(content: &str) -> String {
+    format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex())
+}
+
+fn normalized_write_source_id(source_id: Option<&str>) -> Option<String> {
+    source_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn normalized_write_trust_class(trust_class: &str) -> String {
+    let normalized = trust_class.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        "unknown".to_owned()
+    } else {
+        normalized
+    }
+}
+
+fn ratio_u32(numerator: u32, denominator: u32) -> f32 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f32 / denominator as f32
+    }
+}
+
+fn capped_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// Result of a write operation.
@@ -609,6 +922,23 @@ struct WriteOwnerStats {
     total_processed: u64,
     total_wait_ms: u64,
     max_wait_ms: u64,
+    source_observations: VecDeque<WriteStreamObservation>,
+}
+
+impl WriteOwnerStats {
+    fn record_operation(&mut self, operation: &WriteOperation) {
+        let Some(observation) = operation.write_stream_observation() else {
+            return;
+        };
+        self.source_observations.push_back(observation);
+        while self.source_observations.len() > DEFAULT_WRITE_STREAM_OBSERVATION_CAPACITY {
+            self.source_observations.pop_front();
+        }
+    }
+
+    fn source_write_stats(&self, config: WriteStreamStatsConfig) -> Vec<SourceWriteStats> {
+        compute_source_write_stats(&self.source_observations, config)
+    }
 }
 
 impl WriteOwner {
@@ -647,6 +977,7 @@ impl WriteOwner {
             if wait_ms > self.stats.max_wait_ms {
                 self.stats.max_wait_ms = wait_ms;
             }
+            self.stats.record_operation(&request.operation);
 
             let result = process(request.operation);
 
@@ -672,6 +1003,12 @@ impl WriteOwner {
             avg_wait_ms,
             max_wait_ms: self.stats.max_wait_ms,
         }
+    }
+
+    /// Compute write-immune source statistics for observations retained by this owner.
+    #[must_use]
+    pub fn source_write_stats(&self, config: WriteStreamStatsConfig) -> Vec<SourceWriteStats> {
+        self.stats.source_write_stats(config)
     }
 }
 
@@ -2738,8 +3075,13 @@ mod tests {
             level: "semantic".into(),
             kind: "note".into(),
             tags: vec![],
+            source_id: Some("agent:MagentaPlateau".into()),
+            trust_class: "agent_assertion".into(),
+            provenance_uri: Some("manual://test".into()),
+            observed_at_ms: 1_000,
         };
         assert_eq!(op.operation_type(), "memory_create");
+        assert!(op.write_stream_observation().is_some());
 
         let op = WriteOperation::LinkCreate {
             workspace_id: "ws".into(),
@@ -2792,6 +3134,81 @@ mod tests {
         assert_eq!(err.code, WRITE_OWNER_BUSY_CODE);
         assert!(err.message.contains("5 pending"));
         assert_eq!(err.repair, "ee diag locks --json");
+    }
+
+    #[test]
+    fn source_write_stats_are_deterministic_by_source_and_window() {
+        let observations = vec![
+            WriteStreamObservation::memory_create(
+                "agent:beta".to_owned(),
+                "Run cargo fmt before release.",
+                "agent_assertion",
+                Some("manual://beta-1"),
+                20,
+            ),
+            WriteStreamObservation::memory_create(
+                "agent:alpha".to_owned(),
+                "Run cargo fmt before release.",
+                "human_explicit",
+                Some("manual://alpha-1"),
+                10,
+            ),
+            WriteStreamObservation::memory_create(
+                "agent:alpha".to_owned(),
+                "Run cargo fmt before release.",
+                "human_explicit",
+                None,
+                11,
+            ),
+            WriteStreamObservation::memory_create(
+                "agent:alpha".to_owned(),
+                "Run cargo fmt before releases.",
+                "agent_assertion",
+                Some("manual://alpha-3"),
+                12,
+            ),
+            WriteStreamObservation::memory_create(
+                "agent:alpha".to_owned(),
+                "outside the rolling window",
+                "agent_assertion",
+                None,
+                200,
+            ),
+        ];
+
+        let stats =
+            compute_source_write_stats(&observations, WriteStreamStatsConfig::new(0, 100, 128));
+
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats[0].source_id, "agent:alpha");
+        assert_eq!(stats[0].write_count, 3);
+        assert_eq!(stats[0].duplicate_content_hash_count, 1);
+        assert_eq!(stats[0].near_duplicate_count, 2);
+        assert_eq!(stats[0].evidence_present_count, 2);
+        assert_eq!(stats[0].evidence_missing_count, 1);
+        assert_eq!(stats[0].trust_class_counts.get("human_explicit"), Some(&2));
+        assert_eq!(stats[0].trust_class_counts.get("agent_assertion"), Some(&1));
+
+        assert_eq!(stats[1].source_id, "agent:beta");
+        assert_eq!(stats[1].write_count, 1);
+        assert_eq!(stats[1].near_duplicate_count, 0);
+    }
+
+    #[test]
+    fn memory_create_without_source_is_not_observed_for_write_immune_stats() {
+        let op = WriteOperation::MemoryCreate {
+            workspace_id: "ws".into(),
+            content: "test".into(),
+            level: "semantic".into(),
+            kind: "note".into(),
+            tags: vec![],
+            source_id: Some("   ".into()),
+            trust_class: "agent_assertion".into(),
+            provenance_uri: None,
+            observed_at_ms: 1,
+        };
+
+        assert_eq!(op.write_stream_observation(), None);
     }
 
     #[test]
