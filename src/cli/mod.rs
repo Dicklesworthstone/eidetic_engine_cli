@@ -287,8 +287,8 @@ use crate::models::{
     CertificateKind, CertificateStatus, DEMO_FILE_SCHEMA_V1, DEMO_RUN_RESULT_SCHEMA_V1, DemoEntry,
     DemoFile, DemoId, DemoStatus, DomainError, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
     FilterOperator, InstallOperation, LearningObservationSignal, MemoryAnchorKind, MemoryScope,
-    OutputVerification, ProcessExitCode, QUERY_SCHEMA_V1, RedactionLevel, Tag,
-    is_valid_demo_artifact_path, parse_demo_file_yaml,
+    OutputVerification, ProcessExitCode, QUERY_SCHEMA_V1, RedactionLevel, Tag, TaskLens,
+    TaskLensCatalog, TaskLensOverlay, is_valid_demo_artifact_path, parse_demo_file_yaml,
 };
 use crate::output;
 use crate::pack::{
@@ -660,6 +660,8 @@ thread_local! {
 }
 
 const EXPORT_REPORT_SCHEMA_V1: &str = "ee.export.report.v1";
+const TASK_LENS_CATALOG_SCHEMA_V1: &str = "ee.task_lens.catalog.v1";
+const TASK_LENS_EXPLAIN_SCHEMA_V1: &str = "ee.task_lens.explain.v1";
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum Command {
@@ -811,6 +813,9 @@ pub enum Command {
     /// Active learning agenda, uncertainty sampling, and knowledge gaps.
     #[command(subcommand)]
     Learn(LearnCommand),
+    /// Inspect task lens policy overlays.
+    #[command(subcommand)]
+    Lens(LensCommand),
     /// Manage stored memories (show, list, history).
     #[command(subcommand)]
     Memory(MemoryCommand),
@@ -4624,6 +4629,27 @@ pub enum LearnCommand {
     Close(LearnCloseArgs),
     /// Report what the system has learned from recent activity.
     Summary(LearnSummaryArgs),
+}
+
+/// Subcommands for `ee lens`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum LensCommand {
+    /// List built-in and workspace task lenses.
+    List(LensListArgs),
+    /// Explain one task lens and its effective overlay.
+    Explain(LensExplainArgs),
+}
+
+/// Arguments for `ee lens list`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct LensListArgs {}
+
+/// Arguments for `ee lens explain`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct LensExplainArgs {
+    /// Lens id, such as bugfix, code-review, or a workspace override id.
+    #[arg(value_name = "LENS")]
+    pub lens: String,
 }
 
 /// Arguments for `ee learn agenda`.
@@ -11361,6 +11387,7 @@ where
         Some(Command::Learn(LearnCommand::Summary(ref args))) => {
             handle_learn_summary(&cli, args, stdout, stderr)
         }
+        Some(Command::Lens(ref lens_cmd)) => handle_lens_command(&cli, lens_cmd, stdout, stderr),
         Some(Command::Graph(GraphCommand::Pagerank(ref args))) => {
             handle_graph_pagerank(&cli, args, stdout, stderr)
         }
@@ -20615,6 +20642,327 @@ fn config_set_human_output(report: &ConfigSetReport) -> String {
         out.push_str(&format!("  Next: {repair}\n"));
     }
     out
+}
+
+fn handle_lens_command<W, E>(
+    cli: &Cli,
+    command: &LensCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (workspace_root, catalog) = match load_task_lens_catalog(cli) {
+        Ok(loaded) => loaded,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    match command {
+        LensCommand::List(_) => write_task_lens_catalog(cli, &workspace_root, &catalog, stdout),
+        LensCommand::Explain(args) => match catalog.get(&args.lens) {
+            Some(lens) => write_task_lens_explain(cli, &workspace_root, lens, &args.lens, stdout),
+            None => {
+                let error = DomainError::NotFound {
+                    resource: "task lens".to_owned(),
+                    id: args.lens.clone(),
+                    repair: Some(
+                        "Run `ee lens list --json` to inspect available task lens ids.".to_owned(),
+                    ),
+                };
+                write_domain_error(&error, cli.wants_json(), stdout, stderr)
+            }
+        },
+    }
+}
+
+fn load_task_lens_catalog(cli: &Cli) -> Result<(PathBuf, TaskLensCatalog), DomainError> {
+    let workspace_root =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let merged = crate::core::config_surface::merged_workspace_config(&workspace_root)
+        .map_err(config_surface_error_to_domain)?;
+    let catalog = TaskLensCatalog::with_workspace_overrides(merged.values.task_lens.overrides)
+        .map_err(|error| DomainError::Configuration {
+            message: format!("Could not build task lens catalog: {error}"),
+            repair: Some("Fix [task_lens.overrides] in .ee/config.toml.".to_owned()),
+        })?;
+    Ok((workspace_root, catalog))
+}
+
+fn write_task_lens_catalog<W>(
+    cli: &Cli,
+    workspace_root: &Path,
+    catalog: &TaskLensCatalog,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let report = serde_json::json!({
+        "schema": TASK_LENS_CATALOG_SCHEMA_V1,
+        "command": "lens list",
+        "workspace": workspace_root.display().to_string(),
+        "lensCount": catalog.lenses.len(),
+        "lenses": catalog
+            .lenses
+            .iter()
+            .map(task_lens_json)
+            .collect::<Vec<_>>(),
+    });
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &task_lens_catalog_human(catalog))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&report.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_task_lens_success(stdout, report),
+    }
+}
+
+fn write_task_lens_explain<W>(
+    cli: &Cli,
+    workspace_root: &Path,
+    lens: &TaskLens,
+    requested_lens: &str,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let report = serde_json::json!({
+        "schema": TASK_LENS_EXPLAIN_SCHEMA_V1,
+        "command": "lens explain",
+        "workspace": workspace_root.display().to_string(),
+        "requestedLens": requested_lens,
+        "lens": task_lens_json(lens),
+        "explanation": {
+            "policy": "Task lenses are inspectable overlays compiled into existing pack, search, graph, redaction, and output knobs.",
+            "determinism": "lensHash is a stable blake3 hash over schema, id, version, description, and normalized overlay fields.",
+            "override": "Explicit CLI flags and --no-lens can override lens-derived defaults when pack integration is enabled.",
+        },
+    });
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &task_lens_explain_human(lens))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&report.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_task_lens_success(stdout, report),
+    }
+}
+
+fn write_task_lens_success<W>(stdout: &mut W, data: serde_json::Value) -> ProcessExitCode
+where
+    W: Write,
+{
+    let rendered = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+    });
+    write_stdout(stdout, &(rendered.to_string() + "\n"))
+}
+
+fn task_lens_json(lens: &TaskLens) -> serde_json::Value {
+    serde_json::json!({
+        "schema": lens.schema,
+        "id": lens.id.as_str(),
+        "version": lens.version,
+        "description": lens.description.as_str(),
+        "lensHash": lens.lens_hash.as_str(),
+        "overlay": task_lens_overlay_json(&lens.overlay),
+    })
+}
+
+fn task_lens_overlay_json(overlay: &TaskLensOverlay) -> serde_json::Value {
+    serde_json::json!({
+        "contextProfile": overlay.context_profile.as_deref(),
+        "sourceMode": overlay.source_mode.as_deref(),
+        "strictSourceMode": overlay.strict_source_mode,
+        "packProfile": overlay.pack_profile.as_deref(),
+        "resourceProfile": overlay.resource_profile.as_deref(),
+        "redaction": overlay.redaction.map(RedactionLevel::as_str),
+        "memoryScope": overlay.memory_scope.as_deref(),
+        "maxTokens": overlay.max_tokens,
+        "candidatePool": overlay.candidate_pool,
+        "maxResults": overlay.max_results,
+        "coverageFacets": &overlay.coverage_facets,
+        "allowedKinds": &overlay.allowed_kinds,
+        "deprioritizedKinds": &overlay.deprioritized_kinds,
+    })
+}
+
+fn task_lens_catalog_human(catalog: &TaskLensCatalog) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Task lenses: {}\n", catalog.lenses.len()));
+    for lens in &catalog.lenses {
+        out.push_str(&format!(
+            "  {} v{} {}\n",
+            lens.id, lens.version, lens.lens_hash
+        ));
+        out.push_str(&format!("    {}\n", lens.description));
+        append_task_lens_overlay_human(&mut out, &lens.overlay, "    ");
+    }
+    out
+}
+
+fn task_lens_explain_human(lens: &TaskLens) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Task lens: {} v{}\n", lens.id, lens.version));
+    out.push_str(&format!("  Hash: {}\n", lens.lens_hash));
+    out.push_str(&format!("  Description: {}\n", lens.description));
+    out.push_str("  Effective overlay:\n");
+    append_task_lens_overlay_human(&mut out, &lens.overlay, "    ");
+    out
+}
+
+fn append_task_lens_overlay_human(out: &mut String, overlay: &TaskLensOverlay, indent: &str) {
+    let mut emitted = false;
+    append_optional_str(
+        out,
+        indent,
+        "context profile",
+        overlay.context_profile.as_deref(),
+        &mut emitted,
+    );
+    append_optional_str(
+        out,
+        indent,
+        "source mode",
+        overlay.source_mode.as_deref(),
+        &mut emitted,
+    );
+    append_optional_bool(
+        out,
+        indent,
+        "strict source mode",
+        overlay.strict_source_mode,
+        &mut emitted,
+    );
+    append_optional_str(
+        out,
+        indent,
+        "pack profile",
+        overlay.pack_profile.as_deref(),
+        &mut emitted,
+    );
+    append_optional_str(
+        out,
+        indent,
+        "resource profile",
+        overlay.resource_profile.as_deref(),
+        &mut emitted,
+    );
+    append_optional_str(
+        out,
+        indent,
+        "redaction",
+        overlay.redaction.map(RedactionLevel::as_str),
+        &mut emitted,
+    );
+    append_optional_str(
+        out,
+        indent,
+        "memory scope",
+        overlay.memory_scope.as_deref(),
+        &mut emitted,
+    );
+    append_optional_u32(out, indent, "max tokens", overlay.max_tokens, &mut emitted);
+    append_optional_u32(
+        out,
+        indent,
+        "candidate pool",
+        overlay.candidate_pool,
+        &mut emitted,
+    );
+    append_optional_u32(
+        out,
+        indent,
+        "max results",
+        overlay.max_results,
+        &mut emitted,
+    );
+    append_list(
+        out,
+        indent,
+        "coverage facets",
+        &overlay.coverage_facets,
+        &mut emitted,
+    );
+    append_list(
+        out,
+        indent,
+        "allowed kinds",
+        &overlay.allowed_kinds,
+        &mut emitted,
+    );
+    append_list(
+        out,
+        indent,
+        "deprioritized kinds",
+        &overlay.deprioritized_kinds,
+        &mut emitted,
+    );
+    if !emitted {
+        out.push_str(&format!("{indent}<no overlay fields>\n"));
+    }
+}
+
+fn append_optional_str(
+    out: &mut String,
+    indent: &str,
+    label: &str,
+    value: Option<&str>,
+    emitted: &mut bool,
+) {
+    if let Some(value) = value {
+        out.push_str(&format!("{indent}{label}: {value}\n"));
+        *emitted = true;
+    }
+}
+
+fn append_optional_bool(
+    out: &mut String,
+    indent: &str,
+    label: &str,
+    value: Option<bool>,
+    emitted: &mut bool,
+) {
+    if let Some(value) = value {
+        out.push_str(&format!("{indent}{label}: {value}\n"));
+        *emitted = true;
+    }
+}
+
+fn append_optional_u32(
+    out: &mut String,
+    indent: &str,
+    label: &str,
+    value: Option<u32>,
+    emitted: &mut bool,
+) {
+    if let Some(value) = value {
+        out.push_str(&format!("{indent}{label}: {value}\n"));
+        *emitted = true;
+    }
+}
+
+fn append_list(out: &mut String, indent: &str, label: &str, values: &[String], emitted: &mut bool) {
+    if !values.is_empty() {
+        out.push_str(&format!("{indent}{label}: {}\n", values.join(", ")));
+        *emitted = true;
+    }
 }
 
 fn config_surface_error_to_domain(error: ConfigSurfaceError) -> DomainError {
@@ -50035,6 +50383,7 @@ const COMMAND_NAMES: &[&str] = &[
     "introspect",
     "lab",
     "learn",
+    "lens",
     "maintenance",
     "memory",
     "migrate",
@@ -50166,6 +50515,7 @@ const LEARN_SUBCOMMANDS: &[&str] = &[
     "summary",
 ];
 const LEARN_EXPERIMENT_SUBCOMMANDS: &[&str] = &["propose", "run"];
+const LENS_SUBCOMMANDS: &[&str] = &["list", "explain"];
 const MAINTENANCE_SUBCOMMANDS: &[&str] = &[
     "run",
     "graph-snapshot-prune",
@@ -50291,6 +50641,11 @@ impl NormalizedInvocation {
                     ArtifactCommand::Inspect(_) => "artifact inspect".to_string(),
                     ArtifactCommand::List(_) => "artifact list".to_string(),
                     ArtifactCommand::Relocate(_) => "artifact relocate".to_string(),
+                },
+                Command::Attest(attest) => match attest {
+                    AttestCommand::Memory(_) => "attest memory".to_string(),
+                    AttestCommand::Pack(_) => "attest pack".to_string(),
+                    AttestCommand::Query(_) => "attest query".to_string(),
                 },
                 Command::Backup(backup) => match backup {
                     BackupCommand::Create(_) => "backup create".to_string(),
@@ -50525,6 +50880,10 @@ impl NormalizedInvocation {
                     LearnCommand::Observe(_) => "learn observe".to_string(),
                     LearnCommand::Close(_) => "learn close".to_string(),
                     LearnCommand::Summary(_) => "learn summary".to_string(),
+                },
+                Command::Lens(lens) => match lens {
+                    LensCommand::List(_) => "lens list".to_string(),
+                    LensCommand::Explain(_) => "lens explain".to_string(),
                 },
                 Command::Memory(mem) => match mem {
                     MemoryCommand::Expire(_) => "memory expire".to_string(),
@@ -50911,6 +51270,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "lab" => Some(LAB_SUBCOMMANDS),
         "learn" => Some(LEARN_SUBCOMMANDS),
         "learn experiment" => Some(LEARN_EXPERIMENT_SUBCOMMANDS),
+        "lens" => Some(LENS_SUBCOMMANDS),
         "maintenance" => Some(MAINTENANCE_SUBCOMMANDS),
         "memory" => Some(MEMORY_SUBCOMMANDS),
         "migrate" => Some(MIGRATE_SUBCOMMANDS),
@@ -51495,25 +51855,26 @@ mod tests {
     use clap::{Parser, error::ErrorKind};
 
     use super::{
-        AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction,
+        AgentCommand, AnalyzeCommand, ArtifactCommand, AttestCommand, BackupCommand, BackupRedaction,
         BootstrapCommand, COORDINATION_FALLBACK_INGEST_SCHEMA_V1,
         COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command, ContextPackProfile, CurateCommand,
         DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand, DiagCommand, DiagQuarantineCommand,
         DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES, EconomyCommand,
         EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand, GraphSnapshotCommand,
         HandoffCommand, HookCommand, LabCommand, LabSwarmCommand, LabSwarmWorkloadProfile,
-        LearnCommand, LearnExperimentCommand, MIGRATION_REPAIR_COMMAND, MaintenanceCommand,
-        MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat,
-        PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
-        ReflectRequestLedgerCommand, RegressCommand, RegressExplainArgs, RegressionSurfaceArg,
-        RuleCommand, ShadowMode, SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs,
-        SwarmCommand, SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand,
-        VerifyCommand, VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
-        WorkspaceHygieneMode, db_inspect_redact_source_uri,
-        diag_environment_attestation_response_json, environment_attestation_unavailable_sources,
-        format_impact_json, format_search_json_with_mesh_and_recalibration,
-        hook_git_readiness_response_json, init_report_exit_code, json_with_data_result_path, mesh,
-        orient_next_commands, parse_completion_audit_evidence_input, parse_context_profile,
+        LearnCommand, LearnExperimentCommand, LensCommand, MIGRATION_REPAIR_COMMAND,
+        MaintenanceCommand, MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode,
+        MemoryCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
+        RedactionLevelSource, ReflectCommand, ReflectRequestLedgerCommand, RegressCommand,
+        RegressExplainArgs, RegressionSurfaceArg, RuleCommand, ShadowMode, SituationCommand,
+        StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmWorkPacketArgs,
+        TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand, VerifyRchCommand,
+        WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode,
+        db_inspect_redact_source_uri, diag_environment_attestation_response_json,
+        environment_attestation_unavailable_sources, format_impact_json,
+        format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
+        init_report_exit_code, json_with_data_result_path, mesh, orient_next_commands,
+        parse_completion_audit_evidence_input, parse_context_profile,
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json,
@@ -65758,6 +66119,35 @@ mod tests {
             &"memory list".to_string(),
             "nested command_path",
         )
+    }
+
+    #[test]
+    fn parser_accepts_task_lens_list_and_explain() -> TestResult {
+        let list = Cli::try_parse_from(["ee", "lens", "list", "--json"])
+            .map_err(|e| format!("lens list parse error: {e}"))?;
+        match list.command {
+            Some(Command::Lens(LensCommand::List(_))) => {}
+            other => return Err(format!("expected lens list command, got {other:?}")),
+        }
+
+        let explain = Cli::try_parse_from(["ee", "lens", "explain", "bugfix", "--json"])
+            .map_err(|e| format!("lens explain parse error: {e}"))?;
+        let args: Vec<OsString> = ["ee", "lens", "explain", "bugfix", "--json"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let invocation = super::NormalizedInvocation::from_cli(&explain, &args);
+        ensure_equal(
+            &invocation.command_path,
+            &"lens explain".to_string(),
+            "lens explain command_path",
+        )?;
+        match explain.command {
+            Some(Command::Lens(LensCommand::Explain(args))) => {
+                ensure_equal(&args.lens, &"bugfix".to_string(), "lens id")
+            }
+            other => Err(format!("expected lens explain command, got {other:?}")),
+        }
     }
 
     #[test]
