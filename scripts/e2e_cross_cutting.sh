@@ -133,8 +133,28 @@ assert_jq_file "$BACKUP_MANIFEST" \
     '.policy.missingAssetFailure == "degraded_not_silent_loss" and .policy.hashPolicy == "blake3_required"' \
     "backup coverage fail-visible hash policy"
 assert_jq_file "$BACKUP_MANIFEST" \
+    '.coverageSurfaces == ["backup_create","backup_inspect","backup_verify","backup_restore","manifest_rehash","roundtrip_e2e"] and all(.assets[]; .hashPolicy == "blake3_required" and .missingAssetFailure == "degraded_not_silent_loss" and .coverageSurfaces == ["backup_create","backup_inspect","backup_verify","backup_restore","manifest_rehash","roundtrip_e2e"] and ((.roundTripEvidence // "") | length > 0))' \
+    "backup assets declare full fail-visible coverage surfaces"
+assert_jq_file "$BACKUP_MANIFEST" \
     'all(.assetCoverageMatrix[]; .complianceStatus == "declared_conformant" and .scoreMilli >= 950 and .divergent == 0)' \
     "backup coverage matrix is conformant"
+# shellcheck disable=SC2016
+assert_jq_file "$BACKUP_MANIFEST" \
+    '(.assets[] | select(.assetKind == "memory_anchors") | .privacyContract) as $p | $p.rawAnchorValuesAllowed == false and $p.valueMaterialPolicy == "hash_or_redacted_only" and $p.manifestRedactionClass == "hash" and $p.restoreValidation == "hashes_roundtrip_without_raw_values" and (($p.forbiddenFields | sort) == ["anchor_value","raw_anchor_value","raw_command","raw_path","raw_schema","raw_symbol"]) and ($p.serializedFields | index("anchor_value") == null) and ($p.serializedFields | index("raw_anchor_value") == null) and ($p.serializedFields | index("raw_path") == null)' \
+    "backup memory-anchor privacy forbids raw anchor values"
+assert_jq_file "$BACKUP_MANIFEST" \
+    '([.failureScenarios[].scenario] | sort) == ["corrupt_derived_asset_hash","missing_derived_asset","raw_anchor_value_present","restore_manifest_rehash_mismatch"] and all(.failureScenarios[]; .expectedFailure == "degraded_not_silent_loss" and .hashPolicy == "blake3_required" and ((.roundTripEvidence // "") | length > 0))' \
+    "backup failure scenarios keep required ids and fail-visible posture"
+# shellcheck disable=SC2016
+assert_jq_file "$BACKUP_MANIFEST" \
+    '(.runtimeAnchors) as $anchors | all(.failureScenarios[]; .expectedRuntimeAnchor as $anchor | $anchors | index($anchor))' \
+    "backup failure scenarios name runtime anchors"
+run_static_command \
+    "backup runtime source exposes derived-asset missing anchor" \
+    grep -q "derived_asset_missing" "$REPO_ROOT/src/core/backup.rs"
+run_static_command \
+    "backup runtime source exposes restored derived anchor" \
+    grep -q "restoredDerived" "$REPO_ROOT/src/core/backup.rs"
 
 step "static checker covers manifest-only cross-cutting gates"
 checker_output=""

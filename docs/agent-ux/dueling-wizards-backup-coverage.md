@@ -4,6 +4,8 @@ This checklist is the human-facing companion to
 `tests/fixtures/contracts/dueling_wizards_backup_coverage.json`. It is owned by
 `bd-1n0np.23.2` and enforced by
 `tests/contracts/dueling_wizards_backup_coverage.rs`.
+`scripts/e2e_cross_cutting.sh` also validates the manifest as a
+build-independent shell gate.
 
 The backup coverage registry must stay in lockstep with
 `tests/fixtures/contracts/dueling_wizards_migration_registry.json`. Every new
@@ -32,6 +34,13 @@ the migration registry, but the anchor material must stay in
 `anchor_value_hash` and `redacted_anchor_value`; fields such as
 `anchor_value`, `raw_anchor_value`, `raw_path`, `raw_symbol`, `raw_command`, and
 `raw_schema` are forbidden.
+
+The shell gate checks asset coverage parity with the migration registry,
+complete coverage surfaces, `blake3_required` hashing, fail-visible missing
+asset policy, memory-anchor raw-value privacy, failure-scenario coverage, and
+runtime backup anchors. It does not replace the Rust contract or the eventual
+runtime round-trip proof; it catches manifest drift while RCH or the live
+checkout cannot produce a Rust verdict.
 
 ## Coverage Requirements
 
