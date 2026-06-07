@@ -23,6 +23,7 @@
 //! let exit_code = outcome_exit_code(&outcome);
 //! ```
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::str::FromStr;
 
@@ -3035,8 +3036,170 @@ impl OutcomeSignalSource {
     }
 }
 
+/// Default cap on derived outcome contributions per memory per harvest window
+/// (ADR 0055, bd-1n0np.2.7). Mirrors the harmful-burst per-source ceiling so a
+/// runaway derived stream cannot inflate one memory's confidence.
+pub const DEFAULT_DERIVED_PER_MEMORY_PER_WINDOW: u32 = 3;
+
+/// Outcome of the per-memory/per-window derived self-reinforcement cap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DerivedCapDecision {
+    /// The contribution is within the window cap and may be admitted.
+    Admit,
+    /// The window cap is reached; the contribution is quarantined and must NOT
+    /// update live scoring (it may still be surfaced as a curation candidate).
+    QuarantineCapExceeded,
+}
+
+impl DerivedCapDecision {
+    /// Stable string form for JSON output and audit rows.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admit => "admit",
+            Self::QuarantineCapExceeded => "quarantine_cap_exceeded",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_admitted(self) -> bool {
+        matches!(self, Self::Admit)
+    }
+}
+
+/// Decide whether one more derived outcome contribution for a memory may be
+/// admitted in the current window (ADR 0055, bd-1n0np.2.7). Mirrors the
+/// harmful-burst per-source quarantine: once `prior_admitted_in_window` reaches
+/// `cap`, further derived contributions are quarantined so derived outcomes can
+/// never inflate confidence in a self-reinforcing loop. `cap == 0` disables
+/// derived admission entirely.
+#[must_use]
+pub const fn derived_contribution_decision(
+    prior_admitted_in_window: u32,
+    cap: u32,
+) -> DerivedCapDecision {
+    if prior_admitted_in_window < cap {
+        DerivedCapDecision::Admit
+    } else {
+        DerivedCapDecision::QuarantineCapExceeded
+    }
+}
+
+/// Partition `candidate_count` new derived contributions for one memory into
+/// `(admitted, quarantined)` given how many were already admitted this window
+/// and the per-window `cap`. The admitted count never exceeds the remaining
+/// budget, so the cap holds across a batch.
+#[must_use]
+pub fn cap_derived_contributions(
+    prior_admitted_in_window: u32,
+    candidate_count: u32,
+    cap: u32,
+) -> (u32, u32) {
+    let remaining = cap.saturating_sub(prior_admitted_in_window);
+    let admit = remaining.min(candidate_count);
+    let quarantine = candidate_count - admit;
+    (admit, quarantine)
+}
+
+/// A derived/explicit outcome-evidence row already attributed by the caller to
+/// the memories it could concern (resolved via recorder pack/run/task lineage +
+/// impressions within an explicit window). The pure joiner below applies the
+/// ADR-0055 safety invariants over these; lineage resolution and DB I/O stay
+/// with the caller so this core is pure and deterministic.
+#[derive(Clone, Debug)]
+pub struct AttributedOutcome {
+    pub source: OutcomeEvidenceSource,
+    pub direction: String,
+    pub evidence_ref: String,
+    pub memory_ids: Vec<String>,
+}
+
+/// One proposed derived outcome label from the joiner. This is a PROPOSAL only:
+/// the joiner never mutates confidence, never promotes, and never tombstones a
+/// memory. The caller routes admitted proposals through the write-owner and
+/// quarantined ones to curation candidates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DerivedOutcomeProposal {
+    pub memory_id: String,
+    pub direction: String,
+    pub corroborating_count: u32,
+    pub evidence_refs: Vec<String>,
+    pub cap_decision: DerivedCapDecision,
+}
+
+/// Deterministically propose derived outcome labels from attributed evidence,
+/// enforcing the keystone safety invariants (ADR 0055, bd-1n0np.2.4):
+///
+/// - **Derived-only**: explicit human/agent signals are authoritative on their
+///   own and are never re-proposed here.
+/// - **Never override explicit**: a memory already carrying explicit feedback
+///   (`memories_with_explicit`) is skipped entirely.
+/// - **≥N corroboration**: a `(memory, direction)` needs at least
+///   `min_corroboration` distinct derived signals before a label is proposed.
+/// - **Self-reinforcement cap**: proposals beyond the per-memory/per-window
+///   budget are marked `QuarantineCapExceeded` (must not update live scoring).
+/// - **No mutation**: the result is a sorted, deterministic list of proposals.
+#[must_use]
+pub fn propose_derived_outcomes(
+    attributed: &[AttributedOutcome],
+    memories_with_explicit: &BTreeSet<String>,
+    prior_admitted_per_memory: &BTreeMap<String, u32>,
+    min_corroboration: u32,
+    per_memory_cap: u32,
+) -> Vec<DerivedOutcomeProposal> {
+    // Aggregate corroborating evidence refs per (memory, direction), derived
+    // signals only, skipping any memory that already has explicit feedback.
+    let mut groups: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    for outcome in attributed {
+        if OutcomeSignalSource::classify(outcome.source) != OutcomeSignalSource::Derived {
+            continue;
+        }
+        for memory_id in &outcome.memory_ids {
+            if memories_with_explicit.contains(memory_id) {
+                continue;
+            }
+            groups
+                .entry((memory_id.clone(), outcome.direction.clone()))
+                .or_default()
+                .push(outcome.evidence_ref.clone());
+        }
+    }
+
+    // Emit proposals in deterministic (memory, direction) order, applying the
+    // per-memory cap across this batch on top of prior in-window admissions.
+    let mut admitted_per_memory: BTreeMap<String, u32> = BTreeMap::new();
+    let mut proposals = Vec::new();
+    for ((memory_id, direction), mut evidence_refs) in groups {
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        let corroborating_count = u32::try_from(evidence_refs.len()).unwrap_or(u32::MAX);
+        if corroborating_count < min_corroboration {
+            continue;
+        }
+        let prior = prior_admitted_per_memory
+            .get(&memory_id)
+            .copied()
+            .unwrap_or(0);
+        let already_this_batch = admitted_per_memory.get(&memory_id).copied().unwrap_or(0);
+        let cap_decision =
+            derived_contribution_decision(prior.saturating_add(already_this_batch), per_memory_cap);
+        if cap_decision.is_admitted() {
+            *admitted_per_memory.entry(memory_id.clone()).or_insert(0) += 1;
+        }
+        proposals.push(DerivedOutcomeProposal {
+            memory_id,
+            direction,
+            corroborating_count,
+            evidence_refs,
+            cap_decision,
+        });
+    }
+    proposals
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
 
     use asupersync::Outcome;
@@ -3102,6 +3265,135 @@ mod tests {
         assert!(!S::Derived.is_authoritative());
         assert_eq!(S::Explicit.as_str(), "explicit");
         assert_eq!(S::Derived.as_str(), "derived");
+    }
+
+    #[test]
+    fn derived_cap_admits_until_cap_then_quarantines() {
+        use super::DerivedCapDecision as D;
+        assert_eq!(super::derived_contribution_decision(0, 3), D::Admit);
+        assert_eq!(super::derived_contribution_decision(2, 3), D::Admit);
+        assert_eq!(
+            super::derived_contribution_decision(3, 3),
+            D::QuarantineCapExceeded
+        );
+        assert_eq!(
+            super::derived_contribution_decision(5, 3),
+            D::QuarantineCapExceeded
+        );
+        // cap == 0 disables derived admission entirely.
+        assert_eq!(
+            super::derived_contribution_decision(0, 0),
+            D::QuarantineCapExceeded
+        );
+        assert!(D::Admit.is_admitted());
+        assert!(!D::QuarantineCapExceeded.is_admitted());
+    }
+
+    #[test]
+    fn cap_derived_contributions_partitions_against_remaining_budget() {
+        // 1 already admitted, cap 3 => 2 budget; 5 candidates => 2 admit, 3 quarantine.
+        assert_eq!(super::cap_derived_contributions(1, 5, 3), (2, 3));
+        // already at cap => everything quarantined.
+        assert_eq!(super::cap_derived_contributions(3, 4, 3), (0, 4));
+        // under cap with fewer candidates than budget => all admitted.
+        assert_eq!(super::cap_derived_contributions(0, 2, 5), (2, 0));
+        assert_eq!(super::DEFAULT_DERIVED_PER_MEMORY_PER_WINDOW, 3);
+    }
+
+    fn derived_outcome(
+        direction: &str,
+        evidence_ref: &str,
+        memories: &[&str],
+    ) -> super::AttributedOutcome {
+        super::AttributedOutcome {
+            source: crate::db::OutcomeEvidenceSource::VerifierSuccess,
+            direction: direction.to_string(),
+            evidence_ref: evidence_ref.to_string(),
+            memory_ids: memories.iter().map(|m| (*m).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn joiner_requires_min_corroboration() {
+        let attributed = vec![
+            derived_outcome("positive", "ev1", &["mem_a"]),
+            derived_outcome("positive", "ev2", &["mem_a"]),
+            derived_outcome("positive", "ev3", &["mem_b"]),
+        ];
+        let proposals =
+            super::propose_derived_outcomes(&attributed, &BTreeSet::new(), &BTreeMap::new(), 2, 3);
+        assert_eq!(proposals.len(), 1, "only mem_a reaches >=2 corroboration");
+        assert_eq!(proposals[0].memory_id, "mem_a");
+        assert_eq!(proposals[0].corroborating_count, 2);
+        assert_eq!(proposals[0].cap_decision, super::DerivedCapDecision::Admit);
+    }
+
+    #[test]
+    fn joiner_never_overrides_explicit() {
+        let attributed = vec![
+            derived_outcome("positive", "ev1", &["mem_a"]),
+            derived_outcome("positive", "ev2", &["mem_a"]),
+        ];
+        let mut explicit = BTreeSet::new();
+        explicit.insert("mem_a".to_string());
+        let proposals =
+            super::propose_derived_outcomes(&attributed, &explicit, &BTreeMap::new(), 2, 3);
+        assert!(
+            proposals.is_empty(),
+            "derived signals must never override explicit feedback"
+        );
+    }
+
+    #[test]
+    fn joiner_ignores_explicit_source_rows() {
+        let mut o1 = derived_outcome("positive", "ev1", &["mem_a"]);
+        o1.source = crate::db::OutcomeEvidenceSource::ExplicitHuman;
+        let mut o2 = derived_outcome("positive", "ev2", &["mem_a"]);
+        o2.source = crate::db::OutcomeEvidenceSource::ExplicitAgent;
+        let proposals =
+            super::propose_derived_outcomes(&[o1, o2], &BTreeSet::new(), &BTreeMap::new(), 2, 3);
+        assert!(
+            proposals.is_empty(),
+            "explicit-source rows are authoritative, not re-proposed as derived"
+        );
+    }
+
+    #[test]
+    fn joiner_applies_per_memory_cap_across_directions() {
+        let attributed = vec![
+            derived_outcome("positive", "p1", &["mem_a"]),
+            derived_outcome("positive", "p2", &["mem_a"]),
+            derived_outcome("negative", "n1", &["mem_a"]),
+            derived_outcome("negative", "n2", &["mem_a"]),
+        ];
+        // cap=1: first (deterministic) direction admitted, second quarantined.
+        let proposals =
+            super::propose_derived_outcomes(&attributed, &BTreeSet::new(), &BTreeMap::new(), 2, 1);
+        assert_eq!(proposals.len(), 2);
+        assert_eq!(proposals[0].direction, "negative");
+        assert_eq!(proposals[0].cap_decision, super::DerivedCapDecision::Admit);
+        assert_eq!(proposals[1].direction, "positive");
+        assert_eq!(
+            proposals[1].cap_decision,
+            super::DerivedCapDecision::QuarantineCapExceeded
+        );
+    }
+
+    #[test]
+    fn joiner_dedupes_evidence_and_is_deterministic() {
+        let attributed = vec![
+            derived_outcome("positive", "ev2", &["mem_a"]),
+            derived_outcome("positive", "ev1", &["mem_a"]),
+            derived_outcome("positive", "ev1", &["mem_a"]),
+        ];
+        let proposals =
+            super::propose_derived_outcomes(&attributed, &BTreeSet::new(), &BTreeMap::new(), 2, 3);
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(
+            proposals[0].evidence_refs,
+            vec!["ev1".to_string(), "ev2".to_string()]
+        );
+        assert_eq!(proposals[0].corroborating_count, 2);
     }
 
     type TestResult = Result<(), String>;
