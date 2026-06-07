@@ -49,7 +49,7 @@ Every planned asset kind must declare coverage for:
 The current runtime round-trip proof path is
 `tests/e2e_backup_restore_roundtrip.rs`. Once the dueling-wizards runtime
 schema tasks are implemented, their storage rows must extend that proof or the
-future cross-cutting e2e owned by `bd-1n0np.23.6`.
+`scripts/e2e_cross_cutting.sh` gate owned by `bd-1n0np.23.6`.
 
 ## Asset Inventory
 

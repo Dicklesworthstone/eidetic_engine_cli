@@ -99,6 +99,26 @@ the cross-cutting contracts named in the manifest:
 `dueling_wizards_migration_registry`, `dueling_wizards_backup_coverage`,
 `dueling_wizards_determinism_gate`, and `dueling_wizards_mesh_redaction`.
 
+## Cross-Cutting Static Gate
+
+`scripts/e2e_cross_cutting.sh` is the `bd-1n0np.23.6` static E2E driver for
+the shared foundations. It is intentionally outside `featureE2eScripts` because
+it is not one of the original feature-level real-binary flows. The gate runs
+through `scripts/verify.sh` as `Dueling Wizards Cross-Cutting Static E2E` and
+uses the shared harness to emit `ee.test_event.v1` rows while checking:
+
+- cross-cutting manifest JSON parseability;
+- migration-registry allocation and RCH-only proof posture;
+- backup-coverage asset-kind parity with the migration registry;
+- no-silent-cap and mesh-redaction shell checker blocks;
+- determinism, ingestion-security, mesh, why/PackDna, and observability
+  manifest identities and conservative policy flags;
+- event-radar coverage for the driver itself.
+
+This gate is a build-independent preflight. It does not replace the Rust
+contract tests or future real-binary feature E2Es; it catches cross-manifest
+drift early when RCH or a live checkout cannot produce a Rust verdict.
+
 ## Verify Anchors
 
 `scripts/verify.sh` is the only default readiness runner. Implemented feature

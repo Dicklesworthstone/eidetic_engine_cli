@@ -860,6 +860,11 @@ run_stage "Replay Lab Smoke E2E (bd-ppbue.8)" "./scripts/e2e_overhaul/swarm_repl
 # Gate 6.07: Dueling Wizards why-not real-binary E2E.
 run_stage "Dueling Wizards Why-Not E2E" "./scripts/e2e_why_not.sh"
 
+# Gate 6.08: Dueling Wizards cross-cutting static E2E. This is intentionally
+# no-Cargo and checks the shared manifests/static gates before the feature
+# scripts that depend on them.
+run_stage "Dueling Wizards Cross-Cutting Static E2E" "./scripts/e2e_cross_cutting.sh"
+
 # Heavy gate block: skipped under --ci-smoke for fast swarm-CI / agent
 # pre-push runs. bd-2dgn0.5: see docs/operator-swarm-slo.md for which
 # gates are dropped and how to recover coverage in a follow-up
