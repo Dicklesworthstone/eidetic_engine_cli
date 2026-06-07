@@ -4097,6 +4097,44 @@ mod tests {
     }
 
     #[test]
+    fn joiner_output_is_order_independent() {
+        let forward = vec![
+            derived_outcome("positive", "ev1", &["mem_a"]),
+            derived_outcome("positive", "ev2", &["mem_a"]),
+            derived_outcome("negative", "n1", &["mem_b"]),
+            derived_outcome("negative", "n2", &["mem_b"]),
+        ];
+        let mut reversed = forward.clone();
+        reversed.reverse();
+        let a = super::propose_derived_outcomes(&forward, &BTreeSet::new(), &BTreeMap::new(), 2, 3);
+        let b =
+            super::propose_derived_outcomes(&reversed, &BTreeSet::new(), &BTreeMap::new(), 2, 3);
+        assert_eq!(a, b, "proposals are byte-stable regardless of input order");
+        assert_eq!(a.len(), 2);
+    }
+
+    #[test]
+    fn joiner_explicit_blocks_derived_in_all_directions() {
+        // mem_a has explicit feedback while derived corroboration exists in BOTH
+        // directions; the never-override invariant must suppress every derived
+        // proposal for that memory, not only the matching direction.
+        let attributed = vec![
+            derived_outcome("positive", "p1", &["mem_a"]),
+            derived_outcome("positive", "p2", &["mem_a"]),
+            derived_outcome("negative", "n1", &["mem_a"]),
+            derived_outcome("negative", "n2", &["mem_a"]),
+        ];
+        let mut explicit = BTreeSet::new();
+        explicit.insert("mem_a".to_string());
+        let proposals =
+            super::propose_derived_outcomes(&attributed, &explicit, &BTreeMap::new(), 2, 3);
+        assert!(
+            proposals.is_empty(),
+            "any explicit feedback blocks all derived proposals for that memory"
+        );
+    }
+
+    #[test]
     fn calibration_empty_is_neutral() {
         let report = super::compute_calibration(&[], 10);
         assert_eq!(report.sample_count, 0);
