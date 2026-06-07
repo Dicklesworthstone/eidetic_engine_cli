@@ -45,6 +45,16 @@ source/docs contract. Stop at inspection, run no BV claim command, do not
 rebuild or install `ee` with local Cargo, and coordinate for an approved
 RCH/release-path rebuild instead.
 
+Install-freshness guard: when PATH order or binary freshness is suspect, agents
+may pipe `ee install check --json --offline` into
+`scripts/agent_consume_work_packet_gate.py`. The consumer accepts
+`ee.install.check.v1` only as blocking evidence and emits `safeToClaim=false`;
+stale, duplicate-PATH, and version-skew findings appear as
+`install_freshness:<verdict>` and `install_finding:<code>`. Even a fresh install
+check emits `install_check_is_not_claim_gate` because it is not a claim ticket:
+it only clears the binary-freshness precondition, then the normal work-packet
+claim gate must decide whether the Beads claim is safe.
+
 ## Intended Flow
 
 ```bash

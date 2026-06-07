@@ -16,6 +16,8 @@ import sys
 OUTPUT_SCHEMA = "ee.agent.work_packet_gate_decision.v1"
 CLAIM_GATE_SCHEMA = "ee.swarm.work_packet.claim_gate.v1"
 WORK_PACKET_SCHEMA = "ee.swarm.work_packet.v1"
+INSTALL_CHECK_SCHEMA = "ee.install.check.v1"
+INSTALL_FRESHNESS_SCHEMA = "ee.install.freshness.v1"
 SAFE_COPY = "safe_structured_argv"
 DECISION_DIAGNOSTIC_LIMIT = 16
 DECISION_ACTION_LIMIT = 16
@@ -130,6 +132,7 @@ MACHINE_RESPONSE_SCHEMAS = {
     "ee.response.v2",
     CLAIM_GATE_SCHEMA,
     WORK_PACKET_SCHEMA,
+    INSTALL_CHECK_SCHEMA,
 }
 
 SECRET_PATTERNS = [
@@ -181,6 +184,15 @@ def list_items(value):
 
 def dict_or_empty(value):
     return value if isinstance(value, dict) else {}
+
+
+def field_value(container, *names):
+    if not isinstance(container, dict):
+        return None
+    for name in names:
+        if name in container:
+            return container.get(name)
+    return None
 
 
 def bool_or_none(value):
@@ -830,6 +842,21 @@ def source_summary_from_packet(packet):
     }
 
 
+def source_summary_for_install_check():
+    return {
+        "trackerHealth": None,
+        "trackerAuthoritative": None,
+        "requiresCandidateDowngrade": None,
+        "agentMailStatus": None,
+        "reservationAuthoritative": None,
+        "inboxAuthoritative": None,
+        "rchPosture": None,
+        "rchRemoteOnlyRequired": None,
+        "rchSafeToLaunchCargoVerification": None,
+        "sourceCount": 1,
+    }
+
+
 def classify_action(action, safe_to_claim, action_kind):
     argv_input = action.get("argv")
     argv = []
@@ -1368,6 +1395,65 @@ def consume_work_packet(packet, envelope_degraded=None):
     }
 
 
+def install_check_finding_codes(report, freshness):
+    codes = []
+
+    def add_code(value):
+        text = redact_text(value, 96)
+        if text and text not in codes:
+            codes.append(text)
+
+    for code in list_items(
+        field_value(freshness, "blockingFindings", "blocking_findings")
+    ):
+        add_code(code)
+
+    for finding in list_items(report.get("findings")):
+        if isinstance(finding, dict):
+            add_code(finding.get("code"))
+        else:
+            add_code(finding)
+
+    return codes
+
+
+def consume_install_check(report, envelope_degraded=None):
+    freshness = dict_or_empty(report.get("freshness"))
+    freshness_schema = freshness.get("schema")
+    verdict = freshness.get("verdict") if isinstance(freshness.get("verdict"), str) else None
+    if freshness_schema != INSTALL_FRESHNESS_SCHEMA:
+        verdict = "missing_freshness"
+    verdict = redact_text(verdict or "unknown_freshness", 64)
+
+    why_not_safe = ["install_check_is_not_claim_gate"]
+    if verdict != "fresh":
+        why_not_safe.insert(0, f"install_freshness:{verdict}")
+
+    for code in install_check_finding_codes(report, freshness):
+        why_not_safe.append(f"install_finding:{code}")
+
+    repair = field_value(freshness, "repair")
+    if isinstance(repair, str) and repair.strip():
+        why_not_safe.append(f"install_repair:{redact_text(repair, 120)}")
+
+    return {
+        "schema": OUTPUT_SCHEMA,
+        "sourceSchema": INSTALL_CHECK_SCHEMA,
+        "safeToClaim": False,
+        "candidateId": None,
+        "decision": f"install_freshness_{verdict}",
+        "action": "run_claim_gate_after_fresh_install_check"
+        if verdict == "fresh"
+        else "repair_install_freshness",
+        "argvActions": [],
+        "mutatingActionsRequireHuman": False,
+        "whyNotSafe": compact_list(why_not_safe),
+        "sourceSummary": source_summary_for_install_check(),
+        "degradedSummary": degraded_summary(report, envelope_degraded),
+        "legacyCommandStringsRefused": 0,
+    }
+
+
 def consume(response):
     if not isinstance(response, dict):
         return error_decision("invalid_json_shape")
@@ -1387,6 +1473,8 @@ def consume(response):
         return consume_claim_gate(payload, envelope_degraded)
     if schema == WORK_PACKET_SCHEMA:
         return consume_work_packet(payload, envelope_degraded)
+    if schema == INSTALL_CHECK_SCHEMA:
+        return consume_install_check(payload, envelope_degraded)
     return error_decision(
         f"unsupported_schema:{redact_text(schema or 'unknown', 64)}",
         payload,

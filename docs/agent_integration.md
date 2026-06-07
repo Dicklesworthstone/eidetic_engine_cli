@@ -71,6 +71,14 @@ The fixture-driven consumer check is:
 python3 scripts/agent_consume_work_packet_gate_test.py
 ```
 
+The same consumer may ingest `ee install check --json --offline` output when an
+agent is diagnosing a stale or shadowed installed binary. For
+`ee.install.check.v1`, it always emits `safeToClaim=false`: stale, missing, or
+duplicate-PATH evidence appears in `whyNotSafe` as `install_freshness:<verdict>`
+and `install_finding:<code>`, while a fresh install check reports
+`install_check_is_not_claim_gate`. Fresh install evidence is necessary but not a
+claim ticket; run the work-packet claim gate afterward.
+
 ## No-Local-Cargo Install Freshness
 
 When an agent sees a stale or missing `ee` command surface, it needs an
@@ -85,6 +93,13 @@ Start with the binary agents will actually run:
 command -v ee
 ee --version
 ee install check --json --offline
+```
+
+Optional consumer form for handoffs and scripts:
+
+```bash
+ee install check --json --offline \
+  | scripts/agent_consume_work_packet_gate.py
 ```
 
 Treat the check as trusted only when it returns `schema=ee.response.v2`,

@@ -992,7 +992,7 @@ The 26 path-deps need individual triage. Create 26 sub-beads under `bd-3usjw.11`
 - **Acceptance:** `cargo publish --dry-run -p <crate>` clean from this repo
 
 Top-priority sub-beads (impossible to defer):
-- `asupersync` — verify version pin matches crates.io 0.3.1 (likely fast)
+- `asupersync` — verify version pin matches crates.io 0.3.3 (likely fast)
 - `sqlmodel-core`, `sqlmodel-frankensqlite` — only 2 sub-crates of sqlmodel_rust
 - `frankensearch` — core dep, feature surgery needed
 - `franken-agent-detection` — small surface, fast publish

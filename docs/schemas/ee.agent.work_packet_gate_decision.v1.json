@@ -31,7 +31,8 @@
           "type": "string",
           "enum": [
             "ee.swarm.work_packet.claim_gate.v1",
-            "ee.swarm.work_packet.v1"
+            "ee.swarm.work_packet.v1",
+            "ee.install.check.v1"
           ]
         }
       ]

@@ -81,9 +81,9 @@ future compile or test verification must use `rch exec -- cargo ...`.
 asupersync = { version = "0.3.3", default-features = false, features = ["tracing-integration"] }
 ```
 
-That is the right starting point. It avoids Asupersync's default
-`test-internals` and `proc-macros` features, and it does not enable optional
-surfaces that would violate EE constraints.
+That is the right starting point. It avoids Asupersync's upstream default
+`proc-macros` feature and the explicit `test-internals` feature, and it does
+not enable optional surfaces that would violate EE constraints.
 
 `src/core/mod.rs` already contains the walking runtime bootstrap:
 
@@ -450,7 +450,7 @@ rch exec -- cargo tree -e features
 | Risk | Impact | Mitigation |
 | ---- | ------ | ---------- |
 | Public request-Cx API is unavailable | EE cannot honestly claim full production `&Cx` propagation | Keep adapter thin, avoid fake contexts, track follow-up |
-| Enabling Asupersync defaults accidentally | `test-internals` and proc macros enter production build | Keep `default-features = false`, audit feature tree |
+| Enabling Asupersync defaults accidentally | proc macros enter production build; explicit test-only features could also leak if added casually | Keep `default-features = false`, audit feature tree |
 | Enabling `sqlite` | Pulls forbidden `rusqlite` | Explicitly forbid and audit |
 | Flattening `Outcome` into `Result` too early | Cancellation and panic semantics disappear | Preserve four-state command outcome until output boundary |
 | Blocking operations on current-thread runtime | Cancellation can be delayed | Keep blocking phases bounded, add blocking pool only with tests |

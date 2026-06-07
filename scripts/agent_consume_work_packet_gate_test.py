@@ -94,6 +94,31 @@ def safe_gate():
     }
 
 
+def install_check_report(verdict="stale", blocking_findings=None, findings=None):
+    return {
+        "schema": "ee.install.check.v1",
+        "version": "0.5.0",
+        "freshness": {
+            "schema": "ee.install.freshness.v1",
+            "verdict": verdict,
+            "authoritative": verdict == "fresh",
+            "comparison": "installed_older_than_source"
+            if verdict == "stale"
+            else "equal",
+            "blocking_findings": blocking_findings
+            if blocking_findings is not None
+            else ["installed_binary_stale"],
+            "repair": "Adopt a current release artifact or request an operator exception.",
+        },
+        "findings": findings
+        if findings is not None
+        else [
+            {"code": "duplicate_path_binary", "severity": "warning"},
+            {"code": "path_binary_version_mismatch", "severity": "warning"},
+        ],
+    }
+
+
 def load_fixture(relative_path):
     with (REPO_ROOT / relative_path).open(encoding="utf-8") as fh:
         return json.load(fh)
@@ -2514,6 +2539,77 @@ class ErrorHandling(unittest.TestCase):
         self.assertEqual(decision["decision"], "error")
         self.assertIn("error:migration_required", decision["whyNotSafe"])
 
+    def test_install_check_stale_report_fails_closed_with_findings(self):
+        decision = consumer.consume(envelope(install_check_report()))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["sourceSchema"], "ee.install.check.v1")
+        self.assertEqual(decision["decision"], "install_freshness_stale")
+        self.assertEqual(decision["action"], "repair_install_freshness")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertFalse(decision["mutatingActionsRequireHuman"])
+        self.assertIn("install_freshness:stale", decision["whyNotSafe"])
+        self.assertIn("install_check_is_not_claim_gate", decision["whyNotSafe"])
+        self.assertIn(
+            "install_finding:installed_binary_stale", decision["whyNotSafe"]
+        )
+        self.assertIn("install_finding:duplicate_path_binary", decision["whyNotSafe"])
+        self.assertIn(
+            "install_finding:path_binary_version_mismatch", decision["whyNotSafe"]
+        )
+        self.assertTrue(
+            any(reason.startswith("install_repair:") for reason in decision["whyNotSafe"])
+        )
+        self.assertEqual(decision["sourceSummary"]["sourceCount"], 1)
+
+    def test_install_check_missing_freshness_fails_closed(self):
+        report = install_check_report()
+        report.pop("freshness")
+
+        decision = consumer.consume(envelope(report))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["sourceSchema"], "ee.install.check.v1")
+        self.assertEqual(decision["decision"], "install_freshness_missing_freshness")
+        self.assertIn("install_freshness:missing_freshness", decision["whyNotSafe"])
+        self.assertIn("install_check_is_not_claim_gate", decision["whyNotSafe"])
+
+    def test_install_check_fresh_report_still_requires_claim_gate(self):
+        decision = consumer.consume(
+            envelope(
+                install_check_report(
+                    verdict="fresh",
+                    blocking_findings=[],
+                    findings=[{"code": "offline_no_manifest", "severity": "info"}],
+                )
+            )
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "install_freshness_fresh")
+        self.assertEqual(decision["action"], "run_claim_gate_after_fresh_install_check")
+        self.assertIn("install_check_is_not_claim_gate", decision["whyNotSafe"])
+        self.assertNotIn("install_freshness:fresh", decision["whyNotSafe"])
+
+    def test_cli_line_mode_accepts_raw_install_check_payload(self):
+        noisy_log = {"schema": "log.event.v1", "message": "interleaved diagnostic"}
+        report = install_check_report()
+
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / "agent_consume_work_packet_gate.py")],
+            input=json.dumps(noisy_log) + "\n" + json.dumps(report) + "\n",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.stderr, "")
+        decision = json.loads(result.stdout)
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["sourceSchema"], "ee.install.check.v1")
+        self.assertIn("install_freshness:stale", decision["whyNotSafe"])
+
     def test_error_envelope_preserves_degraded_summary(self):
         decision = consumer.consume(
             {
@@ -3567,6 +3663,7 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
             consumer.consume(
                 load_fixture("tests/fixtures/swarm_work_packet/bv_timeout_no_output.json")
             ),
+            consumer.consume(envelope(install_check_report())),
             consumer.consume({"schema": "ee.error.v2", "error": {"code": "usage"}}),
         ]
 
@@ -3753,6 +3850,28 @@ class WorkPacketDocsContract(unittest.TestCase):
         docs = [
             "README.md",
             "docs/agent_integration.md",
+        ]
+
+        for relative_path in docs:
+            body = normalize_whitespace(load_text(relative_path))
+            for marker in required_markers:
+                self.assertIn(marker, body, f"{relative_path} missing {marker!r}")
+
+    def test_agent_docs_pin_install_check_consumer_fail_closed(self):
+        required_markers = [
+            "ee install check --json --offline",
+            "scripts/agent_consume_work_packet_gate.py",
+            "ee.install.check.v1",
+            "safeToClaim=false",
+            "install_freshness:<verdict>",
+            "install_finding:<code>",
+            "install_check_is_not_claim_gate",
+            "not a claim ticket",
+            "work-packet claim gate",
+        ]
+        docs = [
+            "docs/agent_integration.md",
+            "docs/agent-ux/swarm-work-packet.md",
         ]
 
         for relative_path in docs:
