@@ -7258,6 +7258,9 @@ fn compare_peer_conflict_events(left: &PeerConflictEvent, right: &PeerConflictEv
     peer_conflict_kind_rank(left.kind)
         .cmp(&peer_conflict_kind_rank(right.kind))
         .then_with(|| left.primary_memory_hash.cmp(&right.primary_memory_hash))
+        .then_with(|| {
+            peer_near_duplicate_hamming_rank(left).cmp(&peer_near_duplicate_hamming_rank(right))
+        })
         .then_with(|| left.peer_memory_hashes.cmp(&right.peer_memory_hashes))
         .then_with(|| left.detector_verdict.cmp(right.detector_verdict))
 }
@@ -7269,6 +7272,13 @@ fn peer_conflict_kind_rank(kind: &str) -> u8 {
         "contradiction_candidate" => 2,
         _ => 3,
     }
+}
+
+fn peer_near_duplicate_hamming_rank(event: &PeerConflictEvent) -> u32 {
+    event
+        .near_duplicate_score
+        .as_ref()
+        .map_or(u32::MAX, |score| score.hamming_distance)
 }
 
 fn contradiction_signal(
@@ -7679,7 +7689,7 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let memory_id = "mem_auditlane000000000000000001";
+        let memory_id = "mem_00000000000000000000002002";
         let audit_id = "audit_auditlane00000000000000001";
         let index_job_id = "sidx_auditlane000000000000000001";
         let memory_input = CreateMemoryInput {
