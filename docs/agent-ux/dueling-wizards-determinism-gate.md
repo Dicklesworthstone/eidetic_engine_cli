@@ -21,6 +21,14 @@ The initiative builds on the current determinism infrastructure:
 | `scripts/lib/e2e_harness.sh` | Feature e2e harness used by new scripts. |
 | `docs/agent-ux/dueling-wizards-surface-contract.md` | New-surface checklist that all planned JSON surfaces share. |
 
+`scripts/e2e_overhaul/determinism.sh` now validates this manifest before it
+runs the older J7 real-binary surfaces. That shell check is a contract-presence
+gate: it proves the dueling-wizards rows, policy, pack-hash requirements, and
+coverage accounting are still coherent, but it does not pretend planned
+surfaces have runtime three-run proofs. When an individual surface moves to
+`implemented`, its implementation slice must add the real command proof in this
+script or a focused companion test.
+
 ## Required Surfaces
 
 Every row below must eventually be covered by the determinism shell gate or a

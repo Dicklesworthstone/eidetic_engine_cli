@@ -35,6 +35,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/e2e_overhaul/lib/shared.sh
 source "$SCRIPT_DIR/lib/shared.sh"
 
+DUELING_WIZARDS_DETERMINISM_MANIFEST="$REPO_ROOT/tests/fixtures/contracts/dueling_wizards_determinism_gate.json"
+
 # Resolve a content hasher: prefer blake3sum (matches ee's pack hash),
 # fall back to shasum -a 256 on systems where blake3 isn't installed.
 # Either is fine for byte-equality checking; only the absolute value
@@ -104,12 +106,87 @@ strip_variable_fields() {
     jq "$(volatile_field_delete_filter)"
 }
 
+assert_dueling_wizards_determinism_manifest() {
+    local manifest="$DUELING_WIZARDS_DETERMINISM_MANIFEST"
+    local summary surface_count pack_hash_count
+
+    if [ ! -f "$manifest" ]; then
+        e2e_log_assert_eq "missing" "present" "determinism_dueling_wizards_manifest_exists"
+        return 1
+    fi
+
+    if ! summary=$(jq -er '
+        ["why_not", "harvest", "calibration", "impact", "error_recall", "blind_spots", "conflict", "read_fence_consistency", "pack_lod", "feedback_roi"] as $surfaces
+        | ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"] as $required_assertions
+        | if .schema != "ee.dueling_wizards.determinism_gate.v1" then
+            error("schema must be ee.dueling_wizards.determinism_gate.v1")
+          elif .gateBead != "bd-1n0np.15.2" then
+            error("gateBead must be bd-1n0np.15.2")
+          elif .implementationState != "planned_contract" then
+            error("implementationState must remain planned_contract until runtime rows are wired")
+          elif .policy.runCount != 3 then
+            error("policy.runCount must be 3")
+          elif .policy.canonicalization != "explicit_volatile_field_removal" then
+            error("policy.canonicalization drifted")
+          elif .policy.stdoutMachineOnly != true then
+            error("policy.stdoutMachineOnly must be true")
+          elif .policy.localCargoProof != "invalid" then
+            error("policy.localCargoProof must be invalid")
+          elif .policy.rchProofRequiredForRuntimeTests != true then
+            error("policy.rchProofRequiredForRuntimeTests must be true")
+          elif (([.determinismMatrix[].surface] | sort) != ($surfaces | sort)) then
+            error("determinismMatrix surface set drifted")
+          elif (([.surfaceCoverageMatrix[].surface] | sort) != ($surfaces | sort)) then
+            error("surfaceCoverageMatrix surface set drifted")
+          elif (.determinismMatrix | length) != 10 then
+            error("determinismMatrix must carry 10 dueling-wizards surfaces")
+          elif (.surfaceCoverageMatrix | length) != 10 then
+            error("surfaceCoverageMatrix must carry 10 dueling-wizards surfaces")
+          elif (all(.determinismMatrix[];
+            .runCount == 3
+            and .canonicalization == "explicit_volatile_field_removal"
+            and .stdoutMachineOnly == true
+            and .diagnosticsChannel == "stderr_or_artifact"
+            and .runtimeProof == "rch_only"
+            and ((.requiredAssertions | sort) == ($required_assertions | sort))
+            and (if .packHashExpected then
+              .packHashAbsenceFailure == true and .packHashField == "data.pack.hash"
+            else
+              .packHashAbsenceFailure == false and .packHashField == null
+            end)
+          ) | not) then
+            error("determinismMatrix policy row drifted")
+          elif (all(.surfaceCoverageMatrix[];
+            .mustClauses == 9
+            and .tested == 9
+            and .passing == 9
+            and .divergent == 0
+            and .scoreMilli >= 950
+            and .determinismStatus == "three_run_contract_declared"
+            and .runtimeProofPolicy == "rch_required_local_invalid"
+            and .complianceStatus == "declared_conformant"
+          ) | not) then
+            error("surfaceCoverageMatrix coverage row drifted")
+          else
+            [(.determinismMatrix | length), ([.determinismMatrix[] | select(.packHashExpected)] | length)] | @tsv
+          end
+    ' "$manifest"); then
+        e2e_log_assert_eq "invalid" "valid" "determinism_dueling_wizards_manifest_contract"
+        return 1
+    fi
+
+    IFS=$'\t' read -r surface_count pack_hash_count <<< "$summary"
+    e2e_log_assert_eq "true" "true" "determinism_dueling_wizards_manifest_contract"
+    e2e_log_note "dueling_wizards_determinism_manifest surfaces=$surface_count pack_hash_rows=$pack_hash_count"
+}
+
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
     return 0
 fi
 
 require_jq
 epic_setup "epic_J_determinism"
+assert_dueling_wizards_determinism_manifest
 
 # Run `ee ARGS...` three times, canonicalize each output, hash, and
 # emit an assert via the J1 logger. The assert name is the first arg.
