@@ -45,6 +45,7 @@ set -euo pipefail
 #   4.6. Plan Drift Advisory   - advisory plan_doc_section drift hints for Beads triage
 #   4.65. Contract Drift Radar - advisory schema/docs/taxonomy drift scanner (bd-31nul.5)
 #   4.66. E2E Event Contract Radar - advisory shell evidence coverage scanner (bd-2ljka.4)
+#   4.665. Work Packet No-Mutation - shell fixture matrix for claim-gate consumer safety
 #   4.67. Panic Helper Radar Contract - no-Cargo schema/golden scanner contract gate
 #   4.68. Swarm SLO Replay Contract - no-Cargo replay fixture/golden contract gate
 #   4.69. CI Proof-Lane Snapshot Contract - no-Cargo proof-lane fixture gate
@@ -770,6 +771,11 @@ run_stage "Contract Drift Radar Advisory" "./scripts/contract-drift-radar.sh --q
 # .e2e-event-contract-radar-report.json by default and does not fail the
 # readiness gate for advisory or known gaps; scanner/runtime errors still fail.
 run_stage "E2E Event Contract Radar Advisory" "e2e_event_contract_radar_advisory"
+
+# Gate 3.855: Work-packet no-mutation contract. This shell-only harness proves
+# packet generation and the agent-facing claim-gate consumer stay read-only,
+# refuse unsafe claim states, and include install-check freshness fixtures.
+run_stage "Work Packet No-Mutation Contract" "./scripts/e2e_swarm_work_packet_no_mutation.sh"
 
 # Gate 3.86: Panic-helper radar contract (bd-ppbue.30). This no-Cargo harness
 # validates ee.panic_helper_radar.v1 schema/golden fixtures so scanner drift is
