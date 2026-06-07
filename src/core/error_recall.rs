@@ -304,12 +304,105 @@ pub fn redact_diagnostic(
     }
 }
 
+/// The kind of downstream artifact an error fingerprint links to (bd-1n0np.4.3):
+/// the failure → repair → proof → outcome chain. Persisted in the
+/// `error_repair_links` table (V069) once the store lands; this models the
+/// link semantics so the planner below stays pure and testable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErrorRepairLinkKind {
+    /// A memory that repaired this failure.
+    Repair,
+    /// A proof / verification that the repair worked.
+    Proof,
+    /// An outcome attributing helpfulness or harm to the repair.
+    Outcome,
+    /// A curation candidate raised from this failure.
+    CurationCandidate,
+}
+
+impl ErrorRepairLinkKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Repair => "repair",
+            Self::Proof => "proof",
+            Self::Outcome => "outcome",
+            Self::CurationCandidate => "curation_candidate",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "repair" => Self::Repair,
+            "proof" => Self::Proof,
+            "outcome" => Self::Outcome,
+            "curation_candidate" => Self::CurationCandidate,
+            _ => return None,
+        })
+    }
+}
+
+/// One planned link from an error fingerprint to a downstream artifact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErrorRepairLink {
+    pub fingerprint_key: String,
+    pub kind: ErrorRepairLinkKind,
+    pub target_id: String,
+}
+
+/// Plan the failure → repair → proof → outcome links for a fingerprint from the
+/// already-known target ids (bd-1n0np.4.3). Pure: blank ids are dropped, output
+/// is deduplicated and ordered deterministically by `(kind, target_id)`. The
+/// caller persists the result into `error_repair_links` (V069) + the graph; this
+/// keeps the link semantics verifiable without the migration.
+#[must_use]
+pub fn plan_error_repair_links(
+    fingerprint_key: &str,
+    repair_memory_ids: &[String],
+    proof_ids: &[String],
+    outcome_ids: &[String],
+    curation_candidate_ids: &[String],
+) -> Vec<ErrorRepairLink> {
+    let groups: [(ErrorRepairLinkKind, &[String]); 4] = [
+        (ErrorRepairLinkKind::Repair, repair_memory_ids),
+        (ErrorRepairLinkKind::Proof, proof_ids),
+        (ErrorRepairLinkKind::Outcome, outcome_ids),
+        (
+            ErrorRepairLinkKind::CurationCandidate,
+            curation_candidate_ids,
+        ),
+    ];
+    let mut links = Vec::new();
+    for (kind, ids) in groups {
+        for id in ids {
+            let trimmed = id.trim();
+            if !trimmed.is_empty() {
+                links.push(ErrorRepairLink {
+                    fingerprint_key: fingerprint_key.to_string(),
+                    kind,
+                    target_id: trimmed.to_string(),
+                });
+            }
+        }
+    }
+    links.sort_by(|left, right| {
+        left.kind
+            .as_str()
+            .cmp(right.kind.as_str())
+            .then_with(|| left.target_id.cmp(&right.target_id))
+    });
+    links.dedup();
+    links
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagnosticTool, FingerprintLayer, SIMHASH_TAIL_MAX_DISTANCE, canonical_message_template,
-        from_cargo, from_ee_error, from_rch_blocker, from_rustc, from_shell, redact_diagnostic,
-        simhash_hamming_distance, simhash_tail_matches,
+        DiagnosticTool, ErrorRepairLinkKind, FingerprintLayer, SIMHASH_TAIL_MAX_DISTANCE,
+        canonical_message_template, from_cargo, from_ee_error, from_rch_blocker, from_rustc,
+        from_shell, plan_error_repair_links, redact_diagnostic, simhash_hamming_distance,
+        simhash_tail_matches,
     };
 
     #[test]
@@ -420,5 +513,45 @@ mod tests {
         assert_eq!(red.fingerprint_key.layer, FingerprintLayer::CanonicalCode);
         assert_eq!(red.fingerprint_key.key, "rustc:E0382");
         assert_eq!(red.redacted_message, "use of moved value x");
+    }
+
+    #[test]
+    fn plan_error_repair_links_dedups_orders_and_skips_blanks() {
+        let links = plan_error_repair_links(
+            "rustc:E0277",
+            &[
+                "mem_fix".to_string(),
+                "mem_fix".to_string(),
+                "  ".to_string(),
+            ],
+            &["proof_1".to_string()],
+            &["out_1".to_string()],
+            &[],
+        );
+        // 1 repair (deduped, blank skipped) + 1 proof + 1 outcome, ordered by kind.
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].kind, ErrorRepairLinkKind::Outcome);
+        assert_eq!(links[0].target_id, "out_1");
+        assert_eq!(links[1].kind, ErrorRepairLinkKind::Proof);
+        assert_eq!(links[2].kind, ErrorRepairLinkKind::Repair);
+        assert_eq!(links[2].target_id, "mem_fix");
+        assert!(
+            links
+                .iter()
+                .all(|link| link.fingerprint_key == "rustc:E0277")
+        );
+    }
+
+    #[test]
+    fn error_repair_link_kind_roundtrips() {
+        for kind in [
+            ErrorRepairLinkKind::Repair,
+            ErrorRepairLinkKind::Proof,
+            ErrorRepairLinkKind::Outcome,
+            ErrorRepairLinkKind::CurationCandidate,
+        ] {
+            assert_eq!(ErrorRepairLinkKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(ErrorRepairLinkKind::parse("nope"), None);
     }
 }
