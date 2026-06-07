@@ -57,10 +57,10 @@ checklist is accounted for.
 
 Each row uses `planned_gate_declared` until the corresponding feature script is
 implemented. `requiredEvidenceCount` mirrors the `verifyGateMatrix` evidence
-list, `implementationRequirementCount` mirrors the closeout checklist, and
-`preflightContractCount` mirrors any `preflightContracts` on the feature row.
-Rows with preflight contracts use `preflight_contracts_declared`; rows without
-them use `not_applicable`.
+list, `implementationRequirementCount` mirrors the `implementationRequirements`
+closeout checklist, and `preflightContractCount` mirrors any
+`preflightContracts` on the feature row. Rows with preflight contracts use
+`preflight_contracts_declared`; rows without them use `not_applicable`.
 
 The coverage counters are explicit: `mustClauses`, `tested`, `passing`,
 `divergent`, and `scoreMilli` must show full conformance before a row can be
