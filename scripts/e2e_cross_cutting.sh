@@ -155,6 +155,27 @@ assert_jq_file "$DETERMINISM_MANIFEST" \
 assert_jq_file "$INGESTION_MANIFEST" \
     '.schema == "ee.dueling_wizards.ingestion_security.v1" and .gateBead == "bd-1n0np.23.3"' \
     "ingestion security manifest identity"
+assert_jq_file "$INGESTION_MANIFEST" \
+    '.policy.externalTextDefault == "untrusted_until_guarded" and .policy.rawExternalTextStorage == "forbidden_by_default" and .policy.flaggedInputBehavior == "quarantine_not_store" and .policy.auditEventRequired == true and .policy.localCargoProof == "invalid"' \
+    "ingestion security policy is fail-closed and RCH-only"
+assert_jq_file "$INGESTION_MANIFEST" \
+    '.requiredPipeline == ["source_classification","secret_redaction","prompt_injection_guard","quarantine_not_store","audit_event","regression_corpus"]' \
+    "ingestion security guard pipeline order is stable"
+assert_jq_file "$INGESTION_MANIFEST" \
+    '([.surfaces[].surface] | sort) == ["docs_bootstrap","error_log_diagnosis","sandbox_import"]' \
+    "ingestion security surface set is complete"
+assert_jq_file "$INGESTION_MANIFEST" \
+    'all(.surfaces[]; .ownerBead == "bd-1n0np.23.3" and .externalText == true and .redaction == "crate::policy::redact_secret_like_content" and .promptInjectionGuard == "crate::policy::detect_instruction_like_content" and .flaggedBehavior == "quarantine_not_store" and .rawStorage == "forbidden" and (.requiredPipeline == ["source_classification","secret_redaction","prompt_injection_guard","quarantine_not_store","audit_event","regression_corpus"]) and ((.requiredRegressionPayloadClasses | sort) == ["destructive_command_coercion","ignore_previous_instructions","mixed_benign_and_malicious","role_markup","secret_like_token"]))' \
+    "ingestion surfaces require redaction, prompt guard, quarantine, and corpus coverage"
+assert_jq_file "$INGESTION_MANIFEST" \
+    '([.guardOrderMatrix[].surface] | sort) == ([.surfaces[].surface] | sort) and all(.guardOrderMatrix[]; .redactionBeforePromptGuard == true and .promptGuardBeforeStorage == true and .rawStorageBeforeGuards == "forbidden" and .flaggedStorageDisposition == "quarantine_not_store" and .auditAfterDisposition == true)' \
+    "ingestion guard-order matrix keeps raw text out of storage"
+assert_jq_file "$INGESTION_MANIFEST" \
+    '([.regressionPayloadExamples[].payloadClass] | sort) == (.regressionPayloadClasses | sort) and all(.regressionPayloadExamples[]; .mustRunPromptInjectionGuard == true and .mustQuarantineWhenFlagged == true and .rawStorage == "forbidden" and (.expectedAuditEvent | endswith("_ingestion_security")))' \
+    "ingestion regression payload examples require quarantine and audit"
+run_static_command \
+    "ingestion policy source exposes external-text screen" \
+    grep -q "screen_external_text_for_ingestion" "$REPO_ROOT/src/policy/mod.rs"
 assert_jq_file "$MESH_MANIFEST" \
     '.schema == "ee.dueling_wizards.mesh_redaction.v1" and .policy.rawPayloadExportAllowed == false' \
     "mesh manifest forbids raw payload export"

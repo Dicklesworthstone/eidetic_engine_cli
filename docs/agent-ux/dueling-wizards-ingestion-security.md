@@ -8,6 +8,8 @@ candidate rows, overlays, fingerprints, or derived evidence.
 The executable manifest is
 `tests/fixtures/contracts/dueling_wizards_ingestion_security.json`; the CI guard
 is `tests/contracts/dueling_wizards_ingestion_security.rs`.
+`scripts/e2e_cross_cutting.sh` also validates the manifest as a
+build-independent shell gate.
 
 ## Required Pipeline
 
@@ -26,6 +28,12 @@ must keep `redactionBeforePromptGuard` and `promptGuardBeforeStorage` true,
 `flaggedStorageDisposition` set to `quarantine_not_store`. The matrix mirrors
 the per-surface `requiredPipeline` arrays so a future implementation cannot
 claim complete coverage by listing the right gates in the wrong order.
+
+The shell gate checks the exact external-text surface set, guard-pipeline
+ordering, regression payload class coverage, quarantine-not-store behavior,
+raw-storage forbiddance, audit-event expectations, and policy source anchors.
+It is not a replacement for the Rust contract; it catches manifest drift while
+RCH or the live checkout cannot produce a Rust verdict.
 
 `secret_redaction` means the content is passed through
 `crate::policy::redact_secret_like_content` before persistence or output.
