@@ -44,6 +44,7 @@ use fnx_runtime::{CgseValue, CompatibilityMode};
 use sqlmodel_core::{Row, Value};
 
 pub mod algorithms;
+pub mod anchor_projection;
 pub mod bipartite_provenance;
 pub mod causal;
 pub mod cooperative_refresh;
@@ -8245,9 +8246,21 @@ mod tests {
         );
 
         let pack_input = super::pack_dna::PackDnaInput::new(
-            vec![MEMORY_B.parse().map_err(|error| error.to_string())?],
-            vec![MEMORY_A.parse().map_err(|error| error.to_string())?],
-            vec![MEMORY_A.parse().map_err(|error| error.to_string())?],
+            vec![
+                MEMORY_B
+                    .parse::<crate::models::MemoryId>()
+                    .map_err(|error| error.to_string())?,
+            ],
+            vec![
+                MEMORY_A
+                    .parse::<crate::models::MemoryId>()
+                    .map_err(|error| error.to_string())?,
+            ],
+            vec![
+                MEMORY_A
+                    .parse::<crate::models::MemoryId>()
+                    .map_err(|error| error.to_string())?,
+            ],
         );
         let pack_dna = graph_result(super::pack_dna::compute_pack_dna(&projection, &pack_input))?;
         assert_eq!(
