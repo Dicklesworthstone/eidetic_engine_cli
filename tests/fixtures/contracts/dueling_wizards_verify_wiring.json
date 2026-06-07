@@ -34,7 +34,7 @@
       "order": 1,
       "script": "scripts/e2e_why_not.sh",
       "verifyStage": "Dueling Wizards Why-Not E2E",
-      "status": "planned",
+      "status": "implemented",
       "expectedHarness": "scripts/lib/e2e_harness.sh",
       "eventLogSchema": "ee.test_event.v1",
       "cargoProof": "rch_only",
@@ -215,7 +215,7 @@
   "gateCoverageMatrix": [
     {
       "id": "why_not",
-      "status": "planned",
+      "status": "implemented",
       "order": 1,
       "script": "scripts/e2e_why_not.sh",
       "verifyStage": "Dueling Wizards Why-Not E2E",
@@ -494,7 +494,7 @@
       "script": "scripts/e2e_why_not.sh",
       "verifyStage": "Dueling Wizards Why-Not E2E",
       "order": 1,
-      "status": "planned",
+      "status": "implemented",
       "cargoBacked": true,
       "expectedHarness": "scripts/lib/e2e_harness.sh",
       "requiredEvidence": ["run_stage", "exit_code", "elapsed_ms", "artifact_dir", "ee.test_event.v1"]

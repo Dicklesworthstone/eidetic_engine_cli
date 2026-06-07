@@ -62,6 +62,7 @@ set -euo pipefail
 #   6. Basic E2E               - scripts/e2e_test.sh
 #   6.05 Output Budget E2E     - scripts/e2e_output_budget.sh
 #   6.06 Replay Lab Smoke E2E  - scripts/e2e_overhaul/swarm_replay_lab_smoke.sh
+#   6.07 Why-Not E2E          - scripts/e2e_why_not.sh
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
@@ -855,6 +856,9 @@ run_stage "Output Budget E2E (bd-kua65)" "./scripts/e2e_output_budget.sh"
 # the public `ee lab swarm replay --dry-run` path plus ee.test_event.v1 logging
 # before the heavier replay/RCH proof lanes.
 run_stage "Replay Lab Smoke E2E (bd-ppbue.8)" "./scripts/e2e_overhaul/swarm_replay_lab_smoke.sh"
+
+# Gate 6.07: Dueling Wizards why-not real-binary E2E.
+run_stage "Dueling Wizards Why-Not E2E" "./scripts/e2e_why_not.sh"
 
 # Heavy gate block: skipped under --ci-smoke for fast swarm-CI / agent
 # pre-push runs. bd-2dgn0.5: see docs/operator-swarm-slo.md for which
