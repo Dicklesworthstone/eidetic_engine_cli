@@ -41,6 +41,7 @@ pub mod derived_asset;
 pub mod derived_asset_freshness;
 pub mod determinism;
 pub mod disk_pressure;
+pub mod docs_bootstrap;
 pub mod doctor;
 pub mod doctor_fixers;
 pub mod doctor_runtime;
