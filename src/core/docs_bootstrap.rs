@@ -6,11 +6,23 @@
 
 use std::fs::{self, File};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use chrono::Utc;
 use serde::Serialize;
 
+use crate::core::curate::{
+    CurateApplyOptions, CurateApplyReport, apply_curation_candidate, stable_workspace_id,
+};
+use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
+use crate::db::{
+    CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateSessionInput,
+    CreateWorkspaceInput, DbConnection, StoredCurationCandidate, WorkspaceScopeFields,
+};
+use crate::models::{CandidateId, DomainError, EvidenceId, SessionId};
+
 pub const DOCS_BOOTSTRAP_RUN_SCHEMA_V1: &str = "ee.bootstrap.docs.run.v1";
+pub const DOCS_BOOTSTRAP_APPLY_SCHEMA_V1: &str = "ee.bootstrap.docs.apply.v1";
 pub const DOCS_BOOTSTRAP_PARSER_VERSION: &str = "docs-bootstrap-v1";
 pub const DOCS_BOOTSTRAP_DEFAULT_MAX_SOURCE_BYTES: u64 = 512 * 1024;
 pub const DOCS_BOOTSTRAP_DEFAULT_MAX_TOTAL_BYTES: u64 = 4 * 1024 * 1024;
@@ -195,6 +207,88 @@ impl<'a> CompileDocsBootstrapOptions<'a> {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct ApplyDocsBootstrapOptions<'a> {
+    pub workspace_path: &'a Path,
+    pub database_path: Option<&'a Path>,
+    pub run_id: &'a str,
+    pub actor: Option<&'a str>,
+    pub approved_only: bool,
+    pub max_source_bytes: u64,
+    pub max_total_bytes: u64,
+}
+
+impl<'a> ApplyDocsBootstrapOptions<'a> {
+    #[must_use]
+    pub const fn for_workspace(workspace_path: &'a Path, run_id: &'a str) -> Self {
+        Self {
+            workspace_path,
+            database_path: None,
+            run_id,
+            actor: None,
+            approved_only: false,
+            max_source_bytes: DOCS_BOOTSTRAP_DEFAULT_MAX_SOURCE_BYTES,
+            max_total_bytes: DOCS_BOOTSTRAP_DEFAULT_MAX_TOTAL_BYTES,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapApplyReport {
+    pub schema: &'static str,
+    pub parser_version: &'static str,
+    pub run_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub approved_only: bool,
+    pub candidate_count: usize,
+    pub materialized_count: usize,
+    pub approved_candidate_count: usize,
+    pub applied_count: usize,
+    pub unchanged_count: usize,
+    pub blocked_count: usize,
+    pub skipped_count: usize,
+    pub durable_mutation: bool,
+    pub candidates: Vec<BootstrapApplyCandidate>,
+    pub applied_reports: Vec<CurateApplyReport>,
+    pub degraded: Vec<BootstrapDegradation>,
+    pub next_action: String,
+}
+
+impl BootstrapApplyReport {
+    #[must_use]
+    pub fn data_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|error| {
+            serde_json::json!({
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "serialization_failed",
+                    "message": "Failed to serialize docs bootstrap apply report.",
+                    "severity": "high",
+                    "repair": "Fix the docs bootstrap apply serializer before exposing this command.",
+                    "details": {
+                        "serializerError": error.to_string(),
+                    },
+                },
+            })
+            .to_string()
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapApplyCandidate {
+    pub bootstrap_candidate_id: String,
+    pub curation_candidate_id: String,
+    pub evidence_id: String,
+    pub source_path: String,
+    pub source_hash: String,
+    pub status: String,
+    pub action: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AllowedSource {
     relative_path: String,
@@ -244,6 +338,642 @@ pub fn compile_docs_bootstrap(options: &CompileDocsBootstrapOptions<'_>) -> Boot
         degraded,
         durable_mutation: false,
     }
+}
+
+pub fn apply_docs_bootstrap(
+    options: &ApplyDocsBootstrapOptions<'_>,
+) -> Result<BootstrapApplyReport, DomainError> {
+    if !options.approved_only {
+        return Err(DomainError::UsageWithDetails {
+            message: "ee bootstrap apply requires --approved-only.".to_owned(),
+            repair: Some("Run `ee bootstrap apply <run-id> --approved-only --json`.".to_owned()),
+            details_json: serde_json::json!({
+                "runId": options.run_id,
+                "durableMutation": false,
+                "requiredFlag": "--approved-only",
+            })
+            .to_string(),
+        });
+    }
+
+    let workspace_path = resolve_bootstrap_workspace_path(options.workspace_path)?;
+    let mut compile_options = CompileDocsBootstrapOptions::for_workspace(&workspace_path);
+    compile_options.max_source_bytes = options.max_source_bytes;
+    compile_options.max_total_bytes = options.max_total_bytes;
+    let run = compile_docs_bootstrap(&compile_options);
+    if run.run_id != options.run_id {
+        return Err(DomainError::UsageWithDetails {
+            message: format!(
+                "Bootstrap run ID {} does not match the current docs bootstrap run {}.",
+                options.run_id, run.run_id
+            ),
+            repair: Some(
+                "Re-run `ee bootstrap docs --dry-run --json` and apply the current run ID."
+                    .to_owned(),
+            ),
+            details_json: serde_json::json!({
+                "requestedRunId": options.run_id,
+                "currentRunId": run.run_id,
+                "parserVersion": run.parser_version,
+                "durableMutation": false,
+            })
+            .to_string(),
+        });
+    }
+
+    let database_path = options
+        .database_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    let workspace_id = stable_workspace_id(&workspace_path);
+    let mut degraded = run.degraded.clone();
+    let mut candidates = Vec::new();
+    let mut approved_candidate_ids = Vec::new();
+    let mut materialized_count = 0_usize;
+    let mut skipped_count = 0_usize;
+
+    let connection = open_bootstrap_database(&database_path)?;
+    prepare_bootstrap_workspace(&connection, &workspace_id, &workspace_path)?;
+    let session_id = ensure_bootstrap_session(&connection, &workspace_id, &workspace_path, &run)?;
+
+    for candidate in &run.candidates {
+        let curation_candidate_id = bootstrap_curate_candidate_id(&run.run_id, candidate);
+        let evidence_id = bootstrap_evidence_id(&run.run_id, candidate);
+
+        let stored = connection
+            .get_curation_candidate(&workspace_id, &curation_candidate_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to load docs bootstrap curation candidate: {error}"),
+                repair: Some("ee curate candidates --all --json".to_owned()),
+            })?;
+
+        match stored {
+            Some(stored) if !bootstrap_candidate_matches(candidate, &evidence_id, &stored) => {
+                skipped_count = skipped_count.saturating_add(1);
+                degraded.push(degradation(
+                    "docs_bootstrap_candidate_collision",
+                    "high",
+                    format!(
+                        "Skipped docs bootstrap candidate {} because curation row {} is not owned by this bootstrap source.",
+                        candidate.candidate_id, stored.id
+                    ),
+                    "Inspect the curation candidate before retrying docs bootstrap apply.",
+                    Some(&candidate.source_path),
+                ));
+                candidates.push(apply_candidate_summary(
+                    candidate,
+                    &curation_candidate_id,
+                    &evidence_id,
+                    stored.status.as_str(),
+                    "skipped_collision",
+                ));
+            }
+            Some(stored) if stored.status == CandidateStatus::Approved.as_str() => {
+                approved_candidate_ids.push(curation_candidate_id.clone());
+                candidates.push(apply_candidate_summary(
+                    candidate,
+                    &curation_candidate_id,
+                    &evidence_id,
+                    "approved",
+                    "queued_apply",
+                ));
+            }
+            Some(stored) if stored.status == CandidateStatus::Applied.as_str() => {
+                approved_candidate_ids.push(curation_candidate_id.clone());
+                candidates.push(apply_candidate_summary(
+                    candidate,
+                    &curation_candidate_id,
+                    &evidence_id,
+                    "applied",
+                    "queued_replay",
+                ));
+            }
+            Some(stored) if bootstrap_candidate_matches(candidate, &evidence_id, &stored) => {
+                skipped_count = skipped_count.saturating_add(1);
+                candidates.push(apply_candidate_summary(
+                    candidate,
+                    &curation_candidate_id,
+                    &evidence_id,
+                    stored.status.as_str(),
+                    "awaiting_curation_approval",
+                ));
+            }
+            None => {
+                let evidence_hash = ensure_bootstrap_evidence_span(
+                    &connection,
+                    &workspace_id,
+                    &session_id,
+                    &run,
+                    candidate,
+                    &evidence_id,
+                )?;
+                insert_bootstrap_curation_candidate(
+                    &connection,
+                    &workspace_id,
+                    &run,
+                    candidate,
+                    &curation_candidate_id,
+                    &evidence_id,
+                    &evidence_hash,
+                )?;
+                materialized_count = materialized_count.saturating_add(1);
+                candidates.push(apply_candidate_summary(
+                    candidate,
+                    &curation_candidate_id,
+                    &evidence_id,
+                    "pending",
+                    "materialized_pending",
+                ));
+            }
+        }
+    }
+
+    connection.close().map_err(|error| DomainError::Storage {
+        message: format!("Failed to close docs bootstrap database: {error}"),
+        repair: Some("Retry `ee bootstrap apply` after checking database health.".to_owned()),
+    })?;
+
+    let mut applied_reports = Vec::new();
+    for candidate_id in &approved_candidate_ids {
+        applied_reports.push(apply_curation_candidate(&CurateApplyOptions {
+            workspace_path: &workspace_path,
+            database_path: Some(&database_path),
+            candidate_id,
+            actor: options.actor,
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })?);
+    }
+
+    let applied_count = applied_reports
+        .iter()
+        .filter(|report| report.durable_mutation)
+        .count();
+    let unchanged_count = applied_reports
+        .iter()
+        .filter(|report| report.application.status == "already_applied")
+        .count();
+    let blocked_count = applied_reports
+        .iter()
+        .filter(|report| {
+            report.application.status == "blocked" || !report.application.errors.is_empty()
+        })
+        .count();
+    let durable_mutation = materialized_count > 0 || applied_count > 0;
+
+    Ok(BootstrapApplyReport {
+        schema: DOCS_BOOTSTRAP_APPLY_SCHEMA_V1,
+        parser_version: DOCS_BOOTSTRAP_PARSER_VERSION,
+        run_id: run.run_id,
+        workspace_path: workspace_path.display().to_string(),
+        database_path: database_path.display().to_string(),
+        approved_only: options.approved_only,
+        candidate_count: run.candidates.len(),
+        materialized_count,
+        approved_candidate_count: approved_candidate_ids.len(),
+        applied_count,
+        unchanged_count,
+        blocked_count,
+        skipped_count,
+        durable_mutation,
+        candidates,
+        applied_reports,
+        degraded,
+        next_action: bootstrap_apply_next_action(
+            materialized_count,
+            approved_candidate_ids.len(),
+            applied_count,
+            blocked_count,
+        ),
+    })
+}
+
+fn open_bootstrap_database(database_path: &Path) -> Result<DbConnection, DomainError> {
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Docs bootstrap apply database does not exist: {}",
+                database_path.display()
+            ),
+            repair: Some(
+                "Run `ee init --workspace .` before applying docs bootstrap candidates.".to_owned(),
+            ),
+        });
+    }
+    let connection =
+        DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open docs bootstrap database: {error}"),
+            repair: Some("Run `ee doctor --json` to inspect database health.".to_owned()),
+        })?;
+    connection.migrate().map_err(|error| DomainError::Storage {
+        message: format!("Failed to migrate docs bootstrap database: {error}"),
+        repair: Some(
+            "Run `ee migrate run --workspace .` before applying docs bootstrap candidates."
+                .to_owned(),
+        ),
+    })?;
+    Ok(connection)
+}
+
+fn prepare_bootstrap_workspace(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &Path,
+) -> Result<(), DomainError> {
+    let name = workspace_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_owned);
+    connection
+        .upsert_workspace_with_scope(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: workspace_path.display().to_string(),
+                name,
+            },
+            &WorkspaceScopeFields::standalone(),
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to prepare docs bootstrap workspace row: {error}"),
+            repair: Some("Run `ee init --workspace .` and retry docs bootstrap apply.".to_owned()),
+        })
+}
+
+fn ensure_bootstrap_session(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &Path,
+    run: &BootstrapRun,
+) -> Result<String, DomainError> {
+    let session_id = bootstrap_session_id(workspace_id, &run.run_id);
+    if let Some(stored) =
+        connection
+            .get_session(&session_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to inspect docs bootstrap session: {error}"),
+                repair: Some(
+                    "Run `ee doctor --json` before retrying docs bootstrap apply.".to_owned(),
+                ),
+            })?
+    {
+        if stored.workspace_id != workspace_id {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Docs bootstrap session {} belongs to workspace {}, not {}.",
+                    stored.id, stored.workspace_id, workspace_id
+                ),
+                repair: Some("Inspect sessions before retrying docs bootstrap apply.".to_owned()),
+            });
+        }
+        return Ok(session_id);
+    }
+
+    let metadata_json = serde_json::json!({
+        "schema": "ee.bootstrap.docs.session.v1",
+                "runId": &run.run_id,
+                "parserVersion": run.parser_version,
+                "sourceCount": run.source_count,
+                "sourceBytes": run.source_bytes,
+    })
+    .to_string();
+    connection
+        .insert_session(
+            &session_id,
+            &CreateSessionInput {
+                workspace_id: workspace_id.to_owned(),
+                cass_session_id: format!("docs-bootstrap:{}", run.run_id),
+                source_path: Some(workspace_path.display().to_string()),
+                agent_name: Some("ee bootstrap docs".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: u32::try_from(run.candidates.len()).unwrap_or(u32::MAX),
+                token_count: None,
+                content_hash: bootstrap_session_content_hash(run),
+                metadata_json: Some(metadata_json),
+            },
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to create docs bootstrap session: {error}"),
+            repair: Some("Run `ee doctor --json` before retrying docs bootstrap apply.".to_owned()),
+        })?;
+    Ok(session_id)
+}
+
+fn ensure_bootstrap_evidence_span(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session_id: &str,
+    run: &BootstrapRun,
+    candidate: &BootstrapCandidate,
+    evidence_id: &str,
+) -> Result<String, DomainError> {
+    let evidence_hash = content_hash(candidate.proposed_content.as_bytes());
+    if let Some(stored) =
+        connection
+            .get_evidence_span(evidence_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to inspect docs bootstrap evidence span: {error}"),
+                repair: Some(
+                    "Run `ee doctor --json` before retrying docs bootstrap apply.".to_owned(),
+                ),
+            })?
+    {
+        if stored.workspace_id != workspace_id
+            || stored.session_id != session_id
+            || stored.content_hash != evidence_hash
+        {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Docs bootstrap evidence span {} does not match the current run candidate.",
+                    stored.id
+                ),
+                repair: Some(
+                    "Inspect evidence spans before retrying docs bootstrap apply.".to_owned(),
+                ),
+            });
+        }
+        if stored
+            .memory_id
+            .as_deref()
+            .is_some_and(|memory_id| !memory_id.trim().is_empty())
+        {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Docs bootstrap evidence span {} is already linked to a memory.",
+                    stored.id
+                ),
+                repair: Some(
+                    "Use the existing applied curation candidate or inspect evidence drift."
+                        .to_owned(),
+                ),
+            });
+        }
+        return Ok(evidence_hash);
+    }
+
+    let metadata_json = serde_json::json!({
+        "schema": "ee.bootstrap.docs.evidence_span.v1",
+        "runId": &run.run_id,
+        "parserVersion": run.parser_version,
+        "bootstrapCandidateId": &candidate.candidate_id,
+        "sourcePath": &candidate.source_path,
+        "sourceHash": &candidate.source_hash,
+        "sourceSpan": &candidate.source_span,
+        "anchors": &candidate.anchors,
+        "specificity": candidate.specificity,
+        "trustClass": candidate.trust_class,
+    })
+    .to_string();
+    connection
+        .insert_evidence_span(
+            evidence_id,
+            &CreateEvidenceSpanInput {
+                workspace_id: workspace_id.to_owned(),
+                session_id: session_id.to_owned(),
+                memory_id: None,
+                cass_span_id: candidate.candidate_id.clone(),
+                span_kind: "file".to_owned(),
+                start_line: line_number_to_u32(candidate.source_span.start_line),
+                end_line: line_number_to_u32(candidate.source_span.end_line),
+                start_byte: Some(offset_to_u32(candidate.source_span.start_byte)),
+                end_byte: Some(offset_to_u32(candidate.source_span.end_byte)),
+                role: Some("docs_bootstrap".to_owned()),
+                excerpt: candidate.proposed_content.clone(),
+                content_hash: evidence_hash.clone(),
+                metadata_json: Some(metadata_json),
+            },
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to create docs bootstrap evidence span: {error}"),
+            repair: Some("Run `ee doctor --json` before retrying docs bootstrap apply.".to_owned()),
+        })?;
+    Ok(evidence_hash)
+}
+
+fn insert_bootstrap_curation_candidate(
+    connection: &DbConnection,
+    workspace_id: &str,
+    run: &BootstrapRun,
+    candidate: &BootstrapCandidate,
+    curation_candidate_id: &str,
+    evidence_id: &str,
+    evidence_hash: &str,
+) -> Result<(), DomainError> {
+    let confidence = bootstrap_candidate_confidence(candidate.specificity);
+    let source_refs_json = serde_json::json!([{
+        "kind": "evidence_span",
+        "id": evidence_id,
+        "contentHash": evidence_hash,
+    }])
+    .to_string();
+    let metadata_json = serde_json::json!({
+        "memorySpec": {
+            "level": &candidate.level,
+            "kind": &candidate.kind,
+            "confidence": confidence,
+            "utility": 0.5,
+            "importance": 0.5,
+            "provenanceUri": bootstrap_candidate_provenance_uri(&run.run_id, candidate),
+            "trustClass": "agent_assertion",
+            "trustSubclass": "docs_bootstrap",
+            "tags": &candidate.tags,
+        },
+        "producer": {
+            "producer": "docs_bootstrap",
+            "producerPayload": {
+                "schema": "ee.bootstrap.docs.curation_candidate.v1",
+                "runId": &run.run_id,
+                "parserVersion": run.parser_version,
+                "bootstrapCandidateId": &candidate.candidate_id,
+                "sourcePath": &candidate.source_path,
+                "sourceHash": &candidate.source_hash,
+                "sourceSpan": &candidate.source_span,
+                "specificity": candidate.specificity,
+                "bootstrapTrustClass": candidate.trust_class,
+                "anchors": &candidate.anchors,
+                "redacted": candidate.redacted,
+                "redactedReasons": &candidate.redacted_reasons,
+            },
+        },
+    })
+    .to_string();
+    connection
+        .insert_curation_candidate(
+            curation_candidate_id,
+            &CreateCurationCandidateInput {
+                workspace_id: workspace_id.to_owned(),
+                candidate_type: CandidateType::CreateDerivedMemory.as_str().to_owned(),
+                target_memory_id: None,
+                proposed_content: Some(candidate.proposed_content.clone()),
+                proposed_confidence: Some(confidence),
+                proposed_trust_class: Some("agent_assertion".to_owned()),
+                source_type: CandidateSource::AgentInference.as_str().to_owned(),
+                source_id: Some(evidence_id.to_owned()),
+                reason: format!(
+                    "Docs bootstrap candidate {} from {} lines {}-{}.",
+                    candidate.candidate_id,
+                    candidate.source_path,
+                    candidate.source_span.start_line,
+                    candidate.source_span.end_line
+                ),
+                confidence,
+                status: Some(CandidateStatus::Pending.as_str().to_owned()),
+                created_at: Some(Utc::now().to_rfc3339()),
+                ttl_expires_at: None,
+                derivation_source_refs_json: Some(source_refs_json),
+                derivation_metadata_json: Some(metadata_json),
+            },
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to create docs bootstrap curation candidate: {error}"),
+            repair: Some(
+                "Run `ee curate candidates --json` before retrying docs bootstrap apply."
+                    .to_owned(),
+            ),
+        })
+}
+
+fn bootstrap_candidate_matches(
+    candidate: &BootstrapCandidate,
+    evidence_id: &str,
+    stored: &StoredCurationCandidate,
+) -> bool {
+    stored.candidate_type == CandidateType::CreateDerivedMemory.as_str()
+        && stored.source_type == CandidateSource::AgentInference.as_str()
+        && stored.source_id.as_deref() == Some(evidence_id)
+        && stored.proposed_content.as_deref() == Some(candidate.proposed_content.as_str())
+}
+
+fn apply_candidate_summary(
+    candidate: &BootstrapCandidate,
+    curation_candidate_id: &str,
+    evidence_id: &str,
+    status: &str,
+    action: &str,
+) -> BootstrapApplyCandidate {
+    BootstrapApplyCandidate {
+        bootstrap_candidate_id: candidate.candidate_id.clone(),
+        curation_candidate_id: curation_candidate_id.to_owned(),
+        evidence_id: evidence_id.to_owned(),
+        source_path: candidate.source_path.clone(),
+        source_hash: candidate.source_hash.clone(),
+        status: status.to_owned(),
+        action: action.to_owned(),
+    }
+}
+
+fn bootstrap_apply_next_action(
+    materialized_count: usize,
+    approved_count: usize,
+    applied_count: usize,
+    blocked_count: usize,
+) -> String {
+    if blocked_count > 0 {
+        "ee curate candidates --all --json".to_owned()
+    } else if applied_count > 0 {
+        "ee search \"docs bootstrap\" --json".to_owned()
+    } else if approved_count > 0 {
+        "ee curate candidates --all --json".to_owned()
+    } else if materialized_count > 0 {
+        "ee curate candidates --json".to_owned()
+    } else {
+        "no action required".to_owned()
+    }
+}
+
+fn bootstrap_candidate_confidence(specificity: u32) -> f32 {
+    let bounded = specificity.min(100) as f32;
+    (0.45 + (bounded / 200.0)).min(0.9)
+}
+
+fn bootstrap_candidate_provenance_uri(run_id: &str, candidate: &BootstrapCandidate) -> String {
+    format!(
+        "docs-bootstrap://{}/{}/L{}-L{}",
+        run_id,
+        candidate.source_path,
+        candidate.source_span.start_line,
+        candidate.source_span.end_line
+    )
+}
+
+fn bootstrap_session_id(workspace_id: &str, run_id: &str) -> String {
+    SessionId::from_uuid(stable_uuid_from_parts(&[
+        "docs-bootstrap-session",
+        workspace_id,
+        run_id,
+    ]))
+    .to_string()
+}
+
+fn bootstrap_evidence_id(run_id: &str, candidate: &BootstrapCandidate) -> String {
+    EvidenceId::from_uuid(stable_uuid_from_parts(&[
+        "docs-bootstrap-evidence",
+        run_id,
+        candidate.candidate_id.as_str(),
+        candidate.source_hash.as_str(),
+    ]))
+    .to_string()
+}
+
+fn bootstrap_curate_candidate_id(run_id: &str, candidate: &BootstrapCandidate) -> String {
+    let candidate_id = CandidateId::from_uuid(stable_uuid_from_parts(&[
+        "docs-bootstrap-curate",
+        run_id,
+        candidate.candidate_id.as_str(),
+        candidate.source_hash.as_str(),
+    ]))
+    .to_string();
+    format!("curate_{}", candidate_id.trim_start_matches("cand_"))
+}
+
+fn bootstrap_session_content_hash(run: &BootstrapRun) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(run.run_id.as_bytes());
+    for source in &run.sources {
+        hasher.update(source.relative_path.as_bytes());
+        hasher.update(source.content_hash.as_bytes());
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn stable_uuid_from_parts(parts: &[&str]) -> uuid::Uuid {
+    let mut hasher = blake3::Hasher::new();
+    for part in parts {
+        hasher.update(part.as_bytes());
+        hasher.update(b"\0");
+    }
+    let hash = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    uuid::Uuid::from_bytes(bytes)
+}
+
+fn line_number_to_u32(value: usize) -> u32 {
+    u32::try_from(value.max(1)).unwrap_or(u32::MAX)
+}
+
+fn offset_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn resolve_bootstrap_workspace_path(path: &Path) -> Result<PathBuf, DomainError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    absolute
+        .canonicalize()
+        .map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Failed to resolve docs bootstrap workspace {}: {error}",
+                absolute.display()
+            ),
+            repair: Some("Run `ee init --workspace .` from a valid workspace.".to_owned()),
+        })
 }
 
 enum SourceReadOutcome {

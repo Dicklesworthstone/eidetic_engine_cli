@@ -92,7 +92,10 @@ use crate::core::disk_pressure::{
     ArtifactRetentionOptions, BuildAdmissionOptions, DiskPressureOptions, current_unix_seconds,
     gather_artifact_retention_report, gather_build_admission_report, gather_disk_pressure_report,
 };
-use crate::core::docs_bootstrap::{CompileDocsBootstrapOptions, compile_docs_bootstrap};
+use crate::core::docs_bootstrap::{
+    ApplyDocsBootstrapOptions, BootstrapApplyReport, CompileDocsBootstrapOptions,
+    apply_docs_bootstrap, compile_docs_bootstrap,
+};
 use crate::core::doctor::{
     DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport, IntegrityDiagnosticsOptions,
     IntegrityDiagnosticsReport,
@@ -1248,6 +1251,22 @@ pub struct BootstrapApplyArgs {
     /// Only apply candidates already approved through normal curation review.
     #[arg(long, action = ArgAction::SetTrue)]
     pub approved_only: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded in curation apply audit metadata.
+    #[arg(long, value_name = "NAME")]
+    pub actor: Option<String>,
+
+    /// Maximum bytes to read from any one allowlisted source.
+    #[arg(long, value_name = "BYTES")]
+    pub max_source_bytes: Option<u64>,
+
+    /// Maximum bytes to read across all allowlisted sources.
+    #[arg(long, value_name = "BYTES")]
+    pub max_total_bytes: Option<u64>,
 }
 
 /// Arguments for `ee backup create`.
@@ -16963,25 +16982,7 @@ where
 {
     match command {
         BootstrapCommand::Docs(args) => handle_bootstrap_docs(cli, args, stdout, stderr),
-        BootstrapCommand::Apply(args) => {
-            let error = DomainError::UsageWithDetails {
-                message: format!(
-                    "ee bootstrap apply {} is not enabled in this dry-run CLI slice.",
-                    args.run_id
-                ),
-                repair: Some(
-                    "Use `ee bootstrap docs --dry-run --json`; apply will route through normal curation in the next bootstrap slice."
-                        .to_owned(),
-                ),
-                details: serde_json::json!({
-                    "runId": args.run_id,
-                    "approvedOnly": args.approved_only,
-                    "durableMutation": false,
-                    "requiredNextSlice": "bootstrap_apply_via_curate",
-                }),
-            };
-            write_domain_error(&error, cli.wants_json(), stdout, stderr)
-        }
+        BootstrapCommand::Apply(args) => handle_bootstrap_apply(cli, args, stdout, stderr),
     }
 }
 
@@ -16999,10 +17000,11 @@ where
         let error = DomainError::UsageWithDetails {
             message: "ee bootstrap docs currently requires --dry-run.".to_owned(),
             repair: Some("Run `ee bootstrap docs --dry-run --json`.".to_owned()),
-            details: serde_json::json!({
+            details_json: serde_json::json!({
                 "durableMutation": false,
                 "supportedMode": "dry_run",
-            }),
+            })
+            .to_string(),
         };
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
@@ -17017,6 +17019,35 @@ where
     }
     let run = compile_docs_bootstrap(&options);
     write_bootstrap_docs_run(cli, &run, stdout)
+}
+
+fn handle_bootstrap_apply<W, E>(
+    cli: &Cli,
+    args: &BootstrapApplyArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let mut options =
+        ApplyDocsBootstrapOptions::for_workspace(workspace_path.as_path(), args.run_id.as_str());
+    options.database_path = args.database.as_deref();
+    options.actor = args.actor.as_deref();
+    options.approved_only = args.approved_only;
+    if let Some(max_source_bytes) = args.max_source_bytes {
+        options.max_source_bytes = max_source_bytes;
+    }
+    if let Some(max_total_bytes) = args.max_total_bytes {
+        options.max_total_bytes = max_total_bytes;
+    }
+
+    match apply_docs_bootstrap(&options) {
+        Ok(report) => write_bootstrap_apply_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn write_bootstrap_docs_run<W>(
@@ -17052,6 +17083,47 @@ where
                 "success": true,
                 "data": run,
                 "degraded": &run.degraded,
+            });
+            write_stdout(stdout, &(response.to_string() + "\n"))
+        }
+    }
+}
+
+fn write_bootstrap_apply_report<W>(
+    cli: &Cli,
+    report: &BootstrapApplyReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &format!(
+                "Docs bootstrap apply\n  Run: {}\n  Candidates: {}\n  Materialized: {}\n  Approved queued: {}\n  Applied: {}\n  Blocked: {}\n  Durable mutation: {}\n",
+                report.run_id,
+                report.candidate_count,
+                report.materialized_count,
+                report.approved_candidate_count,
+                report.applied_count,
+                report.blocked_count,
+                report.durable_mutation
+            ),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&report.data_json()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let response = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": report,
+                "degraded": &report.degraded,
             });
             write_stdout(stdout, &(response.to_string() + "\n"))
         }
@@ -54588,14 +54660,35 @@ mod tests {
 
     #[test]
     fn parser_accepts_bootstrap_apply_approved_only() -> TestResult {
-        let parsed =
-            Cli::try_parse_from(["ee", "bootstrap", "apply", "boot_123", "--approved-only"])
-                .map_err(|error| format!("failed to parse bootstrap apply: {:?}", error.kind()))?;
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "bootstrap",
+            "apply",
+            "boot_123",
+            "--approved-only",
+            "--database",
+            "db.sqlite",
+            "--actor",
+            "IcyCat",
+            "--max-source-bytes",
+            "1024",
+            "--max-total-bytes",
+            "4096",
+        ])
+        .map_err(|error| format!("failed to parse bootstrap apply: {:?}", error.kind()))?;
 
         match parsed.command {
             Some(Command::Bootstrap(BootstrapCommand::Apply(args))) => {
                 ensure_equal(&args.run_id, &"boot_123".to_string(), "run id")?;
-                ensure_equal(&args.approved_only, &true, "approved only")
+                ensure_equal(&args.approved_only, &true, "approved only")?;
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("db.sqlite")),
+                    "database",
+                )?;
+                ensure_equal(&args.actor, &Some("IcyCat".to_owned()), "actor")?;
+                ensure_equal(&args.max_source_bytes, &Some(1024), "max source bytes")?;
+                ensure_equal(&args.max_total_bytes, &Some(4096), "max total bytes")
             }
             other => Err(format!("expected bootstrap apply command, got {other:?}")),
         }
