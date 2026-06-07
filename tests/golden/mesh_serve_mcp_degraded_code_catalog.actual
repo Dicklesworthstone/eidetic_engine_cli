@@ -4,10 +4,10 @@
 # Update path: UPDATE_GOLDENS=1 cargo test --test contracts \
 #   mesh_serve_mcp_degraded_code_catalog -- --exact; review the diff.
 #
-# Total codes:                53
-# With failure-mode fixture:  34
-# In docs/degraded_code_taxonomy.md: 35
-# In docs/degraded_codes.md (## header): 34
+# Total codes:                52
+# With failure-mode fixture:  33
+# In docs/degraded_code_taxonomy.md: 34
+# In docs/degraded_codes.md (## header): 33
 #
 # Columns: code | fixture | taxonomy | gen-docs | const | source
 #
