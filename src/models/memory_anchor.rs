@@ -780,6 +780,80 @@ fn looks_like_config_key(token: &str) -> bool {
         && token.chars().any(|character| character == '.')
 }
 
+/// Canonical schema id for the `ee pack --surface` coverage facet.
+pub const SURFACE_COVERAGE_FACET_SCHEMA_V1: &str = "ee.pack.surface_coverage.v1";
+
+/// Anchor coverage of one code surface named by an `ee pack --surface` hint
+/// (bd-1n0np.3.6).
+///
+/// Redaction-safe: the surface is identified by its domain-separated anchor
+/// hash plus a short redacted display token, never its raw value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SurfaceCoverage {
+    pub anchor_kind: MemoryAnchorKind,
+    pub anchor_value_hash: String,
+    pub redacted_surface: String,
+    pub anchored_memory_count: usize,
+}
+
+impl SurfaceCoverage {
+    /// A surface is covered when at least one durable memory is anchored to it.
+    #[must_use]
+    pub const fn is_covered(&self) -> bool {
+        self.anchored_memory_count > 0
+    }
+}
+
+/// Deterministic coverage facet for a set of `ee pack --surface` hints
+/// (bd-1n0np.3.6), consumed by the gap-honesty epic to surface uncovered
+/// (blind-spot) surfaces.
+///
+/// The pack path resolves each hint to its anchor and counts anchored memories
+/// (`query_memory_anchors`); this pure builder shapes those counts into a stable
+/// facet. It performs no I/O and is side-effect free.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SurfaceCoverageFacet {
+    pub schema: &'static str,
+    pub surfaces: Vec<SurfaceCoverage>,
+    pub covered_count: usize,
+    pub uncovered_count: usize,
+}
+
+impl SurfaceCoverageFacet {
+    /// Build a deterministic facet from per-surface anchored-memory counts.
+    /// Surfaces are ordered by `(kind, hash)` for byte-stable output.
+    #[must_use]
+    pub fn from_surfaces(surfaces: impl IntoIterator<Item = SurfaceCoverage>) -> Self {
+        let mut surfaces: Vec<SurfaceCoverage> = surfaces.into_iter().collect();
+        surfaces.sort_by(|left, right| {
+            left.anchor_kind
+                .cmp(&right.anchor_kind)
+                .then_with(|| left.anchor_value_hash.cmp(&right.anchor_value_hash))
+        });
+        let covered_count = surfaces
+            .iter()
+            .filter(|surface| surface.is_covered())
+            .count();
+        let uncovered_count = surfaces.len() - covered_count;
+        Self {
+            schema: SURFACE_COVERAGE_FACET_SCHEMA_V1,
+            surfaces,
+            covered_count,
+            uncovered_count,
+        }
+    }
+
+    /// Fraction of requested surfaces with at least one anchored memory.
+    /// An empty facet (no surfaces requested) has full coverage `1.0`.
+    #[must_use]
+    pub fn coverage_ratio(&self) -> f32 {
+        if self.surfaces.is_empty() {
+            return 1.0;
+        }
+        self.covered_count as f32 / self.surfaces.len() as f32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -932,5 +1006,40 @@ mod tests {
         // Malformed input is rejected, not panicked.
         assert!(MemoryAnchorFreshnessTransition::from_audit_details_json("not json").is_none());
         assert!(MemoryAnchorFreshnessTransition::from_audit_details_json("{}").is_none());
+    }
+
+    #[test]
+    fn surface_coverage_facet_is_deterministic_and_counts_gaps() {
+        let covered = SurfaceCoverage {
+            anchor_kind: MemoryAnchorKind::Path,
+            anchor_value_hash: memory_anchor_value_hash(MemoryAnchorKind::Path, "src/db/mod.rs"),
+            redacted_surface: "path:blake3:000000000000".to_owned(),
+            anchored_memory_count: 3,
+        };
+        let uncovered = SurfaceCoverage {
+            anchor_kind: MemoryAnchorKind::Command,
+            anchor_value_hash: memory_anchor_value_hash(
+                MemoryAnchorKind::Command,
+                "cargo fmt --check",
+            ),
+            redacted_surface: "command:blake3:111111111111".to_owned(),
+            anchored_memory_count: 0,
+        };
+        assert!(covered.is_covered());
+        assert!(!uncovered.is_covered());
+
+        // Insertion order does not change the facet (deterministic sort).
+        let facet = SurfaceCoverageFacet::from_surfaces([covered.clone(), uncovered.clone()]);
+        let reversed = SurfaceCoverageFacet::from_surfaces([uncovered, covered]);
+        assert_eq!(facet, reversed);
+        assert_eq!(facet.schema, SURFACE_COVERAGE_FACET_SCHEMA_V1);
+        assert_eq!(facet.covered_count, 1);
+        assert_eq!(facet.uncovered_count, 1);
+        assert!((facet.coverage_ratio() - 0.5).abs() < f32::EPSILON);
+
+        // An empty facet (no surfaces requested) reports full coverage, no gap.
+        let empty = SurfaceCoverageFacet::from_surfaces(Vec::new());
+        assert_eq!(empty.uncovered_count, 0);
+        assert_eq!(empty.coverage_ratio(), 1.0);
     }
 }
