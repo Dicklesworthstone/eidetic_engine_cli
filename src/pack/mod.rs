@@ -11062,6 +11062,44 @@ mod tests {
     }
 
     #[test]
+    fn lod_preview_is_deterministic_extractive_and_off_by_one_free() -> TestResult {
+        // bd-1n0np.5.2: the truncated-preview tier must be a DETERMINISTIC,
+        // EXTRACTIVE (never generated/abstractive) word-prefix of the source,
+        // and its token estimate must never exceed the tier limit (off-by-one-
+        // free accounting at the budget boundary so the pack hash stays stable).
+        let source = (0..48)
+            .map(|index| format!("w{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let source_words = source.split_whitespace().collect::<Vec<_>>();
+
+        for limit in [3_u32, 5, 8, 13, 21] {
+            let first = super::truncated_preview_content(&source, limit);
+            let second = super::truncated_preview_content(&source, limit);
+            ensure_equal(&first, &second, "preview must be deterministic across runs")?;
+
+            let Some(preview) = first else {
+                continue;
+            };
+            // Off-by-one-free: the estimate never exceeds the limit it was given.
+            ensure(
+                super::estimate_tokens_default(&preview) <= limit,
+                "preview token estimate must stay within the tier limit",
+            )?;
+            // Extractive: stripping the deterministic ellipsis marker leaves a
+            // strict word-prefix of the source (no synthesized tokens).
+            let body = preview.strip_suffix(" ...").unwrap_or(&preview);
+            let preview_words = body.split_whitespace().collect::<Vec<_>>();
+            ensure(
+                preview_words.len() <= source_words.len()
+                    && preview_words[..] == source_words[..preview_words.len()],
+                "preview must be a strict word-prefix of the source (extractive, not generated)",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn preview_lod_respects_candidate_token_estimate_when_heuristic_is_short() -> TestResult {
         let candidate = candidate_with_content(
             4,
