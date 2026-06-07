@@ -116,6 +116,15 @@ The static contract anchors this rule to existing build-independent surfaces:
 | `tests/contracts/no_silent_fallback.rs` | Existing no-silent-fallback inventory shape. |
 | `scripts/lib/e2e_harness.sh` | E2E helper that exposes `log_drop`. |
 
+`scripts/check-tracing-fields.sh` also validates
+`tests/fixtures/contracts/dueling_wizards_observability_no_silent_cap.json`.
+That shell/static gate checks the shared trace-field vocabulary, cap operations,
+cap event fields, non-zero dropped-count examples, source anchors, subsystem
+coverage rows, and `rch_required_local_invalid` proof posture before runtime
+source exists. It gives review and CI a build-independent way to catch silent
+cap drift; once a subsystem is implemented, the corresponding source slice must
+still add real tracing/e2e evidence and RCH-backed runtime proof.
+
 ## Implementation Rule
 
 When a subsystem moves from planned contract to implemented source:
