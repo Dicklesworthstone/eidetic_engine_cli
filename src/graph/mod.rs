@@ -1247,11 +1247,38 @@ struct ContradictionSubgraphRow {
     link_id: String,
     src_memory_id: String,
     dst_memory_id: String,
+    relation: String,
     weight: f64,
     confidence: f64,
     directed: bool,
     evidence_count: u32,
     source: String,
+    typed_field: Option<String>,
+    typed_value_hash: Option<String>,
+    contribution_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct TypedMemoryGraphRow {
+    memory_id: String,
+    workspace_id: String,
+    kind: String,
+    fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TypedMemoryGraphEdge {
+    edge_id: String,
+    src_memory_id: String,
+    dst_memory_id: String,
+    relation: String,
+    typed_field: String,
+    typed_value_hash: String,
+    weight: f64,
+    confidence: f64,
+    directed: bool,
+    evidence_count: u32,
+    contribution_score: f64,
 }
 
 /// Options for building a memory graph.
@@ -1288,8 +1315,9 @@ pub fn build_memory_graph(
     options: &ProjectionOptions,
 ) -> GraphResult<MemoryGraphProjection> {
     let links = graph_projection_links(conn, options)?;
+    let typed_edges = typed_memory_graph_edges(conn, None)?;
     // Live build from DB → version 0 (not from a persisted snapshot)
-    build_memory_graph_from_links(&links, 0)
+    build_memory_graph_from_links_and_typed_edges(&links, &typed_edges, 0)
 }
 
 /// Build a bounded graph projection around a seed frontier.
@@ -1349,7 +1377,20 @@ pub fn build_memory_graph_for_frontier(
             .then_with(|| left.dst_memory_id.cmp(&right.dst_memory_id))
             .then_with(|| left.id.cmp(&right.id))
     });
-    build_memory_graph_from_links(&links, 0)
+    let frontier_scope = seed_memory_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let workspace_ids = workspace_ids_for_memory_ids(conn, &frontier_scope)?;
+    let remaining_edge_budget = options.max_edges.saturating_sub(links.len());
+    let mut typed_edges = typed_memory_graph_edges(conn, Some(&workspace_ids))?
+        .into_iter()
+        .filter(|edge| {
+            frontier_scope.contains(&edge.src_memory_id)
+                || frontier_scope.contains(&edge.dst_memory_id)
+                || visited.contains(&edge.src_memory_id)
+                || visited.contains(&edge.dst_memory_id)
+        })
+        .collect::<Vec<_>>();
+    typed_edges.truncate(remaining_edge_budget);
+    build_memory_graph_from_links_and_typed_edges(&links, &typed_edges, 0)
 }
 
 /// Build the causal-evidence typed subgraph from persisted ledger rows.
@@ -1363,7 +1404,9 @@ pub fn build_causal_evidence_graph_from_table(
     workspace_id: &str,
 ) -> GraphResult<DiGraph> {
     let rows = causal_evidence_graph_rows(conn, workspace_id)?;
-    build_causal_evidence_graph_from_rows(&rows)
+    let workspace_ids = BTreeSet::from([workspace_id.to_owned()]);
+    let typed_edges = typed_memory_graph_edges(conn, Some(&workspace_ids))?;
+    build_causal_evidence_graph_from_rows_and_typed_edges(&rows, &typed_edges)
 }
 
 /// Build the memory revision DAG for a workspace from logical revision chains.
@@ -1402,11 +1445,19 @@ pub fn build_contradiction_subgraph_from_memory_links(
     conn: &DbConnection,
     workspace_id: &str,
 ) -> GraphResult<DiGraph> {
-    let rows = contradiction_subgraph_rows(conn, workspace_id)?;
+    let mut rows = contradiction_subgraph_rows(conn, workspace_id)?;
+    rows.extend(typed_contradiction_subgraph_rows(conn, workspace_id)?);
     build_contradiction_subgraph_from_rows(&rows)
 }
 
 fn build_causal_evidence_graph_from_rows(rows: &[CausalEvidenceGraphRow]) -> GraphResult<DiGraph> {
+    build_causal_evidence_graph_from_rows_and_typed_edges(rows, &[])
+}
+
+fn build_causal_evidence_graph_from_rows_and_typed_edges(
+    rows: &[CausalEvidenceGraphRow],
+    typed_edges: &[TypedMemoryGraphEdge],
+) -> GraphResult<DiGraph> {
     let mut graph = DiGraph::new(CompatibilityMode::Strict);
     for row in rows {
         graph.add_node(&row.failure_id);
@@ -1421,6 +1472,15 @@ fn build_causal_evidence_graph_from_rows(rows: &[CausalEvidenceGraphRow]) -> Gra
                 operation: "add causal evidence edge",
                 source: error.to_string(),
             })?;
+    }
+    for edge in typed_edges
+        .iter()
+        .filter(|edge| edge.relation != "supersedes" && edge.contribution_score > 0.0)
+    {
+        add_typed_causal_edge(&mut graph, edge, &edge.src_memory_id, &edge.dst_memory_id)?;
+        if !edge.directed {
+            add_typed_causal_edge(&mut graph, edge, &edge.dst_memory_id, &edge.src_memory_id)?;
+        }
     }
     Ok(graph)
 }
@@ -1618,17 +1678,17 @@ fn contradiction_subgraph_rows(
     workspace_id: &str,
 ) -> GraphResult<Vec<ContradictionSubgraphRow>> {
     conn.query(
-        "SELECT links.id, links.src_memory_id, links.dst_memory_id, links.weight, links.confidence,
+        "SELECT links.id, links.src_memory_id, links.dst_memory_id, links.relation, links.weight, links.confidence,
                 links.directed, links.evidence_count, links.source
          FROM memory_links links
          JOIN memories src ON src.id = links.src_memory_id
          JOIN memories dst ON dst.id = links.dst_memory_id
-         WHERE links.relation = 'contradicts'
+         WHERE links.relation IN ('contradicts', 'supersedes')
            AND src.workspace_id = ?1
            AND dst.workspace_id = ?1
            AND src.tombstoned_at IS NULL
            AND dst.tombstoned_at IS NULL
-         ORDER BY links.src_memory_id ASC, links.dst_memory_id ASC, links.id ASC",
+         ORDER BY links.relation ASC, links.src_memory_id ASC, links.dst_memory_id ASC, links.id ASC",
         &[Value::Text(workspace_id.to_string())],
     )
     .map_err(|error| GraphError::storage("query contradiction subgraph rows", error))?
@@ -1638,7 +1698,7 @@ fn contradiction_subgraph_rows(
 }
 
 fn contradiction_subgraph_row_from_row(row: &Row) -> GraphResult<ContradictionSubgraphRow> {
-    let directed = match row.get(5) {
+    let directed = match row.get(6) {
         Some(Value::Int(value)) => *value != 0,
         Some(Value::BigInt(value)) => *value != 0,
         Some(value) => {
@@ -1654,7 +1714,7 @@ fn contradiction_subgraph_row_from_row(row: &Row) -> GraphResult<ContradictionSu
             });
         }
     };
-    let evidence_count = match row.get(6) {
+    let evidence_count = match row.get(7) {
         Some(Value::Int(value)) => u32::try_from(*value),
         Some(Value::BigInt(value)) => u32::try_from(*value),
         Some(value) => {
@@ -1679,11 +1739,41 @@ fn contradiction_subgraph_row_from_row(row: &Row) -> GraphResult<ContradictionSu
         link_id: graph_row_text(row, 0, "memory_links.id")?,
         src_memory_id: graph_row_text(row, 1, "memory_links.src_memory_id")?,
         dst_memory_id: graph_row_text(row, 2, "memory_links.dst_memory_id")?,
-        weight: graph_row_f64(row, 3, "memory_links.weight")?.clamp(0.0, 1.0),
-        confidence: graph_row_f64(row, 4, "memory_links.confidence")?.clamp(0.0, 1.0),
+        relation: graph_row_text(row, 3, "memory_links.relation")?,
+        weight: graph_row_f64(row, 4, "memory_links.weight")?.clamp(0.0, 1.0),
+        confidence: graph_row_f64(row, 5, "memory_links.confidence")?.clamp(0.0, 1.0),
         directed,
         evidence_count,
-        source: graph_row_text(row, 7, "memory_links.source")?,
+        source: graph_row_text(row, 8, "memory_links.source")?,
+        typed_field: None,
+        typed_value_hash: None,
+        contribution_score: None,
+    })
+}
+
+fn typed_contradiction_subgraph_rows(
+    conn: &DbConnection,
+    workspace_id: &str,
+) -> GraphResult<Vec<ContradictionSubgraphRow>> {
+    let workspace_ids = BTreeSet::from([workspace_id.to_owned()]);
+    typed_memory_graph_edges(conn, Some(&workspace_ids)).map(|edges| {
+        edges
+            .into_iter()
+            .map(|edge| ContradictionSubgraphRow {
+                link_id: edge.edge_id,
+                src_memory_id: edge.src_memory_id,
+                dst_memory_id: edge.dst_memory_id,
+                relation: edge.relation,
+                weight: edge.weight,
+                confidence: edge.confidence,
+                directed: edge.directed,
+                evidence_count: edge.evidence_count,
+                source: "typed_fields".to_owned(),
+                typed_field: Some(edge.typed_field),
+                typed_value_hash: Some(edge.typed_value_hash),
+                contribution_score: Some(edge.contribution_score),
+            })
+            .collect()
     })
 }
 
@@ -1766,6 +1856,62 @@ fn causal_evidence_edge_attrs(row: &CausalEvidenceGraphRow) -> AttrMap {
     attrs
 }
 
+fn typed_causal_edge_attrs(edge: &TypedMemoryGraphEdge) -> AttrMap {
+    let mut attrs = AttrMap::new();
+    attrs.insert(
+        "contribution_score".to_string(),
+        CgseValue::Float(edge.contribution_score),
+    );
+    attrs.insert(
+        "method".to_string(),
+        CgseValue::String(edge.relation.clone()),
+    );
+    attrs.insert(
+        "evidence_count".to_string(),
+        CgseValue::Int(i64::from(edge.evidence_count)),
+    );
+    attrs.insert(
+        "edge_id".to_string(),
+        CgseValue::String(edge.edge_id.clone()),
+    );
+    attrs.insert(
+        "source".to_string(),
+        CgseValue::String("typed_fields".to_owned()),
+    );
+    attrs.insert(
+        "relation".to_string(),
+        CgseValue::String(edge.relation.clone()),
+    );
+    attrs.insert(
+        "typed_field".to_string(),
+        CgseValue::String(edge.typed_field.clone()),
+    );
+    attrs.insert(
+        "typed_value_hash".to_string(),
+        CgseValue::String(edge.typed_value_hash.clone()),
+    );
+    attrs
+}
+
+fn add_typed_causal_edge(
+    graph: &mut DiGraph,
+    edge: &TypedMemoryGraphEdge,
+    src_memory_id: &str,
+    dst_memory_id: &str,
+) -> GraphResult<()> {
+    if graph.has_edge(src_memory_id, dst_memory_id) {
+        return Ok(());
+    }
+    graph.add_node(src_memory_id);
+    graph.add_node(dst_memory_id);
+    graph
+        .add_edge_with_attrs(src_memory_id, dst_memory_id, typed_causal_edge_attrs(edge))
+        .map_err(|error| GraphError::GraphEngine {
+            operation: "add typed causal edge",
+            source: error.to_string(),
+        })
+}
+
 fn revision_supersedes_edge_attrs(logical_id: &str) -> AttrMap {
     let mut attrs = AttrMap::new();
     attrs.insert(
@@ -1811,7 +1957,7 @@ fn contradiction_edge_attrs(row: &ContradictionSubgraphRow) -> AttrMap {
     let mut attrs = AttrMap::new();
     attrs.insert(
         "relation".to_string(),
-        CgseValue::String("contradicts".to_string()),
+        CgseValue::String(row.relation.clone()),
     );
     attrs.insert(
         "link_id".to_string(),
@@ -1825,6 +1971,18 @@ fn contradiction_edge_attrs(row: &ContradictionSubgraphRow) -> AttrMap {
         CgseValue::Int(i64::from(row.evidence_count)),
     );
     attrs.insert("source".to_string(), CgseValue::String(row.source.clone()));
+    if let Some(field) = &row.typed_field {
+        attrs.insert("typed_field".to_string(), CgseValue::String(field.clone()));
+    }
+    if let Some(value_hash) = &row.typed_value_hash {
+        attrs.insert(
+            "typed_value_hash".to_string(),
+            CgseValue::String(value_hash.clone()),
+        );
+    }
+    if let Some(score) = row.contribution_score {
+        attrs.insert("contribution_score".to_string(), CgseValue::Float(score));
+    }
     attrs
 }
 
@@ -1901,6 +2059,14 @@ fn build_memory_graph_from_links(
     links: &[StoredMemoryLink],
     snapshot_version: u64,
 ) -> GraphResult<MemoryGraphProjection> {
+    build_memory_graph_from_links_and_typed_edges(links, &[], snapshot_version)
+}
+
+fn build_memory_graph_from_links_and_typed_edges(
+    links: &[StoredMemoryLink],
+    typed_edges: &[TypedMemoryGraphEdge],
+    snapshot_version: u64,
+) -> GraphResult<MemoryGraphProjection> {
     use std::time::Instant;
 
     let start = Instant::now();
@@ -1923,6 +2089,12 @@ fn build_memory_graph_from_links(
                 &link.src_memory_id,
                 attrs_rev,
             )?;
+        }
+    }
+    for edge in typed_edges {
+        add_typed_projection_edge(&mut graph, edge, &edge.src_memory_id, &edge.dst_memory_id)?;
+        if !edge.directed {
+            add_typed_projection_edge(&mut graph, edge, &edge.dst_memory_id, &edge.src_memory_id)?;
         }
     }
 
@@ -2000,6 +2172,329 @@ fn graph_projection_edge_attrs(link: &StoredMemoryLink) -> AttrMap {
     );
 
     attrs
+}
+
+fn typed_projection_edge_attrs(edge: &TypedMemoryGraphEdge) -> AttrMap {
+    let mut attrs = AttrMap::new();
+    attrs.insert("weight".to_string(), CgseValue::Float(edge.weight));
+    attrs.insert("confidence".to_string(), CgseValue::Float(edge.confidence));
+    attrs.insert(
+        "relation".to_string(),
+        CgseValue::String(edge.relation.clone()),
+    );
+    attrs.insert(
+        "source".to_string(),
+        CgseValue::String("typed_fields".to_owned()),
+    );
+    attrs.insert(
+        "evidence_count".to_string(),
+        CgseValue::Int(i64::from(edge.evidence_count)),
+    );
+    attrs.insert("directed".to_string(), CgseValue::Bool(edge.directed));
+    attrs.insert(
+        "graph_origin".to_string(),
+        CgseValue::String("typed_fields".to_owned()),
+    );
+    attrs.insert(
+        "typed_field".to_string(),
+        CgseValue::String(edge.typed_field.clone()),
+    );
+    attrs.insert(
+        "typed_value_hash".to_string(),
+        CgseValue::String(edge.typed_value_hash.clone()),
+    );
+    attrs.insert(
+        "edge_id".to_string(),
+        CgseValue::String(edge.edge_id.clone()),
+    );
+    attrs.insert(
+        "contribution_score".to_string(),
+        CgseValue::Float(edge.contribution_score),
+    );
+    attrs
+}
+
+fn add_typed_projection_edge(
+    graph: &mut DiGraph,
+    edge: &TypedMemoryGraphEdge,
+    src_memory_id: &str,
+    dst_memory_id: &str,
+) -> GraphResult<()> {
+    if graph.has_edge(src_memory_id, dst_memory_id) {
+        return Ok(());
+    }
+    graph.add_node(src_memory_id);
+    graph.add_node(dst_memory_id);
+    graph
+        .add_edge_with_attrs(
+            src_memory_id,
+            dst_memory_id,
+            typed_projection_edge_attrs(edge),
+        )
+        .map_err(|error| GraphError::GraphEngine {
+            operation: "add typed projection edge",
+            source: error.to_string(),
+        })
+}
+
+fn typed_memory_graph_edges(
+    conn: &DbConnection,
+    workspace_filter: Option<&BTreeSet<String>>,
+) -> GraphResult<Vec<TypedMemoryGraphEdge>> {
+    let active_memory_workspaces = active_memory_workspace_ids(conn)?;
+    let rows = typed_memory_graph_rows(conn, workspace_filter)?;
+    Ok(build_typed_memory_graph_edges(
+        &rows,
+        &active_memory_workspaces,
+    ))
+}
+
+fn active_memory_workspace_ids(conn: &DbConnection) -> GraphResult<BTreeMap<String, String>> {
+    conn.query(
+        "SELECT id, workspace_id
+         FROM memories
+         WHERE tombstoned_at IS NULL
+         ORDER BY workspace_id ASC, id ASC",
+        &[],
+    )
+    .map_err(|error| GraphError::storage("query active memory workspace ids", error))?
+    .iter()
+    .map(|row| {
+        Ok((
+            graph_row_text(row, 0, "memories.id")?,
+            graph_row_text(row, 1, "memories.workspace_id")?,
+        ))
+    })
+    .collect()
+}
+
+fn workspace_ids_for_memory_ids(
+    conn: &DbConnection,
+    memory_ids: &BTreeSet<String>,
+) -> GraphResult<BTreeSet<String>> {
+    let active_memory_workspaces = active_memory_workspace_ids(conn)?;
+    Ok(memory_ids
+        .iter()
+        .filter_map(|memory_id| active_memory_workspaces.get(memory_id).cloned())
+        .collect())
+}
+
+fn typed_memory_graph_rows(
+    conn: &DbConnection,
+    workspace_filter: Option<&BTreeSet<String>>,
+) -> GraphResult<Vec<TypedMemoryGraphRow>> {
+    let rows = conn
+        .query(
+            "SELECT id, workspace_id, kind, typed_fields_json
+             FROM memories
+             WHERE tombstoned_at IS NULL
+               AND typed_fields_json IS NOT NULL
+             ORDER BY workspace_id ASC, kind ASC, id ASC",
+            &[],
+        )
+        .map_err(|error| GraphError::storage("query typed memory graph rows", error))?;
+
+    rows.iter()
+        .map(typed_memory_graph_row_from_row)
+        .filter(|row| match row {
+            Ok(row) => {
+                workspace_filter.is_none_or(|workspaces| workspaces.contains(&row.workspace_id))
+            }
+            Err(_) => true,
+        })
+        .collect()
+}
+
+fn typed_memory_graph_row_from_row(row: &Row) -> GraphResult<TypedMemoryGraphRow> {
+    Ok(TypedMemoryGraphRow {
+        memory_id: graph_row_text(row, 0, "memories.id")?,
+        workspace_id: graph_row_text(row, 1, "memories.workspace_id")?,
+        kind: graph_row_text(row, 2, "memories.kind")?,
+        fields: typed_memory_fields_from_json(&graph_row_text(
+            row,
+            3,
+            "memories.typed_fields_json",
+        )?)?,
+    })
+}
+
+fn typed_memory_fields_from_json(raw_json: &str) -> GraphResult<BTreeMap<String, String>> {
+    let parsed = serde_json::from_str::<serde_json::Value>(raw_json)
+        .map_err(|error| GraphError::json("parse typed memory fields", error))?;
+    let fields = parsed.get("fields").unwrap_or(&parsed);
+    let Some(object) = fields.as_object() else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(object
+        .iter()
+        .filter_map(|(field, value)| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| (field.clone(), value.to_owned()))
+        })
+        .collect())
+}
+
+fn build_typed_memory_graph_edges(
+    rows: &[TypedMemoryGraphRow],
+    active_memory_workspaces: &BTreeMap<String, String>,
+) -> Vec<TypedMemoryGraphEdge> {
+    let mut edges = BTreeMap::<String, TypedMemoryGraphEdge>::new();
+
+    for row in rows.iter().filter(|row| row.kind == "decision") {
+        let Some(target_id) = row.fields.get("supersedes") else {
+            continue;
+        };
+        if row.memory_id == *target_id || target_id.parse::<MemoryId>().is_err() {
+            continue;
+        }
+        if active_memory_workspaces.get(target_id) != Some(&row.workspace_id) {
+            continue;
+        }
+        insert_typed_memory_graph_edge(
+            &mut edges,
+            row,
+            target_id,
+            "supersedes",
+            "supersedes",
+            target_id,
+            true,
+            0.80,
+            0.85,
+            0.0,
+        );
+    }
+
+    insert_grouped_failure_typed_edges(
+        &mut edges,
+        rows,
+        "family",
+        "failure_family",
+        0.55,
+        0.75,
+        0.25,
+    );
+    insert_grouped_failure_typed_edges(
+        &mut edges,
+        rows,
+        "reverted_at_sha",
+        "failure_reverted_at_sha",
+        0.65,
+        0.80,
+        0.35,
+    );
+
+    edges.into_values().collect()
+}
+
+fn insert_grouped_failure_typed_edges(
+    edges: &mut BTreeMap<String, TypedMemoryGraphEdge>,
+    rows: &[TypedMemoryGraphRow],
+    field: &'static str,
+    relation: &'static str,
+    weight: f64,
+    confidence: f64,
+    contribution_score: f64,
+) {
+    let mut groups = BTreeMap::<(String, String), Vec<&TypedMemoryGraphRow>>::new();
+    for row in rows.iter().filter(|row| row.kind == "failure") {
+        let Some(value) = row.fields.get(field) else {
+            continue;
+        };
+        let key = normalize_typed_memory_edge_value(value);
+        if key.is_empty() {
+            continue;
+        }
+        groups
+            .entry((row.workspace_id.clone(), key))
+            .or_default()
+            .push(row);
+    }
+
+    for mut group_rows in groups.into_values() {
+        group_rows.sort_by(|left, right| {
+            compare_ulid_payload_or_lexical(&left.memory_id, &right.memory_id)
+        });
+        for index in 0..group_rows.len() {
+            for peer in group_rows.iter().skip(index + 1) {
+                insert_typed_memory_graph_edge(
+                    edges,
+                    group_rows[index],
+                    &peer.memory_id,
+                    relation,
+                    field,
+                    group_rows[index]
+                        .fields
+                        .get(field)
+                        .map_or("", String::as_str),
+                    false,
+                    weight,
+                    confidence,
+                    contribution_score,
+                );
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_typed_memory_graph_edge(
+    edges: &mut BTreeMap<String, TypedMemoryGraphEdge>,
+    src: &TypedMemoryGraphRow,
+    dst_memory_id: &str,
+    relation: &str,
+    typed_field: &str,
+    typed_value: &str,
+    directed: bool,
+    weight: f64,
+    confidence: f64,
+    contribution_score: f64,
+) {
+    if src.memory_id == dst_memory_id {
+        return;
+    }
+    let typed_value_hash = typed_memory_edge_value_hash(typed_value);
+    let edge_id = format!(
+        "typed_edge:{}:{}:{}:{}",
+        relation,
+        src.memory_id,
+        dst_memory_id,
+        typed_value_hash
+            .strip_prefix("blake3:")
+            .unwrap_or(&typed_value_hash)
+    );
+    edges
+        .entry(edge_id.clone())
+        .or_insert(TypedMemoryGraphEdge {
+            edge_id,
+            src_memory_id: src.memory_id.clone(),
+            dst_memory_id: dst_memory_id.to_owned(),
+            relation: relation.to_owned(),
+            typed_field: typed_field.to_owned(),
+            typed_value_hash,
+            weight,
+            confidence,
+            directed,
+            evidence_count: 1,
+            contribution_score,
+        });
+}
+
+fn normalize_typed_memory_edge_value(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn typed_memory_edge_value_hash(value: &str) -> String {
+    let normalized = normalize_typed_memory_edge_value(value);
+    let hash = blake3::hash(normalized.as_bytes());
+    let hex = hash.to_hex();
+    format!("blake3:{}", &hex[..16])
 }
 
 fn graph_row_text(row: &Row, index: usize, column: &'static str) -> GraphResult<String> {
@@ -6849,13 +7344,22 @@ mod tests {
     }
 
     fn insert_memory(connection: &DbConnection, id: &str, content: &str) -> TestResult {
+        insert_memory_with_kind(connection, id, "fact", content)
+    }
+
+    fn insert_memory_with_kind(
+        connection: &DbConnection,
+        id: &str,
+        kind: &str,
+        content: &str,
+    ) -> TestResult {
         connection
             .insert_memory(
                 id,
                 &CreateMemoryInput {
                     workspace_id: WORKSPACE_ID.to_string(),
                     level: "semantic".to_string(),
-                    kind: "fact".to_string(),
+                    kind: kind.to_string(),
                     content: content.to_string(),
                     workflow_id: None,
                     confidence: 0.8,
@@ -7689,6 +8193,167 @@ mod tests {
         assert!(!projection.graph.has_edge(MEMORY_B, MEMORY_A));
         assert!(projection.graph.has_edge(MEMORY_B, MEMORY_C));
         assert!(projection.graph.has_edge(MEMORY_C, MEMORY_B));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn projection_derives_decision_supersedes_typed_edge() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_memory_with_kind(
+            &connection,
+            MEMORY_A,
+            "decision",
+            "Decision: keep compact graph projections. Supersedes: mem_00000000000000000000000012.",
+        )?;
+        insert_memory(
+            &connection,
+            MEMORY_B,
+            "Older memory superseded by a decision.",
+        )?;
+        connection
+            .set_memory_typed_fields_json(
+                MEMORY_A,
+                Some(r#"{"supersedes":"mem_00000000000000000000000012"}"#),
+            )
+            .map_err(|error| error.to_string())?;
+
+        let projection = graph_result(super::build_memory_graph(
+            &connection,
+            &super::ProjectionOptions::default(),
+        ))?;
+
+        assert_eq!(projection.node_count, 2);
+        assert_eq!(projection.edge_count, 1);
+        assert!(projection.graph.has_edge(MEMORY_A, MEMORY_B));
+        let attrs = projection
+            .graph
+            .edge_attrs(MEMORY_A, MEMORY_B)
+            .ok_or_else(|| "typed supersedes attrs should exist".to_string())?;
+        assert_eq!(
+            attrs.get("relation"),
+            Some(&CgseValue::String("supersedes".to_string()))
+        );
+        assert_eq!(
+            attrs.get("source"),
+            Some(&CgseValue::String("typed_fields".to_string()))
+        );
+        assert_eq!(
+            attrs.get("typed_field"),
+            Some(&CgseValue::String("supersedes".to_string()))
+        );
+
+        let pack_input = super::pack_dna::PackDnaInput::new(
+            vec![MEMORY_B.parse().map_err(|error| error.to_string())?],
+            vec![MEMORY_A.parse().map_err(|error| error.to_string())?],
+            vec![MEMORY_A.parse().map_err(|error| error.to_string())?],
+        );
+        let pack_dna = graph_result(super::pack_dna::compute_pack_dna(&projection, &pack_input))?;
+        assert_eq!(
+            pack_dna
+                .dominator
+                .ok_or_else(|| "typed edge should feed Pack DNA dominator".to_string())?
+                .memory_id,
+            MEMORY_A
+        );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn typed_failure_edges_feed_projection_contradiction_and_causal_graphs() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_memory_with_kind(
+            &connection,
+            MEMORY_A,
+            "failure",
+            "Failure family: cache churn.",
+        )?;
+        insert_memory_with_kind(
+            &connection,
+            MEMORY_B,
+            "failure",
+            "Failure family: cache churn.",
+        )?;
+        insert_memory_with_kind(
+            &connection,
+            MEMORY_C,
+            "failure",
+            "Failure reverted at SHA 9af3c21.",
+        )?;
+        insert_memory_with_kind(
+            &connection,
+            MEMORY_D,
+            "failure",
+            "Another failure reverted at SHA 9af3c21.",
+        )?;
+        connection
+            .set_memory_typed_fields_json(MEMORY_A, Some(r#"{"family":"cache churn"}"#))
+            .map_err(|error| error.to_string())?;
+        connection
+            .set_memory_typed_fields_json(MEMORY_B, Some(r#"{"family":"Cache   Churn"}"#))
+            .map_err(|error| error.to_string())?;
+        connection
+            .set_memory_typed_fields_json(MEMORY_C, Some(r#"{"reverted_at_sha":"9af3c21"}"#))
+            .map_err(|error| error.to_string())?;
+        connection
+            .set_memory_typed_fields_json(MEMORY_D, Some(r#"{"reverted_at_sha":"9AF3C21"}"#))
+            .map_err(|error| error.to_string())?;
+
+        let projection = graph_result(super::build_memory_graph(
+            &connection,
+            &super::ProjectionOptions::default(),
+        ))?;
+        assert!(projection.graph.has_edge(MEMORY_A, MEMORY_B));
+        assert!(projection.graph.has_edge(MEMORY_B, MEMORY_A));
+        assert!(projection.graph.has_edge(MEMORY_C, MEMORY_D));
+        let family_attrs = projection
+            .graph
+            .edge_attrs(MEMORY_A, MEMORY_B)
+            .ok_or_else(|| "typed family attrs should exist".to_string())?;
+        assert_eq!(
+            family_attrs.get("relation"),
+            Some(&CgseValue::String("failure_family".to_string()))
+        );
+        let reverted_attrs = projection
+            .graph
+            .edge_attrs(MEMORY_C, MEMORY_D)
+            .ok_or_else(|| "typed reverted-at-sha attrs should exist".to_string())?;
+        assert_eq!(
+            reverted_attrs.get("relation"),
+            Some(&CgseValue::String("failure_reverted_at_sha".to_string()))
+        );
+
+        let contradiction_graph = graph_result(
+            super::build_contradiction_subgraph_from_memory_links(&connection, WORKSPACE_ID),
+        )?;
+        assert!(contradiction_graph.has_edge(MEMORY_A, MEMORY_B));
+        assert_eq!(
+            contradiction_graph
+                .edge_attrs(MEMORY_A, MEMORY_B)
+                .and_then(|attrs| attrs.get("typed_field")),
+            Some(&CgseValue::String("family".to_string()))
+        );
+
+        let causal_graph = graph_result(super::build_causal_evidence_graph_from_table(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+        assert!(causal_graph.has_edge(MEMORY_C, MEMORY_D));
+        assert_eq!(
+            causal_graph
+                .edge_attrs(MEMORY_C, MEMORY_D)
+                .and_then(|attrs| attrs.get("relation")),
+            Some(&CgseValue::String("failure_reverted_at_sha".to_string()))
+        );
+        assert_eq!(
+            causal_graph
+                .edge_attrs(MEMORY_C, MEMORY_D)
+                .and_then(|attrs| attrs.get("contribution_score")),
+            Some(&CgseValue::Float(0.35))
+        );
 
         connection.close().map_err(|error| error.to_string())
     }
