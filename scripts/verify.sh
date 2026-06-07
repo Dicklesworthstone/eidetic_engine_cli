@@ -63,6 +63,8 @@ set -euo pipefail
 #   6.05 Output Budget E2E     - scripts/e2e_output_budget.sh
 #   6.06 Replay Lab Smoke E2E  - scripts/e2e_overhaul/swarm_replay_lab_smoke.sh
 #   6.07 Why-Not E2E          - scripts/e2e_why_not.sh
+#   6.08 Cross-Cutting E2E     - scripts/e2e_cross_cutting.sh
+#   6.09 Evidence Harvester E2E - scripts/e2e_evidence_harvester.sh
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
@@ -864,6 +866,11 @@ run_stage "Dueling Wizards Why-Not E2E" "./scripts/e2e_why_not.sh"
 # no-Cargo and checks the shared manifests/static gates before the feature
 # scripts that depend on them.
 run_stage "Dueling Wizards Cross-Cutting Static E2E" "./scripts/e2e_cross_cutting.sh"
+
+# Gate 6.09: Dueling Wizards evidence-harvester real-binary E2E. Real-binary,
+# no-Cargo: the script self-guards (log_drop) when the harvest/calibration CLI
+# is not yet built into the binary, so it never false-fails the gate.
+run_stage "Dueling Wizards Evidence Harvester E2E" "./scripts/e2e_evidence_harvester.sh"
 
 # Heavy gate block: skipped under --ci-smoke for fast swarm-CI / agent
 # pre-push runs. bd-2dgn0.5: see docs/operator-swarm-slo.md for which
