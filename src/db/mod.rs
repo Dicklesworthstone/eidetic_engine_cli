@@ -11915,6 +11915,44 @@ fn stored_memory_sentinel_result_from_row(row: &Row) -> Result<StoredMemorySenti
     })
 }
 
+/// A persisted `error_fingerprints` row (bd-1n0np.4.3 / V072): the DB-local
+/// projection of the `core::error_recall::ErrorFingerprint` model plus workspace
+/// scope and audit timestamps. `stderr_simhash` is the 32-hex simhash string.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredErrorFingerprint {
+    pub fingerprint_key: String,
+    pub workspace_id: String,
+    pub tool: String,
+    pub canonical_code: Option<String>,
+    pub message_template_signature: String,
+    pub location_shape: Option<String>,
+    pub stderr_simhash: String,
+    pub version_hints: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+fn stored_error_fingerprint_from_row(row: &Row) -> Result<StoredErrorFingerprint> {
+    Ok(StoredErrorFingerprint {
+        fingerprint_key: required_text(row, 0, DbOperation::Query, "fingerprint_key")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        tool: required_text(row, 2, DbOperation::Query, "tool")?.to_string(),
+        canonical_code: optional_text(row, 3)?.map(str::to_string),
+        message_template_signature: required_text(
+            row,
+            4,
+            DbOperation::Query,
+            "message_template_signature",
+        )?
+        .to_string(),
+        location_shape: optional_text(row, 5)?.map(str::to_string),
+        stderr_simhash: required_text(row, 6, DbOperation::Query, "stderr_simhash")?.to_string(),
+        version_hints: optional_text(row, 7)?.map(str::to_string),
+        created_at: required_text(row, 8, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 9, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
 impl DbConnection {
     /// Insert a new memory and its tags.
     pub fn insert_memory(&self, id: &str, input: &CreateMemoryInput) -> Result<()> {
@@ -12155,6 +12193,57 @@ impl DbConnection {
         )?;
         rows.first()
             .map(stored_memory_sentinel_result_from_row)
+            .transpose()
+    }
+
+    /// Upsert an error fingerprint row (bd-1n0np.4.3 / V072). Idempotent on
+    /// (workspace_id, fingerprint_key): re-observing the same failure refreshes
+    /// the mutable fields and `updated_at` without duplicating the row.
+    pub fn upsert_error_fingerprint(&self, fingerprint: &StoredErrorFingerprint) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO error_fingerprints (fingerprint_key, workspace_id, tool, canonical_code, message_template_signature, location_shape, stderr_simhash, version_hints, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT(workspace_id, fingerprint_key) DO UPDATE SET tool = excluded.tool, canonical_code = excluded.canonical_code, message_template_signature = excluded.message_template_signature, location_shape = excluded.location_shape, stderr_simhash = excluded.stderr_simhash, version_hints = excluded.version_hints, updated_at = excluded.updated_at",
+            &[
+                Value::Text(fingerprint.fingerprint_key.clone()),
+                Value::Text(fingerprint.workspace_id.clone()),
+                Value::Text(fingerprint.tool.clone()),
+                fingerprint
+                    .canonical_code
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(fingerprint.message_template_signature.clone()),
+                fingerprint
+                    .location_shape
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(fingerprint.stderr_simhash.clone()),
+                fingerprint
+                    .version_hints
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(fingerprint.created_at.clone()),
+                Value::Text(fingerprint.updated_at.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Look up a single error fingerprint by its workspace and layered key.
+    pub fn get_error_fingerprint(
+        &self,
+        workspace_id: &str,
+        fingerprint_key: &str,
+    ) -> Result<Option<StoredErrorFingerprint>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT fingerprint_key, workspace_id, tool, canonical_code, message_template_signature, location_shape, stderr_simhash, version_hints, created_at, updated_at FROM error_fingerprints WHERE workspace_id = ?1 AND fingerprint_key = ?2 ORDER BY fingerprint_key ASC LIMIT 1",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(fingerprint_key.to_string()),
+            ],
+        )?;
+        rows.first()
+            .map(stored_error_fingerprint_from_row)
             .transpose()
     }
 
