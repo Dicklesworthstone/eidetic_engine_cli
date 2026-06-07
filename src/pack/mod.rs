@@ -3792,6 +3792,14 @@ pub fn render_context_markdown(
 }
 
 #[must_use]
+/// A link-only LOD pack item: `link_only_lod_candidate` replaced its body with
+/// the deterministic `Memory <id>` stub (or the bare id). Such items render in
+/// the peripheral-vision index rather than inline with full/preview content.
+fn is_link_only_pack_item(item: &PackDraftItem) -> bool {
+    let memory_id = item.memory_id.to_string();
+    item.content == format!("Memory {memory_id}") || item.content == memory_id
+}
+
 pub fn render_context_markdown_with_analysis(
     request: &ContextRequest,
     pack: &PackDraft,
@@ -3860,6 +3868,12 @@ pub fn render_context_markdown_with_analysis(
         render_coordination_markdown(&mut output, coordination);
     }
 
+    let peripheral_items: Vec<&PackDraftItem> = pack
+        .items
+        .iter()
+        .filter(|item| is_link_only_pack_item(item))
+        .collect();
+
     if pack.items.is_empty() {
         output.push_str("*No items in pack.*\n\n");
     } else {
@@ -3867,6 +3881,11 @@ pub fn render_context_markdown_with_analysis(
             std::collections::HashMap::new();
         let mut section_order: Vec<&str> = Vec::new();
         for item in &pack.items {
+            // Link-only LOD items render in the peripheral index below, not
+            // inline with full/preview content.
+            if is_link_only_pack_item(item) {
+                continue;
+            }
             let section = item.section.as_str();
             if !by_section.contains_key(section) {
                 section_order.push(section);
@@ -3917,6 +3936,21 @@ pub fn render_context_markdown_with_analysis(
                 }
             }
         }
+    }
+
+    if !peripheral_items.is_empty() {
+        output.push_str("## Peripheral Index\n\n");
+        output.push_str(
+            "Link-only memories carried as a peripheral-vision index; drill in with `ee memory show <id>`.\n\n",
+        );
+        for item in &peripheral_items {
+            output.push_str(&format!(
+                "- {} ({})\n",
+                markdown_inline_code(&item.memory_id.to_string()),
+                context_section_display_name(item.section.as_str())
+            ));
+        }
+        output.push('\n');
     }
 
     if !pack.omitted.is_empty() {
@@ -11130,6 +11164,39 @@ mod tests {
                 "link-only tier must drop the full body content",
             )?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn link_only_pack_items_classify_for_peripheral_index() -> TestResult {
+        // bd-1n0np.5.3: the markdown renderer routes link-only LOD items to the
+        // peripheral index by recognizing their deterministic stub content.
+        let candidate = candidate_with_content(11, 0.9, 0.8, 5, "full body content stays inline")?;
+        let memory_id = candidate.memory_id;
+        let full_item = super::PackDraftItem::from_selected_candidate(
+            1,
+            candidate,
+            Vec::new(),
+            super::PackSelectionPhase::StrictMmr,
+        );
+        ensure(
+            !super::is_link_only_pack_item(&full_item),
+            "a full-content item must not be classified as peripheral",
+        )?;
+
+        let mut prefixed_stub = full_item.clone();
+        prefixed_stub.content = format!("Memory {memory_id}");
+        ensure(
+            super::is_link_only_pack_item(&prefixed_stub),
+            "the 'Memory <id>' link stub must classify as peripheral",
+        )?;
+
+        let mut bare_stub = full_item;
+        bare_stub.content = memory_id.to_string();
+        ensure(
+            super::is_link_only_pack_item(&bare_stub),
+            "the bare-id link stub must classify as peripheral",
+        )?;
         Ok(())
     }
 
