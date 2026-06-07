@@ -11201,6 +11201,62 @@ mod tests {
     }
 
     #[test]
+    fn markdown_render_routes_link_only_items_to_peripheral_index() -> TestResult {
+        // bd-1n0np.5.3/5.4: render-level proof that link-only LOD items land in
+        // the markdown peripheral index (not inline), and that packs without
+        // link-only items emit no peripheral section (golden-safety guard).
+        let full = candidate_with_content(20, 0.95, 0.8, 30, "full body that stays inline")?;
+        let stub = candidate_with_content(21, 0.85, 0.8, 5, "placeholder body")?;
+        let stub_id = stub.memory_id;
+        let mut draft = draft_from_candidates(vec![full, stub])?;
+        if let Some(item) = draft
+            .items
+            .iter_mut()
+            .find(|item| item.memory_id == stub_id)
+        {
+            item.content = format!("Memory {stub_id}");
+        }
+        let request = ContextRequest::new(ContextRequestInput {
+            query: "lod peripheral render".to_string(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(1_000),
+            candidate_pool: Some(20),
+            max_results: None,
+            sections: Vec::new(),
+        })
+        .map_err(|error| format!("request rejected: {error:?}"))?;
+
+        let markdown = render_context_markdown_with_analysis(&request, &draft, &[], &[], &[], None);
+        ensure(
+            markdown.contains("## Peripheral Index"),
+            "a link-only item must produce a peripheral index section",
+        )?;
+        ensure(
+            markdown.contains(&stub_id.to_string()),
+            "the peripheral index must list the link-only memory id",
+        )?;
+        ensure(
+            !markdown.contains(&format!("Memory {stub_id}")),
+            "the link-only stub body must not render inline; only the id appears in the index",
+        )?;
+
+        let plain = draft_from_candidates(vec![candidate_with_content(
+            22,
+            0.9,
+            0.8,
+            20,
+            "plain inline content",
+        )?])?;
+        let plain_markdown =
+            render_context_markdown_with_analysis(&request, &plain, &[], &[], &[], None);
+        ensure(
+            !plain_markdown.contains("## Peripheral Index"),
+            "packs without link-only items must not emit a peripheral index",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn preview_lod_respects_candidate_token_estimate_when_heuristic_is_short() -> TestResult {
         let candidate = candidate_with_content(
             4,
