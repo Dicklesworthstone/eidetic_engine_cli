@@ -2994,6 +2994,47 @@ pub fn collect_verifier_success_evidence(
         .collect()
 }
 
+/// Two-class signal taxonomy for the harvester joiner (ADR 0055, bd-1n0np.2.4):
+/// every outcome-evidence source is either an `Explicit` human/agent signal or a
+/// `Derived` signal inferred from observations `ee` already makes. The joiner
+/// uses this split to enforce the keystone safety invariant — derived signals
+/// carry low weight, require ≥2 corroborating signals, and must NEVER override
+/// explicit feedback or directly promote/tombstone a memory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutcomeSignalSource {
+    Explicit,
+    Derived,
+}
+
+impl OutcomeSignalSource {
+    /// Stable string form for JSON output and audit rows.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Derived => "derived",
+        }
+    }
+
+    /// Classify an outcome-evidence source into its signal class.
+    #[must_use]
+    pub const fn classify(source: OutcomeEvidenceSource) -> Self {
+        if source.is_explicit() {
+            Self::Explicit
+        } else {
+            Self::Derived
+        }
+    }
+
+    /// Whether a signal of this class may, on its own, decide feedback. Only
+    /// explicit signals are self-sufficient; derived signals require
+    /// corroboration and never override explicit feedback.
+    #[must_use]
+    pub const fn is_authoritative(self) -> bool {
+        matches!(self, Self::Explicit)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -3044,6 +3085,23 @@ mod tests {
         assert_eq!(row.workspace_id, "wsp_demo");
         assert!(row.agent_id.is_none());
         assert!(row.run_id.is_none());
+    }
+
+    #[test]
+    fn outcome_signal_source_classifies_explicit_vs_derived() {
+        use super::OutcomeSignalSource as S;
+        use crate::db::OutcomeEvidenceSource as E;
+        assert_eq!(S::classify(E::ExplicitHuman), S::Explicit);
+        assert_eq!(S::classify(E::ExplicitAgent), S::Explicit);
+        assert_eq!(S::classify(E::VerifierSuccess), S::Derived);
+        assert_eq!(S::classify(E::RevertedPatch), S::Derived);
+        assert_eq!(S::classify(E::TaskCloseWithoutProof), S::Derived);
+        assert_eq!(S::classify(E::ReopenedTask), S::Derived);
+        // Only explicit signals are authoritative on their own.
+        assert!(S::Explicit.is_authoritative());
+        assert!(!S::Derived.is_authoritative());
+        assert_eq!(S::Explicit.as_str(), "explicit");
+        assert_eq!(S::Derived.as_str(), "derived");
     }
 
     type TestResult = Result<(), String>;
