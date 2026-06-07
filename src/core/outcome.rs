@@ -3557,6 +3557,121 @@ pub fn calibration_honesty_report(
     }
 }
 
+/// Schema id for the Token ROI report (bd-1n0np.13.1).
+pub const TOKEN_ROI_SCHEMA_V1: &str = "ee.token_roi.v1";
+
+/// Minimum per-bucket sample count below which a Token ROI bucket is flagged
+/// low-confidence (`abstained`).
+pub const TOKEN_ROI_MIN_SAMPLES: u32 = 10;
+
+/// One Token ROI input bucket, aggregated by the caller from pack ledgers
+/// (pack_records / pack_items / pack_omissions) joined to outcome feedback over
+/// an explicit window. The bucket dimension (memory / kind / section / lens /
+/// profile / task / anchor) is the caller's choice; this core is dimension-
+/// agnostic.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TokenRoiBucketInput {
+    pub key: String,
+    pub helpful_count: u32,
+    pub total_count: u32,
+    pub total_tokens: u64,
+}
+
+/// One scored Token ROI bucket (reporting-only).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TokenRoiBucket {
+    pub key: String,
+    pub helpful_count: u32,
+    pub total_count: u32,
+    pub total_tokens: u64,
+    pub hit_rate: f64,
+    /// Wilson lower bound — the conservative hit rate used for ranking so a few
+    /// lucky hits on thin data cannot dominate the token budget.
+    pub conservative_hit_rate: f64,
+    /// Conservative helpful outcomes per 1000 tokens spent.
+    pub utility_per_1k_tokens: f64,
+    pub abstained: bool,
+}
+
+/// Deterministic, reporting-only Token ROI report (bd-1n0np.13.1): which packed
+/// buckets earn their token cost? Uses conservative (Wilson lower-bound)
+/// smoothing — never opaque ML — and ranks by conservative utility-per-token.
+/// This only informs how scarce pack tokens are allocated; Frankensearch still
+/// owns retrieval scores. The selection tie-breaker stays out until outcomes are
+/// dense (otherwise it optimizes on priors and starves fresh evidence).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TokenRoiReport {
+    pub schema: &'static str,
+    pub min_samples: u32,
+    pub bucket_count: u32,
+    pub buckets: Vec<TokenRoiBucket>,
+    pub table_hash: String,
+}
+
+/// Compute the Token ROI report from pre-aggregated buckets. Buckets are ranked
+/// by `utility_per_1k_tokens` descending (ties broken by key) and the
+/// `table_hash` pins determinism. Buckets with `total_count < min_samples` are
+/// flagged `abstained`.
+#[must_use]
+pub fn compute_token_roi(inputs: &[TokenRoiBucketInput], min_samples: u32) -> TokenRoiReport {
+    let mut buckets: Vec<TokenRoiBucket> = inputs
+        .iter()
+        .map(|bucket| {
+            let hit_rate = if bucket.total_count == 0 {
+                0.0
+            } else {
+                f64::from(bucket.helpful_count) / f64::from(bucket.total_count)
+            };
+            let (conservative_hit_rate, _upper) =
+                wilson_interval(bucket.helpful_count, bucket.total_count);
+            let utility_per_1k_tokens = if bucket.total_tokens == 0 {
+                0.0
+            } else {
+                conservative_hit_rate * f64::from(bucket.total_count) / bucket.total_tokens as f64
+                    * 1000.0
+            };
+            TokenRoiBucket {
+                key: bucket.key.clone(),
+                helpful_count: bucket.helpful_count,
+                total_count: bucket.total_count,
+                total_tokens: bucket.total_tokens,
+                hit_rate,
+                conservative_hit_rate,
+                utility_per_1k_tokens,
+                abstained: bucket.total_count < min_samples,
+            }
+        })
+        .collect();
+    buckets.sort_by(|a, b| {
+        b.utility_per_1k_tokens
+            .total_cmp(&a.utility_per_1k_tokens)
+            .then_with(|| a.key.cmp(&b.key))
+    });
+
+    let mut canonical = String::new();
+    for bucket in &buckets {
+        canonical.push_str(&format!(
+            "{}|{}|{}|{}|{:.6}|{:.6}|{:.6}|{}\n",
+            bucket.key,
+            bucket.helpful_count,
+            bucket.total_count,
+            bucket.total_tokens,
+            bucket.hit_rate,
+            bucket.conservative_hit_rate,
+            bucket.utility_per_1k_tokens,
+            bucket.abstained
+        ));
+    }
+    let table_hash = format!("blake3:{}", blake3::hash(canonical.as_bytes()).to_hex());
+    TokenRoiReport {
+        schema: TOKEN_ROI_SCHEMA_V1,
+        min_samples,
+        bucket_count: buckets.len() as u32,
+        buckets,
+        table_hash,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -3906,6 +4021,90 @@ mod tests {
         assert!(first.table_hash.starts_with("blake3:"));
         assert!(!first.schema.contains("guarantee"));
         assert!(!first.schema.contains("coverage"));
+    }
+
+    #[test]
+    fn token_roi_ranks_cheaper_bucket_above_costlier_at_equal_hit_rate() {
+        let inputs = vec![
+            super::TokenRoiBucketInput {
+                key: "cheap_useful".to_string(),
+                helpful_count: 18,
+                total_count: 20,
+                total_tokens: 1000,
+            },
+            super::TokenRoiBucketInput {
+                key: "expensive_useful".to_string(),
+                helpful_count: 18,
+                total_count: 20,
+                total_tokens: 10000,
+            },
+            super::TokenRoiBucketInput {
+                key: "thin".to_string(),
+                helpful_count: 2,
+                total_count: 2,
+                total_tokens: 100,
+            },
+        ];
+        let report = super::compute_token_roi(&inputs, 10);
+        assert_eq!(report.schema, "ee.token_roi.v1");
+        assert_eq!(report.bucket_count, 3);
+        let cheap = report
+            .buckets
+            .iter()
+            .position(|b| b.key == "cheap_useful")
+            .unwrap();
+        let expensive = report
+            .buckets
+            .iter()
+            .position(|b| b.key == "expensive_useful")
+            .unwrap();
+        assert!(
+            cheap < expensive,
+            "10x cheaper at equal hit rate ranks higher"
+        );
+        let thin = report.buckets.iter().find(|b| b.key == "thin").unwrap();
+        assert!(thin.abstained, "n=2 < 10 is low-confidence");
+    }
+
+    #[test]
+    fn token_roi_conservative_rate_is_below_point_estimate() {
+        let inputs = vec![super::TokenRoiBucketInput {
+            key: "k".to_string(),
+            helpful_count: 15,
+            total_count: 20,
+            total_tokens: 1000,
+        }];
+        let report = super::compute_token_roi(&inputs, 10);
+        let bucket = &report.buckets[0];
+        assert!((bucket.hit_rate - 0.75).abs() < 1e-9);
+        assert!(bucket.conservative_hit_rate < bucket.hit_rate);
+        assert!(bucket.conservative_hit_rate > 0.0);
+        assert!(bucket.utility_per_1k_tokens > 0.0);
+    }
+
+    #[test]
+    fn token_roi_is_deterministic_and_handles_zero_tokens() {
+        let inputs = vec![
+            super::TokenRoiBucketInput {
+                key: "z".to_string(),
+                helpful_count: 0,
+                total_count: 0,
+                total_tokens: 0,
+            },
+            super::TokenRoiBucketInput {
+                key: "a".to_string(),
+                helpful_count: 5,
+                total_count: 10,
+                total_tokens: 500,
+            },
+        ];
+        let first = super::compute_token_roi(&inputs, 10);
+        let second = super::compute_token_roi(&inputs, 10);
+        assert_eq!(first, second);
+        assert!(first.table_hash.starts_with("blake3:"));
+        let zero = first.buckets.iter().find(|b| b.key == "z").unwrap();
+        assert!((zero.utility_per_1k_tokens - 0.0).abs() < 1e-12);
+        assert!(zero.abstained);
     }
 
     type TestResult = Result<(), String>;
