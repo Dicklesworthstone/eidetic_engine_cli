@@ -3879,6 +3879,54 @@ class WorkPacketDocsContract(unittest.TestCase):
             for marker in required_markers:
                 self.assertIn(marker, body, f"{relative_path} missing {marker!r}")
 
+    def test_agent_docs_pin_no_local_cargo_install_adoption_workflow(self):
+        integration_markers = [
+            "No-Local-Cargo Install Freshness",
+            "command -v ee",
+            "ee --version",
+            "ee install check --json --offline",
+            "ee install plan --json --offline",
+            "--manifest <release-manifest.json>",
+            "--artifact-root <release-artifact-dir>",
+            "--install-dir \"$HOME/.local/bin\"",
+            "--target aarch64-apple-darwin",
+            "data.schema=ee.install.plan.v1",
+            "data.status",
+            "ready",
+            "idempotent",
+            "selected artifact target matches the host",
+            "data.verification.checksumStatus=verified",
+            "checksumStatus=planned",
+            "Applying a plan is a mutating install action",
+            "must not run it unless the user explicitly approves the overwrite path and artifact source",
+            "RCH Linux proof and macOS install freshness are different claims",
+            "operator exception request",
+            "local build would violate the RCH-only policy",
+        ]
+        integration_body = normalize_whitespace(load_text("docs/agent_integration.md"))
+        for marker in integration_markers:
+            self.assertIn(marker, integration_body, f"docs/agent_integration.md missing {marker!r}")
+
+        work_packet_markers = [
+            "macOS adoption without local Cargo",
+            "docs/agent_integration.md",
+            "ee install plan --json --offline",
+            "--artifact-root <release-artifact-dir>",
+            "--target aarch64-apple-darwin",
+            "data.verification.checksumStatus=verified",
+            "Running `ee update`, copying from `target/`, or using `cargo install`",
+            "requires explicit approval of the overwrite path and artifact source",
+        ]
+        work_packet_body = normalize_whitespace(
+            load_text("docs/agent-ux/swarm-work-packet.md")
+        )
+        for marker in work_packet_markers:
+            self.assertIn(
+                marker,
+                work_packet_body,
+                f"docs/agent-ux/swarm-work-packet.md missing {marker!r}",
+            )
+
     def test_environment_attestation_docs_pin_beads_bv_authority_stop_rule(self):
         body = normalize_whitespace(load_text("docs/environment_attestation.md"))
         required_markers = [

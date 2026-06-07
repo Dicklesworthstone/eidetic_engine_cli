@@ -55,6 +55,25 @@ check emits `install_check_is_not_claim_gate` because it is not a claim ticket:
 it only clears the binary-freshness precondition, then the normal work-packet
 claim gate must decide whether the Beads claim is safe.
 
+For macOS adoption without local Cargo, follow
+[`docs/agent_integration.md`](../agent_integration.md#no-local-cargo-install-freshness).
+The approved path is read-only inspection and planning:
+
+```bash
+ee install check --json --offline
+ee install plan --json --offline \
+  --manifest <release-manifest.json> \
+  --artifact-root <release-artifact-dir> \
+  --install-dir "$HOME/.local/bin" \
+  --target aarch64-apple-darwin
+```
+
+A plan is only adoptable when the selected
+artifact target matches the host and `data.verification.checksumStatus=verified`.
+Running `ee update`, copying from `target/`, or using `cargo install` is an
+operator install action and requires explicit approval of the overwrite path and
+artifact source.
+
 ## Intended Flow
 
 ```bash
