@@ -1307,7 +1307,18 @@ fn memory_documents_with_anchors(
     memories
         .iter()
         .map(|memory| {
-            let anchors = db.list_memory_anchors(&memory.id)?;
+            // Index rebuild is the fourth precision anchor-extraction point, after
+            // remember, CASS import, and curate apply (all wired through
+            // DbConnection::insert_memory). Backfill anchors for memories that have
+            // none yet — rows created before the anchor table existed, or through the
+            // revision write path, which does not extract at insert time. Memories
+            // that already carry anchors keep their original source provenance; this
+            // never downgrades a cass_import/curate_apply source to index_rebuild.
+            let mut anchors = db.list_memory_anchors(&memory.id)?;
+            if anchors.is_empty() {
+                db.refresh_memory_anchors_for_memory(&memory.id, &memory.content)?;
+                anchors = db.list_memory_anchors(&memory.id)?;
+            }
             Ok(memory_to_document_with_context_and_anchors(
                 memory,
                 None,
@@ -3159,6 +3170,84 @@ mod tests {
             !contention.acquired_at.is_empty(),
             "contention acquired_at timestamp",
         )
+    }
+
+    #[test]
+    fn index_rebuild_backfills_anchors_for_unanchored_memory() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_anchorbackfill0000000000000",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-anchor-backfill".to_owned(),
+                    name: Some("anchor-backfill".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        // The revision write path inserts a memory row without extracting
+        // anchors, mirroring rows created before the anchor table existed.
+        let memory_id = "mem_anchorbackfill00000000000001";
+        connection
+            .insert_memory_revision(
+                memory_id,
+                memory_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_anchorbackfill0000000000000".to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Run `cargo fmt --check` before touching `src/db/mod.rs`.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .list_memory_anchors(memory_id)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            "revision insert must not extract anchors",
+        )?;
+
+        let memories = connection
+            .list_memories_for_retrieval_with_global("wsp_anchorbackfill0000000000000", None, false)
+            .map_err(|error| error.to_string())?;
+        let documents = memory_documents_with_anchors(&connection, &memories)
+            .map_err(|error| error.to_string())?;
+        ensure(documents.len() == 1, "one indexable document expected")?;
+
+        let anchors = connection
+            .list_memory_anchors(memory_id)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            anchors
+                .iter()
+                .any(|anchor| anchor.source == crate::models::MemoryAnchorSource::IndexRebuild),
+            "index rebuild must backfill anchors with the index_rebuild source",
+        )?;
+        ensure(
+            anchors
+                .iter()
+                .any(|anchor| anchor.anchor_kind == crate::models::MemoryAnchorKind::Command),
+            "command anchor expected from backfill",
+        )?;
+        ensure(
+            anchors
+                .iter()
+                .any(|anchor| anchor.anchor_kind == crate::models::MemoryAnchorKind::Path),
+            "path anchor expected from backfill",
+        )?;
+        connection.close().map_err(|error| error.to_string())
     }
 
     fn unique_test_dir(label: &str) -> PathBuf {
