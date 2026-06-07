@@ -3197,6 +3197,162 @@ pub fn propose_derived_outcomes(
     proposals
 }
 
+/// Default reliability-curve bucket count for the calibration report
+/// (ADR 0055, bd-1n0np.2.6).
+pub const DEFAULT_CALIBRATION_BUCKET_COUNT: u32 = 10;
+
+/// Absolute calibration gap (observed − predicted) beyond which a recalibration
+/// is proposed.
+pub const CALIBRATION_RECALIBRATION_THRESHOLD: f64 = 0.05;
+
+/// Deterministic recalibration proposal direction (report-only).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecalibrationDirection {
+    /// Stored confidences overstate helpfulness — consider raising
+    /// `harmful_weight` or shortening half-lives.
+    Overconfident,
+    /// Stored confidences understate helpfulness.
+    Underconfident,
+    /// Observed and predicted agree within tolerance.
+    WellCalibrated,
+}
+
+impl RecalibrationDirection {
+    /// Stable string form for JSON output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Overconfident => "overconfident",
+            Self::Underconfident => "underconfident",
+            Self::WellCalibrated => "well_calibrated",
+        }
+    }
+}
+
+/// One reliability-curve bucket: predicted-vs-observed for confidences in
+/// `[lower, upper)` (the last bucket is closed at 1.0).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReliabilityBucket {
+    pub lower: f64,
+    pub upper: f64,
+    pub count: u32,
+    pub mean_predicted: f64,
+    pub observed_positive_rate: f64,
+}
+
+/// Deterministic calibration report (ADR 0055, bd-1n0np.2.6): does stored
+/// confidence predict helpful outcomes? Report-only; never mutates scoring.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CalibrationReport {
+    pub sample_count: u32,
+    pub bucket_count: u32,
+    pub brier_score: Option<f64>,
+    pub mean_predicted: f64,
+    pub observed_positive_rate: f64,
+    pub calibration_gap: f64,
+    pub recalibration: RecalibrationDirection,
+    pub buckets: Vec<ReliabilityBucket>,
+}
+
+/// Compute a deterministic calibration report from `(predicted_confidence,
+/// observed_helpful)` observations. Predictions are clamped to `[0, 1]`; sums
+/// run in the caller's (deterministic, explicit-window) order; `bucket_count`
+/// is clamped to at least 1. Empty input yields a neutral, well-calibrated
+/// report with no Brier score.
+#[must_use]
+pub fn compute_calibration(observations: &[(f64, bool)], bucket_count: u32) -> CalibrationReport {
+    let bucket_count = bucket_count.max(1);
+    let buckets_len = bucket_count as usize;
+    let mut sum_pred = vec![0.0_f64; buckets_len];
+    let mut pos = vec![0_u32; buckets_len];
+    let mut counts = vec![0_u32; buckets_len];
+    let mut brier_sum = 0.0_f64;
+    let mut pred_total = 0.0_f64;
+    let mut pos_total = 0_u32;
+
+    for &(raw_pred, helpful) in observations {
+        let pred = raw_pred.clamp(0.0, 1.0);
+        let outcome = if helpful { 1.0_f64 } else { 0.0_f64 };
+        let diff = pred - outcome;
+        brier_sum += diff * diff;
+        pred_total += pred;
+        if helpful {
+            pos_total += 1;
+        }
+        let scaled = pred * f64::from(bucket_count);
+        let idx = (scaled as usize).min(buckets_len - 1);
+        sum_pred[idx] += pred;
+        counts[idx] += 1;
+        if helpful {
+            pos[idx] += 1;
+        }
+    }
+
+    let sample_count = observations.len() as u32;
+    let (brier_score, mean_predicted, observed_positive_rate) = if observations.is_empty() {
+        (None, 0.0, 0.0)
+    } else {
+        let n = observations.len() as f64;
+        (
+            Some(brier_sum / n),
+            pred_total / n,
+            f64::from(pos_total) / n,
+        )
+    };
+    let calibration_gap = observed_positive_rate - mean_predicted;
+    let recalibration = if observations.is_empty() {
+        RecalibrationDirection::WellCalibrated
+    } else if calibration_gap < -CALIBRATION_RECALIBRATION_THRESHOLD {
+        RecalibrationDirection::Overconfident
+    } else if calibration_gap > CALIBRATION_RECALIBRATION_THRESHOLD {
+        RecalibrationDirection::Underconfident
+    } else {
+        RecalibrationDirection::WellCalibrated
+    };
+
+    let width = 1.0_f64 / f64::from(bucket_count);
+    let buckets = counts
+        .iter()
+        .zip(&sum_pred)
+        .zip(&pos)
+        .enumerate()
+        .map(|(i, ((&count, &sum_p), &pos_c))| {
+            let (mean_predicted, observed_positive_rate) = if count == 0 {
+                (0.0, 0.0)
+            } else {
+                (
+                    sum_p / f64::from(count),
+                    f64::from(pos_c) / f64::from(count),
+                )
+            };
+            let lower = width * i as f64;
+            let upper = if i + 1 == buckets_len {
+                1.0
+            } else {
+                width * (i as f64 + 1.0)
+            };
+            ReliabilityBucket {
+                lower,
+                upper,
+                count,
+                mean_predicted,
+                observed_positive_rate,
+            }
+        })
+        .collect();
+
+    CalibrationReport {
+        sample_count,
+        bucket_count,
+        brier_score,
+        mean_predicted,
+        observed_positive_rate,
+        calibration_gap,
+        recalibration,
+        buckets,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -3394,6 +3550,54 @@ mod tests {
             vec!["ev1".to_string(), "ev2".to_string()]
         );
         assert_eq!(proposals[0].corroborating_count, 2);
+    }
+
+    #[test]
+    fn calibration_empty_is_neutral() {
+        let report = super::compute_calibration(&[], 10);
+        assert_eq!(report.sample_count, 0);
+        assert!(report.brier_score.is_none());
+        assert_eq!(
+            report.recalibration,
+            super::RecalibrationDirection::WellCalibrated
+        );
+        assert_eq!(report.buckets.len(), 10);
+    }
+
+    #[test]
+    fn calibration_perfect_predictions_have_zero_brier() {
+        let obs = vec![(1.0, true), (1.0, true), (0.0, false), (0.0, false)];
+        let report = super::compute_calibration(&obs, 10);
+        assert_eq!(report.sample_count, 4);
+        assert!(report.brier_score.unwrap().abs() < 1e-12);
+        // mean predicted 0.5 == observed rate 0.5 => well calibrated.
+        assert_eq!(
+            report.recalibration,
+            super::RecalibrationDirection::WellCalibrated
+        );
+    }
+
+    #[test]
+    fn calibration_flags_overconfidence() {
+        // High stored confidence, mostly unhelpful outcomes.
+        let obs = vec![(0.9, false), (0.9, false), (0.9, false), (0.9, true)];
+        let report = super::compute_calibration(&obs, 10);
+        assert_eq!(
+            report.recalibration,
+            super::RecalibrationDirection::Overconfident
+        );
+        assert!(report.brier_score.unwrap() > 0.0);
+        // 0.9 * 10 == 9.0 => last bucket.
+        assert_eq!(report.buckets[9].count, 4);
+    }
+
+    #[test]
+    fn calibration_is_deterministic() {
+        let obs = vec![(0.3, true), (0.7, false), (0.5, true)];
+        let first = super::compute_calibration(&obs, 5);
+        let second = super::compute_calibration(&obs, 5);
+        assert_eq!(first, second);
+        assert_eq!(first.bucket_count, 5);
     }
 
     type TestResult = Result<(), String>;
