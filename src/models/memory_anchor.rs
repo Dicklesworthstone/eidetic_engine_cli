@@ -245,6 +245,25 @@ impl MemoryAnchorFreshnessTransition {
         self.new_state.rank() > self.previous_state.rank()
     }
 
+    /// Agent-facing freshness label for surfacing (bd-1n0np.3.8): `ee memory
+    /// show`, the per-pack `symbol_drift` facet, and revalidate candidates.
+    ///
+    /// Maps the transition's resulting state + drift code to one of
+    /// `fresh | symbol_changed | symbol_missing | unknown`. Conservatism rule:
+    /// an ambiguous (`Suspect`) result — e.g. an unresolved rename/move —
+    /// surfaces as `unknown` (advisory), NEVER as a hard stale label.
+    #[must_use]
+    pub fn surface_label(&self) -> &'static str {
+        match (self.new_state, self.drift_code.as_deref()) {
+            (MemoryAnchorFreshnessState::Current, _) => "fresh",
+            (MemoryAnchorFreshnessState::Suspect, _) => "unknown",
+            (MemoryAnchorFreshnessState::Stale, Some("memory_drift_source_missing")) => {
+                "symbol_missing"
+            }
+            (MemoryAnchorFreshnessState::Stale, _) => "symbol_changed",
+        }
+    }
+
     /// Canonical, deterministic audit-details JSON with a trailing
     /// `detailsHash` over the redaction-safe payload, mirroring
     /// `memory.level_transition` audit rows. The same transition always
@@ -1041,5 +1060,32 @@ mod tests {
         let empty = SurfaceCoverageFacet::from_surfaces(Vec::new());
         assert_eq!(empty.uncovered_count, 0);
         assert_eq!(empty.coverage_ratio(), 1.0);
+    }
+
+    #[test]
+    fn freshness_transition_surface_label_maps_states_conservatively() {
+        let mut t = sample_freshness_transition(
+            MemoryAnchorFreshnessState::Current,
+            MemoryAnchorFreshnessState::Current,
+        );
+        t.drift_code = None;
+        assert_eq!(t.surface_label(), "fresh");
+
+        // Stale + content change -> symbol_changed.
+        let mut changed = t.clone();
+        changed.new_state = MemoryAnchorFreshnessState::Stale;
+        changed.drift_code = Some("memory_drift_source_changed".to_owned());
+        assert_eq!(changed.surface_label(), "symbol_changed");
+
+        // Stale + disappearance -> symbol_missing.
+        let mut missing = changed.clone();
+        missing.drift_code = Some("memory_drift_source_missing".to_owned());
+        assert_eq!(missing.surface_label(), "symbol_missing");
+
+        // Ambiguity (Suspect) -> unknown, never a hard stale label.
+        let mut suspect = changed.clone();
+        suspect.new_state = MemoryAnchorFreshnessState::Suspect;
+        suspect.drift_code = Some("memory_drift_source_unverifiable".to_owned());
+        assert_eq!(suspect.surface_label(), "unknown");
     }
 }
