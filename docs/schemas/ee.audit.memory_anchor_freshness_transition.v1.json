@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.audit.memory_anchor_freshness_transition.v1.json",
+  "title": "ee.audit.memory_anchor_freshness_transition.v1",
+  "description": "Audit-details payload for one code-coupled memory-anchor freshness transition (ADR-0056, bd-1n0np.3.7). Stored in audit_log.details for action 'memory.freshness_transition'. Redaction-safe: it carries only the anchor's domain-separated BLAKE3 hash, never the raw anchor value.",
+  "type": "object",
+  "required": [
+    "schema",
+    "memoryId",
+    "anchorKind",
+    "anchorValueHash",
+    "previousState",
+    "newState",
+    "driftCode",
+    "fileLine",
+    "reason",
+    "automatic",
+    "detectedAt",
+    "detailsHash"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.audit.memory_anchor_freshness_transition.v1"
+    },
+    "memoryId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "anchorKind": {
+      "type": "string",
+      "enum": [
+        "path",
+        "symbol",
+        "command",
+        "env_var",
+        "schema",
+        "degraded_code",
+        "dependency",
+        "config_key"
+      ]
+    },
+    "anchorValueHash": {
+      "description": "Domain-separated BLAKE3 hash of the normalized anchor value. The raw value is never persisted.",
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "previousState": {
+      "type": "string",
+      "enum": ["current", "suspect", "stale"]
+    },
+    "newState": {
+      "type": "string",
+      "enum": ["current", "suspect", "stale"]
+    },
+    "driftCode": {
+      "description": "Drift classification when drift-driven; null for non-drift transitions such as an explicit revalidation.",
+      "type": ["string", "null"],
+      "enum": [
+        "memory_drift_source_changed",
+        "memory_drift_source_missing",
+        "memory_drift_source_unverifiable",
+        null
+      ]
+    },
+    "fileLine": {
+      "description": "Live file:line of the resolved symbol at detection time; null under rename/move ambiguity.",
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "automatic": {
+      "description": "True when written by an automatic drift check; false for an explicit/manual transition.",
+      "type": "boolean"
+    },
+    "detectedAt": {
+      "description": "RFC 3339 timestamp of the transition detection.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "detailsHash": {
+      "description": "BLAKE3 over the redaction-safe payload, appended after construction.",
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    }
+  }
+}
