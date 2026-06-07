@@ -4,8 +4,8 @@
   "gateBead": "bd-1n0np.23.1",
   "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
   "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
-  "currentLastCompiledMigration": 67,
-  "nextPlannedMigration": 68,
+  "currentLastCompiledMigration": 68,
+  "nextPlannedMigration": 69,
   "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
   "backupCoverageBead": "bd-1n0np.23.2",
   "policy": {
@@ -38,11 +38,11 @@
     {
       "id": "outcome_evidence_rows",
       "version": 68,
-      "status": "planned",
-      "runtimeRule": "planned_allocation_only",
-      "migrationConstant": "required_before_implemented",
-      "boundaryMigrationEvidence": "required_before_implemented",
-      "backupCoverageEvidence": "required_before_implemented",
+      "status": "implemented",
+      "runtimeRule": "compiled_migration_present",
+      "migrationConstant": "V068_OUTCOME_EVIDENCE_ROWS",
+      "boundaryMigrationEvidence": "required_and_current",
+      "backupCoverageEvidence": "required_and_current",
       "proofPosture": "rch_only_no_local_fallback"
     },
     {
@@ -182,7 +182,7 @@
       "migrationName": "V068_OUTCOME_EVIDENCE_ROWS",
       "ownerBead": "bd-1n0np.2.3",
       "ownerSurface": "evidence_harvester",
-      "status": "planned",
+      "status": "implemented",
       "tables": ["outcome_evidence_rows"],
       "backupAssetKind": "derived_outcome_evidence",
       "reversibleClass": "reversible_where_safe",

@@ -5768,6 +5768,50 @@ CREATE INDEX IF NOT EXISTS idx_pack_candidate_impressions_query_lens
     "blake3:v067_pack_candidate_impressions_2026_06_07",
 );
 
+pub const V068_OUTCOME_EVIDENCE_ROWS: Migration = Migration::new(
+    68,
+    "outcome_evidence_rows",
+    r#"
+CREATE TABLE IF NOT EXISTS outcome_evidence_rows (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    source_kind TEXT NOT NULL CHECK (source_kind IN (
+        'explicit_human', 'explicit_agent', 'verifier_success',
+        'reverted_patch', 'task_close_without_proof', 'reopened_task'
+    )),
+    evidence_family TEXT NOT NULL CHECK (evidence_family IN (
+        'explicit', 'verification', 'commit', 'beads'
+    )),
+    signal_direction TEXT NOT NULL CHECK (signal_direction IN ('positive', 'negative')),
+    base_weight_milli INTEGER NOT NULL CHECK (base_weight_milli >= 0 AND base_weight_milli <= 1000),
+    evidence_ref TEXT NOT NULL CHECK (length(trim(evidence_ref)) > 0),
+    agent_id TEXT CHECK (agent_id IS NULL OR length(trim(agent_id)) > 0),
+    task_id TEXT CHECK (task_id IS NULL OR length(trim(task_id)) > 0),
+    run_id TEXT CHECK (run_id IS NULL OR length(trim(run_id)) > 0),
+    observed_at TEXT NOT NULL CHECK (length(trim(observed_at)) > 0),
+    provenance_hash TEXT NOT NULL CHECK (
+        length(provenance_hash) = 71 AND substr(provenance_hash, 1, 7) = 'blake3:'
+    ),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    PRIMARY KEY (workspace_id, source_kind, evidence_ref, observed_at),
+    CHECK (
+        (source_kind IN ('explicit_human', 'explicit_agent') AND evidence_family = 'explicit')
+        OR (source_kind = 'verifier_success' AND evidence_family = 'verification' AND signal_direction = 'positive')
+        OR (source_kind = 'reverted_patch' AND evidence_family = 'commit' AND signal_direction = 'negative')
+        OR (source_kind = 'task_close_without_proof' AND evidence_family = 'beads' AND signal_direction = 'positive')
+        OR (source_kind = 'reopened_task' AND evidence_family = 'beads' AND signal_direction = 'negative')
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_outcome_evidence_rows_observed
+    ON outcome_evidence_rows(workspace_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_outcome_evidence_rows_task
+    ON outcome_evidence_rows(task_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_outcome_evidence_rows_run
+    ON outcome_evidence_rows(run_id, observed_at);
+"#,
+    "blake3:v068_outcome_evidence_rows_2026_06_07",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -5837,6 +5881,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V065_EVIDENCE_SPAN_CONTENT_HASH_BLAKE3_PREFIX,
     V066_MEMORY_ANCHORS,
     V067_PACK_CANDIDATE_IMPRESSIONS,
+    V068_OUTCOME_EVIDENCE_ROWS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -15655,6 +15700,128 @@ pub struct StoredImpression {
     pub created_at: String,
 }
 
+/// Source taxonomy for outcome evidence (ADR 0055, bd-1n0np.2.3), ordered
+/// strongest → weakest by reliability: explicit human > explicit agent >
+/// verifier success > reverted patch > task close without proof > reopened
+/// task. The base weight is the prior a signal carries *before* the joiner's
+/// ≥2-corroboration gate and never-override-explicit invariant (bd-1n0np.2.4).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutcomeEvidenceSource {
+    ExplicitHuman,
+    ExplicitAgent,
+    VerifierSuccess,
+    RevertedPatch,
+    TaskCloseWithoutProof,
+    ReopenedTask,
+}
+
+impl OutcomeEvidenceSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitHuman => "explicit_human",
+            Self::ExplicitAgent => "explicit_agent",
+            Self::VerifierSuccess => "verifier_success",
+            Self::RevertedPatch => "reverted_patch",
+            Self::TaskCloseWithoutProof => "task_close_without_proof",
+            Self::ReopenedTask => "reopened_task",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "explicit_human" => Self::ExplicitHuman,
+            "explicit_agent" => Self::ExplicitAgent,
+            "verifier_success" => Self::VerifierSuccess,
+            "reverted_patch" => Self::RevertedPatch,
+            "task_close_without_proof" => Self::TaskCloseWithoutProof,
+            "reopened_task" => Self::ReopenedTask,
+            _ => return None,
+        })
+    }
+
+    /// Evidence family this source is observed from (matches the DB CHECK).
+    #[must_use]
+    pub const fn evidence_family(self) -> &'static str {
+        match self {
+            Self::ExplicitHuman | Self::ExplicitAgent => "explicit",
+            Self::VerifierSuccess => "verification",
+            Self::RevertedPatch => "commit",
+            Self::TaskCloseWithoutProof | Self::ReopenedTask => "beads",
+        }
+    }
+
+    /// Reliability prior in milli-units (0..=1000), strictly decreasing across
+    /// the source ordering so derived signals stay well below explicit ones.
+    #[must_use]
+    pub const fn base_weight_milli(self) -> u32 {
+        match self {
+            Self::ExplicitHuman => 1000,
+            Self::ExplicitAgent => 800,
+            Self::VerifierSuccess => 400,
+            Self::RevertedPatch => 350,
+            Self::TaskCloseWithoutProof => 150,
+            Self::ReopenedTask => 120,
+        }
+    }
+
+    /// Fixed signal direction for derived sources; `None` for explicit sources
+    /// (the caller supplies helpful/harmful intent).
+    #[must_use]
+    pub const fn default_direction(self) -> Option<&'static str> {
+        match self {
+            Self::ExplicitHuman | Self::ExplicitAgent => None,
+            Self::VerifierSuccess | Self::TaskCloseWithoutProof => Some("positive"),
+            Self::RevertedPatch | Self::ReopenedTask => Some("negative"),
+        }
+    }
+
+    /// Explicit human/agent feedback, which derived signals must never override.
+    #[must_use]
+    pub const fn is_explicit(self) -> bool {
+        matches!(self, Self::ExplicitHuman | Self::ExplicitAgent)
+    }
+}
+
+/// Input for one derived/explicit outcome-evidence row (ADR 0055,
+/// bd-1n0np.2.3). `evidence_family` and `base_weight_milli` are derived from
+/// `source` at insert time so they can never drift from the taxonomy;
+/// `observed_at` is an explicit RFC3339 timestamp (never `Date::now`) so the
+/// joiner stays deterministic over explicit windows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateOutcomeEvidenceInput {
+    pub workspace_id: String,
+    pub source: OutcomeEvidenceSource,
+    /// `positive` or `negative`. For derived sources this must equal
+    /// `source.default_direction()`; the DB CHECK enforces consistency.
+    pub signal_direction: String,
+    /// Pointer to the originating observation (verification record id, bead id,
+    /// commit hash, or recorder run id) — never raw log content.
+    pub evidence_ref: String,
+    pub agent_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub observed_at: String,
+}
+
+/// A stored `outcome_evidence_rows` row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredOutcomeEvidence {
+    pub workspace_id: String,
+    pub source: OutcomeEvidenceSource,
+    pub evidence_family: String,
+    pub signal_direction: String,
+    pub base_weight_milli: u32,
+    pub evidence_ref: String,
+    pub agent_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub observed_at: String,
+    pub provenance_hash: String,
+    pub created_at: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackSelectionLedgerCore {
@@ -15797,6 +15964,9 @@ const PACK_OMISSION_INSERT_BATCH_ROWS: usize =
 const IMPRESSION_INSERT_VALUE_COUNT: usize = 14;
 const IMPRESSION_INSERT_BATCH_ROWS: usize =
     PACK_INSERT_MAX_BIND_PARAMS / IMPRESSION_INSERT_VALUE_COUNT;
+const OUTCOME_EVIDENCE_INSERT_VALUE_COUNT: usize = 12;
+const OUTCOME_EVIDENCE_INSERT_BATCH_ROWS: usize =
+    PACK_INSERT_MAX_BIND_PARAMS / OUTCOME_EVIDENCE_INSERT_VALUE_COUNT;
 const PACK_REPLAY_LEDGER_COMPRESSION_LEVEL: i32 = 3;
 const PACK_REPLAY_LEDGER_COMPRESSION_MIN_BYTES: usize = 4 * 1024;
 
@@ -16051,6 +16221,94 @@ impl DbConnection {
         rows.iter().map(stored_impression_from_row).collect()
     }
 
+    /// Insert derived/explicit outcome-evidence rows (ADR 0055, bd-1n0np.2.3).
+    ///
+    /// `evidence_family` and `base_weight_milli` are derived from the source
+    /// taxonomy so they cannot drift. `INSERT OR IGNORE` against the
+    /// `(workspace_id, source_kind, evidence_ref, observed_at)` primary key
+    /// keeps the join append-only and idempotent across reruns.
+    pub fn insert_outcome_evidence_rows(&self, rows: &[CreateOutcomeEvidenceInput]) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        for chunk in rows.chunks(OUTCOME_EVIDENCE_INSERT_BATCH_ROWS) {
+            let mut sql = String::from(
+                "INSERT OR IGNORE INTO outcome_evidence_rows (workspace_id, source_kind, evidence_family, signal_direction, base_weight_milli, evidence_ref, agent_id, task_id, run_id, observed_at, provenance_hash, created_at) VALUES ",
+            );
+            append_multi_row_placeholders(
+                &mut sql,
+                chunk.len(),
+                OUTCOME_EVIDENCE_INSERT_VALUE_COUNT,
+            );
+
+            let mut params = Vec::with_capacity(chunk.len() * OUTCOME_EVIDENCE_INSERT_VALUE_COUNT);
+            for row in chunk {
+                let provenance_hash = outcome_evidence_provenance_hash(row);
+                params.push(Value::Text(row.workspace_id.clone()));
+                params.push(Value::Text(row.source.as_str().to_string()));
+                params.push(Value::Text(row.source.evidence_family().to_string()));
+                params.push(Value::Text(row.signal_direction.clone()));
+                params.push(Value::BigInt(i64::from(row.source.base_weight_milli())));
+                params.push(Value::Text(row.evidence_ref.clone()));
+                params.push(
+                    row.agent_id
+                        .as_ref()
+                        .map_or(Value::Null, |value| Value::Text(value.clone())),
+                );
+                params.push(
+                    row.task_id
+                        .as_ref()
+                        .map_or(Value::Null, |value| Value::Text(value.clone())),
+                );
+                params.push(
+                    row.run_id
+                        .as_ref()
+                        .map_or(Value::Null, |value| Value::Text(value.clone())),
+                );
+                params.push(Value::Text(row.observed_at.clone()));
+                params.push(Value::Text(provenance_hash));
+                params.push(Value::Text(now.clone()));
+            }
+
+            self.execute_for(DbOperation::Execute, &sql, &params)?;
+        }
+
+        Ok(())
+    }
+
+    /// List outcome evidence tied to a task lineage, newest first.
+    pub fn list_outcome_evidence_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<StoredOutcomeEvidence>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, source_kind, evidence_family, signal_direction, base_weight_milli, evidence_ref, agent_id, task_id, run_id, observed_at, provenance_hash, created_at FROM outcome_evidence_rows WHERE task_id = ?1 ORDER BY observed_at DESC, source_kind ASC, evidence_ref ASC",
+            &[Value::Text(task_id.to_string())],
+        )?;
+
+        rows.iter().map(stored_outcome_evidence_from_row).collect()
+    }
+
+    /// List outcome evidence for a workspace within an explicit RFC3339 window
+    /// `[from, to)` (ADR 0055 determinism: never an implicit `Date::now`).
+    pub fn list_outcome_evidence_in_window(
+        &self,
+        workspace_id: &str,
+        from_rfc3339: &str,
+        to_rfc3339: &str,
+    ) -> Result<Vec<StoredOutcomeEvidence>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, source_kind, evidence_family, signal_direction, base_weight_milli, evidence_ref, agent_id, task_id, run_id, observed_at, provenance_hash, created_at FROM outcome_evidence_rows WHERE workspace_id = ?1 AND observed_at >= ?2 AND observed_at < ?3 ORDER BY observed_at ASC, source_kind ASC, evidence_ref ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(from_rfc3339.to_string()),
+                Value::Text(to_rfc3339.to_string()),
+            ],
+        )?;
+
+        rows.iter().map(stored_outcome_evidence_from_row).collect()
+    }
+
     /// Get a pack record by ID.
     pub fn get_pack_record(&self, id: &str) -> Result<Option<StoredPackRecord>> {
         let rows = self.query_for(
@@ -16230,6 +16488,46 @@ fn stored_impression_from_row(row: &Row) -> Result<StoredImpression> {
         index_generation: optional_u32_column(row, 11, "index_generation")?,
         graph_generation: optional_u32_column(row, 12, "graph_generation")?,
         created_at: required_text(row, 13, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
+/// Deterministic provenance hash for an outcome-evidence row (ADR 0055). Binds
+/// the source, direction, evidence pointer, and explicit window timestamp.
+fn outcome_evidence_provenance_hash(input: &CreateOutcomeEvidenceInput) -> String {
+    blake3_text_hash(&format!(
+        "ee.outcome_evidence.v1\u{0}{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
+        input.workspace_id,
+        input.source.as_str(),
+        input.signal_direction,
+        input.evidence_ref,
+        input.observed_at,
+    ))
+}
+
+fn parse_outcome_evidence_source(row_value: &str) -> Result<OutcomeEvidenceSource> {
+    OutcomeEvidenceSource::parse(row_value).ok_or_else(|| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("outcome_evidence_rows.source_kind has unknown value {row_value:?}"),
+    })
+}
+
+fn stored_outcome_evidence_from_row(row: &Row) -> Result<StoredOutcomeEvidence> {
+    let source =
+        parse_outcome_evidence_source(required_text(row, 1, DbOperation::Query, "source_kind")?)?;
+    Ok(StoredOutcomeEvidence {
+        workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
+        source,
+        evidence_family: required_text(row, 2, DbOperation::Query, "evidence_family")?.to_string(),
+        signal_direction: required_text(row, 3, DbOperation::Query, "signal_direction")?
+            .to_string(),
+        base_weight_milli: required_u32(row, 4, DbOperation::Query, "base_weight_milli")?,
+        evidence_ref: required_text(row, 5, DbOperation::Query, "evidence_ref")?.to_string(),
+        agent_id: optional_text(row, 6)?.map(str::to_string),
+        task_id: optional_text(row, 7)?.map(str::to_string),
+        run_id: optional_text(row, 8)?.map(str::to_string),
+        observed_at: required_text(row, 9, DbOperation::Query, "observed_at")?.to_string(),
+        provenance_hash: required_text(row, 10, DbOperation::Query, "provenance_hash")?.to_string(),
+        created_at: required_text(row, 11, DbOperation::Query, "created_at")?.to_string(),
     })
 }
 
@@ -31002,6 +31300,137 @@ mod tests {
             &false,
             "lens hash changes with profile",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn outcome_evidence_source_weights_strictly_decrease() -> TestResult {
+        use super::OutcomeEvidenceSource as S;
+        let ordered = [
+            S::ExplicitHuman,
+            S::ExplicitAgent,
+            S::VerifierSuccess,
+            S::RevertedPatch,
+            S::TaskCloseWithoutProof,
+            S::ReopenedTask,
+        ];
+        for pair in ordered.windows(2) {
+            ensure_equal(
+                &(pair[0].base_weight_milli() > pair[1].base_weight_milli()),
+                &true,
+                "outcome evidence weights strictly decrease by reliability",
+            )?;
+        }
+        ensure_equal(&S::ExplicitHuman.is_explicit(), &true, "human is explicit")?;
+        ensure_equal(
+            &S::VerifierSuccess.is_explicit(),
+            &false,
+            "verifier is derived",
+        )?;
+        ensure_equal(
+            &S::ExplicitAgent.default_direction(),
+            &None,
+            "explicit carries no fixed direction",
+        )?;
+        ensure_equal(
+            &S::RevertedPatch.default_direction(),
+            &Some("negative"),
+            "reverted patch is a negative signal",
+        )?;
+        ensure_equal(
+            &S::VerifierSuccess.evidence_family(),
+            &"verification",
+            "verifier family",
+        )?;
+        for source in ordered {
+            ensure_equal(
+                &S::parse(source.as_str()),
+                &Some(source),
+                "source as_str/parse roundtrip",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn insert_and_list_outcome_evidence_rows_over_explicit_window() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let workspace = "wsp_01234567890123456789012345";
+        let rows = vec![
+            super::CreateOutcomeEvidenceInput {
+                workspace_id: workspace.to_string(),
+                source: super::OutcomeEvidenceSource::ExplicitHuman,
+                signal_direction: "positive".to_string(),
+                evidence_ref: "mem_00000000000000000000pack01".to_string(),
+                agent_id: None,
+                task_id: Some("bd-1n0np.2.3".to_string()),
+                run_id: None,
+                observed_at: "2026-06-07T02:00:00Z".to_string(),
+            },
+            super::CreateOutcomeEvidenceInput {
+                workspace_id: workspace.to_string(),
+                source: super::OutcomeEvidenceSource::VerifierSuccess,
+                signal_direction: "positive".to_string(),
+                evidence_ref: "rchverify_0001".to_string(),
+                agent_id: Some("BronzeHorizon".to_string()),
+                task_id: Some("bd-1n0np.2.3".to_string()),
+                run_id: Some("run_0001".to_string()),
+                observed_at: "2026-06-07T01:00:00Z".to_string(),
+            },
+        ];
+        connection.insert_outcome_evidence_rows(&rows)?;
+        // Append-only idempotency: a second insert ignores the composite PK dups.
+        connection.insert_outcome_evidence_rows(&rows)?;
+
+        let by_task = connection.list_outcome_evidence_for_task("bd-1n0np.2.3")?;
+        ensure_equal(&by_task.len(), &2_usize, "outcome rows for task")?;
+
+        let window = connection.list_outcome_evidence_in_window(
+            workspace,
+            "2026-06-07T00:00:00Z",
+            "2026-06-07T01:30:00Z",
+        )?;
+        ensure_equal(
+            &window.len(),
+            &1_usize,
+            "explicit window excludes later row",
+        )?;
+        let only = &window[0];
+        ensure_equal(
+            &only.source,
+            &super::OutcomeEvidenceSource::VerifierSuccess,
+            "window row source",
+        )?;
+        ensure_equal(
+            &only.evidence_family,
+            &"verification".to_string(),
+            "derived family persisted from taxonomy",
+        )?;
+        ensure_equal(
+            &only.base_weight_milli,
+            &super::OutcomeEvidenceSource::VerifierSuccess.base_weight_milli(),
+            "derived weight persisted from taxonomy",
+        )?;
+        ensure_equal(
+            &only.signal_direction,
+            &"positive".to_string(),
+            "signal direction persisted",
+        )?;
+        ensure_equal(
+            &only.provenance_hash.len(),
+            &71_usize,
+            "provenance hash length",
+        )?;
+        ensure_equal(
+            &only.provenance_hash.starts_with("blake3:"),
+            &true,
+            "provenance hash prefix",
+        )?;
+
+        connection.close()?;
         Ok(())
     }
 
