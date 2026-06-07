@@ -3,12 +3,20 @@
 Bead: bd-1n0np.23.5
 Manifest: tests/fixtures/contracts/dueling_wizards_why_packdna_signals.json
 Contract: tests/contracts/dueling_wizards_why_packdna_signals.rs
+Shell gate: scripts/e2e_cross_cutting.sh
 
 This contract pins the additive explanation signals that the dueling-wizards
 initiative expects in `ee why` and Pack DNA once the underlying feature slices
 land. It is a planning gate, not proof that the runtime fields are implemented
 today. Its job is to prevent the cross-cutting explanation work from becoming
 implicit or scattered across feature-specific beads.
+
+`scripts/e2e_cross_cutting.sh` validates the manifest as a build-independent
+preflight. The shell gate checks the required signal set, owner/schema/field
+coverage, causal-schema coverage, coverage-matrix parity, redaction posture,
+degraded handling, and RCH-only proof policy. It does not replace
+`tests/contracts/dueling_wizards_why_packdna_signals.rs`; it catches manifest
+drift when RCH or a live checkout cannot run the Rust contract.
 
 ## Authority Points
 

@@ -161,6 +161,21 @@ assert_jq_file "$MESH_MANIFEST" \
 assert_jq_file "$WHY_PACKDNA_MANIFEST" \
     '.schema == "ee.dueling_wizards.why_packdna_signals.v1" and .gateBead == "bd-1n0np.23.5"' \
     "why/PackDna manifest identity"
+assert_jq_file "$WHY_PACKDNA_MANIFEST" \
+    '([.requiredSignals[].id] | sort) == ["anchor_file_line_provenance","causal_ancestry_path","contradiction_suppressed","freshness_symbol_drift","sentinel_state","task_lens"]' \
+    "why/PackDna required signal set is complete"
+assert_jq_file "$WHY_PACKDNA_MANIFEST" \
+    'all(.requiredSignals[]; (.ownerBeads | index("bd-1n0np.23.5")) and (.whyFields | length > 0) and (.packDnaFields | length > 0) and (.schemaRefs | index("ee.why.v1")) and (.schemaRefs | index("ee.context.pack_dna.v1")) and ((.agentQuestion // "") | length > 0) and ((.decisionImpact // "") | length > 0))' \
+    "why/PackDna signals declare owners, fields, schemas, and agent decisions"
+assert_jq_file "$WHY_PACKDNA_MANIFEST" \
+    'all(.requiredSignals[] | select(.id == "causal_ancestry_path"); .schemaRefs | index("ee.why.causal.v1"))' \
+    "why/PackDna causal signal references causal schema"
+assert_jq_file "$WHY_PACKDNA_MANIFEST" \
+    '([.requiredSignals[].id] | sort) == ([.signalCoverageMatrix[].signal] | sort)' \
+    "why/PackDna coverage matrix mirrors required signals"
+assert_jq_file "$WHY_PACKDNA_MANIFEST" \
+    'all(.signalCoverageMatrix[]; .compatibility == "stable_additive" and .redactionStatus == "redaction_safe" and .degradedHandlingStatus == "degraded_not_silent" and .runtimeProofPolicy == "rch_required_local_invalid" and .complianceStatus == "planned_conformant" and .scoreMilli >= 950 and .divergent == 0)' \
+    "why/PackDna coverage matrix keeps conservative proof posture"
 assert_jq_file "$OBSERVABILITY_MANIFEST" \
     '.schema == "ee.dueling_wizards.observability_no_silent_cap.v1" and .policy.noSilentCapRequired == true' \
     "observability manifest keeps no-silent-cap required"
