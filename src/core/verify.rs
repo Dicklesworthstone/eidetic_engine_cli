@@ -50,6 +50,7 @@ use crate::models::{
 pub const VERIFY_REPORT_SCHEMA_V1: &str = "ee.verify.report.v1";
 pub const VERIFY_RECORD_REPORT_SCHEMA_V1: &str = "ee.verify.record_report.v1";
 pub const VERIFY_CLOSURE_GUIDANCE_REPORT_SCHEMA_V1: &str = "ee.verify.closure_guidance_report.v1";
+pub const VERIFY_PROVENANCE_REPORT_SCHEMA_V1: &str = "ee.verify.provenance.v1";
 pub const VERIFY_PROVENANCE_REFERENT_SCHEMA_V1: &str = "ee.verify.provenance_referent.v1";
 pub const VERIFICATION_LEDGER_ENTRY_SCHEMA_V1: &str = "ee.verification.ledger_entry.v1";
 pub const VERIFICATION_POSTURE_SCHEMA_V1: &str = "ee.verification.posture.v1";
@@ -59,6 +60,8 @@ const VERIFY_STEP_TIMEOUT: Duration = Duration::from_secs(60);
 const VERIFY_STEP_OUTPUT_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const VERIFY_PROVENANCE_FILE_SCAN_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const VERIFY_PROVENANCE_GIT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_VERIFY_PROVENANCE_LIMIT: u32 = 100;
+pub const DEFAULT_VERIFY_PROVENANCE_STALE_AFTER_DAYS: u32 = 7;
 
 /// Schema for artifact policy.
 pub const ARTIFACT_POLICY_SCHEMA_V1: &str = "ee.artifact_policy.v1";
@@ -754,6 +757,112 @@ impl VerifyProvenanceReferentReport {
     }
 }
 
+#[derive(Clone)]
+pub struct VerifyProvenanceOptions<'a> {
+    pub workspace_path: &'a Path,
+    pub database: &'a DbConnection,
+    pub workspace_id: &'a str,
+    pub memory_id: Option<&'a str>,
+    pub stale_after_days: u32,
+    pub limit: u32,
+    pub allow_network: bool,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifyProvenanceMemoryReport {
+    pub memory_id: String,
+    pub provenance_uri: String,
+    pub previous_status: String,
+    pub previous_verified_at: Option<String>,
+    pub checked_at: String,
+    pub referent: VerifyProvenanceReferentReport,
+}
+
+impl VerifyProvenanceMemoryReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "memoryId": self.memory_id,
+            "provenanceUri": self.provenance_uri,
+            "previousStatus": self.previous_status,
+            "previousVerifiedAt": self.previous_verified_at,
+            "checkedAt": self.checked_at,
+            "referent": self.referent.data_json(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifyProvenanceReport {
+    pub schema: &'static str,
+    pub workspace_id: String,
+    pub requested_memory_id: Option<String>,
+    pub checked_at: String,
+    pub stale_after_days: u32,
+    pub limit: u32,
+    pub inspected_count: u32,
+    pub no_provenance_count: u32,
+    pub due_count: u32,
+    pub checked_count: u32,
+    pub skipped_recent_count: u32,
+    pub bounded_skipped_count: u32,
+    pub verified_count: u32,
+    pub evidence_missing_count: u32,
+    pub evidence_drift_count: u32,
+    pub unverifiable_count: u32,
+    pub records: Vec<VerifyProvenanceMemoryReport>,
+}
+
+impl VerifyProvenanceReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        let records = self
+            .records
+            .iter()
+            .map(VerifyProvenanceMemoryReport::data_json)
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "schema": self.schema,
+            "workspaceId": self.workspace_id,
+            "requestedMemoryId": self.requested_memory_id,
+            "checkedAt": self.checked_at,
+            "staleAfterDays": self.stale_after_days,
+            "limit": self.limit,
+            "inspectedCount": self.inspected_count,
+            "noProvenanceCount": self.no_provenance_count,
+            "dueCount": self.due_count,
+            "checkedCount": self.checked_count,
+            "skippedRecentCount": self.skipped_recent_count,
+            "boundedSkippedCount": self.bounded_skipped_count,
+            "verifiedCount": self.verified_count,
+            "evidenceMissingCount": self.evidence_missing_count,
+            "evidenceDriftCount": self.evidence_drift_count,
+            "unverifiableCount": self.unverifiable_count,
+            "records": records,
+        })
+    }
+
+    fn push(&mut self, record: VerifyProvenanceMemoryReport) {
+        self.checked_count = self.checked_count.saturating_add(1);
+        match record.referent.status {
+            VerifyProvenanceReferentStatus::Verified => {
+                self.verified_count = self.verified_count.saturating_add(1);
+            }
+            VerifyProvenanceReferentStatus::EvidenceMissing => {
+                self.evidence_missing_count = self.evidence_missing_count.saturating_add(1);
+            }
+            VerifyProvenanceReferentStatus::EvidenceDrift => {
+                self.evidence_drift_count = self.evidence_drift_count.saturating_add(1);
+            }
+            VerifyProvenanceReferentStatus::Unverifiable => {
+                self.unverifiable_count = self.unverifiable_count.saturating_add(1);
+            }
+        }
+        self.records.push(record);
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerificationClosureGuidanceReport {
     pub schema: &'static str,
@@ -797,6 +906,90 @@ pub struct VerificationClosureGuidanceOptions<'a> {
     pub database_path: &'a Path,
     pub bead_id: Option<&'a str>,
     pub requirements: Vec<VerificationGateRequirement>,
+}
+
+pub fn verify_bounded_provenance(
+    options: VerifyProvenanceOptions<'_>,
+) -> Result<VerifyProvenanceReport, DomainError> {
+    let memories = match options.memory_id {
+        Some(memory_id) => match options.database.get_memory(memory_id) {
+            Ok(Some(memory)) => vec![memory],
+            Ok(None) => {
+                return Err(DomainError::Usage {
+                    message: format!("Memory {memory_id} was not found."),
+                    repair: Some("Pass an existing memory ID or omit --memory-id.".to_owned()),
+                });
+            }
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!("Failed to load memory {memory_id}: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                });
+            }
+        },
+        None => options
+            .database
+            .list_memories(options.workspace_id, None, false)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to list memories for provenance verification: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?,
+    };
+    let checked_at = options.now.to_rfc3339();
+    let mut report = VerifyProvenanceReport {
+        schema: VERIFY_PROVENANCE_REPORT_SCHEMA_V1,
+        workspace_id: options.workspace_id.to_owned(),
+        requested_memory_id: options.memory_id.map(str::to_owned),
+        checked_at: checked_at.clone(),
+        stale_after_days: options.stale_after_days,
+        limit: options.limit,
+        inspected_count: 0,
+        no_provenance_count: 0,
+        due_count: 0,
+        checked_count: 0,
+        skipped_recent_count: 0,
+        bounded_skipped_count: 0,
+        verified_count: 0,
+        evidence_missing_count: 0,
+        evidence_drift_count: 0,
+        unverifiable_count: 0,
+        records: Vec::new(),
+    };
+    let referent_options = VerifyProvenanceReferentOptions {
+        workspace_path: options.workspace_path,
+        database: Some(options.database),
+        allow_network: options.allow_network,
+    };
+
+    for memory in memories {
+        report.inspected_count = report.inspected_count.saturating_add(1);
+        let Some(provenance_uri) = memory.provenance_uri.clone() else {
+            report.no_provenance_count = report.no_provenance_count.saturating_add(1);
+            continue;
+        };
+        if options.memory_id.is_none()
+            && !provenance_memory_is_due(&memory, options.stale_after_days, options.now)
+        {
+            report.skipped_recent_count = report.skipped_recent_count.saturating_add(1);
+            continue;
+        }
+        report.due_count = report.due_count.saturating_add(1);
+        if report.checked_count >= options.limit {
+            report.bounded_skipped_count = report.bounded_skipped_count.saturating_add(1);
+            continue;
+        }
+        let referent = verify_provenance_referent(&provenance_uri, &referent_options);
+        report.push(VerifyProvenanceMemoryReport {
+            memory_id: memory.id,
+            provenance_uri,
+            previous_status: memory.provenance_verification_status,
+            previous_verified_at: memory.provenance_verified_at,
+            checked_at: checked_at.clone(),
+            referent,
+        });
+    }
+
+    Ok(report)
 }
 
 /// Re-resolve one provenance URI without mutating memories or evidence.
@@ -1177,6 +1370,24 @@ fn provenance_workspace_path(workspace_path: &Path, raw_path: &str) -> PathBuf {
     } else {
         workspace_path.join(path)
     }
+}
+
+fn provenance_memory_is_due(
+    memory: &crate::db::StoredMemory,
+    stale_after_days: u32,
+    now: DateTime<Utc>,
+) -> bool {
+    if stale_after_days == 0 {
+        return true;
+    }
+    let Some(verified_at) = memory.provenance_verified_at.as_deref() else {
+        return true;
+    };
+    let Ok(parsed) = DateTime::parse_from_rfc3339(verified_at) else {
+        return true;
+    };
+    now.signed_duration_since(parsed.with_timezone(&Utc))
+        >= ChronoDuration::days(i64::from(stale_after_days))
 }
 
 fn provenance_referent_report(
@@ -2283,6 +2494,157 @@ mod tests {
             &"unverifiable",
             "json status",
         )
+    }
+
+    #[test]
+    fn bounded_provenance_scan_checks_only_due_memories() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(temp.path().join("due.md"), "due\n").map_err(|error| error.to_string())?;
+        std::fs::write(temp.path().join("recent.md"), "recent\n")
+            .map_err(|error| error.to_string())?;
+        let connection = provenance_fixture_connection(temp.path())?;
+        let workspace_id = "wsp_verify_provenance_fixture";
+        insert_provenance_fixture_memory(
+            &connection,
+            workspace_id,
+            "mem_00000000000000000000009101",
+            "file://due.md#L1",
+        )?;
+        insert_provenance_fixture_memory(
+            &connection,
+            workspace_id,
+            "mem_00000000000000000000009102",
+            "file://recent.md#L1",
+        )?;
+        connection
+            .execute_raw(
+                "UPDATE memories SET provenance_verification_status = 'verified', \
+                 provenance_verified_at = '2026-06-06T12:00:00Z' \
+                 WHERE id = 'mem_00000000000000000000009102'",
+            )
+            .map_err(|error| error.to_string())?;
+        let now = DateTime::parse_from_rfc3339("2026-06-07T12:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+
+        let report = verify_bounded_provenance(VerifyProvenanceOptions {
+            workspace_path: temp.path(),
+            database: &connection,
+            workspace_id,
+            memory_id: None,
+            stale_after_days: 7,
+            limit: 10,
+            allow_network: false,
+            now,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(&report.inspected_count, &2, "inspected")?;
+        ensure_equal(&report.due_count, &1, "due")?;
+        ensure_equal(&report.checked_count, &1, "checked")?;
+        ensure_equal(&report.skipped_recent_count, &1, "recent skipped")?;
+        ensure_equal(&report.verified_count, &1, "verified")?;
+        ensure_equal(
+            &report.records[0].memory_id.as_str(),
+            &"mem_00000000000000000000009101",
+            "checked memory",
+        )?;
+        ensure_equal(
+            &report.data_json()["schema"],
+            &serde_json::json!(VERIFY_PROVENANCE_REPORT_SCHEMA_V1),
+            "report schema",
+        )
+    }
+
+    #[test]
+    fn bounded_provenance_scan_forces_explicit_memory_id() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(temp.path().join("recent.md"), "recent\n")
+            .map_err(|error| error.to_string())?;
+        let connection = provenance_fixture_connection(temp.path())?;
+        let workspace_id = "wsp_verify_provenance_fixture";
+        let memory_id = "mem_00000000000000000000009103";
+        insert_provenance_fixture_memory(
+            &connection,
+            workspace_id,
+            memory_id,
+            "file://recent.md#L1",
+        )?;
+        connection
+            .execute_raw(
+                "UPDATE memories SET provenance_verification_status = 'verified', \
+                 provenance_verified_at = '2026-06-06T12:00:00Z' \
+                 WHERE id = 'mem_00000000000000000000009103'",
+            )
+            .map_err(|error| error.to_string())?;
+        let now = DateTime::parse_from_rfc3339("2026-06-07T12:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+
+        let report = verify_bounded_provenance(VerifyProvenanceOptions {
+            workspace_path: temp.path(),
+            database: &connection,
+            workspace_id,
+            memory_id: Some(memory_id),
+            stale_after_days: 7,
+            limit: 10,
+            allow_network: false,
+            now,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(&report.due_count, &1, "explicit memory due")?;
+        ensure_equal(&report.checked_count, &1, "explicit memory checked")?;
+        ensure_equal(&report.skipped_recent_count, &0, "no recent skip")?;
+        ensure_equal(
+            &report.records[0].referent.status,
+            &VerifyProvenanceReferentStatus::Verified,
+            "explicit referent verified",
+        )
+    }
+
+    fn provenance_fixture_connection(workspace_path: &Path) -> Result<DbConnection, String> {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_verify_provenance_fixture",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().to_string(),
+                    name: Some("verify provenance fixture".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(connection)
+    }
+
+    fn insert_provenance_fixture_memory(
+        connection: &DbConnection,
+        workspace_id: &str,
+        memory_id: &str,
+        provenance_uri: &str,
+    ) -> Result<(), String> {
+        connection
+            .insert_memory(
+                memory_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "episodic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: format!("fixture memory {memory_id}"),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.6,
+                    provenance_uri: Some(provenance_uri.to_owned()),
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())
     }
 
     #[test]
