@@ -2995,6 +2995,98 @@ pub fn collect_verifier_success_evidence(
         .collect()
 }
 
+/// Bead lifecycle transition kind observed from `.beads/issues.jsonl` (resolved
+/// by the caller via completion_audit), normalized into outcome evidence
+/// (ADR 0055, bd-1n0np.2.3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BeadLifecycleKind {
+    /// Bead closed and not later reopened — a very weak positive signal.
+    ClosedClean,
+    /// Bead reopened after a close — a weak negative signal.
+    Reopened,
+}
+
+/// One observed bead lifecycle transition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BeadLifecycleObservation {
+    pub bead_id: String,
+    pub kind: BeadLifecycleKind,
+    pub observed_at: String,
+    pub run_id: Option<String>,
+}
+
+/// Collect derived outcome evidence from bead lifecycle transitions
+/// (bd-1n0np.2.3): a clean close maps to `task_close_without_proof` (very weak
+/// positive), a reopen to `reopened_task` (weak negative). Observations without
+/// an explicit `observed_at` are skipped so the joiner stays deterministic over
+/// explicit windows.
+#[must_use]
+pub fn collect_task_lifecycle_evidence(
+    workspace_id: &str,
+    observations: &[BeadLifecycleObservation],
+) -> Vec<CreateOutcomeEvidenceInput> {
+    observations
+        .iter()
+        .filter(|obs| !obs.observed_at.trim().is_empty())
+        .map(|obs| {
+            let source = match obs.kind {
+                BeadLifecycleKind::ClosedClean => OutcomeEvidenceSource::TaskCloseWithoutProof,
+                BeadLifecycleKind::Reopened => OutcomeEvidenceSource::ReopenedTask,
+            };
+            let direction = source.default_direction().unwrap_or("positive").to_string();
+            CreateOutcomeEvidenceInput {
+                workspace_id: workspace_id.to_string(),
+                source,
+                signal_direction: direction,
+                evidence_ref: obs.bead_id.clone(),
+                agent_id: None,
+                task_id: Some(obs.bead_id.clone()),
+                run_id: obs.run_id.clone(),
+                observed_at: obs.observed_at.clone(),
+            }
+        })
+        .collect()
+}
+
+/// One observed commit landing/revert (resolved by the caller via the bounded
+/// source-runner / git), normalized into outcome evidence (ADR 0055,
+/// bd-1n0np.2.3).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommitObservation {
+    pub commit_ref: String,
+    pub reverted: bool,
+    pub bead_id: Option<String>,
+    pub observed_at: String,
+    pub run_id: Option<String>,
+}
+
+/// Collect derived outcome evidence from commit observations. Only reverted
+/// commits produce a signal — `reverted_patch` (weak negative); a commit merely
+/// landing is not, on its own, evidence that a packed memory helped.
+/// Observations without an explicit `observed_at` are skipped.
+#[must_use]
+pub fn collect_reverted_patch_evidence(
+    workspace_id: &str,
+    observations: &[CommitObservation],
+) -> Vec<CreateOutcomeEvidenceInput> {
+    let source = OutcomeEvidenceSource::RevertedPatch;
+    let direction = source.default_direction().unwrap_or("negative").to_string();
+    observations
+        .iter()
+        .filter(|obs| obs.reverted && !obs.observed_at.trim().is_empty())
+        .map(|obs| CreateOutcomeEvidenceInput {
+            workspace_id: workspace_id.to_string(),
+            source,
+            signal_direction: direction.clone(),
+            evidence_ref: obs.commit_ref.clone(),
+            agent_id: None,
+            task_id: obs.bead_id.clone(),
+            run_id: obs.run_id.clone(),
+            observed_at: obs.observed_at.clone(),
+        })
+        .collect()
+}
+
 /// Two-class signal taxonomy for the harvester joiner (ADR 0055, bd-1n0np.2.4):
 /// every outcome-evidence source is either an `Explicit` human/agent signal or a
 /// `Derived` signal inferred from observations `ee` already makes. The joiner
@@ -3404,6 +3496,72 @@ mod tests {
         assert_eq!(row.workspace_id, "wsp_demo");
         assert!(row.agent_id.is_none());
         assert!(row.run_id.is_none());
+    }
+
+    #[test]
+    fn collect_task_lifecycle_maps_close_and_reopen() {
+        let obs = vec![
+            super::BeadLifecycleObservation {
+                bead_id: "bd-x".to_string(),
+                kind: super::BeadLifecycleKind::ClosedClean,
+                observed_at: "2026-06-07T01:00:00Z".to_string(),
+                run_id: None,
+            },
+            super::BeadLifecycleObservation {
+                bead_id: "bd-y".to_string(),
+                kind: super::BeadLifecycleKind::Reopened,
+                observed_at: "2026-06-07T02:00:00Z".to_string(),
+                run_id: Some("run_1".to_string()),
+            },
+            super::BeadLifecycleObservation {
+                bead_id: "bd-z".to_string(),
+                kind: super::BeadLifecycleKind::ClosedClean,
+                observed_at: "   ".to_string(),
+                run_id: None,
+            },
+        ];
+        let rows = super::collect_task_lifecycle_evidence("wsp_x", &obs);
+        assert_eq!(rows.len(), 2, "blank-timestamp observation is skipped");
+        assert_eq!(
+            rows[0].source,
+            crate::db::OutcomeEvidenceSource::TaskCloseWithoutProof
+        );
+        assert_eq!(rows[0].signal_direction, "positive");
+        assert_eq!(rows[0].task_id.as_deref(), Some("bd-x"));
+        assert_eq!(
+            rows[1].source,
+            crate::db::OutcomeEvidenceSource::ReopenedTask
+        );
+        assert_eq!(rows[1].signal_direction, "negative");
+        assert_eq!(rows[1].run_id.as_deref(), Some("run_1"));
+    }
+
+    #[test]
+    fn collect_reverted_patch_only_emits_reverts() {
+        let obs = vec![
+            super::CommitObservation {
+                commit_ref: "abc".to_string(),
+                reverted: false,
+                bead_id: Some("bd-x".to_string()),
+                observed_at: "2026-06-07T01:00:00Z".to_string(),
+                run_id: None,
+            },
+            super::CommitObservation {
+                commit_ref: "def".to_string(),
+                reverted: true,
+                bead_id: Some("bd-y".to_string()),
+                observed_at: "2026-06-07T02:00:00Z".to_string(),
+                run_id: None,
+            },
+        ];
+        let rows = super::collect_reverted_patch_evidence("wsp_x", &obs);
+        assert_eq!(rows.len(), 1, "only reverted commits are evidence");
+        assert_eq!(
+            rows[0].source,
+            crate::db::OutcomeEvidenceSource::RevertedPatch
+        );
+        assert_eq!(rows[0].signal_direction, "negative");
+        assert_eq!(rows[0].evidence_ref, "def");
     }
 
     #[test]
