@@ -30,6 +30,7 @@ use crate::core::qos::{
     QosThrottleCheckpoint, decide_background_throttle,
 };
 use crate::db::{DbConnection, StoredAuditEntry, audit_actions};
+use crate::models::install::{InstallCheckReport, InstallVersionEvidence};
 use crate::models::regression_causality::{
     REGRESSION_CAUSALITY_SCHEMA_V1, RegressionEvidenceInput, RegressionEvidenceKind,
     normalize_regression_evidence_inputs, rank_regression_cause_hypotheses,
@@ -145,6 +146,7 @@ const SINGLEFLIGHT_POSTURE_FILE: &str = "singleflight_posture.json";
 const QOS_LANE_SUMMARY_FILE: &str = "qos_lane_summary.json";
 const TRIAGE_SUMMARY_FILE: &str = "scale_triage_summary.json";
 const LOCAL_CARGO_TRIPWIRE_FILE: &str = "local_cargo_tripwire.json";
+const INSTALL_FRESHNESS_SUMMARY_FILE: &str = "install_freshness_summary.json";
 const REGRESSION_CAUSALITY_SUMMARY_FILE: &str = "regression_causality_summary.json";
 const SUPPORT_BUNDLE_REGRESSION_CAUSALITY_SUMMARY_SCHEMA_V1: &str =
     "ee.support_bundle.regression_causality_summary.v1";
@@ -153,6 +155,8 @@ pub(crate) const SUPPORT_BUNDLE_PROOF_BROKER_SUMMARY_SCHEMA_V1: &str =
 const ENVIRONMENT_ATTESTATION_SUMMARY_FILE: &str = "environment_attestation_summary.json";
 pub(crate) const SUPPORT_BUNDLE_ENVIRONMENT_ATTESTATION_SUMMARY_SCHEMA_V1: &str =
     "ee.support_bundle.environment_attestation_summary.v1";
+pub(crate) const SUPPORT_BUNDLE_INSTALL_FRESHNESS_SUMMARY_SCHEMA_V1: &str =
+    "ee.support_bundle.install_freshness_summary.v1";
 const SHADOW_POLICY_SUMMARY_FILE: &str = "shadow_policy_summary.json";
 pub(crate) const SUPPORT_BUNDLE_SHADOW_POLICY_SUMMARY_SCHEMA_V1: &str =
     "ee.support_bundle.shadow_policy_summary.v1";
@@ -361,6 +365,7 @@ struct CollectedDiagnostics {
     qos_lane_summary_json: String,
     triage_summary_json: String,
     local_cargo_tripwire_json: String,
+    install_freshness_summary_json: String,
     regression_causality_summary_json: String,
     environment_attestation_summary_json: String,
     shadow_policy_summary_json: String,
@@ -503,6 +508,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (
             LOCAL_CARGO_TRIPWIRE_FILE,
             &diagnostics.local_cargo_tripwire_json,
+        ),
+        (
+            INSTALL_FRESHNESS_SUMMARY_FILE,
+            &diagnostics.install_freshness_summary_json,
         ),
         (
             REGRESSION_CAUSALITY_SUMMARY_FILE,
@@ -1048,6 +1057,7 @@ fn collect_diagnostics(
     let qos_lane_summary_json = qos_lane_summary_json(workspace);
     let triage_summary_json = triage_summary_json(&status, &swarm_reports);
     let local_cargo_tripwire_json = local_cargo_tripwire_json(workspace);
+    let install_freshness_summary_json = install_freshness_summary_json();
     let environment_attestation_summary_json = environment_attestation_summary_json(workspace);
     let shadow_policy_summary_json = shadow_policy_summary_json(workspace);
     let regression_causality_summary_json =
@@ -1063,6 +1073,7 @@ fn collect_diagnostics(
             triage_summary_json.as_str(),
             coordination_fallback_summary_json.as_str(),
             local_cargo_tripwire_json.as_str(),
+            install_freshness_summary_json.as_str(),
             environment_attestation_summary_json.as_str(),
             shadow_policy_summary_json.as_str(),
         ));
@@ -1092,6 +1103,7 @@ fn collect_diagnostics(
         qos_lane_summary_json,
         triage_summary_json,
         local_cargo_tripwire_json,
+        install_freshness_summary_json,
         regression_causality_summary_json,
         environment_attestation_summary_json,
         shadow_policy_summary_json,
@@ -1848,6 +1860,7 @@ pub(crate) fn collect_regression_causality_summary(workspace: &Path) -> Value {
     let triage_summary_json = triage_summary_json(&status, &swarm_reports);
     let coordination_fallback_summary_json = coordination_fallback_summary_json(workspace);
     let local_cargo_tripwire_json = local_cargo_tripwire_json(workspace);
+    let install_freshness_summary_json = install_freshness_summary_json();
     let environment_attestation_summary_json = environment_attestation_summary_json(workspace);
     let shadow_policy_summary_json = shadow_policy_summary_json(workspace);
 
@@ -1863,6 +1876,7 @@ pub(crate) fn collect_regression_causality_summary(workspace: &Path) -> Value {
         triage_summary_json.as_str(),
         coordination_fallback_summary_json.as_str(),
         local_cargo_tripwire_json.as_str(),
+        install_freshness_summary_json.as_str(),
         environment_attestation_summary_json.as_str(),
         shadow_policy_summary_json.as_str(),
     ))
@@ -3139,6 +3153,154 @@ fn qos_lane_summary_json(workspace: &Path) -> String {
     stable_json(&value)
 }
 
+fn install_freshness_summary_json() -> String {
+    let report = super::install::check_install(&super::install::InstallCheckOptions {
+        offline: true,
+        ..Default::default()
+    });
+    stable_json(&install_freshness_summary_from_check(&report))
+}
+
+pub(crate) fn install_freshness_summary_from_check(report: &InstallCheckReport) -> Value {
+    let (finding_counts_by_code, finding_counts_by_severity) = install_finding_counts(report);
+    let mut summary = json!({
+        "schema": SUPPORT_BUNDLE_INSTALL_FRESHNESS_SUMMARY_SCHEMA_V1,
+        "sourceSchema": report.schema,
+        "sourceFreshnessSchema": report.freshness.schema,
+        "status": "available",
+        "installStatus": report.status().as_str(),
+        "redactionStatus": "counts_versions_statuses_codes_hashes_redacted_text_no_raw_paths",
+        "version": redact_support_diagnostic_text(&report.version),
+        "freshness": {
+            "verdict": report.freshness.verdict.as_str(),
+            "authoritative": report.freshness.authoritative,
+            "comparison": redact_support_diagnostic_text(&report.freshness.comparison),
+            "repair": redact_support_diagnostic_text(&report.freshness.repair),
+            "sourceVersion": install_version_evidence_summary(&report.freshness.source_version),
+            "installedVersion": install_version_evidence_summary(&report.freshness.installed_version),
+            "pathStatus": report.freshness.path_status.as_str(),
+            "requiredSurfaces": report.freshness.required_surfaces,
+            "missingRequiredSurfaces": report.freshness.missing_required_surfaces,
+            "blockingFindings": report
+                .freshness
+                .blocking_findings
+                .iter()
+                .map(|code| code.as_str())
+                .collect::<Vec<_>>(),
+        },
+        "pathPosture": {
+            "status": report.path.status.as_str(),
+            "pathEntryCount": report.path.path_entries.len(),
+            "binaryCount": report.path.binaries.len(),
+            "duplicateCount": report.path.duplicate_count,
+            "currentBinaryOnPath": report.path.current_binary_on_path,
+            "firstBinaryHash": support_path_hash(report.path.first_binary.as_deref()),
+            "currentBinaryPathHash": support_path_hash(report.current_binary.path.as_deref()),
+            "binaries": report
+                .path
+                .binaries
+                .iter()
+                .take(16)
+                .map(|binary| json!({
+                    "ordinal": binary.ordinal,
+                    "pathHash": support_path_hash(Some(binary.path.as_str())),
+                    "isCurrentBinary": binary.is_current_binary,
+                    "version": binary.version.as_deref().map(redact_support_diagnostic_text),
+                    "versionStatus": binary
+                        .version_status
+                        .as_deref()
+                        .map(redact_support_diagnostic_text),
+                }))
+                .collect::<Vec<_>>(),
+        },
+        "target": {
+            "targetTriple": redact_support_diagnostic_text(&report.target.target_triple),
+            "supported": report.target.supported,
+            "binaryName": redact_support_diagnostic_text(&report.target.binary_name),
+            "executableName": redact_support_diagnostic_text(&report.target.executable_name),
+            "installDirHash": support_cache_key(&report.target.install_dir),
+            "installPathHash": support_cache_key(&report.target.install_path),
+        },
+        "permissions": {
+            "status": report.permissions.status.as_str(),
+            "exists": report.permissions.exists,
+            "writable": report.permissions.writable,
+            "installDirHash": support_cache_key(&report.permissions.install_dir),
+            "targetPathHash": support_cache_key(&report.permissions.target_path),
+        },
+        "updateSource": {
+            "configured": report.update_source.configured,
+            "offline": report.update_source.offline,
+            "status": redact_support_diagnostic_text(&report.update_source.status),
+            "sourceHash": report
+                .update_source
+                .source
+                .as_deref()
+                .map(support_cache_key),
+        },
+        "findingCounts": {
+            "total": report.findings.len(),
+            "byCode": finding_counts_by_code,
+            "bySeverity": finding_counts_by_severity,
+        },
+        "findings": report
+            .findings
+            .iter()
+            .take(16)
+            .map(|finding| json!({
+                "code": finding.code.as_str(),
+                "severity": serialized_token(&finding.severity),
+                "message": redact_support_diagnostic_text(&finding.message),
+                "nextAction": redact_support_diagnostic_text(&finding.next_action),
+            }))
+            .collect::<Vec<_>>(),
+        "redaction": {
+            "rawPathEntriesIncluded": false,
+            "rawBinaryPathsIncluded": false,
+            "rawInstallTargetsIncluded": false,
+            "rawCommandArgvIncluded": false,
+            "hostPrivatePathsRedacted": true,
+        },
+    });
+    let summary_hash = support_cache_key(&stable_json(&summary));
+    if let Some(object) = summary.as_object_mut() {
+        object.insert("summaryHash".to_owned(), json!(summary_hash));
+    }
+    summary
+}
+
+fn install_version_evidence_summary(evidence: &InstallVersionEvidence) -> Value {
+    json!({
+        "version": evidence.version.as_deref().map(redact_support_diagnostic_text),
+        "source": redact_support_diagnostic_text(&evidence.source),
+        "status": redact_support_diagnostic_text(&evidence.status),
+        "pathHash": support_path_hash(evidence.path.as_deref()),
+        "pathClass": evidence
+            .path_class
+            .as_deref()
+            .map(redact_support_diagnostic_text),
+    })
+}
+
+fn install_finding_counts(
+    report: &InstallCheckReport,
+) -> (BTreeMap<String, u64>, BTreeMap<String, u64>) {
+    let mut by_code = BTreeMap::new();
+    let mut by_severity = BTreeMap::new();
+    for finding in &report.findings {
+        *by_code.entry(finding.code.as_str().to_owned()).or_insert(0) += 1;
+        *by_severity
+            .entry(serialized_token(&finding.severity))
+            .or_insert(0) += 1;
+    }
+    (by_code, by_severity)
+}
+
+fn support_path_hash(path: Option<&str>) -> Option<String> {
+    path.filter(|value| !value.trim().is_empty())
+        .map(support_cache_key)
+}
+
 fn local_cargo_tripwire_json(workspace: &Path) -> String {
     let direct_cargo = local_cargo_preflight_classification(
         workspace,
@@ -3304,9 +3466,10 @@ fn regression_causality_support_sections<'a>(
     triage_summary_json: &'a str,
     coordination_fallback_summary_json: &'a str,
     local_cargo_tripwire_json: &'a str,
+    install_freshness_summary_json: &'a str,
     environment_attestation_summary_json: &'a str,
     shadow_policy_summary_json: &'a str,
-) -> [(&'static str, RegressionEvidenceKind, &'a str); 13] {
+) -> [(&'static str, RegressionEvidenceKind, &'a str); 14] {
     [
         (
             "support_bundle:verification_evidence_summary",
@@ -3362,6 +3525,11 @@ fn regression_causality_support_sections<'a>(
             "support_bundle:local_cargo_tripwire",
             RegressionEvidenceKind::VerificationEvidence,
             local_cargo_tripwire_json,
+        ),
+        (
+            "support_bundle:install_freshness_summary",
+            RegressionEvidenceKind::VerificationEvidence,
+            install_freshness_summary_json,
         ),
         (
             "support_bundle:environment_attestation_summary",
@@ -5151,6 +5319,7 @@ fn planned_files() -> Vec<String> {
         QOS_LANE_SUMMARY_FILE.to_owned(),
         TRIAGE_SUMMARY_FILE.to_owned(),
         LOCAL_CARGO_TRIPWIRE_FILE.to_owned(),
+        INSTALL_FRESHNESS_SUMMARY_FILE.to_owned(),
         REGRESSION_CAUSALITY_SUMMARY_FILE.to_owned(),
         ENVIRONMENT_ATTESTATION_SUMMARY_FILE.to_owned(),
         SHADOW_POLICY_SUMMARY_FILE.to_owned(),
@@ -5582,11 +5751,22 @@ mod tests {
         EnvironmentAttestationVerdict,
     };
     use crate::core::qos::QosBackgroundThrottleAction;
+    use crate::models::install::{
+        INSTALL_FRESHNESS_SCHEMA_V1, InstallFreshnessReport, InstallFreshnessVerdict,
+        InstallVersionEvidence,
+    };
+    use crate::models::{
+        CurrentBinary, INSTALL_CHECK_SCHEMA_V1, InstallCheckReport, InstallFinding,
+        InstallFindingCode, InstallPathAnalysis, InstallPathStatus, InstallPermissionCheck,
+        InstallPermissionStatus, InstallTarget, PathBinary, UpdateSourcePosture,
+    };
 
     type TestResult = Result<(), String>;
     const SUPPORT_BUNDLE_ATTESTATION_SUMMARY_SCHEMA_TEXT: &str = include_str!(
         "../../docs/schemas/ee.support_bundle.environment_attestation_summary.v1.json"
     );
+    const SUPPORT_BUNDLE_INSTALL_FRESHNESS_SUMMARY_SCHEMA_TEXT: &str =
+        include_str!("../../docs/schemas/ee.support_bundle.install_freshness_summary.v1.json");
     const SUPPORT_BUNDLE_ATTESTATION_SUMMARY_MATRIX_GOLDEN: &str = include_str!(
         "../../tests/fixtures/golden/environment_attestation/support_bundle_summary_matrix.json.golden"
     );
@@ -5597,6 +5777,17 @@ mod tests {
         "raw mail body",
         "raw-body",
         "raw source snippet",
+        "BEGIN PRIVATE KEY",
+        "ghp_",
+        "Bearer ",
+        "DATABASE_URL=",
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+    ];
+    const INSTALL_FRESHNESS_SUMMARY_DENIED_SUBSTRINGS: &[&str] = &[
+        "body_md",
+        "raw mail body",
         "BEGIN PRIVATE KEY",
         "ghp_",
         "Bearer ",
@@ -6647,6 +6838,82 @@ mod tests {
         require_blake3_hash(command.get("argvHash"), context, "argvHash")
     }
 
+    fn validate_support_bundle_install_freshness_summary_schema(
+        summary: &Value,
+        schema: &Value,
+        case_name: &str,
+    ) -> TestResult {
+        let object = summary
+            .as_object()
+            .ok_or_else(|| format!("{case_name}: install freshness summary is not an object"))?;
+        let required = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "install freshness schema missing required list".to_owned())?;
+        for field in required.iter().filter_map(Value::as_str) {
+            if !object.contains_key(field) {
+                return Err(format!(
+                    "{case_name}: missing schema-required install freshness field {field}"
+                ));
+            }
+        }
+        let properties = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "install freshness schema missing properties".to_owned())?;
+        for field in object.keys() {
+            if !properties.contains_key(field) {
+                return Err(format!(
+                    "{case_name}: unexpected install freshness field {field}"
+                ));
+            }
+        }
+        if summary.get("schema").and_then(Value::as_str)
+            != Some(SUPPORT_BUNDLE_INSTALL_FRESHNESS_SUMMARY_SCHEMA_V1)
+        {
+            return Err(format!("{case_name}: wrong install freshness schema token"));
+        }
+        if summary.get("sourceSchema").and_then(Value::as_str) != Some(INSTALL_CHECK_SCHEMA_V1) {
+            return Err(format!(
+                "{case_name}: wrong install freshness source schema token"
+            ));
+        }
+        if summary.get("sourceFreshnessSchema").and_then(Value::as_str)
+            != Some(INSTALL_FRESHNESS_SCHEMA_V1)
+        {
+            return Err(format!("{case_name}: wrong source freshness schema token"));
+        }
+        for pointer in [
+            "/summaryHash",
+            "/target/installDirHash",
+            "/target/installPathHash",
+        ] {
+            require_blake3_hash(summary.pointer(pointer), case_name, pointer)?;
+        }
+        for pointer in [
+            "/redaction/rawPathEntriesIncluded",
+            "/redaction/rawBinaryPathsIncluded",
+            "/redaction/rawInstallTargetsIncluded",
+            "/redaction/rawCommandArgvIncluded",
+        ] {
+            if summary.pointer(pointer).and_then(Value::as_bool) != Some(false) {
+                return Err(format!(
+                    "{case_name}: install freshness redaction flag {pointer} was not false"
+                ));
+            }
+        }
+        if summary
+            .pointer("/redaction/hostPrivatePathsRedacted")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            return Err(format!(
+                "{case_name}: install freshness hostPrivatePathsRedacted was not true"
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_support_bundle_shadow_policy_summary_schema(
         summary: &Value,
         schema: &Value,
@@ -6779,6 +7046,21 @@ mod tests {
             if rendered.contains(denied) {
                 return Err(format!(
                     "{case_name}: support-bundle attestation summary leaked denied substring {denied:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn assert_no_install_freshness_summary_denied_substrings(
+        case_name: &str,
+        summary: &Value,
+    ) -> TestResult {
+        let rendered = stable_json(summary);
+        for denied in INSTALL_FRESHNESS_SUMMARY_DENIED_SUBSTRINGS {
+            if rendered.contains(denied) {
+                return Err(format!(
+                    "{case_name}: support-bundle install freshness summary leaked denied substring {denied:?}"
                 ));
             }
         }
@@ -8022,6 +8304,7 @@ mod tests {
             TRIAGE_SUMMARY_FILE,
             QOS_LANE_SUMMARY_FILE,
             LOCAL_CARGO_TRIPWIRE_FILE,
+            INSTALL_FRESHNESS_SUMMARY_FILE,
             REGRESSION_CAUSALITY_SUMMARY_FILE,
             VERIFICATION_EVIDENCE_SUMMARY_FILE,
             MEMORY_DRIFT_SUMMARY_FILE,
@@ -8881,6 +9164,146 @@ mod tests {
             "classification must cite the direct rustc/rustdoc guard: {value}"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn install_freshness_summary_hashes_paths_and_preserves_blocking_verdict() -> TestResult {
+        let report = InstallCheckReport {
+            command: "install check".to_owned(),
+            schema: INSTALL_CHECK_SCHEMA_V1.to_owned(),
+            version: "0.6.0".to_owned(),
+            current_binary: CurrentBinary {
+                path: Some("/Users/alice/bin/ee".to_owned()),
+                version: "0.6.0".to_owned(),
+                source: "running_process".to_owned(),
+            },
+            target: InstallTarget {
+                target_triple: "x86_64-apple-darwin".to_owned(),
+                supported: true,
+                binary_name: "ee".to_owned(),
+                executable_name: "ee".to_owned(),
+                install_dir: "/Users/alice/.local/bin".to_owned(),
+                install_path: "/Users/alice/.local/bin/ee".to_owned(),
+            },
+            path: InstallPathAnalysis {
+                status: InstallPathStatus::Duplicate,
+                path_entries: vec![
+                    "/Volumes/USBNVME16TB/bin".to_owned(),
+                    "/Users/alice/bin".to_owned(),
+                ],
+                binaries: vec![
+                    PathBinary {
+                        path: "/Volumes/USBNVME16TB/bin/ee".to_owned(),
+                        ordinal: 0,
+                        is_current_binary: false,
+                        version: Some("0.5.9".to_owned()),
+                        version_status: Some("reported".to_owned()),
+                    },
+                    PathBinary {
+                        path: "/Users/alice/bin/ee".to_owned(),
+                        ordinal: 1,
+                        is_current_binary: true,
+                        version: Some("0.6.0".to_owned()),
+                        version_status: Some("reported".to_owned()),
+                    },
+                ],
+                first_binary: Some("/Volumes/USBNVME16TB/bin/ee".to_owned()),
+                current_binary_on_path: true,
+                duplicate_count: 2,
+            },
+            permissions: InstallPermissionCheck {
+                status: InstallPermissionStatus::Writable,
+                install_dir: "/Users/alice/.local/bin".to_owned(),
+                target_path: "/Users/alice/.local/bin/ee".to_owned(),
+                exists: true,
+                writable: true,
+            },
+            update_source: UpdateSourcePosture {
+                configured: false,
+                offline: true,
+                source: Some("/Users/alice/release-manifest.json".to_owned()),
+                status: "offline_no_manifest".to_owned(),
+            },
+            freshness: InstallFreshnessReport {
+                schema: INSTALL_FRESHNESS_SCHEMA_V1.to_owned(),
+                verdict: InstallFreshnessVerdict::ShadowedBinary,
+                authoritative: false,
+                comparison: "equal".to_owned(),
+                source_version: InstallVersionEvidence {
+                    version: Some("0.6.0".to_owned()),
+                    source: "cargo_toml".to_owned(),
+                    status: "ok".to_owned(),
+                    path: Some("/Users/alice/project/Cargo.toml".to_owned()),
+                    path_class: Some("host_local_path".to_owned()),
+                },
+                installed_version: InstallVersionEvidence {
+                    version: Some("0.6.0".to_owned()),
+                    source: "running_process".to_owned(),
+                    status: "reported".to_owned(),
+                    path: Some("/Users/alice/bin/ee".to_owned()),
+                    path_class: Some("host_local_path".to_owned()),
+                },
+                path_status: InstallPathStatus::Duplicate,
+                required_surfaces: vec!["install_check".to_owned()],
+                missing_required_surfaces: Vec::new(),
+                blocking_findings: vec![InstallFindingCode::CurrentBinaryShadowed],
+                repair:
+                    "Run the first ee binary found in PATH or fix PATH ordering before trusting agent automation."
+                        .to_owned(),
+            },
+            findings: vec![
+                InstallFinding::warning(
+                    InstallFindingCode::DuplicatePathBinary,
+                    "2 'ee' binaries were found in PATH: /Users/alice/bin/ee",
+                    "Remove stale duplicates or make the intended install directory appear first in PATH.",
+                ),
+                InstallFinding::error(
+                    InstallFindingCode::CurrentBinaryShadowed,
+                    "the running ee binary (/Users/alice/bin/ee) is shadowed by the first PATH binary (/Volumes/USBNVME16TB/bin/ee)",
+                    "Run the first ee binary found in PATH or fix PATH ordering before trusting agent automation.",
+                ),
+            ],
+        };
+        let summary = install_freshness_summary_from_check(&report);
+        let schema: Value =
+            serde_json::from_str(SUPPORT_BUNDLE_INSTALL_FRESHNESS_SUMMARY_SCHEMA_TEXT)
+                .map_err(|error| error.to_string())?;
+
+        validate_support_bundle_install_freshness_summary_schema(&summary, &schema, "shadowed")?;
+        assert_no_install_freshness_summary_denied_substrings("shadowed", &summary)?;
+        assert_eq!(
+            summary.get("schema").and_then(Value::as_str),
+            Some(SUPPORT_BUNDLE_INSTALL_FRESHNESS_SUMMARY_SCHEMA_V1)
+        );
+        assert_eq!(
+            summary
+                .pointer("/freshness/verdict")
+                .and_then(Value::as_str),
+            Some("shadowed_binary")
+        );
+        assert_eq!(
+            summary
+                .pointer("/freshness/blockingFindings/0")
+                .and_then(Value::as_str),
+            Some("current_binary_shadowed")
+        );
+        assert_eq!(
+            summary
+                .pointer("/pathPosture/duplicateCount")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
+        for pointer in [
+            "/pathPosture/firstBinaryHash",
+            "/pathPosture/currentBinaryPathHash",
+            "/target/installPathHash",
+            "/permissions/targetPathHash",
+            "/updateSource/sourceHash",
+            "/summaryHash",
+        ] {
+            require_blake3_hash(summary.pointer(pointer), "shadowed", pointer)?;
+        }
         Ok(())
     }
 
@@ -10145,6 +10568,7 @@ mod tests {
             SINGLEFLIGHT_POSTURE_FILE,
             TRIAGE_SUMMARY_FILE,
             LOCAL_CARGO_TRIPWIRE_FILE,
+            INSTALL_FRESHNESS_SUMMARY_FILE,
         ] {
             assert!(
                 report.files_collected.contains(&required.to_owned()),

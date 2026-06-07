@@ -1,0 +1,351 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.support_bundle.install_freshness_summary.v1.json",
+  "title": "ee.support_bundle.install_freshness_summary.v1",
+  "description": "Redaction-safe support-bundle capsule for ee.install.check.v1 freshness evidence. It preserves installed/source version posture, PATH counts, finding codes, and hashed host paths without raw PATH entries, binary paths, install targets, or command argv.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "sourceSchema",
+    "sourceFreshnessSchema",
+    "status",
+    "installStatus",
+    "redactionStatus",
+    "version",
+    "freshness",
+    "pathPosture",
+    "target",
+    "permissions",
+    "updateSource",
+    "findingCounts",
+    "findings",
+    "redaction",
+    "summaryHash"
+  ],
+  "properties": {
+    "schema": {"const": "ee.support_bundle.install_freshness_summary.v1"},
+    "sourceSchema": {"const": "ee.install.check.v1"},
+    "sourceFreshnessSchema": {"const": "ee.install.freshness.v1"},
+    "status": {"const": "available"},
+    "installStatus": {
+      "type": "string",
+      "enum": ["ready", "blocked", "degraded", "idempotent"]
+    },
+    "redactionStatus": {
+      "const": "counts_versions_statuses_codes_hashes_redacted_text_no_raw_paths"
+    },
+    "version": {"$ref": "#/$defs/safeString"},
+    "freshness": {"$ref": "#/$defs/freshness"},
+    "pathPosture": {"$ref": "#/$defs/pathPosture"},
+    "target": {"$ref": "#/$defs/target"},
+    "permissions": {"$ref": "#/$defs/permissions"},
+    "updateSource": {"$ref": "#/$defs/updateSource"},
+    "findingCounts": {"$ref": "#/$defs/findingCounts"},
+    "findings": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"$ref": "#/$defs/finding"}
+    },
+    "redaction": {"$ref": "#/$defs/redaction"},
+    "summaryHash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^blake3:"
+    },
+    "safeString": {
+      "type": "string",
+      "maxLength": 1024,
+      "not": {
+        "anyOf": [
+          {"pattern": "BEGIN PRIVATE KEY"},
+          {"pattern": "BEGIN OPENSSH PRIVATE KEY"},
+          {"pattern": "ghp_[A-Za-z0-9_]+"},
+          {"pattern": "Bearer [A-Za-z0-9._-]+"},
+          {"pattern": "DATABASE_URL="},
+          {"pattern": "body_md"},
+          {"pattern": "raw mail body"},
+          {"pattern": "/Users/[^\\s]+"},
+          {"pattern": "/home/[^\\s]+"},
+          {"pattern": "/Volumes/[^\\s]+"},
+          {"pattern": "/private/[^\\s]+"}
+        ]
+      }
+    },
+    "nullableSafeString": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/safeString"}
+      ]
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "fresh",
+        "stale",
+        "unknown_source_version",
+        "unknown_installed_version",
+        "missing_required_surface",
+        "path_binary_missing",
+        "shadowed_binary"
+      ]
+    },
+    "pathStatus": {
+      "type": "string",
+      "enum": ["ok", "missing", "duplicate", "shadowed"]
+    },
+    "findingCode": {
+      "type": "string",
+      "enum": [
+        "artifact_checksum_mismatch",
+        "artifact_missing",
+        "binary_not_on_path",
+        "checksum_verification_pending",
+        "current_binary_shadowed",
+        "duplicate_path_binary",
+        "existing_unknown_file",
+        "installed_binary_stale",
+        "installed_version_unknown",
+        "path_binary_version_mismatch",
+        "required_surface_missing",
+        "install_dir_missing",
+        "install_dir_not_writable",
+        "duplicate_target",
+        "manifest_invalid",
+        "manifest_missing",
+        "no_artifacts",
+        "no_update_source_configured",
+        "offline_no_manifest",
+        "signature_missing",
+        "source_version_unknown",
+        "target_mismatch",
+        "unsupported_target",
+        "unsafe_artifact",
+        "unsafe_target_path",
+        "update_apply_unsupported",
+        "would_downgrade"
+      ]
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["info", "warning", "error"]
+    },
+    "versionEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "source", "status", "pathHash", "pathClass"],
+      "properties": {
+        "version": {"$ref": "#/$defs/nullableSafeString"},
+        "source": {"$ref": "#/$defs/safeString"},
+        "status": {"$ref": "#/$defs/safeString"},
+        "pathHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
+        "pathClass": {"$ref": "#/$defs/nullableSafeString"}
+      }
+    },
+    "freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verdict",
+        "authoritative",
+        "comparison",
+        "repair",
+        "sourceVersion",
+        "installedVersion",
+        "pathStatus",
+        "requiredSurfaces",
+        "missingRequiredSurfaces",
+        "blockingFindings"
+      ],
+      "properties": {
+        "verdict": {"$ref": "#/$defs/verdict"},
+        "authoritative": {"type": "boolean"},
+        "comparison": {"$ref": "#/$defs/safeString"},
+        "repair": {"$ref": "#/$defs/safeString"},
+        "sourceVersion": {"$ref": "#/$defs/versionEvidence"},
+        "installedVersion": {"$ref": "#/$defs/versionEvidence"},
+        "pathStatus": {"$ref": "#/$defs/pathStatus"},
+        "requiredSurfaces": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/safeString"}
+        },
+        "missingRequiredSurfaces": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/safeString"}
+        },
+        "blockingFindings": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/findingCode"}
+        }
+      }
+    },
+    "pathPosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "pathEntryCount",
+        "binaryCount",
+        "duplicateCount",
+        "currentBinaryOnPath",
+        "firstBinaryHash",
+        "currentBinaryPathHash",
+        "binaries"
+      ],
+      "properties": {
+        "status": {"$ref": "#/$defs/pathStatus"},
+        "pathEntryCount": {"type": "integer", "minimum": 0},
+        "binaryCount": {"type": "integer", "minimum": 0},
+        "duplicateCount": {"type": "integer", "minimum": 0},
+        "currentBinaryOnPath": {"type": "boolean"},
+        "firstBinaryHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
+        "currentBinaryPathHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
+        "binaries": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {"$ref": "#/$defs/pathBinary"}
+        }
+      }
+    },
+    "pathBinary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordinal",
+        "pathHash",
+        "isCurrentBinary",
+        "version",
+        "versionStatus"
+      ],
+      "properties": {
+        "ordinal": {"type": "integer", "minimum": 0},
+        "pathHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
+        "isCurrentBinary": {"type": "boolean"},
+        "version": {"$ref": "#/$defs/nullableSafeString"},
+        "versionStatus": {"$ref": "#/$defs/nullableSafeString"}
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "targetTriple",
+        "supported",
+        "binaryName",
+        "executableName",
+        "installDirHash",
+        "installPathHash"
+      ],
+      "properties": {
+        "targetTriple": {"$ref": "#/$defs/safeString"},
+        "supported": {"type": "boolean"},
+        "binaryName": {"$ref": "#/$defs/safeString"},
+        "executableName": {"$ref": "#/$defs/safeString"},
+        "installDirHash": {"$ref": "#/$defs/hash"},
+        "installPathHash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "exists", "writable", "installDirHash", "targetPathHash"],
+      "properties": {
+        "status": {
+          "enum": [
+            "writable",
+            "missing_parent_writable",
+            "missing_parent_unknown",
+            "not_writable"
+          ]
+        },
+        "exists": {"type": "boolean"},
+        "writable": {"type": "boolean"},
+        "installDirHash": {"$ref": "#/$defs/hash"},
+        "targetPathHash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "updateSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configured", "offline", "status", "sourceHash"],
+      "properties": {
+        "configured": {"type": "boolean"},
+        "offline": {"type": "boolean"},
+        "status": {"$ref": "#/$defs/safeString"},
+        "sourceHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        }
+      }
+    },
+    "findingCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "byCode", "bySeverity"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "byCode": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "bySeverity": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "nextAction"],
+      "properties": {
+        "code": {"$ref": "#/$defs/findingCode"},
+        "severity": {"$ref": "#/$defs/severity"},
+        "message": {"$ref": "#/$defs/safeString"},
+        "nextAction": {"$ref": "#/$defs/safeString"}
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rawPathEntriesIncluded",
+        "rawBinaryPathsIncluded",
+        "rawInstallTargetsIncluded",
+        "rawCommandArgvIncluded",
+        "hostPrivatePathsRedacted"
+      ],
+      "properties": {
+        "rawPathEntriesIncluded": {"const": false},
+        "rawBinaryPathsIncluded": {"const": false},
+        "rawInstallTargetsIncluded": {"const": false},
+        "rawCommandArgvIncluded": {"const": false},
+        "hostPrivatePathsRedacted": {"const": true}
+      }
+    }
+  }
+}

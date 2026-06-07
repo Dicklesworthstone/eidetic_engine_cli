@@ -79,6 +79,11 @@ and `install_finding:<code>`, while a fresh install check reports
 `install_check_is_not_claim_gate`. Fresh install evidence is necessary but not a
 claim ticket; run the work-packet claim gate afterward.
 
+Support bundles include `install_freshness_summary.json` with the same
+diagnostic posture in redaction-safe form: version/status/finding codes and
+hashed path references, never raw PATH entries, binary paths, install targets,
+or command argv.
+
 ## No-Local-Cargo Install Freshness
 
 When an agent sees a stale or missing `ee` command surface, it needs an

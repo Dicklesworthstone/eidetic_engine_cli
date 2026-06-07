@@ -55,6 +55,11 @@ check emits `install_check_is_not_claim_gate` because it is not a claim ticket:
 it only clears the binary-freshness precondition, then the normal work-packet
 claim gate must decide whether the Beads claim is safe.
 
+For handoffs and postmortems, support bundles persist the same posture in
+`install_freshness_summary.json`: a redaction-safe capsule of version status,
+PATH counts, finding codes, and hashed install/path references. Treat it as
+diagnostic evidence only, not as a Beads claim gate.
+
 For macOS adoption without local Cargo, follow
 [`docs/agent_integration.md`](../agent_integration.md#no-local-cargo-install-freshness).
 The approved path is read-only inspection and planning:
