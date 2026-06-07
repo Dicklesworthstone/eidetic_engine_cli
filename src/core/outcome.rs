@@ -3672,6 +3672,54 @@ pub fn compute_token_roi(inputs: &[TokenRoiBucketInput], min_samples: u32) -> To
     }
 }
 
+/// Default trailing-window size (most-recent outcome events) for regime-shift
+/// detection (bd-1n0np.13.2).
+pub const REGIME_SHIFT_TRAILING_WINDOW: usize = 20;
+
+/// A proposed — never auto-applied — demotion from regime-shift detection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegimeShiftProposal {
+    pub memory_id: String,
+    pub decision: &'static str,
+    pub trailing_event_count: usize,
+    pub trailing_harmful: usize,
+    pub trailing_helpful: usize,
+    pub statistic: f64,
+    /// True only when the trailing-window SPRT crosses the bad-source threshold.
+    /// The caller raises a demotion curation candidate; nothing is auto-demoted.
+    pub proposed_demotion: bool,
+}
+
+/// Detect a helpful→harmful regime shift for a memory over its TRAILING window
+/// of chronologically-ordered outcome observations (bd-1n0np.13.2). Reuses
+/// Wald's SPRT (`src/core/sprt.rs`) on the last `window` events so a rule that
+/// was historically helpful but flipped harmful after a toolchain/dependency
+/// upgrade is caught without the stale history masking it. It only PROPOSES a
+/// demotion curation candidate (`proposed_demotion`) when the recent regime
+/// crosses the bad-source threshold — it never mutates or auto-demotes. Thin
+/// windows yield `Continue` (no proposal), so it stays quiet until E2 supplies a
+/// dense outcome stream.
+#[must_use]
+pub fn detect_regime_shift(
+    memory_id: &str,
+    time_ordered_outcomes: &[SprtObservation],
+    window: usize,
+) -> RegimeShiftProposal {
+    let window = window.max(1);
+    let start = time_ordered_outcomes.len().saturating_sub(window);
+    let trailing = &time_ordered_outcomes[start..];
+    let evaluation = evaluate_sprt(trailing.iter().copied());
+    RegimeShiftProposal {
+        memory_id: memory_id.to_string(),
+        decision: evaluation.decision.as_str(),
+        trailing_event_count: evaluation.event_count,
+        trailing_harmful: evaluation.harmful_count,
+        trailing_helpful: evaluation.helpful_count,
+        statistic: evaluation.statistic,
+        proposed_demotion: matches!(evaluation.decision, SprtDecision::Quarantine),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -4105,6 +4153,44 @@ mod tests {
         let zero = first.buckets.iter().find(|b| b.key == "z").unwrap();
         assert!((zero.utility_per_1k_tokens - 0.0).abs() < 1e-12);
         assert!(zero.abstained);
+    }
+
+    #[test]
+    fn regime_shift_proposes_demotion_when_recent_window_flips_harmful() {
+        use crate::core::sprt::SprtObservation::{Harmful, Helpful};
+        // Long helpful history, then a recent harmful streak (post-upgrade flip).
+        let obs = [vec![Helpful; 30], vec![Harmful; 6]].concat();
+        let proposal = super::detect_regime_shift("mem_a", &obs, 6);
+        assert!(
+            proposal.proposed_demotion,
+            "the recent harmful regime crosses the SPRT bad-source threshold"
+        );
+        assert_eq!(proposal.decision, "quarantine");
+        assert_eq!(proposal.trailing_harmful, 6);
+        assert_eq!(proposal.trailing_helpful, 0);
+    }
+
+    #[test]
+    fn regime_shift_quiet_when_recent_window_still_helpful() {
+        use crate::core::sprt::SprtObservation::{Harmful, Helpful};
+        // Old harmful blip, since recovered — the trailing window is all helpful.
+        let obs = [vec![Harmful; 4], vec![Helpful; 20]].concat();
+        let proposal = super::detect_regime_shift("mem_b", &obs, 20);
+        assert!(!proposal.proposed_demotion);
+        assert_eq!(proposal.trailing_helpful, 20);
+    }
+
+    #[test]
+    fn regime_shift_stays_quiet_on_thin_window() {
+        use crate::core::sprt::SprtObservation::Harmful;
+        let obs = vec![Harmful, Harmful];
+        let proposal = super::detect_regime_shift("mem_c", &obs, 20);
+        assert!(
+            !proposal.proposed_demotion,
+            "two harmful events are below the SPRT bad-source threshold"
+        );
+        assert_eq!(proposal.decision, "continue");
+        assert_eq!(proposal.trailing_event_count, 2);
     }
 
     type TestResult = Result<(), String>;
