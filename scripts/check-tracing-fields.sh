@@ -122,6 +122,49 @@ cap_event_fields = {
 observability_manifest_rel = Path(
     "tests/fixtures/contracts/dueling_wizards_observability_no_silent_cap.json"
 )
+mesh_redaction_manifest_rel = Path(
+    "tests/fixtures/contracts/dueling_wizards_mesh_redaction.json"
+)
+
+mesh_material_lanes = {
+    "metadata",
+    "body",
+    "embedding",
+    "graphLink",
+    "revisionNotice",
+    "curationSignal",
+}
+mesh_redaction_classes = {"omit", "hash", "redact"}
+mesh_export_postures = {"deny", "redact"}
+mesh_anchor_forbidden_fields = {
+    "anchor_value",
+    "raw_anchor_value",
+    "raw_path",
+    "raw_symbol",
+    "raw_command",
+    "raw_schema",
+}
+mesh_peer_policy_anchors = {
+    "redaction",
+    "metadata",
+    "body",
+    "embedding",
+    "graphLink",
+    "revisionNotice",
+    "curationSignal",
+    "payloadExportAllowed",
+    "rawPayloadExportAllowed",
+    "redactedPayloadRequired",
+}
+mesh_share_preview_anchors = {
+    "SHARE_PREVIEW_SCHEMA_V1",
+    "SharePreviewCandidate",
+    "redaction_class",
+    "build_share_preview",
+    "share_preview_hash",
+    "scan_mesh_export_subjects",
+    "MESH_EXPORT_POLICY_ATTESTATION_SCHEMA_V1",
+}
 
 def as_set(values):
     return set(values or [])
@@ -394,6 +437,429 @@ def validate_observability_manifest(root_path, required):
         "violations": violations,
     }
 
+def read_manifest_json(root_path, rel_path, violations, label):
+    path = root_path / rel_path
+    if not path.exists():
+        add_manifest_violation(violations, f"missing {label} manifest", path=str(rel_path))
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        add_manifest_violation(
+            violations,
+            f"{label} manifest is not valid JSON",
+            path=str(rel_path),
+            detail=str(error),
+        )
+        return None
+
+def validate_mesh_redaction_manifest(root_path, required):
+    violations = []
+    manifest_path = root_path / mesh_redaction_manifest_rel
+    if not manifest_path.exists():
+        if required:
+            add_manifest_violation(
+                violations,
+                "missing dueling-wizards mesh redaction manifest",
+                path=str(mesh_redaction_manifest_rel),
+            )
+            status = "fail"
+        else:
+            status = "skipped"
+        return {
+            "schema": "ee.dueling_wizards.mesh_redaction_shell_check.v1",
+            "status": status,
+            "manifest": str(mesh_redaction_manifest_rel),
+            "violationCount": len(violations),
+            "violations": violations,
+        }
+
+    manifest = read_manifest_json(root_path, mesh_redaction_manifest_rel, violations, "dueling-wizards mesh redaction")
+    if manifest is None:
+        return {
+            "schema": "ee.dueling_wizards.mesh_redaction_shell_check.v1",
+            "status": "fail",
+            "manifest": str(mesh_redaction_manifest_rel),
+            "violationCount": len(violations),
+            "violations": violations,
+        }
+
+    expected_scalars = {
+        "schema": "ee.dueling_wizards.mesh_redaction.v1",
+        "initiativeBead": "bd-1n0np",
+        "gateBead": "bd-1n0np.23.4",
+        "manifestOwner": "tests/contracts/dueling_wizards_mesh_redaction.rs",
+        "doc": "docs/agent-ux/dueling-wizards-mesh-redaction.md",
+        "migrationRegistry": "tests/fixtures/contracts/dueling_wizards_migration_registry.json",
+        "peerPolicyDoc": "docs/mesh/peer_policy.md",
+        "sharePreviewSource": "src/policy/mod.rs",
+    }
+    for key, expected in expected_scalars.items():
+        if manifest.get(key) != expected:
+            add_manifest_violation(
+                violations,
+                "mesh redaction manifest scalar drifted",
+                field=key,
+                expected=expected,
+                actual=manifest.get(key),
+            )
+
+    policy = manifest.get("policy") or {}
+    for key in ["requiresPeerPolicy", "redactedPayloadRequiredWhenExportable", "rchProofRequiredForRustTests"]:
+        if policy.get(key) is not True:
+            add_manifest_violation(
+                violations,
+                "mesh redaction policy boolean must be true",
+                field=f"policy.{key}",
+                actual=policy.get(key),
+            )
+    for key in ["rawBodyExportAllowed", "rawEmbeddingExportAllowed", "payloadExportAllowed", "rawPayloadExportAllowed"]:
+        if policy.get(key) is not False:
+            add_manifest_violation(
+                violations,
+                "mesh redaction policy export boolean must be false",
+                field=f"policy.{key}",
+                actual=policy.get(key),
+            )
+    for key, expected in {
+        "defaultPosture": "conservative_omit_or_hash",
+        "localCargoProof": "invalid",
+    }.items():
+        if policy.get(key) != expected:
+            add_manifest_violation(
+                violations,
+                "mesh redaction policy scalar drifted",
+                field=f"policy.{key}",
+                expected=expected,
+                actual=policy.get(key),
+            )
+
+    expected_sets = {
+        "allowedMaterialLanes": mesh_material_lanes,
+        "allowedRedactionClasses": mesh_redaction_classes,
+        "allowedExportPostures": mesh_export_postures,
+    }
+    for key, expected in expected_sets.items():
+        actual = as_set(manifest.get(key))
+        if actual != expected:
+            add_manifest_violation(
+                violations,
+                "mesh redaction vocabulary set drifted",
+                field=key,
+                missing=sorted(expected - actual),
+                extra=sorted(actual - expected),
+            )
+
+    registry_rel = Path(manifest.get("migrationRegistry") or "")
+    registry = None
+    if registry_rel == Path(""):
+        add_manifest_violation(violations, "mesh redaction manifest missing migrationRegistry")
+    elif registry_rel != Path("tests/fixtures/contracts/dueling_wizards_migration_registry.json"):
+        add_manifest_violation(
+            violations,
+            "mesh redaction manifest points at unexpected migration registry",
+            actual=str(registry_rel),
+        )
+    else:
+        registry = read_manifest_json(root_path, registry_rel, violations, "dueling-wizards migration registry")
+
+    allocations_by_id = {}
+    planned_shape_by_id = {}
+    expected_asset_kinds = set()
+    if registry is not None:
+        for index, allocation in enumerate(registry.get("allocations") or []):
+            context = f"migrationRegistry.allocations[{index}]"
+            allocation_id = allocation.get("id")
+            backup_asset_kind = allocation.get("backupAssetKind")
+            owner_bead = allocation.get("ownerBead")
+            if not allocation_id or not backup_asset_kind or not owner_bead:
+                add_manifest_violation(
+                    violations,
+                    "migration allocation missing id, backupAssetKind, or ownerBead",
+                    context=context,
+                )
+                continue
+            allocations_by_id[allocation_id] = {
+                "backupAssetKind": backup_asset_kind,
+                "ownerBead": owner_bead,
+            }
+            expected_asset_kinds.add(backup_asset_kind)
+            if isinstance(allocation.get("plannedShape"), dict):
+                planned_shape_by_id[allocation_id] = allocation["plannedShape"]
+
+    field_class_by_asset_kind = {}
+    for index, field_class in enumerate(manifest.get("fieldClasses") or []):
+        context = f"fieldClasses[{index}]"
+        asset_kind = field_class.get("assetKind")
+        if not asset_kind:
+            add_manifest_violation(violations, "field class missing assetKind", context=context)
+            continue
+        if asset_kind in field_class_by_asset_kind:
+            add_manifest_violation(violations, "duplicate mesh redaction assetKind", assetKind=asset_kind)
+        field_class_by_asset_kind[asset_kind] = field_class
+
+        owner_beads = as_set(field_class.get("ownerBeads"))
+        allocation_ids = as_set(field_class.get("migrationAllocationIds"))
+        if not owner_beads or not allocation_ids:
+            add_manifest_violation(
+                violations,
+                "field class ownerBeads and migrationAllocationIds must be non-empty",
+                assetKind=asset_kind,
+            )
+        for allocation_id in allocation_ids:
+            allocation = allocations_by_id.get(allocation_id)
+            if allocation is None:
+                add_manifest_violation(
+                    violations,
+                    "field class references unknown migration allocation",
+                    assetKind=asset_kind,
+                    allocationId=allocation_id,
+                )
+                continue
+            if allocation["backupAssetKind"] != asset_kind:
+                add_manifest_violation(
+                    violations,
+                    "field class allocation belongs to another backup asset kind",
+                    assetKind=asset_kind,
+                    allocationId=allocation_id,
+                    actual=allocation["backupAssetKind"],
+                )
+            if allocation["ownerBead"] not in owner_beads:
+                add_manifest_violation(
+                    violations,
+                    "field class ownerBeads missing registry owner",
+                    assetKind=asset_kind,
+                    ownerBead=allocation["ownerBead"],
+                )
+
+        for key, allowed in {
+            "meshMaterialLane": mesh_material_lanes,
+            "defaultRedactionClass": mesh_redaction_classes,
+            "meshExportPosture": mesh_export_postures,
+            "sharePreviewClass": mesh_redaction_classes,
+        }.items():
+            actual = field_class.get(key)
+            if actual not in allowed:
+                add_manifest_violation(
+                    violations,
+                    "field class has unsupported mesh redaction vocabulary",
+                    assetKind=asset_kind,
+                    field=key,
+                    actual=actual,
+                )
+        if field_class.get("requiresPeerPolicy") is not True:
+            add_manifest_violation(violations, "field class requiresPeerPolicy must be true", assetKind=asset_kind)
+        for key in ["payloadExportAllowed", "rawPayloadExportAllowed", "rawBodyExportAllowed", "rawEmbeddingExportAllowed"]:
+            if field_class.get(key) is not False:
+                add_manifest_violation(
+                    violations,
+                    "field class export boolean must be false",
+                    assetKind=asset_kind,
+                    field=key,
+                    actual=field_class.get(key),
+                )
+
+        redaction_class = field_class.get("defaultRedactionClass")
+        export_posture = field_class.get("meshExportPosture")
+        share_preview_class = field_class.get("sharePreviewClass")
+        redacted_required = field_class.get("redactedPayloadRequired")
+        if redaction_class == "omit":
+            if export_posture != "deny" or share_preview_class != "omit" or redacted_required is not False:
+                add_manifest_violation(
+                    violations,
+                    "omit field classes must deny export, omit previews, and not require redacted payloads",
+                    assetKind=asset_kind,
+                )
+        elif redaction_class in {"hash", "redact"}:
+            if export_posture != "redact" or redacted_required is not True:
+                add_manifest_violation(
+                    violations,
+                    "hash/redact field classes must use redacted export posture and require redacted payloads",
+                    assetKind=asset_kind,
+                )
+        if not str(field_class.get("sourceValueHandling") or "").strip():
+            add_manifest_violation(violations, "field class sourceValueHandling must not be empty", assetKind=asset_kind)
+        if not str(field_class.get("reason") or "").strip():
+            add_manifest_violation(violations, "field class reason must not be empty", assetKind=asset_kind)
+
+    actual_asset_kinds = set(field_class_by_asset_kind)
+    if expected_asset_kinds and actual_asset_kinds != expected_asset_kinds:
+        add_manifest_violation(
+            violations,
+            "mesh redaction asset kind set drifted",
+            missing=sorted(expected_asset_kinds - actual_asset_kinds),
+            extra=sorted(actual_asset_kinds - expected_asset_kinds),
+        )
+
+    memory_anchor_class = field_class_by_asset_kind.get("memory_anchors")
+    if memory_anchor_class is None:
+        add_manifest_violation(violations, "mesh redaction manifest missing memory_anchors field class")
+    else:
+        contract = memory_anchor_class.get("anchorValueContract") or {}
+        if contract.get("rawAnchorValuesAllowed") is not False:
+            add_manifest_violation(violations, "memory_anchors raw anchor values must be forbidden")
+        for key, expected in {
+            "meshValueMaterialPolicy": "hash_or_redacted_anchor_value_only",
+            "sharePreviewValue": "hash_only",
+            "peerPolicyEscalation": "required_for_any_raw_value_or_payload_lane_change",
+        }.items():
+            if contract.get(key) != expected:
+                add_manifest_violation(
+                    violations,
+                    "memory_anchors anchorValueContract scalar drifted",
+                    field=key,
+                    expected=expected,
+                    actual=contract.get(key),
+                )
+        allowed_fields = as_set(contract.get("allowedValueFields"))
+        for required_field in ["anchor_value_hash", "redacted_anchor_value"]:
+            if required_field not in allowed_fields:
+                add_manifest_violation(
+                    violations,
+                    "memory_anchors allowedValueFields missing required field",
+                    field=required_field,
+                )
+        forbidden_fields = as_set(contract.get("forbiddenOutboundFields"))
+        for forbidden_field in mesh_anchor_forbidden_fields:
+            if forbidden_field not in forbidden_fields:
+                add_manifest_violation(
+                    violations,
+                    "memory_anchors forbiddenOutboundFields missing raw field",
+                    field=forbidden_field,
+                )
+            if forbidden_field in allowed_fields:
+                add_manifest_violation(
+                    violations,
+                    "memory_anchors allowedValueFields includes raw field",
+                    field=forbidden_field,
+                )
+        planned_shape = planned_shape_by_id.get("memory_anchors") or {}
+        for key, expected in {
+            "anchorValueStorage": "hash_required_raw_value_forbidden",
+            "meshExport": "redacted_or_hashed_values_only",
+        }.items():
+            if planned_shape.get(key) != expected:
+                add_manifest_violation(
+                    violations,
+                    "memory_anchors plannedShape scalar drifted",
+                    field=key,
+                    expected=expected,
+                    actual=planned_shape.get(key),
+                )
+
+    covered_redaction_classes = set()
+    covered_export_postures = set()
+    example_ids = set()
+    for index, example in enumerate(manifest.get("outboundDecisionExamples") or []):
+        context = f"outboundDecisionExamples[{index}]"
+        example_id = example.get("exampleId")
+        if not str(example_id or "").strip() or example_id in example_ids:
+            add_manifest_violation(violations, "outbound decision example id must be unique and non-empty", context=context)
+        example_ids.add(example_id)
+        asset_kind = example.get("assetKind")
+        field_class = field_class_by_asset_kind.get(asset_kind)
+        if field_class is None:
+            add_manifest_violation(violations, "outbound decision example references unknown assetKind", context=context, assetKind=asset_kind)
+            continue
+        if not str(example.get("requestedMaterial") or "").strip():
+            add_manifest_violation(violations, "outbound decision example requestedMaterial must not be empty", context=context)
+        for key in ["defaultRedactionClass", "meshExportPosture", "sharePreviewClass"]:
+            if example.get(key) != field_class.get(key):
+                add_manifest_violation(
+                    violations,
+                    "outbound decision example must match field class scalar",
+                    context=context,
+                    field=key,
+                    expected=field_class.get(key),
+                    actual=example.get(key),
+                )
+        for key in ["payloadExportAllowed", "rawPayloadExportAllowed", "rawBodyExportAllowed", "rawEmbeddingExportAllowed", "redactedPayloadRequired"]:
+            if example.get(key) != field_class.get(key):
+                add_manifest_violation(
+                    violations,
+                    "outbound decision example must match field class boolean",
+                    context=context,
+                    field=key,
+                    expected=field_class.get(key),
+                    actual=example.get(key),
+                )
+        for key in ["payloadExportAllowed", "rawPayloadExportAllowed", "rawBodyExportAllowed", "rawEmbeddingExportAllowed"]:
+            if example.get(key) is not False:
+                add_manifest_violation(
+                    violations,
+                    "outbound decision example export boolean must be false",
+                    context=context,
+                    field=key,
+                    actual=example.get(key),
+                )
+        redaction_class = example.get("defaultRedactionClass")
+        export_posture = example.get("meshExportPosture")
+        covered_redaction_classes.add(redaction_class)
+        covered_export_postures.add(export_posture)
+        decision = example.get("decision")
+        if decision == "deny":
+            if export_posture != "deny" or redaction_class != "omit" or example.get("redactedPayloadRequired") is not False:
+                add_manifest_violation(violations, "deny examples must omit, deny, and not require redacted payloads", context=context)
+        elif decision == "redact":
+            if export_posture != "redact" or example.get("redactedPayloadRequired") is not True:
+                add_manifest_violation(violations, "redact examples must require redacted export posture", context=context)
+        else:
+            add_manifest_violation(violations, "outbound decision example has unsupported decision", context=context, decision=decision)
+        if asset_kind == "memory_anchors":
+            contract = field_class.get("anchorValueContract") or {}
+            if example.get("peerPolicyEscalation") != contract.get("peerPolicyEscalation"):
+                add_manifest_violation(violations, "memory_anchors example peerPolicyEscalation drifted", context=context)
+
+    if covered_redaction_classes != mesh_redaction_classes:
+        add_manifest_violation(
+            violations,
+            "outbound decision examples must cover every redaction class",
+            missing=sorted(mesh_redaction_classes - covered_redaction_classes),
+            extra=sorted(covered_redaction_classes - mesh_redaction_classes),
+        )
+    if covered_export_postures != mesh_export_postures:
+        add_manifest_violation(
+            violations,
+            "outbound decision examples must cover every export posture",
+            missing=sorted(mesh_export_postures - covered_export_postures),
+            extra=sorted(covered_export_postures - mesh_export_postures),
+        )
+
+    for rel_path, anchors, label in [
+        (Path(manifest.get("peerPolicyDoc") or ""), mesh_peer_policy_anchors, "peer policy doc"),
+        (Path(manifest.get("sharePreviewSource") or ""), mesh_share_preview_anchors, "share preview source"),
+    ]:
+        if rel_path == Path(""):
+            add_manifest_violation(violations, f"mesh redaction manifest missing {label} path")
+            continue
+        target = root_path / rel_path
+        if not target.exists():
+            add_manifest_violation(violations, f"mesh redaction {label} is missing", path=str(rel_path))
+            continue
+        try:
+            text = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            add_manifest_violation(violations, f"mesh redaction {label} is not UTF-8", path=str(rel_path))
+            continue
+        for anchor in anchors:
+            if anchor not in text:
+                add_manifest_violation(
+                    violations,
+                    f"mesh redaction {label} missing required anchor",
+                    path=str(rel_path),
+                    anchor=anchor,
+                )
+
+    return {
+        "schema": "ee.dueling_wizards.mesh_redaction_shell_check.v1",
+        "status": "pass" if not violations else "fail",
+        "manifest": str(mesh_redaction_manifest_rel),
+        "fieldClassCount": len(field_class_by_asset_kind),
+        "outboundDecisionExampleCount": len(example_ids),
+        "violationCount": len(violations),
+        "violations": violations,
+    }
+
 def load_beads(path):
     beads = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -503,7 +969,12 @@ for bead in beads:
             })
 
 observability_report = validate_observability_manifest(root, manifest_required)
-total_violations = len(violations) + int(observability_report["violationCount"])
+mesh_redaction_report = validate_mesh_redaction_manifest(root, manifest_required)
+total_violations = (
+    len(violations)
+    + int(observability_report["violationCount"])
+    + int(mesh_redaction_report["violationCount"])
+)
 
 report = {
     "schema": "ee.tracing_field_report.v1",
@@ -513,6 +984,7 @@ report = {
     "requiredFields": required_fields,
     "standardPhases": sorted(phase_names),
     "duelingWizardsNoSilentCap": observability_report,
+    "duelingWizardsMeshRedaction": mesh_redaction_report,
     "violations": violations,
 }
 print(json.dumps(report, sort_keys=True, separators=(",", ":")))

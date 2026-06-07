@@ -3,6 +3,7 @@
 Bead: bd-1n0np.23.4
 Manifest: tests/fixtures/contracts/dueling_wizards_mesh_redaction.json
 Contract: tests/contracts/dueling_wizards_mesh_redaction.rs
+Shell gate: scripts/check-tracing-fields.sh
 
 This contract pins the mesh export posture for the new dueling-wizards storage
 surfaces before their schema migrations land. Each field class listed by the
@@ -19,6 +20,12 @@ The contract links three existing authority points:
   redaction postures.
 - `src/policy/mod.rs` owns share previews, mesh export secret scans, content
   hashing, and export policy attestations.
+
+`scripts/check-tracing-fields.sh` also validates the manifest as a
+build-independent gate and reports the result under
+`duelingWizardsMeshRedaction`. This shell gate is not a replacement for the
+Rust contract; it exists so manifest drift is caught during static review when
+RCH is blocked or a live checkout cannot compile.
 
 ## Field Classes
 
