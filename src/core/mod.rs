@@ -96,6 +96,7 @@ pub mod recorder;
 pub mod rehearse;
 pub mod repro;
 pub mod rule;
+pub mod sandbox;
 pub mod search;
 pub mod singleflight;
 pub mod situation;
