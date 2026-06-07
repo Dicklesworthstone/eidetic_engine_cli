@@ -372,6 +372,7 @@ fn stage_5_score(fixtures: &[RetrievalFixture]) -> Vec<ScoredFixture> {
                 redundancy: None,
                 anchor_match: None,
                 bead_affinity: None,
+                freshness_drift: None,
             };
             let score = SearchScoreComponents::from_signals(signals, config).final_score;
             (score > 0.0).then(|| ScoredFixture {

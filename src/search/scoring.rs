@@ -370,6 +370,10 @@ pub struct SearchScoringSignals {
     pub redundancy: Option<f32>,
     pub anchor_match: Option<f32>,
     pub bead_affinity: Option<f32>,
+    /// Code-coupled freshness state of the candidate's anchored symbol, if any
+    /// (bd-1n0np.3.7). `None` means unanchored or freshness unknown — a neutral
+    /// `1.0` multiplier, so existing callers are unaffected.
+    pub freshness_drift: Option<MemoryAnchorFreshnessState>,
 }
 
 impl SearchScoringSignals {
@@ -387,6 +391,7 @@ impl SearchScoringSignals {
             redundancy: None,
             anchor_match: None,
             bead_affinity: None,
+            freshness_drift: None,
         }
     }
 }
@@ -405,6 +410,7 @@ pub struct SearchScoreComponents {
     pub redundancy: f32,
     pub anchor_match: f32,
     pub bead_affinity: f32,
+    pub freshness_drift: f32,
     pub final_score: f32,
 }
 
@@ -437,6 +443,12 @@ impl SearchScoreComponents {
             + finite_unit(signals.graph_centrality.unwrap_or(0.0))
                 * finite_nonnegative(config.graph_centrality_weight);
         let redundancy = redundancy_multiplier(signals.redundancy, config.redundancy_lambda);
+        // Code-coupled freshness drift penalty (bd-1n0np.3.7): a drifted anchored
+        // memory ranks DOWN (never vanishes). `None` is neutral (1.0), so this is
+        // behavior-preserving for callers that do not supply a freshness state.
+        let freshness_drift = signals.freshness_drift.map_or(1.0, |state| {
+            freshness_drift_multiplier(state, DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR)
+        });
         let multiplicative_score = base
             * recency
             * confidence
@@ -445,7 +457,8 @@ impl SearchScoreComponents {
             * harmful_penalty
             * scope_match
             * graph_centrality
-            * redundancy;
+            * redundancy
+            * freshness_drift;
         let anchor_match_cap = finite_nonnegative(config.anchor_match_bias_cap.abs());
         let anchor_match = finite_signed(signals.anchor_match.unwrap_or(0.0))
             .clamp(-anchor_match_cap, anchor_match_cap);
@@ -466,6 +479,7 @@ impl SearchScoreComponents {
             redundancy,
             anchor_match,
             bead_affinity,
+            freshness_drift,
             final_score,
         }
     }
@@ -704,10 +718,12 @@ mod tests {
     use super::{
         AnchorMatchCandidateSignals, AnchorMatchContext, BeadAffinityCandidateSignals,
         BeadAffinityContext, DEFAULT_ANCHOR_MATCH_BIAS_CAP, DEFAULT_BEAD_AFFINITY_BIAS_CAP,
-        DEFAULT_GRAPH_CENTRALITY_WEIGHT, DEFAULT_RECENCY_TAU_DAYS, RetrievalMaturity,
-        SearchScoreComponents, SearchScoringConfig, SearchScoringSignals, SpeedMode,
-        anchor_match_score, bead_affinity_score, final_score,
+        DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR, DEFAULT_GRAPH_CENTRALITY_WEIGHT,
+        DEFAULT_RECENCY_TAU_DAYS, RetrievalMaturity, SearchScoreComponents, SearchScoringConfig,
+        SearchScoringSignals, SpeedMode, anchor_match_score, bead_affinity_score, final_score,
+        freshness_drift_multiplier,
     };
+    use crate::models::MemoryAnchorFreshnessState;
 
     fn assert_close(actual: f32, expected: f32) {
         assert!(
@@ -815,6 +831,7 @@ mod tests {
             redundancy: Some(0.25),
             anchor_match: Some(0.04),
             bead_affinity: Some(0.03),
+            freshness_drift: None,
         };
 
         let components = SearchScoreComponents::from_signals(signals, config);
@@ -862,6 +879,7 @@ mod tests {
                 redundancy: Some(9.0),
                 anchor_match: Some(f32::NAN),
                 bead_affinity: Some(f32::NAN),
+                freshness_drift: None,
             },
             config,
         );
@@ -925,6 +943,7 @@ mod tests {
                 redundancy: Some(1.0),
                 anchor_match: Some(DEFAULT_ANCHOR_MATCH_BIAS_CAP),
                 bead_affinity: Some(DEFAULT_BEAD_AFFINITY_BIAS_CAP),
+                freshness_drift: None,
             },
             config,
         );
@@ -1183,5 +1202,35 @@ mod tests {
         );
         let stale_neg = freshness_drift_multiplier(MemoryAnchorFreshnessState::Stale, -1.0);
         assert!((0.0..=1.0).contains(&stale_neg));
+    }
+
+    #[test]
+    fn from_signals_applies_freshness_drift_penalty() {
+        let config = SearchScoringConfig::default();
+        let base = SearchScoringSignals::new(1.0, RetrievalMaturity::Semantic);
+
+        // No freshness state is neutral, identical to an explicitly current one.
+        let neutral = SearchScoreComponents::from_signals(base, config);
+        assert_eq!(neutral.freshness_drift, 1.0);
+        let current = SearchScoreComponents::from_signals(
+            SearchScoringSignals {
+                freshness_drift: Some(MemoryAnchorFreshnessState::Current),
+                ..base
+            },
+            config,
+        );
+        assert_eq!(current.final_score, neutral.final_score);
+
+        // A stale anchored memory ranks DOWN to the floor but never vanishes.
+        let stale = SearchScoreComponents::from_signals(
+            SearchScoringSignals {
+                freshness_drift: Some(MemoryAnchorFreshnessState::Stale),
+                ..base
+            },
+            config,
+        );
+        assert_eq!(stale.freshness_drift, DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR);
+        assert!(stale.final_score < neutral.final_score);
+        assert!(stale.final_score > 0.0);
     }
 }
