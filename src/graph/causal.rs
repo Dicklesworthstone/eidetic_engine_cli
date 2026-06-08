@@ -519,6 +519,118 @@ pub fn causal_ancestry_ppr_seed_map(
     seed_map
 }
 
+/// Default hard ceiling on the additive causal-PPR boost any single memory
+/// receives (bd-1n0np.19.2), so a high PPR mass can never override the base
+/// frankensearch ordering.
+pub const DEFAULT_MAX_CAUSAL_BOOST: f64 = 0.25;
+
+/// Default minimum PPR score below which a candidate is treated as noise and is
+/// not boosted (so the seed never diffuses into noise).
+pub const DEFAULT_MIN_CAUSAL_PPR_SCORE: f64 = 1.0e-6;
+
+/// Configuration for the capped additive causal-PPR boost (bd-1n0np.19.2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CausalBoostConfig {
+    pub max_boost: f64,
+    pub min_ppr_score: f64,
+}
+
+impl Default for CausalBoostConfig {
+    fn default() -> Self {
+        Self {
+            max_boost: DEFAULT_MAX_CAUSAL_BOOST,
+            min_ppr_score: DEFAULT_MIN_CAUSAL_PPR_SCORE,
+        }
+    }
+}
+
+/// Whether the causal-PPR pre-warming boost was applied, and if not, why — never
+/// silent (bd-1n0np.19.2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CausalBoostStatus {
+    /// At least one candidate received a boost.
+    Applied,
+    /// No PPR scores were supplied (no reliable seeds) — a clean no-op.
+    SkippedNoSeeds,
+    /// PPR scores existed but all fell below the noise threshold — a clean no-op.
+    SkippedAllBelowThreshold,
+}
+
+impl CausalBoostStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::SkippedNoSeeds => "skipped_no_seeds",
+            Self::SkippedAllBelowThreshold => "skipped_all_below_threshold",
+        }
+    }
+}
+
+/// The capped additive boost map plus applied/skipped accounting.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CausalBoostResult {
+    pub status: CausalBoostStatus,
+    /// `memory_id -> additive boost` (each `<= max_boost`). Empty when skipped.
+    pub boosts: BTreeMap<String, f64>,
+    pub considered: usize,
+    pub boosted: usize,
+}
+
+/// Turn causal-ancestry PPR scores into a CAPPED ADDITIVE pre-warming boost
+/// (bd-1n0np.19.2). The base ranking stays frankensearch's; this only returns an
+/// additive boost per memory, normalized by the top PPR score and scaled to
+/// `max_boost` (the hard ceiling), so a high PPR mass can never override base
+/// retrieval. Candidates below `min_ppr_score` are not boosted (the seed never
+/// diffuses into noise). NO-OPs cleanly — empty scores or all-below-threshold —
+/// and reports applied-vs-skipped so the behavior is never silent. Deterministic.
+///
+/// The caller obtains `ppr_scores` from
+/// `graph::ppr::compute_personalized_pagerank_result(graph, seed_map)` over the
+/// seed map from [`causal_ancestry_ppr_seed_map`], then adds these boosts on top
+/// of the base ranking and cites the ancestry path in `why`/PackDna.
+#[must_use]
+pub fn compute_causal_ppr_boosts(
+    ppr_scores: &BTreeMap<String, f64>,
+    config: CausalBoostConfig,
+) -> CausalBoostResult {
+    if ppr_scores.is_empty() {
+        return CausalBoostResult {
+            status: CausalBoostStatus::SkippedNoSeeds,
+            boosts: BTreeMap::new(),
+            considered: 0,
+            boosted: 0,
+        };
+    }
+    let max_score = ppr_scores
+        .values()
+        .copied()
+        .filter(|score| score.is_finite())
+        .fold(0.0_f64, f64::max);
+    let mut boosts: BTreeMap<String, f64> = BTreeMap::new();
+    for (id, &score) in ppr_scores {
+        if !score.is_finite() || score < config.min_ppr_score || max_score <= 0.0 {
+            continue;
+        }
+        let normalized = (score / max_score).clamp(0.0, 1.0);
+        let boost = (normalized * config.max_boost).min(config.max_boost);
+        if boost > 0.0 {
+            boosts.insert(id.clone(), boost);
+        }
+    }
+    let status = if boosts.is_empty() {
+        CausalBoostStatus::SkippedAllBelowThreshold
+    } else {
+        CausalBoostStatus::Applied
+    };
+    CausalBoostResult {
+        status,
+        boosted: boosts.len(),
+        considered: ppr_scores.len(),
+        boosts,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,5 +1179,58 @@ mod tests {
             },
         );
         assert!(none.is_empty(), "max_seeds=0 expands nothing");
+    }
+
+    #[test]
+    fn causal_ppr_boosts_are_capped_and_top_score_hits_the_ceiling() {
+        let mut scores = BTreeMap::new();
+        scores.insert("top".to_owned(), 100.0);
+        scores.insert("mid".to_owned(), 50.0);
+        let result = compute_causal_ppr_boosts(&scores, CausalBoostConfig::default());
+        assert_eq!(result.status, CausalBoostStatus::Applied);
+        let cap = DEFAULT_MAX_CAUSAL_BOOST;
+        assert!(
+            (result.boosts["top"] - cap).abs() < 1e-9,
+            "top score hits the cap"
+        );
+        assert!(
+            (result.boosts["mid"] - cap * 0.5).abs() < 1e-9,
+            "mid is normalized to the top"
+        );
+        for boost in result.boosts.values() {
+            assert!(
+                *boost <= cap + 1e-9,
+                "no boost may exceed the cap (base ranking owns the order)"
+            );
+        }
+    }
+
+    #[test]
+    fn causal_ppr_boosts_no_op_cleanly_with_no_seeds_or_only_noise() {
+        let empty = compute_causal_ppr_boosts(&BTreeMap::new(), CausalBoostConfig::default());
+        assert_eq!(empty.status, CausalBoostStatus::SkippedNoSeeds);
+        assert!(empty.boosts.is_empty());
+
+        let mut noise = BTreeMap::new();
+        noise.insert("dust".to_owned(), 1.0e-9); // below min_ppr_score
+        let result = compute_causal_ppr_boosts(&noise, CausalBoostConfig::default());
+        assert_eq!(
+            result.status,
+            CausalBoostStatus::SkippedAllBelowThreshold,
+            "scores below the noise floor produce a clean no-op, not a silent boost"
+        );
+        assert!(result.boosts.is_empty());
+        assert_eq!(result.considered, 1);
+        assert_eq!(result.boosted, 0);
+    }
+
+    #[test]
+    fn causal_ppr_boosts_are_deterministic() {
+        let mut scores = BTreeMap::new();
+        scores.insert("a".to_owned(), 9.0);
+        scores.insert("b".to_owned(), 3.0);
+        let first = compute_causal_ppr_boosts(&scores, CausalBoostConfig::default());
+        let second = compute_causal_ppr_boosts(&scores, CausalBoostConfig::default());
+        assert_eq!(first, second);
     }
 }
