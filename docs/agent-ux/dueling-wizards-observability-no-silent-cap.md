@@ -124,6 +124,9 @@ coverage rows, and `rch_required_local_invalid` proof posture before runtime
 source exists. It gives review and CI a build-independent way to catch silent
 cap drift; once a subsystem is implemented, the corresponding source slice must
 still add real tracing/e2e evidence and RCH-backed runtime proof.
+The cross-cutting driver also asserts the checker schema, zero violation count,
+subsystem count, cap-operation count, and manifest policy/vocabulary/matrix
+invariants directly so a checker status bit cannot mask partial coverage.
 
 ## Implementation Rule
 

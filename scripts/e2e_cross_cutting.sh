@@ -201,7 +201,11 @@ run_static_capture checker_output checker_status \
     --bead __no_such_bead__ \
     --json
 assert_eq "$checker_status" "0" "tracing checker manifest-only invocation exits 0"
+assert_json "$checker_output" '.duelingWizardsNoSilentCap.schema' "ee.dueling_wizards.no_silent_cap_shell_check.v1" "no-silent-cap shell block schema is stable"
 assert_json "$checker_output" '.duelingWizardsNoSilentCap.status' "pass" "no-silent-cap shell block passes"
+assert_json "$checker_output" '.duelingWizardsNoSilentCap.violationCount' "0" "no-silent-cap shell block has no violations"
+assert_json "$checker_output" '.duelingWizardsNoSilentCap.subsystemCount' "8" "no-silent-cap shell block sees all subsystems"
+assert_json "$checker_output" '.duelingWizardsNoSilentCap.capOperationCount' "4" "no-silent-cap shell block sees all cap operations"
 assert_json "$checker_output" '.duelingWizardsMeshRedaction.status' "pass" "mesh-redaction shell block passes"
 assert_json "$checker_output" '.duelingWizardsMeshRedaction.violationCount' "0" "mesh-redaction shell block has no violations"
 
@@ -286,8 +290,24 @@ assert_jq_file "$WHY_PACKDNA_MANIFEST" \
     'all(.signalCoverageMatrix[]; .compatibility == "stable_additive" and .redactionStatus == "redaction_safe" and .degradedHandlingStatus == "degraded_not_silent" and .runtimeProofPolicy == "rch_required_local_invalid" and .complianceStatus == "planned_conformant" and .scoreMilli >= 950 and .divergent == 0)' \
     "why/PackDna coverage matrix keeps conservative proof posture"
 assert_jq_file "$OBSERVABILITY_MANIFEST" \
-    '.schema == "ee.dueling_wizards.observability_no_silent_cap.v1" and .policy.noSilentCapRequired == true' \
-    "observability manifest keeps no-silent-cap required"
+    '.schema == "ee.dueling_wizards.observability_no_silent_cap.v1" and .initiativeBead == "bd-1n0np" and .gateBead == "bd-1n0np.15.5" and .manifestOwner == "tests/contracts/dueling_wizards_observability_no_silent_cap.rs" and .doc == "docs/agent-ux/dueling-wizards-observability-no-silent-cap.md" and .implementationState == "planned_contract"' \
+    "observability manifest identity and owner are stable"
+assert_jq_file "$OBSERVABILITY_MANIFEST" \
+    '.policy.structuredTracingRequired == true and .policy.noSilentCapRequired == true and .policy.capEventCompatibility == "stable_additive" and .policy.missingCapEventBehavior == "degraded_not_silent" and .policy.localCargoProof == "invalid" and .policy.rchProofRequiredForRuntimeTests == true' \
+    "observability manifest keeps no-silent-cap and RCH-only proof policy"
+assert_jq_file "$OBSERVABILITY_MANIFEST" \
+    '(.requiredTraceFields | sort) == ["bead_id","degraded_codes","elapsed_ms","phase","request_id","surface","workspace_id"] and (.standardPhases | sort) == ["dependency_check","dispatch","input","persistence","response"] and (.capOperations | sort) == ["abstention","sampling","top_n","truncation"] and (.capEventFields | sort) == ["cap_kind","cap_limit","drop_reason","dropped_count","retained_count"]' \
+    "observability manifest shared trace and cap vocabularies are complete"
+assert_jq_file "$OBSERVABILITY_MANIFEST" \
+    '([.capEventExamples[].cap_kind] | sort) == ["abstention","sampling","top_n","truncation"] and ([.capEventExamples[].drop_reason] | sort) == ["fixture_sample_limit","ranked_output_limit","required_dependency_unavailable","token_budget_exceeded"] and all(.capEventExamples[]; .surface == "harness_contract" and (.phase | IN("dependency_check","persistence","response")) and (.dropped_count | type == "number" and . > 0) and (.cap_limit | type == "number") and (.retained_count | type == "number") and .retained_count <= .cap_limit and ((.drop_reason // "") | length > 0))' \
+    "observability cap-event examples cover all operations without silent drops"
+# shellcheck disable=SC2016
+assert_jq_file "$OBSERVABILITY_MANIFEST" \
+    '["evidence_harvester","anchors_freshness","error_recall","read_fence","write_immune","gap_honesty","contradiction_resolution","harness_contract"] as $subsystems | ["workspace_id","request_id","bead_id","surface","phase","elapsed_ms","degraded_codes"] as $trace | ["truncation","sampling","top_n","abstention"] as $ops | ["cap_kind","dropped_count","drop_reason","cap_limit","retained_count"] as $cap_fields | ([.subsystems[].id] | sort) == ($subsystems | sort) and all(.subsystems[]; .surface == .id and (.ownerBeads | index("bd-1n0np.15.5")) and ((.requiredTraceFields | sort) == ($trace | sort)) and ((.capOperations | sort) == ($ops | sort)) and ((.capEventFields | sort) == ($cap_fields | sort)) and (if .status == "implemented" then (.sourceAnchors | length) > 0 else true end))' \
+    "observability subsystems carry shared fields, cap vocabulary, owners, and anchors"
+assert_jq_file "$OBSERVABILITY_MANIFEST" \
+    'all(.subsystemCoverageMatrix[]; .traceFieldCount == 7 and .capOperationCount == 4 and .capEventFieldCount == 5 and .mustClauses == 10 and .tested == 10 and .passing == 10 and .divergent == 0 and .scoreMilli == 1000 and .traceStatus == "shared_fields_declared" and .capStatus == "no_silent_cap_declared" and .runtimeProofPolicy == "rch_required_local_invalid" and .complianceStatus == "declared_conformant" and (if .status == "implemented" then .anchorEvidenceStatus == "source_anchors_required" else .anchorEvidenceStatus == "planned_contract_only" end))' \
+    "observability subsystem coverage matrix is conformant and fail-visible"
 
 step "event-contract radar recognizes the cross-cutting driver"
 run_static_command \
