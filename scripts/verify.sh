@@ -47,6 +47,7 @@ set -euo pipefail
 #   4.5. Bridge Staleness      - advisory signal when CLOSE_THE_GAP_PLAN needs refresh
 #   4.59. Plan Drift Contract  - no-Cargo plan/bead fixture scanner self-test
 #   4.6. Plan Drift Advisory   - advisory plan_doc_section drift hints for Beads triage
+#   4.64. Tracing Field Contract - no-Cargo tracing manifest checker self-test
 #   4.65. Contract Drift Radar - advisory schema/docs/taxonomy drift scanner (bd-31nul.5)
 #   4.655. E2E Event Contract Radar Contract - no-Cargo golden report/schema harness
 #   4.66. E2E Event Contract Radar - advisory shell evidence coverage scanner (bd-2ljka.4)
@@ -905,6 +906,11 @@ run_stage "Plan Drift Contract" "./scripts/plan-drift.sh --self-test"
 # .plan-drift-report.json with BV-friendly warning hints for active
 # implements-surface beads whose plan_doc_section labels point at evolved text.
 run_stage "Plan Drift Advisory" "with_beads_read_locks ./scripts/plan-drift.sh --quiet"
+
+# Gate 3.79: Tracing field contract. This no-Cargo self-test validates the
+# synthetic checker path for Part II tracing declarations and dueling-wizards
+# observability manifests before later real-binary cross-cutting E2E coverage.
+run_stage "Tracing Field Contract" "./scripts/check-tracing-fields.sh --self-test"
 
 # Gate 3.8: Advisory contract-drift radar (bd-31nul.5). Cargo-free static
 # scan of current-facing agent docs for stale envelope versions, unknown
