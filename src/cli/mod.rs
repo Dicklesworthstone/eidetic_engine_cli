@@ -696,6 +696,8 @@ pub enum Command {
     /// Emit redaction-safe local provenance attestation bundles.
     #[command(subcommand)]
     Attest(AttestCommand),
+    /// Diagnose a tool error against the fingerprint recall store (error-recall).
+    DiagnoseError(DiagnoseErrorArgs),
     /// Create, verify, and inspect local backups.
     #[command(subcommand)]
     Backup(BackupCommand),
@@ -1156,6 +1158,29 @@ pub struct AttestQueryArgs {
     /// Query text to attest. The raw text is not exported.
     #[arg(value_name = "QUERY")]
     pub query: String,
+}
+
+/// Arguments for `ee diagnose-error`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct DiagnoseErrorArgs {
+    /// The tool that produced the failure: rustc | cargo | ee | rch | shell.
+    #[arg(long, value_name = "TOOL", default_value = "rustc")]
+    pub tool: String,
+    /// Structured error code when one exists (e.g. rustc `E0277`, an ee error code).
+    #[arg(long, value_name = "CODE")]
+    pub code: Option<String>,
+    /// Shell exit status when `--tool shell` (folded into the fingerprint).
+    #[arg(long, value_name = "N")]
+    pub exit_code: Option<i32>,
+    /// The raw diagnostic text. Masked before fingerprinting; never persisted raw.
+    #[arg(value_name = "MESSAGE")]
+    pub message: String,
+    /// Persist this error's fingerprint so future diagnoses recall it.
+    #[arg(long)]
+    pub record: bool,
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee artifact register`.
@@ -5233,6 +5258,10 @@ pub struct VerifyProvenanceArgs {
     /// Permit network-backed provenance resolvers when implemented.
     #[arg(long = "allow-network", action = ArgAction::SetTrue)]
     pub allow_network: bool,
+
+    /// Report planned demotion/revalidation writes without mutating the database.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -10719,6 +10748,7 @@ where
         Some(Command::Attest(ref attest_cmd)) => {
             handle_attest_command(&cli, attest_cmd, stdout, stderr)
         }
+        Some(Command::DiagnoseError(ref args)) => handle_diagnose_error(&cli, args, stdout, stderr),
         Some(Command::Backup(BackupCommand::Create(ref args))) => {
             handle_backup_create(&cli, args, stdout, stderr)
         }
@@ -38508,6 +38538,7 @@ where
         stale_after_days: args.stale_after_days,
         limit: args.limit,
         allow_network: args.allow_network,
+        dry_run: args.dry_run,
         now: chrono::Utc::now(),
     };
 
@@ -38566,7 +38597,20 @@ where
             "version".to_owned(),
             serde_json::Value::String(env!("CARGO_PKG_VERSION").to_owned()),
         );
-        object.insert("readOnly".to_owned(), serde_json::Value::Bool(true));
+        let durable_mutation = report.records.iter().any(|record| {
+            record
+                .mutation
+                .as_ref()
+                .is_some_and(|mutation| mutation.persisted)
+        });
+        object.insert(
+            "readOnly".to_owned(),
+            serde_json::Value::Bool(!durable_mutation),
+        );
+        object.insert(
+            "durableMutation".to_owned(),
+            serde_json::Value::Bool(durable_mutation),
+        );
     }
 
     match cli.renderer() {
@@ -38589,12 +38633,19 @@ where
 
 fn render_verify_provenance_human(report: &crate::core::verify::VerifyProvenanceReport) -> String {
     format!(
-        "verify provenance\n  Checked: {}\n  Verified: {}\n  Evidence missing: {}\n  Evidence drift: {}\n  Unverifiable: {}\n",
+        "verify provenance\n  Checked: {}\n  Verified: {}\n  Evidence missing: {}\n  Evidence drift: {}\n  Unverifiable: {}\n  Mutations: {} durable={}\n",
         report.checked_count,
         report.verified_count,
         report.evidence_missing_count,
         report.evidence_drift_count,
-        report.unverifiable_count
+        report.unverifiable_count,
+        report.mutation_count,
+        report.records.iter().any(|record| {
+            record
+                .mutation
+                .as_ref()
+                .is_some_and(|mutation| mutation.persisted)
+        })
     )
 }
 
@@ -39639,6 +39690,136 @@ where
     };
 
     write_attestation_bundle(cli, &bundle, stdout)
+}
+
+/// bd-1n0np.4.4 / 4.10: the public caller that makes the error-recall subsystem
+/// reachable. Canonicalizes a tool diagnostic (redaction happens inside the
+/// library — the raw message is never persisted), optionally records its
+/// fingerprint (`--record`), and reports whether this exact error class has been
+/// seen before via layered-key recall.
+fn handle_diagnose_error<W, E>(
+    cli: &Cli,
+    args: &DiagnoseErrorArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::error_recall::{
+        from_cargo, from_ee_error, from_rch_blocker, from_rustc, from_shell,
+    };
+
+    let canonical = match args.tool.as_str() {
+        "rustc" => from_rustc(args.code.as_deref(), &args.message),
+        "cargo" => from_cargo(args.code.as_deref(), &args.message),
+        "ee" => from_ee_error(args.code.as_deref().unwrap_or_default(), &args.message),
+        "rch" => from_rch_blocker(
+            args.code.as_deref().unwrap_or("blocker"),
+            "diagnose",
+            &args.message,
+        ),
+        "shell" => from_shell(args.exit_code.unwrap_or(1), &args.message),
+        other => {
+            return write_domain_error(
+                &DomainError::Usage {
+                    message: format!(
+                        "Unknown --tool '{other}'. Expected one of: rustc, cargo, ee, rch, shell."
+                    ),
+                    repair: Some("ee diagnose-error --help".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+
+    let connection = match open_attest_database(cli, args.database.as_deref()) {
+        Ok(connection) => connection,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let workspace_path = cli.resolve_workspace().to_string_lossy().into_owned();
+    let workspace_id = match connection.get_workspace_by_path(&workspace_path) {
+        Ok(Some(workspace)) => workspace.id,
+        Ok(None) => {
+            return write_domain_error(
+                &DomainError::Storage {
+                    message: format!("No workspace registered at {workspace_path}"),
+                    repair: Some("ee init --workspace . --json".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Storage {
+                    message: format!("Failed to query workspace row: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+
+    let mut recorded = false;
+    if args.record {
+        if let Err(error) = crate::core::error_diagnosis::record_error_fingerprint(
+            &connection,
+            &workspace_id,
+            &canonical,
+        ) {
+            return write_domain_error(
+                &DomainError::Storage {
+                    message: format!("Failed to record error fingerprint: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+        recorded = true;
+    }
+
+    let outcome = match crate::core::error_diagnosis::diagnose_error(
+        &connection,
+        &workspace_id,
+        &canonical,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Storage {
+                    message: format!("Failed to diagnose error: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": {
+            "schema": "ee.diagnose_error.v1",
+            "tool": canonical.tool.as_str(),
+            "fingerprintKey": outcome.fingerprint_key,
+            "layer": outcome.layer,
+            "isKnown": outcome.is_known(),
+            "recorded": recorded,
+        },
+        "degraded": [],
+    });
+    write_stdout(stdout, &(response.to_string() + "\n"))
 }
 
 fn open_attest_database(
@@ -52126,6 +52307,7 @@ impl NormalizedInvocation {
                     AttestCommand::Pack(_) => "attest pack".to_string(),
                     AttestCommand::Query(_) => "attest query".to_string(),
                 },
+                Command::DiagnoseError(_) => "diagnose-error".to_string(),
                 Command::Backup(backup) => match backup {
                     BackupCommand::Create(_) => "backup create".to_string(),
                     BackupCommand::List(_) => "backup list".to_string(),
@@ -57806,6 +57988,7 @@ mod tests {
             "--limit",
             "3",
             "--allow-network",
+            "--dry-run",
             "--json",
         ])
         .map(|cli| (cli.wants_json(), cli.command))
@@ -57821,7 +58004,8 @@ mod tests {
                 )?;
                 ensure_equal(&args.stale_after_days, &0, "stale-after-days")?;
                 ensure_equal(&args.limit, &3, "limit")?;
-                ensure(args.allow_network, "allow network")
+                ensure(args.allow_network, "allow network")?;
+                ensure(args.dry_run, "dry run")
             }
             other => Err(format!("expected verify provenance, got {other:?}")),
         }

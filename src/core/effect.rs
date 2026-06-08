@@ -1860,6 +1860,11 @@ impl EffectManifest {
     fn durable_write_commands() -> Vec<CommandEffect> {
         vec![
             CommandEffect::durable_write(
+                "diagnose-error",
+                vec!["error_fingerprints"],
+                "Diagnose a tool error against the fingerprint recall store; --record persists its fingerprint",
+            ),
+            CommandEffect::durable_write(
                 "bootstrap apply",
                 vec![
                     "curation_candidates",
