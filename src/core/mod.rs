@@ -119,6 +119,7 @@ pub mod swarm_next_action;
 pub mod symbol_graph;
 pub mod tailscale_probe;
 pub mod task_frame;
+pub mod trauma_guard;
 pub mod tripwire;
 pub mod verify;
 pub mod verify_ledger;

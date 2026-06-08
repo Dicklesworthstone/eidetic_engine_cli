@@ -1,0 +1,243 @@
+//! bd-1n0np.18.1 — trauma-guard bypass-evidence collector.
+//!
+//! The trauma guard (`core::preflight_guard`) already looks up risk / anti-pattern
+//! / failure memories for risky commands, but it never *learns* from how a human
+//! actually resolved a halt. This collector adds the **high-precision** signal
+//! only: when the guard policy-DENIED a preflight (`preflight.halt`) and a human
+//! then issued a one-shot bypass for the **exact same command** (`preflight.bypass`)
+//! shortly after, that correlation is audited evidence — so the guard's next
+//! prompt for that command class can be calmer + cited (reducing guard fatigue
+//! without weakening safety).
+//!
+//! This is the pure, deterministic correlator over explicit time windows; the
+//! caller loads the two audit-event streams (via
+//! `list_audit_by_action(PREFLIGHT_HALT/PREFLIGHT_BYPASS)`) and parses the
+//! `command_hash` + timestamp. Correlation is by EXACT `command_hash` only.
+//!
+//! EXPLICITLY OUT OF SCOPE (per the duel): the confound-prone
+//! "allowed-then-damaging" auto-detector. This module never infers harm from an
+//! allowed command — it only records the human-confirmed bypass of a denied one.
+
+use std::collections::BTreeMap;
+
+pub const TRAUMA_GUARD_BYPASS_EVIDENCE_SCHEMA_V1: &str = "ee.trauma_guard.bypass_evidence.v1";
+
+/// Default window: a bypass counts as resolving a halt only if it lands within
+/// this many seconds AFTER the halt (a human acting on the same denied command).
+pub const BYPASS_EVIDENCE_CORRELATION_WINDOW_SECONDS: i64 = 3_600;
+
+/// A policy-denied preflight (`preflight.halt` audit event).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreflightHaltEvent {
+    pub command_hash: String,
+    pub occurred_at_epoch: i64,
+}
+
+/// A one-shot human bypass (`preflight.bypass` audit event).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreflightBypassEvent {
+    pub command_hash: String,
+    pub occurred_at_epoch: i64,
+}
+
+/// Correlated bypass evidence for one exact command hash: how many policy-denied
+/// halts the human subsequently bypassed (within the window), and when the most
+/// recent such bypass occurred. The guard cites this to calm repeat prompts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandBypassEvidence {
+    pub command_hash: String,
+    /// Number of (halt -> human bypass within window) correlations for this hash.
+    pub correlated_bypass_count: u32,
+    /// Epoch of the most recent correlated bypass.
+    pub last_bypass_at_epoch: i64,
+}
+
+/// Correlate policy-denied halts with subsequent one-shot human bypasses for the
+/// EXACT same command hash (bd-1n0np.18.1).
+///
+/// Deterministic: events are grouped by `command_hash`; within each group, halts
+/// and bypasses are sorted by time and greedily matched — each halt consumes the
+/// earliest still-unused bypass at `t in [t_halt, t_halt + window]` (a one-shot
+/// resolution). Output is sorted by descending correlation count, then hash.
+/// A non-positive window or empty input yields no evidence.
+#[must_use]
+pub fn correlate_bypass_evidence(
+    halts: &[PreflightHaltEvent],
+    bypasses: &[PreflightBypassEvent],
+    window_seconds: i64,
+) -> Vec<CommandBypassEvidence> {
+    if window_seconds <= 0 || halts.is_empty() || bypasses.is_empty() {
+        return Vec::new();
+    }
+
+    // command hash -> (sorted halt times, sorted bypass times)
+    let mut halts_by_hash: BTreeMap<&str, Vec<i64>> = BTreeMap::new();
+    for halt in halts {
+        let hash = halt.command_hash.trim();
+        if !hash.is_empty() {
+            halts_by_hash
+                .entry(hash)
+                .or_default()
+                .push(halt.occurred_at_epoch);
+        }
+    }
+    let mut bypasses_by_hash: BTreeMap<&str, Vec<i64>> = BTreeMap::new();
+    for bypass in bypasses {
+        let hash = bypass.command_hash.trim();
+        if !hash.is_empty() {
+            bypasses_by_hash
+                .entry(hash)
+                .or_default()
+                .push(bypass.occurred_at_epoch);
+        }
+    }
+
+    let mut evidence: Vec<CommandBypassEvidence> = Vec::new();
+    for (hash, halt_times) in halts_by_hash {
+        let Some(bypass_times) = bypasses_by_hash.get(hash) else {
+            continue;
+        };
+        let mut halt_times = halt_times;
+        halt_times.sort_unstable();
+        let mut bypass_times = bypass_times.clone();
+        bypass_times.sort_unstable();
+
+        let mut used = vec![false; bypass_times.len()];
+        let mut count = 0_u32;
+        let mut last_bypass = i64::MIN;
+        for halt_at in halt_times {
+            // earliest unused bypass at or after the halt, within the window.
+            for (index, &bypass_at) in bypass_times.iter().enumerate() {
+                if used[index] || bypass_at < halt_at {
+                    continue;
+                }
+                if bypass_at > halt_at.saturating_add(window_seconds) {
+                    break; // sorted: no later bypass can be in-window either.
+                }
+                used[index] = true;
+                count = count.saturating_add(1);
+                last_bypass = last_bypass.max(bypass_at);
+                break;
+            }
+        }
+        if count > 0 {
+            evidence.push(CommandBypassEvidence {
+                command_hash: hash.to_string(),
+                correlated_bypass_count: count,
+                last_bypass_at_epoch: last_bypass,
+            });
+        }
+    }
+
+    evidence.sort_by(|left, right| {
+        right
+            .correlated_bypass_count
+            .cmp(&left.correlated_bypass_count)
+            .then_with(|| left.command_hash.cmp(&right.command_hash))
+    });
+    evidence
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BYPASS_EVIDENCE_CORRELATION_WINDOW_SECONDS, PreflightBypassEvent, PreflightHaltEvent,
+        correlate_bypass_evidence,
+    };
+
+    fn halt(hash: &str, at: i64) -> PreflightHaltEvent {
+        PreflightHaltEvent {
+            command_hash: hash.to_string(),
+            occurred_at_epoch: at,
+        }
+    }
+
+    fn bypass(hash: &str, at: i64) -> PreflightBypassEvent {
+        PreflightBypassEvent {
+            command_hash: hash.to_string(),
+            occurred_at_epoch: at,
+        }
+    }
+
+    #[test]
+    fn correlates_halt_with_subsequent_exact_command_bypass() {
+        let halts = vec![halt("blake3:cmd_a", 1_000)];
+        let bypasses = vec![bypass("blake3:cmd_a", 1_500)];
+        let evidence = correlate_bypass_evidence(
+            &halts,
+            &bypasses,
+            BYPASS_EVIDENCE_CORRELATION_WINDOW_SECONDS,
+        );
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].command_hash, "blake3:cmd_a");
+        assert_eq!(evidence[0].correlated_bypass_count, 1);
+        assert_eq!(evidence[0].last_bypass_at_epoch, 1_500);
+    }
+
+    #[test]
+    fn does_not_correlate_different_command_or_bypass_before_halt() {
+        let halts = vec![halt("blake3:cmd_a", 1_000)];
+        // Bypass is for a DIFFERENT command, and another is BEFORE the halt.
+        let bypasses = vec![bypass("blake3:cmd_b", 1_500), bypass("blake3:cmd_a", 900)];
+        let evidence = correlate_bypass_evidence(
+            &halts,
+            &bypasses,
+            BYPASS_EVIDENCE_CORRELATION_WINDOW_SECONDS,
+        );
+        assert!(
+            evidence.is_empty(),
+            "only an exact-command bypass AFTER the halt counts"
+        );
+    }
+
+    #[test]
+    fn bypass_outside_window_is_not_correlated() {
+        let halts = vec![halt("blake3:cmd_a", 1_000)];
+        let bypasses = vec![bypass("blake3:cmd_a", 1_000 + 10_000)];
+        let evidence = correlate_bypass_evidence(&halts, &bypasses, 3_600);
+        assert!(
+            evidence.is_empty(),
+            "a bypass past the window does not count"
+        );
+    }
+
+    #[test]
+    fn one_shot_each_bypass_resolves_at_most_one_halt() {
+        // Two halts for the same command, only one in-window bypass -> count 1.
+        let halts = vec![halt("blake3:cmd_a", 1_000), halt("blake3:cmd_a", 1_100)];
+        let bypasses = vec![bypass("blake3:cmd_a", 1_200)];
+        let evidence = correlate_bypass_evidence(&halts, &bypasses, 3_600);
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].correlated_bypass_count, 1);
+    }
+
+    #[test]
+    fn evidence_is_deterministic_and_ranked() {
+        let halts = vec![
+            halt("blake3:rare", 1_000),
+            halt("blake3:common", 1_000),
+            halt("blake3:common", 2_000),
+        ];
+        let bypasses = vec![
+            bypass("blake3:rare", 1_100),
+            bypass("blake3:common", 1_100),
+            bypass("blake3:common", 2_100),
+        ];
+        let mut reversed_halts = halts.clone();
+        reversed_halts.reverse();
+        let first = correlate_bypass_evidence(&halts, &bypasses, 3_600);
+        let second = correlate_bypass_evidence(&reversed_halts, &bypasses, 3_600);
+        assert_eq!(first, second, "correlation is independent of input order");
+        // `common` (2 correlations) outranks `rare` (1).
+        assert_eq!(first[0].command_hash, "blake3:common");
+        assert_eq!(first[0].correlated_bypass_count, 2);
+        assert_eq!(first[1].command_hash, "blake3:rare");
+    }
+
+    #[test]
+    fn non_positive_window_yields_no_evidence() {
+        let halts = vec![halt("blake3:cmd_a", 1_000)];
+        let bypasses = vec![bypass("blake3:cmd_a", 1_100)];
+        assert!(correlate_bypass_evidence(&halts, &bypasses, 0).is_empty());
+    }
+}
