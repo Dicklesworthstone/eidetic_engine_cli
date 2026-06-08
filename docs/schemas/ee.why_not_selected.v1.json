@@ -46,6 +46,7 @@
         "omitted_by_token_budget",
         "omitted_by_redundancy",
         "omitted_by_score_floor",
+        "contradiction_suppressed",
         "excluded_by_scope",
         "excluded_by_redaction",
         "excluded_by_validity_window",

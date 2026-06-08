@@ -1676,8 +1676,9 @@ pub fn explain_why_not(
             )
         })
         .collect();
-    let input = WhyNotSelectedInput::new(options.query.clone(), target, budget, profile, candidates)
-        .with_degraded(why_not_degraded);
+    let input =
+        WhyNotSelectedInput::new(options.query.clone(), target, budget, profile, candidates)
+            .with_degraded(why_not_degraded);
     explain_why_not_selected(input).map_err(|error| ContextPackError::Pack(error.to_string()))
 }
 

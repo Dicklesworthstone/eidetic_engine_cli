@@ -2046,6 +2046,16 @@ impl PackDraft {
             }
         }
         self.items = kept;
+        self.used_tokens = self
+            .items
+            .iter()
+            .map(|item| item.estimated_tokens)
+            .sum::<u32>();
+        self.selection_audit.selected_count = self.items.len();
+        self.selection_audit.omitted_count = self.omitted.len();
+        self.selection_audit.budget_used = self.used_tokens;
+        self.selection_audit.selected_items = selected_items_from_draft_items(&self.items);
+        self.hash = None;
         count
     }
 
@@ -8494,6 +8504,87 @@ mod tests {
             .iter()
             .find(|item| item.memory_id == memory_id)
             .ok_or_else(|| format!("expected selected item for memory {memory_id}"))
+    }
+
+    #[test]
+    fn contradiction_guard_updates_pack_accounting_and_clears_hash() -> TestResult {
+        let candidates = vec![
+            candidate_with_content(
+                1,
+                0.95,
+                0.8,
+                30,
+                "network retries must retry transient failures exactly three times",
+            )?,
+            candidate_with_content(
+                2,
+                0.94,
+                0.8,
+                20,
+                "network retries must never retry transient failures",
+            )?,
+            candidate_with_content(3, 0.7, 0.5, 10, "keep release notes concise")?,
+        ];
+        let mut draft = assemble_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "network retry policy",
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?,
+            candidates,
+        )
+        .map_err(|error| format!("draft assembly failed: {error:?}"))?;
+        ensure_equal(&draft.items.len(), &3, "fixture selected all candidates")?;
+        draft.hash = Some("stale_hash_before_guard".to_owned());
+
+        let suppressed = draft.apply_contradiction_guard(
+            &[(memory_id(1).to_string(), memory_id(2).to_string())],
+            false,
+        );
+
+        ensure_equal(&suppressed, &1, "one contradiction side suppressed")?;
+        ensure_equal(&draft.items.len(), &2, "selected item count after guard")?;
+        ensure_equal(&draft.omitted.len(), &1, "omitted item count after guard")?;
+        ensure(
+            draft
+                .items
+                .iter()
+                .filter(|item| item.memory_id == memory_id(1) || item.memory_id == memory_id(2))
+                .count()
+                == 1,
+            "pack retains exactly one side of the unresolved contradiction",
+        )?;
+        ensure_equal(
+            &draft.omitted.first().map(|omission| omission.reason),
+            &Some(PackOmissionReason::ContradictionSuppressed),
+            "omission reason",
+        )?;
+        let selected_token_sum = draft
+            .items
+            .iter()
+            .map(|item| item.estimated_tokens)
+            .sum::<u32>();
+        ensure_equal(&draft.used_tokens, &selected_token_sum, "used token accounting")?;
+        ensure_equal(
+            &draft.selection_audit.selected_count,
+            &draft.items.len(),
+            "audit selected count",
+        )?;
+        ensure_equal(
+            &draft.selection_audit.omitted_count,
+            &draft.omitted.len(),
+            "audit omitted count",
+        )?;
+        ensure_equal(
+            &draft.selection_audit.budget_used,
+            &draft.used_tokens,
+            "audit budget used",
+        )?;
+        ensure_equal(
+            &draft.selection_audit.selected_items.len(),
+            &draft.items.len(),
+            "audit selected items",
+        )?;
+        ensure_equal(&draft.hash, &None, "guard clears stale pack hash")?;
+        Ok(())
     }
 
     #[test]
