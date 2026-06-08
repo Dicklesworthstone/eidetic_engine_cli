@@ -287,7 +287,7 @@ when the applied candidate, audit row, and derived memory agree, `curate apply`
 returns the existing applied result. Missing, duplicate, or mismatched replay
 evidence is classified under the `create_derived_replay_*` conflict codes above.
 
-#### Search and pack quality (54)
+#### Search and pack quality (56)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
 | `adaptive_backoff_applied` | low | bd-16pwc.2 (SRR5) |
@@ -331,6 +331,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `swarm_scale_budget_exceeded` | warning | bd-1zb7k.8 (S7) |
 | `swarm_scale_nondeterminism` | high | bd-1zb7k.8 (S7) |
 | `profile_search_limit_capped` | low | bd-17c65.2.4 (B7) |
+| `recent_hours_window_clamped` | warning | bd-1idcb (G) |
 | `scope_agent_unavailable` | warning | bd-17c65.10.6 (J6) |
 | `scope_excluded_evidence` | low | bd-17c65.10.6 (J6) |
 | `scope_metadata_unavailable` | medium | bd-17c65.10.6 (J6) |
@@ -363,6 +364,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `host_calibration_unavailable` | warning | bd-1zb7k.12.3.4 (H3.4) |
 | `perf_latency_evidence_missing` | medium | bd-1zb7k.11 (P) |
 | `perf_latency_evidence_partial` | warning | bd-1zb7k.11 (P) |
+| `task_frame_intersect_empty` | info | bd-1idcb (G) |
 | `l2_pack_cache_corruption` | low | (TBD) |
 | `l2_pack_cache_unavailable` | low | (TBD) |
 | `source_unparsable` | medium | (TBD) |
@@ -706,7 +708,7 @@ by the wiring slices under bd-21xbi; see
 | `lexical_ram_tier_disabled` | info | bd-1hvzh (bd-21xbi scaffold) |
 | `lexical_ram_unavailable_on_macos` | info | bd-21xbi.2 |
 
-#### Daemon UDS RPC (7 — response_time)
+#### Daemon UDS RPC (9 — response_time)
 
 The `ee daemon` hot-mode UDS RPC skeleton (bd-oja31 / SRR1) emits most of
 these codes from the per-connection dispatcher (`src/daemon/server.rs`) and
@@ -728,6 +730,8 @@ dispatch executes the canonical pack path instead.
 | `daemon_method_unauthorized` | high | bd-3mbao |
 | `daemon_request_decode_failed` | medium | bd-oja31 |
 | `daemon_request_schema_mismatch` | medium | bd-oja31 |
+| `daemon_setsockopt_failed` | high | bd-3pnno (SRR1) |
+| `daemon_shutting_down` | medium | bd-36dp2 (SRR1) |
 | `daemon_socket_unavailable` | info | bd-oja31 (bd-1feff emission wiring) |
 | `daemon_unknown_method` | medium | bd-oja31 |
 
