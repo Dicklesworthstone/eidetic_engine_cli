@@ -1644,6 +1644,12 @@ pub fn explain_why_not(
     // Locate the target among the real candidate pool (authoritative path). When
     // it never reached the pool, reconstruct a not-retrieved candidate so scores
     // still render and the library reports reason_source=reconstructed.
+    // bd-1n0np.1.9: when the target was filtered out of the candidate pool,
+    // classify *why* by re-running the SAME candidate filters the pack applies
+    // (see candidates_from_search_with_metrics) against the target memory, so a
+    // memory dropped by tag/validity/trust/redaction reports the authoritative
+    // `excluded_by_*` reason instead of collapsing into a bare `not_retrieved`.
+    let mut why_not_exclusions: Vec<crate::pack::WhyNotSelectionExclusion> = Vec::new();
     let target = match candidates
         .iter()
         .find(|candidate| candidate.memory_id == target_memory_id)
@@ -1651,6 +1657,63 @@ pub fn explain_why_not(
     {
         Some(candidate) => candidate,
         None => {
+            let classify_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+            if let Ok(Some(target_memory)) =
+                classify_connection.get_memory(&target_memory_id.to_string())
+            {
+                let target_tags = classify_connection
+                    .get_memory_tags(&target_memory.id)
+                    .unwrap_or_default();
+                if !effective_filters.tags.is_empty()
+                    && !effective_filters.matches_tags(&target_tags)
+                {
+                    why_not_exclusions.push(crate::pack::WhyNotSelectionExclusion::new(
+                        crate::pack::WhyNotSelectionExclusionKind::Filter,
+                        "excluded_by_tag_filter",
+                        "The memory did not match the requested tag filter.",
+                        None,
+                    ));
+                }
+                if !effective_filters.temporal.is_empty()
+                    && matches!(
+                        temporal_memory_outcome(&target_memory, &effective_filters.temporal),
+                        TemporalCandidateOutcome::Exclude
+                    )
+                {
+                    why_not_exclusions.push(crate::pack::WhyNotSelectionExclusion::new(
+                        crate::pack::WhyNotSelectionExclusionKind::ValidityWindow,
+                        "excluded_by_validity_window",
+                        "The memory fell outside the requested temporal validity window.",
+                        None,
+                    ));
+                }
+                if !effective_filters.trust.is_empty()
+                    && !effective_filters.trust.matches(
+                        &target_memory.trust_class,
+                        posture_for_trust_class(&target_memory.trust_class),
+                    )
+                {
+                    why_not_exclusions.push(crate::pack::WhyNotSelectionExclusion::new(
+                        crate::pack::WhyNotSelectionExclusionKind::Filter,
+                        "excluded_by_trust_filter",
+                        "The memory's trust class did not match the requested trust filter.",
+                        None,
+                    ));
+                }
+                if !effective_filters.redaction.allow_categories.is_empty()
+                    && !redaction_allow_categories(
+                        &target_memory.content,
+                        &effective_filters.redaction,
+                    )
+                {
+                    why_not_exclusions.push(crate::pack::WhyNotSelectionExclusion::new(
+                        crate::pack::WhyNotSelectionExclusionKind::Redaction,
+                        "excluded_by_redaction",
+                        "The memory was withheld by the redaction allow-category filter.",
+                        None,
+                    ));
+                }
+            }
             let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
             reconstruct_not_retrieved_candidate(
                 read_connection,
@@ -1680,7 +1743,8 @@ pub fn explain_why_not(
         .collect();
     let input =
         WhyNotSelectedInput::new(options.query.clone(), target, budget, profile, candidates)
-            .with_degraded(why_not_degraded);
+            .with_degraded(why_not_degraded)
+            .with_exclusions(why_not_exclusions);
     explain_why_not_selected(input).map_err(|error| ContextPackError::Pack(error.to_string()))
 }
 
