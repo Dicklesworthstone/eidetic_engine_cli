@@ -112,6 +112,9 @@ Operator loop:
 4. Record whether the diagnosis helped or misled. If the capsule abstains, file
    a follow-up bead for the missing artifact class instead of promoting a weak
    hypothesis.
+5. If Beads is not authoritative because the export is stale, reserved, or
+   merge-artifact contaminated, send the outcome record through Agent Mail or a
+   handoff note and leave tracker mutation for a later clean claim gate.
 
 `ee regress explain` reads explicit JSON artifacts, hashes their contents, and
 normalizes them into redaction-safe evidence rows. It does not open the ee
@@ -137,6 +140,26 @@ The record should name the capsule artifact hash, top hypothesis code, evidence
 refs inspected, command hashes for follow-up probes, and the next owner. Do not
 paste raw stdout, stderr, mail bodies, memory bodies, private paths, or secret
 scan hits into the note.
+
+Closeout template:
+
+```text
+regression causality outcome for <surface>:
+- capsule: schema=ee.regression_causality.v1 artifact_hash=<hash>
+- top_hypothesis: <code> confidence=<confidence> authoritative=false
+- evidence_refs_inspected: <ids or hashes>
+- follow_up_commands: <read-only command hashes or none>
+- outcome: confirmed|misled|abstained|environment_blocked
+- next_owner: <source|fixture|tracker|environment|support|unknown>
+- tracker_posture: authoritative|mail_handoff_only
+- note: no raw logs, mail bodies, memory bodies, private paths, or source bead
+  closeout from an abstaining or remote-source-unknown capsule
+```
+
+Use `confirmed` only after later evidence proves the owner. Use
+`environment_blocked` when the follow-up command stopped before source
+verification, and preserve the exact RCH or admission blocker string. Use
+`mail_handoff_only` whenever the live tracker is not safe to mutate.
 
 ## Abstention and Follow-Up Beads
 

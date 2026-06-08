@@ -110,6 +110,13 @@ announce the exception in Agent Mail, and leave Beads mutation for the holder of
 unblock documentation or triage, but it is not source/test proof and must not be
 reported as a successful claim.
 
+When the packet, Beads/BV history, RCH proof, support-bundle summary, or E2E
+radar artifacts disagree about why a gate failed, use
+[`regression-causality.md`](regression-causality.md) to build an
+`ee.regression_causality.v1` capsule from those read-only artifacts. The capsule
+may justify a follow-up bead or Agent Mail handoff, but it does not make an
+unsafe claim gate safe and must not drive a Beads claim command.
+
 ## Agent Mail Snapshot Bridge
 
 Use this bridge only when the claim gate fails closed because Agent Mail

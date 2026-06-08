@@ -200,6 +200,7 @@ regression detected?
 | Condition | Escalation |
 |-----------|------------|
 | Unknown regression cause | Run `ee explain-performance` |
+| Perf evidence disagrees with replay, RCH, or support-bundle evidence | Build an `ee.regression_causality.v1` capsule with `ee regress explain` and `perf_report=<artifact>` |
 | Need profiler data | Attach `perf record` or flamegraph |
 | Need full bundle | Generate `ee support bundle` |
 | Cross-service impact | File regression issue with owner hints |
@@ -303,6 +304,7 @@ ee perf budget check --profile swarm --report swarm_artifact.json --json
 | `ee bench smoke` | Generate benchmark artifact |
 | `ee profile config plan` | View current profile configuration |
 | `ee support bundle` | Generate full support bundle |
+| `ee regress explain` | Compare perf, replay, RCH, tracker, and support evidence without treating a hypothesis as proof |
 
 ### Tested scenarios
 
@@ -317,5 +319,6 @@ These scenarios are covered by automated tests:
 | Schema | Description |
 |--------|-------------|
 | `ee.perf.artifact_summary.v1` | Normalized performance artifact |
+| `ee.regression_causality.v1` | Redaction-safe capsule for ranking cross-artifact regression leads |
 | `ee.response.v2` | Standard response envelope |
 | `ee.error.v2` | Error response envelope |

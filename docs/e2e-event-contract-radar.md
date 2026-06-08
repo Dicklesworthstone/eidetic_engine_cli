@@ -107,6 +107,22 @@ the stale-binary error explicitly. Refreshing the binary or running Rust tests
 must go through RCH; local Cargo fallback is not acceptable proof on the Mac dev
 host.
 
+When a radar row, smoke artifact, degraded fixture, and RCH proof disagree about
+the owner, package the existing structured artifacts into
+`ee regress explain --json`:
+
+```bash
+ee regress explain \
+  --from e2e_event_log=.e2e-event-contract-radar-report.json \
+  --from degraded_fixture=tests/fixtures/failure_modes/<code>.json \
+  --surface e2e_gate \
+  --json
+```
+
+The resulting `ee.regression_causality.v1` capsule can support a closeout note
+or follow-up bead, but a ranked hypothesis is not proof that the script, source,
+fixture, or environment is the owner.
+
 ## Reading Verdicts
 
 Use the row status to choose the next action:
@@ -221,5 +237,8 @@ negative fixture still exercises the closed-object contract.
 - `docs/agent-ux/swarm-replay-contracts.md` and
   `docs/agent-ux/workload-replay.md` describe the replay smoke that motivated
   the first remediation pass.
+- `docs/agent-ux/regression-causality.md` describes when to combine radar,
+  fixture, RCH, replay, and tracker artifacts into a redaction-safe diagnostic
+  capsule.
 - `docs/testing-strategy.md` defines closeout expectations for code, behavior,
   docs-only, and shell E2E work.

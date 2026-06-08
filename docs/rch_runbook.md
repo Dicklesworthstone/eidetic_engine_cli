@@ -58,6 +58,22 @@ RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR \
 
 If RCH prints that it is `running locally`, stop immediately, report the exact
 path-normalization or topology line, and do not count any Cargo output as proof.
+If a failed proof leaves source state, worker topology, tracker history, or
+fixture ownership unclear, build a read-only regression causality capsule from
+the existing proof artifacts instead of rerunning local Cargo or guessing from
+raw logs:
+
+```bash
+ee regress explain \
+  --from verification_evidence=/tmp/proof.json \
+  --from rch_selector_admission=/tmp/selector-admission.json \
+  --surface verification_gate \
+  --json
+```
+
+The capsule schema is `ee.regression_causality.v1`; its hypotheses are
+non-authoritative leads. Close only the owner later evidence confirms, and use
+Agent Mail or a handoff note when Beads is not authoritative.
 
 Before a real remote run, the wrapper also attempts a read-only
 `ee diag build-admission --json` preflight when it can find a usable `ee`

@@ -480,7 +480,11 @@ Support-bundle regression-causality evidence is covered by
 non-authoritative hypotheses, and records redaction posture. Tests must prove it
 omits raw logs, raw mail bodies, raw memory bodies, private paths, and copied
 input artifacts while retaining hash/provenance-based evidence for handoff and
-support triage.
+support triage. Operator-facing closeouts should follow
+[`docs/agent-ux/regression-causality.md`](agent-ux/regression-causality.md):
+record the capsule hash, inspected evidence refs, read-only follow-up command
+hashes, outcome status, and tracker posture, and never close a source bead from
+an abstaining or remote-source-unknown capsule.
 
 ## Replay, Freshness, and Egress Tests
 

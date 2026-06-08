@@ -224,6 +224,10 @@ Failure triage:
    scenario run.
 6. Update fixture expectations only after the new behavior is intentional and
    documented.
+7. If pack replay, pack diff, degraded fixtures, RCH proof, or tracker evidence
+   point at different owners, build an `ee.regression_causality.v1` capsule with
+   `ee regress explain --from pack_replay=<artifact> --from pack_diff=<artifact>`
+   and treat the top hypothesis as a lead, not a source verdict.
 
 ## Fixture Authoring
 
@@ -316,6 +320,7 @@ rch exec -- cargo test --test freshness_contracts
 | `ee.pack_replay.v1` | Replay command stdout contract |
 | `ee.pack_diff.v1` | Diff command stdout contract |
 | `ee.support_bundle.pack_replay_summary.v1` | Support bundle artifact |
+| `ee.regression_causality.v1` | Cross-artifact capsule for pack omission and stale-derived-asset triage |
 | `ee.pack.compression_manifest.v1` | Optional compressed pack or ledger sidecar manifest; preserves uncompressed pack and ledger hashes |
 
 ## ADR References
