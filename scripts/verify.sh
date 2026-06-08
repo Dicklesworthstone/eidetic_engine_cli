@@ -49,7 +49,8 @@ set -euo pipefail
 #   4.67. Panic Helper Radar Contract - no-Cargo schema/golden scanner contract gate
 #   4.68. Swarm SLO Replay Contract - no-Cargo replay fixture/golden contract gate
 #   4.69. CI Proof-Lane Snapshot Contract - no-Cargo proof-lane fixture gate
-#   4.70. CI Proof-Lane Hygiene Advisory - no-Cargo workflow policy scanner
+#   4.70. CI Proof-Lane Hygiene Contract - no-Cargo workflow policy self-test
+#   4.705. CI Proof-Lane Hygiene Advisory - no-Cargo workflow policy scanner
 #   4.71. RCH Doc Examples Lint - no-Cargo docs command-shape scanner
 #   4.72. Local Cargo Tripwire Contract - no-Cargo guardrail self-test
 #   4.73. RCH Portability Diagnostic Contract - no-Cargo Mac-leak self-test
@@ -803,7 +804,13 @@ run_stage "Swarm SLO Replay Contract" "./scripts/e2e_overhaul/swarm_slo_replay.s
 # SHA behavior before agents rely on CI artifact source-authority evidence.
 run_stage "CI Proof-Lane Snapshot Contract" "./scripts/ci_proof_lane_snapshot_fixture_test.sh"
 
-# Gate 3.89: CI proof-lane hygiene advisory (bd-1n3x1.8). This no-Cargo,
+# Gate 3.89: CI proof-lane hygiene contract. This no-Cargo synthetic harness
+# exercises workflow-dispatch, duplicate-dispatch, cancellable CI artifacts,
+# release artifacts, and unclassified artifact-lane policy without reading
+# live workflows or invoking Cargo.
+run_stage "CI Proof-Lane Hygiene Contract" "./scripts/ci_proof_lane_hygiene.sh --self-test"
+
+# Gate 3.895: CI proof-lane hygiene advisory (bd-1n3x1.8). This no-Cargo,
 # network-free workflow scanner emits ee.ci_proof_lane_hygiene.v1 so agents see
 # duplicate-dispatch, cancel-in-progress, artifact-retention, release-artifact,
 # and unclassified artifact-lane posture before spending CI/RCH proof slots.

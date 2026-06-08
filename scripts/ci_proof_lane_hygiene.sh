@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKSPACE="$REPO_ROOT"
 STRICT=false
+SELF_TEST=false
 
 usage() {
     cat <<'USAGE'
@@ -13,10 +14,13 @@ ci_proof_lane_hygiene.sh
 Static, network-free GitHub Actions proof-lane hygiene check.
 
 Usage:
-  scripts/ci_proof_lane_hygiene.sh [--workspace <path>] [--json] [--strict]
+  scripts/ci_proof_lane_hygiene.sh [--workspace <path>] [--json] [--strict] [--self-test]
 
 The check reads workflow YAML only. It does not call gh, dispatch workflows,
 cancel runs, download artifacts, reserve files, mutate Beads, or run Cargo.
+
+Options:
+  --self-test  Run synthetic workflow policy tests without reading the workspace.
 USAGE
 }
 
@@ -37,6 +41,10 @@ while [ "$#" -gt 0 ]; do
             STRICT=true
             shift
             ;;
+        --self-test)
+            SELF_TEST=true
+            shift
+            ;;
         --help|-h)
             usage
             exit 0
@@ -54,27 +62,18 @@ if ! command -v ruby >/dev/null 2>&1; then
     exit 2
 fi
 
-if [ ! -d "$WORKSPACE" ]; then
+if [ "$SELF_TEST" != true ] && [ ! -d "$WORKSPACE" ]; then
     printf 'ci_proof_lane_hygiene: workspace not found: %s\n' "$WORKSPACE" >&2
     exit 2
 fi
 
 report="$(
-    ruby - "$WORKSPACE" <<'RUBY'
+    ruby - "$WORKSPACE" "$SELF_TEST" <<'RUBY'
 require "json"
 require "yaml"
 
 repo_root = File.expand_path(ARGV.fetch(0))
-workflow_dir = File.join(repo_root, ".github/workflows")
-workflow_paths =
-  if File.directory?(workflow_dir)
-    Dir.children(workflow_dir)
-       .select { |entry| entry.end_with?(".yml", ".yaml") }
-       .sort
-       .map { |entry| ".github/workflows/#{entry}" }
-  else
-    [".github/workflows/ci.yml", ".github/workflows/macos-ee-artifact.yml"]
-  end
+SELF_TEST = ARGV.fetch(1) == "true"
 
 SEVERITY_RANK = {
   "info" => 0,
@@ -85,8 +84,17 @@ SEVERITY_RANK = {
   "critical" => 5
 }.freeze
 
-findings = []
-workflows = []
+def workflow_paths_for(repo_root)
+  workflow_dir = File.join(repo_root, ".github/workflows")
+  if File.directory?(workflow_dir)
+    Dir.children(workflow_dir)
+       .select { |entry| entry.end_with?(".yml", ".yaml") }
+       .sort
+       .map { |entry| ".github/workflows/#{entry}" }
+  else
+    [".github/workflows/ci.yml", ".github/workflows/macos-ee-artifact.yml"]
+  end
+end
 
 def add_finding(findings, code:, severity:, workflow_path:, verdict:, message:, guidance:, job: nil)
   finding = {
@@ -170,36 +178,7 @@ def command_surface_probe?(job, pattern)
   end
 end
 
-workflow_paths.each do |workflow_path|
-  absolute_path = File.join(repo_root, workflow_path)
-  unless File.file?(absolute_path)
-    add_finding(
-      findings,
-      code: "proof_lane_workflow_missing",
-      severity: "high",
-      workflow_path: workflow_path,
-      verdict: "abstain_manual_review",
-      message: "workflow file is missing",
-      guidance: "Restore the workflow before treating this proof lane as usable."
-    )
-    next
-  end
-
-  begin
-    data = YAML.load_file(absolute_path) || {}
-  rescue Psych::Exception => error
-    add_finding(
-      findings,
-      code: "proof_lane_workflow_yaml_invalid",
-      severity: "high",
-      workflow_path: workflow_path,
-      verdict: "abstain_manual_review",
-      message: "workflow YAML could not be parsed: #{error.class}",
-      guidance: "Fix workflow YAML before using this proof lane."
-    )
-    next
-  end
-
+def analyze_workflow(data, workflow_path, findings)
   triggers = trigger_names(data)
   flow_concurrency = concurrency(data)
   jobs = data.fetch("jobs", {}) || {}
@@ -377,34 +356,242 @@ workflow_paths.each do |workflow_path|
     )
   end
 
-  workflows << workflow
+  workflow
 end
 
-highest = findings.map { |finding| finding["severity"] }.max_by { |severity| SEVERITY_RANK.fetch(severity, -1) } || "info"
-status =
-  if SEVERITY_RANK.fetch(highest) >= SEVERITY_RANK.fetch("high")
-    "blocked"
-  elsif findings.empty?
-    "pass"
-  else
-    "warning"
+def build_report(workflows, findings)
+  highest = findings.map { |finding| finding["severity"] }.max_by { |severity| SEVERITY_RANK.fetch(severity, -1) } || "info"
+  status =
+    if SEVERITY_RANK.fetch(highest) >= SEVERITY_RANK.fetch("high")
+      "blocked"
+    elsif findings.empty?
+      "pass"
+    else
+      "warning"
+    end
+
+  {
+    "schema" => "ee.ci_proof_lane_hygiene.v1",
+    "status" => status,
+    "summary" => {
+      "workflowCount" => workflows.length,
+      "findingCount" => findings.length,
+      "highestSeverity" => highest
+    },
+    "findings" => findings,
+    "workflows" => workflows
+  }
+end
+
+def report_for_workspace(repo_root)
+  findings = []
+  workflows = []
+
+  workflow_paths_for(repo_root).each do |workflow_path|
+    absolute_path = File.join(repo_root, workflow_path)
+    unless File.file?(absolute_path)
+      add_finding(
+        findings,
+        code: "proof_lane_workflow_missing",
+        severity: "high",
+        workflow_path: workflow_path,
+        verdict: "abstain_manual_review",
+        message: "workflow file is missing",
+        guidance: "Restore the workflow before treating this proof lane as usable."
+      )
+      next
+    end
+
+    begin
+      data = YAML.load_file(absolute_path) || {}
+    rescue Psych::Exception => error
+      add_finding(
+        findings,
+        code: "proof_lane_workflow_yaml_invalid",
+        severity: "high",
+        workflow_path: workflow_path,
+        verdict: "abstain_manual_review",
+        message: "workflow YAML could not be parsed: #{error.class}",
+        guidance: "Fix workflow YAML before using this proof lane."
+      )
+      next
+    end
+
+    workflows << analyze_workflow(data, workflow_path, findings)
   end
 
-puts JSON.generate(
-  "schema" => "ee.ci_proof_lane_hygiene.v1",
-  "status" => status,
-  "summary" => {
-    "workflowCount" => workflows.length,
-    "findingCount" => findings.length,
-    "highestSeverity" => highest
-  },
-  "findings" => findings,
-  "workflows" => workflows
-)
+  build_report(workflows, findings)
+end
+
+def workflow_from_yaml(text)
+  YAML.load(text) || {}
+end
+
+def synthetic_report(fixtures)
+  findings = []
+  workflows = fixtures.map do |workflow_path, yaml|
+    analyze_workflow(workflow_from_yaml(yaml), workflow_path, findings)
+  end
+  build_report(workflows, findings)
+end
+
+def assert_self_test(condition, message)
+  raise "ci_proof_lane_hygiene self-test failed: #{message}" unless condition
+end
+
+def assert_codes(report, expected_codes)
+  actual = report.fetch("findings").map { |finding| finding.fetch("code") }
+  expected_codes.each do |code|
+    assert_self_test(actual.include?(code), "missing expected finding code #{code}; actual=#{actual.inspect}")
+  end
+end
+
+def run_self_test
+  dedicated_pass = <<~YAML
+    name: macOS EE Artifact
+    on: [workflow_dispatch]
+    concurrency:
+      group: "macos-ee-artifact-${{ github.sha }}"
+      cancel-in-progress: false
+    jobs:
+      package:
+        runs-on: macos-latest
+        steps:
+          - name: Probe environment attestation
+            run: ee diag environment-attestation --help
+          - name: Upload artifact
+            uses: actions/upload-artifact@v4
+            with:
+              name: ee-macos
+              retention-days: 7
+              if-no-files-found: error
+  YAML
+
+  report = synthetic_report(".github/workflows/macos-ee-artifact.yml" => dedicated_pass)
+  assert_self_test(report.fetch("schema") == "ee.ci_proof_lane_hygiene.v1", "schema mismatch")
+  assert_self_test(report.fetch("status") == "pass", "dedicated pass workflow should pass")
+  assert_self_test(report.fetch("summary").fetch("workflowCount") == 1, "expected one workflow")
+  assert_self_test(report.fetch("findings").empty?, "dedicated pass workflow should not emit findings")
+  assert_self_test(report.fetch("workflows").first.fetch("policyVerdicts").include?("wait_for_active_run"), "dedicated workflow should advise waiting for active run")
+
+  ci_cancellable = <<~YAML
+    name: CI
+    on: [push]
+    concurrency:
+      group: "ci-${{ github.ref }}"
+      cancel-in-progress: true
+    jobs:
+      test:
+        runs-on: ubuntu-latest
+        steps:
+          - name: Upload logs
+            uses: actions/upload-artifact@v4
+            with:
+              name: test-logs
+  YAML
+
+  report = synthetic_report(".github/workflows/ci.yml" => ci_cancellable)
+  assert_self_test(report.fetch("status") == "warning", "cancellable CI artifact lane should warn")
+  assert_codes(report, ["proof_lane_artifact_cancellable_by_push"])
+  assert_self_test(report.fetch("workflows").first.fetch("policyVerdicts").include?("run_cancelled_before_artifact"), "CI workflow should classify cancellable artifact")
+
+  duplicate_dispatch = <<~YAML
+    name: macOS EE Artifact
+    on: [workflow_dispatch]
+    concurrency:
+      group: "macos-ee-artifact-${{ github.run_id }}"
+      cancel-in-progress: true
+    jobs:
+      package:
+        runs-on: macos-latest
+        steps:
+          - name: Upload artifact
+            uses: actions/upload-artifact@v4
+            with:
+              name: ee-macos
+  YAML
+
+  report = synthetic_report(".github/workflows/macos-ee-artifact.yml" => duplicate_dispatch)
+  assert_self_test(report.fetch("status") == "warning", "duplicate-dispatch workflow should warn")
+  assert_codes(
+    report,
+    [
+      "proof_lane_concurrency_group_per_run",
+      "proof_lane_cancel_in_progress_not_false",
+      "proof_lane_surface_probe_missing"
+    ]
+  )
+
+  unusable_dedicated = <<~YAML
+    name: macOS EE Artifact
+    on: [push]
+    jobs:
+      package:
+        runs-on: macos-latest
+        steps:
+          - name: Build placeholder
+            run: echo placeholder
+  YAML
+
+  report = synthetic_report(".github/workflows/macos-ee-artifact.yml" => unusable_dedicated)
+  assert_self_test(report.fetch("status") == "blocked", "dedicated workflow with no dispatch/artifact should block")
+  assert_codes(
+    report,
+    [
+      "proof_lane_manual_dispatch_missing",
+      "proof_lane_artifact_missing",
+      "proof_lane_surface_probe_missing"
+    ]
+  )
+
+  release_artifact = <<~YAML
+    name: Release
+    on: [workflow_dispatch]
+    jobs:
+      release:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/upload-artifact@v4
+            with:
+              name: release-archive
+  YAML
+
+  report = synthetic_report(".github/workflows/release.yml" => release_artifact)
+  assert_self_test(report.fetch("status") == "warning", "release artifacts should require manual review")
+  assert_codes(report, ["proof_lane_release_artifact_requires_manual_review"])
+
+  unclassified_artifact = <<~YAML
+    name: Extra Artifact
+    on: [workflow_dispatch]
+    jobs:
+      package:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/upload-artifact@v4
+            with:
+              name: misc
+  YAML
+
+  report = synthetic_report(".github/workflows/extra-artifact.yml" => unclassified_artifact)
+  assert_self_test(report.fetch("status") == "warning", "unknown artifact workflow should warn")
+  assert_codes(report, ["proof_lane_artifact_workflow_unclassified"])
+
+  puts "ci proof-lane hygiene self-test passed"
+end
+
+if SELF_TEST
+  run_self_test
+else
+  puts JSON.generate(report_for_workspace(repo_root))
+end
 RUBY
 )"
 
 printf '%s\n' "$report"
+
+if [ "$SELF_TEST" = true ]; then
+    exit 0
+fi
 
 if [ "$STRICT" = true ]; then
     status="$(printf '%s\n' "$report" | ruby -rjson -e 'print JSON.parse(STDIN.read).fetch("status")')"
