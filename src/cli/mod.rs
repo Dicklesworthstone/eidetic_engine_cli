@@ -311,6 +311,7 @@ use crate::steward::{
 mod conflict;
 mod insights;
 mod mesh;
+mod sandbox;
 mod share;
 
 const MIGRATION_REPAIR_COMMAND: &str = "ee migrate run --workspace . --json";
@@ -808,6 +809,9 @@ pub enum Command {
     /// Surface memory contradictions (read-only): list / explain / cluster.
     #[command(subcommand)]
     Conflict(conflict::ConflictCommand),
+    /// What-If Memory Sandbox (no durable mutation): remember / import / curate / diff.
+    #[command(subcommand)]
+    Sandbox(sandbox::SandboxCommand),
     /// Introspect ee's command, schema, and error maps.
     Introspect,
     /// Manage search indexes.
@@ -11314,6 +11318,7 @@ where
         }
         Some(Command::Insights(ref args)) => handle_insights(&cli, args, stdout, stderr),
         Some(Command::Conflict(ref cmd)) => handle_conflict(&cli, cmd, stdout, stderr),
+        Some(Command::Sandbox(ref cmd)) => handle_sandbox(&cli, cmd, stdout, stderr),
         Some(Command::Introspect) => match cli.renderer() {
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_introspect_human())
@@ -14281,6 +14286,66 @@ where
             write_stdout(stdout, &conflict::render_conflict_human(&surface, command))
         }
         _ => write_stdout(stdout, &(conflict::render_conflict_json(&surface) + "\n")),
+    }
+}
+
+/// `ee sandbox remember|import|curate|diff` — What-If Memory Sandbox
+/// (bd-1n0np.21.2/21.3). Reuses the 21.1 overlay evaluator; performs NO durable
+/// memory mutation (proposals live in a scratch session file).
+fn handle_sandbox<W, E>(
+    cli: &Cli,
+    command: &sandbox::SandboxCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli.resolve_workspace();
+    let human = matches!(cli.renderer(), output::Renderer::Human);
+    match command {
+        sandbox::SandboxCommand::Remember(args) => {
+            match sandbox::propose_remember(&workspace, args) {
+                Ok(outcome) if human => {
+                    write_stdout(stdout, &sandbox::render_propose_human("remember", &outcome))
+                }
+                Ok(outcome) => write_stdout(
+                    stdout,
+                    &(sandbox::render_propose_json("sandbox remember", &outcome) + "\n"),
+                ),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
+        sandbox::SandboxCommand::Import(args) => match sandbox::propose_import(&workspace, args) {
+            Ok(outcome) if human => {
+                write_stdout(stdout, &sandbox::render_propose_human("import", &outcome))
+            }
+            Ok(outcome) => write_stdout(
+                stdout,
+                &(sandbox::render_propose_json("sandbox import", &outcome) + "\n"),
+            ),
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        },
+        sandbox::SandboxCommand::Curate(args) => match sandbox::propose_curate(&workspace, args) {
+            Ok(outcome) if human => {
+                write_stdout(stdout, &sandbox::render_propose_human("curate", &outcome))
+            }
+            Ok(outcome) => write_stdout(
+                stdout,
+                &(sandbox::render_propose_json("sandbox curate", &outcome) + "\n"),
+            ),
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        },
+        sandbox::SandboxCommand::Diff(args) => match sandbox::build_diff(&workspace, args) {
+            Ok((name, surface)) if human => {
+                write_stdout(stdout, &sandbox::render_diff_human(&name, &surface))
+            }
+            Ok((name, surface)) => {
+                write_stdout(stdout, &(sandbox::render_diff_json(&name, &surface) + "\n"))
+            }
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        },
     }
 }
 
@@ -51128,6 +51193,12 @@ impl NormalizedInvocation {
                     conflict::ConflictCommand::List(_) => "conflict list".to_string(),
                     conflict::ConflictCommand::Explain(_) => "conflict explain".to_string(),
                     conflict::ConflictCommand::Cluster(_) => "conflict cluster".to_string(),
+                },
+                Command::Sandbox(sandbox_cmd) => match sandbox_cmd {
+                    sandbox::SandboxCommand::Remember(_) => "sandbox remember".to_string(),
+                    sandbox::SandboxCommand::Import(_) => "sandbox import".to_string(),
+                    sandbox::SandboxCommand::Curate(_) => "sandbox curate".to_string(),
+                    sandbox::SandboxCommand::Diff(_) => "sandbox diff".to_string(),
                 },
                 Command::Import(import) => match import {
                     ImportCommand::Cass(_) => "import cass".to_string(),

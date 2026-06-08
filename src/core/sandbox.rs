@@ -158,11 +158,175 @@ pub fn diff_overlay(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Sandbox session + diff surface (bd-1n0np.21.2/21.3): the `ee sandbox`
+// remember/import/curate/diff CLI consumes these. A session is SCRATCH overlay
+// state persisted under `<workspace>/.ee/sandbox/`, never the truth store — no
+// durable memory mutation happens here.
+// ---------------------------------------------------------------------------
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// Schema id for the read-only sandbox diff surface.
+pub const SANDBOX_DIFF_SCHEMA_V1: &str = "ee.sandbox.diff.v1";
+
+/// A `blake3:`-prefixed content hash, used consistently for baseline memories and
+/// proposed synthetic memories so the overlay diff classifies changes correctly.
+#[must_use]
+pub fn content_hash(content: &str) -> String {
+    format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex())
+}
+
+/// A synthetic, non-durable memory id for a sandbox-proposed `remember`/`import`.
+#[must_use]
+pub fn synthetic_memory_id(content: &str) -> String {
+    let digest = blake3::hash(format!("sandbox:{content}").as_bytes()).to_hex();
+    format!("sandbox_mem_{}", &digest[..20])
+}
+
+/// One proposed, non-durable change accumulated in a sandbox session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SandboxProposal {
+    /// Propose a new synthetic memory (`ee sandbox remember`).
+    Remember {
+        memory_id: String,
+        content_hash: String,
+        content_preview: String,
+    },
+    /// Propose importing a memory into the overlay (`ee sandbox import`).
+    Import {
+        memory_id: String,
+        content_hash: String,
+        content_preview: String,
+    },
+    /// Propose hypothetically retiring an existing memory (`ee sandbox curate --retire`).
+    Retire { memory_id: String },
+}
+
+/// Accumulated scratch overlay state for one sandbox session.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SandboxSession {
+    #[serde(default)]
+    pub proposals: Vec<SandboxProposal>,
+}
+
+impl SandboxSession {
+    /// Scratch session file path (NOT the truth DB).
+    #[must_use]
+    pub fn session_path(workspace: &Path, name: &str) -> PathBuf {
+        workspace
+            .join(".ee")
+            .join("sandbox")
+            .join(format!("{name}.json"))
+    }
+
+    /// Load a session from its scratch file, or a fresh empty session if absent
+    /// or unparseable (defensive: a corrupt scratch file never aborts a sandbox).
+    #[must_use]
+    pub fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    /// Persist the session to its scratch file (creating `.ee/sandbox/`).
+    ///
+    /// This writes only the non-durable overlay scratch, never a memory row.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_owned());
+        std::fs::write(path, body)
+    }
+
+    /// Build the [`SandboxOverlay`] this session's proposals describe.
+    #[must_use]
+    pub fn overlay(&self) -> SandboxOverlay {
+        let mut overlay = SandboxOverlay::new();
+        for proposal in &self.proposals {
+            match proposal {
+                SandboxProposal::Remember {
+                    memory_id,
+                    content_hash,
+                    ..
+                }
+                | SandboxProposal::Import {
+                    memory_id,
+                    content_hash,
+                    ..
+                } => overlay.upsert(memory_id, content_hash),
+                SandboxProposal::Retire { memory_id } => overlay.remove(memory_id),
+            }
+        }
+        overlay
+    }
+}
+
+/// The read-only sandbox diff surface (`ee.sandbox.diff.v1`): baseline-vs-overlay
+/// changes plus the honesty markers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxDiffSurface {
+    pub schema: &'static str,
+    pub overlay_hash: String,
+    pub added: Vec<String>,
+    pub modified: Vec<String>,
+    pub removed: Vec<String>,
+    pub unchanged: usize,
+    pub proposal_count: usize,
+    /// Always false: the sandbox performs NO durable memory mutation.
+    pub durable_mutation: bool,
+    /// Always true in this implementation: retrieval impact is shown as a
+    /// baseline-vs-overlay change set over content hashes, NOT a live temporary
+    /// index (bd-1n0np.21.2). The marker is never omitted when an approximation
+    /// is used, so an agent never mistakes the change set for faithful retrieval.
+    pub sandbox_approximation: bool,
+    pub approximation_reason: &'static str,
+}
+
+/// Assemble the sandbox diff surface from a baseline `memory_id -> content` map
+/// and a session's proposed overlay (bd-1n0np.21.2/21.3). Pure + deterministic;
+/// performs no durable mutation. The caller supplies the baseline memories
+/// (read-only), keeping this decoupled from the database.
+#[must_use]
+pub fn assemble_sandbox_diff(
+    baseline_memories: &[(String, String)],
+    session: &SandboxSession,
+) -> SandboxDiffSurface {
+    let mut baseline: BTreeMap<String, String> = BTreeMap::new();
+    for (memory_id, content) in baseline_memories {
+        baseline.insert(memory_id.clone(), content_hash(content));
+    }
+    let overlay = session.overlay();
+    let report = diff_overlay(&baseline, &overlay);
+
+    SandboxDiffSurface {
+        schema: SANDBOX_DIFF_SCHEMA_V1,
+        overlay_hash: report.overlay_hash,
+        added: report.added,
+        modified: report.modified,
+        removed: report.removed,
+        unchanged: report.unchanged,
+        proposal_count: session.proposals.len(),
+        durable_mutation: false,
+        sandbox_approximation: true,
+        approximation_reason: "Retrieval impact is shown as a baseline-vs-overlay change set over memory content hashes, not a live temporary index; new-memory search/pack ranking is approximated, not faithfully retrieved.",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{SandboxOverlay, diff_overlay};
+    use super::{
+        SandboxOverlay, SandboxProposal, SandboxSession, assemble_sandbox_diff, content_hash,
+        diff_overlay, synthetic_memory_id,
+    };
 
     fn baseline() -> BTreeMap<String, String> {
         let mut base = BTreeMap::new();
@@ -237,5 +401,85 @@ mod tests {
         assert!(report.modified.is_empty());
         assert!(report.removed.is_empty());
         assert_eq!(report.unchanged, base.len());
+    }
+
+    #[test]
+    fn session_proposals_build_the_expected_overlay() {
+        let session = SandboxSession {
+            proposals: vec![
+                SandboxProposal::Remember {
+                    memory_id: synthetic_memory_id("a brand new fact"),
+                    content_hash: content_hash("a brand new fact"),
+                    content_preview: "a brand new fact".to_owned(),
+                },
+                SandboxProposal::Retire {
+                    memory_id: "mem_a".to_owned(),
+                },
+            ],
+        };
+        let overlay = session.overlay();
+        assert_eq!(overlay.len(), 2, "one upsert + one remove");
+    }
+
+    #[test]
+    fn session_round_trips_through_json() {
+        let session = SandboxSession {
+            proposals: vec![SandboxProposal::Import {
+                memory_id: "mem_x".to_owned(),
+                content_hash: content_hash("imported"),
+                content_preview: "imported".to_owned(),
+            }],
+        };
+        let json = serde_json::to_string(&session).expect("serialize");
+        let restored: SandboxSession = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(session, restored);
+    }
+
+    #[test]
+    fn assemble_diff_classifies_proposals_and_marks_approximation() {
+        // Baseline: two real memories.
+        let baseline_memories = vec![
+            ("mem_a".to_owned(), "alpha".to_owned()),
+            ("mem_b".to_owned(), "beta".to_owned()),
+        ];
+        let new_id = synthetic_memory_id("gamma fact");
+        let session = SandboxSession {
+            proposals: vec![
+                SandboxProposal::Remember {
+                    memory_id: new_id.clone(),
+                    content_hash: content_hash("gamma fact"),
+                    content_preview: "gamma fact".to_owned(),
+                },
+                SandboxProposal::Retire {
+                    memory_id: "mem_b".to_owned(),
+                },
+            ],
+        };
+
+        let surface = assemble_sandbox_diff(&baseline_memories, &session);
+        assert_eq!(surface.schema, super::SANDBOX_DIFF_SCHEMA_V1);
+        assert_eq!(surface.added, vec![new_id]);
+        assert_eq!(surface.removed, vec!["mem_b".to_owned()]);
+        assert_eq!(surface.unchanged, 1); // mem_a
+        assert_eq!(surface.proposal_count, 2);
+        // No durable mutation; approximation honestly marked (bd-1n0np.21.2).
+        assert!(!surface.durable_mutation);
+        assert!(surface.sandbox_approximation);
+        assert!(surface.overlay_hash.starts_with("blake3:"));
+    }
+
+    #[test]
+    fn assemble_diff_is_deterministic() {
+        let baseline_memories = vec![("mem_a".to_owned(), "alpha".to_owned())];
+        let session = SandboxSession {
+            proposals: vec![SandboxProposal::Remember {
+                memory_id: synthetic_memory_id("new"),
+                content_hash: content_hash("new"),
+                content_preview: "new".to_owned(),
+            }],
+        };
+        let first = assemble_sandbox_diff(&baseline_memories, &session);
+        let second = assemble_sandbox_diff(&baseline_memories, &session);
+        assert_eq!(first, second, "sandbox diff is deterministic");
     }
 }
