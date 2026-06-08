@@ -191,8 +191,8 @@ pub use memory_sentinel::{
     MEMORY_SENTINEL_SPEC_SCHEMA_V1, MemorySentinelKind, MemorySentinelResult,
     MemorySentinelResultInput, MemorySentinelResultStatus, MemorySentinelSafetyClass,
     MemorySentinelSpec, MemorySentinelValidationError, ParsedMemorySentinelSpec,
-    StoredMemorySentinelResult, StoredMemorySentinelSpec, memory_sentinel_spec_repair_hint,
-    parse_memory_sentinel_spec,
+    SentinelObservation, StoredMemorySentinelResult, StoredMemorySentinelSpec,
+    memory_sentinel_spec_repair_hint, parse_memory_sentinel_spec,
 };
 pub use model_registry::{
     EMBEDDING_METADATA_SCHEMA_V1, EmbeddingMetadataFieldSchema, EmbeddingMetadataObjectSchema,
