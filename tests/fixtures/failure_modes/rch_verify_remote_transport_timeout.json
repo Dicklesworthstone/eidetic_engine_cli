@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "rch_verify_remote_transport_timeout",
+  "introduced_by": {
+    "bead": "bd-37ugy",
+    "epic_letter": "RCH"
+  },
+  "surfaces": [
+    "verify proofs",
+    "rch verifier"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "The RCH verifier observes a remote transport timeout such as RCH-E104 before reliable Cargo output is available, so the proof is classified as an environment blocker instead of a source failure.",
+    "setup_commands": [
+      "# run scripts/rch_verify.sh through a remote worker whose SSH command times out before producing compiler diagnostics"
+    ],
+    "invocation": "scripts/rch_verify.sh --summary --no-write -- cargo check --all-targets"
+  },
+  "expected_emission": {
+    "code": "rch_verify_remote_transport_timeout",
+    "severity": "warning",
+    "message_contains": [
+      "rch_verify_remote_transport_timeout",
+      "RCH-E104"
+    ],
+    "repair_contains": "bd-37ugy"
+  }
+}

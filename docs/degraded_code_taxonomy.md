@@ -75,7 +75,7 @@ The command's recovery actions use the repair-action risk classes above:
 | Read-only inspection | `dirty_checkout_observed`, `source_authority_ambiguous`, `stale_binary_suspected` | `read_only_probe`; structured `argv` such as `git status --short --branch --untracked-files=all`, `ee --version`, or `ee swarm brief --workspace . --include-rch --json` may be run by a harness. |
 | Coordination required | `agent_mail_unavailable`, `agent_mail_probe_mismatch`, `reservation_evidence_stale` | `mutating_external_coordination_repair` if the next step sends mail, changes reservations, or touches Beads; the attestation itself is read-only. |
 | Beads/BV disagreement | `beads_tracker_stale`, `beads_metadata_only_stale`, `bv_recommendation_stale` | Beads remains authoritative for tracker state; BV is advisory. Mutating Beads repair commands require coordination. |
-| Remote proof environment blocked | `rch_worker_topology_blocked`, `rch_source_materialization_blocked`, `rch_remote_required_fallback_prevented`, `build_admission_blocked` | `read_only_probe` for inspection commands such as `rch status --json`; do not reclassify as `source_failed` and do not substitute local Cargo proof. |
+| Remote proof environment blocked | `rch_worker_topology_blocked`, `rch_source_materialization_blocked`, `rch_remote_required_fallback_prevented`, `rch_verify_remote_transport_timeout`, `rch_verify_worker_health_threshold_blocked`, `build_admission_blocked` | `read_only_probe` for inspection commands such as `rch status --json`; do not reclassify as `source_failed` and do not substitute local Cargo proof. |
 | Local Cargo bypass | `local_cargo_bypass_detected` | `approval_required_repair`; requires human decision because it contradicts remote-only verification policy. |
 | Support-bundle redaction unknown | `support_bundle_redaction_unverified` | Verify redaction before attaching bundle evidence; support bundles do not replace a fresh claim gate. |
 
@@ -767,7 +767,7 @@ dispatch executes the canonical pack path instead.
 | `quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 | `trust_quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 
-#### Coordination / external tools (30)
+#### Coordination / external tools (32)
 | Code | Severity | Bead |
 |------|----------|------|
 | `agent_mail_unavailable` | medium | bd-2nkbn (Agent Mail resilience) |
@@ -786,6 +786,8 @@ dispatch executes the canonical pack path instead.
 | `git_not_repository` | medium | bd-1eq3l.11 |
 | `rch_remote_required_fallback_prevented` | warning | bd-1zb7k.13.4 (C4) |
 | `rch_unavailable` | low | bd-1zb7k.5 (S4) |
+| `rch_verify_remote_transport_timeout` | warning | bd-37ugy (RCH) |
+| `rch_verify_worker_health_threshold_blocked` | warning | bd-37ugy (RCH) |
 | `rch_worker_topology_blocked` | warning | bd-1zb7k.13.4 (C4) |
 | `workspace_hygiene_agent_mail_timeout` | warning | bd-1eq3l.11 |
 | `workspace_hygiene_agent_mail_unavailable` | warning | bd-1eq3l.11 |

@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "rch_verify_worker_health_threshold_blocked",
+  "introduced_by": {
+    "bead": "bd-37ugy",
+    "epic_letter": "RCH"
+  },
+  "surfaces": [
+    "verify proofs",
+    "rch verifier"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "The RCH selector reports configured workers but no worker passes health thresholds, so the verifier preserves the proof as an environment blocker with selector-admission detail.",
+    "setup_commands": [
+      "# run scripts/rch_verify.sh while the RCH daemon reports workers but refuses selection with no_workers_passed_health"
+    ],
+    "invocation": "scripts/rch_verify.sh --summary --no-write -- cargo build --bin ee"
+  },
+  "expected_emission": {
+    "code": "rch_verify_worker_health_threshold_blocked",
+    "severity": "warning",
+    "message_contains": [
+      "rch_verify_worker_health_threshold_blocked",
+      "no_workers_passed_health"
+    ],
+    "repair_contains": "bd-37ugy"
+  }
+}
