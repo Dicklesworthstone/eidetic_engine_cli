@@ -59608,7 +59608,7 @@ mod tests {
         )?;
         ensure_contains(
             json["error"]["message"].as_str().unwrap_or_default(),
-            "Available sections: authorities, bridges, causalBottlenecks, comprehensiveRules, contradictionClusters, hubs, kCore, kTruss, knowledgeGaps, knowledgeSkyline, loadBearingMemories, proximityHotspots, revisionFrontiers, topMemories",
+            "Available sections: authorities, blindSpots, bridges, causalBottlenecks, comprehensiveRules, contradictionClusters, houseRules, hubs, kCore, kTruss, knowledgeGaps, knowledgeSkyline, loadBearingMemories, proximityHotspots, revisionFrontiers, topMemories",
             "unknown section available list",
         )
     }
