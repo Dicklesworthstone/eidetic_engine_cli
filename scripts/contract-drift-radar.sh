@@ -35,14 +35,16 @@ EVENTS_OUT=""
 STRICT=0
 QUIET=0
 JSON_FLAG=0
+SELF_TEST=0
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/contract-drift-radar.sh [--json] [--quiet] [--strict] [--events-out <path>] [--output <path>]
+Usage: scripts/contract-drift-radar.sh [--json] [--quiet] [--strict] [--self-test] [--events-out <path>] [--output <path>]
 
   --json              Emit the JSON report to stdout (diagnostics on stderr).
   --quiet             Suppress human-readable summary (still writes JSON to disk).
   --strict            Exit code 4 if any violation is detected (default: advisory exit 0).
+  --self-test         Validate the live report and per-phase event contract.
   --events-out <path> Append the per-phase ee.test_event.v1 JSONL to this file.
   --output <path>     Override .contract-drift-radar-report.json location.
 
@@ -58,7 +60,7 @@ Reads:
 Writes:
   .contract-drift-radar-report.json (schema "ee.contract_drift_radar.v1")
 
-Exit codes: 0=advisory pass, 4=violations detected (only with --strict).
+Exit codes: 0=advisory/self-test pass, 1=self-test failure, 4=violations detected (only with --strict).
 USAGE
 }
 
@@ -67,6 +69,7 @@ while [ "$#" -gt 0 ]; do
     --json) JSON_FLAG=1; shift ;;
     --quiet) QUIET=1; shift ;;
     --strict) STRICT=1; shift ;;
+    --self-test) SELF_TEST=1; QUIET=1; shift ;;
     --events-out) EVENTS_OUT="${2:-}"; shift 2 ;;
     --output) OUTPUT_PATH="${2:-}"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
@@ -80,6 +83,8 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 generated_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+emitted_event_count=0
+emitted_event_phases="[]"
 
 emit_event() {
   local phase="$1"
@@ -110,9 +115,71 @@ emit_event() {
       degradedCodes: $degraded
     }')
   printf '%s\n' "$line" >&2
+  emitted_event_count=$((emitted_event_count + 1))
+  emitted_event_phases=$(printf '%s' "$emitted_event_phases" | jq --arg phase "$phase" '. + [$phase]')
   if [ -n "$EVENTS_OUT" ]; then
     printf '%s\n' "$line" >>"$EVENTS_OUT"
   fi
+}
+
+run_self_test() {
+  local report_json="$1"
+  local phases_json="$2"
+  local phase_count="$3"
+
+  printf '%s\n' "$report_json" | jq -e '
+    (.violations.docsScan | length) as $docs_scan_violations |
+    (.violations.jsonExampleCheck | length) as $json_example_violations |
+    (.violations.taxonomyXcheck | length) as $taxonomy_violations |
+    (.violations.dependencyXcheck | length) as $dependency_violations |
+    ($docs_scan_violations + $json_example_violations + $taxonomy_violations + $dependency_violations) as $total_violations |
+    .schema == "ee.contract_drift_radar.v1" and
+    .verdict == (if $total_violations > 0 then "violations" else "ok" end) and
+    .summary.docsScanned > 0 and
+    .summary.schemasLoaded > 0 and
+    .summary.envelopeExamplesScanned > 0 and
+    .summary.staleEnvelopeRefs == $docs_scan_violations and
+    .summary.schemaIdViolations == $json_example_violations and
+    .summary.documentedCodes > 0 and
+    .summary.fixtureCodes > 0 and
+    .summary.documentedMissingFixture == $taxonomy_violations and
+    .summary.dependencyDocsChecked == (.summary.dependencyDocsCheckedFiles | length) and
+    .summary.dependencyDocsChecked >= 1 and
+    .summary.dependencyDocsCheckedFiles == [
+      "Cargo.toml",
+      "docs/dependency-research-notes.md",
+      "docs/dependency-contract-matrix.md",
+      "COMPREHENSIVE_PLAN.md"
+    ] and
+    .summary.dependencyProfileViolations == $dependency_violations
+  ' >/dev/null || {
+    printf 'self-test FAILED: report contract did not match expected live radar shape\n' >&2
+    printf '%s\n' "$report_json" >&2
+    exit 1
+  }
+
+  [ "$phase_count" -eq 6 ] || {
+    printf 'self-test FAILED: expected 6 phase events, got %s\n' "$phase_count" >&2
+    printf '%s\n' "$phases_json" >&2
+    exit 1
+  }
+
+  printf '%s\n' "$phases_json" | jq -e '
+    sort == [
+      "dependency_xcheck",
+      "docs_scan",
+      "inventory_load",
+      "json_example_check",
+      "summary",
+      "taxonomy_xcheck"
+    ]
+  ' >/dev/null || {
+    printf 'self-test FAILED: phase event set drifted\n' >&2
+    printf '%s\n' "$phases_json" >&2
+    exit 1
+  }
+
+  printf 'self-test PASSED: contract drift radar report and phase events are stable\n'
 }
 
 if [ -n "$EVENTS_OUT" ]; then
@@ -504,6 +571,11 @@ emit_event "summary" "$verdict" \
   "contract-drift-radar verdict: $verdict ($total_violations violations across phases)" \
   "$(jq -cn --argjson t "$total_violations" '{totalViolations: $t}')" \
   "[]"
+
+if [ "$SELF_TEST" -eq 1 ]; then
+  run_self_test "$report" "$emitted_event_phases" "$emitted_event_count"
+  exit 0
+fi
 
 if [ "$JSON_FLAG" -eq 1 ]; then
   printf '%s\n' "$report"

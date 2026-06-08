@@ -57,6 +57,9 @@ scripts/contract-drift-radar.sh --json > radar.json
 # fail-closed on any violation (default is advisory exit 0)
 scripts/contract-drift-radar.sh --strict
 
+# validate the radar's own report and event contract
+scripts/contract-drift-radar.sh --self-test
+
 # capture per-phase events to an ee.test_event.v1 JSONL log
 scripts/contract-drift-radar.sh --events-out /tmp/radar.events.jsonl
 ```
@@ -256,6 +259,8 @@ include:
 - Static gate: `scripts/contract-drift-radar.sh --json > radar.json` →
   `verdict=<ok|violations>`, schemasLoaded=<n>, schemaIdViolations=<n>,
   documentedMissingFixture=<n>, dependencyDocsCheckedFiles=<files>.
+- Static self-test: `scripts/contract-drift-radar.sh --self-test` passed
+  (report contract + phase event set).
 - Surviving violations (if any): list each `violations.*[]` entry by
   file:line + reason. Either include the fix in the same PR or open a
   follow-up bead with a clear reproduction step.

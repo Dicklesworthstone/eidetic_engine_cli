@@ -770,6 +770,10 @@ run_stage "Plan Drift Advisory" "with_beads_read_locks ./scripts/plan-drift.sh -
 # under cargo test -p ee --test contracts and stays an RCH-only surface.
 run_stage "Contract Drift Radar Advisory" "./scripts/contract-drift-radar.sh --quiet"
 
+# Gate 3.81: Deterministic self-test for the static radar's own report/event
+# contract. This is shell-only and does not run Cargo or RCH.
+run_stage "Contract Drift Radar Self-Test" "./scripts/contract-drift-radar.sh --self-test"
+
 # Gate 3.85: Advisory e2e event-contract radar (bd-2ljka.4). This is a
 # no-Cargo static scanner for shell E2E evidence logging. It writes
 # .e2e-event-contract-radar-report.json by default and does not fail the
