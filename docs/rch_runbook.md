@@ -254,7 +254,9 @@ Stable fields for automation:
   low disk headroom.
 - `evidence[]`: compact policy and disk-pressure facts for support bundles.
 - `detectedLocalBuilds[]`: bounded pid/ppid/cwd/elapsed/command-kind rows from
-  the read-only scanner.
+  the read-only scanner. When tmux is available, each row includes `tmuxPane`
+  with pane id, pane pid, locator, current path, and title; null fields mean no
+  pane ancestor was found or tmux was unavailable.
 - `worktreePolicy`: single-canonical-worktree posture for the checkout.
 - `forbiddenWorktreeCount` / `forbiddenWorktrees[]`: read-only rows from
   `git worktree list --porcelain`, including path, head, branch/detached state,

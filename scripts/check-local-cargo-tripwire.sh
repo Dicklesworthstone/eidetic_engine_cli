@@ -18,7 +18,7 @@
 #
 # Usage:
 #   scripts/check-local-cargo-tripwire.sh --cmd '<command-line>' [--json]
-#   scripts/check-local-cargo-tripwire.sh --probe-processes [--ps-file <fixture>] [--package-cache-pids <csv>] [--worktree-file <fixture>] [--json]
+#   scripts/check-local-cargo-tripwire.sh --probe-processes [--ps-file <fixture>] [--package-cache-pids <csv>] [--worktree-file <fixture>] [--tmux-panes-file <fixture>] [--json]
 #   scripts/check-local-cargo-tripwire.sh --self-test
 #
 # Exit codes: 0 = allowed/clean, 1 = bypass detected, 2 = usage error.
@@ -34,6 +34,8 @@ CMD=""
 PS_FIXTURE=""
 PACKAGE_CACHE_PIDS_FIXTURE=""
 WORKTREE_FIXTURE=""
+TMUX_PANES_FIXTURE=""
+TMUX_PANES_TEXT_FIXTURE=""
 
 usage() {
     sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
@@ -72,6 +74,16 @@ while [ $# -gt 0 ]; do
                 exit 2
             fi
             WORKTREE_FIXTURE="$1"
+            shift
+            ;;
+        --tmux-panes-file)
+            shift
+            if [ $# -eq 0 ]; then
+                printf -- '--tmux-panes-file requires a value\n' >&2
+                usage >&2
+                exit 2
+            fi
+            TMUX_PANES_FIXTURE="$1"
             shift
             ;;
         --cmd)
@@ -203,7 +215,7 @@ probe_processes() {
     # process tree because ps -eo ppid is racy on macOS during fork.
     #
     # Output rows:
-    # <pid>\t<ppid>\t<elapsed>\t<command-kind>\t<subcommand>\t<cwd>\t<manifest>\t<workspace>\t<package-cache-lock>\t<policy-status>\t<short-command>\t<flagged-reason>
+    # <pid>\t<ppid>\t<elapsed>\t<command-kind>\t<subcommand>\t<cwd>\t<manifest>\t<workspace>\t<package-cache-lock>\t<policy-status>\t<short-command>\t<flagged-reason>\t<tmux-pane-id>\t<tmux-pane-pid>\t<tmux-locator>\t<tmux-current-path>\t<tmux-title>
     local ps_output
     ps_output=$(process_scan_ps_output 2>/dev/null || true)
     if [ -z "$ps_output" ]; then
@@ -216,6 +228,8 @@ probe_processes() {
     fi
     local lock_holder_pids
     lock_holder_pids=$(package_cache_lock_pids)
+    local tmux_panes
+    tmux_panes=$(tmux_panes_output)
     # `ps` on macOS prints PID with leading spaces; normalize.
     printf '%s\n' "$rust_process_lines" | while IFS= read -r line; do
         local pid
@@ -295,6 +309,7 @@ probe_processes() {
         local package_cache_lock_state
         local policy_status
         local reason
+        local tmux_attribution
         command_kind=$(command_kind_from_command "$cmd")
         subcommand=$(cargo_subcommand_from_command "$cmd")
         manifest_path=$(manifest_path_from_command "$cmd" "$cwd")
@@ -302,10 +317,12 @@ probe_processes() {
         package_cache_lock_state=$(package_cache_lock_state "$pid" "$lock_holder_pids")
         policy_status=$(active_process_policy_status "$command_kind" "$subcommand" "$package_cache_lock_state")
         reason=$(active_process_reason "$command_kind" "$subcommand" "$package_cache_lock_state")
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        tmux_attribution=$(tmux_pane_for_process "$ps_output" "$tmux_panes" "$pid")
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$pid" "$ppid" "$elapsed" "$command_kind" "$subcommand" "$cwd" \
             "$manifest_path" "$workspace_path" "$package_cache_lock_state" \
-            "$policy_status" "$(printf '%s' "$cmd" | cut -c1-200)" "$reason"
+            "$policy_status" "$(printf '%s' "$cmd" | cut -c1-200)" "$reason" \
+            "$tmux_attribution"
     done | sort -n -k1,1
 }
 
@@ -449,6 +466,69 @@ parent_command_from_ps_output() {
             exit
         }
     '
+}
+
+parent_pid_from_ps_output() {
+    local ps_text="$1"
+    local child_pid="$2"
+    [ -n "$child_pid" ] || return 0
+    printf '%s\n' "$ps_text" | awk -v wanted_pid="$child_pid" '$1 == wanted_pid { print $2; exit }'
+}
+
+tmux_panes_output() {
+    if [ -n "$TMUX_PANES_TEXT_FIXTURE" ]; then
+        printf '%s\n' "$TMUX_PANES_TEXT_FIXTURE"
+        return
+    fi
+    if [ -n "$TMUX_PANES_FIXTURE" ]; then
+        cat "$TMUX_PANES_FIXTURE"
+        return
+    fi
+    if ! command -v tmux >/dev/null 2>&1; then
+        return 0
+    fi
+    tmux list-panes -a -F '#{pane_id}	#{pane_pid}	#{session_name}:#{window_index}.#{pane_index}	#{pane_current_path}	#{pane_title}' 2>/dev/null || true
+}
+
+tmux_pane_record_for_pid() {
+    local tmux_text="$1"
+    local candidate_pid="$2"
+    [ -n "$candidate_pid" ] || return 0
+    printf '%s\n' "$tmux_text" | awk -F '\t' -v wanted_pid="$candidate_pid" '
+        $2 == wanted_pid {
+            pane_id = ($1 == "" ? "-" : $1)
+            pane_pid = ($2 == "" ? "-" : $2)
+            locator = ($3 == "" ? "-" : $3)
+            current_path = ($4 == "" ? "-" : $4)
+            title = ($5 == "" ? "-" : $5)
+            print pane_id "\t" pane_pid "\t" locator "\t" current_path "\t" title
+            exit
+        }
+    '
+}
+
+empty_tmux_pane_record() {
+    printf -- '-\t-\t-\t-\t-\n'
+}
+
+tmux_pane_for_process() {
+    local ps_text="$1"
+    local tmux_text="$2"
+    local pid="$3"
+    local current_pid="$pid"
+    local depth=0
+    local record
+    [ -n "$tmux_text" ] || { empty_tmux_pane_record; return; }
+    while [ -n "$current_pid" ] && [ "$current_pid" != "0" ] && [ "$depth" -lt 32 ]; do
+        record=$(tmux_pane_record_for_pid "$tmux_text" "$current_pid")
+        if [ -n "$record" ]; then
+            printf '%s\n' "$record"
+            return
+        fi
+        current_pid=$(parent_pid_from_ps_output "$ps_text" "$current_pid")
+        depth=$((depth + 1))
+    done
+    empty_tmux_pane_record
 }
 
 process_cwd() {
@@ -761,10 +841,10 @@ emit_human_probe() {
     fi
     if [ "$count" -gt 0 ]; then
         printf '[rch tripwire] %d local cargo/rustc process(es) running without rch exec wrapper:\n' "$count"
-        printf '%s' "$body" | while IFS=$(printf '\t') read -r pid ppid elapsed command_kind subcommand cwd manifest_path workspace_path package_cache_lock_state policy_status short_cmd reason; do
+        printf '%s' "$body" | while IFS=$(printf '\t') read -r pid ppid elapsed command_kind subcommand cwd manifest_path workspace_path package_cache_lock_state policy_status short_cmd reason tmux_pane_id tmux_pane_pid tmux_locator tmux_current_path tmux_title; do
             [ -n "$pid" ] || continue
-            printf '  - pid=%s ppid=%s elapsed=%s kind=%s subcommand=%s policy=%s cwd=%s manifest=%s package_cache_lock=%s reason=%s\n      command: %s\n' \
-                "$pid" "$ppid" "$elapsed" "$command_kind" "$subcommand" "$policy_status" "$cwd" "$manifest_path" "$package_cache_lock_state" "$reason" "$short_cmd"
+            printf '  - pid=%s ppid=%s elapsed=%s kind=%s subcommand=%s policy=%s cwd=%s manifest=%s package_cache_lock=%s tmux_pane=%s tmux_pane_pid=%s tmux_locator=%s tmux_path=%s tmux_title=%s reason=%s\n      command: %s\n' \
+                "$pid" "$ppid" "$elapsed" "$command_kind" "$subcommand" "$policy_status" "$cwd" "$manifest_path" "$package_cache_lock_state" "$tmux_pane_id" "$tmux_pane_pid" "$tmux_locator" "$tmux_current_path" "$tmux_title" "$reason" "$short_cmd"
         done
         printf '  suggestion: investigate the offending shell; never automatically kill processes here.\n'
     fi
@@ -862,7 +942,14 @@ emit_json_probe() {
                     packageCacheLockHeld:(if .[8] == "held" then true elif .[8] == "not_observed" then false else null end),
                     policyStatus:.[9],
                     command:.[10],
-                    reason:.[11]
+                    reason:.[11],
+                    tmuxPane:{
+                        paneId:(if (.[12] // "-") == "-" then null else .[12] end),
+                        panePid:(if (.[13] // "-") == "-" then null else .[13] end),
+                        locator:(if (.[14] // "-") == "-" then null else .[14] end),
+                        currentPath:(if (.[15] // "-") == "-" then null else .[15] end),
+                        title:(if (.[16] // "-") == "-" then null else .[16] end)
+                    }
                 })
             ')
     fi
@@ -911,6 +998,7 @@ emit_json_probe() {
                 workspacePath:.workspacePath,
                 packageCacheLockState:.packageCacheLockState,
                 packageCacheLockHeld:.packageCacheLockHeld,
+                tmuxPane:.tmuxPane,
                 command:.command,
                 reason:.reason
             })) as $detected |
@@ -1178,13 +1266,19 @@ EOF
         esac
         local old_ps_fixture="$PS_FIXTURE"
         local old_package_cache_pids_fixture="$PACKAGE_CACHE_PIDS_FIXTURE"
+        local old_tmux_panes_text_fixture="$TMUX_PANES_TEXT_FIXTURE"
         PS_FIXTURE="tests/fixtures/rch_local_cargo_tripwire/process_scan_ps_fixture.txt"
         PACKAGE_CACHE_PIDS_FIXTURE="102"
+        TMUX_PANES_TEXT_FIXTURE=$(cat <<'EOF'
+%22	102	eidetic_engine_cli:0.2	/Users/jemanuel/projects/eidetic_engine_cli	eidetic_engine_cli__cc_test
+EOF
+)
         fixture_body=$(probe_processes | sort -n -k1,1)
         fixture_count=$(printf '%s' "$fixture_body" | grep -c . || true)
         fixture_report=$(emit_json_probe "$fixture_body" "$fixture_count" "$worktree_body" "$worktree_count")
         PS_FIXTURE="$old_ps_fixture"
         PACKAGE_CACHE_PIDS_FIXTURE="$old_package_cache_pids_fixture"
+        TMUX_PANES_TEXT_FIXTURE="$old_tmux_panes_text_fixture"
         if ! printf '%s' "$fixture_report" | jq -e '
             .count == 3
             and .forbiddenWorktreeCount == 2
@@ -1193,8 +1287,8 @@ EOF
             and ([.processes[].command] | map(contains("lsd")) | any | not)
             and ([.processes[].command] | map(contains("bash -s --")) | any | not)
             and ([.processes[].command] | map(contains("ssh -i")) | any | not)
-            and any(.detectedLocalBuilds[]; .policyStatus == "local_cargo_read_only_lock_holder" and .subcommand == "metadata" and .packageCacheLockHeld == true)
-            and any(.detectedLocalBuilds[]; .policyStatus == "local_cargo_disallowed" and .subcommand == "test" and .manifestPath == "/Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml")
+            and any(.detectedLocalBuilds[]; .policyStatus == "local_cargo_read_only_lock_holder" and .subcommand == "metadata" and .packageCacheLockHeld == true and .tmuxPane.paneId == "%22" and .tmuxPane.locator == "eidetic_engine_cli:0.2" and .tmuxPane.title == "eidetic_engine_cli__cc_test")
+            and any(.detectedLocalBuilds[]; .policyStatus == "local_cargo_disallowed" and .subcommand == "test" and .manifestPath == "/Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml" and .tmuxPane.paneId == null)
             and any(.detectedLocalBuilds[]; .policyStatus == "local_rust_tool_disallowed" and .commandKind == "rustc")
             and any(.forbiddenWorktrees[]; .path == "/Users/jemanuel/projects/ee-clean-verify" and .detached == true and .severity == "critical")
             and any(.forbiddenWorktrees[]; .path == "/tmp/eidetic-engine-extra" and .branch == "refs/heads/feature" and .detached == false)
@@ -1205,7 +1299,7 @@ EOF
             exit 1
         fi
     fi
-    printf 'self-test PASSED: 21 classifier cases, JSON repair action, stable-wrapper/ssh exclusion, process fixture, and worktree fixtures produced expected outcomes\n'
+    printf 'self-test PASSED: 21 classifier cases, JSON repair action, stable-wrapper/ssh exclusion, process/tmux fixture, and worktree fixtures produced expected outcomes\n'
     exit 0
 }
 
