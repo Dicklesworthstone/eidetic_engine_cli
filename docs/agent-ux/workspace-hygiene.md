@@ -54,6 +54,59 @@ Strict failure reasons are stable machine-readable codes:
 | `parse_error` | Workspace hygiene could not parse metadata needed for a safe advisory. |
 | `unknown_high_risk_binary` | Dirty binary or oversized paths require human review. |
 
+## Staged Beads Churn Classifier
+
+`scripts/commit-hygiene-classifier.sh` is the lightweight pre-commit check for
+the crowded-checkout failure mode where a source commit accidentally includes a
+large `.beads/issues.jsonl` export rewrite. It is read-only and inspects only
+the Git index:
+
+```bash
+git diff --cached --name-only
+scripts/commit-hygiene-classifier.sh --strict --json
+```
+
+The script emits `ee.commit_hygiene_classifier.v1` with project-relative paths,
+staged source/tracker counts, `.beads/issues.jsonl` numstat, cheap record-count
+delta, `verdict`, `severity`, and `recommendedAction`. Default mode exits 0 for
+advisory use; `--strict` exits 1 only for
+`mixed_full_tracker_export_churn`.
+
+Verdicts:
+
+| Verdict | Action |
+| --- | --- |
+| `source_only` | Safe to proceed with an explicit source/docs/test pathspec. |
+| `tracker_only` | Safe for an intentional Beads sync commit. |
+| `mixed_small_tracker_metadata` | Review the staged tracker diff; split unless the metadata belongs with the source change. |
+| `mixed_full_tracker_export_churn` | Stop and split source from tracker metadata before committing. |
+| `no_staged_changes` | Stage the intended paths before committing. |
+
+Split repair path:
+
+```bash
+git commit -m "..." -- <explicit-source-doc-test-paths>
+br sync --flush-only
+git add .beads/issues.jsonl
+scripts/commit-hygiene-classifier.sh --strict --json
+git commit -m "tracker: sync beads metadata" -- .beads/issues.jsonl
+```
+
+Intentional mixed commits require an auditable override. Re-run the classifier
+without `--strict`, paste the JSON report into the Beads closeout or Agent Mail
+thread, explain why source and tracker metadata must travel together, and commit
+with an explicit pathspec. Suggested Agent Mail/Beads handoff:
+
+```text
+Subject: [<bead-id>] Intentional mixed commit hygiene override
+
+Classifier report: <paste ee.commit_hygiene_classifier.v1 JSON>
+Why mixed: <one sentence>
+Paths committed: <explicit pathspec>
+Tracker scope: <Beads IDs/comments included>
+Verification: <no-Cargo/static or RCH proof summary>
+```
+
 ## Buckets
 
 Each dirty path is classified into one top-level bucket:

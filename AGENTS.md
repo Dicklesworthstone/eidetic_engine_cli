@@ -1321,6 +1321,41 @@ This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) 
 
 **Important:** `br` is non-invasive—it NEVER executes git commands. After `br sync --flush-only`, you must manually run `git add .beads/ && git commit`.
 
+### Crowded-Checkout Commit Hygiene
+
+Before committing source, docs, or test changes in this shared checkout, stage
+only the paths you intend to commit and run:
+
+```bash
+scripts/commit-hygiene-classifier.sh --strict --json
+```
+
+The classifier is read-only. It inspects staged path names plus
+`.beads/issues.jsonl` numstat/record-count churn and emits
+`ee.commit_hygiene_classifier.v1`. Treat
+`mixed_full_tracker_export_churn` as a stop signal: split the source commit from
+the tracker export instead of sweeping `.beads/issues.jsonl` into unrelated
+source proof. `tracker_only` commits remain allowed for intentional Beads syncs,
+and `mixed_small_tracker_metadata` means review the staged tracker diff before
+deciding.
+
+Default split workflow:
+
+```bash
+git diff --cached --name-only
+scripts/commit-hygiene-classifier.sh --strict --json
+git commit -m "..." -- <explicit-source-doc-test-paths>
+br sync --flush-only
+git add .beads/issues.jsonl
+scripts/commit-hygiene-classifier.sh --strict --json
+git commit -m "tracker: sync beads metadata" -- .beads/issues.jsonl
+```
+
+If a mixed source-plus-tracker commit is truly intentional, do not bypass this
+silently. Re-run the classifier without `--strict`, paste the JSON verdict into
+the Beads closeout or Agent Mail thread, state why the mix is intentional, and
+commit with an explicit pathspec.
+
 ### Reality-Check Cadence
 
 Every 90 days, or whenever `scripts/vision-coverage.sh --json` reports
@@ -1380,10 +1415,13 @@ br sync --flush-only  # Export to JSONL (NO git operations)
 
 ```bash
 git status              # Check what changed
-git add <files>         # Stage code changes
+git add <files>         # Stage only your intended source/docs/test changes
+scripts/commit-hygiene-classifier.sh --strict --json
+git commit -m "..." -- <explicit-source-doc-test-paths>
 br sync --flush-only    # Export beads to JSONL
-git add .beads/         # Stage beads changes
-git commit -m "..."     # Commit everything together
+git add .beads/issues.jsonl
+scripts/commit-hygiene-classifier.sh --strict --json
+git commit -m "tracker: sync beads metadata" -- .beads/issues.jsonl
 git push                # Push to remote
 ```
 

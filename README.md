@@ -932,11 +932,19 @@ ee workspace hygiene --workspace . --json \
   | jq '.data.pathClassifications | group_by(.bucket) | map({bucket: .[0].bucket, count: length})'
 
 ee workspace hygiene --workspace . --mode precommit --strict-advisory --json
+
+scripts/commit-hygiene-classifier.sh --strict --json
 ```
 
 The report can include Agent Mail reservations and Beads links, so an agent can
 see whether a path is risky because of content, ownership, or current work
 coordination.
+
+Use the commit-hygiene classifier after staging and before source commits in
+crowded checkouts. A `mixed_full_tracker_export_churn` verdict means split the
+source/docs/test commit from the tracker-only `.beads/issues.jsonl` sync; an
+intentional mixed commit needs the classifier JSON pasted into the Beads or
+Agent Mail handoff.
 
 ### Handoff and resume
 
