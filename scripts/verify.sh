@@ -37,6 +37,7 @@ set -euo pipefail
 #
 # Gates (in order):
 #   0. Plan Doc Smoke        - optional bd-3usjw.23 verify_cmd manifest checks
+#   0.9. Forbidden Dependency Contract - no-Cargo metadata scanner self-test
 #   1. Forbidden Dependencies  - cargo tree audit for banned crates
 #   2. Closure Linter          - prevent abstention-as-implementation closure
 #   3. Snapshot Proposal Guard - block unreviewed tracked insta proposals
@@ -51,7 +52,8 @@ set -euo pipefail
 #   4.69. CI Proof-Lane Snapshot Contract - no-Cargo proof-lane fixture gate
 #   4.70. CI Proof-Lane Hygiene Contract - no-Cargo workflow policy self-test
 #   4.705. CI Proof-Lane Hygiene Advisory - no-Cargo workflow policy scanner
-#   4.71. RCH Doc Examples Lint - no-Cargo docs command-shape scanner
+#   4.71. RCH Doc Examples Contract - no-Cargo command classifier self-test
+#   4.715. RCH Doc Examples Lint - no-Cargo docs command-shape scanner
 #   4.72. Local Cargo Tripwire Contract - no-Cargo guardrail self-test
 #   4.73. RCH Portability Diagnostic Contract - no-Cargo Mac-leak self-test
 #   4.74. Package Artifact Leak Contract - no-Cargo deny-pattern self-test
@@ -736,6 +738,11 @@ if [ "$PLAN_DOC_SMOKE" = "true" ]; then
     exit 0
 fi
 
+# Gate 0.9: Forbidden dependency scanner contract. This no-Cargo self-test
+# proves the JSON metadata classifier catches forbidden crates before the live
+# cargo-tree audit runs.
+run_stage "Forbidden Dependency Contract" "./scripts/check-forbidden-deps.sh --self-test"
+
 # Gate 1: Check Forbidden Dependencies
 run_stage "Forbidden Dependencies" "./scripts/check-forbidden-deps.sh"
 
@@ -816,7 +823,12 @@ run_stage "CI Proof-Lane Hygiene Contract" "./scripts/ci_proof_lane_hygiene.sh -
 # and unclassified artifact-lane posture before spending CI/RCH proof slots.
 run_stage "CI Proof-Lane Hygiene Advisory" "./scripts/ci_proof_lane_hygiene.sh --json"
 
-# Gate 3.90: RCH doc examples lint (bd-1n3x1.9). This no-Cargo docs scanner
+# Gate 3.90: RCH doc examples classifier contract. This no-Cargo self-test
+# proves the command classifier denies local Cargo examples while accepting
+# RCH-wrapped proof recipes before the live docs scan.
+run_stage "RCH Doc Examples Contract" "python3 scripts/check-rch-doc-examples.py --self-test"
+
+# Gate 3.905: RCH doc examples lint (bd-1n3x1.9). This no-Cargo docs scanner
 # fails before expensive gates if AGENTS.md, README.md, or the RCH runbooks grow
 # copy-pasteable local Cargo compile examples that bypass the verifier wrapper.
 run_stage "RCH Doc Examples Lint" "python3 scripts/check-rch-doc-examples.py --json"
