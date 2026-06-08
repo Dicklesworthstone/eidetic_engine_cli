@@ -41,16 +41,48 @@ OUTPUT_PATH="${ROOT}/.bridge-staleness-report.json"
 
 JSON_FLAG=""
 QUIET_FLAG=""
-for arg in "$@"; do
-  case "$arg" in
-    --json) JSON_FLAG="1" ;;
-    --quiet) QUIET_FLAG="1" ;;
+SELF_TEST=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --json)
+      JSON_FLAG="1"
+      shift
+      ;;
+    --quiet)
+      QUIET_FLAG="1"
+      shift
+      ;;
+    --self-test)
+      SELF_TEST="1"
+      shift
+      ;;
+    --plan)
+      PLAN_PATH="${2:-}"
+      shift 2
+      ;;
+    --vision)
+      VISION_REPORT="${2:-}"
+      shift 2
+      ;;
+    --beads)
+      BEADS_JSONL="${2:-}"
+      shift 2
+      ;;
+    --output)
+      OUTPUT_PATH="${2:-}"
+      shift 2
+      ;;
     --help)
       cat <<'USAGE'
-Usage: scripts/bridge-staleness.sh [--json] [--quiet]
+Usage: scripts/bridge-staleness.sh [--json] [--quiet] [--self-test] [--plan <path>] [--vision <path>] [--beads <path>] [--output <path>]
 
   --json   Emit only the JSON report to stdout; diagnostics on stderr.
   --quiet  Suppress human-readable summary (still writes JSON to disk).
+  --self-test Run synthetic bridge-staleness fixture checks without reading the workspace.
+  --plan <path>   Read bridge plan mtime from this path.
+  --vision <path> Read vision coverage JSON from this path.
+  --beads <path>  Read bead records from this JSONL path.
+  --output <path> Write the JSON report to this path.
 
 Reads:
   CLOSE_THE_GAP_PLAN.md            (plan mtime check)
@@ -62,19 +94,82 @@ Writes:
 
 Exit code: always 0 (advisory gate).
 USAGE
-      exit 0 ;;
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 1
+      ;;
   esac
 done
 
 now_epoch=$(date +%s)
 generated_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+assert_report_jq() {
+  local report="$1"
+  local filter="$2"
+  local message="$3"
+
+  if ! printf '%s\n' "$report" | jq -e "$filter" >/dev/null; then
+    echo "error: bridge-staleness self-test failed: $message" >&2
+    echo "       jq filter: $filter" >&2
+    return 1
+  fi
+}
+
+run_self_test() {
+  local report
+  report=$(bash "${BASH_SOURCE[0]}" --json --quiet --output /dev/null \
+    --plan <(cat <<'PLAN'
+# Synthetic Active Bridge
+
+Fresh plan content is enough for the self-test because process substitutions
+carry a current mtime and should not trigger plan_mtime_age_days.
+PLAN
+    ) \
+    --vision <(printf '%s\n' '{"gap_percentage":1.5}') \
+    --beads <(cat <<'JSONL'
+{"id":"bd-bridge.self-open","status":"open","labels":["wave-4"],"created_at":"2000-01-01T00:00:00Z","updated_at":"2000-01-01T00:00:00Z"}
+{"id":"bd-bridge.self-ignored","status":"closed","labels":["wave-4"],"created_at":"2000-01-01T00:00:00Z","updated_at":"2000-01-01T00:00:00Z"}
+JSONL
+    ))
+
+  assert_report_jq "$report" '.schema == "ee.bridge.staleness.v1"' "schema mismatch"
+  assert_report_jq "$report" '.inputs.planPresent == true' "synthetic plan should be present"
+  assert_report_jq "$report" '.inputs.visionCoverageReportPresent == true' "synthetic vision report should be present"
+  assert_report_jq "$report" '.inputs.partIIOpenCount == 1' "expected one stale open Part II bead"
+  assert_report_jq "$report" '.inputs.partIIInProgressCount == 0' "expected no in-progress Part II beads"
+  assert_report_jq "$report" '.inputs.partIIMaxStaleDays > 7' "expected stale Part II age above threshold"
+  assert_report_jq "$report" '(.signals | map(.code) | index("vision_coverage_gap_low")) != null' "missing low vision-gap signal"
+  assert_report_jq "$report" '(.signals | map(.code) | index("in_progress_beads_mtime")) != null' "missing Part II inactivity signal"
+  assert_report_jq "$report" '(.signals | map(.severity) | index("low")) != null' "missing low-severity signal"
+  assert_report_jq "$report" '(.signals | map(.severity) | index("medium")) != null' "missing medium-severity signal"
+
+  local quiet_report
+  quiet_report=$(bash "${BASH_SOURCE[0]}" --json --quiet --output /dev/null \
+    --plan <(printf '%s\n' '# Synthetic Active Bridge') \
+    --vision <(printf '%s\n' '{"gap_percentage":5.0}') \
+    --beads <(cat <<'JSONL'
+{"id":"bd-bridge.self-active","status":"in_progress","labels":["reality-check-2026-05-14"],"created_at":"2000-01-01T00:00:00Z","updated_at":"2000-01-01T00:00:00Z"}
+JSONL
+    ))
+  assert_report_jq "$quiet_report" '.signals | length == 0' "active Part II or high vision gap should not emit advisory signals"
+
+  echo "ok: bridge-staleness self-test passed"
+}
+
+if [ -n "$SELF_TEST" ]; then
+  run_self_test
+  exit 0
+fi
+
 signals_json=""
 
 # Signal 1: plan mtime age.
 plan_present=false
 plan_age_days=0
-if [ -f "$PLAN_PATH" ]; then
+if [ -r "$PLAN_PATH" ]; then
   plan_present=true
   mtime_epoch=""
   if mtime_candidate=$(stat -f %m "$PLAN_PATH" 2>/dev/null) && [[ "$mtime_candidate" =~ ^[0-9]+$ ]]; then
@@ -102,7 +197,7 @@ fi
 # Signal 2: vision-coverage gap percentage.
 vision_present=false
 gap_percentage=null
-if [ -f "$VISION_REPORT" ]; then
+if [ -r "$VISION_REPORT" ]; then
   vision_present=true
   gap_percentage=$(jq -r '.gap_percentage // empty' "$VISION_REPORT" 2>/dev/null || true)
 fi
@@ -125,7 +220,7 @@ fi
 part_ii_open_count=0
 part_ii_in_progress_count=0
 part_ii_max_stale_days=0
-if [ -f "$BEADS_JSONL" ]; then
+if [ -r "$BEADS_JSONL" ]; then
   # Filter beads to those tagged reality-check-2026-05-14 OR wave-4.
   part_ii_stats=$(jq -s '
     [.[]

@@ -43,6 +43,7 @@ set -euo pipefail
 #   2. Closure Linter          - prevent abstention-as-implementation closure
 #   3. Snapshot Proposal Guard - block unreviewed tracked insta proposals
 #   4. Untracked Work Audit    - advisory Beads FILE SURFACE coverage for dirty paths
+#   4.49. Bridge Staleness Contract - no-Cargo bridge fixture scanner self-test
 #   4.5. Bridge Staleness      - advisory signal when CLOSE_THE_GAP_PLAN needs refresh
 #   4.59. Plan Drift Contract  - no-Cargo plan/bead fixture scanner self-test
 #   4.6. Plan Drift Advisory   - advisory plan_doc_section drift hints for Beads triage
@@ -884,6 +885,10 @@ run_stage "Snapshot Proposal Guard" "snapshot_proposal_guard"
 # Gate 3.5: Advisory dirty-work ownership coverage. This remains advisory while
 # multi-agent sessions routinely carry unrelated in-flight changes.
 run_stage "Untracked Work Audit (advisory)" "with_beads_read_locks ./scripts/untracked-work-audit.sh"
+
+# Gate 3.59: Bridge staleness contract. This no-Cargo fixture harness proves
+# signal classifications before the live advisory scan reads Beads state.
+run_stage "Bridge Staleness Contract" "./scripts/bridge-staleness.sh --self-test"
 
 # Gate 3.6: Advisory bridge-plan staleness. This always exits 0 and writes
 # .bridge-staleness-report.json so the trailing verify summary includes whether
