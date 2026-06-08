@@ -1659,8 +1659,25 @@ pub fn explain_why_not(
         }
     };
 
-    let input =
-        WhyNotSelectedInput::new(options.query.clone(), target, budget, profile, candidates);
+    // bd-1n0np.1.8: surface the retrieval-time degradations collected above (e.g.
+    // a degraded/missing search index that forced the lexical fallback) so a miss
+    // caused by a broken index reports `not_retrieved_due_to_degraded_index`
+    // (stage `degraded_index`) instead of a bare `not_retrieved` — the
+    // honest-vs-misleading distinction. Map the context degradations onto the
+    // why-not degradation contract.
+    let why_not_degraded: Vec<crate::pack::WhyNotSelectionDegradation> = degraded
+        .iter()
+        .map(|degradation| {
+            crate::pack::WhyNotSelectionDegradation::new(
+                degradation.code.clone(),
+                degradation.severity.as_str(),
+                degradation.message.clone(),
+                degradation.repair.clone(),
+            )
+        })
+        .collect();
+    let input = WhyNotSelectedInput::new(options.query.clone(), target, budget, profile, candidates)
+        .with_degraded(why_not_degraded);
     explain_why_not_selected(input).map_err(|error| ContextPackError::Pack(error.to_string()))
 }
 
