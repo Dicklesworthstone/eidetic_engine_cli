@@ -16233,6 +16233,14 @@ pub struct CreatePackRecordInput {
     pub created_by: Option<String>,
 }
 
+/// Task lens metadata bound to a persisted pack record.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CreatePackTaskLensInput {
+    pub id: String,
+    pub version: u32,
+    pub lens_hash: String,
+}
+
 /// A stored pack_records row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredPackRecord {
@@ -16513,6 +16521,8 @@ struct PackSelectionLedgerCore {
     created_at: String,
     created_by: Option<String>,
     command_surface: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_lens: Option<PackLedgerTaskLens>,
     request: PackLedgerRequest,
     database: PackLedgerDatabase,
     derived_assets: PackLedgerDerivedAssets,
@@ -16554,6 +16564,14 @@ struct PackLedgerRequest {
     query: PackLedgerTextRecord,
     profile: String,
     max_tokens: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackLedgerTaskLens {
+    id: String,
+    version: u32,
+    lens_hash: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -16683,11 +16701,23 @@ impl DbConnection {
         items: &[CreatePackItemInput],
         omissions: &[CreatePackOmissionInput],
     ) -> Result<PackRecordInsertTimings> {
+        self.insert_pack_record_with_timings_and_task_lens(id, input, items, omissions, None)
+    }
+
+    /// Insert a pack record with task-lens metadata bound into the replay ledger.
+    pub fn insert_pack_record_with_timings_and_task_lens(
+        &self,
+        id: &str,
+        input: &CreatePackRecordInput,
+        items: &[CreatePackItemInput],
+        omissions: &[CreatePackOmissionInput],
+        task_lens: Option<&CreatePackTaskLensInput>,
+    ) -> Result<PackRecordInsertTimings> {
         let mut timings = PackRecordInsertTimings::default();
         let now = Utc::now().to_rfc3339();
         let ledger_start = Instant::now();
         let (ledger_json, ledger_hash) =
-            build_pack_selection_ledger(id, input, items, omissions, &now)?;
+            build_pack_selection_ledger(id, input, items, omissions, &now, task_lens)?;
         timings.ledger_serialization = ledger_start.elapsed();
         timings.item_write_batches =
             pack_insert_batch_count(items.len(), PACK_ITEM_INSERT_BATCH_ROWS);
@@ -17218,9 +17248,11 @@ fn build_pack_selection_ledger(
     items: &[CreatePackItemInput],
     omissions: &[CreatePackOmissionInput],
     created_at: &str,
+    task_lens: Option<&CreatePackTaskLensInput>,
 ) -> Result<(String, String)> {
-    let (ledger_json, ledger_hash) =
-        build_uncompressed_pack_selection_ledger(id, input, items, omissions, created_at)?;
+    let (ledger_json, ledger_hash) = build_uncompressed_pack_selection_ledger(
+        id, input, items, omissions, created_at, task_lens,
+    )?;
     let stored_ledger_json = store_pack_selection_ledger_json(&ledger_json, &ledger_hash)?;
 
     Ok((stored_ledger_json, ledger_hash))
@@ -17232,6 +17264,7 @@ fn build_uncompressed_pack_selection_ledger(
     items: &[CreatePackItemInput],
     omissions: &[CreatePackOmissionInput],
     created_at: &str,
+    task_lens: Option<&CreatePackTaskLensInput>,
 ) -> Result<(String, String)> {
     let mut selected_items = items
         .iter()
@@ -17273,6 +17306,11 @@ fn build_uncompressed_pack_selection_ledger(
             .created_by
             .clone()
             .unwrap_or_else(|| "unknown".to_string()),
+        task_lens: task_lens.map(|task_lens| PackLedgerTaskLens {
+            id: task_lens.id.clone(),
+            version: task_lens.version,
+            lens_hash: task_lens.lens_hash.clone(),
+        }),
         request: PackLedgerRequest {
             query: pack_ledger_text_record(&input.query),
             profile: input.profile.clone(),
@@ -32438,8 +32476,19 @@ mod tests {
             trust_class: "human_explicit".to_string(),
             trust_subclass: Some("project-rule".to_string()),
         }];
+        let task_lens = super::CreatePackTaskLensInput {
+            id: "bugfix".to_string(),
+            version: 1,
+            lens_hash: "blake3:task-lens-bugfix".to_string(),
+        };
 
-        connection.insert_pack_record(pack_id, &input, &items, &[])?;
+        connection.insert_pack_record_with_timings_and_task_lens(
+            pack_id,
+            &input,
+            &items,
+            &[],
+            Some(&task_lens),
+        )?;
         let record = connection
             .get_pack_record(pack_id)?
             .ok_or_else(|| TestFailure::new("pack record not found"))?;
@@ -32477,6 +32526,21 @@ mod tests {
             &ledger["request"]["query"]["redacted"],
             &serde_json::json!(true),
             "query redacted",
+        )?;
+        ensure_equal(
+            &ledger["taskLens"]["id"],
+            &serde_json::json!("bugfix"),
+            "task lens id persisted",
+        )?;
+        ensure_equal(
+            &ledger["taskLens"]["version"],
+            &serde_json::json!(1),
+            "task lens version persisted",
+        )?;
+        ensure_equal(
+            &ledger["taskLens"]["lensHash"],
+            &serde_json::json!("blake3:task-lens-bugfix"),
+            "task lens hash persisted",
         )?;
         let redaction_classes = ledger["selectedItems"][0]["redactionClasses"]
             .as_array()
@@ -32635,6 +32699,7 @@ mod tests {
             &items,
             &[],
             created_at,
+            None,
         )?;
         let stored_json = super::store_pack_selection_ledger_json(&canonical_json, &ledger_hash)?;
         let storage = super::pack_ledger_storage_summary(Some(&stored_json));
@@ -32719,6 +32784,7 @@ mod tests {
             &items,
             &[],
             "2026-05-24T00:00:00Z",
+            None,
         )?;
         let stored_json = super::store_pack_selection_ledger_json(&canonical_json, &ledger_hash)?;
         let mut envelope: super::CompressedPackSelectionLedger = serde_json::from_str(&stored_json)
@@ -32851,6 +32917,7 @@ mod tests {
             &first_items,
             &omissions,
             created_at,
+            None,
         )?;
         let (second_json, second_hash) = super::build_pack_selection_ledger(
             pack_id,
@@ -32858,6 +32925,7 @@ mod tests {
             &second_items,
             &omissions,
             created_at,
+            None,
         )?;
 
         ensure_equal(&first_hash, &second_hash, "equivalent ledger hash")?;

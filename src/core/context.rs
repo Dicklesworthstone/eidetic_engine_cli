@@ -75,8 +75,9 @@ use crate::db::read_pool::{
     SnapshotPin, SnapshotPinMetadata, registered_process_read_pool,
 };
 use crate::db::{
-    CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DatabaseConfig,
-    DbConnection, PackRecordInsertTimings, StoredAgentContextProfileForPack, StoredMemory,
+    CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, CreatePackTaskLensInput,
+    DatabaseConfig, DbConnection, PackRecordInsertTimings, StoredAgentContextProfileForPack,
+    StoredMemory,
 };
 use crate::models::degradation::{
     GRAPH_PACK_DNA_TIMEOUT_CODE, GRAPH_PPR_EMPTY_SEED_SET_CODE, GRAPH_PPR_SNAPSHOT_STALE_CODE,
@@ -2525,6 +2526,7 @@ fn run_context_pack_with_performance_inner(
                         &request,
                         &draft,
                         &degraded,
+                        options.task_lens.as_ref(),
                         &mut pack_persistence,
                     )
                     .map_err(|error| error.to_string()),
@@ -2536,6 +2538,7 @@ fn run_context_pack_with_performance_inner(
                             &draft,
                             &degraded,
                             pack_id_seed,
+                            options.task_lens.as_ref(),
                             &mut pack_persistence,
                         )
                         .map(|_| ())
@@ -2557,6 +2560,7 @@ fn run_context_pack_with_performance_inner(
                                 &request,
                                 &draft,
                                 &degraded,
+                                options.task_lens.as_ref(),
                                 &mut pack_persistence,
                             )
                             .map_err(|error| error.to_string()),
@@ -2568,6 +2572,7 @@ fn run_context_pack_with_performance_inner(
                                     &draft,
                                     &degraded,
                                     pack_id_seed,
+                                    options.task_lens.as_ref(),
                                     &mut pack_persistence,
                                 )
                                 .map(|_| ())
@@ -4019,6 +4024,7 @@ fn persist_pack_record(
         request,
         draft,
         degraded,
+        None,
         &mut subspans,
     )
 }
@@ -4029,6 +4035,7 @@ fn persist_pack_record_measured(
     request: &ContextRequest,
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
+    task_lens: Option<&ContextTaskLens>,
     subspans: &mut PackPersistenceSubspans,
 ) -> Result<(), String> {
     persist_pack_record_with_pack_id(
@@ -4037,6 +4044,7 @@ fn persist_pack_record_measured(
         request,
         draft,
         degraded,
+        task_lens,
         PackId::now(),
         subspans,
     )
@@ -4060,6 +4068,7 @@ fn persist_pack_record_seeded(
         draft,
         degraded,
         determinism,
+        None,
         &mut subspans,
     )
 }
@@ -4071,6 +4080,7 @@ fn persist_pack_record_seeded_measured(
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
     determinism: &Deterministic<Seed>,
+    task_lens: Option<&ContextTaskLens>,
     subspans: &mut PackPersistenceSubspans,
 ) -> Result<String, String> {
     let mut pack_id_token = determinism.shared_child("ulid.pack");
@@ -4080,6 +4090,7 @@ fn persist_pack_record_seeded_measured(
         request,
         draft,
         degraded,
+        task_lens,
         PackId::now_seeded(&mut pack_id_token),
         subspans,
     )
@@ -4091,6 +4102,7 @@ fn persist_pack_record_with_pack_id(
     request: &ContextRequest,
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
+    task_lens: Option<&ContextTaskLens>,
     pack_id: PackId,
     subspans: &mut PackPersistenceSubspans,
 ) -> Result<String, String> {
@@ -4207,8 +4219,20 @@ fn persist_pack_record_with_pack_id(
         .collect();
     subspans.omission_input_build = omission_input_start.elapsed();
 
+    let db_task_lens = task_lens.map(|task_lens| CreatePackTaskLensInput {
+        id: task_lens.id.clone(),
+        version: task_lens.version,
+        lens_hash: task_lens.lens_hash.clone(),
+    });
+
     connection
-        .insert_pack_record_with_timings(&pack_id.to_string(), &input, &items, &omissions)
+        .insert_pack_record_with_timings_and_task_lens(
+            &pack_id.to_string(),
+            &input,
+            &items,
+            &omissions,
+            db_task_lens.as_ref(),
+        )
         .map(|timings| subspans.apply_insert_timings(&timings))
         .map_err(|e| format!("insert failed: {e}"))?;
     Ok(pack_id.to_string())
