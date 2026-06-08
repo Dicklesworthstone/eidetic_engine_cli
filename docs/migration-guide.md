@@ -116,11 +116,22 @@ snapshot yet; it does not mean live graph compute is unavailable.
 - Memory record CRUD with audit trail
 - Revision history and provenance linking
 - Confidence scoring and decay application
+- Extraction-first typed sidecars for structured failure, decision, command,
+  and risk memories when the body contains explicit field markers
 
 **What changed:**
 - `revise` internals no longer fabricate revision rationale
 - Revisions require explicit user input or skill handoff
 - Audit entries are always written for mutations
+- `ee remember --kind failure|decision|command|risk` can populate typed fields
+  from explicit body text. Bare or unstructured memories remain unchanged; the
+  extractor does not fabricate missing fields.
+- `ee search` accepts `--kind <kind>` plus repeatable `--field name=value`
+  filters for typed sidecar fields, for example
+  `ee search "prefetch" --kind failure --field family=aggressive-prefetch --json`.
+- Negative-evidence ledger tag prefixes such as `family-*`, `cause-*`, and
+  `reverted-at-*` are now documented compatibility tags. The canonical typed
+  fields are `family`, `cause`, and `reverted_at_sha` when present in the body.
 
 **Skill handoff:** None required — these are pure mechanical operations.
 

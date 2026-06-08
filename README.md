@@ -1502,12 +1502,17 @@ structured imports through `ee import jsonl --source <file>`.
 
 For long-running optimization work, record failed attempts before they disappear
 into a revert. The useful artifact is the attempt, why it lost, and the smallest
-measurement or source that proves it lost.
+measurement or source that proves it lost. Failure memories now use typed
+memory fields as the formal machine-readable convention: write `Family:`,
+`Cause:`, and `Reverted at SHA ...` in the body so `ee remember --kind failure`
+can populate the typed sidecar. Legacy tags remain useful for broad grouping,
+but `ee search --kind failure --field family=<name> --json` is the precise
+filtering surface.
 
 | Loop step | `ee` surface |
 |---|---|
 | Start a campaign | `ee init --workspace ./optimization/<campaign> --json` |
-| Capture a failed attempt | `ee remember "...what lost and why..." --level episodic --kind failure --tags family-...,cause-...,regression-... --source <artifact-uri> --json` |
+| Capture a failed attempt | `ee remember "...what lost and why... Family: <name>. Cause: <root>. Reverted at SHA <sha>." --level episodic --kind failure --source <artifact-uri> --json` |
 | Cluster repeated failures | `ee playbook extract --workspace ./optimization/<campaign> --dry-run --json` |
 | Promote a validated anti-pattern | `ee curate validate <candidate-id>` then `ee curate apply <candidate-id>` |
 | Prime the next attempt | `ee pack "<next hypothesis>" --workspace ./optimization/<campaign> --profile thorough --format markdown` |
@@ -1532,10 +1537,10 @@ Useful tag prefixes:
 
 | Prefix | Meaning |
 |---|---|
-| `family-<name>` | Approach family, such as `family-aggressive-prefetch` |
+| `family-<name>` | Approach family, such as `family-aggressive-prefetch`; canonical typed field is `family` |
 | `regression-<surface>` | Where it lost, such as `regression-tail-latency` |
-| `cause-<root>` | Inferred root cause, such as `cause-cache-pollution` |
-| `reverted-at-<sha>` | Decision point or revert commit |
+| `cause-<root>` | Inferred root cause, such as `cause-cache-pollution`; canonical typed field is `cause` |
+| `reverted-at-<sha>` | Decision point or revert commit; canonical typed field is `reverted_at_sha` |
 
 ---
 

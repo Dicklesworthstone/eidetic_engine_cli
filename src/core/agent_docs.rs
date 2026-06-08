@@ -915,6 +915,18 @@ pub const EXAMPLES: &[ExampleEntry] = &[
         category: "search",
     },
     ExampleEntry {
+        title: "Store typed failure evidence",
+        description: "Record a failure body that ee can parse into typed fields such as family, cause, and reverted_at_sha",
+        command: "ee remember \"Reverted at SHA 9af3c21. Family: aggressive-prefetch. Cause: cache pollution.\" --level episodic --kind failure --json",
+        category: "memory",
+    },
+    ExampleEntry {
+        title: "Search typed memory fields",
+        description: "Filter memories by typed sidecar fields extracted from structured memory bodies",
+        command: "ee search \"prefetch regression\" --kind failure --field family=aggressive-prefetch --json",
+        category: "search",
+    },
+    ExampleEntry {
         title: "Impact lookup",
         description: "Find memories attached to a path or typed surface before editing it",
         command: "ee impact src/core/search.rs --workspace . --json",
@@ -1079,6 +1091,19 @@ pub const IMPACT_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     },
 ];
 
+pub const TYPED_SEARCH_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "typed field filter is malformed",
+        jq: r#".error | select(.code == "usage") | {message, repair}"#,
+        next_action: "Pass typed filters as `--field name=value`; keep raw query text in the positional query instead of the field value.",
+    },
+    FailureBranchEntry {
+        condition: "search succeeds but no typed sidecar fields match",
+        jq: r#".data | select((.results // []) | length == 0)"#,
+        next_action: "Inspect the source memory with `ee memory show <id> --json`; bare memories and unstructured bodies intentionally have no fabricated typed fields.",
+    },
+];
+
 pub const DOCS_BOOTSTRAP_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
         condition: "dry-run reports degraded source handling",
@@ -1198,6 +1223,16 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#".data.results[]? | {memoryId, matchType, score, preview: .memory.contentPreview}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.impact.v1""#,
         failure_branches: IMPACT_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "typed-memory-search",
+        title: "Filter typed memory fields",
+        description: "Use extraction-first typed memory sidecars to find failures, decisions, commands, or risks by structured fields without matching raw prose.",
+        category: "search",
+        command: "ee search \"prefetch regression\" --workspace . --kind failure --field family=aggressive-prefetch --json",
+        jq: r#".data.results[]? | {memoryId, kind, typedFields: (.typedFields // .memory.typedFields // {})}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
+        failure_branches: TYPED_SEARCH_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
         id: "workspace-health",
@@ -1754,6 +1789,39 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn typed_memory_search_flags_are_documented_for_agents() -> TestResult {
+        let typed_example = EXAMPLES
+            .iter()
+            .find(|example| example.title == "Search typed memory fields")
+            .ok_or_else(|| "typed memory search example is documented".to_string())?;
+        ensure(
+            typed_example.command.contains("--kind failure"),
+            "typed search example documents --kind",
+        )?;
+        ensure(
+            typed_example.command.contains("--field family="),
+            "typed search example documents --field name=value",
+        )?;
+
+        let recipe = AGENT_DOC_RECIPES
+            .iter()
+            .find(|recipe| recipe.id == "typed-memory-search")
+            .ok_or_else(|| "typed memory search recipe is documented".to_string())?;
+        ensure(
+            recipe.description.contains("extraction-first"),
+            "typed search recipe documents extraction-first behavior",
+        )?;
+        ensure(
+            recipe.command.contains("--kind failure") && recipe.command.contains("--field family="),
+            "typed search recipe command includes kind and field filters",
+        )?;
+        ensure(
+            recipe.jq.contains("typedFields"),
+            "typed search recipe extracts typed field output",
+        )
     }
 
     #[test]
