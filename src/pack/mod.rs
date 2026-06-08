@@ -8,6 +8,7 @@ use tiktoken_rs::{CoreBPE, cl100k_base};
 
 use crate::cache::{CacheBudget, MemoryPressure, assess_pressure};
 use crate::config::MeshCommandMode;
+use crate::core::contradiction_guard::{GuardedMemory, decide_contradiction_survivor};
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
 };
@@ -1949,6 +1950,18 @@ pub struct PackSelectedItem {
     pub feasible: bool,
 }
 
+/// Map a memory trust class to a deterministic standing rank (higher = more
+/// trusted) for the pack-time contradiction guard (bd-1n0np.7.5).
+const fn trust_class_rank_milli(class: TrustClass) -> i64 {
+    match class {
+        TrustClass::HumanExplicit => 5_000,
+        TrustClass::AgentValidated => 4_000,
+        TrustClass::AgentAssertion => 3_000,
+        TrustClass::CassEvidence => 2_000,
+        TrustClass::LegacyImport => 1_000,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PackDraft {
     pub query: String,
@@ -1964,6 +1977,76 @@ impl PackDraft {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// bd-1n0np.7.5 — pack-time contradiction guard. Drops the lower-standing
+    /// side of each unresolved hard-contradiction pair among the selected items,
+    /// recording it as a [`PackOmissionReason::ContradictionSuppressed`] omission,
+    /// so a pack never carries both sides of an unresolved contradiction.
+    /// Standing is higher trust class, then better (lower) selection rank, then a
+    /// deterministic id tie-break (via [`decide_contradiction_survivor`]). A no-op
+    /// in `forced` mode (the caller surfaces both sides under a `## Contradictions`
+    /// header instead). `unresolved_pairs` come from the 7.2 detector minus 7.4
+    /// resolutions. Returns the number of items suppressed.
+    pub fn apply_contradiction_guard(
+        &mut self,
+        unresolved_pairs: &[(String, String)],
+        forced: bool,
+    ) -> usize {
+        if forced || unresolved_pairs.is_empty() || self.items.len() < 2 {
+            return 0;
+        }
+        let standing: std::collections::BTreeMap<String, GuardedMemory> = self
+            .items
+            .iter()
+            .map(|item| {
+                let id = item.memory_id.to_string();
+                (
+                    id.clone(),
+                    GuardedMemory {
+                        memory_id: id,
+                        trust_milli: trust_class_rank_milli(item.trust.class),
+                        // Lower selection rank = stronger standing -> higher key.
+                        freshness_epoch: -i64::from(item.rank),
+                    },
+                )
+            })
+            .collect();
+
+        let mut suppressed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (a, b) in unresolved_pairs {
+            if suppressed.contains(a) || suppressed.contains(b) {
+                continue;
+            }
+            let (Some(ga), Some(gb)) = (standing.get(a), standing.get(b)) else {
+                continue;
+            };
+            suppressed.insert(decide_contradiction_survivor(ga, gb).suppressed_memory_id);
+        }
+        if suppressed.is_empty() {
+            return 0;
+        }
+
+        let count = suppressed.len();
+        let mut kept = Vec::with_capacity(self.items.len().saturating_sub(count));
+        for item in std::mem::take(&mut self.items) {
+            if suppressed.contains(&item.memory_id.to_string()) {
+                self.omitted.push(PackOmission {
+                    memory_id: item.memory_id,
+                    estimated_tokens: item.estimated_tokens,
+                    relevance: item.relevance,
+                    utility: item.utility,
+                    reason: PackOmissionReason::ContradictionSuppressed,
+                    rejected_at: PackRejectionStage::Selection,
+                    feasible: true,
+                    could_fit_with_budget: None,
+                });
+            } else {
+                kept.push(item);
+            }
+        }
+        self.items = kept;
+        count
     }
 
     #[must_use]
@@ -1997,7 +2080,9 @@ impl PackDraft {
                 PackOmissionReason::BelowRelevanceFloor => {
                     below_relevance_floor = below_relevance_floor.saturating_add(1);
                 }
-                PackOmissionReason::ExcludedByPolicy | PackOmissionReason::ExcludedByFilter => {}
+                PackOmissionReason::ExcludedByPolicy
+                | PackOmissionReason::ExcludedByFilter
+                | PackOmissionReason::ContradictionSuppressed => {}
             }
         }
 
@@ -2461,6 +2546,7 @@ fn why_not_primary_reason(
             PackOmissionReason::BelowRelevanceFloor => "omitted_by_score_floor",
             PackOmissionReason::ExcludedByPolicy => "excluded_by_policy",
             PackOmissionReason::ExcludedByFilter => "excluded_by_filter",
+            PackOmissionReason::ContradictionSuppressed => "contradiction_suppressed",
         }
         .to_string();
     }
@@ -4819,6 +4905,9 @@ pub enum PackOmissionReason {
     BelowRelevanceFloor,
     ExcludedByPolicy,
     ExcludedByFilter,
+    /// bd-1n0np.7.5 — dropped by the pack-time contradiction guard: the
+    /// lower-standing side of an unresolved hard contradiction.
+    ContradictionSuppressed,
 }
 
 impl PackOmissionReason {
@@ -4830,6 +4919,7 @@ impl PackOmissionReason {
             Self::BelowRelevanceFloor => "below_relevance_floor",
             Self::ExcludedByPolicy => "excluded_by_policy",
             Self::ExcludedByFilter => "excluded_by_filter",
+            Self::ContradictionSuppressed => "contradiction_suppressed",
         }
     }
 }
