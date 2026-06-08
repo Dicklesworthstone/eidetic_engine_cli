@@ -2527,6 +2527,10 @@ pub struct ContextArgs {
     #[arg(long = "require-fresh-sentinels", action = ArgAction::SetTrue)]
     pub require_fresh_sentinels: bool,
 
+    /// Disable level-of-detail tiering and assemble a legacy flat pack.
+    #[arg(long = "no-lod", action = ArgAction::SetTrue)]
+    pub no_lod: bool,
+
     /// Redaction level for context pack output.
     #[arg(long, value_enum)]
     pub redaction: Option<BackupRedaction>,
@@ -2762,6 +2766,10 @@ pub struct PackArgs {
     #[arg(long = "require-fresh-sentinels", action = ArgAction::SetTrue)]
     pub require_fresh_sentinels: bool,
 
+    /// Disable level-of-detail tiering and assemble a legacy flat pack.
+    #[arg(long = "no-lod", action = ArgAction::SetTrue)]
+    pub no_lod: bool,
+
     /// Redacted ee.coordination_snapshot.v1 JSON to embed in the pack.
     #[arg(long, value_name = "PATH")]
     pub coordination_snapshot: Option<PathBuf>,
@@ -2900,6 +2908,10 @@ pub struct PackBuildArgs {
     #[arg(long = "require-fresh-sentinels", action = ArgAction::SetTrue)]
     pub require_fresh_sentinels: bool,
 
+    /// Disable level-of-detail tiering and assemble a legacy flat pack.
+    #[arg(long = "no-lod", action = ArgAction::SetTrue)]
+    pub no_lod: bool,
+
     /// Redacted ee.coordination_snapshot.v1 JSON to embed in the pack.
     #[arg(long, value_name = "PATH")]
     pub coordination_snapshot: Option<PathBuf>,
@@ -2992,6 +3004,7 @@ impl PackArgs {
             no_meta: self.no_meta,
             read_only: self.read_only,
             require_fresh_sentinels: self.require_fresh_sentinels,
+            no_lod: self.no_lod,
             include_non_affecting_degradations: self.include_non_affecting_degradations,
             database: self.database.clone(),
             index_dir: self.index_dir.clone(),
@@ -31786,6 +31799,7 @@ where
             require_fresh_sentinels: false,
             output_options,
             persist_pack: false,
+            no_lod: false,
         };
         match run_context_pack_with_performance(&pack_options, "orient") {
             Ok(run) => {
@@ -32118,6 +32132,7 @@ where
         filters,
         output_options,
         persist_pack: !args.read_only,
+        no_lod: args.no_lod,
     };
 
     if args.explain_performance {
@@ -35086,6 +35101,7 @@ where
             no_meta: args.no_meta,
             read_only: args.read_only,
             require_fresh_sentinels: args.require_fresh_sentinels,
+            no_lod: args.no_lod,
             redaction: task_lens_redaction(resolved_lens.as_ref()),
             include_non_affecting_degradations: args.include_non_affecting_degradations,
             include_tombstoned: false,
@@ -35297,6 +35313,7 @@ where
         require_fresh_sentinels: args.require_fresh_sentinels,
         output_options,
         persist_pack: !args.read_only,
+        no_lod: args.no_lod,
     };
     let renderer = effective_pack_renderer(cli, request.renderer);
 
@@ -40042,6 +40059,7 @@ where
         output_options: ContextPackOutputOptions::default(),
         // why-not is read-only and never persists a pack record (reverse of `ee why`).
         persist_pack: false,
+        no_lod: false,
     };
 
     let report = match explain_why_not_default(&options, memory_id) {

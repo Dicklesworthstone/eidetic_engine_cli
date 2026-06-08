@@ -623,6 +623,16 @@ pub struct ContextPackOptions {
     pub require_fresh_sentinels: bool,
     pub output_options: ContextPackOutputOptions,
     pub persist_pack: bool,
+    /// bd-1n0np.5.8 (E5): when `true` (via `pack --no-lod`), the
+    /// level-of-detail tiering is disabled and the pack is assembled with
+    /// `lod_budget_shares: None` — the legacy flat selector that places
+    /// every selected candidate at the `Full` tier. This reproduces
+    /// pre-LOD packs byte-for-byte (zero `truncated_preview`/`link_only`
+    /// budget ⇒ `has_compressed_tiers()` is false ⇒ heap selector), giving
+    /// callers a deterministic escape hatch when LOD compression is
+    /// undesirable. Defaults to `false` (LOD on, the post-bd-1n0np.5.2
+    /// behavior).
+    pub no_lod: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2470,9 +2480,16 @@ fn run_context_pack_with_performance_inner(
             // bd-1n0np.5.2: apply the [pack.lod_*] tier-ratio config override when
             // all three basis points are configured (and fit u16); otherwise keep
             // the in-code default so existing pack goldens stay byte-identical.
-            lod_budget_shares: match context_lod_budget_shares(&options.workspace_path) {
-                Ok(Some(shares)) => Some(shares),
-                _ => crate::pack::PackAssemblyOptions::default().lod_budget_shares,
+            // bd-1n0np.5.8: `pack --no-lod` forces `None`, the legacy flat
+            // selector that assembles every candidate at the `Full` tier
+            // (byte-identical to pre-LOD packs); it overrides any config.
+            lod_budget_shares: if options.no_lod {
+                None
+            } else {
+                match context_lod_budget_shares(&options.workspace_path) {
+                    Ok(Some(shares)) => Some(shares),
+                    _ => crate::pack::PackAssemblyOptions::default().lod_budget_shares,
+                }
             },
             // bd-1prrl.7.3: arena mode is plumbed through the
             // `PackAssemblyOptions` surface. Context orchestration
@@ -9861,6 +9878,7 @@ mod tests {
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            no_lod: false,
         }
     }
 
@@ -12457,6 +12475,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            no_lod: false,
         };
         let trace = ContextPerformanceTrace {
             db_open_count: 1,
@@ -12623,6 +12642,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            no_lod: false,
         };
         let trace = ContextPerformanceTrace::default();
         let source_mode_metadata = super::ContextPackL2SourceModeMetadata::from_options(&options);
@@ -12786,6 +12806,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            no_lod: false,
         };
         let payload = serde_json::json!({
             "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1,
@@ -12916,6 +12937,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            no_lod: false,
         })
         .map_err(|error| error.to_string())?;
 
@@ -13032,6 +13054,7 @@ pub fn unrelated_context() -> u64 {{
             output_options: super::ContextPackOutputOptions::default()
                 .with_cache_json_response(true),
             persist_pack: true,
+            no_lod: false,
         };
 
         let fresh = super::run_context_pack(&options).map_err(|error| error.to_string())?;
@@ -13141,6 +13164,7 @@ pub fn unrelated_context() -> u64 {{
             output_options: super::ContextPackOutputOptions::default()
                 .with_cache_json_response(true),
             persist_pack: true,
+            no_lod: false,
         };
         let mut search_report =
             super::missing_index_search_report("lexical fallback", 10, test_runtime_profile());
@@ -13249,6 +13273,7 @@ pub fn unrelated_context() -> u64 {{
                     require_fresh_sentinels: false,
                     output_options: Default::default(),
                     persist_pack: true,
+                    no_lod: false,
                 },
                 &determinism,
             )
@@ -13361,6 +13386,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            no_lod: false,
         };
 
         let mut hashes_by_pool_size = BTreeMap::new();
@@ -13992,6 +14018,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            no_lod: false,
         };
 
         let default_response = super::run_context_pack(&base_options)
@@ -14161,6 +14188,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            no_lod: false,
         };
 
         let default_response = super::run_context_pack(&base_options)

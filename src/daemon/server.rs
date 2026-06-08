@@ -1626,6 +1626,9 @@ impl DaemonContextParams {
             task_lens: None,
             output_options: self.output_options(),
             persist_pack: !self.read_only,
+            // bd-1n0np.5.8: the daemon does not expose `--no-lod`; keep LOD
+            // tiering on (the default), matching the one-shot CLI default.
+            no_lod: false,
         }
     }
 }
