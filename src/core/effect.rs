@@ -605,6 +605,19 @@ impl CommandEffect {
         }
     }
 
+    /// Create a durable write that also declares companion workspace-file surfaces.
+    #[must_use]
+    pub fn durable_write_with_workspace_files(
+        command_path: &'static str,
+        db_tables: Vec<&'static str>,
+        workspace_files: Vec<&'static str>,
+        description: &'static str,
+    ) -> Self {
+        let mut effect = Self::durable_write(command_path, db_tables, description);
+        effect.write_surfaces.workspace_files = workspace_files;
+        effect
+    }
+
     /// Create an append-only durable-write effect entry.
     #[must_use]
     pub fn append_only_write(
@@ -1170,7 +1183,20 @@ impl EffectManifest {
             ),
             CommandEffect::read_only("config get", "Read one merged config key"),
             CommandEffect::read_only("config show", "Show merged config values"),
+            CommandEffect::read_only_db(
+                "conflict cluster",
+                "Cluster persisted contradiction/conflict evidence without mutation",
+            ),
+            CommandEffect::read_only_db(
+                "conflict explain",
+                "Explain persisted contradiction/conflict evidence",
+            ),
+            CommandEffect::read_only_db(
+                "conflict list",
+                "List persisted contradiction/conflict evidence",
+            ),
             CommandEffect::read_only_db("context", "Assemble context pack (reads only)"),
+            CommandEffect::read_only_db("context-show", "Show a persisted context pack"),
             CommandEffect::read_only_db("orient", "Assemble read-only agent orientation bundle"),
             CommandEffect::read_only("completion", "Generate shell completion scripts"),
             CommandEffect::read_only_db("db status", "Report database status"),
@@ -1193,17 +1219,55 @@ impl EffectManifest {
             CommandEffect::read_only("demo list", "List demo manifests"),
             CommandEffect::read_only_db("demo show", "Show persisted demo audit rows"),
             CommandEffect::read_only_db("demo verify", "Verify demo artifacts"),
+            CommandEffect::read_only_db("diag advisory-lock", "Inspect advisory-lock diagnostics"),
+            CommandEffect::read_only_db("diag artifacts", "Inspect artifact diagnostics"),
+            CommandEffect::read_only_db(
+                "diag build-admission",
+                "Inspect build-admission diagnostics",
+            ),
+            CommandEffect::read_only_db("diag causal-edge", "Inspect causal-edge diagnostics"),
             CommandEffect::read_only_db("diag claims", "Inspect claim diagnostics"),
+            CommandEffect::read_only_db(
+                "diag curation-candidate",
+                "Inspect curation-candidate diagnostics",
+            ),
+            CommandEffect::read_only_db("diag database-skew", "Inspect database-skew diagnostics"),
             CommandEffect::read_only_db("diag dependencies", "Inspect dependency diagnostics"),
+            CommandEffect::read_only_db("diag disk-pressure", "Inspect disk-pressure diagnostics"),
             CommandEffect::read_only_db(
                 "diag environment-attestation",
                 "Inspect environment attestation diagnostics",
             ),
             CommandEffect::read_only_db("diag graph", "Inspect graph diagnostics"),
+            CommandEffect::read_only_db(
+                "diag graph-snapshot",
+                "Inspect graph-snapshot diagnostics",
+            ),
+            CommandEffect::read_only_db("diag host-profile", "Inspect host-profile diagnostics"),
+            CommandEffect::read_only_db("diag incident", "Inspect incident diagnostics"),
             CommandEffect::read_only_db("diag integrity", "Inspect storage integrity diagnostics"),
+            CommandEffect::read_only_db(
+                "diag memory-validity",
+                "Inspect memory-validity diagnostics",
+            ),
+            CommandEffect::read_only_db(
+                "diag model-registry",
+                "Inspect model-registry diagnostics",
+            ),
+            CommandEffect::read_only_db("diag pack-latest", "Inspect latest pack diagnostics"),
+            CommandEffect::read_only_db("diag pack-record", "Inspect pack-record diagnostics"),
+            CommandEffect::read_only_db("diag plan-cache", "Inspect plan-cache diagnostics"),
             CommandEffect::read_only_db("diag quarantine list", "List quarantine entries"),
             CommandEffect::read_only_db("diag quarantine show", "Show single quarantine entry"),
+            CommandEffect::read_only_db("diag search", "Inspect search diagnostics"),
+            CommandEffect::read_only(
+                "diag store-integrity",
+                "Inspect explicit read-fence and write-immune diagnostics",
+            ),
             CommandEffect::read_only_db("diag streams", "Show streams status"),
+            CommandEffect::read_only_db("diag tripwire", "Inspect tripwire diagnostics"),
+            CommandEffect::read_only_db("diag write-owner", "Inspect write-owner diagnostics"),
+            CommandEffect::read_only_db("diag write-spool", "Inspect write-spool diagnostics"),
             CommandEffect::read_only_db("doctor", "Run health checks"),
             CommandEffect::read_only("eval list", "List evaluation scenarios"),
             CommandEffect::read_only("eval report", "Summarize evaluation fixture reports"),
@@ -1238,6 +1302,7 @@ impl EffectManifest {
                 "graph betweenness",
                 "Compute graph betweenness centrality",
             ),
+            CommandEffect::read_only_db("graph centrality", "Compute graph centrality metrics"),
             CommandEffect::read_only_db("graph communities", "Compute graph communities"),
             CommandEffect::read_only_db("graph explain-link", "Explain graph link evidence"),
             CommandEffect::read_only_db("graph export", "Export graph projection report"),
@@ -1259,8 +1324,21 @@ impl EffectManifest {
             CommandEffect::read_only("handoff resume", "Render handoff resume payload"),
             CommandEffect::read_only_db("artifact inspect", "Inspect artifact metadata"),
             CommandEffect::read_only_db("artifact list", "List registered artifacts"),
+            CommandEffect::read_only_db(
+                "attest memory",
+                "Inspect memory attestation inputs and verdicts",
+            ),
+            CommandEffect::read_only_db(
+                "attest pack",
+                "Inspect context-pack attestation inputs and verdicts",
+            ),
+            CommandEffect::read_only_db(
+                "attest query",
+                "Inspect query attestation inputs and verdicts",
+            ),
             CommandEffect::read_only_db("health", "Quick health check"),
             CommandEffect::read_only("help", "Print help"),
+            CommandEffect::read_only_db("history", "Show persisted memory history summary"),
             CommandEffect::read_only(
                 "hook preflight-shell",
                 "Emit a shell snippet wiring ee preflight check into bash or zsh",
@@ -1269,11 +1347,16 @@ impl EffectManifest {
                 "hook git-readiness",
                 "Inspect local Git hook-chain readiness without mutation",
             ),
+            CommandEffect::read_only_db(
+                "impact",
+                "Estimate impact from persisted graph and memory state",
+            ),
             CommandEffect::read_only_db("index status", "Show index status"),
             CommandEffect::read_only(
                 "index vacuum",
                 "Preview reclaimable derived index artifacts without mutation",
             ),
+            CommandEffect::read_only_db("insights", "Render persisted insight summaries"),
             CommandEffect::read_only("install check", "Inspect install posture"),
             CommandEffect::read_only("install plan", "Plan install without mutation"),
             CommandEffect::read_only("introspect", "Introspect ee metadata"),
@@ -1287,22 +1370,54 @@ impl EffectManifest {
                 "lab counterfactual",
                 "Replays a frozen episode with single-input swaps and surfaces the pack diff between the captured pack and the counterfactual pack (N15.5 / bd-17c65.14.15.6)",
             ),
+            CommandEffect::read_only(
+                "lab generate-workload",
+                "Generate a deterministic workload report without persisting it",
+            ),
+            CommandEffect::read_only(
+                "lab promote-workload",
+                "Preview workload promotion and admission without persisting it",
+            ),
             CommandEffect::read_only_db(
                 "learn agenda",
                 "Show learning agenda with prioritized gaps",
             ),
+            CommandEffect::read_only_db(
+                "learn cluster",
+                "Cluster learning evidence without durable mutation",
+            ),
             CommandEffect::read_only_db("learn summary", "Show learning summary statistics"),
             CommandEffect::read_only_db("learn uncertainty", "Show uncertainty estimates"),
+            CommandEffect::read_only_db("lens explain", "Explain a persisted lens projection"),
+            CommandEffect::read_only_db("lens list", "List available persisted lens projections"),
             CommandEffect::read_only_db(
                 "maintenance status",
                 "Report maintenance job availability",
             ),
             CommandEffect::read_only_db("migrate status", "Report pending schema migrations"),
             CommandEffect::read_only("mcp manifest", "Inspect optional MCP adapter manifest"),
+            CommandEffect::read_only("mcp validate", "Validate optional MCP adapter contracts"),
             CommandEffect::read_only_db("memory drift", "Report read-only memory provenance drift"),
             CommandEffect::read_only_db("memory history", "Show memory revision history"),
             CommandEffect::read_only_db("memory list", "List memories"),
             CommandEffect::read_only_db("memory show", "Show memory details"),
+            CommandEffect::read_only_db(
+                "mesh hello-responder",
+                "Inspect mesh hello-responder status",
+            ),
+            CommandEffect::read_only_db("mesh init", "Preview mesh initialization state"),
+            CommandEffect::read_only_db("mesh peer list", "List mesh peers"),
+            CommandEffect::read_only_db("mesh peer show", "Show one mesh peer"),
+            CommandEffect::read_only_db(
+                "mesh peer unknown-attempt",
+                "Inspect unknown mesh-peer admission attempts",
+            ),
+            CommandEffect::read_only_db("mesh peers", "List mesh peers"),
+            CommandEffect::read_only_db(
+                "mesh preview-grant",
+                "Preview a mesh sharing grant without persisting it",
+            ),
+            CommandEffect::read_only_db("mesh status", "Inspect mesh status"),
             CommandEffect::read_only_db("model list", "List model registry entries"),
             CommandEffect::read_only_db("model status", "Inspect model registry status"),
             CommandEffect::read_only_db("outcome quarantine list", "List feedback quarantine rows"),
@@ -1325,6 +1440,10 @@ impl EffectManifest {
                 "Stream read-only performance snapshots for swarm observability",
             ),
             CommandEffect::read_only(
+                "perf prompt-budget",
+                "Estimate prompt budget posture without durable mutation",
+            ),
+            CommandEffect::read_only(
                 "perf snapshot",
                 "Emit one read-only performance snapshot for swarm observability",
             ),
@@ -1337,6 +1456,10 @@ impl EffectManifest {
             CommandEffect::read_only(
                 "preflight guard",
                 "Checks command against preflight guard rules",
+            ),
+            CommandEffect::read_only_db(
+                "preflight list-bypass-tokens",
+                "List hashed preflight bypass-token metadata",
             ),
             CommandEffect::read_only("plan goal", "Recommends recipes for goals"),
             CommandEffect::read_only("plan explain", "Explains recipe selection"),
@@ -1366,6 +1489,12 @@ impl EffectManifest {
                 "profile config plan",
                 "Plan operating profile configuration without writing files",
             ),
+            CommandEffect::read_only_db("proof admit", "Preview proof admission status"),
+            CommandEffect::read_only_db("proof status", "Inspect proof status"),
+            CommandEffect::read_only_db(
+                "proximity",
+                "Compute memory proximity from persisted graph state",
+            ),
             CommandEffect::read_only(
                 "recorder tail",
                 "Recorder tail reads persisted recorder events without mutation",
@@ -1383,6 +1512,10 @@ impl EffectManifest {
                 "List persisted recorder events without mutation",
             ),
             CommandEffect::read_only(
+                "recorder flight replay",
+                "Replay a flight-recorder trace without mutating source state",
+            ),
+            CommandEffect::read_only(
                 "rehearse plan",
                 "Rehearsal planning validates command specs and estimates side-path artifacts",
             ),
@@ -1398,6 +1531,10 @@ impl EffectManifest {
                 "review session",
                 "Analyze session evidence spans for curation candidates",
             ),
+            CommandEffect::read_only(
+                "sandbox diff",
+                "Compare sandbox state with workspace state without applying changes",
+            ),
             CommandEffect::read_only_db("rule list", "List procedural rules"),
             CommandEffect::read_only_db(
                 "rule provenance",
@@ -1407,6 +1544,11 @@ impl EffectManifest {
             CommandEffect::read_only("schema export", "Export public response schemas"),
             CommandEffect::read_only("schema list", "List response schemas"),
             CommandEffect::read_only_db("search", "Search memories"),
+            CommandEffect::read_only_db(
+                "sentinel explain",
+                "Explain sentinel specifications and prior results",
+            ),
+            CommandEffect::read_only_db("show", "Show a persisted memory or artifact"),
             CommandEffect::read_only(
                 "situation classify",
                 "Classify task into situation category",
@@ -1416,15 +1558,65 @@ impl EffectManifest {
             CommandEffect::read_only("situation link", "Plan situation link (dry-run)"),
             CommandEffect::read_only_db("situation show", "Show stored situation details"),
             CommandEffect::read_only_db("status", "Report workspace status"),
+            CommandEffect::read_only_db("subscribe poll", "Poll subscription state"),
+            CommandEffect::read_only_db(
+                "subscribe stream",
+                "Stream subscription state without writing durable records",
+            ),
             CommandEffect::read_only(
                 "support inspect",
                 "Verify and inspect a redacted support bundle manifest",
             ),
             CommandEffect::read_only_db("swarm brief", "Report read-only swarm coordination brief"),
+            CommandEffect::read_only_db(
+                "swarm next-action",
+                "Recommend the next swarm action without claiming work",
+            ),
+            CommandEffect::read_only_db(
+                "swarm work-packet",
+                "Render a swarm work packet without mutating coordination state",
+            ),
             CommandEffect::read_only_db("task-frame show", "Show passive task-frame state"),
             CommandEffect::read_only_db("tripwire list", "List persisted tripwire rules"),
             CommandEffect::read_only("update", "Plan update without mutation"),
+            CommandEffect::read_only_db(
+                "verification broker lookup",
+                "Look up verification broker state",
+            ),
+            CommandEffect::read_only_db(
+                "verification closeout capsule",
+                "Render a verification closeout capsule",
+            ),
+            CommandEffect::read_only_db(
+                "verification closure-guidance",
+                "Render verification closure guidance",
+            ),
+            CommandEffect::read_only_db("verification proofs", "List verification proofs"),
+            CommandEffect::read_only_db(
+                "verification rch blockers",
+                "List RCH verification blockers",
+            ),
+            CommandEffect::read_only_db("verification rch runs", "List RCH verification runs"),
+            CommandEffect::read_only_db(
+                "verify broker lookup",
+                "Look up verification broker state",
+            ),
+            CommandEffect::read_only_db(
+                "verify closeout capsule",
+                "Render a verification closeout capsule",
+            ),
+            CommandEffect::read_only_db(
+                "verify closure-guidance",
+                "Render verification closure guidance",
+            ),
+            CommandEffect::read_only_db("verify proofs", "List verification proofs"),
+            CommandEffect::read_only_db("verify rch blockers", "List RCH verification blockers"),
+            CommandEffect::read_only_db("verify rch runs", "List RCH verification runs"),
             CommandEffect::read_only("version", "Print version"),
+            CommandEffect::read_only_db(
+                "workspace hygiene",
+                "Inspect workspace hygiene and coordination state",
+            ),
             CommandEffect::read_only("workspace list", "List workspace aliases"),
             CommandEffect::read_only("workspace resolve", "Resolve workspace identity"),
             CommandEffect::read_only_db("why", "Explain memory selection"),
@@ -1454,6 +1646,11 @@ impl EffectManifest {
                 vec![".ee/graph/"],
                 "Refresh derived graph feature enrichments",
             ),
+            CommandEffect::derived_write(
+                "graph snapshot refresh",
+                vec![".ee/graph/"],
+                "Refresh derived graph snapshots from source database state",
+            ),
         ]
     }
 
@@ -1481,16 +1678,63 @@ impl EffectManifest {
     }
 
     fn external_io_write_commands() -> Vec<CommandEffect> {
-        vec![CommandEffect::external_io_write(
-            "demo run",
-            vec!["audit_log"],
-            vec![
-                "demo evidence root",
-                "manifest-declared demo artifact paths",
-            ],
-            "demo id plus manifest hash plus generated run id",
-            "Execute safe demo manifest steps with audit ledger rows and evidence artifacts",
-        )]
+        vec![
+            CommandEffect::external_io_write(
+                "demo run",
+                vec!["audit_log"],
+                vec![
+                    "demo evidence root",
+                    "manifest-declared demo artifact paths",
+                ],
+                "demo id plus manifest hash plus generated run id",
+                "Execute safe demo manifest steps with audit ledger rows and evidence artifacts",
+            ),
+            CommandEffect::external_io_write(
+                "lab swarm replay",
+                vec!["audit_log"],
+                vec![".ee/lab/swarm-replay/"],
+                "workload id plus replay host profile plus generated run id",
+                "Replay a swarm workload through subprocess execution and write replay evidence artifacts",
+            ),
+            CommandEffect::external_io_write(
+                "mcp serve-stdio",
+                Vec::new(),
+                vec!["stdio JSON-RPC stream"],
+                "process id plus stdio session",
+                "Serve the optional MCP stdio adapter over process I/O",
+            ),
+            CommandEffect::external_io_write(
+                "mesh auto-enroll",
+                vec!["mesh_peers", "mesh_audit_events", "audit_log"],
+                vec![
+                    ".ee/mesh/auto_enroll_overrides.json",
+                    ".ee/mesh/discovery_denylist.txt",
+                ],
+                "tailscale peer set hash plus workspace id",
+                "Probe mesh peers and persist reviewed auto-enrollment state",
+            ),
+            CommandEffect::external_io_write(
+                "mesh sync",
+                vec!["mesh_peers", "mesh_import_ledger", "search_index_jobs"],
+                vec!["peer mesh transport"],
+                "origin peer cursor plus event content hash",
+                "Contact mesh peers and import authorized memory events",
+            ),
+            CommandEffect::external_io_write(
+                "model fetch",
+                vec!["model_registry", "audit_log"],
+                vec!["~/.local/share/ee/models/"],
+                "model alias plus artifact content hash",
+                "Fetch or import a model artifact and update the model registry",
+            ),
+            CommandEffect::external_io_write(
+                "serve",
+                Vec::new(),
+                vec!["localhost HTTP/SSE listener"],
+                "process id plus listener address",
+                "Serve the optional localhost adapter",
+            ),
+        ]
     }
 
     fn supervised_job_commands() -> Vec<CommandEffect> {
@@ -1509,6 +1753,11 @@ impl EffectManifest {
                 "maintenance run",
                 vec!["memories", "feedback_events", "audit_log"],
                 "Run an explicit bounded maintenance job through the steward backend",
+            ),
+            CommandEffect::supervised_job(
+                "maintenance graph-snapshot-prune",
+                vec!["graph_snapshots", "audit_log"],
+                "Prune expired graph snapshots through a bounded steward job",
             ),
         ]
     }
@@ -1563,6 +1812,48 @@ impl EffectManifest {
                 "target peer id plus preview hash plus actor",
                 "Preview outbound mesh sharing without exporting data; --record-consent appends consent audit evidence",
             ),
+            CommandEffect::append_only_write(
+                "mesh import",
+                vec!["mesh_peers", "mesh_import_ledger", "search_index_jobs"],
+                "origin peer cursor plus event content hash",
+                "Import a mesh artifact by replaying idempotent peer events",
+            ),
+            CommandEffect::append_only_write(
+                "verification ingest",
+                vec!["audit_log"],
+                "verification evidence content hash",
+                "Ingest verification evidence into the audit ledger",
+            ),
+            CommandEffect::append_only_write(
+                "verification rch ingest",
+                vec!["rch_verify_runs"],
+                "rch proof command hash plus run id",
+                "Ingest RCH verification run evidence",
+            ),
+            CommandEffect::append_only_write(
+                "verification record",
+                vec!["audit_log"],
+                "verification record content hash",
+                "Record verification evidence in the audit ledger",
+            ),
+            CommandEffect::append_only_write(
+                "verify ingest",
+                vec!["audit_log"],
+                "verification evidence content hash",
+                "Ingest verification evidence into the audit ledger",
+            ),
+            CommandEffect::append_only_write(
+                "verify rch ingest",
+                vec!["rch_verify_runs"],
+                "rch proof command hash plus run id",
+                "Ingest RCH verification run evidence",
+            ),
+            CommandEffect::append_only_write(
+                "verify record",
+                vec!["audit_log"],
+                "verification record content hash",
+                "Record verification evidence in the audit ledger",
+            ),
         ]
     }
 
@@ -1585,16 +1876,6 @@ impl EffectManifest {
                 "causal promote-plan",
                 vec!["curation_candidates", "audit_log"],
                 "Plan causal promotion and persist reviewed curation candidates when evidence clears thresholds",
-            ),
-            CommandEffect::durable_write(
-                "daemon start",
-                Vec::new(),
-                "Bind the optional UDS RPC socket at $XDG_RUNTIME_DIR/ee/daemon.sock (or ${TMPDIR:-/tmp}/ee-<uid>/daemon.sock); creates the parent directory and writes a UDS file outside the workspace. RPC dispatch is same-uid auth-required, and workspace-bound methods such as ee.daemon.context reject missing or mismatched workspace_id values.",
-            ),
-            CommandEffect::durable_write(
-                "daemon stop",
-                Vec::new(),
-                "Remove the UDS RPC socket file (best-effort); subsequent CLI invocations stop dialing the daemon",
             ),
             CommandEffect::durable_write(
                 "curate accept",
@@ -1630,14 +1911,55 @@ impl EffectManifest {
                 "Merge curation candidates",
             ),
             CommandEffect::durable_write(
+                "curate propose-derived",
+                vec!["curation_candidates", "audit_log"],
+                "Persist derived curation proposals for explicit review",
+            ),
+            CommandEffect::durable_write(
                 "curate reject",
                 vec!["curation_candidates", "audit_log"],
                 "Reject a curation candidate",
             ),
             CommandEffect::durable_write(
+                "curate retire",
+                vec![
+                    "curation_candidates",
+                    "memories",
+                    "search_index_jobs",
+                    "audit_log",
+                ],
+                "Retire an accepted curation artifact through audited memory/index updates",
+            ),
+            CommandEffect::durable_write(
                 "curate snooze",
                 vec!["curation_candidates", "audit_log"],
                 "Snooze a curation candidate",
+            ),
+            CommandEffect::durable_write(
+                "curate tombstone",
+                vec![
+                    "curation_candidates",
+                    "memories",
+                    "search_index_jobs",
+                    "audit_log",
+                ],
+                "Tombstone a curation candidate and related memory state without deleting records",
+            ),
+            CommandEffect::durable_write(
+                "curate untombstone",
+                vec![
+                    "curation_candidates",
+                    "memories",
+                    "search_index_jobs",
+                    "audit_log",
+                ],
+                "Restore a tombstoned curation candidate through audited memory/index updates",
+            ),
+            CommandEffect::durable_write_with_workspace_files(
+                "handoff rotate-key",
+                vec!["audit_log"],
+                vec!["<handoff capsule path>"],
+                "Rotate a handoff capsule HMAC key and rewrite the signed capsule body",
             ),
             CommandEffect::durable_write(
                 "playbook extract",
@@ -1735,6 +2057,117 @@ impl EffectManifest {
                 vec!["memory_tags", "search_index_jobs", "audit_log"],
                 "List or mutate memory tags with deterministic idempotent audits",
             ),
+            CommandEffect::durable_write(
+                "link",
+                vec!["memory_links", "audit_log"],
+                "Create or inspect explicit memory links with audited mutation when requested",
+            ),
+            CommandEffect::durable_state_write(
+                "maintenance wal-checkpoint",
+                vec!["database_wal"],
+                "database path plus checkpoint mode",
+                "database WAL checkpoint",
+                "Checkpoint the workspace database WAL without changing logical memory records",
+            ),
+            CommandEffect::durable_write_with_workspace_files(
+                "mesh discovery-policy",
+                vec!["mesh_audit_events", "audit_log"],
+                vec![
+                    ".ee/mesh/discovery_policy.json",
+                    ".ee/mesh/discovery_allowlist.txt",
+                    ".ee/mesh/discovery_denylist.txt",
+                ],
+                "Persist mesh discovery policy files and audit the policy change",
+            ),
+            CommandEffect::durable_write_with_workspace_files(
+                "mesh export",
+                vec!["mesh_audit_events", "audit_log"],
+                vec!["<--out path>"],
+                "Export authorized mesh material to an explicit side-path artifact",
+            ),
+            CommandEffect::durable_write(
+                "mesh peer add",
+                vec!["mesh_peers", "mesh_audit_events", "audit_log"],
+                "Add a mesh peer with audited policy metadata",
+            ),
+            CommandEffect::durable_write(
+                "mesh peer revoke",
+                vec!["mesh_peers", "mesh_audit_events", "audit_log"],
+                "Revoke a mesh peer with audited policy metadata",
+            ),
+            CommandEffect::durable_write(
+                "mesh peer rotate",
+                vec!["mesh_peers", "mesh_audit_events", "audit_log"],
+                "Rotate mesh peer credentials with audited policy metadata",
+            ),
+            CommandEffect::durable_write(
+                "note",
+                vec!["memories", "memory_tags", "audit_log"],
+                "Store a note as a memory with optional tags",
+            ),
+            CommandEffect::durable_state_write(
+                "preflight check",
+                vec!["preflight_bypass_tokens", "audit_log"],
+                "command hash plus matched rule ids plus override token hash",
+                "preflight bypass token audit",
+                "Check a shell command and audit override-token use when present",
+            ),
+            CommandEffect::durable_state_write(
+                "preflight issue-bypass-token",
+                vec!["preflight_bypass_tokens", "audit_log"],
+                "approved command hash plus issued token hash",
+                "preflight bypass token store",
+                "Issue an audited one-shot preflight bypass token",
+            ),
+            CommandEffect::durable_state_write(
+                "preflight revoke-bypass-token",
+                vec!["preflight_bypass_tokens", "audit_log"],
+                "token hash plus revocation timestamp",
+                "preflight bypass token store",
+                "Revoke an audited preflight bypass token",
+            ),
+            CommandEffect::durable_write(
+                "reflect ingest",
+                vec![
+                    "reflection_request_ledger",
+                    "curation_candidates",
+                    "audit_log",
+                ],
+                "Ingest reflection evidence and propose reviewed curation candidates",
+            ),
+            CommandEffect::durable_write(
+                "review workspace",
+                vec!["curation_candidates", "audit_log"],
+                "Review workspace evidence and persist curation candidates",
+            ),
+            CommandEffect::durable_write_with_workspace_files(
+                "sandbox apply",
+                vec!["memories", "memory_tags", "audit_log"],
+                vec![".ee/sandbox/<session>.json"],
+                "Apply reviewed sandbox memories and record sandbox session state",
+            ),
+            CommandEffect::durable_state_write(
+                "sentinel check",
+                vec!["memory_sentinel_results"],
+                "sentinel spec hash plus observed result hash",
+                "memory sentinel results",
+                "Evaluate sentinel specs and persist checked results",
+            ),
+            CommandEffect::durable_write(
+                "tag",
+                vec!["memory_tags", "search_index_jobs", "audit_log"],
+                "Add or remove memory tags through audited metadata updates",
+            ),
+            CommandEffect::durable_write(
+                "verification provenance",
+                vec!["memories", "curation_candidates", "audit_log"],
+                "Verify provenance and persist reviewed revalidation candidates",
+            ),
+            CommandEffect::durable_write(
+                "verify provenance",
+                vec!["memories", "curation_candidates", "audit_log"],
+                "Verify provenance and persist reviewed revalidation candidates",
+            ),
             CommandEffect::durable_state_write(
                 "recorder start",
                 vec!["recorder_runs"],
@@ -1765,6 +2198,11 @@ impl EffectManifest {
                 "workflow close",
                 vec!["memories", "audit_log"],
                 "Promote eligible workflow working memories to episodic records",
+            ),
+            CommandEffect::durable_write(
+                "workflow create",
+                vec!["memories", "audit_log"],
+                "Create workflow working memory and audit provenance",
             ),
             CommandEffect::durable_write(
                 "rule add",
@@ -1848,6 +2286,18 @@ impl EffectManifest {
                 "workspace key path plus --show/--force mode",
                 "Generate or inspect a local certificate signing key",
             ),
+            CommandEffect::config_write(
+                "mesh disable",
+                vec![".ee/config.toml", ".ee/mesh/emergency_disable.json"],
+                "workspace id plus mesh disable reason",
+                "Disable mesh synchronization for a workspace",
+            ),
+            CommandEffect::config_write(
+                "mesh reenable",
+                vec![".ee/config.toml", ".ee/mesh/emergency_disable.json"],
+                "workspace id plus mesh reenable reason",
+                "Re-enable mesh synchronization for a workspace",
+            ),
         ]
     }
 
@@ -1868,6 +2318,32 @@ impl EffectManifest {
                 "export",
                 vec![".ee/backups/<backup-id>/ or <--output-dir>/<backup-id>/"],
                 "Export redacted JSONL records as side-path artifacts",
+            ),
+            CommandEffect::workspace_file_write(
+                "artifact relocate",
+                vec![
+                    "artifact relocation destination paths",
+                    "artifact relocation manifest path",
+                ],
+                "Copy preserved artifacts to explicit relocation destinations without deleting originals",
+            ),
+            CommandEffect::workspace_state_write(
+                "coordination evidence ingest",
+                vec![".ee/coordination-fallback-evidence.jsonl"],
+                "coordination evidence content hash",
+                "Append coordination fallback evidence to the workspace-local evidence log",
+            ),
+            CommandEffect::workspace_state_write(
+                "daemon start",
+                vec!["$XDG_RUNTIME_DIR/ee/daemon.sock or ${TMPDIR:-/tmp}/ee-<uid>/daemon.sock"],
+                "daemon socket path plus process id",
+                "Bind the optional UDS RPC socket outside the workspace",
+            ),
+            CommandEffect::workspace_state_write(
+                "daemon stop",
+                vec!["$XDG_RUNTIME_DIR/ee/daemon.sock or ${TMPDIR:-/tmp}/ee-<uid>/daemon.sock"],
+                "daemon socket path plus process id",
+                "Stop dialing the optional UDS RPC socket and update daemon state",
             ),
             CommandEffect::workspace_file_write(
                 "lab capture",
@@ -1913,6 +2389,30 @@ impl EffectManifest {
                     "tempfile-backed sandbox workspace",
                 ],
                 "Rehearsal execution writes side-path sandbox artifacts without mutating the source workspace",
+            ),
+            CommandEffect::workspace_state_write(
+                "recorder flight append",
+                vec!["flight recorder trace directory"],
+                "flight recorder event hash plus sequence",
+                "Append an event to a flight-recorder trace",
+            ),
+            CommandEffect::workspace_state_write(
+                "sandbox curate",
+                vec![".ee/sandbox/<session>.json"],
+                "sandbox session id plus curation event hash",
+                "Update sandbox curation state without applying it to durable memories",
+            ),
+            CommandEffect::workspace_state_write(
+                "sandbox import",
+                vec![".ee/sandbox/<session>.json"],
+                "sandbox session id plus import source hash",
+                "Import memories into sandbox state without applying them to durable storage",
+            ),
+            CommandEffect::workspace_state_write(
+                "sandbox remember",
+                vec![".ee/sandbox/<session>.json"],
+                "sandbox session id plus memory content hash",
+                "Record a sandbox memory without applying it to durable storage",
             ),
             CommandEffect::workspace_file_write(
                 "focus clear",
