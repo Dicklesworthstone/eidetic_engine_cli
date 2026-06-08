@@ -1437,18 +1437,27 @@ pub fn build_rule_provenance_bipartite_from_tables(
     build_rule_provenance_bipartite_from_rows(&rows)
 }
 
-/// Build a directed subgraph containing only persisted contradiction links.
+/// Build a directed subgraph containing contradiction-family links.
 ///
 /// Undirected `memory_links` rows are represented as reciprocal directed edges
 /// so this filtered view preserves the same traversal semantics as the main
-/// memory-link projection.
+/// memory-link projection. Typed failure fields emit the same edge shape so
+/// live and persisted contradiction graph surfaces stay aligned.
 pub fn build_contradiction_subgraph_from_memory_links(
     conn: &DbConnection,
     workspace_id: &str,
 ) -> GraphResult<DiGraph> {
+    let rows = contradiction_subgraph_rows_with_typed_edges(conn, workspace_id)?;
+    build_contradiction_subgraph_from_rows(&rows)
+}
+
+fn contradiction_subgraph_rows_with_typed_edges(
+    conn: &DbConnection,
+    workspace_id: &str,
+) -> GraphResult<Vec<ContradictionSubgraphRow>> {
     let mut rows = contradiction_subgraph_rows(conn, workspace_id)?;
     rows.extend(typed_contradiction_subgraph_rows(conn, workspace_id)?);
-    build_contradiction_subgraph_from_rows(&rows)
+    Ok(rows)
 }
 
 fn build_causal_evidence_graph_from_rows(rows: &[CausalEvidenceGraphRow]) -> GraphResult<DiGraph> {
@@ -4437,7 +4446,7 @@ fn typed_graph_snapshot_topology(
             typed_undirected_graph_snapshot_topology(graph_type, &graph, rows.len())
         }
         GraphSnapshotType::ContradictionSubgraph => {
-            let rows = contradiction_subgraph_rows(conn, workspace_id)?;
+            let rows = contradiction_subgraph_rows_with_typed_edges(conn, workspace_id)?;
             let graph = build_contradiction_subgraph_from_rows(&rows)?;
             typed_directed_graph_snapshot_topology(graph_type, &graph, rows.len())
         }
@@ -5986,12 +5995,20 @@ fn parse_graph_snapshot_metrics(metrics_json: &str) -> GraphResult<ParsedGraphDo
 }
 
 fn first_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    first_string_at(value, keys).or_else(|| value.get("attrs").and_then(|attrs| first_string_at(attrs, keys)))
+}
+
+fn first_string_at(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .filter_map(|key| value.get(*key))
         .find_map(|candidate| candidate.as_str().map(ToOwned::to_owned))
 }
 
 fn first_bool(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+    first_bool_at(value, keys).or_else(|| value.get("attrs").and_then(|attrs| first_bool_at(attrs, keys)))
+}
+
+fn first_bool_at(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
     keys.iter()
         .filter_map(|key| value.get(*key))
         .find_map(serde_json::Value::as_bool)
@@ -6474,6 +6491,7 @@ mod tests {
     const MEMORY_B: &str = "mem_00000000000000000000000012";
     const MEMORY_C: &str = "mem_00000000000000000000000013";
     const MEMORY_D: &str = "mem_00000000000000000000000014";
+    const MEMORY_E: &str = "mem_00000000000000000000000015";
     const RULE_A: &str = "rule_00000000000000000000000011";
     const RULE_B: &str = "rule_00000000000000000000000012";
     const KARATE_SNAPSHOT_HASH: &str =
@@ -8366,6 +8384,112 @@ mod tests {
                 .edge_attrs(MEMORY_C, MEMORY_D)
                 .and_then(|attrs| attrs.get("contribution_score")),
             Some(&CgseValue::Float(0.35))
+        );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn contradiction_snapshot_refresh_persists_typed_failure_edges() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_memory_with_kind(
+            &connection,
+            MEMORY_D,
+            "failure",
+            "Failure family: cache churn.",
+        )?;
+        insert_memory_with_kind(
+            &connection,
+            MEMORY_E,
+            "failure",
+            "Another failure family: cache churn.",
+        )?;
+        connection
+            .set_memory_typed_fields_json(MEMORY_D, Some(r#"{"family":"cache churn"}"#))
+            .map_err(|error| error.to_string())?;
+        connection
+            .set_memory_typed_fields_json(MEMORY_E, Some(r#"{"family":"Cache   Churn"}"#))
+            .map_err(|error| error.to_string())?;
+
+        let report = graph_result(super::refresh_graph_snapshot_by_type(
+            &connection,
+            WORKSPACE_ID,
+            GraphSnapshotType::ContradictionSubgraph,
+            &super::CentralityRefreshOptions::default(),
+        ))?;
+
+        assert_eq!(
+            report.centrality.status,
+            super::CentralityRefreshStatus::Refreshed
+        );
+        assert_eq!(report.centrality.node_count, 2);
+        assert_eq!(report.centrality.edge_count, 2);
+        let snapshot = report
+            .snapshot
+            .ok_or_else(|| "contradiction snapshot should persist".to_string())?;
+        assert_eq!(
+            snapshot.graph_type,
+            GraphSnapshotType::ContradictionSubgraph
+        );
+        assert_eq!(snapshot.source_generation, 1);
+
+        let latest = connection
+            .get_latest_graph_snapshot(WORKSPACE_ID, GraphSnapshotType::ContradictionSubgraph)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "latest contradiction snapshot should exist".to_string())?;
+        let metrics: serde_json::Value =
+            serde_json::from_str(&latest.metrics_json).map_err(|error| error.to_string())?;
+        let edges = metrics
+            .pointer("/graph/edges")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                "contradiction snapshot metrics should include graph edges".to_string()
+            })?;
+        assert_eq!(edges.len(), 2);
+        let typed_edge = edges
+            .iter()
+            .find(|edge| edge["source"] == MEMORY_D && edge["target"] == MEMORY_E)
+            .ok_or_else(|| "typed family edge should be persisted".to_string())?;
+        assert_eq!(
+            typed_edge["attrs"]["relation"],
+            serde_json::Value::String("failure_family".to_string())
+        );
+        assert_eq!(
+            typed_edge["attrs"]["source"],
+            serde_json::Value::String("typed_fields".to_string())
+        );
+        assert_eq!(
+            typed_edge["attrs"]["typed_field"],
+            serde_json::Value::String("family".to_string())
+        );
+        assert_eq!(
+            typed_edge["attrs"]["contribution_score"],
+            serde_json::json!(0.25)
+        );
+        assert!(
+            typed_edge["attrs"]["typed_value_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "typed edge should carry a redacted value hash"
+        );
+
+        let export = graph_result(super::export_graph_snapshot(
+            &connection,
+            &super::GraphExportOptions {
+                workspace_id: WORKSPACE_ID.to_string(),
+                graph_type: GraphSnapshotType::ContradictionSubgraph,
+                snapshot_id: Some(latest.id.clone()),
+                format: super::GraphExportFormat::Mermaid,
+            },
+        ))?;
+        assert_eq!(export.status, super::GraphExportStatus::Exported);
+        assert_eq!(export.node_count, 2);
+        assert_eq!(export.edge_count, 2);
+        assert!(
+            export.diagram.contains("failure_family"),
+            "export diagram should carry typed relation label: {}",
+            export.diagram
         );
 
         connection.close().map_err(|error| error.to_string())
