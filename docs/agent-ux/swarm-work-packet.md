@@ -60,6 +60,25 @@ For handoffs and postmortems, support bundles persist the same posture in
 PATH counts, finding codes, and hashed install/path references. Treat it as
 diagnostic evidence only, not as a Beads claim gate.
 
+When quoting that capsule in Agent Mail, Beads comments, or closeout notes,
+prefer the stable decision fields over copied command output:
+
+- `freshness.verdict`, `freshness.authoritative`, and
+  `freshness.blockingFindings[]` explain the install-freshness decision.
+- `pathPosture.status`, `binaryCount`, `duplicateCount`, and
+  `currentBinaryOnPath` explain PATH ordering without leaking PATH entries.
+- `findingCounts` and `findings[].code` summarize stale, shadowed, duplicate,
+  missing-manifest, unsupported-target, or checksum/manifest blockers.
+- `target.targetTriple`, `target.supported`, `permissions.status`, and
+  `updateSource.status` explain whether a no-local-Cargo adoption path existed.
+- `summaryHash` is the correlation handle for later support bundles or
+  regression-causality notes.
+
+Never treat `install_freshness_summary.json` as current by age or by presence
+alone. It records the install state when the support bundle was produced; a
+fresh claim still requires a live `ee install check --json --offline` followed
+by the normal work-packet claim gate.
+
 For macOS adoption without local Cargo, follow
 [`docs/agent_integration.md`](../agent_integration.md#no-local-cargo-install-freshness).
 The approved path is read-only inspection and planning:

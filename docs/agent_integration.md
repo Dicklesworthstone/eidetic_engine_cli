@@ -84,6 +84,22 @@ diagnostic posture in redaction-safe form: version/status/finding codes and
 hashed path references, never raw PATH entries, binary paths, install targets,
 or command argv.
 
+Use that support-bundle member when a later agent needs to understand why an
+older claim gate was trusted or refused without replaying host-private
+transcripts. The handoff-worthy fields are `freshness.verdict`,
+`freshness.authoritative`, `freshness.blockingFindings[]`,
+`pathPosture.{status,binaryCount,duplicateCount,currentBinaryOnPath}`,
+`findingCounts`, `target.{targetTriple,supported}`, `permissions.status`,
+`updateSource.status`, and `summaryHash`. The path-oriented fields are hashes
+only; cite them as correlation evidence, not as raw install locations.
+
+The capsule is historical diagnostic evidence. It can justify a blocked
+handoff such as "installed binary was stale" or "current binary was shadowed",
+but it does not make a future claim safe by itself. Before claiming or closing
+work, rerun the live install check and then the normal work-packet claim gate;
+if the live check disagrees with the bundle, the live check wins and the
+bundle becomes stale incident context.
+
 ## No-Local-Cargo Install Freshness
 
 When an agent sees a stale or missing `ee` command surface, it needs an
