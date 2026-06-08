@@ -30,6 +30,7 @@ set -euo pipefail
 #                                       # bd-2dgn0 swarm SLO evidence trail.
 #                                       # Documented in docs/operator-swarm-slo.md.
 #   ./scripts/verify.sh --plan-doc-smoke # Run plan-sweep verify_cmd smoke checks
+#   ./scripts/verify.sh --fuzz-target-audit-self-test # Run only the no-Cargo fuzz audit matcher self-test
 #   ./scripts/verify.sh --fuzz-smoke   # Include 30s cargo-fuzz query parser smoke
 #   ./scripts/verify.sh --include-bench # Include performance benchmarks
 #   ./scripts/verify.sh --eval          # Include pack-quality eval regression sweep
@@ -58,7 +59,8 @@ set -euo pipefail
 #   4.73. RCH Portability Diagnostic Contract - no-Cargo Mac-leak self-test
 #   4.74. Package Artifact Leak Contract - no-Cargo deny-pattern self-test
 #   4.75. Package Artifact Leak - cargo package list gate for generated artifacts
-#   4.8. Fuzz Target Audit     - static cargo-fuzz target registration/docs check
+#   4.8. Fuzz Target Audit Contract - no-Cargo cargo-fuzz matcher self-test
+#   4.81. Fuzz Target Audit     - static cargo-fuzz target registration/docs check
 #   4.9. Fuzz Smoke            - optional 30s search query parser cargo-fuzz sweep
 #   5. Vision Coverage         - report documented implemented/stubbed/missing surfaces
 #   5.5. Proof Verification    - advisory Lean4/TLA+ proof artifact checks
@@ -84,6 +86,7 @@ set -euo pipefail
 INCLUDE_BENCH=false
 INCLUDE_EVAL=false
 INCLUDE_FUZZ_SMOKE=false
+FUZZ_TARGET_AUDIT_SELF_TEST=false
 PLAN_DOC_SMOKE=false
 CI_SMOKE=false
 SWARM_HEAVY=false
@@ -103,6 +106,9 @@ for arg in "$@"; do
             ;;
         --plan-doc-smoke)
             PLAN_DOC_SMOKE=true
+            ;;
+        --fuzz-target-audit-self-test)
+            FUZZ_TARGET_AUDIT_SELF_TEST=true
             ;;
         --fuzz-smoke)
             INCLUDE_FUZZ_SMOKE=true
@@ -278,6 +284,140 @@ snapshot_proposal_guard() {
 }
 
 # shellcheck disable=SC2329
+fuzz_target_names() {
+    printf '%s\n' \
+        insights_section_dispatch \
+        proximity_arg_parser \
+        ppr_weight_clamp \
+        insights_json_decode \
+        search_query_parser
+}
+
+# shellcheck disable=SC2329
+fuzz_manifest_has_registration() {
+    local manifest="$1"
+    local target="$2"
+    local target_path="$3"
+
+    awk -v name="name = \"${target}\"" -v path="path = \"${target_path}\"" '
+        index($0, name) { has_name = 1 }
+        index($0, path) { has_path = 1 }
+        END { exit !(has_name && has_path) }
+    ' "$manifest"
+}
+
+# shellcheck disable=SC2329
+fuzz_target_file_has_shape() {
+    local target_file="$1"
+
+    awk '
+        index($0, "#![no_main]") { has_no_main = 1 }
+        index($0, "fuzz_target!") { has_fuzz_target = 1 }
+        END { exit !(has_no_main && has_fuzz_target) }
+    ' "$target_file"
+}
+
+# shellcheck disable=SC2329
+fuzz_readme_has_sweep() {
+    local readme="$1"
+    local target="$2"
+    local sweep_command="cargo fuzz run ${target} -- -max_total_time=300 -print_final_stats=1"
+
+    grep -Fq "$sweep_command" "$readme"
+}
+
+# shellcheck disable=SC2329
+fuzz_readme_has_global_proofs() {
+    local readme="$1"
+
+    awk '
+        index($0, "Deliberate-panic proof") { has_deliberate_panic = 1 }
+        index($0, "-max_total_time=900") { has_nightly_duration = 1 }
+        END { exit !(has_deliberate_panic && has_nightly_duration) }
+    ' "$readme"
+}
+
+# shellcheck disable=SC2329
+fuzz_target_audit_self_test() {
+    local manifest_good
+    manifest_good='
+[[bin]]
+name = "insights_section_dispatch"
+path = "fuzz_targets/insights_section_dispatch.rs"
+[[bin]]
+name = "proximity_arg_parser"
+path = "fuzz_targets/proximity_arg_parser.rs"
+[[bin]]
+name = "ppr_weight_clamp"
+path = "fuzz_targets/ppr_weight_clamp.rs"
+[[bin]]
+name = "insights_json_decode"
+path = "fuzz_targets/insights_json_decode.rs"
+[[bin]]
+name = "search_query_parser"
+path = "fuzz_targets/search_query_parser.rs"
+'
+
+    local readme_good
+    readme_good='
+cargo fuzz run insights_section_dispatch -- -max_total_time=300 -print_final_stats=1
+cargo fuzz run proximity_arg_parser -- -max_total_time=300 -print_final_stats=1
+cargo fuzz run ppr_weight_clamp -- -max_total_time=300 -print_final_stats=1
+cargo fuzz run insights_json_decode -- -max_total_time=300 -print_final_stats=1
+cargo fuzz run search_query_parser -- -max_total_time=300 -print_final_stats=1
+Deliberate-panic proof
+cargo fuzz run search_query_parser -- -max_total_time=900 -print_final_stats=1
+'
+
+    local source_good='#![no_main]
+use libfuzzer_sys::fuzz_target;
+fuzz_target!(|data: &[u8]| {
+    let _ = data;
+});
+'
+    local source_bad='#![no_main]
+pub fn placeholder() {}
+'
+
+    local target
+    while IFS= read -r target; do
+        [ -n "$target" ] || continue
+        local target_path="fuzz_targets/${target}.rs"
+        if ! fuzz_manifest_has_registration <(printf '%s\n' "$manifest_good") "$target" "$target_path"; then
+            echo "error: fuzz target self-test expected manifest registration for ${target}" >&2
+            return 1
+        fi
+        if ! fuzz_readme_has_sweep <(printf '%s\n' "$readme_good") "$target"; then
+            echo "error: fuzz target self-test expected README sweep for ${target}" >&2
+            return 1
+        fi
+        if ! fuzz_target_file_has_shape <(printf '%s\n' "$source_good"); then
+            echo "error: fuzz target self-test expected valid target source shape" >&2
+            return 1
+        fi
+    done < <(fuzz_target_names)
+
+    if fuzz_manifest_has_registration <(printf '%s\n' "$manifest_good") search_query_parser "fuzz_targets/wrong.rs"; then
+        echo "error: fuzz target self-test should reject mismatched manifest path" >&2
+        return 1
+    fi
+    if fuzz_readme_has_sweep <(printf '%s\n' "cargo fuzz run search_query_parser") search_query_parser; then
+        echo "error: fuzz target self-test should reject incomplete sweep command" >&2
+        return 1
+    fi
+    if fuzz_target_file_has_shape <(printf '%s\n' "$source_bad"); then
+        echo "error: fuzz target self-test should reject missing fuzz_target entrypoint" >&2
+        return 1
+    fi
+    if ! fuzz_readme_has_global_proofs <(printf '%s\n' "$readme_good"); then
+        echo "error: fuzz target self-test expected global README proof markers" >&2
+        return 1
+    fi
+
+    echo "ok: fuzz target audit self-test passed"
+}
+
+# shellcheck disable=SC2329
 fuzz_target_audit() {
     local manifest="${REPO_ROOT}/fuzz/Cargo.toml"
     local readme="${REPO_ROOT}/fuzz/README.md"
@@ -293,49 +433,29 @@ fuzz_target_audit() {
         return 1
     fi
 
-    for target in \
-        insights_section_dispatch \
-        proximity_arg_parser \
-        ppr_weight_clamp \
-        insights_json_decode \
-        search_query_parser
-    do
+    while IFS= read -r target; do
+        [ -n "$target" ] || continue
         local target_path="fuzz_targets/${target}.rs"
         local target_file="${REPO_ROOT}/fuzz/${target_path}"
-        local sweep_command="cargo fuzz run ${target} -- -max_total_time=300 -print_final_stats=1"
-        if ! grep -Fq "name = \"${target}\"" "$manifest"; then
-            echo "error: fuzz/Cargo.toml missing bin registration for ${target}" >&2
-            failures=1
-        fi
-        if ! grep -Fq "path = \"${target_path}\"" "$manifest"; then
-            echo "error: fuzz/Cargo.toml missing path registration for ${target_path}" >&2
+        if ! fuzz_manifest_has_registration "$manifest" "$target" "$target_path"; then
+            echo "error: fuzz/Cargo.toml missing bin/path registration for ${target}" >&2
             failures=1
         fi
         if [ ! -f "$target_file" ]; then
             echo "error: missing fuzz target file: fuzz/${target_path}" >&2
             failures=1
-        else
-            if ! grep -Fq '#![no_main]' "$target_file"; then
-                echo "error: fuzz/${target_path} is missing #![no_main]" >&2
-                failures=1
-            fi
-            if ! grep -Fq 'fuzz_target!' "$target_file"; then
-                echo "error: fuzz/${target_path} is missing fuzz_target! entrypoint" >&2
-                failures=1
-            fi
+        elif ! fuzz_target_file_has_shape "$target_file"; then
+            echo "error: fuzz/${target_path} is missing #![no_main] or fuzz_target! entrypoint" >&2
+            failures=1
         fi
-        if ! grep -Fq "$sweep_command" "$readme"; then
+        if ! fuzz_readme_has_sweep "$readme" "$target"; then
             echo "error: fuzz/README.md missing 5-minute logged cargo-fuzz sweep command for ${target}" >&2
             failures=1
         fi
-    done
+    done < <(fuzz_target_names)
 
-    if ! grep -Fq "Deliberate-panic proof" "$readme"; then
-        echo "error: fuzz/README.md missing deliberate-panic proof instructions" >&2
-        failures=1
-    fi
-    if ! grep -Fq -- "-max_total_time=900" "$readme"; then
-        echo "error: fuzz/README.md missing 15-minute nightly cargo-fuzz sweep duration" >&2
+    if ! fuzz_readme_has_global_proofs "$readme"; then
+        echo "error: fuzz/README.md missing deliberate-panic proof instructions or 15-minute nightly cargo-fuzz sweep duration" >&2
         failures=1
     fi
 
@@ -731,6 +851,11 @@ artifact_retention_summary() {
     fi
 }
 
+if [ "$FUZZ_TARGET_AUDIT_SELF_TEST" = "true" ]; then
+    fuzz_target_audit_self_test
+    exit 0
+fi
+
 if [ "$PLAN_DOC_SMOKE" = "true" ]; then
     run_stage "Plan Doc Smoke (bd-3usjw.23)" "plan_doc_smoke"
     echo "=== Verification Summary ==="
@@ -853,7 +978,12 @@ run_stage "Package Artifact Leak Contract" "./scripts/package-artifact-leak-chec
 # tracker, perf, backup, or temp artifact paths would enter the published crate.
 run_stage "Package Artifact Leak Check (bd-2ifvx)" "./scripts/package-artifact-leak-check.sh"
 
-# Gate 4.8: Static cargo-fuzz target registration/docs audit. This is a
+# Gate 4.8: Fuzz target audit contract. This no-Cargo self-test proves the
+# manifest, target source, README sweep, and nightly-proof matchers before the
+# live static cargo-fuzz target registration/docs audit.
+run_stage "Fuzz Target Audit Contract" "fuzz_target_audit_self_test"
+
+# Gate 4.81: Static cargo-fuzz target registration/docs audit. This is a
 # no-build guard; actual cargo-fuzz sweeps remain explicit RCH-only evidence.
 run_stage "Fuzz Target Audit (bd-bife.10)" "fuzz_target_audit"
 
