@@ -6,7 +6,7 @@ use crate::core::read_fence::{
     ConsistencyBlock, ConsistencySeverity, ConsistencyVerdict, ReadFence, evaluate_consistency,
 };
 use crate::core::write_owner::{
-    SourceWriteStats, WriteImmuneQuarantineConfig, WriteImmuneQuarantineDecision, WriteOperation,
+    SourceWriteStats, WriteImmuneQuarantineConfig, WriteImmuneQuarantineDecision,
     WriteStreamObservation, WriteStreamStatsConfig, compute_source_write_stats,
     evaluate_write_immune_quarantine,
 };
@@ -38,15 +38,13 @@ pub struct StoreIntegrityWriteObservationInput {
 impl StoreIntegrityWriteObservationInput {
     #[must_use]
     pub fn to_observation(&self) -> WriteStreamObservation {
-        WriteStreamObservation {
-            operation: WriteOperation::MemoryCreate {
-                source_id: self.source_id.clone(),
-                content: self.content.clone(),
-                trust_class: self.trust_class.clone(),
-                provenance_uri: self.provenance_uri.clone(),
-                observed_at_ms: self.observed_at_ms,
-            },
-        }
+        WriteStreamObservation::memory_create(
+            self.source_id.clone(),
+            &self.content,
+            &self.trust_class,
+            self.provenance_uri.as_deref(),
+            self.observed_at_ms,
+        )
     }
 }
 
@@ -124,7 +122,7 @@ pub fn run_store_integrity_report(options: StoreIntegrityOptions) -> StoreIntegr
     let read_fence = StoreIntegrityReadFenceReport::from_consistency(&consistency);
 
     let stats =
-        compute_source_write_stats(&options.write_observations, &options.write_stream_config);
+        compute_source_write_stats(&options.write_observations, options.write_stream_config);
     let decisions = stats
         .iter()
         .map(|source_stats| {
