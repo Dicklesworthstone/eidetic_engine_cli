@@ -444,6 +444,37 @@ metadata did not include them as used packages.
 - Disable compression (`RCH_COMPRESSION=0`).
 - Pin a known-good worker: `RCH_WORKERS=trj` (or css/csd).
 
+### Selector health after a timed-out proof
+
+Symptom: a remote-required proof starts remote Cargo, the local wrapper times
+out first, and the next dry-run reports `no_workers_passed_health` even though
+`rch status --json` still shows a healthy worker.
+
+Observed 2026-06-08 from this repo:
+
+```text
+scripts/rch_verify.sh -- cargo test --lib blind_spots -- --nocapture
+=> timed out locally while remote rustc was still compiling eidetic-engine
+```
+
+The daemon cancelled the orphaned remote job cleanly, but the short-term
+selection history still counted the cancellation as a worker failure. Refresh
+capabilities, then pin the known worker for the retry so the proof does not wait
+for health-score decay:
+
+```bash
+rch workers capabilities --refresh --json
+RCH_WORKERS=vmi1149989 \
+RCH_VERIFY_ATTEMPT_TIMEOUT_MS=1200000 \
+scripts/rch_verify.sh --summary -- \
+  cargo test --lib blind_spots -- --nocapture
+```
+
+The retry produced `status=remote_pass`, `worker_id=vmi1149989`, `exit_code=0`,
+local Cargo tripwire `count=0`, and `[RCH] remote vmi1149989 (874.9s)`. Treat
+the first timeout as a capacity/timeout proof, not a source failure; only the
+successful retry is source evidence.
+
 ### "All workers busy" (capacity wait)
 
 Symptom: RCH says it's waiting for a slot for >5 minutes.
