@@ -1321,6 +1321,10 @@ is_no_workers_passed_health_output() {
     grep -Eiq "no workers passed health thresholds|no_workers_passed_health"
 }
 
+is_client_daemon_unknown_variant_output() {
+    grep -Eiq "Failed to parse daemon response: unknown variant"
+}
+
 is_remote_transport_timeout_output() {
     grep -Eiq "RCH-E104|SSH command timed out|Remote execution failed .*SSH timeout"
 }
@@ -3626,6 +3630,9 @@ if printf '%s' "$combined_output" | is_all_workers_preflight_failed_output; then
 fi
 if printf '%s' "$combined_output" | is_no_workers_passed_health_output; then
     degraded+=("rch_verify_worker_health_threshold_blocked")
+fi
+if printf '%s' "$combined_output" | is_client_daemon_unknown_variant_output; then
+    degraded+=("rch_verify_client_daemon_version_skew")
 fi
 if printf '%s' "$combined_output" | is_remote_transport_timeout_output; then
     degraded+=("rch_verify_remote_transport_timeout")

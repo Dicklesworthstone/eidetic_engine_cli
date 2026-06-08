@@ -3173,6 +3173,75 @@ fn selector_admission_probe_classifies_worker_health_threshold_block() -> TestRe
 }
 
 #[test]
+fn selector_admission_probe_preserves_daemon_unknown_variant_skew() -> TestResult {
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--summary",
+            "--no-write",
+            "--",
+            "cargo",
+            "test",
+            "--test",
+            "contracts",
+            "dueling_wizards_verify_wiring",
+            "--",
+            "--nocapture",
+        ],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "selection request failed: Failed to parse daemon response: unknown variant `no_workers_passed_health`, expected one of `success`, `no_workers_configured`, `all_workers_unreachable`, `all_circuits_open`, `all_workers_busy`, `all_workers_failed_preflight`, `all_workers_failed_convergence`, `no_matching_workers`, `no_workers_with_runtime`, `selection_error`, `affinity_pinned`, `affinity_fallback` at line 1 column 50\n[RCH] remote required; refusing local fallback (no worker assigned)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "15"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1149989"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "vmi1149989"),
+        ],
+    )?;
+    if status.success() {
+        return Err(
+            "daemon unknown-variant selector failure should preserve non-zero exit".to_owned(),
+        );
+    }
+    let report: Value = serde_json::from_str(&stdout).map_err(|error| {
+        format!("parse unknown-variant selector report: {error}\nstderr:\n{stderr}")
+    })?;
+    if report["status"] != "rch_environment_failure" {
+        return Err(format!(
+            "unknown-variant refusal should be an environment failure: {report}"
+        ));
+    }
+    for expected in [
+        "rch_verify_client_daemon_version_skew",
+        "rch_verify_worker_health_threshold_blocked",
+        "rch_verify_local_fallback_refused",
+        "rch_verify_remote_marker_missing",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!(
+                "missing {expected} in unknown-variant proof: {report}"
+            ));
+        }
+        if !worker_degraded_contains(&report, expected)? {
+            return Err(format!(
+                "missing {expected} in worker-state degradation: {report}"
+            ));
+        }
+    }
+    let probe = selector_probe(&report)?;
+    if probe["status"] != "selection_failed"
+        || probe["selection_failure_reason"] != "no_workers_passed_health"
+        || probe["workers_vs_selection_contradiction"] != true
+        || probe["local_fallback_refused"] != true
+    {
+        return Err(format!(
+            "selector probe did not preserve daemon unknown-variant reason: {probe}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn synthetic_dependency_planner_ignores_requested_worker_reports_filter_ignored() -> TestResult {
     let (status, stdout, _stderr) = run_script_with_env(
         &[
