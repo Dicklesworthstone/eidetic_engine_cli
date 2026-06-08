@@ -40,6 +40,7 @@ use crate::core::rule::{
 use crate::core::status::{
     DegradationReport, MeshStorageStatusReport, StatusReport, StatusSkylineReport,
 };
+use crate::core::store_integrity::{StoreIntegrityReport, StoreIntegrityStatus};
 use crate::core::swarm_brief::{RchWorkerPressureObservation, RchWorkerPressureReport};
 use crate::core::tailscale_probe::{TailscaleLocalReport, TailscaleProbeDegradation};
 use crate::core::why::WhyReport;
@@ -7911,6 +7912,70 @@ pub fn render_install_check_toon(report: &InstallCheckReport) -> String {
 #[must_use]
 pub fn render_install_plan_json(report: &InstallPlanReport) -> String {
     render_serialized_report_response(report, "InstallPlanReport")
+}
+
+#[must_use]
+pub fn render_store_integrity_json(report: &StoreIntegrityReport) -> String {
+    render_serialized_report_response(report, "StoreIntegrityReport")
+}
+
+#[must_use]
+pub fn render_store_integrity_toon(report: &StoreIntegrityReport) -> String {
+    render_toon_from_json(&render_store_integrity_json(report))
+}
+
+#[must_use]
+pub fn render_store_integrity_human(report: &StoreIntegrityReport) -> String {
+    let mut output = String::new();
+    output.push_str(&format!(
+        "Store integrity: {}\n",
+        store_integrity_status_label(report.status)
+    ));
+    output.push_str(&format!(
+        "Read fence: mode={} verdict={} severity={} workspace_generation={} strict_failed={}\n",
+        report.read_fence.mode,
+        report.read_fence.verdict,
+        report.read_fence.severity,
+        report.read_fence.workspace_generation,
+        report.read_fence.strict_failed
+    ));
+    for asset in &report.read_fence.stale_assets {
+        output.push_str(&format!(
+            "- stale asset {}: generation={} lag={}\n",
+            asset.name, asset.generation, asset.lag
+        ));
+    }
+    output.push_str(&format!(
+        "Write immune: sources={} quarantined={} observations={} advisory_only={} global_write_stall={}\n",
+        report.write_immune.source_count,
+        report.write_immune.quarantined_source_count,
+        report.write_immune.observation_count,
+        report.write_immune.advisory_only,
+        report.write_immune.global_write_stall
+    ));
+    for decision in &report.write_immune.decisions {
+        output.push_str(&format!(
+            "- source {}: action={} writes={} reasons={}\n",
+            decision.source_id,
+            decision.action,
+            decision.write_count,
+            decision
+                .reasons
+                .iter()
+                .map(|reason| reason.code)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    output
+}
+
+fn store_integrity_status_label(status: StoreIntegrityStatus) -> &'static str {
+    match status {
+        StoreIntegrityStatus::Ok => "ok",
+        StoreIntegrityStatus::Degraded => "degraded",
+        StoreIntegrityStatus::Blocked => "blocked",
+    }
 }
 
 fn render_serialized_report_json<T>(report: &T, report_name: &str) -> String
@@ -15922,6 +15987,7 @@ pub fn render_handoff_preview_json(report: &HandoffPreviewReport) -> String {
         "swarm_brief_summary": report.swarm_brief_summary,
         "swarm_incident_summary": report.swarm_incident_summary,
         "swarm_replay_summary": report.swarm_replay_summary,
+        "pack_replay_summary": report.pack_replay_summary,
         "environment_attestation_summary": report.environment_attestation_summary,
         "regression_causality_summary": report.regression_causality_summary,
         "token_estimate": report.token_estimate,
@@ -16008,6 +16074,7 @@ pub fn render_handoff_create_json(report: &HandoffCreateReport) -> String {
         "swarm_brief_summary": report.swarm_brief_summary,
         "swarm_incident_summary": report.swarm_incident_summary,
         "swarm_replay_summary": report.swarm_replay_summary,
+        "pack_replay_summary": report.pack_replay_summary,
         "environment_attestation_summary": report.environment_attestation_summary,
         "regression_causality_summary": report.regression_causality_summary,
         "token_count": report.token_count,
@@ -16187,6 +16254,7 @@ pub fn render_handoff_resume_json(report: &HandoffResumeReport) -> String {
         "swarm_brief_summary": report.swarm_brief_summary,
         "swarm_incident_summary": report.swarm_incident_summary,
         "swarm_replay_summary": report.swarm_replay_summary,
+        "pack_replay_summary": report.pack_replay_summary,
         "environment_attestation_summary": report.environment_attestation_summary,
         "regression_causality_summary": report.regression_causality_summary,
         "artifact_pointers": report.artifact_pointers,
@@ -20496,6 +20564,9 @@ mod tests {
         preview.swarm_replay_summary = Some(serde_json::json!({
             "schema": "ee.support_bundle.swarm_replay_summary.v1",
         }));
+        preview.pack_replay_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.pack_replay_summary.v1",
+        }));
         preview.environment_attestation_summary = Some(serde_json::json!({
             "schema": "ee.support_bundle.environment_attestation_summary.v1",
         }));
@@ -20528,6 +20599,9 @@ mod tests {
         create.swarm_replay_summary = Some(serde_json::json!({
             "schema": "ee.support_bundle.swarm_replay_summary.v1",
         }));
+        create.pack_replay_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.pack_replay_summary.v1",
+        }));
         create.environment_attestation_summary = Some(serde_json::json!({
             "schema": "ee.support_bundle.environment_attestation_summary.v1",
         }));
@@ -20559,6 +20633,13 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             &Some("ee.support_bundle.swarm_replay_summary.v1"),
             "handoff preview JSON includes swarm replay summary",
+        )?;
+        ensure_equal(
+            &preview_json
+                .pointer("/pack_replay_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.pack_replay_summary.v1"),
+            "handoff preview JSON includes pack replay summary",
         )?;
         ensure_equal(
             &preview_json
@@ -20601,6 +20682,13 @@ mod tests {
         )?;
         ensure_equal(
             &create_json
+                .pointer("/pack_replay_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.pack_replay_summary.v1"),
+            "handoff create JSON includes pack replay summary",
+        )?;
+        ensure_equal(
+            &create_json
                 .pointer("/environment_attestation_summary/schema")
                 .and_then(serde_json::Value::as_str),
             &Some("ee.support_bundle.environment_attestation_summary.v1"),
@@ -20640,6 +20728,9 @@ mod tests {
         resume.swarm_replay_summary = Some(serde_json::json!({
             "schema": "ee.support_bundle.swarm_replay_summary.v1",
         }));
+        resume.pack_replay_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.pack_replay_summary.v1",
+        }));
         resume.environment_attestation_summary = Some(serde_json::json!({
             "schema": "ee.support_bundle.environment_attestation_summary.v1",
         }));
@@ -20662,6 +20753,13 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             &Some("ee.support_bundle.swarm_replay_summary.v1"),
             "handoff resume JSON includes swarm replay summary",
+        )?;
+        ensure_equal(
+            &resume_json
+                .pointer("/pack_replay_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.pack_replay_summary.v1"),
+            "handoff resume JSON includes pack replay summary",
         )?;
         ensure_equal(
             &resume_json

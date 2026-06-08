@@ -3088,6 +3088,8 @@ pub enum DiagCommand {
     Search(DiagSearchArgs),
     /// Verify stdout/stderr stream separation is correct.
     Streams,
+    /// Report explicit read-fence and per-source write-immune store-integrity state.
+    StoreIntegrity(DiagStoreIntegrityArgs),
     /// Seed a deterministic tripwire row for diagnostic fixture replay.
     Tripwire(DiagTripwireArgs),
     /// Exercise write-owner queue capacity and busy diagnostics.
@@ -3735,6 +3737,111 @@ pub struct DiagWriteOwnerArgs {
     /// Number of deterministic write requests to enqueue without running the owner.
     #[arg(long, default_value_t = 0, value_name = "N")]
     pub enqueue: u32,
+}
+
+/// Arguments for `ee diag store-integrity`.
+#[derive(Clone, Debug, PartialEq, Parser)]
+pub struct DiagStoreIntegrityArgs {
+    /// Read-fence mode: eventual, latest, or snapshot:<generation>.
+    #[arg(
+        long,
+        value_parser = parse_read_fence_arg,
+        default_value = "eventual",
+        value_name = "MODE"
+    )]
+    pub read_fence: crate::core::read_fence::ReadFence,
+
+    /// Fail closed when --read-fence latest observes a stale derived asset.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_read_fence: bool,
+
+    /// Current durable workspace/database generation.
+    #[arg(long, default_value_t = 0, value_name = "GENERATION")]
+    pub db_generation: u64,
+
+    /// Derived asset generation as NAME=GENERATION. May be repeated.
+    #[arg(
+        long = "asset-generation",
+        value_parser = parse_asset_generation_arg,
+        value_name = "NAME=GENERATION"
+    )]
+    pub asset_generations: Vec<(String, u64)>,
+
+    /// Inclusive write-observation window start in milliseconds.
+    #[arg(long, default_value_t = 0, value_name = "MS")]
+    pub window_start_ms: u64,
+
+    /// Inclusive write-observation window end in milliseconds.
+    #[arg(
+        long,
+        default_value_t = crate::core::write_owner::DEFAULT_WRITE_STREAM_WINDOW_MS,
+        value_name = "MS"
+    )]
+    pub window_end_ms: u64,
+
+    /// SimHash distance at or below this value is counted as near-duplicate.
+    #[arg(
+        long,
+        default_value_t = crate::core::write_owner::DEFAULT_WRITE_STREAM_NEAR_DUPLICATE_HAMMING,
+        value_name = "N"
+    )]
+    pub near_duplicate_hamming: u32,
+
+    /// Cosine similarity floor required to confirm a SimHash near-duplicate.
+    #[arg(
+        long,
+        default_value_t = crate::core::write_owner::DEFAULT_WRITE_STREAM_COSINE_FLOOR,
+        value_name = "FLOAT"
+    )]
+    pub near_duplicate_cosine_floor: f32,
+
+    /// Explicit source write observation: SOURCE|CONTENT|TRUST_CLASS|PROVENANCE_URI_OR_-|OBSERVED_MS.
+    #[arg(
+        long = "write-observation",
+        value_parser = parse_store_integrity_write_observation_arg,
+        value_name = "OBSERVATION"
+    )]
+    pub write_observations: Vec<crate::core::store_integrity::StoreIntegrityWriteObservationInput>,
+
+    /// Maximum writes allowed from one source in the explicit window.
+    #[arg(
+        long,
+        default_value_t = crate::core::write_owner::DEFAULT_WRITE_IMMUNE_WRITES_PER_WINDOW,
+        value_name = "N"
+    )]
+    pub max_writes_per_window: u32,
+
+    /// Maximum allowed near-duplicate ratio before advisory source quarantine.
+    #[arg(
+        long,
+        default_value_t = crate::core::write_owner::DEFAULT_WRITE_IMMUNE_NEAR_DUPLICATE_RATIO,
+        value_name = "FLOAT"
+    )]
+    pub max_near_duplicate_ratio: f32,
+
+    /// Maximum allowed missing-evidence ratio before advisory source quarantine.
+    #[arg(
+        long,
+        default_value_t = crate::core::write_owner::DEFAULT_WRITE_IMMUNE_MISSING_EVIDENCE_RATIO,
+        value_name = "FLOAT"
+    )]
+    pub max_missing_evidence_ratio: f32,
+
+    /// Maximum high-trust missing-evidence ratio before advisory source quarantine.
+    #[arg(
+        long,
+        default_value_t = crate::core::write_owner::DEFAULT_WRITE_IMMUNE_HIGH_TRUST_MISSING_EVIDENCE_RATIO,
+        value_name = "FLOAT"
+    )]
+    pub max_high_trust_missing_evidence_ratio: f32,
+
+    /// Override high-trust classes used for evidence-abuse checks. May be repeated.
+    #[arg(long = "high-trust-class", value_name = "CLASS")]
+    pub high_trust_classes: Vec<String>,
+
+    /// Source ID allowed to bypass advisory quarantine. May be repeated.
+    #[arg(long = "source-whitelist", value_name = "SOURCE_ID")]
+    pub source_whitelist: Vec<String>,
 }
 
 /// Arguments for `ee diag write-spool`.
@@ -10820,6 +10927,7 @@ where
                 }
             }
             DiagCommand::Tripwire(args) => handle_diag_tripwire(&cli, args, stdout, stderr),
+            DiagCommand::StoreIntegrity(args) => handle_diag_store_integrity(&cli, args, stdout),
             DiagCommand::WriteOwner(args) => handle_diag_write_owner(&cli, args, stdout),
             DiagCommand::WriteSpool(args) => handle_diag_write_spool(&cli, args, stdout),
         },
@@ -24196,6 +24304,162 @@ fn plan_cache_diag_response_json(
         },
         "degraded": degraded,
     })
+}
+
+fn parse_read_fence_arg(input: &str) -> Result<crate::core::read_fence::ReadFence, String> {
+    let trimmed = input.trim();
+    let normalized = trimmed.to_ascii_lowercase();
+    if normalized == "eventual" {
+        return Ok(crate::core::read_fence::ReadFence::Eventual);
+    }
+    if normalized == "latest" {
+        return Ok(crate::core::read_fence::ReadFence::Latest);
+    }
+    let Some(generation) = normalized.strip_prefix("snapshot:") else {
+        return Err(
+            "read fence must be one of `eventual`, `latest`, or `snapshot:<generation>`".to_owned(),
+        );
+    };
+    let generation = generation
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| format!("snapshot generation must be a non-negative integer: {error}"))?;
+    Ok(crate::core::read_fence::ReadFence::Snapshot(generation))
+}
+
+fn parse_asset_generation_arg(input: &str) -> Result<(String, u64), String> {
+    let Some((name, generation)) = input.split_once('=') else {
+        return Err("asset generation must use NAME=GENERATION".to_owned());
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("asset generation name must not be empty".to_owned());
+    }
+    let generation = generation
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| format!("asset generation must be a non-negative integer: {error}"))?;
+    Ok((name.to_owned(), generation))
+}
+
+fn parse_store_integrity_write_observation_arg(
+    input: &str,
+) -> Result<crate::core::store_integrity::StoreIntegrityWriteObservationInput, String> {
+    let fields = input.split('|').collect::<Vec<_>>();
+    if fields.len() != 5 {
+        return Err(
+            "write observation must use SOURCE|CONTENT|TRUST_CLASS|PROVENANCE_URI_OR_-|OBSERVED_MS"
+                .to_owned(),
+        );
+    }
+    let source_id = fields[0].trim();
+    if source_id.is_empty() {
+        return Err("write observation source must not be empty".to_owned());
+    }
+    let content = fields[1].trim();
+    if content.is_empty() {
+        return Err("write observation content must not be empty".to_owned());
+    }
+    let trust_class = fields[2].trim();
+    if trust_class.is_empty() {
+        return Err("write observation trust class must not be empty".to_owned());
+    }
+    let provenance_uri = match fields[3].trim() {
+        "" | "-" => None,
+        value => Some(value.to_owned()),
+    };
+    let observed_at_ms = fields[4].trim().parse::<u64>().map_err(|error| {
+        format!("observed timestamp must be milliseconds as an integer: {error}")
+    })?;
+
+    Ok(
+        crate::core::store_integrity::StoreIntegrityWriteObservationInput {
+            source_id: source_id.to_owned(),
+            content: content.to_owned(),
+            trust_class: trust_class.to_owned(),
+            provenance_uri,
+            observed_at_ms,
+        },
+    )
+}
+
+fn handle_diag_store_integrity<W>(
+    cli: &Cli,
+    args: &DiagStoreIntegrityArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let default_quarantine_config =
+        crate::core::write_owner::WriteImmuneQuarantineConfig::default();
+    let quarantine_config = crate::core::write_owner::WriteImmuneQuarantineConfig {
+        max_writes_per_window: args.max_writes_per_window,
+        max_near_duplicate_ratio: args.max_near_duplicate_ratio,
+        max_missing_evidence_ratio: args.max_missing_evidence_ratio,
+        max_high_trust_missing_evidence_ratio: args.max_high_trust_missing_evidence_ratio,
+        high_trust_classes: if args.high_trust_classes.is_empty() {
+            default_quarantine_config.high_trust_classes
+        } else {
+            args.high_trust_classes
+                .iter()
+                .map(|class| class.trim())
+                .filter(|class| !class.is_empty())
+                .map(str::to_owned)
+                .collect()
+        },
+        source_whitelist: args
+            .source_whitelist
+            .iter()
+            .map(|source| source.trim())
+            .filter(|source| !source.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    };
+    let write_observations = args
+        .write_observations
+        .iter()
+        .map(crate::core::store_integrity::StoreIntegrityWriteObservationInput::to_observation)
+        .collect();
+    let report = crate::core::store_integrity::run_store_integrity_report(
+        crate::core::store_integrity::StoreIntegrityOptions {
+            read_fence: args.read_fence,
+            db_generation: args.db_generation,
+            asset_generations: args.asset_generations.clone(),
+            strict_read_fence: args.strict_read_fence,
+            write_stream_config: crate::core::write_owner::WriteStreamStatsConfig::new(
+                args.window_start_ms,
+                args.window_end_ms,
+                args.near_duplicate_hamming,
+            )
+            .with_cosine_floor(args.near_duplicate_cosine_floor),
+            write_observations,
+            quarantine_config,
+        },
+    );
+
+    let write_exit = match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_store_integrity_human(&report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_store_integrity_toon(&report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_store_integrity_json(&report) + "\n"),
+        ),
+    };
+
+    if write_exit == ProcessExitCode::Success && report.read_fence.strict_failed {
+        ProcessExitCode::UnsatisfiedDegradedMode
+    } else {
+        write_exit
+    }
 }
 
 fn handle_diag_write_owner<W>(
@@ -51944,6 +52208,7 @@ impl NormalizedInvocation {
                     },
                     DiagCommand::Search(_) => "diag search".to_string(),
                     DiagCommand::Streams => "diag streams".to_string(),
+                    DiagCommand::StoreIntegrity(_) => "diag store-integrity".to_string(),
                     DiagCommand::Tripwire(_) => "diag tripwire".to_string(),
                     DiagCommand::WriteOwner(_) => "diag write-owner".to_string(),
                     DiagCommand::WriteSpool(_) => "diag write-spool".to_string(),
@@ -62220,6 +62485,79 @@ mod tests {
                 ensure_equal(&args.enqueue, &2, "enqueue")
             }
             _ => Err("expected diag write-owner command".to_string()),
+        }
+    }
+
+    #[test]
+    fn diag_store_integrity_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "store-integrity",
+            "--read-fence",
+            "latest",
+            "--strict-read-fence",
+            "--db-generation",
+            "12",
+            "--asset-generation",
+            "search=12",
+            "--asset-generation",
+            "graph=11",
+            "--window-start-ms",
+            "0",
+            "--window-end-ms",
+            "1000",
+            "--write-observation",
+            "noisy-agent|same content|agent_validated|-|10",
+            "--max-writes-per-window",
+            "2",
+            "--high-trust-class",
+            "agent_validated",
+            "--source-whitelist",
+            "trusted-agent",
+        ])
+        .map_err(|e| format!("failed to parse diag store-integrity: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::StoreIntegrity(args))) => {
+                ensure_equal(
+                    &args.read_fence,
+                    &crate::core::read_fence::ReadFence::Latest,
+                    "read fence",
+                )?;
+                ensure_equal(&args.strict_read_fence, &true, "strict read fence")?;
+                ensure_equal(&args.db_generation, &12, "db generation")?;
+                ensure_equal(
+                    &args.asset_generations,
+                    &vec![("search".to_owned(), 12), ("graph".to_owned(), 11)],
+                    "asset generations",
+                )?;
+                ensure_equal(&args.window_start_ms, &0, "window start")?;
+                ensure_equal(&args.window_end_ms, &1000, "window end")?;
+                ensure_equal(&args.write_observations.len(), &1, "write observations")?;
+                ensure_equal(
+                    &args.write_observations[0].source_id,
+                    &"noisy-agent".to_owned(),
+                    "observation source",
+                )?;
+                ensure_equal(
+                    &args.write_observations[0].provenance_uri,
+                    &None,
+                    "observation provenance",
+                )?;
+                ensure_equal(&args.max_writes_per_window, &2, "max writes")?;
+                ensure_equal(
+                    &args.high_trust_classes,
+                    &vec!["agent_validated".to_owned()],
+                    "high trust classes",
+                )?;
+                ensure_equal(
+                    &args.source_whitelist,
+                    &vec!["trusted-agent".to_owned()],
+                    "source whitelist",
+                )
+            }
+            _ => Err("expected diag store-integrity command".to_string()),
         }
     }
 

@@ -111,6 +111,7 @@ pub mod situation;
 pub mod source_run;
 pub mod sprt;
 pub mod status;
+pub mod store_integrity;
 pub mod streams;
 pub mod subscribe;
 pub mod support_bundle;
