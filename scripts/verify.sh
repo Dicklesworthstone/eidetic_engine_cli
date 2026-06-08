@@ -1099,6 +1099,17 @@ run_stage "Dueling Wizards Docs Bootstrap E2E" "./scripts/e2e_docs_bootstrap.sh"
 # bd-1n0np.22.3 wires it.
 run_stage "Dueling Wizards Attestation E2E" "./scripts/e2e_attestation.sh"
 
+# Dueling Wizards Feedback-Gated E2E (bd-1n0np.13.5). Real-binary, no-Cargo:
+# hard-asserts the cold-start calibration honesty invariant; condition-guards
+# (log_drop) the feedback-gated reporting CLIs not yet wired (roi/calibration/
+# regime). Validated PASS against the built binary.
+run_stage "Dueling Wizards Feedback-Gated E2E" "./scripts/e2e_feedback_gated.sh"
+
+# Dueling Wizards Trauma-Guard Learn E2E (bd-1n0np.18.4). Real-binary, no-Cargo;
+# self-guards via log_drop for the not-yet-wired preflight-learn surfaces.
+# Validated PASS against the built binary.
+run_stage "Dueling Wizards Trauma-Guard Learn E2E" "./scripts/e2e_trauma_guard_learn.sh"
+
 # Heavy gate block: skipped under --ci-smoke for fast swarm-CI / agent
 # pre-push runs. bd-2dgn0.5: see docs/operator-swarm-slo.md for which
 # gates are dropped and how to recover coverage in a follow-up
