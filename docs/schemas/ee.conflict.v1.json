@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.conflict.v1.json",
+  "title": "ee.conflict.v1",
+  "description": "Read-only contradiction surface emitted by `ee conflict list|explain|cluster --json` (bd-1n0np.7.3). The ee.response.v2 envelope wraps an ee.conflict.v1 surface assembled from the explicit-evidence detector (bd-1n0np.7.2): ranked conflicting memory pairs carrying both bodies, the higher-trust/fresher preferred side, and the load-bearing signal weight, plus the detected contradiction clusters. Read-only: never mutates. Deferred explicit-signal kinds are reported (no silent omission).",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v2"},
+    "success": {"type": "boolean", "const": true},
+    "data": {
+      "type": "object",
+      "required": [
+        "schema",
+        "pairs",
+        "clusters",
+        "explicitEdgeCount",
+        "gatheredSignals",
+        "deferredSignals",
+        "fuzzyNearConflictSkipped",
+        "degraded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.conflict.v1"},
+        "pairs": {
+          "type": "array",
+          "description": "Ranked conflicting pairs, heaviest load-bearing weight first (deterministic; ties break on conflictId).",
+          "items": {
+            "type": "object",
+            "required": [
+              "conflictId",
+              "signal",
+              "loadBearingMilli",
+              "preferredSide",
+              "preferredReason",
+              "memoryA",
+              "memoryB"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "conflictId": {"type": "string", "description": "Stable, order-independent id for the canonical pair (cf_<blake3-16>)."},
+              "signal": {
+                "type": "string",
+                "description": "Heaviest explicit signal implicating the pair.",
+                "enum": [
+                  "contradiction_link",
+                  "supersession",
+                  "validity_window_overlap",
+                  "duplicate_divergent",
+                  "trust_outcome_split",
+                  "repeated_co_selection"
+                ]
+              },
+              "loadBearingMilli": {"type": "integer", "minimum": 0},
+              "preferredSide": {"type": "string", "enum": ["a", "b", "tie"]},
+              "preferredReason": {"type": "string", "enum": ["higher_trust", "fresher", "tie_no_signal"]},
+              "memoryA": {"$ref": "#/$defs/conflictMember"},
+              "memoryB": {"$ref": "#/$defs/conflictMember"}
+            }
+          }
+        },
+        "clusters": {
+          "type": "array",
+          "description": "Detected contradiction clusters (k-truss + Louvain via graph::health), most-urgent first.",
+          "items": {
+            "type": "object",
+            "required": [
+              "louvainId",
+              "size",
+              "density",
+              "severity",
+              "memberIds",
+              "centrality",
+              "loadBearingMilli",
+              "rankScore",
+              "suggestedAction"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "louvainId": {"type": "integer", "minimum": 0},
+              "size": {"type": "integer", "minimum": 0},
+              "density": {"type": "number"},
+              "severity": {"type": "string", "enum": ["inconsistent", "incoherent"]},
+              "memberIds": {"type": "array", "items": {"type": "string"}},
+              "centrality": {"type": "integer", "minimum": 0},
+              "loadBearingMilli": {"type": "integer", "minimum": 0},
+              "rankScore": {"type": "number"},
+              "suggestedAction": {"type": "string"}
+            }
+          }
+        },
+        "explicitEdgeCount": {"type": "integer", "minimum": 0},
+        "gatheredSignals": {
+          "type": "array",
+          "description": "Explicit signal kinds the DB-gather covered.",
+          "items": {"type": "string"}
+        },
+        "deferredSignals": {
+          "type": "array",
+          "description": "Explicit signal kinds deferred to later gather slices, reported so an un-gathered kind is never silently treated as absent.",
+          "items": {"type": "string"}
+        },
+        "fuzzyNearConflictSkipped": {"type": "boolean"},
+        "degraded": {
+          "type": "array",
+          "description": "Non-fatal degradations (e.g. a link read failure or an unreadable cited memory row); surfaced, never silent loss.",
+          "items": {"type": "string"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "conflictMember": {
+      "type": "object",
+      "description": "One memory's read-only projection inside a conflicting pair.",
+      "required": [
+        "id",
+        "content",
+        "level",
+        "kind",
+        "trustClass",
+        "trustRank",
+        "confidence",
+        "importance",
+        "updatedAt",
+        "preferred"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "content": {"type": "string"},
+        "level": {"type": "string"},
+        "kind": {"type": "string"},
+        "trustClass": {"type": "string"},
+        "trustRank": {"type": "integer", "minimum": 0},
+        "confidence": {"type": "number"},
+        "importance": {"type": "number"},
+        "validFrom": {"type": ["string", "null"]},
+        "validTo": {"type": ["string", "null"]},
+        "updatedAt": {"type": "string"},
+        "preferred": {"type": "boolean", "description": "true when this side is the higher-trust / fresher side of the pair."}
+      }
+    }
+  }
+}
