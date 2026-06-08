@@ -102,6 +102,20 @@
     "degraded": {
       "type": "array",
       "items": {"$ref": "#/definitions/degradation"}
+    },
+    "knowledgeGaps": {
+      "type": "array",
+      "description": "Knowledge-gap candidates: queries the swarm repeatedly searched and missed (bd-1n0np.6.4), surfaced from the query-miss audit log. Omitted when empty. Query text is redacted at the source (bd-1n0np.6.3), so each gap is identified by its opaque query hash, repeat count, and miss reasons.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["queryHash", "missCount", "reasons"],
+        "properties": {
+          "queryHash": {"type": "string"},
+          "missCount": {"type": "integer", "minimum": 0},
+          "reasons": {"type": "array", "items": {"type": "string"}}
+        }
+      }
     }
   },
   "field_presets": {

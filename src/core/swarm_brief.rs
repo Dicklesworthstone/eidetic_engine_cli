@@ -27,6 +27,9 @@ use crate::core::git_ahead::{
     summarize_git_ahead_with_log_state,
 };
 use crate::core::profile::{HostResourceProbeReport, recommend_operating_profile};
+use crate::core::query_miss_cluster::{
+    KNOWLEDGE_GAP_MIN_CLUSTER_MISSES, MissAuditObservation, cluster_repeated_misses,
+};
 use crate::core::singleflight::singleflight_posture_report;
 use crate::core::verify::{
     VerificationPostureAdvisoryCounts, VerificationPostureEvidenceHealth,
@@ -36,6 +39,7 @@ use crate::core::workspace::{
     WorkspaceHygieneOptions, WorkspaceHygieneSwarmBriefSummary,
     build_workspace_hygiene_swarm_brief_summary,
 };
+use crate::db::{DbConnection, StoredAuditEntry, audit_actions};
 use crate::policy::redact_secret_like_content;
 
 pub const SWARM_BRIEF_SCHEMA_V1: &str = "ee.swarm.brief.v1";
@@ -206,6 +210,30 @@ pub struct SwarmBriefReport {
     /// not "broken".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_hygiene: Option<WorkspaceHygieneSwarmBriefSummary>,
+    /// Knowledge-gap candidates: queries the swarm repeatedly searched and
+    /// missed (bd-1n0np.6.4), surfaced from the query-miss audit log. Empty when
+    /// the workspace DB is absent or no query hash crossed the repeat threshold.
+    /// Advisory/read-only; the query text is redacted (6.3), so each gap is
+    /// identified by its opaque hash + repeat count. Omitted from JSON when
+    /// empty so briefs without repeated misses keep their existing shape.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub knowledge_gaps: Vec<SwarmBriefKnowledgeGap>,
+}
+
+/// Maximum query-miss audit rows scanned when assembling knowledge gaps. Bounds
+/// the read on a hot append-only log; the repeat-threshold filter keeps the
+/// surfaced set small regardless.
+const SWARM_BRIEF_MISS_AUDIT_SCAN_LIMIT: u32 = 5_000;
+
+/// A surfaced knowledge gap (bd-1n0np.6.4): a query hash the swarm repeatedly
+/// searched and missed. The query text is redacted at the source (6.3), so the
+/// gap is identified by its opaque hash, the repeat count, and the miss reasons.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmBriefKnowledgeGap {
+    pub query_hash: String,
+    pub miss_count: u32,
+    pub reasons: Vec<String>,
 }
 
 impl SwarmBriefReport {
@@ -238,6 +266,7 @@ impl SwarmBriefReport {
             recommendations: Vec::new(),
             degraded: Vec::new(),
             workspace_hygiene: None,
+            knowledge_gaps: Vec::new(),
         }
     }
 
@@ -2622,6 +2651,7 @@ pub fn collect_swarm_brief(
         || MemoryDriftSourceAdapter.collect(options),
     );
     attach_qos_resource_pressure(&mut report, &options.workspace);
+    attach_knowledge_gaps(&mut report, &options.workspace);
     // bd-1eq3l.6: embed the compact workspace-hygiene summary so the swarm
     // brief surfaces counts/dirtyPathCount/needsHumanReviewTop/coordination
     // blockers/beadsStateStatus without forcing a separate
@@ -2684,6 +2714,54 @@ fn skipped_source_output(
         },
         contribution: SwarmBriefContribution::None,
     }
+}
+
+/// Parse a query-miss audit row's `details` JSON into a [`MissAuditObservation`].
+/// Returns `None` for rows without a usable `queryHash` (defensive: malformed or
+/// schema-drifted rows are skipped, never panicked on).
+fn parse_miss_audit_observation(entry: &StoredAuditEntry) -> Option<MissAuditObservation> {
+    let details = entry.details.as_deref()?;
+    let value: Value = serde_json::from_str(details).ok()?;
+    let query_hash = value.get("queryHash")?.as_str()?.trim().to_string();
+    if query_hash.is_empty() {
+        return None;
+    }
+    let reason = value
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    Some(MissAuditObservation { query_hash, reason })
+}
+
+/// Surface knowledge-gap candidates (bd-1n0np.6.4) from the query-miss audit log:
+/// read recorded misses, cluster by exact query hash, and keep hashes that
+/// crossed the repeat threshold. Read-only and graceful — a missing/unreadable
+/// workspace DB leaves `knowledge_gaps` empty rather than failing the brief.
+fn attach_knowledge_gaps(report: &mut SwarmBriefReport, workspace: &Path) {
+    let database_path = workspace.join(".ee").join("ee.db");
+    let Ok(connection) = DbConnection::open_file(&database_path) else {
+        return;
+    };
+    let Ok(entries) = connection.list_audit_by_action(
+        audit_actions::SEARCH_MISS_RECORDED,
+        Some(SWARM_BRIEF_MISS_AUDIT_SCAN_LIMIT),
+    ) else {
+        return;
+    };
+    let observations: Vec<MissAuditObservation> = entries
+        .iter()
+        .filter_map(parse_miss_audit_observation)
+        .collect();
+    report.knowledge_gaps =
+        cluster_repeated_misses(&observations, KNOWLEDGE_GAP_MIN_CLUSTER_MISSES)
+            .into_iter()
+            .map(|gap| SwarmBriefKnowledgeGap {
+                query_hash: gap.query_hash,
+                miss_count: gap.miss_count,
+                reasons: gap.reasons,
+            })
+            .collect();
 }
 
 fn attach_qos_resource_pressure(report: &mut SwarmBriefReport, workspace: &Path) {
