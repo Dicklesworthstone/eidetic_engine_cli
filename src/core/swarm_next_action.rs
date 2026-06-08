@@ -25,9 +25,9 @@ use crate::core::environment_attestation::{
 };
 use crate::core::preflight_guard::classify_repair_command_for_preflight;
 use crate::core::swarm_brief::{
-    SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandError, SwarmBriefCommandRunner,
-    SwarmBriefCommit, SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefReport,
-    SwarmBriefSourceKind, SwarmBriefSourceStatus, SwarmBriefThreadSummary,
+    SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandRunner, SwarmBriefCommit,
+    SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefReport, SwarmBriefSourceKind,
+    SwarmBriefSourceStatus, SwarmBriefThreadSummary,
     agent_mail_snapshot_brief_retry_command_template,
     agent_mail_snapshot_producer_command_template, collect_swarm_brief,
 };
@@ -4928,9 +4928,10 @@ mod tests {
     use crate::core::swarm_brief::{
         RchCodexHookCapability, RchLocalCapabilityReport, RchQueueHealth, RchWorkerPressureReport,
         RchWorkerProbeSummary, SwarmBriefBead, SwarmBriefBvPick, SwarmBriefBvSummary,
-        SwarmBriefCommit, SwarmBriefDegradation, SwarmBriefDirtyFile, SwarmBriefFileReservation,
-        SwarmBriefInboxSummary, SwarmBriefSourceFreshness, SwarmBriefSourceKind,
-        SwarmBriefSourceProvenance, SwarmBriefSourceSnapshot, SwarmBriefThreadSummary,
+        SwarmBriefCommandError, SwarmBriefCommit, SwarmBriefDegradation, SwarmBriefDirtyFile,
+        SwarmBriefFileReservation, SwarmBriefInboxSummary, SwarmBriefSourceFreshness,
+        SwarmBriefSourceKind, SwarmBriefSourceProvenance, SwarmBriefSourceSnapshot,
+        SwarmBriefThreadSummary,
     };
 
     fn unknown_worker_pressure() -> RchWorkerPressureReport {
@@ -7745,11 +7746,11 @@ mod tests {
     }
 
     #[test]
-    fn work_packet_keeps_metadata_only_pending_import_unclaimable() {
+    fn work_packet_keeps_metadata_only_pending_import_claimable() {
         let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
         let snapshot = snapshot_with_candidates(vec![candidate(
             "bd-metadata-only",
-            "Metadata-only stale marker must block claims",
+            "Metadata-only stale marker must not block claims",
             "beads_ready",
             Some(1),
         )]);
@@ -7777,18 +7778,19 @@ mod tests {
             packet.tracker_integrity.health,
             BeadsIntegrityHealth::ExternalChangesPendingImport
         );
-        assert!(!packet.tracker_integrity.br_reads_authoritative);
-        assert_eq!(packet.candidates[0].decision, "external_state_required");
-        assert!(packet.candidates[0].unsafe_reasons.contains(
+        assert!(packet.tracker_integrity.br_reads_authoritative);
+        assert!(!packet.tracker_integrity.requires_candidate_downgrade);
+        assert_eq!(packet.candidates[0].decision, "safe_to_claim");
+        assert!(!packet.candidates[0].unsafe_reasons.contains(
             &"beads_tracker_not_authoritative:external_changes_pending_import".to_owned()
         ));
-        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
-        assert_eq!(packet.recommended_action.action, "blocked_no_action");
-        assert_eq!(gate.source_authority.tracker_authoritative, false);
-        assert_eq!(gate.verdict, "external_state_required");
-        assert!(!gate.safe_to_claim);
-        assert!(gate.claim_command_action.is_none());
-        assert!(gate.unsafe_reasons.contains(
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(true));
+        assert_eq!(packet.recommended_action.action, "inspect_and_claim");
+        assert_eq!(gate.source_authority.tracker_authoritative, true);
+        assert_eq!(gate.verdict, "safe_to_claim");
+        assert!(gate.safe_to_claim);
+        assert!(gate.claim_command_action.is_some());
+        assert!(!gate.unsafe_reasons.contains(
             &"beads_tracker_not_authoritative:external_changes_pending_import".to_owned()
         ));
     }
