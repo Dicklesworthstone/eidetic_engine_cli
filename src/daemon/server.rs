@@ -1622,6 +1622,7 @@ impl DaemonContextParams {
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
             output_options: self.output_options(),
             persist_pack: !self.read_only,
         }

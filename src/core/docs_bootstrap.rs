@@ -448,7 +448,7 @@ pub fn apply_docs_bootstrap(
                     "queued_replay",
                 ));
             }
-            Some(stored) if bootstrap_candidate_matches(candidate, &evidence_id, &stored) => {
+            Some(stored) => {
                 skipped_count = skipped_count.saturating_add(1);
                 candidates.push(apply_candidate_summary(
                     candidate,

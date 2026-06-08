@@ -11748,7 +11748,8 @@ mod tests {
             &mut report,
             Some("failure"),
             &filters,
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
         assert_eq!(report.status, SearchStatus::Success);
         assert_eq!(report.results.len(), 1);
         assert_eq!(report.results[0].doc_id, "mem_11000000000000000000000001");
@@ -11778,7 +11779,8 @@ mod tests {
             &mut empty_report,
             Some("failure"),
             &filters,
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
         assert_eq!(empty_report.status, SearchStatus::NoResults);
         assert!(empty_report.results.is_empty());
 

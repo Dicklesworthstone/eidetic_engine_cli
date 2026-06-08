@@ -8105,7 +8105,8 @@ mod tests {
         assemble_draft_with_profile_and_options_seeded_in_workspace, candidate_similarity,
         escape_markdown_text, estimate_character_heuristic_tokens, estimate_tokens,
         estimate_tokens_default, estimate_word_heuristic_tokens, facility_similarity,
-        pack_item_provenance_json, prewarm_pack_hotset, subsystem_name,
+        pack_item_provenance_json, prewarm_pack_hotset, render_context_markdown_with_analysis,
+        subsystem_name,
     };
     use crate::cache::{CacheBudget, MemoryPressure};
     use crate::config::MeshCommandMode;

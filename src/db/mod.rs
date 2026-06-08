@@ -21567,10 +21567,12 @@ mod tests {
         guard_storage_panic, lock_file_write_owner_gate, sanitize_panic_payload, sqlite_u32_column,
         sqlite_u64_column, subsystem_name,
     };
+    use crate::models::memory_anchor::MemoryAnchorFreshnessTransition;
     use crate::models::{
-        AgentContextProfileCounts, EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider,
-        ModelPurpose, ModelRegistryStatus, RationaleTrace, RationaleTraceKind,
-        RationaleTracePosture, RationaleTraceVisibility, RedactionStatus,
+        AgentContextProfileCounts, EmbeddingMetadataRecord, MemoryAnchorFreshnessState,
+        MemoryAnchorKind, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
+        RationaleTrace, RationaleTraceKind, RationaleTracePosture, RationaleTraceVisibility,
+        RedactionStatus,
     };
 
     type TestResult = std::result::Result<(), TestFailure>;
