@@ -14346,6 +14346,11 @@ where
             }
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
         },
+        sandbox::SandboxCommand::Apply(args) => match sandbox::apply_session(&workspace, args) {
+            Ok(outcome) if human => write_stdout(stdout, &sandbox::render_apply_human(&outcome)),
+            Ok(outcome) => write_stdout(stdout, &(sandbox::render_apply_json(&outcome) + "\n")),
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        },
     }
 }
 
@@ -51199,6 +51204,7 @@ impl NormalizedInvocation {
                     sandbox::SandboxCommand::Import(_) => "sandbox import".to_string(),
                     sandbox::SandboxCommand::Curate(_) => "sandbox curate".to_string(),
                     sandbox::SandboxCommand::Diff(_) => "sandbox diff".to_string(),
+                    sandbox::SandboxCommand::Apply(_) => "sandbox apply".to_string(),
                 },
                 Command::Import(import) => match import {
                     ImportCommand::Cass(_) => "import cass".to_string(),

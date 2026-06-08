@@ -190,17 +190,23 @@ pub fn synthetic_memory_id(content: &str) -> String {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SandboxProposal {
-    /// Propose a new synthetic memory (`ee sandbox remember`).
+    /// Propose a new synthetic memory (`ee sandbox remember`). Carries the full
+    /// content + level/kind so `ee sandbox apply` can promote it through the
+    /// normal audited remember path.
     Remember {
         memory_id: String,
+        content: String,
         content_hash: String,
-        content_preview: String,
+        level: String,
+        kind: String,
     },
     /// Propose importing a memory into the overlay (`ee sandbox import`).
     Import {
         memory_id: String,
+        content: String,
         content_hash: String,
-        content_preview: String,
+        level: String,
+        kind: String,
     },
     /// Propose hypothetically retiring an existing memory (`ee sandbox curate --retire`).
     Retire { memory_id: String },
@@ -409,8 +415,10 @@ mod tests {
             proposals: vec![
                 SandboxProposal::Remember {
                     memory_id: synthetic_memory_id("a brand new fact"),
+                    content: "a brand new fact".to_owned(),
                     content_hash: content_hash("a brand new fact"),
-                    content_preview: "a brand new fact".to_owned(),
+                    level: "episodic".to_owned(),
+                    kind: "fact".to_owned(),
                 },
                 SandboxProposal::Retire {
                     memory_id: "mem_a".to_owned(),
@@ -426,8 +434,10 @@ mod tests {
         let session = SandboxSession {
             proposals: vec![SandboxProposal::Import {
                 memory_id: "mem_x".to_owned(),
+                content: "imported".to_owned(),
                 content_hash: content_hash("imported"),
-                content_preview: "imported".to_owned(),
+                level: "episodic".to_owned(),
+                kind: "fact".to_owned(),
             }],
         };
         let json = serde_json::to_string(&session).expect("serialize");
@@ -447,8 +457,10 @@ mod tests {
             proposals: vec![
                 SandboxProposal::Remember {
                     memory_id: new_id.clone(),
+                    content: "gamma fact".to_owned(),
                     content_hash: content_hash("gamma fact"),
-                    content_preview: "gamma fact".to_owned(),
+                    level: "episodic".to_owned(),
+                    kind: "fact".to_owned(),
                 },
                 SandboxProposal::Retire {
                     memory_id: "mem_b".to_owned(),
@@ -474,8 +486,10 @@ mod tests {
         let session = SandboxSession {
             proposals: vec![SandboxProposal::Remember {
                 memory_id: synthetic_memory_id("new"),
+                content: "new".to_owned(),
                 content_hash: content_hash("new"),
-                content_preview: "new".to_owned(),
+                level: "episodic".to_owned(),
+                kind: "fact".to_owned(),
             }],
         };
         let first = assemble_sandbox_diff(&baseline_memories, &session);

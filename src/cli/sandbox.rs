@@ -14,6 +14,7 @@ use std::path::Path;
 
 use clap::{Args, Subcommand};
 
+use crate::core::memory::{RememberMemoryOptions, remember_memory};
 use crate::core::sandbox::{
     SandboxDiffSurface, SandboxProposal, SandboxSession, assemble_sandbox_diff, content_hash,
     synthetic_memory_id,
@@ -32,6 +33,9 @@ pub enum SandboxCommand {
     Curate(SandboxCurateArgs),
     /// Show the baseline-vs-overlay diff for the session (no durable write).
     Diff(SandboxDiffArgs),
+    /// Promote the session's additive proposals to durable memory through the
+    /// normal audited remember path (the only durable-write subcommand).
+    Apply(SandboxApplyArgs),
 }
 
 /// Shared `--session` selector (defaults to `default`).
@@ -99,6 +103,13 @@ pub struct SandboxDiffArgs {
     pub session: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Args)]
+pub struct SandboxApplyArgs {
+    /// Overlay session name.
+    #[arg(long, value_name = "NAME")]
+    pub session: Option<String>,
+}
+
 /// Outcome of a proposal command: the updated session + which session it is.
 pub struct ProposeOutcome {
     pub session_name: String,
@@ -129,8 +140,10 @@ pub fn propose_remember(
     let mut session = load_session(workspace, &name);
     session.proposals.push(SandboxProposal::Remember {
         memory_id: synthetic_memory_id(&args.content),
+        content: args.content.clone(),
         content_hash: content_hash(&args.content),
-        content_preview: preview(&args.content),
+        level: args.level.clone().unwrap_or_else(default_level),
+        kind: args.kind.clone().unwrap_or_else(default_kind),
     });
     save_session(workspace, &name, &session)?;
     Ok(ProposeOutcome {
@@ -138,6 +151,14 @@ pub fn propose_remember(
         session,
         notes: Vec::new(),
     })
+}
+
+fn default_level() -> String {
+    "episodic".to_owned()
+}
+
+fn default_kind() -> String {
+    "fact".to_owned()
 }
 
 /// `ee sandbox import` — append an import proposal (no durable write).
@@ -149,8 +170,10 @@ pub fn propose_import(
     let mut session = load_session(workspace, &name);
     session.proposals.push(SandboxProposal::Import {
         memory_id: synthetic_memory_id(&args.content),
+        content: args.content.clone(),
         content_hash: content_hash(&args.content),
-        content_preview: preview(&args.content),
+        level: args.level.clone().unwrap_or_else(default_level),
+        kind: args.kind.clone().unwrap_or_else(default_kind),
     });
     save_session(workspace, &name, &session)?;
     // bd-1n0np.21.3: imports must pass the injection guard (bd-1n0np.23.3) before
@@ -237,15 +260,126 @@ fn baseline_memories(workspace: &Path) -> Result<Vec<(String, String)>, DomainEr
         .collect())
 }
 
-fn preview(content: &str) -> String {
-    const MAX: usize = 80;
-    let oneline = content.replace('\n', " ");
-    if oneline.chars().count() <= MAX {
-        oneline
-    } else {
-        let kept: String = oneline.chars().take(MAX).collect();
-        format!("{kept}…")
+/// Outcome of `ee sandbox apply`: which proposals were persisted vs deferred.
+pub struct ApplyOutcome {
+    pub session_name: String,
+    /// Memory ids persisted through the normal audited remember path.
+    pub persisted: Vec<String>,
+    /// Retire proposals that require explicit `ee curate` promotion (apply does
+    /// not auto-tombstone existing memories).
+    pub retire_pending: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+/// `ee sandbox apply` — promote the session's additive proposals to durable
+/// memory through the NORMAL audited remember path (bd-1n0np.21.3). Retire
+/// proposals are reported for explicit `ee curate` promotion, never silently
+/// auto-applied. Applied additive proposals are cleared from the session.
+pub fn apply_session(
+    workspace: &Path,
+    args: &SandboxApplyArgs,
+) -> Result<ApplyOutcome, DomainError> {
+    let name = session_name(&args.session);
+    let session = load_session(workspace, &name);
+
+    let mut persisted = Vec::new();
+    let mut retire_pending = Vec::new();
+    for proposal in &session.proposals {
+        match proposal {
+            SandboxProposal::Remember {
+                content,
+                level,
+                kind,
+                ..
+            }
+            | SandboxProposal::Import {
+                content,
+                level,
+                kind,
+                ..
+            } => {
+                let options = RememberMemoryOptions {
+                    workspace_path: workspace,
+                    database_path: None,
+                    content,
+                    workflow_id: None,
+                    level,
+                    kind,
+                    tags: None,
+                    confidence: 0.8,
+                    source: None,
+                    allow_secret_mention: false,
+                    valid_from: None,
+                    valid_to: None,
+                    dry_run: false,
+                    auto_link: false,
+                    propose_candidates: false,
+                };
+                let report = remember_memory(&options)?;
+                persisted.push(report.memory_id.to_string());
+            }
+            SandboxProposal::Retire { memory_id } => retire_pending.push(memory_id.clone()),
+        }
     }
+
+    let mut notes = Vec::new();
+    if !retire_pending.is_empty() {
+        notes.push(format!(
+            "{} retire proposal(s) require explicit `ee curate` promotion; sandbox apply persists additive proposals through the audited remember path and never auto-tombstones existing memories",
+            retire_pending.len()
+        ));
+    }
+
+    // Clear the applied additive proposals; keep un-promoted retires.
+    let mut remaining = SandboxSession::default();
+    for proposal in &session.proposals {
+        if matches!(proposal, SandboxProposal::Retire { .. }) {
+            remaining.proposals.push(proposal.clone());
+        }
+    }
+    save_session(workspace, &name, &remaining)?;
+
+    Ok(ApplyOutcome {
+        session_name: name,
+        persisted,
+        retire_pending,
+        notes,
+    })
+}
+
+/// Render an `ee.response.v2` envelope for an apply outcome.
+#[must_use]
+pub fn render_apply_json(outcome: &ApplyOutcome) -> String {
+    serde_json::json!({
+        "schema": RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": {
+            "command": "sandbox apply",
+            "sessionName": outcome.session_name,
+            "persistedMemoryIds": outcome.persisted,
+            "persistedCount": outcome.persisted.len(),
+            "retireProposalsPending": outcome.retire_pending,
+            "notes": outcome.notes,
+        },
+    })
+    .to_string()
+}
+
+/// Compact human summary for an apply outcome.
+#[must_use]
+pub fn render_apply_human(outcome: &ApplyOutcome) -> String {
+    let mut out = format!(
+        "sandbox apply (session `{}`): persisted {} memory(ies) via the audited remember path\n",
+        outcome.session_name,
+        outcome.persisted.len(),
+    );
+    for id in &outcome.persisted {
+        out.push_str(&format!("  + {id}\n"));
+    }
+    for note in &outcome.notes {
+        out.push_str(&format!("  note: {note}\n"));
+    }
+    out
 }
 
 /// Render an `ee.response.v2` envelope for a proposal outcome.
