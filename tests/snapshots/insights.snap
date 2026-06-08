@@ -1,14 +1,16 @@
 ---
 source: tests/json_contract_snapshots.rs
-expression: value
+expression: canonical_json(value)
 ---
 {
   "availableSections": [
     "authorities",
+    "blindSpots",
     "bridges",
     "causalBottlenecks",
     "comprehensiveRules",
     "contradictionClusters",
+    "houseRules",
     "hubs",
     "kCore",
     "kTruss",
@@ -63,6 +65,16 @@ expression: value
     },
     {
       "items": [],
+      "name": "blindSpots",
+      "nextCommands": [
+        "ee insights --section blindSpots --workspace . --json"
+      ],
+      "summary": "Code-graph nodes with no matching memory file provenance, path mention, or symbol mention.",
+      "title": "Blind Spots",
+      "whyItMatters": "Blind spots give agents a calibrated caution signal before they rely on memory for code areas the store does not cover."
+    },
+    {
+      "items": [],
       "name": "bridges",
       "nextCommands": [
         "ee insights --section bridges --workspace . --json"
@@ -100,6 +112,16 @@ expression: value
       "summary": "Louvain communities filtered to contradiction-heavy memory neighborhoods.",
       "title": "Contradiction Clusters",
       "whyItMatters": "Contradiction clusters identify parts of the memory graph that need curation before agents rely on them."
+    },
+    {
+      "items": [],
+      "name": "houseRules",
+      "nextCommands": [
+        "ee insights --section houseRules --workspace . --json"
+      ],
+      "summary": "Global-tier memories (house rules) visible across this workspace, with originating-workspace provenance.",
+      "title": "House Rules",
+      "whyItMatters": "House rules are cross-workspace conventions; surfacing them with provenance shows which global rules will shape packs in this workspace."
     },
     {
       "items": [],

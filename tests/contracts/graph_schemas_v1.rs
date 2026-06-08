@@ -65,10 +65,12 @@ const GRAPH_SCHEMA_IDS: &[&str] = &[
 
 const INSIGHTS_SECTIONS: &[&str] = &[
     "authorities",
+    "blindSpots",
     "bridges",
     "causalBottlenecks",
     "comprehensiveRules",
     "contradictionClusters",
+    "houseRules",
     "hubs",
     "kCore",
     "kTruss",

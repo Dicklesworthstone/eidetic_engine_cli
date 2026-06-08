@@ -58,6 +58,7 @@ const BLIND_SPOT_CENTRALITY_STATUS_UNAVAILABLE: &str =
 const BRIDGE_INSIGHT_SCHEMA_V1: &str = "ee.graph.bridge_insight.v1";
 const KNOWLEDGE_GAP_SCHEMA_V1: &str = "ee.graph.knowledge_gap.v1";
 const TOP_MEMORY_INSIGHT_SCHEMA_V1: &str = "ee.graph.top_memory.v1";
+const HOUSE_RULES_INSIGHT_SCHEMA_V1: &str = "ee.insights.house_rules.v1";
 const KNOWLEDGE_GAP_THIN_EVIDENCE_MAX_SPANS: u32 = 2;
 const KNOWLEDGE_GAP_LOW_CONFIDENCE_MAX: f32 = 0.50;
 
@@ -367,6 +368,7 @@ fn section_registry() -> Vec<SectionRegistryEntry> {
             "contradictionClusters",
             contradiction_clusters_section,
         ),
+        ("houserules", "houseRules", house_rules_section),
         ("hubs", "hubs", hubs_section),
         ("kcore", "kCore", k_core_section),
         ("ktruss", "kTruss", k_truss_section),
@@ -589,6 +591,10 @@ fn build_registry_section(
         "topMemories" => {
             let inputs = load_top_memory_inputs(workspace)?;
             Ok(top_memories_section_from_inputs(&inputs))
+        }
+        "houseRules" => {
+            let inputs = load_house_rules_inputs(workspace)?;
+            Ok(house_rules_section_from_inputs(&inputs))
         }
         _ => Ok(builder()),
     }
@@ -822,6 +828,69 @@ fn load_top_memory_inputs(
         return Ok(Vec::new());
     };
     top_memory_inputs_from_graph_data(&data)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HouseRuleInsightInput {
+    memory_id: String,
+    originating_workspace_id: String,
+    level: String,
+    kind: String,
+    trust_class: String,
+    tags: Vec<String>,
+}
+
+/// Load the global-tier ("house rule") memories visible in this workspace, each
+/// tagged with its originating workspace for provenance (bd-1n0np.10.3). Reuses
+/// the 10.1 candidate-load union and the global-scope tag predicate, so a memory
+/// counts as a house rule iff it carries a `global`/`house_rule` tag.
+fn load_house_rules_inputs(
+    workspace: Option<&Path>,
+) -> Result<Vec<HouseRuleInsightInput>, DomainError> {
+    let Some(workspace) = workspace else {
+        return Ok(Vec::new());
+    };
+    let database_path = workspace.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return Ok(Vec::new());
+    }
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open workspace database: {error}"),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })?;
+    let Some(workspace_id) = insights_workspace_id(&connection, workspace)? else {
+        return Ok(Vec::new());
+    };
+    let memories = connection
+        .list_memories_for_retrieval_with_global(&workspace_id, None, false)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query global-scope memories: {error}"),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })?;
+    let mut inputs = Vec::new();
+    for memory in memories {
+        let tags =
+            connection
+                .get_memory_tags(&memory.id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to query memory tags: {error}"),
+                    repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+                })?;
+        if !crate::models::query::memory_tags_include_global_scope(&tags) {
+            continue;
+        }
+        inputs.push(HouseRuleInsightInput {
+            memory_id: memory.id.clone(),
+            originating_workspace_id: memory.workspace_id.clone(),
+            level: memory.level.clone(),
+            kind: memory.kind.clone(),
+            trust_class: memory.trust_class.clone(),
+            tags,
+        });
+    }
+    inputs.sort_by(|left, right| left.memory_id.cmp(&right.memory_id));
+    Ok(inputs)
 }
 
 fn load_knowledge_skyline(
@@ -2842,6 +2911,40 @@ fn top_memories_section_from_inputs(inputs: &[TopMemoryInsightInput]) -> Insight
     }
 }
 
+fn house_rules_section() -> InsightsSection {
+    house_rules_section_from_inputs(&[])
+}
+
+fn house_rules_section_from_inputs(inputs: &[HouseRuleInsightInput]) -> InsightsSection {
+    let items = inputs
+        .iter()
+        .map(|input| {
+            serde_json::json!({
+                "memoryId": &input.memory_id,
+                "originatingWorkspace": &input.originating_workspace_id,
+                "level": &input.level,
+                "kind": &input.kind,
+                "trustClass": &input.trust_class,
+                "tags": &input.tags,
+                "interpretation": "house_rule",
+                "evidence": {
+                    "schema": HOUSE_RULES_INSIGHT_SCHEMA_V1,
+                    "scope": "global",
+                },
+            })
+        })
+        .collect();
+
+    InsightsSection {
+        name: "houseRules",
+        title: "House Rules",
+        summary: "Global-tier memories (house rules) visible across this workspace, with originating-workspace provenance.",
+        why_it_matters: "House rules are cross-workspace conventions; surfacing them with provenance shows which global rules will shape packs in this workspace.",
+        items,
+        next_commands: vec!["ee insights --section houseRules --workspace . --json"],
+    }
+}
+
 fn placeholder_section(
     name: &'static str,
     title: &'static str,
@@ -3182,6 +3285,7 @@ mod tests {
                 "causalBottlenecks",
                 "comprehensiveRules",
                 "contradictionClusters",
+                "houseRules",
                 "hubs",
                 "kCore",
                 "kTruss",
