@@ -36,6 +36,7 @@ pub mod conformal;
 pub mod context;
 pub mod context_delta;
 pub mod contradiction_detect;
+pub mod contradiction_guard;
 pub mod curate;
 pub mod degraded_aggregation;
 pub mod degraded_honesty;
