@@ -163,11 +163,17 @@ emit_json_report() {
 }
 
 run_self_test() {
+    command -v jq >/dev/null 2>&1 || {
+        printf 'self-test FAILED: jq is required to validate JSON output\n' >&2
+        exit 1
+    }
+
     local fixture
     fixture="$(cat <<'EOF'
 remote command: cargo build --target x86_64-unknown-linux-gnu --target arm64-apple-darwin22.0
 syncing /Volumes/USBNVME16TB/temp_agent_space/cargo-target -> /data/projects/...
 warning: vendor/zstd-sys/c/._zstd.c contains AppleDouble metadata
+transfer sidecar: vendor/zstd-sys/.DS_Store
 TMPDIR=/var/folders/abc/xyz123/T/cargo-build-xxxx
 EOF
 )"
@@ -175,12 +181,52 @@ EOF
     body=$(detect_anomalies "$fixture")
     local count
     count=$(printf '%s' "$body" | grep -c .)
-    [ "$count" -ge 4 ] || {
-        printf 'self-test FAILED: expected >=4 anomalies, got %d\n' "$count" >&2
+    [ "$count" -eq 5 ] || {
+        printf 'self-test FAILED: expected 5 anomalies, got %d\n' "$count" >&2
         printf '%s\n' "$body" >&2
         exit 1
     }
-    printf 'self-test PASSED: detected %d anomalies in fixture\n' "$count"
+
+    local report
+    report=$(emit_json_report "$count" "$body")
+    printf '%s\n' "$report" | jq -e \
+        --arg schema "$REPORT_SCHEMA" \
+        '
+        .schema == $schema and
+        .status == "anomalies_found" and
+        .count == 5 and
+        (.anomalies | length) == 5 and
+        ([.anomalies[].code] | unique) == [
+            "rch_portability_appledouble_compile",
+            "rch_portability_darwin_target",
+            "rch_portability_ds_store",
+            "rch_portability_usb_volume",
+            "rch_portability_var_folders_tmp"
+        ] and
+        any(.anomalies[]; .code == "rch_portability_darwin_target" and .example == "arm64-apple-darwin22.0") and
+        any(.anomalies[]; .code == "rch_portability_usb_volume" and (.example | startswith("/Volumes/USBNVME16TB/"))) and
+        any(.anomalies[]; .code == "rch_portability_appledouble_compile" and .example == "._zstd.c") and
+        any(.anomalies[]; .code == "rch_portability_ds_store" and .example == ".DS_Store") and
+        any(.anomalies[]; .code == "rch_portability_var_folders_tmp" and (.example | startswith("/var/folders/abc/xyz123/")))
+        ' >/dev/null || {
+        printf 'self-test FAILED: JSON anomaly report did not match contract\n' >&2
+        printf '%s\n' "$report" >&2
+        exit 1
+    }
+
+    local clean_body
+    clean_body=$(detect_anomalies 'remote linux target x86_64-unknown-linux-gnu uses worker-local /tmp')
+    local clean_report
+    clean_report=$(emit_json_report 0 "$clean_body")
+    printf '%s\n' "$clean_report" | jq -e \
+        --arg schema "$REPORT_SCHEMA" \
+        '.schema == $schema and .status == "ok" and .count == 0 and (.anomalies | length) == 0' >/dev/null || {
+        printf 'self-test FAILED: clean JSON report did not match contract\n' >&2
+        printf '%s\n' "$clean_report" >&2
+        exit 1
+    }
+
+    printf 'self-test PASSED: detected expected anomaly catalog and clean JSON contract\n'
     exit 0
 }
 
