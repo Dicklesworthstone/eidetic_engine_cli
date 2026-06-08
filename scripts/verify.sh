@@ -77,6 +77,7 @@ set -euo pipefail
 #   6.08 Cross-Cutting E2E     - scripts/e2e_cross_cutting.sh
 #   6.09 Evidence Harvester E2E - scripts/e2e_evidence_harvester.sh
 #   6.10 LOD Packing E2E       - scripts/e2e_lod_packing.sh
+#   6.11 House Rules E2E       - scripts/e2e_house_rules.sh
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
@@ -1066,6 +1067,12 @@ run_stage "Dueling Wizards Evidence Harvester E2E" "./scripts/e2e_evidence_harve
 # hard-asserts pack budget + hash determinism; condition-guards (log_drop) the
 # peripheral-index/link-only tier and the cli-gated --no-lod parity.
 run_stage "Dueling Wizards LOD Packing E2E" "./scripts/e2e_lod_packing.sh"
+
+# Gate 6.11: Dueling Wizards House Rules real-binary E2E. Real-binary, no-Cargo:
+# hard-asserts the houseRules insights section in its origin workspace (lists the
+# global-tagged rule, no workspace-local leak); condition-guards (log_drop) the
+# cross-workspace shared-DB read path and the cli-gated `remember --scope global`.
+run_stage "Dueling Wizards House Rules E2E" "./scripts/e2e_house_rules.sh"
 
 # Heavy gate block: skipped under --ci-smoke for fast swarm-CI / agent
 # pre-push runs. bd-2dgn0.5: see docs/operator-swarm-slo.md for which
