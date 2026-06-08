@@ -81,6 +81,7 @@ set -euo pipefail
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
 #   7. Advanced E2E            - scripts/e2e_advanced.sh
 #   8. Boundary Migration      - scripts/e2e_boundary_migration.sh
+#   8.75. Eval Regression Contract - no-Cargo pack-quality threshold self-test
 #   8.8. Eval Regression       - scripts/eval_regression.sh (optional)
 #   9. Benchmarks (optional)   - scripts/bench_perf_regression.sh --check-regression
 #
@@ -1132,6 +1133,11 @@ else
     STAGE_RESULTS="${STAGE_RESULTS}SKIP Boundary Migration Scripts (ci-smoke)\n"
     STAGE_RESULTS="${STAGE_RESULTS}SKIP ee doctor Safety Harness (bd-21joy) (ci-smoke)\n"
 fi
+
+# Gate 8.75: Pack-quality eval threshold contract. This no-Cargo self-test
+# proves the committed regression reports' deliberate top-1 miss trips the
+# NDCG@10 threshold before the optional full eval sweep runs.
+run_stage "Eval Regression Contract (bd-bife.18)" "./scripts/eval_regression.sh --self-test-misrank-top1"
 
 # Gate 8.8: Pack-quality eval regression sweep. Optional because it validates
 # committed report artifacts and intended eval thresholds after feature slices.
