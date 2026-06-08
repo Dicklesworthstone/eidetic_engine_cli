@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use fnx_classes::Graph;
 use fnx_runtime::CompatibilityMode;
 
+use crate::db::{DbConnection, MemoryLinkRelation};
 use crate::graph::health::{
     ContradictionCluster, ContradictionClusterPolicy, detect_contradiction_clusters_with_policy,
 };
@@ -265,12 +266,206 @@ fn rank_cluster(
     }
 }
 
+/// Explicit conflict edges gathered from the database, with an honest record of
+/// which signal kinds were covered (bd-1n0np.7.2 DB-gather).
+///
+/// The `deferred` list is surfaced so a not-yet-gathered signal kind is never
+/// silently treated as "no conflict" — the same no-silent-cap discipline the
+/// detector uses for its deferred fuzzy pass.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GatheredConflictEdges {
+    /// The explicit conflict edges, ready to feed [`detect_explicit_contradictions`].
+    pub edges: Vec<ConflictEdge>,
+    /// Explicit signal kinds this gather covered.
+    pub gathered: Vec<ExplicitConflictSignal>,
+    /// Explicit signal kinds deferred to a later DB-gather slice (reported, not
+    /// silently dropped).
+    pub deferred: Vec<ExplicitConflictSignal>,
+    /// Set when the link read failed: the gather degrades to no edges rather than
+    /// panicking, and the read failure is reported instead of being swallowed.
+    pub read_error: Option<String>,
+}
+
+/// Explicit signal kinds the v1 DB-gather covers (the link-based, least-ambiguous
+/// evidence the store records directly).
+const GATHERED_SIGNAL_KINDS: [ExplicitConflictSignal; 2] = [
+    ExplicitConflictSignal::ContradictionLink,
+    ExplicitConflictSignal::Supersession,
+];
+
+/// Explicit signal kinds deferred to later DB-gather slices. These require
+/// cross-referencing memory rows / feedback events (and are more
+/// false-positive-prone), so v1 reports them as not-yet-gathered.
+const DEFERRED_SIGNAL_KINDS: [ExplicitConflictSignal; 4] = [
+    ExplicitConflictSignal::DuplicateDivergent,
+    ExplicitConflictSignal::ValidityWindowOverlap,
+    ExplicitConflictSignal::TrustOutcomeSplit,
+    ExplicitConflictSignal::RepeatedCoSelection,
+];
+
+/// Gather explicit conflict edges from the database (bd-1n0np.7.2 DB-gather).
+///
+/// v1 gathers the **link-based** explicit signals — the heaviest, least-ambiguous
+/// evidence the store records directly: `contradicts` links
+/// ([`ExplicitConflictSignal::ContradictionLink`]) and `supersedes` links
+/// ([`ExplicitConflictSignal::Supersession`]). It reuses the exact same
+/// [`DbConnection::list_all_memory_links`] load that `graph::health` uses, so the
+/// contradiction graph stays consistent with structural health.
+///
+/// The remaining explicit signals (validity-window overlap, duplicate-divergent,
+/// trust/outcome split, repeated co-selection) require cross-referencing memory
+/// rows and feedback events; they are gathered in later slices and reported via
+/// [`GatheredConflictEdges::deferred`] so an un-gathered kind is never silently
+/// treated as absent. The fuzzy embedding-opposition detector remains opt-in and
+/// out of scope here (the explicit graph is the gate).
+///
+/// Deterministic: links are loaded in the connection's deterministic order and
+/// mapped 1:1; canonicalization/dedup happens downstream in
+/// [`detect_explicit_contradictions`].
+#[must_use]
+pub fn gather_explicit_conflict_edges(connection: &DbConnection) -> GatheredConflictEdges {
+    let gathered = GATHERED_SIGNAL_KINDS.to_vec();
+    let deferred = DEFERRED_SIGNAL_KINDS.to_vec();
+
+    let links = match connection.list_all_memory_links(None) {
+        Ok(links) => links,
+        Err(error) => {
+            return GatheredConflictEdges {
+                edges: Vec::new(),
+                gathered,
+                deferred,
+                read_error: Some(format!("memory links could not be read: {error}")),
+            };
+        }
+    };
+
+    let mut edges = Vec::new();
+    for link in &links {
+        let signal = match link.relation_enum() {
+            Some(MemoryLinkRelation::Contradicts) => ExplicitConflictSignal::ContradictionLink,
+            Some(MemoryLinkRelation::Supersedes) => ExplicitConflictSignal::Supersession,
+            // Supports / Related / DerivedFrom / CoTag / CoMention and any
+            // unparseable relation are not explicit conflict evidence.
+            _ => continue,
+        };
+        edges.push(ConflictEdge::new(
+            &link.src_memory_id,
+            &link.dst_memory_id,
+            signal,
+        ));
+    }
+
+    GatheredConflictEdges {
+        edges,
+        gathered,
+        deferred,
+        read_error: None,
+    }
+}
+
+/// Convenience: gather explicit conflict edges from the database and run the
+/// detector in one call (bd-1n0np.7.2). Returns the detection report alongside
+/// the gather's coverage record so callers (the `ee conflict` surface,
+/// bd-1n0np.7.3) can report both the clusters and which explicit signals were
+/// considered vs deferred.
+#[must_use]
+pub fn detect_explicit_contradictions_from_connection(
+    connection: &DbConnection,
+    config: ContradictionDetectionConfig,
+) -> (ContradictionDetectionReport, GatheredConflictEdges) {
+    let gathered = gather_explicit_conflict_edges(connection);
+    let report = detect_explicit_contradictions(&gathered.edges, config);
+    (report, gathered)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ConflictEdge, ContradictionDetectionConfig, ExplicitConflictSignal, canonical_pair,
-        detect_explicit_contradictions,
+        detect_explicit_contradictions, detect_explicit_contradictions_from_connection,
+        gather_explicit_conflict_edges,
     };
+    use crate::db::{
+        CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
+        MemoryLinkRelation, MemoryLinkSource,
+    };
+
+    // ---- DB-gather test scaffolding (mirrors src/core/health.rs) ----------
+    // IDs must satisfy the schema CHECK constraints: wsp_/mem_ are length 30,
+    // link_ is length 31 (see src/db/mod.rs).
+    const WS_ID: &str = "wsp_00000000000000000000000072";
+    const MEM_A: &str = "mem_00000000000000000000000001";
+    const MEM_B: &str = "mem_00000000000000000000000002";
+    const MEM_C: &str = "mem_00000000000000000000000003";
+    const LINK_1: &str = "link_00000000000000000000000001";
+    const LINK_2: &str = "link_00000000000000000000000002";
+    const LINK_3: &str = "link_00000000000000000000000003";
+
+    fn open_seeded_db() -> DbConnection {
+        let connection = DbConnection::open_memory().expect("open in-memory db");
+        connection.migrate().expect("migrate schema");
+        connection
+            .insert_workspace(
+                WS_ID,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-contradiction-gather-fixture".to_owned(),
+                    name: Some("contradiction gather".to_owned()),
+                },
+            )
+            .expect("insert workspace");
+        connection
+    }
+
+    fn seed_memory(connection: &DbConnection, memory_id: &str) {
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: WS_ID.to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: format!("fixture {memory_id}"),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("insert memory");
+    }
+
+    fn seed_link(
+        connection: &DbConnection,
+        link_id: &str,
+        src: &str,
+        dst: &str,
+        relation: MemoryLinkRelation,
+    ) {
+        connection
+            .insert_memory_link(
+                link_id,
+                &CreateMemoryLinkInput {
+                    src_memory_id: src.to_owned(),
+                    dst_memory_id: dst.to_owned(),
+                    relation,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: false,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("contradiction-gather-test".to_owned()),
+                    metadata_json: None,
+                },
+            )
+            .expect("insert link");
+    }
 
     #[test]
     fn signal_weights_are_ordered_explicit_first() {
@@ -384,5 +579,148 @@ mod tests {
         let second =
             detect_explicit_contradictions(&reversed, ContradictionDetectionConfig::default());
         assert_eq!(first, second, "detection is independent of input order");
+    }
+
+    #[test]
+    fn gather_maps_contradicts_and_supersedes_links_to_explicit_signals() {
+        let connection = open_seeded_db();
+        for memory_id in [MEM_A, MEM_B, MEM_C] {
+            seed_memory(&connection, memory_id);
+        }
+        seed_link(
+            &connection,
+            LINK_1,
+            MEM_A,
+            MEM_B,
+            MemoryLinkRelation::Contradicts,
+        );
+        seed_link(
+            &connection,
+            LINK_2,
+            MEM_B,
+            MEM_C,
+            MemoryLinkRelation::Supersedes,
+        );
+
+        let gathered = gather_explicit_conflict_edges(&connection);
+        assert!(gathered.read_error.is_none(), "links read cleanly");
+        assert_eq!(gathered.edges.len(), 2, "one edge per conflict link");
+        assert!(gathered.edges.contains(&ConflictEdge::new(
+            MEM_A,
+            MEM_B,
+            ExplicitConflictSignal::ContradictionLink
+        )));
+        assert!(gathered.edges.contains(&ConflictEdge::new(
+            MEM_B,
+            MEM_C,
+            ExplicitConflictSignal::Supersession
+        )));
+    }
+
+    #[test]
+    fn gather_ignores_non_conflict_relations() {
+        let connection = open_seeded_db();
+        for memory_id in [MEM_A, MEM_B] {
+            seed_memory(&connection, memory_id);
+        }
+        // Supports / Related are NOT explicit conflict evidence.
+        seed_link(
+            &connection,
+            LINK_1,
+            MEM_A,
+            MEM_B,
+            MemoryLinkRelation::Supports,
+        );
+        seed_link(
+            &connection,
+            LINK_2,
+            MEM_A,
+            MEM_B,
+            MemoryLinkRelation::Related,
+        );
+
+        let gathered = gather_explicit_conflict_edges(&connection);
+        assert!(
+            gathered.edges.is_empty(),
+            "non-conflict relations produce no conflict edges"
+        );
+    }
+
+    #[test]
+    fn gather_reports_deferred_signal_kinds_no_silent_omission() {
+        let connection = open_seeded_db();
+        let gathered = gather_explicit_conflict_edges(&connection);
+        // v1 covers the link-based kinds and explicitly reports the rest as
+        // deferred rather than pretending they were considered.
+        assert!(
+            gathered
+                .gathered
+                .contains(&ExplicitConflictSignal::ContradictionLink)
+        );
+        assert!(
+            gathered
+                .gathered
+                .contains(&ExplicitConflictSignal::Supersession)
+        );
+        assert!(
+            gathered
+                .deferred
+                .contains(&ExplicitConflictSignal::ValidityWindowOverlap),
+            "an un-gathered signal kind is surfaced, never silently absent"
+        );
+        // Gathered and deferred kinds are disjoint and cover all six signals.
+        assert_eq!(gathered.gathered.len() + gathered.deferred.len(), 6);
+        for kind in &gathered.gathered {
+            assert!(!gathered.deferred.contains(kind), "kinds are disjoint");
+        }
+    }
+
+    #[test]
+    fn gather_then_detect_surfaces_a_contradiction_cluster_end_to_end() {
+        let connection = open_seeded_db();
+        for memory_id in [MEM_A, MEM_B, MEM_C] {
+            seed_memory(&connection, memory_id);
+        }
+        // A dense contradiction triangle of explicit links.
+        seed_link(
+            &connection,
+            LINK_1,
+            MEM_A,
+            MEM_B,
+            MemoryLinkRelation::Contradicts,
+        );
+        seed_link(
+            &connection,
+            LINK_2,
+            MEM_B,
+            MEM_C,
+            MemoryLinkRelation::Contradicts,
+        );
+        seed_link(
+            &connection,
+            LINK_3,
+            MEM_A,
+            MEM_C,
+            MemoryLinkRelation::Contradicts,
+        );
+
+        let (report, gathered) = detect_explicit_contradictions_from_connection(
+            &connection,
+            ContradictionDetectionConfig::default(),
+        );
+        assert_eq!(gathered.edges.len(), 3, "three explicit conflict links");
+        assert_eq!(report.explicit_edge_count, 3);
+        assert!(
+            !report.clusters.is_empty(),
+            "a dense explicit contradiction triangle surfaces a cluster"
+        );
+    }
+
+    #[test]
+    fn gather_on_empty_db_yields_no_edges_without_error() {
+        let connection = open_seeded_db();
+        let gathered = gather_explicit_conflict_edges(&connection);
+        assert!(gathered.read_error.is_none());
+        assert!(gathered.edges.is_empty(), "no links -> no conflict edges");
     }
 }
