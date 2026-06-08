@@ -9,14 +9,12 @@
 #      identical bundleHash.
 #   3. The bundle is REDACTION-SAFE: rawTextIncluded is false and the raw secret
 #      never appears anywhere in the bundle JSON (zero secret leakage).
-#   4. When support-bundle / handoff embed the attestation (bd-1n0np.22.3), the
-#      embedded bundleHash MUST equal the standalone hash.
+#   4. support-bundle / handoff consume the shared pack AttestationBundle surface
+#      manifest: the embedded pack bundleHash MUST equal `ee attest pack`.
 #
-# The `ee attest` surface (memory/pack/query) is landed (bd-1n0np.22.1/22.2/22.4),
-# so steps 1-3 run FOR REAL. The consumer-embedding in support-bundle/handoff is
-# bd-1n0np.22.3 and is not wired yet, so step 4 is CAPABILITY-GUARDED: a missing
-# embedding records a visible log_drop (the no-silent-cap rule) carrying the exact
-# hash-equality assertion that activates once 22.3 lands. No false pass.
+# The `ee attest` surface (memory/pack/query) and the consumer embedding
+# (bd-1n0np.22.3) are landed, so all four steps run FOR REAL. No capability drop
+# is allowed for support-bundle/handoff hash equality.
 #
 # NOTE: no `set -e` — the harness assert_* helpers accumulate pass/fail and
 # `harness_summary` decides the exit code, so a single failing assert must not
@@ -83,33 +81,48 @@ assert_eq "$leak_q" "0" "raw secret never appears in the query attestation bundl
 
 step "ee attest pack emits a bundle for a stored pack"
 pk="$(ee_json pack "deploy policy" --workspace "$WS" --json)"
-pack_id="$(printf '%s' "$pk" | jq -r '.data.pack.pack_id // .data.pack_id // .data.packId // empty')"
-if [ -n "$pack_id" ] && ee_supports attest pack; then
-    pb="$(ee_json attest pack "$pack_id" --workspace "$WS" --json)"
-    assert_jq "$pb" '.success == true' "attest pack succeeds"
-    assert_jq "$pb" '(.data.bundleHash // "") | startswith("blake3:")' \
-        "pack bundle carries a blake3 bundleHash"
-else
-    log_drop 1 "attest pack skipped: no stored pack id available on this binary; when present, assert ee attest pack emits a deterministic ee.attest.v1 bundle"
-fi
+assert_jq "$pk" '.success == true' "pack for attestation succeeds"
+pack_records="$(ee_json --workspace "$WS" db inspect pack_records --limit 20 --json)"
+assert_jq "$pack_records" '.success == true' "pack records are inspectable"
+pack_id="$(printf '%s' "$pack_records" \
+    | jq -r '[.data.report.rows[]?.values | select(.query == "deploy policy")] | sort_by(.created_at) | reverse | .[0].id // empty' \
+    2>/dev/null || true)"
+assert_eq "$([ -n "$pack_id" ] && echo present || echo missing)" "present" "stored pack id present"
+pb="$(ee_json attest pack "$pack_id" --workspace "$WS" --json)"
+assert_jq "$pb" '.success == true' "attest pack succeeds"
+assert_jq "$pb" '(.data.bundleHash // "") | startswith("blake3:")' \
+    "pack bundle carries a blake3 bundleHash"
+pack_hash="$(printf '%s' "$pb" | jq -r '.data.bundleHash // empty')"
+assert_eq "$([ -n "$pack_hash" ] && echo present || echo missing)" "present" "pack bundleHash present"
 
-step "support-bundle / handoff embed the identical bundleHash (bd-1n0np.22.3)"
-embedded_checked=0
-for surface in "support-bundle" "handoff"; do
-    if ee_supports "$surface"; then
-        out="$(ee_json "$surface" --workspace "$WS" --json)"
-        if printf '%s' "$out" | grep -q "$h1"; then
-            embedded_checked=1
-            assert_jq "$out" '.success == true' "$surface runs"
-            # The embedded attestation hash must equal the standalone hash.
-            assert_eq "$(printf '%s' "$out" | grep -c "$h1" | awk '{print ($1>0)?"present":"absent"}')" \
-                "present" "$surface embeds the identical attestation bundleHash"
-        fi
-    fi
-done
-if [ "$embedded_checked" -eq 0 ]; then
-    log_drop 1 "attestation embedding in support-bundle/handoff pending (bd-1n0np.22.3): when wired, assert the embedded ee.attest.v1 bundleHash equals the standalone 'ee attest memory' hash ($h1), proving one canonical chain-of-custody object"
-fi
+step "support-bundle embeds the identical pack bundleHash (bd-1n0np.22.3)"
+support_out="$WS/support-bundles"
+mkdir -p "$support_out"
+support="$(ee_json support bundle --workspace "$WS" --out "$support_out" --json)"
+assert_jq "$support" '.success == true' "support bundle succeeds"
+support_dir="$(printf '%s' "$support" | jq -r '.data.outputPath // empty')"
+assert_eq "$([ -n "$support_dir" ] && echo present || echo missing)" "present" \
+    "support bundle output path present"
+support_pack_summary="$(cat "$support_dir/pack_replay_summary.json" 2>/dev/null || true)"
+assert_jq "$support_pack_summary" '.schema == "ee.support_bundle.pack_replay_summary.v1"' \
+    "support bundle pack replay summary schema"
+support_hash_count="$(printf '%s' "$support_pack_summary" \
+    | jq -r --arg pack "$pack_id" --arg hash "$pack_hash" \
+        '[.packs[]? | select(.packId == $pack and .attestationBundle.bundleHash == $hash)] | length' \
+    2>/dev/null || echo 0)"
+assert_eq "$support_hash_count" "1" \
+    "support bundle embeds the identical pack attestation bundleHash"
+
+step "handoff embeds the identical pack bundleHash (bd-1n0np.22.3)"
+handoff_path="$WS/handoff.json"
+handoff="$(ee_json handoff create --workspace "$WS" --out "$handoff_path" --json)"
+assert_jq "$handoff" '.schema == "ee.handoff.create.v1"' "handoff create succeeds"
+handoff_hash_count="$(printf '%s' "$handoff" \
+    | jq -r --arg pack "$pack_id" --arg hash "$pack_hash" \
+        '[.pack_replay_summary.packs[]? | select(.packId == $pack and .attestationBundle.bundleHash == $hash)] | length' \
+    2>/dev/null || echo 0)"
+assert_eq "$handoff_hash_count" "1" \
+    "handoff embeds the identical pack attestation bundleHash"
 
 end_temp_workspace
 harness_summary
