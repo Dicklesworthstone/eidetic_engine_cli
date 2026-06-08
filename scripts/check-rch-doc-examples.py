@@ -3,7 +3,9 @@
 
 The checker treats fenced shell blocks in the RCH docs as executable contract
 material. RCH-specific blocks in AGENTS.md and README.md are also scanned, while
-general installation/build prose in those files is ignored.
+general installation/build prose in those files is ignored. Cargo examples must
+use the repo verifier wrapper, or an explicitly remote-required `rch exec`
+shape, so copied docs cannot silently become local Cargo proof.
 """
 
 from __future__ import annotations
@@ -174,7 +176,15 @@ def classify_command(command: str) -> tuple[str, str]:
 
     cargo_start = cargo_match.start()
     if wrapper_before_cargo(command, RCH_EXEC_RE, cargo_start):
-        return ("rch_exec_wrapper", "Cargo command is wrapped through rch exec")
+        if re.search(r"\bRCH_REQUIRE_REMOTE\s*=\s*1\b", command):
+            return (
+                "rch_exec_wrapper",
+                "Cargo command is wrapped through remote-required rch exec",
+            )
+        return (
+            "denied_bare_cargo",
+            "rch exec Cargo command lacks RCH_REQUIRE_REMOTE=1; raw rch exec examples can fall back to local Cargo",
+        )
     if wrapper_before_cargo(command, RCH_VERIFY_RE, cargo_start):
         return ("rch_verify_wrapper", "Cargo command is wrapped through scripts/rch_verify.sh")
     if wrapper_before_cargo(command, TRIPWIRE_RE, cargo_start):
@@ -313,6 +323,9 @@ RCH_REQUIRE_REMOTE=1 cargo test --lib bad
 ```bash
 rch exec -- env TMPDIR=/tmp cargo clippy --all-targets -- -D warnings
 ```
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env TMPDIR=/tmp cargo clippy --all-targets -- -D warnings
+```
 """,
         "README.md": """```bash
 cargo install eidetic-engine
@@ -406,10 +419,12 @@ scripts/rch_verify.sh --dry-run -- cargo test --lib smoke -- --nocapture
         reports.append(merged)
 
     denials = [denial for report in reports for denial in report["denials"]]
-    if len(denials) != 2:
-        raise SystemExit(f"self-test expected exactly 2 denials, got {len(denials)}: {denials}")
+    if len(denials) != 3:
+        raise SystemExit(f"self-test expected exactly 3 denials, got {len(denials)}: {denials}")
     if not any("bad" in denial["command_excerpt"] for denial in denials):
         raise SystemExit("self-test denials did not include the synthetic bad cargo commands")
+    if not any("rch exec" in denial["command_excerpt"] for denial in denials):
+        raise SystemExit("self-test denials did not include the bare rch exec cargo command")
     if not any(report["skipped_blocks"] for report in reports if report["path"] == "README.md"):
         raise SystemExit("self-test expected README non-RCH cargo block to be skipped")
     if not any(report["smoke_candidates"] for report in reports):
