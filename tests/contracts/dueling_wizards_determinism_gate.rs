@@ -29,6 +29,8 @@ const REQUIRED_SURFACES: &[&str] = &[
     "error_recall",
     "blind_spots",
     "conflict",
+    "attest",
+    "docs_bootstrap",
     "read_fence_consistency",
     "pack_lod",
     "feedback_roi",

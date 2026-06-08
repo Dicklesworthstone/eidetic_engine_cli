@@ -49,7 +49,9 @@ companion contract test before the corresponding implementation closes.
 | `impact` | `ee impact <surface> --json` | byte-identical JSON and stable anchor ordering. |
 | `error_recall` | `ee diagnose-error --json` | byte-identical JSON after redaction and fingerprint canonicalization. |
 | `blind_spots` | `ee blind-spots --json` | byte-identical JSON and stable `blindSpots` ordering. |
-| `conflict` | `ee conflicts detect --json` | byte-identical JSON and stable conflict evidence ordering. |
+| `conflict` | `ee conflict list --json` | byte-identical JSON and stable conflicting-pair ordering (load-bearing weight then `conflictId`). |
+| `attest` | `ee attest memory <id> --json` | byte-identical JSON and a deterministic `bundleHash` for a fixed subject + database. |
+| `docs_bootstrap` | `ee bootstrap docs --dry-run --json` | byte-identical JSON and a deterministic candidate-id set over a fixed doc tree. |
 | `read_fence_consistency` | `pack/search/why` consistency block | byte-identical JSON and stable generation verdicts. |
 | `pack_lod` | `ee pack --lod --json` | byte-identical JSON plus reproducible pack hash. |
 | `feedback_roi` | `ee feedback roi --json` | byte-identical JSON and stable ROI bucket ordering. |
