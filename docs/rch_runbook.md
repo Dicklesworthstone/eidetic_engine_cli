@@ -197,7 +197,8 @@ The `--cmd` mode is the admission hook shape. Exit code `1` means block the
 command and show the JSON `repairActions[]`; it does not rewrite the command.
 The `--probe-processes` mode is read-only incident evidence for support bundles,
 completion audits, and Beads comments. It reports local `cargo`/`rustc`/`rustdoc`
-processes targeting this checkout, but never kills or cleans anything.
+processes targeting this checkout and forbidden non-canonical git worktrees, but
+never kills or cleans anything.
 
 The live scan knows about the stable wrapper re-exec shape. A
 `bash -s -- ... cargo ...` wrapper shell is treated as compliant data plumbing,
@@ -226,6 +227,23 @@ That command exits with policy-denied status and cites
 `scripts/rch_verify.sh --bead-id bd-XXXX -- cargo test --lib foo` remain allowed;
 only shell substitution used as evidence transport is blocked.
 
+If `--probe-processes` returns `status:"bypass_detected"`, do not launch a
+remote proof even when `rch status` says the worker fleet is remote-ready. The
+tripwire is reporting host evidence that can invalidate the proof lane before
+RCH dispatch: active local Cargo/Rust, a forbidden extra worktree, or critical
+workspace disk pressure. Record the exact `detectedLocalBuilds[]`,
+`forbiddenWorktrees[]`, and `disk_pressure_context.workspace_free_bytes` in the
+bead. Then stop at read-only coordination unless the human explicitly approves
+the cleanup or process termination command.
+
+The Mac incident pattern to preserve is: a forbidden worktree or local Cargo
+bypass may leave a large scratch directory such as `$HOME/ee-clean.noindex` even
+after the worktree itself is no longer registered. The tripwire and runbook may
+name that path as evidence, but that is not permission to delete it. Under
+AGENTS.md, commands such as `rm -rf "$HOME/ee-clean.noindex"` or
+`git worktree remove --force <path>` require explicit written human approval for
+that exact command.
+
 Stable fields for automation:
 
 - `localBuildPolicy`: the policy name and status for the planned command or
@@ -237,6 +255,10 @@ Stable fields for automation:
 - `evidence[]`: compact policy and disk-pressure facts for support bundles.
 - `detectedLocalBuilds[]`: bounded pid/ppid/cwd/elapsed/command-kind rows from
   the read-only scanner.
+- `worktreePolicy`: single-canonical-worktree posture for the checkout.
+- `forbiddenWorktreeCount` / `forbiddenWorktrees[]`: read-only rows from
+  `git worktree list --porcelain`, including path, head, branch/detached state,
+  git common dir when cheaply available, severity, and operator action.
 - `disk_pressure_context`: workspace, target-dir, tmp-dir, and external-drive
   mount facts. This can recommend a repair action, but it must not recommend
   deletion.
