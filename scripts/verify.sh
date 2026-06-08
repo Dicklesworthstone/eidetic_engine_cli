@@ -42,6 +42,7 @@ set -euo pipefail
 #   1. Forbidden Dependencies  - cargo tree audit for banned crates
 #   2. Closure Linter          - prevent abstention-as-implementation closure
 #   3. Snapshot Proposal Guard - block unreviewed tracked insta proposals
+#   4.48. Untracked Work Audit Contract - no-Cargo FILE SURFACE matcher self-test
 #   4. Untracked Work Audit    - advisory Beads FILE SURFACE coverage for dirty paths
 #   4.49. Bridge Staleness Contract - no-Cargo bridge fixture scanner self-test
 #   4.5. Bridge Staleness      - advisory signal when CLOSE_THE_GAP_PLAN needs refresh
@@ -887,6 +888,11 @@ run_stage "Verification Drift Guard" "with_beads_read_locks ./scripts/verificati
 
 # Gate 3: Snapshot Proposal Guard
 run_stage "Snapshot Proposal Guard" "snapshot_proposal_guard"
+
+# Gate 3.49: Untracked work audit contract. This no-Cargo fixture proves the
+# Beads FILE SURFACE matcher and orphan classifier before the live dirty-work
+# advisory consumes current Beads/git state.
+run_stage "Untracked Work Audit Contract" "./scripts/untracked-work-audit.sh --self-test"
 
 # Gate 3.5: Advisory dirty-work ownership coverage. This remains advisory while
 # multi-agent sessions routinely carry unrelated in-flight changes.
