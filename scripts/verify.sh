@@ -53,7 +53,8 @@ set -euo pipefail
 #   4.71. RCH Doc Examples Lint - no-Cargo docs command-shape scanner
 #   4.72. Local Cargo Tripwire Contract - no-Cargo guardrail self-test
 #   4.73. RCH Portability Diagnostic Contract - no-Cargo Mac-leak self-test
-#   4.7. Package Artifact Leak - cargo package list gate for generated artifacts
+#   4.74. Package Artifact Leak Contract - no-Cargo deny-pattern self-test
+#   4.75. Package Artifact Leak - cargo package list gate for generated artifacts
 #   4.8. Fuzz Target Audit     - static cargo-fuzz target registration/docs check
 #   4.9. Fuzz Smoke            - optional 30s search query parser cargo-fuzz sweep
 #   5. Vision Coverage         - report documented implemented/stubbed/missing surfaces
@@ -823,7 +824,12 @@ run_stage "Local Cargo Tripwire Contract" "./scripts/check-local-cargo-tripwire.
 # transcripts without mutating workers, launching RCH, or deleting artifacts.
 run_stage "RCH Portability Diagnostic Contract" "./scripts/check-rch-portability.sh --self-test"
 
-# Gate 4.7: Package artifact leakage guard. This is a quick packaging gate:
+# Gate 4.74: Package artifact leakage self-test. This proves the manifest
+# exclude set and forbidden path classifier before the live cargo package list
+# gate, without invoking Cargo.
+run_stage "Package Artifact Leak Contract" "./scripts/package-artifact-leak-check.sh --self-test"
+
+# Gate 4.75: Package artifact leakage guard. This is a quick packaging gate:
 # it runs cargo package --list without building and fails if local/generated
 # tracker, perf, backup, or temp artifact paths would enter the published crate.
 run_stage "Package Artifact Leak Check (bd-2ifvx)" "./scripts/package-artifact-leak-check.sh"
