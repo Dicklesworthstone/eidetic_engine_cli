@@ -69,14 +69,23 @@ fuzzy_near_conflict_skipped }`.
 
 ## Status (v1)
 
-- **Landed:** the explicit-evidence detection core (`src/core/contradiction_detect.rs`)
-  and its property/contract tests (`tests/contradiction_detect_properties.rs`,
-  `bd-1n0np.7.6`).
-- **In flight:** the DB-evidence *gather* (`bd-1n0np.7.2`) that extracts the six
-  signals from the store into `ConflictEdge`s and persists `7.1` `ConflictCluster`
-  rows; the `ee conflict list/explain/cluster` + `ee curate contradictions`
-  surfaces (`bd-1n0np.7.3`); audited resolution (`7.4`) and the pack guard /
-  forced mode (`7.5`).
+- **Landed:**
+  - the explicit-evidence detection core (`src/core/contradiction_detect.rs`)
+    + its property/contract tests (`tests/contradiction_detect_properties.rs`,
+    `bd-1n0np.7.6`);
+  - the DB-evidence *gather* that extracts the explicit signals from the store
+    into `ConflictEdge`s (`bd-1n0np.7.2`);
+  - the read-only `ee conflict list/explain/cluster` surface
+    (`src/cli/conflict.rs`, `bd-1n0np.7.3`);
+  - the pack-guard *decision core* (`src/core/contradiction_guard.rs`,
+    `bd-1n0np.7.5`): `decide_contradiction_survivor` (keep higher-trust → fresher
+    → deterministic id; never drop both), `unresolved_contradiction_pairs`
+    (detected minus 7.4 resolutions), and `forced_contradiction_view` (ranked +
+    capped, total reported so the cap is never a silent drop).
+- **In flight / follow-on:** audited resolution (`bd-1n0np.7.4`); threading the
+  pack-guard decision into pack assembly + the opt-in `forced` mode
+  (`bd-1n0np.7.5` integration); and the `ee conflict` golden/contract tests +
+  capabilities/help registration (`bd-1n0np.7.6` / `7.8`).
 
 ## See also
 
