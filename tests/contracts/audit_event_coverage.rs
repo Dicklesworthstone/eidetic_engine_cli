@@ -188,6 +188,7 @@ fn ee_context_writes_pack_assembled_and_included_mem_rows() -> TestResult {
     let (_dir, workspace, database, _memory_id) =
         build_workspace().map_err(|error| format!("setup: {error}"))?;
     let response = run_context_pack(&ContextPackOptions {
+        task_lens: None,
         workspace_path: workspace.clone(),
         database_path: Some(database.clone()),
         index_dir: Some(workspace.join(".ee").join("index")),

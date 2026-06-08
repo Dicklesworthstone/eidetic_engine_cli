@@ -172,6 +172,7 @@ fn seed_tiered_recall_database(temp_dir: &Path, memory_tier_admission: bool) -> 
 
 fn context_options(workspace_path: &Path, index_dir: &Path) -> ContextPackOptions {
     ContextPackOptions {
+        task_lens: None,
         workspace_path: workspace_path.to_path_buf(),
         database_path: Some(workspace_path.join(".ee").join("ee.db")),
         index_dir: Some(index_dir.to_path_buf()),

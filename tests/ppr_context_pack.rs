@@ -110,6 +110,7 @@ fn context_options(
     ppr_weight: Option<f32>,
 ) -> ContextPackOptions {
     ContextPackOptions {
+        task_lens: None,
         workspace_path: workspace_path.to_path_buf(),
         database_path: Some(db_path.to_path_buf()),
         index_dir: None,

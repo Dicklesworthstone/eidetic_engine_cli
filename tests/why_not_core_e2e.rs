@@ -51,6 +51,7 @@ fn remember_fixture(workspace_path: &Path, db_path: &Path, content: &str) -> Tes
 
 fn why_not_options(workspace_path: &Path, db_path: &Path, task: &str) -> ContextPackOptions {
     ContextPackOptions {
+        task_lens: None,
         workspace_path: workspace_path.to_path_buf(),
         database_path: Some(db_path.to_path_buf()),
         index_dir: None,

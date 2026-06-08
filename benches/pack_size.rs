@@ -296,6 +296,7 @@ impl PackSizeFixture {
 
     fn measure_once(&self, max_tokens: u32) -> Result<PackSizeSample, String> {
         let options = ContextPackOptions {
+            task_lens: None,
             workspace_path: self.workspace_path.clone(),
             database_path: Some(self.db_path.clone()),
             index_dir: None,
