@@ -9810,11 +9810,6 @@ mod tests {
                 &[],
             )
             .map_err(|error| format!("failed to insert pack record: {error}"))?;
-        let expected_attestation_hash =
-            crate::core::attest::build_pack_attestation(&connection, pack_id)
-                .map_err(|error| format!("failed to build direct pack attestation: {error}"))?
-                .ok_or_else(|| "direct pack attestation missing inserted pack".to_owned())?
-                .bundle_hash();
         connection
             .close()
             .map_err(|error| format!("failed to close test db: {error}"))?;
@@ -10256,6 +10251,11 @@ mod tests {
                 &[],
             )
             .map_err(|error| format!("failed to insert pack record: {error}"))?;
+        let expected_attestation_hash =
+            crate::core::attest::build_pack_attestation(&connection, pack_id)
+                .map_err(|error| format!("failed to build direct pack attestation: {error}"))?
+                .ok_or_else(|| "direct pack attestation missing inserted pack".to_owned())?
+                .bundle_hash();
         connection
             .close()
             .map_err(|error| format!("failed to close test db: {error}"))?;
