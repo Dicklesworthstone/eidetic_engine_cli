@@ -12,7 +12,9 @@
 //! the goldens RCH-remote-regen (bd-17c65.10.17), the cross-surface check once
 //! 22.3 lands.
 
-use ee::core::attest::build_query_attestation;
+use ee::core::attest::{
+    ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1, attestation_surface_manifest, build_query_attestation,
+};
 use ee::models::attestation::ATTESTATION_BUNDLE_SCHEMA_V1;
 
 #[test]
@@ -70,4 +72,30 @@ fn manifest_is_complete_and_schema_tagged() {
             "a complete attestation bundle must include `{key}`"
         );
     }
+}
+
+#[test]
+fn surface_manifest_is_hash_only_and_reuses_bundle_hash() {
+    let secret = "SURFACE_MANIFEST_SECRET_QUERY_DO_NOT_LEAK";
+    let bundle = build_query_attestation(secret);
+    let manifest = attestation_surface_manifest(&bundle);
+
+    assert_eq!(manifest["schema"], ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1);
+    assert_eq!(manifest["status"], "available");
+    assert_eq!(manifest["sourceSchema"], ATTESTATION_BUNDLE_SCHEMA_V1);
+    assert_eq!(manifest["bundleHash"], bundle.bundle_hash());
+    assert_eq!(manifest["subject"]["kind"], "query");
+    assert!(
+        manifest
+            .pointer("/evidenceManifest/entryCount")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|count| count >= 1),
+        "surface manifest must preserve evidence counts for consumers"
+    );
+
+    let rendered = manifest.to_string();
+    assert!(
+        !rendered.contains(secret),
+        "surface manifest must not rehydrate raw subject text"
+    );
 }

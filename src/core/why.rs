@@ -596,6 +596,8 @@ pub struct WhyReport {
     pub verification_evidence: Vec<VerificationEvidenceRecord>,
     /// Redaction-safe coordination fallback evidence linked to this memory.
     pub coordination_fallback_evidence: Vec<CoordinationFallbackEvidenceSummary>,
+    /// Redaction-safe projection of the canonical AttestationBundle for this memory.
+    pub attestation_manifest: Option<JsonValue>,
     /// Non-fatal degradation notices.
     pub degraded: Vec<WhyDegradation>,
     /// Error message if query failed.
@@ -688,6 +690,7 @@ impl WhyReport {
             rationale_traces: Vec::new(),
             verification_evidence: Vec::new(),
             coordination_fallback_evidence: Vec::new(),
+            attestation_manifest: None,
             degraded: Vec::new(),
             error: None,
             dedup_link: None,
@@ -745,6 +748,7 @@ impl WhyReport {
             rationale_traces: Vec::new(),
             verification_evidence: Vec::new(),
             coordination_fallback_evidence: Vec::new(),
+            attestation_manifest: None,
             degraded: Vec::new(),
             error: None,
             dedup_link: None,
@@ -777,6 +781,7 @@ impl WhyReport {
             rationale_traces: Vec::new(),
             verification_evidence: Vec::new(),
             coordination_fallback_evidence: Vec::new(),
+            attestation_manifest: None,
             degraded: Vec::new(),
             error: Some(message),
             dedup_link: None,
@@ -981,6 +986,13 @@ impl WhyReport {
         self.coordination_fallback_evidence = evidence;
         self
     }
+
+    /// Attach the redaction-safe canonical attestation manifest projection.
+    #[must_use]
+    pub fn with_attestation_manifest(mut self, attestation_manifest: Option<JsonValue>) -> Self {
+        self.attestation_manifest = attestation_manifest;
+        self
+    }
 }
 
 /// Options for the why query.
@@ -1167,6 +1179,20 @@ fn explain_memory_inner(
     if let Some(degradation) = coordination_fallback_fetch.degradation {
         evidence_degradations.push(degradation);
     }
+    let attestation_manifest = match crate::core::attest::build_memory_attestation(&conn, memory_id)
+    {
+        Ok(Some(bundle)) => Some(crate::core::attest::attestation_surface_manifest(&bundle)),
+        Ok(None) => None,
+        Err(error) => {
+            evidence_degradations.push(WhyDegradation {
+                code: "why_attestation_unavailable",
+                severity: "low",
+                message: format!("Memory attestation bundle could not be built: {error}"),
+                repair: Some("ee attest memory <memory-id> --workspace . --json".to_owned()),
+            });
+            None
+        }
+    };
     if verification_fetch.items.is_empty()
         && tags.iter().any(|tag| {
             tag == "verification" || tag == "verification-required" || tag == "bead-closure"
@@ -1263,6 +1289,7 @@ fn explain_memory_inner(
                     rationale_traces,
                     verification_evidence: Vec::new(),
                     coordination_fallback_evidence,
+                    attestation_manifest,
                     graph_retrieval,
                     load_bearing,
                     degraded: evidence_degradations,
@@ -1304,6 +1331,7 @@ fn explain_memory_inner(
             rationale_traces,
             verification_evidence,
             coordination_fallback_evidence,
+            attestation_manifest,
             graph_retrieval,
             load_bearing,
             degraded: evidence_degradations,
@@ -1971,6 +1999,7 @@ struct ReportSelectionInputs {
     rationale_traces: Vec<RationaleTraceSummary>,
     verification_evidence: Vec<VerificationEvidenceRecord>,
     coordination_fallback_evidence: Vec<CoordinationFallbackEvidenceSummary>,
+    attestation_manifest: Option<JsonValue>,
     graph_retrieval: GraphRetrievalExplanation,
     load_bearing: Option<LoadBearingWhyExplanation>,
     degraded: Vec<WhyDegradation>,
@@ -2062,6 +2091,7 @@ fn build_report(
         .with_rationale_traces(selection_inputs.rationale_traces)
         .with_verification_evidence(selection_inputs.verification_evidence)
         .with_coordination_fallback_evidence(selection_inputs.coordination_fallback_evidence)
+        .with_attestation_manifest(selection_inputs.attestation_manifest)
         .with_degradations(selection_inputs.degraded)
         .with_optional_dedup_link(selection_inputs.dedup_link)
 }
@@ -3571,6 +3601,7 @@ mod tests {
                 rationale_traces: Vec::new(),
                 verification_evidence: Vec::new(),
                 coordination_fallback_evidence: Vec::new(),
+                attestation_manifest: None,
                 graph_retrieval: graph_retrieval_unavailable(
                     "wsp_01234567890123456789012345",
                     "graph_snapshot_missing",

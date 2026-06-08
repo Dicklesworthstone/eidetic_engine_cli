@@ -27,13 +27,14 @@ use sha2::{Digest, Sha256};
 use crate::core::focus::{focus_state_hash, read_active_focus_state};
 use crate::core::singleflight::singleflight_posture_report;
 use crate::core::support_bundle::{
-    collect_environment_attestation_summary, collect_proof_broker_summary,
-    collect_regression_causality_summary, collect_shadow_policy_summary,
-    environment_attestation_summary_evidence_id, proof_broker_summary_evidence_id,
+    collect_environment_attestation_summary, collect_pack_replay_summary,
+    collect_proof_broker_summary, collect_regression_causality_summary,
+    collect_shadow_policy_summary, environment_attestation_summary_evidence_id,
+    pack_replay_summary_evidence_id, proof_broker_summary_evidence_id,
     redact_support_bundle_swarm_brief_summary, regression_causality_summary_evidence_id,
-    render_environment_attestation_summary_for_handoff, render_proof_broker_summary_for_handoff,
-    render_regression_causality_summary_for_handoff, render_shadow_policy_summary_for_handoff,
-    shadow_policy_summary_evidence_id,
+    render_environment_attestation_summary_for_handoff, render_pack_replay_summary_for_handoff,
+    render_proof_broker_summary_for_handoff, render_regression_causality_summary_for_handoff,
+    render_shadow_policy_summary_for_handoff, shadow_policy_summary_evidence_id,
 };
 use crate::core::swarm_brief::{
     collect_swarm_brief_summary, collect_swarm_incident_summary, collect_swarm_replay_summary,
@@ -482,6 +483,7 @@ pub struct PreviewReport {
     pub swarm_brief_summary: Option<serde_json::Value>,
     pub swarm_incident_summary: Option<serde_json::Value>,
     pub swarm_replay_summary: Option<serde_json::Value>,
+    pub pack_replay_summary: Option<serde_json::Value>,
     pub environment_attestation_summary: Option<serde_json::Value>,
     pub proof_broker_summary: Option<serde_json::Value>,
     pub regression_causality_summary: Option<serde_json::Value>,
@@ -526,6 +528,7 @@ impl PreviewReport {
             swarm_brief_summary: None,
             swarm_incident_summary: None,
             swarm_replay_summary: None,
+            pack_replay_summary: None,
             environment_attestation_summary: None,
             proof_broker_summary: None,
             regression_causality_summary: None,
@@ -713,6 +716,7 @@ pub struct CreateReport {
     pub swarm_brief_summary: Option<serde_json::Value>,
     pub swarm_incident_summary: Option<serde_json::Value>,
     pub swarm_replay_summary: Option<serde_json::Value>,
+    pub pack_replay_summary: Option<serde_json::Value>,
     pub environment_attestation_summary: Option<serde_json::Value>,
     pub proof_broker_summary: Option<serde_json::Value>,
     pub regression_causality_summary: Option<serde_json::Value>,
@@ -748,6 +752,7 @@ impl CreateReport {
             swarm_brief_summary: None,
             swarm_incident_summary: None,
             swarm_replay_summary: None,
+            pack_replay_summary: None,
             environment_attestation_summary: None,
             proof_broker_summary: None,
             regression_causality_summary: None,
@@ -1113,6 +1118,7 @@ pub struct ResumeReport {
     pub swarm_brief_summary: Option<serde_json::Value>,
     pub swarm_incident_summary: Option<serde_json::Value>,
     pub swarm_replay_summary: Option<serde_json::Value>,
+    pub pack_replay_summary: Option<serde_json::Value>,
     pub environment_attestation_summary: Option<serde_json::Value>,
     pub proof_broker_summary: Option<serde_json::Value>,
     pub regression_causality_summary: Option<serde_json::Value>,
@@ -1303,6 +1309,7 @@ impl ResumeReport {
             swarm_brief_summary: None,
             swarm_incident_summary: None,
             swarm_replay_summary: None,
+            pack_replay_summary: None,
             environment_attestation_summary: None,
             proof_broker_summary: None,
             regression_causality_summary: None,
@@ -1407,6 +1414,7 @@ fn strip_swarm_diagnostic_section_content_by_id(value: &mut serde_json::Value) {
                     "swarm_brief_summary"
                         | "swarm_incident_summary"
                         | "swarm_replay_summary"
+                        | "pack_replay_summary"
                         | "environment_attestation_summary"
                         | "proof_broker_summary"
                         | "regression_causality_summary"
@@ -3033,6 +3041,68 @@ fn add_swarm_replay_summary_to_resume(report: &mut ResumeReport, summary: &serde
     }
 }
 
+fn add_pack_replay_summary_to_resume(report: &mut ResumeReport, summary: &serde_json::Value) {
+    let status = summary
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let pack_count = summary
+        .pointer("/database/summarizedPackCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let ledger_available = summary
+        .pointer("/database/ledgerAvailableCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let ledger_missing = summary
+        .pointer("/database/ledgerMissingCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let summary_hash = summary
+        .get("summaryHash")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let attestation_hashes = summary
+        .get("packs")
+        .and_then(serde_json::Value::as_array)
+        .map(|packs| {
+            packs
+                .iter()
+                .filter_map(|pack| pack.pointer("/attestationBundle/bundleHash"))
+                .filter_map(serde_json::Value::as_str)
+                .take(4)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let attestation_preview = if attestation_hashes.is_empty() {
+        "none".to_owned()
+    } else {
+        attestation_hashes.join(",")
+    };
+    let posture = format!(
+        "Embedded pack replay summary: status={status}, packs={pack_count}, ledger_available={ledger_available}, ledger_missing={ledger_missing}, summary_hash={summary_hash}, attestation_bundle_hashes={attestation_preview}; raw_query_text_included=false; raw_memory_content_included=false; diagnostic_not_live=true."
+    );
+    report.status_summary = Some(match report.status_summary.take() {
+        Some(existing) => format!("{existing}\n{posture}"),
+        None => posture,
+    });
+    report.artifact_pointers.push(ArtifactPointer {
+        id: pack_replay_summary_evidence_id(summary),
+        path: None,
+        description:
+            "Redaction-safe pack replay summary embedded in the handoff capsule; pack evidence is represented by AttestationBundle manifest projections."
+                .to_owned(),
+    });
+    report.next_actions.push(
+        NextAction::new(
+            2,
+            "Replay the referenced pack before relying on historical pack selection evidence.",
+        )
+        .with_reason("Embedded pack replay summaries are diagnostic context, not fresh proof.")
+        .with_command("ee pack replay <pack-id> --workspace . --json"),
+    );
+}
+
 fn add_environment_attestation_summary_to_resume(
     report: &mut ResumeReport,
     summary: &serde_json::Value,
@@ -3481,6 +3551,22 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
         token_estimate: swarm_replay_section.token_estimate,
     });
 
+    let pack_replay_summary = collect_pack_replay_summary(&options.workspace);
+    let pack_replay_evidence = vec![pack_replay_summary_evidence_id(&pack_replay_summary)];
+    let pack_replay_section = CapsuleSection::new("pack_replay_summary", "Pack Replay Summary")
+        .with_content(render_pack_replay_summary_for_handoff(&pack_replay_summary))
+        .with_confidence(EvidenceConfidence::Verified)
+        .with_evidence(pack_replay_evidence.clone());
+    report.evidence_ids.extend(pack_replay_evidence);
+    report.planned_sections.push(PlannedSection {
+        id: pack_replay_section.id.clone(),
+        title: pack_replay_section.title.clone(),
+        confidence: pack_replay_section.confidence.as_str().to_owned(),
+        evidence_count: pack_replay_section.evidence_ids.len(),
+        token_estimate: pack_replay_section.token_estimate,
+    });
+    report.pack_replay_summary = Some(pack_replay_summary);
+
     let environment_attestation_summary =
         collect_environment_attestation_summary(&options.workspace);
     let environment_attestation_evidence = vec![environment_attestation_summary_evidence_id(
@@ -3774,6 +3860,19 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         .saturating_add(swarm_replay_evidence.len());
     report.swarm_replay_summary = Some(swarm_replay_summary.clone());
 
+    let pack_replay_summary = collect_pack_replay_summary(&options.workspace);
+    let pack_replay_evidence = vec![pack_replay_summary_evidence_id(&pack_replay_summary)];
+    sections.push(
+        CapsuleSection::new("pack_replay_summary", "Pack Replay Summary")
+            .with_content(render_pack_replay_summary_for_handoff(&pack_replay_summary))
+            .with_confidence(EvidenceConfidence::Verified)
+            .with_evidence(pack_replay_evidence.clone()),
+    );
+    report.evidence_count = report
+        .evidence_count
+        .saturating_add(pack_replay_evidence.len());
+    report.pack_replay_summary = Some(pack_replay_summary.clone());
+
     let environment_attestation_summary =
         collect_environment_attestation_summary(&options.workspace);
     let environment_attestation_evidence = vec![environment_attestation_summary_evidence_id(
@@ -3908,6 +4007,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         "swarm_brief_summary": swarm_brief_summary,
         "swarm_incident_summary": swarm_incident_summary,
         "swarm_replay_summary": swarm_replay_summary,
+        "pack_replay_summary": pack_replay_summary,
         "environment_attestation_summary": environment_attestation_summary,
         "proof_broker_summary": proof_broker_summary,
         "regression_causality_summary": regression_causality_summary,
@@ -4274,6 +4374,14 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         .filter(|value| !value.is_null());
     if let Some(summary) = report.swarm_replay_summary.clone() {
         add_swarm_replay_summary_to_resume(&mut report, &summary);
+    }
+
+    report.pack_replay_summary = capsule
+        .get("pack_replay_summary")
+        .cloned()
+        .filter(|value| !value.is_null());
+    if let Some(summary) = report.pack_replay_summary.clone() {
+        add_pack_replay_summary_to_resume(&mut report, &summary);
     }
 
     report.environment_attestation_summary = capsule

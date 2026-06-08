@@ -35835,6 +35835,22 @@ where
         .cloned()
         .unwrap_or_default();
     let ledger_degraded = ledger_degraded_values(&ledger);
+    let attestation_bundle =
+        match crate::core::attest::build_pack_attestation(&connection, &args.pack_id) {
+            Ok(Some(bundle)) => crate::core::attest::attestation_surface_manifest(&bundle),
+            Ok(None) => serde_json::json!({
+                "schema": crate::core::attest::ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1,
+                "status": "unavailable",
+                "reason": "pack_not_found",
+                "bundleHash": null,
+            }),
+            Err(_) => serde_json::json!({
+                "schema": crate::core::attest::ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1,
+                "status": "unavailable",
+                "reason": "attestation_query_failed",
+                "bundleHash": null,
+            }),
+        };
 
     let response = serde_json::json!({
         "schema": PACK_REPLAY_SCHEMA_V1,
@@ -35849,6 +35865,7 @@ where
                 "omittedItems": omitted_items,
                 "degraded": ledger_degraded,
             },
+            "attestationBundle": attestation_bundle,
             "storedItems": items.iter().map(stored_pack_item_json).collect::<Vec<_>>(),
             "degraded": ledger.degraded,
         }
@@ -40612,6 +40629,25 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
         }
     }
 
+    if let Some(attestation) = &report.attestation_manifest {
+        output.push_str("\nAttestation bundle:\n");
+        let bundle_hash = attestation
+            .get("bundleHash")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unavailable");
+        let subject_kind = attestation
+            .pointer("/subject/kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let evidence_count = attestation
+            .pointer("/evidenceManifest/entryCount")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        output.push_str(&format!(
+            "  Bundle hash: {bundle_hash}\n  Subject: {subject_kind}\n  Evidence entries: {evidence_count}\n"
+        ));
+    }
+
     if !report.degraded.is_empty() {
         output.push_str("\nDegraded:\n");
         for degraded in &report.degraded {
@@ -41092,6 +41128,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "history": history,
             "verificationEvidence": verification_evidence,
             "coordinationFallbackEvidence": coordination_fallback_evidence,
+            "attestationBundle": report.attestation_manifest.clone(),
             "degraded": degraded,
         }
     });

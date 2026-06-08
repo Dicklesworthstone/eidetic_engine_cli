@@ -4,6 +4,8 @@
 //! that could carry user content, queries, logs, or notes is redacted before
 //! the bundle receives either a redacted value or a hash.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde_json::{Value, json};
 
 use crate::db::{
@@ -19,6 +21,7 @@ use crate::policy::redact_secret_like_content;
 
 const ATTESTATION_REDACTION_POLICY: &str = "ee.policy.secret_redaction.v1";
 const ATTESTATION_AUDIT_LIMIT: u32 = 64;
+pub const ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1: &str = "ee.attestation.surface_manifest.v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RedactedText {
@@ -108,6 +111,148 @@ pub fn build_query_attestation(query_text: &str) -> AttestationBundle {
         hash_manifest,
     )
     .with_omissions(query_omissions())
+}
+
+/// Project a bundle into the compact manifest shape consumed by other surfaces.
+///
+/// The projection is intentionally hash- and count-heavy: it lets support
+/// bundles, handoff capsules, pack replay, and why compare the same attested
+/// subject without copying raw evidence text into those surfaces.
+#[must_use]
+pub fn attestation_surface_manifest(bundle: &AttestationBundle) -> Value {
+    let evidence_kinds = count_tokens(
+        bundle
+            .evidence_manifest
+            .entries
+            .iter()
+            .map(|entry| entry.kind.as_str()),
+    );
+    let evidence_schemas = sorted_optional_tokens(
+        bundle
+            .evidence_manifest
+            .entries
+            .iter()
+            .filter_map(|entry| entry.schema.as_deref()),
+    );
+    let evidence_content_hashes = sorted_optional_tokens(
+        bundle
+            .evidence_manifest
+            .entries
+            .iter()
+            .filter_map(|entry| entry.content_hash.as_deref()),
+    );
+    let evidence_chain_hashes = sorted_optional_tokens(
+        bundle
+            .evidence_manifest
+            .entries
+            .iter()
+            .filter_map(|entry| entry.chain_hash.as_deref()),
+    );
+    let subject_hash_labels = sorted_optional_tokens(
+        bundle
+            .subject
+            .content_hashes
+            .iter()
+            .map(|entry| entry.label.as_str()),
+    );
+    let hash_labels = sorted_optional_tokens(
+        bundle
+            .hash_manifest
+            .entries
+            .iter()
+            .map(|entry| entry.label.as_str()),
+    );
+    let hash_values = sorted_optional_tokens(
+        bundle
+            .hash_manifest
+            .entries
+            .iter()
+            .map(|entry| entry.hash.as_str()),
+    );
+    let redaction_fields = sorted_optional_tokens(
+        bundle
+            .redaction_manifest
+            .entries
+            .iter()
+            .map(|entry| entry.field.as_str()),
+    );
+    let redaction_classes = sorted_optional_tokens(
+        bundle
+            .redaction_manifest
+            .entries
+            .iter()
+            .map(|entry| entry.class.as_str()),
+    );
+    let redaction_replacement_hashes = sorted_optional_tokens(
+        bundle
+            .redaction_manifest
+            .entries
+            .iter()
+            .filter_map(|entry| entry.replacement_hash.as_deref()),
+    );
+    let omission_fields =
+        sorted_optional_tokens(bundle.omissions.iter().map(|entry| entry.field.as_str()));
+
+    json!({
+        "schema": ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1,
+        "status": "available",
+        "sourceSchema": &bundle.schema,
+        "bundleHash": bundle.bundle_hash(),
+        "subject": {
+            "kind": bundle.subject.kind.as_str(),
+            "id": &bundle.subject.id,
+            "contentHashCount": bundle.subject.content_hashes.len(),
+            "contentHashLabels": subject_hash_labels,
+        },
+        "evidenceManifest": {
+            "entryCount": bundle.evidence_manifest.entries.len(),
+            "kinds": evidence_kinds,
+            "schemas": evidence_schemas,
+            "contentHashes": evidence_content_hashes,
+            "chainHashes": evidence_chain_hashes,
+            "provenanceUriIncluded": bundle
+                .evidence_manifest
+                .entries
+                .iter()
+                .any(|entry| entry.provenance_uri.is_some()),
+        },
+        "redactionManifest": {
+            "policy": &bundle.redaction_manifest.policy,
+            "entryCount": bundle.redaction_manifest.entries.len(),
+            "fields": redaction_fields,
+            "classes": redaction_classes,
+            "replacementHashes": redaction_replacement_hashes,
+        },
+        "hashManifest": {
+            "entryCount": bundle.hash_manifest.entries.len(),
+            "labels": hash_labels,
+            "hashes": hash_values,
+        },
+        "omissions": {
+            "count": bundle.omissions.len(),
+            "fields": omission_fields,
+        },
+        "trustStatement": {
+            "scope": &bundle.trust_statement.scope,
+        },
+    })
+}
+
+fn count_tokens<'a>(tokens: impl Iterator<Item = &'a str>) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+    for token in tokens {
+        *counts.entry(token.to_owned()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn sorted_optional_tokens<'a>(tokens: impl Iterator<Item = &'a str>) -> Vec<String> {
+    tokens
+        .filter(|token| !token.trim().is_empty())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Build a memory attestation from already-loaded DB rows.
@@ -735,6 +880,35 @@ mod tests {
         assert!(canonical.contains("pack.redacted_query"));
         assert!(canonical.contains("pack_item"));
         assert!(canonical.contains("pack.query"));
+    }
+
+    #[test]
+    fn attestation_surface_manifest_is_redaction_safe_and_deterministic() {
+        let record = stored_pack_with_secret();
+        let item = stored_pack_item_with_secret();
+        let audit = stored_audit_with_secret();
+        let bundle = build_pack_attestation_from_parts(&record, &[item], &[audit]);
+
+        let first = attestation_surface_manifest(&bundle);
+        let second = attestation_surface_manifest(&bundle);
+        assert_eq!(first, second);
+        assert_eq!(first["schema"], ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1);
+        assert_eq!(first["status"], "available");
+        assert_eq!(first["subject"]["kind"], "pack");
+        assert_eq!(
+            first["redactionManifest"]["policy"],
+            ATTESTATION_REDACTION_POLICY
+        );
+        assert!(
+            first["hashManifest"]["hashes"]
+                .as_array()
+                .is_some_and(|hashes| !hashes.is_empty())
+        );
+
+        let rendered = first.to_string();
+        assert!(!rendered.contains("sk-123456789012345678901234567890"));
+        assert!(!rendered.contains("fix release with token"));
+        assert!(!rendered.contains("Selected because"));
     }
 
     #[test]

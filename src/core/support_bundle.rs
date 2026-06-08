@@ -3756,7 +3756,7 @@ fn local_cargo_preflight_classification(workspace: &Path, command: &str) -> Valu
     })
 }
 
-fn collect_pack_replay_summary(workspace: &Path) -> Value {
+pub(crate) fn collect_pack_replay_summary(workspace: &Path) -> Value {
     let database_path = workspace.join(".ee").join("ee.db");
     let database_present = support_bundle_database_path_is_regular(&database_path);
     let mut database = json!({
@@ -3815,7 +3815,7 @@ fn collect_pack_replay_summary(workspace: &Path) -> Value {
 
     let packs = rows
         .iter()
-        .map(pack_replay_record_summary)
+        .map(|row| pack_replay_record_summary(&connection, row))
         .collect::<Vec<_>>();
     database["summarizedPackCount"] = json!(packs.len());
     for pack in &packs {
@@ -3832,7 +3832,7 @@ fn collect_pack_replay_summary(workspace: &Path) -> Value {
 }
 
 fn pack_replay_summary_value(status: &str, database: Value, packs: Vec<Value>) -> Value {
-    json!({
+    let mut summary = json!({
         "schema": "ee.support_bundle.pack_replay_summary.v1",
         "sourceSchema": crate::db::PACK_REPLAY_LEDGER_SCHEMA_V1,
         "source": "workspace_pack_records",
@@ -3843,7 +3843,22 @@ fn pack_replay_summary_value(status: &str, database: Value, packs: Vec<Value>) -
         },
         "database": database,
         "packs": packs,
-    })
+    });
+    let summary_hash = support_cache_key(&stable_json(&summary));
+    if let Some(object) = summary.as_object_mut() {
+        object.insert("summaryHash".to_owned(), json!(summary_hash));
+    }
+    summary
+}
+
+pub(crate) fn pack_replay_summary_evidence_id(summary: &Value) -> String {
+    let hash = summary
+        .get("summaryHash")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .trim_start_matches("blake3:");
+    let short_hash = hash.get(..12).unwrap_or(hash);
+    format!("pack_replay_summary:{short_hash}")
 }
 
 fn increment_json_count(object: &mut Value, field: &str) {
@@ -3851,12 +3866,13 @@ fn increment_json_count(object: &mut Value, field: &str) {
     object[field] = json!(next);
 }
 
-fn pack_replay_record_summary(row: &SqlRow) -> Value {
+fn pack_replay_record_summary(connection: &DbConnection, row: &SqlRow) -> Value {
     let pack_id = row_text(row, 0).unwrap_or("unknown");
     let query = row_text(row, 1).unwrap_or_default();
     let ledger_json = row_text(row, 8);
     let ledger_hash = row_text(row, 9);
     let ledger = summarize_pack_replay_ledger(ledger_json, ledger_hash);
+    let attestation_bundle = pack_replay_record_attestation(connection, pack_id);
 
     json!({
         "packId": pack_id,
@@ -3871,8 +3887,81 @@ fn pack_replay_record_summary(row: &SqlRow) -> Value {
         "omittedCount": row_u64(row, 6),
         "queryTextIncluded": false,
         "queryHash": blake3_text_hash(query),
+        "attestationBundle": attestation_bundle,
         "ledger": ledger,
     })
+}
+
+fn pack_replay_record_attestation(connection: &DbConnection, pack_id: &str) -> Value {
+    match super::attest::build_pack_attestation(connection, pack_id) {
+        Ok(Some(bundle)) => super::attest::attestation_surface_manifest(&bundle),
+        Ok(None) => json!({
+            "schema": super::attest::ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1,
+            "status": "unavailable",
+            "reason": "pack_not_found",
+            "bundleHash": null,
+        }),
+        Err(_) => json!({
+            "schema": super::attest::ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1,
+            "status": "unavailable",
+            "reason": "attestation_query_failed",
+            "bundleHash": null,
+        }),
+    }
+}
+
+pub(crate) fn render_pack_replay_summary_for_handoff(summary: &Value) -> String {
+    let status = summary
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let summary_hash = summary
+        .get("summaryHash")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let pack_count = summary
+        .pointer("/database/summarizedPackCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let available = summary
+        .pointer("/database/ledgerAvailableCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let missing = summary
+        .pointer("/database/ledgerMissingCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let hash_mismatch = summary
+        .pointer("/database/ledgerHashMismatchCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let attestation_hashes = summary
+        .get("packs")
+        .and_then(Value::as_array)
+        .map(|packs| {
+            packs
+                .iter()
+                .filter_map(|pack| pack.pointer("/attestationBundle/bundleHash"))
+                .filter_map(Value::as_str)
+                .take(4)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut lines = vec![
+        format!(
+            "Pack replay summary: status={status}, packs={pack_count}, ledger_available={available}, ledger_missing={missing}, ledger_hash_mismatch={hash_mismatch}, summary_hash={summary_hash}; raw_query_text_included=false; raw_memory_content_included=false."
+        ),
+        "Attestation: pack rows consume ee.attestation.surface_manifest.v1 projections derived from AttestationBundle; bundle hashes are comparable with ee pack replay and ee why."
+            .to_owned(),
+    ];
+    if !attestation_hashes.is_empty() {
+        lines.push(format!(
+            "Pack attestation bundle hashes: {}.",
+            attestation_hashes.join(", ")
+        ));
+    }
+    lines.join("\n")
 }
 
 fn summarize_pack_replay_ledger(raw_ledger: Option<&str>, expected_hash: Option<&str>) -> Value {
@@ -9721,6 +9810,11 @@ mod tests {
                 &[],
             )
             .map_err(|error| format!("failed to insert pack record: {error}"))?;
+        let expected_attestation_hash =
+            crate::core::attest::build_pack_attestation(&connection, pack_id)
+                .map_err(|error| format!("failed to build direct pack attestation: {error}"))?
+                .ok_or_else(|| "direct pack attestation missing inserted pack".to_owned())?
+                .bundle_hash();
         connection
             .close()
             .map_err(|error| format!("failed to close test db: {error}"))?;
@@ -10245,6 +10339,32 @@ mod tests {
         assert_eq!(
             summary.pointer("/packs/0/ledger/status"),
             Some(&json!("available"))
+        );
+        assert_eq!(
+            summary.pointer("/packs/0/attestationBundle/schema"),
+            Some(&json!(
+                crate::core::attest::ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1
+            ))
+        );
+        assert_eq!(
+            summary.pointer("/packs/0/attestationBundle/status"),
+            Some(&json!("available"))
+        );
+        assert!(
+            summary
+                .pointer("/packs/0/attestationBundle/bundleHash")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "pack replay summary must expose the pack attestation bundle hash"
+        );
+        assert_eq!(
+            summary.pointer("/packs/0/attestationBundle/bundleHash"),
+            Some(&json!(expected_attestation_hash)),
+            "pack replay summary must reuse the same pack attestation bundle hash"
+        );
+        assert_eq!(
+            summary.pointer("/packs/0/attestationBundle/subject/kind"),
+            Some(&json!("pack"))
         );
         assert_eq!(
             summary.pointer("/packs/0/ledger/freshnessStates/unavailable"),

@@ -309,6 +309,24 @@ fn why_returns_stable_envelope_for_existing_memory() -> TestResult {
         data["content"].is_string(),
         format!("data.content must be a string for an existing memory; got {data}"),
     )?;
+    ensure(
+        data.pointer("/attestationBundle/schema")
+            .and_then(Value::as_str)
+            == Some("ee.attestation.surface_manifest.v1"),
+        format!("why data must include attestation bundle manifest; got {data}"),
+    )?;
+    ensure(
+        data.pointer("/attestationBundle/subject/kind")
+            .and_then(Value::as_str)
+            == Some("memory"),
+        format!("why attestation subject kind must be memory; got {data}"),
+    )?;
+    ensure(
+        data.pointer("/attestationBundle/bundleHash")
+            .and_then(Value::as_str)
+            .is_some_and(|hash| hash.starts_with("blake3:")),
+        format!("why attestation bundle hash must be blake3-prefixed; got {data}"),
+    )?;
     Ok(())
 }
 

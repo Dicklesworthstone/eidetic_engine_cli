@@ -566,6 +566,23 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
         replay_json.pointer("/data/replay/status") == Some(&serde_json::json!("available")),
         "pack replay should report an available persisted ledger",
     )?;
+    ensure(
+        replay_json.pointer("/data/attestationBundle/schema")
+            == Some(&serde_json::json!("ee.attestation.surface_manifest.v1")),
+        "pack replay should include the shared attestation manifest",
+    )?;
+    ensure(
+        replay_json.pointer("/data/attestationBundle/subject/kind")
+            == Some(&serde_json::json!("pack")),
+        "pack replay attestation subject should be pack",
+    )?;
+    ensure(
+        replay_json
+            .pointer("/data/attestationBundle/bundleHash")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|hash| hash.starts_with("blake3:")),
+        "pack replay should expose the pack attestation bundle hash",
+    )?;
     let replay_ledger_pack_id = replay_json
         .pointer("/data/replay/ledger/core/packId")
         .or_else(|| replay_json.pointer("/data/replay/ledger/packId"));

@@ -141,6 +141,12 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
         "create stdout includes swarm replay summary schema",
     )?;
     ensure(
+        json.pointer("/pack_replay_summary/schema")
+            .and_then(|v| v.as_str())
+            == Some("ee.support_bundle.pack_replay_summary.v1"),
+        "create stdout includes pack replay summary schema",
+    )?;
+    ensure(
         json.pointer("/regression_causality_summary/schema")
             .and_then(|v| v.as_str())
             == Some("ee.support_bundle.regression_causality_summary.v1"),
@@ -174,11 +180,13 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
                 }) && sections.iter().any(|section| {
                     section.get("id").and_then(|v| v.as_str()) == Some("swarm_replay_summary")
                 }) && sections.iter().any(|section| {
+                    section.get("id").and_then(|v| v.as_str()) == Some("pack_replay_summary")
+                }) && sections.iter().any(|section| {
                     section.get("id").and_then(|v| v.as_str())
                         == Some("regression_causality_summary")
                 })
             }),
-        "capsule sections include compact swarm, incident, replay, and regression causality summaries",
+        "capsule sections include compact swarm, incident, replay, pack replay, and regression causality summaries",
     )?;
     let swarm_summary = capsule_json
         .get("swarm_brief_summary")
@@ -252,6 +260,21 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
             .and_then(|v| v.as_str())
             .is_some_and(|hash| hash.starts_with("blake3:")),
         "capsule swarm replay summary includes summary hash",
+    )?;
+    let pack_summary = capsule_json
+        .get("pack_replay_summary")
+        .ok_or_else(|| "capsule missing pack_replay_summary".to_string())?;
+    ensure(
+        pack_summary.get("schema").and_then(|v| v.as_str())
+            == Some("ee.support_bundle.pack_replay_summary.v1"),
+        "capsule pack replay summary schema",
+    )?;
+    ensure(
+        pack_summary
+            .get("summaryHash")
+            .and_then(|v| v.as_str())
+            .is_some_and(|hash| hash.starts_with("blake3:")),
+        "capsule pack replay summary includes summary hash",
     )?;
     let regression_summary = capsule_json
         .get("regression_causality_summary")
@@ -477,6 +500,12 @@ fn handoff_resume_emits_capsule_id_and_objective() -> TestResult {
         "resume includes embedded swarm replay summary",
     )?;
     ensure(
+        json.pointer("/pack_replay_summary/schema")
+            .and_then(|v| v.as_str())
+            == Some("ee.support_bundle.pack_replay_summary.v1"),
+        "resume includes embedded pack replay summary",
+    )?;
+    ensure(
         json.get("artifact_pointers")
             .and_then(|v| v.as_array())
             .is_some_and(|items| {
@@ -511,6 +540,18 @@ fn handoff_resume_emits_capsule_id_and_objective() -> TestResult {
                 })
             }),
         "resume exposes swarm replay summary artifact pointer",
+    )?;
+    ensure(
+        json.get("artifact_pointers")
+            .and_then(|v| v.as_array())
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.get("id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|id| id.starts_with("pack_replay_summary:"))
+                })
+            }),
+        "resume exposes pack replay summary artifact pointer",
     )?;
     Ok(())
 }
