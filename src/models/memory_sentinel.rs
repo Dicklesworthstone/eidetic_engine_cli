@@ -191,6 +191,41 @@ impl fmt::Display for MemorySentinelResultStatus {
     }
 }
 
+/// Outcome of resolving a sentinel's target against current local state, before
+/// it is mapped to a [`MemorySentinelResultStatus`] (bd-1n0np.16.3).
+///
+/// The pure-predicate checker's I/O layer (filesystem / config / schema / env /
+/// fixture / allowlisted-introspection probes) produces one of these; the
+/// mapping below applies the conservatism rule so the decision stays separate
+/// from the I/O and is exhaustively testable.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SentinelObservation {
+    /// The predicate holds — e.g. the path/schema field/config key/env var/
+    /// fixture exists, or the allowlisted help text contains the flag.
+    Satisfied,
+    /// The predicate is definitively false — the referent is gone or absent.
+    Unsatisfied,
+    /// The check could not run or its result is ambiguous (e.g. an
+    /// introspection surface was unavailable, or the workspace could not be
+    /// resolved). Conservative: this is NEVER reported as a failure.
+    Unverifiable,
+}
+
+impl SentinelObservation {
+    /// Map the observation to a result status, enforcing the sentinel
+    /// conservatism rule: an unverifiable check is `Unknown` (advisory), NEVER
+    /// `Fail`. `ee` never mutates on a sentinel result — it reports and proposes
+    /// a curation candidate — so a false `Fail` would be the costly error.
+    #[must_use]
+    pub const fn into_status(self) -> MemorySentinelResultStatus {
+        match self {
+            Self::Satisfied => MemorySentinelResultStatus::Pass,
+            Self::Unsatisfied => MemorySentinelResultStatus::Fail,
+            Self::Unverifiable => MemorySentinelResultStatus::Unknown,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedMemorySentinelSpec {
     pub sentinel_kind: MemorySentinelKind,
@@ -1079,5 +1114,26 @@ mod tests {
             changed.result_hash != first.result_hash,
             "status should affect result hash",
         )
+    }
+
+    #[test]
+    fn sentinel_observation_maps_conservatively_to_status() {
+        assert_eq!(
+            SentinelObservation::Satisfied.into_status(),
+            MemorySentinelResultStatus::Pass
+        );
+        assert_eq!(
+            SentinelObservation::Unsatisfied.into_status(),
+            MemorySentinelResultStatus::Fail
+        );
+        // Conservatism: an ambiguous / unverifiable check is Unknown, never Fail.
+        assert_eq!(
+            SentinelObservation::Unverifiable.into_status(),
+            MemorySentinelResultStatus::Unknown
+        );
+        assert_ne!(
+            SentinelObservation::Unverifiable.into_status(),
+            MemorySentinelResultStatus::Fail
+        );
     }
 }
