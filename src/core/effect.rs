@@ -1126,6 +1126,10 @@ impl EffectManifest {
             CommandEffect::read_only_db("backup inspect", "Inspect backup manifest"),
             CommandEffect::read_only_db("backup list", "List backup manifests"),
             CommandEffect::read_only_db("backup verify", "Verify backup manifest and contents"),
+            CommandEffect::read_only_db(
+                "bootstrap docs",
+                "Compile allowlisted workspace docs into dry-run bootstrap candidates (no durable mutation)",
+            ),
             CommandEffect::read_only("capabilities", "Report feature availability"),
             CommandEffect::read_only(
                 "cache prewarm",
@@ -1564,6 +1568,19 @@ impl EffectManifest {
 
     fn durable_write_commands() -> Vec<CommandEffect> {
         vec![
+            CommandEffect::durable_write(
+                "bootstrap apply",
+                vec![
+                    "curation_candidates",
+                    "memories",
+                    "procedural_rules",
+                    "rule_source_memories",
+                    "rule_tags",
+                    "search_index_jobs",
+                    "audit_log",
+                ],
+                "Apply an approved docs bootstrap run through curation (routes through curate apply with audit)",
+            ),
             CommandEffect::durable_write(
                 "causal promote-plan",
                 vec!["curation_candidates", "audit_log"],
