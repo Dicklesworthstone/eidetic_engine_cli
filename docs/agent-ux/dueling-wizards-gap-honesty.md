@@ -47,7 +47,9 @@ Properties an agent can rely on:
   tree, the section is byte-identical. Churn is supplied as a *bounded git
   input*, never `Date::now()` — so the output does not drift with wall-clock.
 - **Honest coverage, not noise.** The section carries a `coverageRatio` rather
-  than dumping "everything is uncovered."
+  than dumping "everything is uncovered." Items are ranked by an explicit
+  `importanceScore` and `rankingBasis` so agents can see which signals were
+  available.
 
 ### Reading `coverageRatio`
 
@@ -63,13 +65,29 @@ at least one memory references (by provenance or lexical mention).
 A low ratio is not a failure — it is the honest report. Use the listed
 blind-spot nodes as the priority list of where to read source directly.
 
-> **Ranking caveat (`bd-1n0np.6.2`, open).** Importance ranking of blind-spot
-> nodes by `LOC × git-churn × graph-centrality`, the top-N cut with its
-> drop-count, and the per-pack `coverage: thin` marker are not yet wired. Until
-> they land, the section reports membership + `coverageRatio`, not a ranked
-> "most important gaps first" ordering. `scripts/e2e_gap_honesty.sh` records a
-> visible `log_drop` for each of those assertions so the gap is never silently
-> presented as covered.
+### Reading `importanceScore`
+
+`importanceScore` is currently:
+
+```
+locLines * gitChurnFactor * centralityFactor
+```
+
+The `rankingBasis` object carries the exact inputs. `gitChurnLines` is read
+from a bounded `git log --max-count=200 --numstat` scan, so it is deterministic
+for the checked-out repository history and does not depend on wall-clock time.
+When git evidence is unavailable, `gitChurnStatus` is `unavailable` and the
+factor is neutral (`1.0`) instead of silently zeroing a code area.
+
+`centralityStatus` is explicit because the current symbol snapshot has nodes
+but no dependency edges to feed fnx centrality. Until symbol-edge centrality
+lands, `centralityScore` is `null` and `centralityFactor` is neutral (`1.0`).
+That keeps the ranking useful while making the missing signal machine-visible.
+
+> **Remaining `bd-1n0np.6.2` work.** The top-N cut with its drop-count and the
+> per-pack `coverage: thin` marker are still pending. `scripts/e2e_gap_honesty.sh`
+> records visible `log_drop` entries for those assertions so the gap is never
+> silently presented as covered.
 
 ## Query-Miss Clustering → Knowledge-Gap Candidates
 

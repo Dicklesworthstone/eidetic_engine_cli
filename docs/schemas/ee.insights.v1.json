@@ -295,6 +295,8 @@
         "coverageRatio",
         "coveredNodeCount",
         "totalNodeCount",
+        "importanceScore",
+        "rankingBasis",
         "sourceRange",
         "explanation",
         "evidence"
@@ -311,6 +313,40 @@
         "coverageRatio": {"type": "number", "minimum": 0, "maximum": 1},
         "coveredNodeCount": {"type": "integer", "minimum": 0},
         "totalNodeCount": {"type": "integer", "minimum": 1},
+        "importanceScore": {"type": "number", "minimum": 0},
+        "rankingBasis": {
+          "type": "object",
+          "required": [
+            "formula",
+            "locLines",
+            "gitChurnLines",
+            "gitChurnStatus",
+            "gitChurnFactor",
+            "gitChurnMaxCommits",
+            "centralityScore",
+            "centralityStatus",
+            "centralityFactor",
+            "centralitySource"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "formula": {"type": "string", "const": "importanceScore = locLines * gitChurnFactor * centralityFactor"},
+            "locLines": {"type": "integer", "minimum": 1},
+            "gitChurnLines": {"type": "integer", "minimum": 0},
+            "gitChurnStatus": {"type": "string", "enum": ["available", "unavailable"]},
+            "gitChurnFactor": {"type": "number", "minimum": 0},
+            "gitChurnMaxCommits": {"type": "integer", "minimum": 1},
+            "centralityScore": {
+              "anyOf": [
+                {"type": "number", "minimum": 0},
+                {"type": "null"}
+              ]
+            },
+            "centralityStatus": {"type": "string"},
+            "centralityFactor": {"type": "number", "minimum": 0},
+            "centralitySource": {"type": "string", "const": "fnx_symbol_graph"}
+          }
+        },
         "sourceRange": {
           "type": "object",
           "required": ["startLine", "endLine"],

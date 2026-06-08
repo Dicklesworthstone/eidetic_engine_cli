@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use chrono::{DateTime, Utc};
 use clap::Args;
@@ -49,6 +50,11 @@ const INSIGHTS_SECTION_UNAVAILABLE_MESSAGE: &str =
 const INSIGHTS_SECTION_UNAVAILABLE_REPAIR: &str =
     "Use sections with non-empty evidence, or implement the unavailable section builder.";
 const BLIND_SPOT_SCHEMA_V1: &str = "ee.insights.blind_spots.v1";
+const BLIND_SPOT_GIT_CHURN_MAX_COMMITS: usize = 200;
+const BLIND_SPOT_CHURN_STATUS_AVAILABLE: &str = "available";
+const BLIND_SPOT_CHURN_STATUS_UNAVAILABLE: &str = "unavailable";
+const BLIND_SPOT_CENTRALITY_STATUS_UNAVAILABLE: &str =
+    "unavailable_symbol_graph_has_no_dependency_edges";
 const BRIDGE_INSIGHT_SCHEMA_V1: &str = "ee.graph.bridge_insight.v1";
 const KNOWLEDGE_GAP_SCHEMA_V1: &str = "ee.graph.knowledge_gap.v1";
 const TOP_MEMORY_INSIGHT_SCHEMA_V1: &str = "ee.graph.top_memory.v1";
@@ -212,10 +218,45 @@ struct BlindSpotInput {
     symbol_kind: &'static str,
     start_line: u32,
     end_line: u32,
+    loc_lines: u32,
+    git_churn_lines: u64,
+    git_churn_status: &'static str,
+    git_churn_factor: f64,
+    git_churn_max_commits: usize,
+    centrality_score: Option<f64>,
+    centrality_status: &'static str,
+    centrality_factor: f64,
+    importance_score: f64,
     snapshot_hash: String,
     total_node_count: usize,
     covered_node_count: usize,
     coverage_ratio: f64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BlindSpotGitChurnReport {
+    status: &'static str,
+    max_commits: usize,
+    lines_by_path: BTreeMap<String, u64>,
+}
+
+impl BlindSpotGitChurnReport {
+    fn unavailable() -> Self {
+        Self {
+            status: BLIND_SPOT_CHURN_STATUS_UNAVAILABLE,
+            max_commits: BLIND_SPOT_GIT_CHURN_MAX_COMMITS,
+            lines_by_path: BTreeMap::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn available(lines_by_path: BTreeMap<String, u64>) -> Self {
+        Self {
+            status: BLIND_SPOT_CHURN_STATUS_AVAILABLE,
+            max_commits: BLIND_SPOT_GIT_CHURN_MAX_COMMITS,
+            lines_by_path,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -744,13 +785,15 @@ fn load_blind_spot_inputs(workspace: Option<&Path>) -> Result<Vec<BlindSpotInput
     }
     let snapshot = crate::core::symbol_graph::SymbolGraphExtractor::default()
         .extract_paths(workspace, rust_paths);
+    let git_churn = load_blind_spot_git_churn(workspace);
     let memories = load_workspace_insights_graph_data(Some(workspace))?
         .map(|data| data.memories)
         .unwrap_or_default();
-    Ok(blind_spot_inputs_from_symbol_snapshot(
+    Ok(blind_spot_inputs_from_symbol_snapshot_with_churn(
         &snapshot,
         &memories,
         Some(workspace),
+        &git_churn,
     ))
 }
 
@@ -1212,6 +1255,20 @@ fn blind_spot_inputs_from_symbol_snapshot(
     memories: &[StoredMemory],
     workspace: Option<&Path>,
 ) -> Vec<BlindSpotInput> {
+    blind_spot_inputs_from_symbol_snapshot_with_churn(
+        snapshot,
+        memories,
+        workspace,
+        &BlindSpotGitChurnReport::unavailable(),
+    )
+}
+
+fn blind_spot_inputs_from_symbol_snapshot_with_churn(
+    snapshot: &crate::models::SymbolSnapshot,
+    memories: &[StoredMemory],
+    workspace: Option<&Path>,
+    git_churn: &BlindSpotGitChurnReport,
+) -> Vec<BlindSpotInput> {
     if snapshot.symbols.is_empty() {
         return Vec::new();
     }
@@ -1245,19 +1302,116 @@ fn blind_spot_inputs_from_symbol_snapshot(
 
     uncovered
         .into_iter()
-        .map(|symbol| BlindSpotInput {
-            symbol_id: symbol.id.clone(),
-            path: symbol.path.clone(),
-            canonical_name: symbol.canonical_name.clone(),
-            symbol_kind: symbol.kind.as_str(),
-            start_line: symbol.range.start_line,
-            end_line: symbol.range.end_line,
-            snapshot_hash: snapshot.snapshot_hash.clone(),
-            total_node_count,
-            covered_node_count,
-            coverage_ratio,
+        .map(|symbol| {
+            let loc_lines = blind_spot_loc_lines(symbol.range.start_line, symbol.range.end_line);
+            let git_churn_lines = git_churn
+                .lines_by_path
+                .get(symbol.path.as_str())
+                .copied()
+                .unwrap_or(0);
+            let git_churn_factor = if git_churn.status == BLIND_SPOT_CHURN_STATUS_AVAILABLE {
+                git_churn_lines.max(1) as f64
+            } else {
+                1.0
+            };
+            let centrality_factor = 1.0;
+            let importance_score = loc_lines as f64 * git_churn_factor * centrality_factor;
+            BlindSpotInput {
+                symbol_id: symbol.id.clone(),
+                path: symbol.path.clone(),
+                canonical_name: symbol.canonical_name.clone(),
+                symbol_kind: symbol.kind.as_str(),
+                start_line: symbol.range.start_line,
+                end_line: symbol.range.end_line,
+                loc_lines,
+                git_churn_lines,
+                git_churn_status: git_churn.status,
+                git_churn_factor,
+                git_churn_max_commits: git_churn.max_commits,
+                centrality_score: None,
+                centrality_status: BLIND_SPOT_CENTRALITY_STATUS_UNAVAILABLE,
+                centrality_factor,
+                importance_score,
+                snapshot_hash: snapshot.snapshot_hash.clone(),
+                total_node_count,
+                covered_node_count,
+                coverage_ratio,
+            }
         })
         .collect()
+}
+
+fn blind_spot_loc_lines(start_line: u32, end_line: u32) -> u32 {
+    if end_line >= start_line {
+        end_line.saturating_sub(start_line).saturating_add(1)
+    } else {
+        1
+    }
+}
+
+fn load_blind_spot_git_churn(workspace: &Path) -> BlindSpotGitChurnReport {
+    let max_count_arg = format!("--max-count={BLIND_SPOT_GIT_CHURN_MAX_COMMITS}");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .arg("log")
+        .arg(max_count_arg)
+        .arg("--format=")
+        .arg("--numstat")
+        .arg("--")
+        .output();
+
+    let Ok(output) = output else {
+        return BlindSpotGitChurnReport::unavailable();
+    };
+    if !output.status.success() {
+        return BlindSpotGitChurnReport::unavailable();
+    }
+
+    BlindSpotGitChurnReport {
+        status: BLIND_SPOT_CHURN_STATUS_AVAILABLE,
+        max_commits: BLIND_SPOT_GIT_CHURN_MAX_COMMITS,
+        lines_by_path: parse_git_numstat_churn(&output.stdout),
+    }
+}
+
+fn parse_git_numstat_churn(stdout: &[u8]) -> BTreeMap<String, u64> {
+    let mut lines_by_path = BTreeMap::new();
+    for line in String::from_utf8_lossy(stdout).lines() {
+        let mut fields = line.split('\t');
+        let Some(added) = fields.next() else {
+            continue;
+        };
+        let Some(deleted) = fields.next() else {
+            continue;
+        };
+        let Some(path) = fields.next() else {
+            continue;
+        };
+        if fields.next().is_some() {
+            continue;
+        }
+        let Some(line_count) = parse_git_numstat_line_count(added, deleted) else {
+            continue;
+        };
+        let path = normalize_git_numstat_path(path);
+        if path.is_empty() {
+            continue;
+        }
+        let entry = lines_by_path.entry(path).or_insert(0_u64);
+        *entry = entry.saturating_add(line_count);
+    }
+    lines_by_path
+}
+
+fn parse_git_numstat_line_count(added: &str, deleted: &str) -> Option<u64> {
+    let added = added.parse::<u64>().ok()?;
+    let deleted = deleted.parse::<u64>().ok()?;
+    Some(added.saturating_add(deleted))
+}
+
+fn normalize_git_numstat_path(path: &str) -> String {
+    normalize_insights_path(path.trim())
 }
 
 fn blind_spot_coverage_index(
@@ -2135,6 +2289,19 @@ fn blind_spots_section_from_inputs(inputs: &[BlindSpotInput]) -> InsightsSection
                 "coverageRatio": input.coverage_ratio,
                 "coveredNodeCount": input.covered_node_count,
                 "totalNodeCount": input.total_node_count,
+                "importanceScore": input.importance_score,
+                "rankingBasis": {
+                    "formula": "importanceScore = locLines * gitChurnFactor * centralityFactor",
+                    "locLines": input.loc_lines,
+                    "gitChurnLines": input.git_churn_lines,
+                    "gitChurnStatus": input.git_churn_status,
+                    "gitChurnFactor": input.git_churn_factor,
+                    "gitChurnMaxCommits": input.git_churn_max_commits,
+                    "centralityScore": input.centrality_score,
+                    "centralityStatus": input.centrality_status,
+                    "centralityFactor": input.centrality_factor,
+                    "centralitySource": "fnx_symbol_graph",
+                },
                 "sourceRange": {
                     "startLine": input.start_line,
                     "endLine": input.end_line,
@@ -2168,11 +2335,18 @@ fn blind_spots_section_from_inputs(inputs: &[BlindSpotInput]) -> InsightsSection
 
 fn sort_blind_spot_inputs(inputs: &mut [BlindSpotInput]) {
     inputs.sort_by(|left, right| {
-        left.path
-            .cmp(&right.path)
-            .then_with(|| left.start_line.cmp(&right.start_line))
-            .then_with(|| left.canonical_name.cmp(&right.canonical_name))
-            .then_with(|| left.symbol_id.cmp(&right.symbol_id))
+        right
+            .importance_score
+            .total_cmp(&left.importance_score)
+            .then_with(|| right.loc_lines.cmp(&left.loc_lines))
+            .then_with(|| right.git_churn_lines.cmp(&left.git_churn_lines))
+            .then_with(|| {
+                left.path
+                    .cmp(&right.path)
+                    .then_with(|| left.start_line.cmp(&right.start_line))
+                    .then_with(|| left.canonical_name.cmp(&right.canonical_name))
+                    .then_with(|| left.symbol_id.cmp(&right.symbol_id))
+            })
     });
 }
 
@@ -2695,6 +2869,7 @@ mod tests {
     };
     use chrono::TimeZone;
     use clap::Parser as _;
+    use std::collections::BTreeMap;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3934,6 +4109,17 @@ mod tests {
         assert_eq!(item["coverageStatus"].as_str(), Some("uncovered"));
         assert_eq!(item["coveredNodeCount"].as_u64(), Some(2));
         assert_eq!(item["totalNodeCount"].as_u64(), Some(3));
+        assert_eq!(item["importanceScore"].as_f64(), Some(1.0));
+        assert_eq!(item["rankingBasis"]["locLines"].as_u64(), Some(1));
+        assert_eq!(
+            item["rankingBasis"]["gitChurnStatus"].as_str(),
+            Some(BLIND_SPOT_CHURN_STATUS_UNAVAILABLE)
+        );
+        assert!(item["rankingBasis"]["centralityScore"].is_null());
+        assert_eq!(
+            item["rankingBasis"]["centralityStatus"].as_str(),
+            Some(BLIND_SPOT_CENTRALITY_STATUS_UNAVAILABLE)
+        );
         assert_eq!(
             item["evidence"]["schema"].as_str(),
             Some(BLIND_SPOT_SCHEMA_V1)
@@ -3945,6 +4131,53 @@ mod tests {
         assert_eq!(
             item["evidence"]["algorithm"].as_str(),
             Some("symbol_snapshot_minus_memory_file_or_lexical_mentions")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn blind_spots_rank_by_importance_basis_with_bounded_churn() -> TestResult {
+        let snapshot = crate::core::symbol_graph::extract_rust_symbol_snapshot_from_sources(&[
+            crate::core::symbol_graph::RustSourceInput::new(
+                "src/large.rs",
+                "pub fn large_gap() {\n    let value = 1;\n    let doubled = value * 2;\n    let _ = doubled;\n}\n",
+            ),
+            crate::core::symbol_graph::RustSourceInput::new("src/hot.rs", "pub fn hot_gap() {}\n"),
+        ]);
+        let git_churn = BlindSpotGitChurnReport::available(BTreeMap::from([
+            ("src/large.rs".to_owned(), 2),
+            ("src/hot.rs".to_owned(), 20),
+        ]));
+
+        let section = blind_spots_section_from_inputs(
+            &blind_spot_inputs_from_symbol_snapshot_with_churn(&snapshot, &[], None, &git_churn),
+        );
+
+        let names = section
+            .items
+            .iter()
+            .map(|item| item["canonicalName"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["hot_gap", "large_gap"]);
+        assert_eq!(
+            section.items[0]["rankingBasis"]["gitChurnLines"].as_u64(),
+            Some(20)
+        );
+        assert_eq!(
+            section.items[0]["rankingBasis"]["gitChurnMaxCommits"].as_u64(),
+            Some(BLIND_SPOT_GIT_CHURN_MAX_COMMITS as u64)
+        );
+        assert_eq!(
+            section.items[0]["rankingBasis"]["centralityStatus"].as_str(),
+            Some(BLIND_SPOT_CENTRALITY_STATUS_UNAVAILABLE)
+        );
+        assert!(
+            section.items[1]["rankingBasis"]["locLines"]
+                .as_u64()
+                .unwrap_or_default()
+                > section.items[0]["rankingBasis"]["locLines"]
+                    .as_u64()
+                    .unwrap_or_default()
         );
         Ok(())
     }
