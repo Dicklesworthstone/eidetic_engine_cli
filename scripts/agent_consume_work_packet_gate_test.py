@@ -270,6 +270,27 @@ class ClaimGateConsumer(unittest.TestCase):
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
         self.assertFalse(claim["runnable"])
 
+    def test_metadata_only_pending_import_health_does_not_override_authority(self):
+        gate = safe_gate()
+        gate["sourceAuthority"]["trackerHealth"] = "external_changes_pending_import"
+        gate["sourceAuthority"]["trackerAuthoritative"] = True
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertTrue(decision["safeToClaim"])
+        self.assertEqual(decision["sourceSummary"]["trackerAuthoritative"], True)
+        self.assertEqual(
+            decision["sourceSummary"]["trackerHealth"],
+            "external_changes_pending_import",
+        )
+        self.assertNotIn(
+            "claim_gate_tracker_not_authoritative:external_changes_pending_import",
+            decision["whyNotSafe"],
+        )
+        self.assertEqual(decision["whyNotSafe"], [])
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertTrue(claim["runnable"])
+
     def test_source_authority_agent_mail_not_authoritative_fails_closed(self):
         gate = safe_gate()
         gate["sourceAuthority"]["reservationAuthoritative"] = False
@@ -1178,6 +1199,33 @@ class WorkPacketConsumer(unittest.TestCase):
                     expected_sources.issubset(sources),
                     f"{relative_path} missing sources {expected_sources - sources}",
                 )
+
+    def test_bv_timeout_no_output_fixture_surfaces_liveness_blockers(self):
+        root = load_fixture("tests/fixtures/swarm_work_packet/bv_timeout_no_output.json")
+
+        decision = consumer.consume(root)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "packet_degraded_authority:bv_command_timeout",
+            decision["whyNotSafe"],
+        )
+        self.assertIn(
+            "packet_degraded_authority:bv_no_output",
+            decision["whyNotSafe"],
+        )
+        self.assertIn("bv_timeout_no_output", decision["whyNotSafe"])
+        self.assertEqual(decision["argvActions"], [])
+        self.assertEqual(
+            [
+                (entry["code"], entry["source"], entry["severity"])
+                for entry in decision["degradedSummary"][0:2]
+            ],
+            [
+                ("bv_command_timeout", "bv", "warning"),
+                ("bv_no_output", "bv", "warning"),
+            ],
+        )
 
     def test_envelope_degraded_fixture_blocks_optimistic_payload(self):
         root = load_fixture(
@@ -3855,6 +3903,38 @@ class WorkPacketDocsContract(unittest.TestCase):
             body = normalize_whitespace(load_text(relative_path))
             for marker in required_markers:
                 self.assertIn(marker, body, f"{relative_path} missing {marker!r}")
+
+    def test_work_packet_docs_pin_bv_liveness_fail_closed_runbook(self):
+        body = normalize_whitespace(load_text("docs/swarm/work_packet.md"))
+        required_markers = [
+            "Raw `bv --robot-*` probes must be externally bounded",
+            "`bv_command_timeout` and `bv_no_output` are source-authority degradations",
+            "not evidence that no work exists",
+            "emit no runnable claim action",
+            "ignore any legacy BV copy-paste claim",
+            "br --no-auto-import --allow-stale",
+            "rerun `ee swarm work-packet --claim-gate`",
+        ]
+
+        for marker in required_markers:
+            self.assertIn(marker, body, f"docs/swarm/work_packet.md missing {marker!r}")
+
+    def test_work_packet_docs_pin_metadata_only_beads_sync_warning_authority(self):
+        body = normalize_whitespace(load_text("docs/swarm/work_packet.md"))
+        required_markers = [
+            "brReadsAuthoritative` means the collected parity evidence is sufficient",
+            "can remain true for a metadata-only `external_changes_pending_import` warning",
+            "DB/JSONL counts match",
+            "dirtyIssueCount=0",
+            "pendingImportCount=0",
+            "A prose `br doctor` message alone is not tracker corruption evidence",
+            "requiresCandidateDowngrade` is true when tracker evidence is not authoritative",
+            "dirty DB issues",
+            "non-benign merge artifacts",
+        ]
+
+        for marker in required_markers:
+            self.assertIn(marker, body, f"docs/swarm/work_packet.md missing {marker!r}")
 
     def test_agent_docs_pin_claim_gate_rch_remote_authority_rule(self):
         required_markers = [

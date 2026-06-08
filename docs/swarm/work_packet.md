@@ -64,6 +64,13 @@ Fixture scenarios:
 - `beads_command_timeout_no_output` and `bv_timeout_no_output`: tracker or
   graph-triage sources timed out or emitted no output; Beads fallback rows are
   advisory until a bounded retry or manual inspection succeeds.
+  Raw `bv --robot-*` probes must be externally bounded or routed through the
+  `ee swarm` collectors. `bv_command_timeout` and `bv_no_output` are
+  source-authority degradations, not evidence that no work exists. Consumers
+  must fail closed in this state: emit no runnable claim action, ignore any
+  legacy BV copy-paste claim, continue with stale-safe
+  `br --no-auto-import --allow-stale` inspection, and rerun
+  `ee swarm work-packet --claim-gate` before mutating Beads.
 - `tracker_mismatch`: an otherwise claimable leaf is downgraded because Beads
   JSONL and DB state are not authoritative.
 - `rollup_only_no_claimable_child`: an open epic or parent has no claimable
@@ -103,12 +110,16 @@ re-parsing raw tracker rows inside the work-packet layer.
 - `health` is one of `ok`, `merge_artifacts_warn`,
   `external_changes_pending_import`, `db_jsonl_count_mismatch`, or
   `jsonl_parse_error`.
-- `brReadsAuthoritative` is true only for `ok`; when false, consumers must not
-  treat `br ready` or a zero-conflict candidate list as proof that claiming is
-  safe.
-- `requiresCandidateDowngrade` is true for malformed JSONL and DB/JSONL count
-  mismatches. Candidate safety MUST refuse auto-claim-style advice in those
-  states.
+- `brReadsAuthoritative` means the collected parity evidence is sufficient for
+  read-only Beads inspection. It is true for `ok` and can remain true for a
+  metadata-only `external_changes_pending_import` warning when DB/JSONL counts
+  match, `dirtyIssueCount=0`, `pendingImportCount=0`, and no non-benign merge
+  artifacts are present. A prose `br doctor` message alone is not tracker
+  corruption evidence in that state.
+- `requiresCandidateDowngrade` is true when tracker evidence is not
+  authoritative, such as malformed JSONL, DB/JSONL count mismatches, dirty DB
+  issues, or non-benign merge artifacts. Candidate safety MUST refuse
+  auto-claim-style advice in those states.
 - Counts and paths are bounded summaries: JSONL row count, DB row count,
   pending import count, dirty issue count, merge artifact count, and at most a
   small sorted list of merge artifact paths.

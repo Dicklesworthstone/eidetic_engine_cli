@@ -186,6 +186,14 @@ runnable `claimCommandAction`. If `unsafeReasons` or `staleReasons` still name
 reservation collisions, stale tracker state, Beads/BV disagreement, or RCH
 blockers, coordinate instead of claiming.
 
+Treat `bv_command_timeout` and `bv_no_output` as graph-triage liveness
+failures, not as "no good work exists." Do not wait indefinitely on raw
+`bv --robot-*` commands and do not use a BV copy-paste claim command from stale
+or partial output. Retry BV only with an explicit timeout, or continue from
+bounded `ee swarm work-packet` / `ee swarm brief` output plus direct
+`br --no-auto-import --allow-stale ...` inspection until a fresh claim gate
+emits a real `claimCommandAction`.
+
 ## Authority-Degraded Conformance Cases
 
 Authority-degraded fixtures prove that a claim gate fails closed until every

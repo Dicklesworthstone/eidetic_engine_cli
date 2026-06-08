@@ -6250,6 +6250,17 @@ fn degraded_recommendation_must_not_do(source: SwarmBriefSourceKind, code: &str)
             "Do not unset RCH_REQUIRE_REMOTE or count local Cargo output without explicit user approval."
                 .to_string(),
         );
+    } else if source == SwarmBriefSourceKind::Bv
+        && matches!(code, BV_COMMAND_TIMEOUT_CODE | BV_NO_OUTPUT_CODE)
+    {
+        must_not_do.push(
+            "Do not wait on raw bv --robot-* commands without an explicit timeout; use ee swarm brief/work-packet or a bounded retry."
+                .to_string(),
+        );
+        must_not_do.push(
+            "Do not use BV copy-paste claim guidance while graph-triage liveness is degraded; require direct br evidence and a safe claim gate."
+                .to_string(),
+        );
     }
     must_not_do
 }
@@ -12547,6 +12558,53 @@ mod tests {
                 item.contains("Do not close beads requiring remote Cargo evidence")
             })
         );
+    }
+
+    #[test]
+    fn advisor_blocks_raw_bv_claim_guidance_on_liveness_degradation() {
+        for (code, message) in [
+            (
+                BV_COMMAND_TIMEOUT_CODE,
+                "BV robot source command timed out after 1500 ms.",
+            ),
+            (
+                BV_NO_OUTPUT_CODE,
+                "BV robot source command returned no output.",
+            ),
+        ] {
+            let mut report = report_with_ready_sources();
+            let Some(bv_snapshot) = report
+                .sources
+                .iter_mut()
+                .find(|snapshot| snapshot.source == SwarmBriefSourceKind::Bv)
+            else {
+                panic!("bv source");
+            };
+            bv_snapshot.status = SwarmBriefSourceStatus::Unavailable;
+            bv_snapshot.degraded = vec![SwarmBriefDegradation::warning(
+                SwarmBriefSourceKind::Bv,
+                code,
+                message,
+                Some(
+                    "Retry `bv --robot-triage --robot-triage-by-track` with the configured command timeout, or fall back to `br --no-auto-import --allow-stale ready --json`."
+                        .to_string(),
+                ),
+            )];
+
+            apply_swarm_brief_advice(&mut report);
+
+            let rec = recommendation(&report, &format!("rec.degraded.bv.{code}"));
+            assert!(rec.must_not_do.iter().any(|item| {
+                item.contains(
+                    "Do not wait on raw bv --robot-* commands without an explicit timeout",
+                )
+            }));
+            assert!(
+                rec.must_not_do
+                    .iter()
+                    .any(|item| item.contains("Do not use BV copy-paste claim guidance"))
+            );
+        }
     }
 
     #[test]

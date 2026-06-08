@@ -883,6 +883,15 @@ claims. Profile reports and performance forensics diagnose host behavior in
 detail; the brief only carries enough posture to steer choices such as routing
 Cargo through RCH.
 
+Raw `bv --robot-*` probes are liveness-sensitive. Run them only with an
+explicit external timeout, or route work selection through `ee swarm brief` /
+`ee swarm work-packet`, which converts timeout or no-output cases into
+`bv_command_timeout` / `bv_no_output` degradations. Those degradations make
+BV ranking advisory only: continue from bounded stale-safe Beads evidence such
+as `br --no-auto-import --allow-stale ready --json`, and do not use a BV claim
+command unless the claim gate later reports `safeToClaim=true` with a
+structured `claimCommandAction`.
+
 The command never claims work, never reserves files, never releases files,
 never sends mail, never runs builds, never edits files, never mutates Beads,
 never mutates the EE store, never mutates git, and never schedules agents.
