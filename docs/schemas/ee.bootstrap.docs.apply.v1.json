@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.bootstrap.docs.apply.v1.json",
+  "title": "ee.bootstrap.docs.apply.v1",
+  "description": "ee bootstrap apply response envelope.",
+  "type": "object",
+  "required": ["schema", "success", "data", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v2"},
+    "success": {"type": "boolean", "const": true},
+    "fields": {"type": "string"},
+    "data": {
+      "type": "object",
+      "required": [
+        "schema",
+        "parserVersion",
+        "runId",
+        "workspacePath",
+        "databasePath",
+        "approvedOnly",
+        "candidateCount",
+        "materializedCount",
+        "approvedCandidateCount",
+        "appliedCount",
+        "unchangedCount",
+        "blockedCount",
+        "skippedCount",
+        "durableMutation",
+        "candidates",
+        "appliedReports",
+        "degraded",
+        "nextAction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.bootstrap.docs.apply.v1"},
+        "parserVersion": {"type": "string", "const": "docs-bootstrap-v1"},
+        "runId": {"type": "string", "minLength": 1},
+        "workspacePath": {"type": "string", "minLength": 1},
+        "databasePath": {"type": "string", "minLength": 1},
+        "approvedOnly": {"type": "boolean", "const": true},
+        "candidateCount": {"type": "integer", "minimum": 0},
+        "materializedCount": {"type": "integer", "minimum": 0},
+        "approvedCandidateCount": {"type": "integer", "minimum": 0},
+        "appliedCount": {"type": "integer", "minimum": 0},
+        "unchangedCount": {"type": "integer", "minimum": 0},
+        "blockedCount": {"type": "integer", "minimum": 0},
+        "skippedCount": {"type": "integer", "minimum": 0},
+        "durableMutation": {"type": "boolean"},
+        "candidates": {"type": "array", "items": {"$ref": "#/$defs/applyCandidate"}},
+        "appliedReports": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}},
+        "nextAction": {"type": "string"}
+      }
+    },
+    "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
+  },
+  "field_presets": {
+    "minimal": ["schema", "parserVersion", "runId", "candidateCount", "durableMutation", "nextAction"],
+    "summary": ["schema", "parserVersion", "runId", "candidateCount", "materializedCount", "approvedCandidateCount", "appliedCount", "blockedCount", "skippedCount", "durableMutation", "nextAction"],
+    "standard": ["*"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "applyCandidate": {
+      "type": "object",
+      "required": [
+        "bootstrapCandidateId",
+        "curationCandidateId",
+        "evidenceId",
+        "sourcePath",
+        "sourceHash",
+        "status",
+        "action"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "bootstrapCandidateId": {"type": "string", "minLength": 1},
+        "curationCandidateId": {"type": "string", "minLength": 1},
+        "evidenceId": {"type": "string", "minLength": 1},
+        "sourcePath": {"type": "string", "minLength": 1},
+        "sourceHash": {"type": "string", "minLength": 1},
+        "status": {"type": "string"},
+        "action": {"type": "string"}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "severity": {"type": "string"},
+        "message": {"type": "string"},
+        "repair": {"type": "string"},
+        "path": {"type": "string"}
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

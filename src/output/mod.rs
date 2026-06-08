@@ -8724,6 +8724,20 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: curate_show_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::docs_bootstrap::DOCS_BOOTSTRAP_RUN_SCHEMA_V1,
+            version: "1",
+            description: "Docs bootstrap dry-run payload with allowlisted sources, candidate proposals, parser version, and degraded source/quarantine signals.",
+            category: "curate",
+            definition: docs_bootstrap_run_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::docs_bootstrap::DOCS_BOOTSTRAP_APPLY_SCHEMA_V1,
+            version: "1",
+            description: "Docs bootstrap curation apply payload with materialized, approved, skipped, blocked, and durable-mutation counts.",
+            category: "curate",
+            definition: docs_bootstrap_apply_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.diag.incident.replay.v1",
             version: "1",
             description: "Deterministic swarm-incident replay envelope emitted by `ee diag incident --fixture ... --json` (bd-3tend).",
@@ -10225,6 +10239,14 @@ fn curate_peer_evidence_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.curate.peer_evidence.v1.json").to_string()
 }
 
+fn docs_bootstrap_apply_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.bootstrap.docs.apply.v1.json").to_string()
+}
+
+fn docs_bootstrap_run_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.bootstrap.docs.run.v1.json").to_string()
+}
+
 fn diag_plan_cache_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.diag.plan_cache.v1.json").to_string()
 }
@@ -11422,6 +11444,22 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
             SubcommandEntry {
                 name: "restore",
                 description: "Restore a backup into an isolated side path",
+            },
+        ],
+        args: &[],
+    },
+    CommandEntry {
+        name: "bootstrap",
+        description: "Compile docs into reviewable bootstrap candidates",
+        available: true,
+        subcommands: &[
+            SubcommandEntry {
+                name: "docs",
+                description: "Dry-run allowlisted docs into candidate proposals",
+            },
+            SubcommandEntry {
+                name: "apply",
+                description: "Materialize approved docs bootstrap candidates through curation",
             },
         ],
         args: &[],
@@ -20806,6 +20844,40 @@ mod tests {
                 &exported.get("$id").and_then(serde_json::Value::as_str),
                 &Some(schema_id),
                 "exported emitted schema id",
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn docs_bootstrap_is_registered_for_agents() -> TestResult {
+        let command = super::COMMAND_MANIFEST
+            .iter()
+            .find(|entry| entry.name == "bootstrap")
+            .ok_or_else(|| "bootstrap command missing from command manifest".to_string())?;
+        let subcommands = command
+            .subcommands
+            .iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &subcommands,
+            &vec!["docs", "apply"],
+            "bootstrap subcommands",
+        )?;
+
+        let schema_ids = super::public_schemas()
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        for expected in [
+            crate::core::docs_bootstrap::DOCS_BOOTSTRAP_RUN_SCHEMA_V1,
+            crate::core::docs_bootstrap::DOCS_BOOTSTRAP_APPLY_SCHEMA_V1,
+        ] {
+            ensure(
+                schema_ids.contains(&expected),
+                format!("docs bootstrap schema {expected} missing from public registry"),
             )?;
         }
 

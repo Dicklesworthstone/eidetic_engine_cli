@@ -378,6 +378,21 @@ impl CapabilitiesReport {
 
         let commands = vec![
             CommandEntry::new("attest", true, "Emit local provenance attestation bundles"),
+            CommandEntry::new(
+                "bootstrap",
+                true,
+                "Compile docs into reviewable bootstrap candidates",
+            ),
+            CommandEntry::new(
+                "bootstrap docs",
+                true,
+                "Dry-run allowlisted docs into candidate proposals",
+            ),
+            CommandEntry::new(
+                "bootstrap apply",
+                true,
+                "Materialize approved docs bootstrap candidates through curation",
+            ),
             CommandEntry::new("capabilities", true, "Report feature availability"),
             CommandEntry::new("check", true, "Quick posture summary"),
             CommandEntry::new("doctor", true, "Health checks"),
@@ -641,6 +656,31 @@ mod tests {
                 cmd.description
             ));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn capabilities_report_includes_docs_bootstrap_commands() -> TestResult {
+        let report = CapabilitiesReport::gather();
+        let names = report
+            .commands
+            .iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>();
+
+        for expected in ["bootstrap", "bootstrap docs", "bootstrap apply"] {
+            let command = report
+                .commands
+                .iter()
+                .find(|command| command.name == expected)
+                .ok_or_else(|| {
+                    format!(
+                        "docs bootstrap command {expected} should be in capabilities; got {names:?}"
+                    )
+                })?;
+            ensure(command.available, true, format!("{expected} is available"))?;
+        }
+
         Ok(())
     }
 

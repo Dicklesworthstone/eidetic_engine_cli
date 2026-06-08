@@ -1,4 +1,5 @@
 use crate::config::EnvVar;
+use crate::core::docs_bootstrap::{DOCS_BOOTSTRAP_APPLY_SCHEMA_V1, DOCS_BOOTSTRAP_RUN_SCHEMA_V1};
 use crate::models::{ERROR_SCHEMA_V2, RESPONSE_SCHEMA_V2};
 
 fn normalized_agent_docs_token(value: &str) -> String {
@@ -167,6 +168,10 @@ pub const GUIDE_SECTIONS: &[GuideSection] = &[
     GuideSection {
         title: "Degradation",
         content: "ee degrades gracefully. If semantic search is unavailable, it falls back to lexical. If the database is missing, init creates it. Check ee status --json for capability state.",
+    },
+    GuideSection {
+        title: "Docs Bootstrap",
+        content: "Use `ee bootstrap docs --dry-run --json` to compile allowlisted repository docs into reviewable candidates. Dry-runs never create memories, and apply only materializes or applies candidates through curation after `--approved-only`; inspect parserVersion and degraded[] before trusting a run.",
     },
 ];
 
@@ -868,6 +873,18 @@ pub const CONTRACTS: &[ContractEntry] = &[
         description: "Impact lookup payload for memories anchored to paths, symbols, commands, env vars, schemas, degraded codes, dependencies, or config keys",
         stability: "stable",
     },
+    ContractEntry {
+        name: "docs_bootstrap_run",
+        schema: DOCS_BOOTSTRAP_RUN_SCHEMA_V1,
+        description: "Docs bootstrap dry-run payload with allowlisted sources, candidate proposals, parser version, and degraded read/quarantine signals",
+        stability: "stable",
+    },
+    ContractEntry {
+        name: "docs_bootstrap_apply",
+        schema: DOCS_BOOTSTRAP_APPLY_SCHEMA_V1,
+        description: "Docs bootstrap curation apply payload with materialized, approved, skipped, blocked, and durable-mutation counts",
+        stability: "stable",
+    },
 ];
 
 #[derive(Clone, Debug)]
@@ -932,6 +949,12 @@ pub const EXAMPLES: &[ExampleEntry] = &[
         description: "Import evidence from coding agent session search",
         command: "ee import cass --limit 20 --json",
         category: "import",
+    },
+    ExampleEntry {
+        title: "Docs bootstrap dry-run",
+        description: "Compile repository docs into reviewable candidates without creating memories",
+        command: "ee bootstrap docs --dry-run --json",
+        category: "curation",
     },
     ExampleEntry {
         title: "Fix plan",
@@ -1053,6 +1076,24 @@ pub const IMPACT_RECIPE_FAILURES: &[FailureBranchEntry] = &[
         condition: "no anchored memories are found for the surface",
         jq: r#".data | select((.exactAnchorCount // 0) == 0 and (.fallbackCount // 0) == 0)"#,
         next_action: "Continue with ordinary `ee search` or `ee pack`; absence of impact rows is not evidence that the surface has no relevant history.",
+    },
+];
+
+pub const DOCS_BOOTSTRAP_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "dry-run reports degraded source handling",
+        jq: r#".data.degraded[]? | {code, severity, path, repair}"#,
+        next_action: "Treat degraded source reads as bounded input gaps; fix symlinks, permissions, UTF-8, or size limits before applying.",
+    },
+    FailureBranchEntry {
+        condition: "candidate text was quarantined before curation",
+        jq: r#".data.curateQuarantine[]? | {code, sourcePath, instructionRisk, rejectedReasons}"#,
+        next_action: "Review quarantine rows manually; quarantined docs bootstrap text must not become memory without curation review.",
+    },
+    FailureBranchEntry {
+        condition: "apply is attempted without curation approval",
+        jq: r#".error | select(.code == "usage") | {message, repair}"#,
+        next_action: "Run `ee bootstrap apply <run-id> --approved-only --json` only after approving curation candidates.",
     },
 ];
 
@@ -1197,6 +1238,16 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#".data.contracts[] | {name, schema, stability}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: CONTRACT_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "docs-bootstrap-cold-start",
+        title: "Compile repo docs into bootstrap candidates",
+        description: "Cold-start memory review from allowlisted docs without creating memories during dry-run.",
+        category: "curation",
+        command: "ee bootstrap docs --dry-run --json",
+        jq: r#"{runId: .data.runId, parserVersion: .data.parserVersion, candidates: (.data.candidates | length), durableMutation: .data.durableMutation, degraded: (.data.degraded // [])}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.bootstrap.docs.run.v1" and .data.parserVersion == "docs-bootstrap-v1" and .data.durableMutation == false"#,
+        failure_branches: DOCS_BOOTSTRAP_RECIPE_FAILURES,
     },
     // EE-DIST-005: Install/Update/Recovery Recipes
     AgentDocsRecipeEntry {
@@ -1565,6 +1616,48 @@ mod tests {
         ensure(
             impact_contract.description.contains("paths"),
             "impact docs mention path anchors",
+        )
+    }
+
+    #[test]
+    fn docs_bootstrap_contracts_and_recipe_are_registered() -> TestResult {
+        let run_contract = CONTRACTS
+            .iter()
+            .find(|contract| contract.name == "docs_bootstrap_run")
+            .ok_or_else(|| "docs bootstrap run contract is documented".to_string())?;
+        ensure_equal(
+            &run_contract.schema,
+            &crate::core::docs_bootstrap::DOCS_BOOTSTRAP_RUN_SCHEMA_V1,
+            "docs bootstrap run schema",
+        )?;
+
+        let apply_contract = CONTRACTS
+            .iter()
+            .find(|contract| contract.name == "docs_bootstrap_apply")
+            .ok_or_else(|| "docs bootstrap apply contract is documented".to_string())?;
+        ensure_equal(
+            &apply_contract.schema,
+            &crate::core::docs_bootstrap::DOCS_BOOTSTRAP_APPLY_SCHEMA_V1,
+            "docs bootstrap apply schema",
+        )?;
+
+        let recipe = AGENT_DOC_RECIPES
+            .iter()
+            .find(|recipe| recipe.id == "docs-bootstrap-cold-start")
+            .ok_or_else(|| "docs bootstrap cold-start recipe is documented".to_string())?;
+        ensure(
+            recipe.command == "ee bootstrap docs --dry-run --json",
+            "docs bootstrap recipe is dry-run",
+        )?;
+        ensure(
+            recipe
+                .success_check
+                .contains(crate::core::docs_bootstrap::DOCS_BOOTSTRAP_PARSER_VERSION),
+            "docs bootstrap recipe checks parser version",
+        )?;
+        ensure(
+            recipe.success_check.contains("durableMutation == false"),
+            "docs bootstrap recipe documents candidates-not-memories guarantee",
         )
     }
 

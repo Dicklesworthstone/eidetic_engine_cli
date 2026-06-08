@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.bootstrap.docs.run.v1.json",
+  "title": "ee.bootstrap.docs.run.v1",
+  "description": "ee bootstrap docs --dry-run response envelope.",
+  "type": "object",
+  "required": ["schema", "success", "data", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v2"},
+    "success": {"type": "boolean", "const": true},
+    "fields": {"type": "string"},
+    "data": {
+      "type": "object",
+      "required": [
+        "schema",
+        "parserVersion",
+        "runId",
+        "workspacePath",
+        "sourceCount",
+        "sourceBytes",
+        "maxSourceBytes",
+        "maxTotalBytes",
+        "sources",
+        "candidates",
+        "curateQuarantine",
+        "degraded",
+        "durableMutation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.bootstrap.docs.run.v1"},
+        "parserVersion": {"type": "string", "const": "docs-bootstrap-v1"},
+        "runId": {"type": "string", "minLength": 1},
+        "workspacePath": {"type": "string", "minLength": 1},
+        "sourceCount": {"type": "integer", "minimum": 0},
+        "sourceBytes": {"type": "integer", "minimum": 0},
+        "maxSourceBytes": {"type": "integer", "minimum": 0},
+        "maxTotalBytes": {"type": "integer", "minimum": 0},
+        "sources": {"type": "array", "items": {"$ref": "#/$defs/source"}},
+        "candidates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+        "curateQuarantine": {"type": "array", "items": {"$ref": "#/$defs/quarantine"}},
+        "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}},
+        "durableMutation": {"type": "boolean", "const": false}
+      }
+    },
+    "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
+  },
+  "field_presets": {
+    "minimal": ["schema", "parserVersion", "runId", "sourceCount", "candidateCount", "durableMutation"],
+    "summary": ["schema", "parserVersion", "runId", "sourceCount", "sourceBytes", "candidates", "curateQuarantine", "degraded", "durableMutation"],
+    "standard": ["*"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "anchor": {
+      "type": "object",
+      "required": ["anchorType", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "anchorType": {"type": "string"},
+        "value": {"type": "string"}
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "required": [
+        "candidateId",
+        "sourcePath",
+        "sourceHash",
+        "sourceSpan",
+        "proposedContent",
+        "redacted",
+        "redactedReasons",
+        "level",
+        "kind",
+        "tags",
+        "anchors",
+        "specificity",
+        "trustClass",
+        "rationale"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "candidateId": {"type": "string", "minLength": 1},
+        "sourcePath": {"type": "string", "minLength": 1},
+        "sourceHash": {"type": "string", "minLength": 1},
+        "sourceSpan": {"$ref": "#/$defs/sourceSpan"},
+        "proposedContent": {"type": "string"},
+        "redacted": {"type": "boolean"},
+        "redactedReasons": {"type": "array", "items": {"type": "string"}},
+        "level": {"type": "string"},
+        "kind": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "anchors": {"type": "array", "items": {"$ref": "#/$defs/anchor"}},
+        "specificity": {"type": "integer", "minimum": 0},
+        "trustClass": {"type": "string"},
+        "rationale": {"type": "string"}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "severity": {"type": "string"},
+        "message": {"type": "string"},
+        "repair": {"type": "string"},
+        "path": {"type": "string"}
+      }
+    },
+    "quarantine": {
+      "type": "object",
+      "required": [
+        "code",
+        "status",
+        "action",
+        "target",
+        "sourcePath",
+        "sourceHash",
+        "sourceSpan",
+        "candidateKind",
+        "redactedContentHash",
+        "instructionRisk",
+        "instructionScore",
+        "rejectedReasons",
+        "signalCodes",
+        "redacted",
+        "redactedReasons"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "status": {"type": "string"},
+        "action": {"type": "string"},
+        "target": {"type": "string"},
+        "sourcePath": {"type": "string", "minLength": 1},
+        "sourceHash": {"type": "string", "minLength": 1},
+        "sourceSpan": {"$ref": "#/$defs/sourceSpan"},
+        "candidateKind": {"type": "string"},
+        "redactedContentHash": {"type": "string"},
+        "instructionRisk": {"type": "string"},
+        "instructionScore": {"type": "string"},
+        "rejectedReasons": {"type": "array", "items": {"type": "string"}},
+        "signalCodes": {"type": "array", "items": {"type": "string"}},
+        "redacted": {"type": "boolean"},
+        "redactedReasons": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "relativePath",
+        "sourceKind",
+        "contentHash",
+        "byteCount",
+        "lineCount",
+        "redacted",
+        "redactedReasons"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "relativePath": {"type": "string", "minLength": 1},
+        "sourceKind": {"type": "string"},
+        "contentHash": {"type": "string", "minLength": 1},
+        "byteCount": {"type": "integer", "minimum": 0},
+        "lineCount": {"type": "integer", "minimum": 0},
+        "redacted": {"type": "boolean"},
+        "redactedReasons": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "sourceSpan": {
+      "type": "object",
+      "required": ["startLine", "endLine", "startByte", "endByte"],
+      "additionalProperties": false,
+      "properties": {
+        "startLine": {"type": "integer", "minimum": 0},
+        "endLine": {"type": "integer", "minimum": 0},
+        "startByte": {"type": "integer", "minimum": 0},
+        "endByte": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}
