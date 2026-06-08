@@ -46,7 +46,7 @@
     {"surface": "rejected_ideas", "bead": "bd-1n0np.14", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
     {"surface": "harness_contract", "bead": "bd-1n0np.15", "status": "implemented", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 4, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "implemented_artifacts_required"},
     {"surface": "memory_sentinels", "bead": "bd-1n0np.16", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "task_lens", "bead": "bd-1n0np.17", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
+    {"surface": "task_lens", "bead": "bd-1n0np.17", "status": "implemented", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 15, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "implemented_artifacts_required"},
     {"surface": "trauma_guard_loop", "bead": "bd-1n0np.18", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
     {"surface": "causal_ppr", "bead": "bd-1n0np.19", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
     {"surface": "bridge_exemption", "bead": "bd-1n0np.20", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
@@ -263,14 +263,30 @@
     {
       "id": "task_lens",
       "bead": "bd-1n0np.17",
-      "status": "planned",
+      "status": "implemented",
       "title": "Task lens compiler",
-      "plannedCommands": ["task-lens"],
-      "schemas": [],
+      "plannedCommands": ["lens list", "lens explain", "pack --lens", "pack replay"],
+      "schemas": ["ee.response.v2", "ee.pack.v2", "ee.pack.replay.v1"],
       "degradedCodes": [],
       "envVars": [],
       "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
-      "implementedArtifacts": []
+      "implementedArtifacts": [
+        "src/models/task_lens.rs",
+        "src/core/agent_docs.rs",
+        "src/core/capabilities.rs",
+        "src/cli/mod.rs",
+        "src/output/mod.rs",
+        "src/db/mod.rs",
+        "src/core/context.rs",
+        "docs/adr/0061-task-lens-compiler.md",
+        "README.md",
+        "tests/task_lens_golden.rs",
+        "tests/fixtures/golden/task_lens/lens_explain_bugfix.json.golden",
+        "tests/fixtures/golden/task_lens/pack_bugfix_replay.json.golden",
+        "tests/fixtures/golden/agent_docs/agent_docs_json.golden",
+        "tests/fixtures/golden/agent/agent_docs.json.golden",
+        "scripts/e2e_task_lens.sh"
+      ]
     },
     {
       "id": "trauma_guard_loop",

@@ -327,6 +327,7 @@ const HELP_PRELUDE: &str = concat!(
     "  remember      Capture an explicit memory\n",
     "  search        Fine-grained memory retrieval\n",
     "  pack          Assemble a task-specific context pack\n",
+    "  lens          Inspect reusable task lens policies for pack/search\n",
     "  why           Explain why a memory was stored or selected\n",
     "\n",
     "Agent shortcuts:\n",
@@ -334,7 +335,7 @@ const HELP_PRELUDE: &str = concat!(
     "\n",
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
-    "  Inspect:        status, doctor, capabilities, insights, impact, why-not, memory show, memory history\n",
+    "  Inspect:        status, doctor, capabilities, insights, impact, lens, why-not, memory show, memory history\n",
     "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome\n",
     "  Curate:         curate (candidates|validate|apply), reflect, playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
@@ -59479,7 +59480,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Success, "help exit")?;
         ensure_contains(&stdout, "Usage:", "help usage line")?;
         ensure_contains(&stdout, "Most-used commands (start here)", "help prelude")?;
-        for command in ["init", "remember", "search", "pack", "why"] {
+        for command in ["init", "remember", "search", "pack", "lens", "why"] {
             ensure_contains(
                 &stdout,
                 &format!("  {command} "),
@@ -59907,7 +59908,7 @@ mod tests {
         let (exit, stdout, stderr) = invoke(&["ee", "--help-json"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "help-json exit")?;
         ensure(stderr.is_empty(), "help-json stderr must be empty")?;
-        for cmd in &["init", "note", "pack", "why", "search", "remember"] {
+        for cmd in &["init", "note", "pack", "lens", "why", "search", "remember"] {
             ensure_contains(
                 &stdout,
                 &format!("\"name\":\"{cmd}\""),

@@ -1,6 +1,6 @@
 # ADR 0061: Task Lens Compiler
 
-Status: proposed
+Status: accepted
 Date: 2026-06-07
 Bead: bd-1n0np.17.1
 
@@ -54,3 +54,14 @@ memories but the policy that made them eligible.
   records id/version/hash → `ee why` cites the lens → `--no-lens` diverges.
 - Composes with coverage facets (gap-honesty) and the pack-record consumers
   (read-fence consistency, attestation).
+
+## Agent-Facing Registration
+
+- Discovery: `ee capabilities --json` lists `lens`, `lens list`,
+  `lens explain`, `pack`, and `pack --lens` as available command surfaces.
+- Help: `ee --help` promotes `lens` in the task-start prelude; per-command help
+  comes from the `ee lens` and `ee pack` Clap surfaces.
+- Agent docs: `ee agent-docs guide/examples/recipes/contracts --json` document
+  lens inspection, `pack --lens`, and replay-ledger auditability.
+- Audit path: `ee pack replay <pack-id> --json` exposes
+  `data.replay.ledger.taskLens.{id,version,lensHash}` for persisted packs.

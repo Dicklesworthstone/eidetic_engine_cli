@@ -12155,7 +12155,7 @@ pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
             d.field_array_of_strs(
                 "coreCommands",
                 &[
-                    "init", "remember", "search", "pack", "orient", "why", "status",
+                    "init", "remember", "search", "pack", "lens", "orient", "why", "status",
                 ],
             );
             d.field_str("recipeCatalogCommand", "ee agent-docs recipes --json");

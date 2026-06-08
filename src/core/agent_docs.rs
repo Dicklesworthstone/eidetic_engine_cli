@@ -1,6 +1,6 @@
 use crate::config::EnvVar;
 use crate::core::docs_bootstrap::{DOCS_BOOTSTRAP_APPLY_SCHEMA_V1, DOCS_BOOTSTRAP_RUN_SCHEMA_V1};
-use crate::models::{ERROR_SCHEMA_V2, RESPONSE_SCHEMA_V2};
+use crate::models::{ERROR_SCHEMA_V2, PACK_SCHEMA_V2, RESPONSE_SCHEMA_V2};
 
 fn normalized_agent_docs_token(value: &str) -> String {
     let mut normalized = String::with_capacity(value.len());
@@ -156,6 +156,10 @@ pub const GUIDE_SECTIONS: &[GuideSection] = &[
     GuideSection {
         title: "Primary Workflow",
         content: "ee pack \"<task>\" --workspace . --max-tokens 4000 --json",
+    },
+    GuideSection {
+        title: "Task Lenses",
+        content: "Use `ee lens list --json` to discover named pack policies, `ee lens explain <id> --json` to inspect effective options and the stable lens hash, and `ee pack \"<task>\" --lens <id> --json` to bind that policy into the persisted pack replay ledger.",
     },
     GuideSection {
         title: "Machine Output",
@@ -856,6 +860,12 @@ pub const CONTRACTS: &[ContractEntry] = &[
         stability: "stable",
     },
     ContractEntry {
+        name: "pack",
+        schema: PACK_SCHEMA_V2,
+        description: "Context pack payload; task-lens runs also persist lens id, version, and hash in the pack replay ledger for auditability",
+        stability: "stable",
+    },
+    ContractEntry {
         name: "error",
         schema: ERROR_SCHEMA_V2,
         description: "Standard error response with code, message, and repair hint",
@@ -900,6 +910,18 @@ pub const EXAMPLES: &[ExampleEntry] = &[
         title: "Pre-task context",
         description: "Get relevant context before starting a task",
         command: "ee pack \"fix failing CI tests\" --workspace . --max-tokens 4000 --json",
+        category: "context",
+    },
+    ExampleEntry {
+        title: "Task lens policy",
+        description: "Inspect the bugfix lens before applying it to a context pack",
+        command: "ee lens explain bugfix --json",
+        category: "context",
+    },
+    ExampleEntry {
+        title: "Task-lens context pack",
+        description: "Apply a named lens and persist its lens hash in the pack replay ledger",
+        command: "ee pack \"debug failing test\" --workspace . --lens bugfix --json",
         category: "context",
     },
     ExampleEntry {
@@ -1023,6 +1045,19 @@ pub const CONTEXT_RECIPE_FAILURES: &[FailureBranchEntry] = &[
         condition: "semantic retrieval is degraded",
         jq: r#".data.degraded[]? | select(.code == "semantic_unavailable")"#,
         next_action: "Continue with lexical results when acceptable, or run `ee index reembed --workspace .`.",
+    },
+];
+
+pub const TASK_LENS_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "requested lens is unknown or invalid",
+        jq: r#".error | select(.code == "usage") | {message, repair}"#,
+        next_action: "Run `ee lens list --json`, then retry with a listed lens id or pass `--no-lens`.",
+    },
+    FailureBranchEntry {
+        condition: "pack replay does not show lens metadata",
+        jq: r#".data.replay.ledger.taskLens // null"#,
+        next_action: "Ensure the pack was created without `--read-only` or `--no-persist`; persisted packs should carry taskLens id, version, and lensHash in the replay ledger.",
     },
 ];
 
@@ -1215,6 +1250,16 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         failure_branches: CONTEXT_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
+        id: "task-lens-context",
+        title: "Apply an inspectable task lens",
+        description: "Use a named, hash-stable pack policy such as bugfix or code-review, then audit the persisted taskLens metadata through pack replay.",
+        category: "context",
+        command: "ee pack \"<task>\" --workspace . --lens bugfix --json",
+        jq: r#"{packHash: .data.pack.hash, request: .data.request, lens: (.data.pack.taskLens // .data.taskLens // null)}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
+        failure_branches: TASK_LENS_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
         id: "impact-before-edit",
         title: "Inspect surface impact before editing",
         description: "Find anchored memories and fallback search hits for a path, symbol, command, env var, schema, degraded code, dependency, or config key.",
@@ -1363,7 +1408,7 @@ mod tests {
 
     use super::{
         AGENT_DOC_RECIPES, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, EXAMPLES, EXIT_CODES,
-        FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS, env_var_entries,
+        FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS, TASK_LENS_RECIPE_FAILURES, env_var_entries,
     };
     use crate::config::EnvVar;
     use crate::models::ProcessExitCode;
@@ -1615,6 +1660,68 @@ mod tests {
         ensure(
             response_contract.schema != legacy_schema,
             "response contract must not publish legacy schema",
+        )
+    }
+
+    #[test]
+    fn task_lens_docs_are_registered_for_agents() -> TestResult {
+        let guide = GUIDE_SECTIONS
+            .iter()
+            .find(|section| section.title == "Task Lenses")
+            .ok_or_else(|| "task lens guide section is documented".to_string())?;
+        ensure(
+            guide.content.contains("ee lens list --json")
+                && guide.content.contains("ee lens explain <id> --json")
+                && guide.content.contains("--lens <id>"),
+            "task lens guide points to list, explain, and pack --lens",
+        )?;
+
+        let pack_contract = CONTRACTS
+            .iter()
+            .find(|contract| contract.name == "pack")
+            .ok_or_else(|| "pack contract is documented".to_string())?;
+        ensure_equal(
+            &pack_contract.schema,
+            &crate::models::PACK_SCHEMA_V2,
+            "pack contract schema",
+        )?;
+        ensure(
+            pack_contract.description.contains("task-lens"),
+            "pack contract documents task-lens ledger metadata",
+        )?;
+
+        let example = EXAMPLES
+            .iter()
+            .find(|example| example.title == "Task-lens context pack")
+            .ok_or_else(|| "task-lens pack example is documented".to_string())?;
+        ensure(
+            example.command.contains("--lens bugfix"),
+            "task-lens example uses --lens",
+        )?;
+
+        let recipe = AGENT_DOC_RECIPES
+            .iter()
+            .find(|recipe| recipe.id == "task-lens-context")
+            .ok_or_else(|| "task lens recipe is documented".to_string())?;
+        ensure(
+            recipe.command.contains("--lens bugfix"),
+            "task lens recipe command uses a named lens",
+        )?;
+        ensure(
+            recipe.description.contains("pack replay"),
+            "task lens recipe documents replay auditability",
+        )?;
+        ensure_equal(
+            &recipe.failure_branches.len(),
+            &TASK_LENS_RECIPE_FAILURES.len(),
+            "task lens recipe carries dedicated failure branch count",
+        )?;
+        ensure(
+            recipe
+                .failure_branches
+                .iter()
+                .any(|branch| branch.next_action.contains("ee lens list --json")),
+            "task lens recipe tells agents how to recover unknown lenses",
         )
     }
 

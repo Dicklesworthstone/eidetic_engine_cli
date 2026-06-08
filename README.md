@@ -427,7 +427,7 @@ Current top-level groups:
 |---|---|
 | Core memory loop | `init`, `remember`, `search`, `context`, `why`, `status`, `doctor`, `capabilities`, `check`, `health` |
 | Memory lifecycle | `memory`, `rule`, `curate`, `review`, `playbook`, `procedure`, `workflow`, `outcome`, `outcome-quarantine` |
-| Packing and retrieval | `pack`, `context-show`, `show`, `link`, `tag`, `history`, `proximity`, `insights`, `subscribe` |
+| Packing and retrieval | `pack`, `lens`, `context-show`, `show`, `link`, `tag`, `history`, `proximity`, `insights`, `subscribe` |
 | Graph and structure | `graph`, `causal`, `economy`, `focus`, `learn`, `lab`, `rehearse`, `rationale`, `situation`, `task-frame` |
 | Storage and derived assets | `db`, `migrate`, `index`, `model`, `schema`, `backup`, `export`, `artifact`, `config`, `workspace` |
 | Diagnostics and release gates | `diag`, `eval`, `perf`, `preflight`, `tripwire`, `verify`, `verification`, `audit`, `claim`, `certificate`, `demo` |
@@ -445,6 +445,7 @@ Current top-level groups:
 | `ee capabilities [--json]` | Feature, schema, renderer, env-var, and capability posture |
 | `ee orient "<task>" --fast --json` | Fast read-only session-start bundle: bounded swarm brief, install/path posture, workspace hygiene, and explicit follow-up commands for full doctor/pack surfaces |
 | `ee pack "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the headline command) |
+| `ee lens list --json` / `ee lens explain <id> --json` | Inspect named task lenses such as `bugfix`, `code-review`, and `release-readiness` before applying them |
 | `ee search "<query>" [--limit N] [--explain] [--json]` | Hybrid retrieval over memories, sessions, rules, evidence |
 | `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b]` | Capture a durable memory |
 | `ee outcome <id> --signal helpful\|harmful [--reason "<reason>"]` | Record feedback, updating utility/confidence |
@@ -550,6 +551,7 @@ Common red flags:
 | Layer | Flags | Use |
 |---|---|---|
 | Retrieval profile | `--profile compact\|balanced\|grounding\|orientation\|thorough\|submodular` | Choose the memory mix and graph bias |
+| Task lens | `--lens <id>`, `--no-lens`; inspect with `ee lens list --json` and `ee lens explain <id> --json` | Apply a named, hash-stable policy overlay for common tasks such as bugfix, code-review, release-readiness, dependency-update, schema-contract, performance-investigation, or coordination-handoff |
 | Output profile | `--pack-profile lean\|standard\|verbose` | Trim or expand JSON metadata |
 | Resource profile | `--resource-profile lean\|standard\|swarm_heavy` | Pick pack assembly SLO posture |
 | Retrieval source | `--source-mode lexical_only\|semantic_only\|hybrid`, `--strict-source-mode` | Force lexical-only, semantic-only, or hybrid retrieval before packing; strict mode fails instead of falling back |
@@ -568,6 +570,7 @@ Examples:
 ```bash
 ee pack "debug release failure" \
   --workspace . \
+  --lens bugfix \
   --profile thorough \
   --pack-profile verbose \
   --resource-profile swarm_heavy \
@@ -587,6 +590,11 @@ ee pack "large agent handoff" \
   --stream \
   --format jsonl
 ```
+
+Task-lens runs persist the lens id, version, and stable lens hash in the pack
+replay ledger. Use `ee pack replay <pack-id> --json` to audit which lens shaped
+a historical pack, and rerun with `--no-lens` when you need an un-lensed
+comparison.
 
 When `[pack] adaptive_budget = true`, omitted `--max-tokens` lets `ee` compute
 a budget from retrieval entropy, graph fanout, and task keywords. Passing

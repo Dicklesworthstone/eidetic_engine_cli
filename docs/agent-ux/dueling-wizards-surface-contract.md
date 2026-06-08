@@ -76,7 +76,7 @@ map for humans.
 | `rejected_ideas` | `bd-1n0np.14` | `planned` | Durable register of rejected ideas and rationale. |
 | `harness_contract` | `bd-1n0np.15` | `implemented` | Shared e2e harness and this new-surface checklist gate. |
 | `memory_sentinels` | `bd-1n0np.16` | `planned` | Declarative per-memory validity checks. |
-| `task_lens` | `bd-1n0np.17` | `planned` | Named pack/search policies that are inspectable and reusable. |
+| `task_lens` | `bd-1n0np.17` | `implemented` | Named pack/search policies that are inspectable, reusable, and audited through pack-record lens hashes. |
 | `trauma_guard_loop` | `bd-1n0np.18` | `planned` | Bypass-evidence feedback into trauma-guard precision. |
 | `causal_ppr` | `bd-1n0np.19` | `planned` | Causal-ancestry PPR pre-warming for upstream-task lessons. |
 | `bridge_exemption` | `bd-1n0np.20` | `planned` | Protecting rare disaster-recovery memories from decay. |
