@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.attest.v1.json",
+  "title": "ee.attest.v1",
+  "description": "Response payload for `ee attest memory|pack|query --json` (bd-1n0np.22.4). The ee.response.v2 envelope wraps an ee.attest.v1 payload that surfaces a redaction-safe provenance attestation: a blake3 bundleHash over the canonical AttestationBundle (ee.attestation.bundle.v1, bd-1n0np.22.1) plus the subject, the redaction posture, and the local trust statement. The attestation attests LOCAL ee evidence custody and hash consistency — NOT objective truth. Deterministic: the same subject and database reproduce the identical bundleHash.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v2"},
+    "success": {"type": "boolean", "const": true},
+    "data": {
+      "type": "object",
+      "required": [
+        "schema",
+        "bundle",
+        "bundleHash",
+        "subjectId",
+        "subjectKind",
+        "trustStatement"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.attest.v1"},
+        "bundleHash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$",
+          "description": "blake3 hash over the canonical AttestationBundle. Deterministic for a fixed subject + database; this is the single value support-bundle/handoff/why should embed (bd-1n0np.22.3) so all surfaces share one chain-of-custody object."
+        },
+        "subjectId": {"type": "string", "description": "Memory id, pack id, or query text (per subjectKind)."},
+        "subjectKind": {"type": "string", "enum": ["memory", "pack", "query"]},
+        "rawTextIncluded": {
+          "type": ["boolean", "null"],
+          "description": "Whether raw subject text is embedded. Default false (hash-only / redaction-safe); null for hash-only query subjects that carry no raw text."
+        },
+        "objectiveTruthAttested": {
+          "type": ["boolean", "null"],
+          "description": "Always false/null: the bundle attests local custody + hash consistency, never objective truth."
+        },
+        "trustStatement": {
+          "type": "string",
+          "description": "Human-readable scope of what the attestation does and does not claim."
+        },
+        "bundle": {
+          "type": "object",
+          "description": "The canonical AttestationBundle internal manifest (schema ee.attestation.bundle.v1): subject, evidenceManifest, redactionManifest, hashManifest, omissions, trustStatement. See src/models/attestation.rs.",
+          "required": [
+            "schema",
+            "subject",
+            "evidenceManifest",
+            "redactionManifest",
+            "hashManifest",
+            "omissions",
+            "trustStatement"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "schema": {"type": "string", "const": "ee.attestation.bundle.v1"},
+            "subject": {"type": "object"},
+            "evidenceManifest": {"type": "object", "description": "Hash-referenced evidence the bundle covers (no raw payloads)."},
+            "redactionManifest": {"type": "object", "description": "What was redacted and why — redaction is recorded, never silent."},
+            "hashManifest": {"type": "object", "description": "Per-entry blake3 hashes that compose the bundleHash."},
+            "omissions": {"type": "array", "description": "Recorded omissions (no silent loss).", "items": {"type": "object"}},
+            "trustStatement": {"type": "string"}
+          }
+        }
+      }
+    }
+  }
+}
