@@ -85,6 +85,8 @@ fn lod_options(workspace_path: &Path, db_path: &Path) -> ContextPackOptions {
         coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
         output_options: ContextPackOutputOptions::default(),
         persist_pack: false,
+        require_fresh_sentinels: false,
+        no_lod: false,
     }
 }
 
@@ -207,6 +209,67 @@ fn lod_pack_hash_is_byte_stable_across_runs() -> TestResult {
     if first_hash != second_hash {
         return Err(format!(
             "LOD pack hash is not byte-stable: {first_hash} vs {second_hash}"
+        ));
+    }
+    Ok(())
+}
+
+/// bd-1n0np.5.8 acceptance gate: when the token budget is generous enough that
+/// every candidate fits the Full tier (nothing needs compressing), LOD assembly
+/// (`no_lod = false`) must produce a pack BYTE-IDENTICAL to the LOD-disabled path
+/// (`no_lod = true`). This is the "all-Full == byte-identical-to-pre-LOD" invariant
+/// the LOD feature owes (5.8): the tiering machinery must be a no-op — not even a
+/// hash-perturbing annotation — when no candidate exceeds the Full share. It also
+/// exercises the `--no-lod` escape hatch end-to-end through `ContextPackOptions`.
+#[test]
+fn lod_all_full_is_byte_identical_to_no_lod() -> TestResult {
+    let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
+    let workspace_path = temp_dir.path().to_path_buf();
+    let database_path = db_path(&workspace_path);
+    fs::create_dir_all(database_path.parent().ok_or("missing db parent")?)
+        .map_err(|error| error.to_string())?;
+
+    // Small candidates that comfortably fit the Full tier under a generous budget,
+    // so the preview / link tiers never engage and LOD has nothing to compress.
+    let _ = remember_fixture(
+        &workspace_path,
+        &database_path,
+        "lodfixture release verification compact rule one",
+    )?;
+    let _ = remember_fixture(
+        &workspace_path,
+        &database_path,
+        "lodfixture release verification compact rule two",
+    )?;
+
+    // Generous budget: every candidate fits the Full tier in both runs.
+    let mut lod_on = lod_options(&workspace_path, &database_path);
+    lod_on.max_tokens = Some(100_000);
+    lod_on.no_lod = false;
+    let mut lod_off = lod_options(&workspace_path, &database_path);
+    lod_off.max_tokens = Some(100_000);
+    lod_off.no_lod = true;
+
+    let on = run_context_pack(&lod_on).map_err(|error| format!("lod-on pack failed: {error:?}"))?;
+    let off =
+        run_context_pack(&lod_off).map_err(|error| format!("lod-off pack failed: {error:?}"))?;
+
+    let on_hash = on
+        .data
+        .pack
+        .hash
+        .clone()
+        .ok_or_else(|| "all-Full LOD pack must produce a pack hash".to_owned())?;
+    let off_hash = off
+        .data
+        .pack
+        .hash
+        .clone()
+        .ok_or_else(|| "no-LOD pack must produce a pack hash".to_owned())?;
+    if on_hash != off_hash {
+        return Err(format!(
+            "all-Full LOD pack is not byte-identical to the no-LOD pack: \
+             {on_hash} (no_lod=false) vs {off_hash} (no_lod=true)"
         ));
     }
     Ok(())
