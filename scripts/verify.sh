@@ -1080,6 +1080,11 @@ run_stage "Dueling Wizards LOD Packing E2E" "./scripts/e2e_lod_packing.sh"
 # cross-workspace shared-DB read path and the cli-gated `remember --scope global`.
 run_stage "Dueling Wizards House Rules E2E" "./scripts/e2e_house_rules.sh"
 
+# Gate 6.12: Dueling Wizards typed-kinds real-binary E2E. Real-binary, no-Cargo:
+# proves extraction-first failure fields through --kind/--field searches, typed
+# decision supersedes graph projection, and unchanged bare --kind behavior.
+run_stage "Dueling Wizards Typed Kinds E2E" "./scripts/e2e_typed_kinds.sh"
+
 # Heavy gate block: skipped under --ci-smoke for fast swarm-CI / agent
 # pre-push runs. bd-2dgn0.5: see docs/operator-swarm-slo.md for which
 # gates are dropped and how to recover coverage in a follow-up
