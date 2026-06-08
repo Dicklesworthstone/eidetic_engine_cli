@@ -57,6 +57,7 @@ set -euo pipefail
 #   4.69. CI Proof-Lane Snapshot Contract - no-Cargo proof-lane fixture gate
 #   4.70. CI Proof-Lane Hygiene Contract - no-Cargo workflow policy self-test
 #   4.705. CI Proof-Lane Hygiene Advisory - no-Cargo workflow policy scanner
+#   4.706. Release Provenance Contract - no-Cargo release provenance marker gate
 #   4.71. RCH Doc Examples Contract - no-Cargo command classifier self-test
 #   4.715. RCH Doc Examples Lint - no-Cargo docs command-shape scanner
 #   4.72. Local Cargo Tripwire Contract - no-Cargo guardrail self-test
@@ -971,6 +972,11 @@ run_stage "CI Proof-Lane Hygiene Contract" "./scripts/ci_proof_lane_hygiene.sh -
 # duplicate-dispatch, cancel-in-progress, artifact-retention, release-artifact,
 # and unclassified artifact-lane posture before spending CI/RCH proof slots.
 run_stage "CI Proof-Lane Hygiene Advisory" "./scripts/ci_proof_lane_hygiene.sh --json"
+
+# Gate 3.896: Release provenance static contract. This no-Cargo gate verifies
+# the release workflow, installer, README, publish checklist, and audit script
+# still advertise the SLSA/Sigstore provenance contract before release work.
+run_stage "Release Provenance Contract" "./scripts/e2e_release_provenance.sh --static"
 
 # Gate 3.90: RCH doc examples classifier contract. This no-Cargo self-test
 # proves the command classifier denies local Cargo examples while accepting
