@@ -18,7 +18,7 @@
 #
 # Usage:
 #   scripts/check-local-cargo-tripwire.sh --cmd '<command-line>' [--json]
-#   scripts/check-local-cargo-tripwire.sh --probe-processes [--ps-file <fixture>] [--package-cache-pids <csv>] [--json]
+#   scripts/check-local-cargo-tripwire.sh --probe-processes [--ps-file <fixture>] [--package-cache-pids <csv>] [--worktree-file <fixture>] [--json]
 #   scripts/check-local-cargo-tripwire.sh --self-test
 #
 # Exit codes: 0 = allowed/clean, 1 = bypass detected, 2 = usage error.
@@ -33,9 +33,10 @@ MODE="cmd_classify"
 CMD=""
 PS_FIXTURE=""
 PACKAGE_CACHE_PIDS_FIXTURE=""
+WORKTREE_FIXTURE=""
 
 usage() {
-    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -61,6 +62,16 @@ while [ $# -gt 0 ]; do
                 exit 2
             fi
             PACKAGE_CACHE_PIDS_FIXTURE="$1"
+            shift
+            ;;
+        --worktree-file)
+            shift
+            if [ $# -eq 0 ]; then
+                printf -- '--worktree-file requires a value\n' >&2
+                usage >&2
+                exit 2
+            fi
+            WORKTREE_FIXTURE="$1"
             shift
             ;;
         --cmd)
@@ -278,6 +289,96 @@ probe_processes() {
             "$manifest_path" "$workspace_path" "$package_cache_lock_state" \
             "$policy_status" "$(printf '%s' "$cmd" | cut -c1-200)" "$reason"
     done | sort -n -k1,1
+}
+
+canonical_worktree_path() {
+    local top
+    top=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)
+    if [ -n "$top" ] && [ -d "$top" ]; then
+        (cd "$top" 2>/dev/null && pwd -P) || printf '%s\n' "$top"
+    else
+        printf '%s\n' "$PWD"
+    fi
+}
+
+worktree_list_output() {
+    if [ -n "$WORKTREE_FIXTURE" ]; then
+        cat "$WORKTREE_FIXTURE"
+        return
+    fi
+    git -C "$PWD" worktree list --porcelain 2>/dev/null || true
+}
+
+git_common_dir_for_worktree() {
+    local worktree_path="$1"
+    local common_dir="-"
+    if [ -z "$WORKTREE_FIXTURE" ] && [ -d "$worktree_path" ]; then
+        common_dir=$(git -C "$worktree_path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+        if [ -z "$common_dir" ]; then
+            common_dir=$(git -C "$worktree_path" rev-parse --git-common-dir 2>/dev/null || true)
+        fi
+    fi
+    [ -n "$common_dir" ] || common_dir="-"
+    printf '%s\n' "$common_dir"
+}
+
+emit_forbidden_worktree_record() {
+    local canonical="$1"
+    local worktree_path="$2"
+    local head="$3"
+    local branch="$4"
+    local detached="$5"
+    local git_common_dir
+    if [ -z "$worktree_path" ] || [ "$worktree_path" = "$canonical" ]; then
+        return 0
+    fi
+    git_common_dir=$(git_common_dir_for_worktree "$worktree_path")
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$worktree_path" "$head" "$branch" "$detached" "$git_common_dir" \
+        "critical" \
+        "forbidden git worktree for single-checkout repo" \
+        "Stop verification and ask the human before cleanup; AGENTS.md still forbids git worktree remove without explicit approval."
+}
+
+forbidden_worktrees_from_text() {
+    local worktree_text="$1"
+    local canonical="$2"
+    local worktree_path=""
+    local head="-"
+    local branch="-"
+    local detached=false
+    {
+        printf '%s\n' "$worktree_text"
+        printf '\n'
+    } | while IFS= read -r line; do
+        case "$line" in
+            worktree\ *)
+                emit_forbidden_worktree_record "$canonical" "$worktree_path" "$head" "$branch" "$detached"
+                worktree_path=${line#worktree }
+                head="-"
+                branch="-"
+                detached=false
+                ;;
+            HEAD\ *) head=${line#HEAD } ;;
+            branch\ *) branch=${line#branch } ;;
+            detached) detached=true ;;
+            "")
+                emit_forbidden_worktree_record "$canonical" "$worktree_path" "$head" "$branch" "$detached"
+                worktree_path=""
+                head="-"
+                branch="-"
+                detached=false
+                ;;
+        esac
+    done
+}
+
+probe_forbidden_worktrees() {
+    local canonical
+    local worktree_text
+    canonical=$(canonical_worktree_path)
+    worktree_text=$(worktree_list_output)
+    forbidden_worktrees_from_text "$worktree_text" "$canonical" | sort
 }
 
 process_scan_ps_output() {
@@ -581,17 +682,30 @@ emit_json_cmd() {
 emit_human_probe() {
     local body="$1"
     local count="$2"
-    if [ "$count" -eq 0 ]; then
-        printf '[rch tripwire] clean: no local cargo/rustc processes targeting this repo without rch exec.\n'
+    local worktree_body="$3"
+    local worktree_count="$4"
+    if [ "$count" -eq 0 ] && [ "$worktree_count" -eq 0 ]; then
+        printf '[rch tripwire] clean: no local cargo/rustc processes targeting this repo without rch exec and no forbidden git worktrees.\n'
         return 0
     fi
-    printf '[rch tripwire] %d local cargo/rustc process(es) running without rch exec wrapper:\n' "$count"
-    printf '%s' "$body" | while IFS=$(printf '\t') read -r pid ppid elapsed command_kind subcommand cwd manifest_path workspace_path package_cache_lock_state policy_status short_cmd reason; do
-        [ -n "$pid" ] || continue
-        printf '  - pid=%s ppid=%s elapsed=%s kind=%s subcommand=%s policy=%s cwd=%s manifest=%s package_cache_lock=%s reason=%s\n      command: %s\n' \
-            "$pid" "$ppid" "$elapsed" "$command_kind" "$subcommand" "$policy_status" "$cwd" "$manifest_path" "$package_cache_lock_state" "$reason" "$short_cmd"
-    done
-    printf '  suggestion: investigate the offending shell; never automatically kill processes here.\n'
+    if [ "$count" -gt 0 ]; then
+        printf '[rch tripwire] %d local cargo/rustc process(es) running without rch exec wrapper:\n' "$count"
+        printf '%s' "$body" | while IFS=$(printf '\t') read -r pid ppid elapsed command_kind subcommand cwd manifest_path workspace_path package_cache_lock_state policy_status short_cmd reason; do
+            [ -n "$pid" ] || continue
+            printf '  - pid=%s ppid=%s elapsed=%s kind=%s subcommand=%s policy=%s cwd=%s manifest=%s package_cache_lock=%s reason=%s\n      command: %s\n' \
+                "$pid" "$ppid" "$elapsed" "$command_kind" "$subcommand" "$policy_status" "$cwd" "$manifest_path" "$package_cache_lock_state" "$reason" "$short_cmd"
+        done
+        printf '  suggestion: investigate the offending shell; never automatically kill processes here.\n'
+    fi
+    if [ "$worktree_count" -gt 0 ]; then
+        printf '[rch tripwire] %d forbidden git worktree(s) present for this single-checkout repo:\n' "$worktree_count"
+        printf '%s' "$worktree_body" | while IFS=$(printf '\t') read -r path head branch detached git_common_dir severity reason operator_action; do
+            [ -n "$path" ] || continue
+            printf '  - path=%s head=%s branch=%s detached=%s severity=%s git_common_dir=%s reason=%s\n      operator_action: %s\n' \
+                "$path" "$head" "$branch" "$detached" "$severity" "$git_common_dir" "$reason" "$operator_action"
+        done
+        printf '  suggestion: stop RCH proof until a human explicitly authorizes any cleanup/adoption action.\n'
+    fi
 }
 
 path_available_bytes() {
@@ -651,8 +765,13 @@ disk_context_json() {
 emit_json_probe() {
     local body="$1"
     local count="$2"
+    local worktree_body="$3"
+    local worktree_count="$4"
     local processes_json="[]"
+    local worktrees_json="[]"
     local disk_context="{}"
+    local canonical_worktree
+    canonical_worktree=$(canonical_worktree_path)
     if [ -n "$body" ] && command -v jq >/dev/null 2>&1; then
         # Let jq consume raw tab-separated lines so process commands with
         # backslashes, quotes, or shell escapes are JSON-escaped correctly.
@@ -676,19 +795,38 @@ emit_json_probe() {
                 })
             ')
     fi
+    if [ -n "$worktree_body" ] && command -v jq >/dev/null 2>&1; then
+        worktrees_json=$(printf '%s' "$worktree_body" |
+            jq -R -s '
+                split("\n")
+                | map(select(length > 0) | split("\t") | select(length >= 8) | {
+                    path:.[0],
+                    head:.[1],
+                    branch:(if .[2] == "-" then null else .[2] end),
+                    detached:(.[3] == "true"),
+                    gitCommonDir:(if .[4] == "-" then null else .[4] end),
+                    severity:.[5],
+                    reason:.[6],
+                    operatorAction:.[7]
+                })
+            ')
+    fi
     if command -v jq >/dev/null 2>&1; then
         disk_context=$(disk_context_json)
     fi
     local status="ok"
-    if [ "$count" -gt 0 ]; then status="bypass_detected"; fi
+    if [ "$count" -gt 0 ] || [ "$worktree_count" -gt 0 ]; then status="bypass_detected"; fi
     if command -v jq >/dev/null 2>&1; then
         jq -cn \
             --arg schema "$REPORT_SCHEMA" \
             --arg mode "probe_processes" \
             --arg status "$status" \
             --arg required_remote_wrapper "$REQUIRED_REMOTE_WRAPPER" \
+            --arg canonical_worktree "$canonical_worktree" \
             --argjson count "$count" \
+            --argjson worktree_count "$worktree_count" \
             --argjson processes "$processes_json" \
+            --argjson worktrees "$worktrees_json" \
             --argjson disk_context "$disk_context" \
             '($processes | map({
                 policyStatus:.policyStatus,
@@ -710,36 +848,61 @@ emit_json_probe() {
                 mode:$mode,
                 status:$status,
                 count:$count,
+                forbiddenWorktreeCount:$worktree_count,
                 processes:$processes,
+                forbiddenWorktrees:$worktrees,
                 disk_pressure_context:$disk_context,
                 localBuildPolicy:{
                     policy:"rch_only",
-                    status:(if $count > 0 then "blocked" else "satisfied" end),
+                    status:(if ($count > 0 or $worktree_count > 0) then "blocked" else "satisfied" end),
                     commandScope:"active_process_scan",
                     allowedReadOnlyCargoSubcommands:["metadata","locate-project","pkgid","tree"]
+                },
+                worktreePolicy:{
+                    policy:"single_canonical_worktree",
+                    status:(if $worktree_count > 0 then "blocked" else "satisfied" end),
+                    commandScope:"git_worktree_list_porcelain",
+                    canonicalWorktree:$canonical_worktree,
+                    forbiddenWorktreeCount:$worktree_count
                 },
                 requiredRemoteWrapper:$required_remote_wrapper,
                 detectedLocalBuilds:$detected,
                 repairActions:(
-                    if $count > 0 then
+                    (if $count > 0 then
                         [{
                             priority:1,
                             kind:"inspect_shell_without_killing",
                             command:null,
                             message:"Inspect the reported process owner and command; this detector never kills or cleans up processes."
                         }]
-                    else [] end
+                    else [] end) +
+                    (if $worktree_count > 0 then
+                        [{
+                            priority:2,
+                            kind:"request_human_worktree_cleanup_approval",
+                            command:null,
+                            message:"A forbidden git worktree exists. Do not run git worktree remove, delete files, checkout, reset, stash, or mutate it without explicit human approval."
+                        }]
+                    else [] end)
                 ),
-                evidence:[{
-                    kind:"active_process_scan",
-                    result:$status,
-                    processCount:$count,
-                    diskPressureContext:$disk_context
-                }]
+                evidence:[
+                    {
+                        kind:"active_process_scan",
+                        result:(if $count > 0 then "bypass_detected" else "ok" end),
+                        processCount:$count,
+                        diskPressureContext:$disk_context
+                    },
+                    {
+                        kind:"forbidden_worktree_scan",
+                        result:(if $worktree_count > 0 then "bypass_detected" else "ok" end),
+                        canonicalWorktree:$canonical_worktree,
+                        forbiddenWorktreeCount:$worktree_count
+                    }
+                ]
             }'
     else
-        printf '{"schema":"%s","mode":"probe_processes","status":"%s","count":%d,"processes":[]}\n' \
-            "$REPORT_SCHEMA" "$status" "$count"
+        printf '{"schema":"%s","mode":"probe_processes","status":"%s","count":%d,"forbiddenWorktreeCount":%d,"processes":[],"forbiddenWorktrees":[]}\n' \
+            "$REPORT_SCHEMA" "$status" "$count" "$worktree_count"
     fi
 }
 
@@ -876,6 +1039,61 @@ run_self_test() {
         allowed*) ;;
         *) printf 'self-test FAILED: empty command must be allowed; got %s\n' "$result" >&2; exit 1 ;;
     esac
+    local old_worktree_fixture="$WORKTREE_FIXTURE"
+    local clean_worktree_porcelain
+    local forbidden_worktree_porcelain
+    local multiple_worktree_porcelain
+    local worktree_body
+    local worktree_count
+    WORKTREE_FIXTURE="self-test"
+    clean_worktree_porcelain=$(cat <<'EOF'
+worktree /Users/jemanuel/projects/eidetic_engine_cli
+HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+branch refs/heads/main
+EOF
+)
+    worktree_body=$(forbidden_worktrees_from_text "$clean_worktree_porcelain" "/Users/jemanuel/projects/eidetic_engine_cli")
+    if [ -n "$worktree_body" ]; then
+        printf 'self-test FAILED: canonical-only worktree fixture must be clean; got %s\n' "$worktree_body" >&2
+        exit 1
+    fi
+    forbidden_worktree_porcelain=$(cat <<'EOF'
+worktree /Users/jemanuel/projects/eidetic_engine_cli
+HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+branch refs/heads/main
+
+worktree /Users/jemanuel/projects/ee-clean-verify
+HEAD bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+detached
+EOF
+)
+    worktree_body=$(forbidden_worktrees_from_text "$forbidden_worktree_porcelain" "/Users/jemanuel/projects/eidetic_engine_cli")
+    worktree_count=$(printf '%s' "$worktree_body" | grep -c . || true)
+    if [ "$worktree_count" -ne 1 ] || ! printf '%s' "$worktree_body" | grep -Fq '/Users/jemanuel/projects/ee-clean-verify'; then
+        printf 'self-test FAILED: detached forbidden worktree fixture must produce one row; got %s\n' "$worktree_body" >&2
+        exit 1
+    fi
+    multiple_worktree_porcelain=$(cat <<'EOF'
+worktree /Users/jemanuel/projects/eidetic_engine_cli
+HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+branch refs/heads/main
+
+worktree /Users/jemanuel/projects/ee-clean-verify
+HEAD bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+detached
+
+worktree /tmp/eidetic-engine-extra
+HEAD cccccccccccccccccccccccccccccccccccccccc
+branch refs/heads/feature
+EOF
+)
+    worktree_body=$(forbidden_worktrees_from_text "$multiple_worktree_porcelain" "/Users/jemanuel/projects/eidetic_engine_cli")
+    worktree_count=$(printf '%s' "$worktree_body" | grep -c . || true)
+    WORKTREE_FIXTURE="$old_worktree_fixture"
+    if [ "$worktree_count" -ne 2 ] || ! printf '%s' "$worktree_body" | grep -Fq 'refs/heads/feature'; then
+        printf 'self-test FAILED: multiple-worktree fixture must produce two rows with branch data; got %s\n' "$worktree_body" >&2
+        exit 1
+    fi
     if command -v jq >/dev/null 2>&1; then
         repair_kind=$(emit_json_cmd \
             "denied" \
@@ -893,23 +1111,30 @@ run_self_test() {
         PACKAGE_CACHE_PIDS_FIXTURE="102"
         fixture_body=$(probe_processes | sort -n -k1,1)
         fixture_count=$(printf '%s' "$fixture_body" | grep -c . || true)
-        fixture_report=$(emit_json_probe "$fixture_body" "$fixture_count")
+        fixture_report=$(emit_json_probe "$fixture_body" "$fixture_count" "$worktree_body" "$worktree_count")
         PS_FIXTURE="$old_ps_fixture"
         PACKAGE_CACHE_PIDS_FIXTURE="$old_package_cache_pids_fixture"
         if ! printf '%s' "$fixture_report" | jq -e '
             .count == 3
+            and .forbiddenWorktreeCount == 2
+            and .localBuildPolicy.status == "blocked"
+            and .worktreePolicy.status == "blocked"
             and ([.processes[].command] | map(contains("lsd")) | any | not)
             and ([.processes[].command] | map(contains("bash -s --")) | any | not)
             and ([.processes[].command] | map(contains("ssh -i")) | any | not)
             and any(.detectedLocalBuilds[]; .policyStatus == "local_cargo_read_only_lock_holder" and .subcommand == "metadata" and .packageCacheLockHeld == true)
             and any(.detectedLocalBuilds[]; .policyStatus == "local_cargo_disallowed" and .subcommand == "test" and .manifestPath == "/Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml")
             and any(.detectedLocalBuilds[]; .policyStatus == "local_rust_tool_disallowed" and .commandKind == "rustc")
+            and any(.forbiddenWorktrees[]; .path == "/Users/jemanuel/projects/ee-clean-verify" and .detached == true and .severity == "critical")
+            and any(.forbiddenWorktrees[]; .path == "/tmp/eidetic-engine-extra" and .branch == "refs/heads/feature" and .detached == false)
+            and any(.repairActions[]; .kind == "request_human_worktree_cleanup_approval")
+            and any(.evidence[]; .kind == "forbidden_worktree_scan" and .result == "bypass_detected")
         ' >/dev/null; then
-            printf 'self-test FAILED: process scan fixture did not produce expected classifications; got %s\n' "$fixture_report" >&2
+            printf 'self-test FAILED: process/worktree scan fixture did not produce expected classifications; got %s\n' "$fixture_report" >&2
             exit 1
         fi
     fi
-    printf 'self-test PASSED: 21 classifier cases, JSON repair action, stable-wrapper/ssh exclusion, and process fixture produced expected outcomes\n'
+    printf 'self-test PASSED: 21 classifier cases, JSON repair action, stable-wrapper/ssh exclusion, process fixture, and worktree fixtures produced expected outcomes\n'
     exit 0
 }
 
@@ -946,12 +1171,18 @@ case "$MODE" in
         else
             COUNT=0
         fi
-        if [ "$JSON_OUTPUT" = true ]; then
-            emit_json_probe "$BODY" "$COUNT"
+        WORKTREE_BODY=$(probe_forbidden_worktrees || true)
+        if [ -n "$WORKTREE_BODY" ]; then
+            WORKTREE_COUNT=$(printf '%s' "$WORKTREE_BODY" | grep -c . || true)
         else
-            emit_human_probe "$BODY" "$COUNT"
+            WORKTREE_COUNT=0
         fi
-        if [ "$COUNT" -gt 0 ]; then exit 1; fi
+        if [ "$JSON_OUTPUT" = true ]; then
+            emit_json_probe "$BODY" "$COUNT" "$WORKTREE_BODY" "$WORKTREE_COUNT"
+        else
+            emit_human_probe "$BODY" "$COUNT" "$WORKTREE_BODY" "$WORKTREE_COUNT"
+        fi
+        if [ "$COUNT" -gt 0 ] || [ "$WORKTREE_COUNT" -gt 0 ]; then exit 1; fi
         exit 0
         ;;
 esac
