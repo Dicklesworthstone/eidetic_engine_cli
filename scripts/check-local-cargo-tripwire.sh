@@ -209,8 +209,15 @@ probe_processes() {
     if [ -z "$ps_output" ]; then
         return 0
     fi
+    local rust_process_lines
+    rust_process_lines=$(printf '%s\n' "$ps_output" | grep -E "(^|[[:space:]/'\"(;])cargo([[:space:]]|$)|(^|[[:space:]/'\"(;])rustc([[:space:]]|$)|(^|[[:space:]/'\"(;])rustdoc([[:space:]]|$)" || true)
+    if [ -z "$rust_process_lines" ]; then
+        return 0
+    fi
+    local lock_holder_pids
+    lock_holder_pids=$(package_cache_lock_pids)
     # `ps` on macOS prints PID with leading spaces; normalize.
-    printf '%s\n' "$ps_output" | while IFS= read -r line; do
+    printf '%s\n' "$rust_process_lines" | while IFS= read -r line; do
         local pid
         local ppid
         local elapsed
@@ -251,18 +258,29 @@ probe_processes() {
         if is_ssh_remote_rust_payload_command "$cmd"; then
             continue
         fi
-        local cwd="-"
-        cwd=$(process_cwd "$pid")
-        # Only flag processes operating on this repo.
         local matches_repo=false
         for hint in $REPO_PATH_HINTS; do
             case "$cmd" in
                 *"$hint"*) matches_repo=true; break ;;
             esac
         done
-        case "$cwd" in
-            "$PWD"*) matches_repo=true ;;
-        esac
+        if [ "$matches_repo" != true ]; then
+            local parent_cmd
+            parent_cmd=$(parent_command_from_ps_output "$ps_output" "$ppid")
+            for hint in $REPO_PATH_HINTS; do
+                case "$parent_cmd" in
+                    *"$hint"*) matches_repo=true; break ;;
+                esac
+            done
+        fi
+        local cwd="-"
+        if [ "$matches_repo" != true ]; then
+            cwd=$(process_cwd "$pid")
+            case "$cwd" in
+                "$PWD"*) matches_repo=true ;;
+            esac
+        fi
+        # Only flag processes operating on this repo.
         [ "$matches_repo" = true ] || continue
         # Skip if an RCH exec helper appears anywhere in the command
         # (this is the remote-execution local launcher process). The
@@ -281,7 +299,7 @@ probe_processes() {
         subcommand=$(cargo_subcommand_from_command "$cmd")
         manifest_path=$(manifest_path_from_command "$cmd" "$cwd")
         workspace_path=$(workspace_path_from_manifest "$manifest_path" "$cwd")
-        package_cache_lock_state=$(package_cache_lock_state "$pid")
+        package_cache_lock_state=$(package_cache_lock_state "$pid" "$lock_holder_pids")
         policy_status=$(active_process_policy_status "$command_kind" "$subcommand" "$package_cache_lock_state")
         reason=$(active_process_reason "$command_kind" "$subcommand" "$package_cache_lock_state")
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -393,11 +411,44 @@ bounded_lsof() {
     if ! command -v lsof >/dev/null 2>&1; then
         return 127
     fi
+    local timeout_bin
+    timeout_bin=$(timeout_command)
+    if [ -n "$timeout_bin" ]; then
+        "$timeout_bin" 2s lsof "$@"
+        return
+    fi
     if command -v perl >/dev/null 2>&1; then
         perl -e 'alarm shift; exec @ARGV' 2 lsof "$@"
     else
         lsof "$@"
     fi
+}
+
+timeout_command() {
+    local candidate
+    for candidate in /opt/homebrew/bin/timeout gtimeout timeout; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+        if command -v "$candidate" >/dev/null 2>&1; then
+            command -v "$candidate"
+            return
+        fi
+    done
+}
+
+parent_command_from_ps_output() {
+    local ps_text="$1"
+    local parent_pid="$2"
+    [ -n "$parent_pid" ] || return 0
+    printf '%s\n' "$ps_text" | awk -v wanted_pid="$parent_pid" '
+        $1 == wanted_pid {
+            sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+/, "")
+            print
+            exit
+        }
+    '
 }
 
 process_cwd() {
@@ -523,8 +574,13 @@ workspace_path_from_manifest() {
 
 package_cache_lock_state() {
     local pid="$1"
+    local lock_holder_pids="${2:-}"
+    if printf '%s\n' "$lock_holder_pids" | grep -Fxq "__UNAVAILABLE__"; then
+        printf 'unavailable\n'
+        return
+    fi
     if [ -n "$PACKAGE_CACHE_PIDS_FIXTURE" ]; then
-        if printf '%s\n' "$PACKAGE_CACHE_PIDS_FIXTURE" | tr ', ' '\n' | grep -Fxq "$pid"; then
+        if printf '%s\n' "$lock_holder_pids" | grep -Fxq "$pid"; then
             printf 'held\n'
         else
             printf 'not_observed\n'
@@ -535,16 +591,31 @@ package_cache_lock_state() {
         printf 'unavailable\n'
         return
     fi
-    local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-    local lock_path="$cargo_home/.package-cache"
-    if [ ! -e "$lock_path" ]; then
-        printf 'unavailable\n'
-        return
-    fi
-    if bounded_lsof -a -p "$pid" "$lock_path" >/dev/null 2>&1; then
+    if printf '%s\n' "$lock_holder_pids" | grep -Fxq "$pid"; then
         printf 'held\n'
     else
         printf 'not_observed\n'
+    fi
+}
+
+package_cache_lock_pids() {
+    if [ -n "$PACKAGE_CACHE_PIDS_FIXTURE" ]; then
+        printf '%s\n' "$PACKAGE_CACHE_PIDS_FIXTURE" | tr ', ' '\n' | grep -E '^[0-9]+$' || true
+        return
+    fi
+    if [ -n "$PS_FIXTURE" ]; then
+        return
+    fi
+    local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+    local lock_path="$cargo_home/.package-cache"
+    if [ ! -e "$lock_path" ]; then
+        return
+    fi
+    local holders
+    if holders=$(bounded_lsof -t "$lock_path" 2>/dev/null); then
+        printf '%s\n' "$holders" | sort -u
+    else
+        printf '__UNAVAILABLE__\n'
     fi
 }
 
