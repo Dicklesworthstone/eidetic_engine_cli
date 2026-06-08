@@ -12685,14 +12685,26 @@ impl DbConnection {
     /// 5-class enum from ADR 0009; passing an invalid class returns
     /// an error from the storage layer rather than panicking.
     pub fn update_memory_trust_class(&self, id: &str, new_class: &str) -> Result<bool> {
+        let Some(existing) = self.get_memory(id)? else {
+            return Ok(false);
+        };
+        if existing.tombstoned_at.is_some() {
+            return Ok(false);
+        }
+
         let now = Utc::now().to_rfc3339();
+        let mut updated = existing.clone();
+        updated.trust_class = new_class.to_string();
+        let provenance_chain_hash = compute_memory_provenance_chain_hash(&updated);
         let affected = self.execute_for(
             DbOperation::Execute,
-            "UPDATE memories SET trust_class = ?1, updated_at = ?2 \
-             WHERE id = ?3 AND tombstoned_at IS NULL",
+            "UPDATE memories SET trust_class = ?1, updated_at = ?2, provenance_chain_hash = ?3, provenance_chain_hash_version = ?4, provenance_verification_status = ?5, provenance_verified_at = NULL, provenance_verification_note = NULL WHERE id = ?6 AND tombstoned_at IS NULL",
             &[
                 Value::Text(new_class.to_string()),
                 Value::Text(now),
+                Value::Text(provenance_chain_hash),
+                Value::Text(PROVENANCE_CHAIN_HASH_VERSION.to_string()),
+                Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
                 Value::Text(id.to_string()),
             ],
         )?;
@@ -12962,6 +12974,30 @@ impl DbConnection {
             self.garbage_collect_auto_memory_links_for_memory_inner(memory_id)?;
         }
         Ok(())
+    }
+
+    /// Persist the latest provenance verification outcome for a live memory.
+    ///
+    /// This helper does not emit audit rows; callers that also perform trust or
+    /// curation mutations compose those side effects in the same transaction.
+    pub fn update_memory_provenance_verification(
+        &self,
+        memory_id: &str,
+        status: &str,
+        verified_at: &str,
+        note: &str,
+    ) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET provenance_verification_status = ?1, provenance_verified_at = ?2, provenance_verification_note = ?3 WHERE id = ?4 AND tombstoned_at IS NULL",
+            &[
+                Value::Text(status.to_string()),
+                Value::Text(verified_at.to_string()),
+                Value::Text(note.to_string()),
+                Value::Text(memory_id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
     }
 
     /// Inspect a deterministic sample of memory provenance chain hashes without
@@ -28267,6 +28303,83 @@ mod tests {
             super::compute_memory_provenance_chain_hash(&missing_optional)
                 != super::compute_memory_provenance_chain_hash(&literal_optional),
             "missing optional provenance differs from literal optional text",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn update_memory_trust_class_refreshes_provenance_chain_hash() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let memory_id = "mem_01234567890123456789012345";
+        let input = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "procedural".to_string(),
+            kind: "rule".to_string(),
+            content: "Refresh provenance chain metadata when trust changes.".to_string(),
+            workflow_id: None,
+            confidence: 0.8,
+            utility: 0.7,
+            importance: 0.9,
+            provenance_uri: Some("file://runbook.md#L10".to_string()),
+            trust_class: "human_explicit".to_string(),
+            trust_subclass: Some("runbook".to_string()),
+            tags: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        };
+        connection.insert_memory(memory_id, &input)?;
+        connection.verify_sampled_memory_provenance("wsp_01234567890123456789012345", 10)?;
+
+        let before = connection
+            .get_memory(memory_id)?
+            .ok_or_else(|| TestFailure::new("memory not found before trust update"))?;
+        ensure_equal(
+            &before.provenance_verification_status.as_str(),
+            &super::PROVENANCE_STATUS_VERIFIED,
+            "precondition provenance status",
+        )?;
+        ensure(
+            before.provenance_verified_at.is_some(),
+            "precondition verified timestamp recorded",
+        )?;
+
+        let updated = connection.update_memory_trust_class(memory_id, "agent_assertion")?;
+        ensure(updated, "trust-class update should affect the memory")?;
+
+        let after = connection
+            .get_memory(memory_id)?
+            .ok_or_else(|| TestFailure::new("memory not found after trust update"))?;
+        ensure_equal(
+            &after.trust_class.as_str(),
+            &"agent_assertion",
+            "trust class after update",
+        )?;
+        ensure(
+            after.provenance_chain_hash != before.provenance_chain_hash,
+            "trust-class update changes stored provenance chain hash",
+        )?;
+        ensure_equal(
+            &after.provenance_chain_hash,
+            &Some(super::compute_memory_provenance_chain_hash(&after)),
+            "stored provenance hash after trust update",
+        )?;
+        ensure_equal(
+            &after.provenance_verification_status.as_str(),
+            &super::PROVENANCE_STATUS_UNVERIFIED,
+            "trust update resets stale provenance verification status",
+        )?;
+        ensure(
+            after.provenance_verified_at.is_none(),
+            "trust update clears stale provenance verification timestamp",
+        )?;
+        ensure(
+            after.provenance_verification_note.is_none(),
+            "trust update clears stale provenance verification note",
         )?;
 
         connection.close()?;

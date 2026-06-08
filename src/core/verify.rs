@@ -32,15 +32,18 @@ use serde::{Deserialize, Serialize};
 
 use super::{build_info, duration_millis_saturating};
 use crate::core::memory::{EvidenceFreshnessStatus, assess_memory_evidence_freshness};
+use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
-    CreateAuditInput, CreateWorkspaceInput, DbConnection, WorkspaceScopeFields, audit_actions,
-    generate_audit_id,
+    CreateAuditInput, CreateCurationCandidateInput, CreateWorkspaceInput, DbConnection,
+    PROVENANCE_STATUS_MISMATCH, PROVENANCE_STATUS_MISSING, PROVENANCE_STATUS_SKIPPED,
+    PROVENANCE_STATUS_VERIFIED, WorkspaceScopeFields, audit_actions, generate_audit_id,
 };
 use crate::models::{
-    DomainError, LineSpan, ProducerMetadata, ProvenanceUri, RESPONSE_SCHEMA_V2,
-    VERIFICATION_EVIDENCE_SCHEMA_V1, VerificationClosureGuidance, VerificationEvidenceRecord,
-    VerificationGateRequirement, VerificationStatus, rch_cargo_closure_requirements,
-    verification_closure_guidance, verification_evidence_beads_summary,
+    CandidateId, DomainError, LineSpan, ProducerMetadata, ProvenanceUri, RESPONSE_SCHEMA_V2,
+    TrustClass, VERIFICATION_EVIDENCE_SCHEMA_V1, VerificationClosureGuidance,
+    VerificationEvidenceRecord, VerificationGateRequirement, VerificationStatus,
+    rch_cargo_closure_requirements, verification_closure_guidance,
+    verification_evidence_beads_summary,
 };
 
 // ============================================================================
@@ -53,6 +56,7 @@ pub const VERIFY_RECORD_REPORT_SCHEMA_V1: &str = "ee.verify.record_report.v1";
 pub const VERIFY_CLOSURE_GUIDANCE_REPORT_SCHEMA_V1: &str = "ee.verify.closure_guidance_report.v1";
 pub const VERIFY_PROVENANCE_REPORT_SCHEMA_V1: &str = "ee.verify.provenance.v1";
 pub const VERIFY_PROVENANCE_REFERENT_SCHEMA_V1: &str = "ee.verify.provenance_referent.v1";
+pub const VERIFY_PROVENANCE_MUTATION_SCHEMA_V1: &str = "ee.verify.provenance_mutation.v1";
 pub const VERIFICATION_LEDGER_ENTRY_SCHEMA_V1: &str = "ee.verification.ledger_entry.v1";
 pub const VERIFICATION_POSTURE_SCHEMA_V1: &str = "ee.verification.posture.v1";
 const LEGACY_VERIFICATION_RECORD_ACTION: &str = "verification.record";
@@ -63,6 +67,8 @@ const VERIFY_PROVENANCE_FILE_SCAN_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const VERIFY_PROVENANCE_GIT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_VERIFY_PROVENANCE_LIMIT: u32 = 100;
 pub const DEFAULT_VERIFY_PROVENANCE_STALE_AFTER_DAYS: u32 = 7;
+const VERIFY_PROVENANCE_ACTOR: &str = "ee verify provenance";
+const VERIFY_PROVENANCE_CANDIDATE_CONFIDENCE: f32 = 0.82;
 
 /// Schema for artifact policy.
 pub const ARTIFACT_POLICY_SCHEMA_V1: &str = "ee.artifact_policy.v1";
@@ -744,9 +750,9 @@ impl VerifyProvenanceReferentStatus {
 ///
 /// Enforces two invariants: ee NEVER removes a memory (RULE 1 / no silent
 /// mutation) — it demotes (audited) and raises a `revalidate` curation
-/// candidate; and an `Unverifiable` referent (e.g. cass down, network-gated) is
-/// advisory ONLY — never demoted, mirroring "cass missing -> unverifiable, not
-/// missing".
+/// candidate whose reason requests evidence revalidation; and an `Unverifiable`
+/// referent (e.g. cass down, network-gated) is advisory ONLY — never demoted,
+/// mirroring "cass missing -> unverifiable, not missing".
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProvenanceReverifyAction {
     /// Referent re-verified — no action.
@@ -754,8 +760,8 @@ pub enum ProvenanceReverifyAction {
     /// Referent could not be checked — advisory only: no demotion, no candidate.
     Advisory,
     /// Referent is gone or drifted — write an audited demotion (trust-class /
-    /// freshness transition) and raise a revalidate curation candidate. The
-    /// memory is never removed.
+    /// freshness transition) and raise a review candidate requesting evidence
+    /// revalidation. The memory is never removed.
     DemoteAndRevalidate,
 }
 
@@ -771,7 +777,7 @@ impl ProvenanceReverifyAction {
         }
     }
 
-    /// Whether this action writes an audited demotion + revalidate candidate.
+    /// Whether this action writes an audited demotion + revalidation candidate.
     #[must_use]
     pub const fn demotes(self) -> bool {
         matches!(self, Self::DemoteAndRevalidate)
@@ -814,6 +820,56 @@ impl VerifyProvenanceReferentReport {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifyProvenanceMutationReport {
+    pub schema: &'static str,
+    pub memory_id: String,
+    pub status: VerifyProvenanceReferentStatus,
+    pub action: ProvenanceReverifyAction,
+    pub persisted: bool,
+    pub previous_verification_status: String,
+    pub new_verification_status: String,
+    pub previous_verified_at: Option<String>,
+    pub new_verified_at: Option<String>,
+    pub verification_status_updated: bool,
+    pub previous_trust_class: String,
+    pub new_trust_class: String,
+    pub trust_class_updated: bool,
+    pub trust_audit_id: Option<String>,
+    pub candidate_id: Option<String>,
+    pub candidate_type: Option<String>,
+    pub candidate_status: Option<String>,
+    pub candidate_audit_id: Option<String>,
+    pub reason: String,
+}
+
+impl VerifyProvenanceMutationReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": self.schema,
+            "memoryId": self.memory_id,
+            "status": self.status.as_str(),
+            "action": self.action.as_str(),
+            "persisted": self.persisted,
+            "previousVerificationStatus": self.previous_verification_status,
+            "newVerificationStatus": self.new_verification_status,
+            "previousVerifiedAt": self.previous_verified_at,
+            "newVerifiedAt": self.new_verified_at,
+            "verificationStatusUpdated": self.verification_status_updated,
+            "previousTrustClass": self.previous_trust_class,
+            "newTrustClass": self.new_trust_class,
+            "trustClassUpdated": self.trust_class_updated,
+            "trustAuditId": self.trust_audit_id,
+            "candidateId": self.candidate_id,
+            "candidateType": self.candidate_type,
+            "candidateStatus": self.candidate_status,
+            "candidateAuditId": self.candidate_audit_id,
+            "reason": self.reason,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct VerifyProvenanceOptions<'a> {
     pub workspace_path: &'a Path,
@@ -823,6 +879,7 @@ pub struct VerifyProvenanceOptions<'a> {
     pub stale_after_days: u32,
     pub limit: u32,
     pub allow_network: bool,
+    pub dry_run: bool,
     pub now: DateTime<Utc>,
 }
 
@@ -834,6 +891,7 @@ pub struct VerifyProvenanceMemoryReport {
     pub previous_verified_at: Option<String>,
     pub checked_at: String,
     pub referent: VerifyProvenanceReferentReport,
+    pub mutation: Option<VerifyProvenanceMutationReport>,
 }
 
 impl VerifyProvenanceMemoryReport {
@@ -846,6 +904,7 @@ impl VerifyProvenanceMemoryReport {
             "previousVerifiedAt": self.previous_verified_at,
             "checkedAt": self.checked_at,
             "referent": self.referent.data_json(),
+            "mutation": self.mutation.as_ref().map(VerifyProvenanceMutationReport::data_json),
         })
     }
 }
@@ -868,6 +927,11 @@ pub struct VerifyProvenanceReport {
     pub evidence_missing_count: u32,
     pub evidence_drift_count: u32,
     pub unverifiable_count: u32,
+    pub dry_run: bool,
+    pub mutation_count: u32,
+    pub trust_demotion_count: u32,
+    pub curation_candidate_count: u32,
+    pub audit_count: u32,
     pub records: Vec<VerifyProvenanceMemoryReport>,
 }
 
@@ -908,6 +972,14 @@ impl VerifyProvenanceReport {
                         "checkedAt".to_owned(),
                         serde_json::Value::String(record.checked_at.clone()),
                     );
+                    object.insert(
+                        "mutation".to_owned(),
+                        record
+                            .mutation
+                            .as_ref()
+                            .map(VerifyProvenanceMutationReport::data_json)
+                            .unwrap_or(serde_json::Value::Null),
+                    );
                 }
                 referent
             })
@@ -929,6 +1001,11 @@ impl VerifyProvenanceReport {
             "evidenceMissingCount": self.evidence_missing_count,
             "evidenceDriftCount": self.evidence_drift_count,
             "unverifiableCount": self.unverifiable_count,
+            "dryRun": self.dry_run,
+            "mutationCount": self.mutation_count,
+            "trustDemotionCount": self.trust_demotion_count,
+            "curationCandidateCount": self.curation_candidate_count,
+            "auditCount": self.audit_count,
             "referents": referents,
             "records": records,
         })
@@ -948,6 +1025,21 @@ impl VerifyProvenanceReport {
             }
             VerifyProvenanceReferentStatus::Unverifiable => {
                 self.unverifiable_count = self.unverifiable_count.saturating_add(1);
+            }
+        }
+        if let Some(mutation) = &record.mutation {
+            self.mutation_count = self.mutation_count.saturating_add(1);
+            if mutation.trust_class_updated {
+                self.trust_demotion_count = self.trust_demotion_count.saturating_add(1);
+            }
+            if mutation.candidate_audit_id.is_some() {
+                self.curation_candidate_count = self.curation_candidate_count.saturating_add(1);
+            }
+            if mutation.trust_audit_id.is_some() {
+                self.audit_count = self.audit_count.saturating_add(1);
+            }
+            if mutation.candidate_audit_id.is_some() {
+                self.audit_count = self.audit_count.saturating_add(1);
             }
         }
         self.records.push(record);
@@ -1044,6 +1136,11 @@ pub fn verify_bounded_provenance(
         evidence_missing_count: 0,
         evidence_drift_count: 0,
         unverifiable_count: 0,
+        dry_run: options.dry_run,
+        mutation_count: 0,
+        trust_demotion_count: 0,
+        curation_candidate_count: 0,
+        audit_count: 0,
         records: Vec::new(),
     };
     let referent_options = VerifyProvenanceReferentOptions {
@@ -1074,6 +1171,14 @@ pub fn verify_bounded_provenance(
             options.workspace_path,
             verify_provenance_referent(&provenance_uri, &referent_options),
         );
+        let mutation = apply_provenance_reverify_action(
+            options.database,
+            options.workspace_id,
+            &memory,
+            &referent,
+            &checked_at,
+            options.dry_run,
+        )?;
         report.push(VerifyProvenanceMemoryReport {
             memory_id: memory.id,
             provenance_uri,
@@ -1081,10 +1186,360 @@ pub fn verify_bounded_provenance(
             previous_verified_at: memory.provenance_verified_at,
             checked_at: checked_at.clone(),
             referent,
+            mutation,
         });
     }
 
     Ok(report)
+}
+
+fn apply_provenance_reverify_action(
+    database: &DbConnection,
+    workspace_id: &str,
+    memory: &crate::db::StoredMemory,
+    referent: &VerifyProvenanceReferentReport,
+    checked_at: &str,
+    dry_run: bool,
+) -> Result<Option<VerifyProvenanceMutationReport>, DomainError> {
+    let action = referent.status.reverify_action();
+    if dry_run {
+        if !action.demotes() {
+            return Ok(None);
+        }
+        let Some(current_memory) =
+            database
+                .get_memory(&memory.id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to inspect memory before provenance dry run: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?
+        else {
+            return Ok(None);
+        };
+        if current_memory.tombstoned_at.is_some() {
+            return Ok(None);
+        }
+
+        let candidate_id = provenance_reverify_candidate_id(workspace_id, &memory.id, referent);
+        let previous_trust_class = current_memory.trust_class.clone();
+        let new_trust_class = provenance_reverify_demoted_trust_class(&previous_trust_class)
+            .unwrap_or(&previous_trust_class)
+            .to_owned();
+        let reason = provenance_reverify_reason(&current_memory, referent);
+        let new_verification_status = provenance_reverify_memory_status(referent.status).to_owned();
+        return Ok(Some(VerifyProvenanceMutationReport {
+            schema: VERIFY_PROVENANCE_MUTATION_SCHEMA_V1,
+            memory_id: current_memory.id.clone(),
+            status: referent.status,
+            action,
+            persisted: false,
+            previous_verification_status: current_memory.provenance_verification_status.clone(),
+            new_verification_status,
+            previous_verified_at: current_memory.provenance_verified_at.clone(),
+            new_verified_at: Some(checked_at.to_owned()),
+            verification_status_updated: false,
+            previous_trust_class,
+            new_trust_class,
+            trust_class_updated: false,
+            trust_audit_id: None,
+            candidate_id: Some(candidate_id),
+            candidate_type: Some(CandidateType::Deprecate.as_str().to_owned()),
+            candidate_status: Some("planned".to_owned()),
+            candidate_audit_id: None,
+            reason,
+        }));
+    }
+
+    database
+        .with_transaction(|| {
+            let Some(current_memory) = database.get_memory(&memory.id)? else {
+                return Ok(None);
+            };
+            if current_memory.tombstoned_at.is_some() {
+                return Ok(None);
+            }
+
+            let previous_verification_status =
+                current_memory.provenance_verification_status.clone();
+            let new_verification_status =
+                provenance_reverify_memory_status(referent.status).to_owned();
+            let previous_verified_at = current_memory.provenance_verified_at.clone();
+            let new_verified_at = Some(checked_at.to_owned());
+            let previous_trust_class = current_memory.trust_class.clone();
+            let mut new_trust_class = previous_trust_class.clone();
+            let reason = provenance_reverify_reason(&current_memory, referent);
+            let verification_note = provenance_reverify_verification_note(referent);
+            let mut trust_class_updated = false;
+            let candidate_id = provenance_reverify_candidate_id(workspace_id, &memory.id, referent);
+            let trust_audit_id = if action.demotes() {
+                new_trust_class = provenance_reverify_demoted_trust_class(&previous_trust_class)
+                    .unwrap_or(&previous_trust_class)
+                    .to_owned();
+                if previous_trust_class != new_trust_class {
+                    trust_class_updated =
+                        database.update_memory_trust_class(&current_memory.id, &new_trust_class)?;
+                    if trust_class_updated {
+                        let trust_audit_id = generate_audit_id();
+                        database.insert_audit(
+                            &trust_audit_id,
+                            &CreateAuditInput {
+                                workspace_id: Some(workspace_id.to_owned()),
+                                actor: Some(VERIFY_PROVENANCE_ACTOR.to_owned()),
+                                action: audit_actions::TRUST_CLASS_TRANSITION.to_owned(),
+                                target_type: Some("memory".to_owned()),
+                                target_id: Some(current_memory.id.clone()),
+                                details: Some(provenance_reverify_trust_audit_details(
+                                    &current_memory,
+                                    referent,
+                                    checked_at,
+                                    &previous_trust_class,
+                                    &new_trust_class,
+                                    &candidate_id,
+                                )),
+                            },
+                        )?;
+                        Some(trust_audit_id)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let verification_status_updated = database.update_memory_provenance_verification(
+                &current_memory.id,
+                &new_verification_status,
+                checked_at,
+                &verification_note,
+            )?;
+
+            if !action.demotes() {
+                return Ok(Some(VerifyProvenanceMutationReport {
+                    schema: VERIFY_PROVENANCE_MUTATION_SCHEMA_V1,
+                    memory_id: current_memory.id.clone(),
+                    status: referent.status,
+                    action,
+                    persisted: verification_status_updated,
+                    previous_verification_status,
+                    new_verification_status,
+                    previous_verified_at,
+                    new_verified_at,
+                    verification_status_updated,
+                    previous_trust_class: previous_trust_class.clone(),
+                    new_trust_class: previous_trust_class,
+                    trust_class_updated: false,
+                    trust_audit_id: None,
+                    candidate_id: None,
+                    candidate_type: None,
+                    candidate_status: None,
+                    candidate_audit_id: None,
+                    reason,
+                }));
+            }
+
+            let existing_candidate =
+                database.get_curation_candidate(workspace_id, &candidate_id)?;
+            let (candidate_status, candidate_audit_id) = if existing_candidate.is_some() {
+                ("already_exists".to_owned(), None)
+            } else {
+                database.insert_curation_candidate(
+                    &candidate_id,
+                    &CreateCurationCandidateInput {
+                        workspace_id: workspace_id.to_owned(),
+                        candidate_type: CandidateType::Deprecate.as_str().to_owned(),
+                        target_memory_id: Some(current_memory.id.clone()),
+                        proposed_content: None,
+                        proposed_confidence: Some(
+                            (current_memory.confidence * 0.5).clamp(0.0, 1.0),
+                        ),
+                        proposed_trust_class: trust_class_updated.then(|| new_trust_class.clone()),
+                        source_type: CandidateSource::RuleEngine.as_str().to_owned(),
+                        source_id: Some(provenance_reverify_source_id(&current_memory, referent)),
+                        reason: reason.clone(),
+                        confidence: VERIFY_PROVENANCE_CANDIDATE_CONFIDENCE,
+                        status: Some(CandidateStatus::Pending.as_str().to_owned()),
+                        created_at: Some(checked_at.to_owned()),
+                        ttl_expires_at: None,
+                        derivation_source_refs_json: None,
+                        derivation_metadata_json: None,
+                    },
+                )?;
+                let candidate_audit_id = generate_audit_id();
+                database.insert_audit(
+                    &candidate_audit_id,
+                    &CreateAuditInput {
+                        workspace_id: Some(workspace_id.to_owned()),
+                        actor: Some(VERIFY_PROVENANCE_ACTOR.to_owned()),
+                        action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
+                        target_type: Some("curation_candidate".to_owned()),
+                        target_id: Some(candidate_id.clone()),
+                        details: Some(provenance_reverify_candidate_audit_details(
+                            &current_memory,
+                            referent,
+                            checked_at,
+                            &candidate_id,
+                        )),
+                    },
+                )?;
+                ("created".to_owned(), Some(candidate_audit_id))
+            };
+
+            Ok(Some(VerifyProvenanceMutationReport {
+                schema: VERIFY_PROVENANCE_MUTATION_SCHEMA_V1,
+                memory_id: current_memory.id.clone(),
+                status: referent.status,
+                action,
+                persisted: verification_status_updated
+                    || trust_audit_id.is_some()
+                    || candidate_audit_id.is_some(),
+                previous_verification_status,
+                new_verification_status,
+                previous_verified_at,
+                new_verified_at,
+                verification_status_updated,
+                previous_trust_class,
+                new_trust_class,
+                trust_class_updated,
+                trust_audit_id,
+                candidate_id: Some(candidate_id),
+                candidate_type: Some(CandidateType::Deprecate.as_str().to_owned()),
+                candidate_status: Some(candidate_status),
+                candidate_audit_id,
+                reason,
+            }))
+        })
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to persist provenance revalidation action: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })
+}
+
+fn provenance_reverify_memory_status(status: VerifyProvenanceReferentStatus) -> &'static str {
+    match status {
+        VerifyProvenanceReferentStatus::Verified => PROVENANCE_STATUS_VERIFIED,
+        VerifyProvenanceReferentStatus::EvidenceMissing => PROVENANCE_STATUS_MISSING,
+        VerifyProvenanceReferentStatus::EvidenceDrift => PROVENANCE_STATUS_MISMATCH,
+        VerifyProvenanceReferentStatus::Unverifiable => PROVENANCE_STATUS_SKIPPED,
+    }
+}
+
+fn provenance_reverify_verification_note(referent: &VerifyProvenanceReferentReport) -> String {
+    format!(
+        "external provenance reverify {}: {}",
+        referent.status.as_str(),
+        referent.reason.as_str()
+    )
+}
+
+fn provenance_reverify_demoted_trust_class(previous: &str) -> Option<&'static str> {
+    match TrustClass::from_str(previous).ok()? {
+        TrustClass::HumanExplicit | TrustClass::AgentValidated => {
+            Some(TrustClass::AgentAssertion.as_str())
+        }
+        TrustClass::AgentAssertion | TrustClass::CassEvidence | TrustClass::LegacyImport => None,
+    }
+}
+
+fn provenance_reverify_candidate_id(
+    workspace_id: &str,
+    memory_id: &str,
+    referent: &VerifyProvenanceReferentReport,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for part in [
+        "ee.verify.provenance.revalidate.v1",
+        workspace_id,
+        memory_id,
+        referent.uri.as_str(),
+        referent.status.as_str(),
+        referent.reason.as_str(),
+    ] {
+        hasher.update(part.as_bytes());
+        hasher.update(b"\0");
+    }
+    let hash = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    let candidate = CandidateId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string();
+    format!("curate_{}", candidate.trim_start_matches("cand_"))
+}
+
+fn provenance_reverify_source_id(
+    memory: &crate::db::StoredMemory,
+    referent: &VerifyProvenanceReferentReport,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(memory.id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(referent.uri.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(referent.status.as_str().as_bytes());
+    format!("verify_provenance:{}", hasher.finalize().to_hex())
+}
+
+fn provenance_reverify_reason(
+    memory: &crate::db::StoredMemory,
+    referent: &VerifyProvenanceReferentReport,
+) -> String {
+    format!(
+        "Provenance re-verification reported {} for memory {} at {} ({}); revalidate the cited evidence before authoritative use.",
+        referent.status.as_str(),
+        memory.id.as_str(),
+        referent.uri.as_str(),
+        referent.reason.as_str()
+    )
+}
+
+fn provenance_reverify_trust_audit_details(
+    memory: &crate::db::StoredMemory,
+    referent: &VerifyProvenanceReferentReport,
+    checked_at: &str,
+    previous_trust_class: &str,
+    new_trust_class: &str,
+    candidate_id: &str,
+) -> String {
+    serde_json::json!({
+        "schema": VERIFY_PROVENANCE_MUTATION_SCHEMA_V1,
+        "memoryId": memory.id.as_str(),
+        "provenanceUri": referent.uri.as_str(),
+        "status": referent.status.as_str(),
+        "reason": referent.reason.as_str(),
+        "referentHash": referent.referent_hash.as_deref(),
+        "action": referent.status.reverify_action().as_str(),
+        "previousTrustClass": previous_trust_class,
+        "newTrustClass": new_trust_class,
+        "trustClassUpdated": true,
+        "candidateId": candidate_id,
+        "checkedAt": checked_at,
+        "noRemoval": true,
+    })
+    .to_string()
+}
+
+fn provenance_reverify_candidate_audit_details(
+    memory: &crate::db::StoredMemory,
+    referent: &VerifyProvenanceReferentReport,
+    checked_at: &str,
+    candidate_id: &str,
+) -> String {
+    serde_json::json!({
+        "schema": VERIFY_PROVENANCE_MUTATION_SCHEMA_V1,
+        "candidateId": candidate_id,
+        "candidateType": CandidateType::Deprecate.as_str(),
+        "targetMemoryId": memory.id.as_str(),
+        "provenanceUri": referent.uri.as_str(),
+        "status": referent.status.as_str(),
+        "reason": referent.reason.as_str(),
+        "sourceType": CandidateSource::RuleEngine.as_str(),
+        "sourceId": provenance_reverify_source_id(memory, referent),
+        "checkedAt": checked_at,
+        "purpose": "provenance_revalidate",
+        "noRemoval": true,
+    })
+    .to_string()
 }
 
 fn verify_memory_provenance_referent(
@@ -2680,6 +3135,7 @@ mod tests {
             stale_after_days: 7,
             limit: 10,
             allow_network: false,
+            dry_run: true,
             now,
         })
         .map_err(|error| error.to_string())?;
@@ -2734,6 +3190,7 @@ mod tests {
             stale_after_days: 7,
             limit: 10,
             allow_network: false,
+            dry_run: true,
             now,
         })
         .map_err(|error| error.to_string())?;
@@ -2745,6 +3202,112 @@ mod tests {
             &report.records[0].referent.status,
             &VerifyProvenanceReferentStatus::Verified,
             "explicit referent verified",
+        )
+    }
+
+    #[test]
+    fn bounded_provenance_persists_status_and_respects_stale_window() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(temp.path().join("fresh.md"), "fresh\n")
+            .map_err(|error| error.to_string())?;
+        let connection = provenance_fixture_connection(temp.path())?;
+        let workspace_id = "wsp_verify_provenance_fixture";
+        let memory_id = "mem_00000000000000000000009108";
+        insert_provenance_fixture_memory(
+            &connection,
+            workspace_id,
+            memory_id,
+            "file://fresh.md#L1",
+        )?;
+        let now = DateTime::parse_from_rfc3339("2026-06-07T12:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+
+        let report = verify_bounded_provenance(VerifyProvenanceOptions {
+            workspace_path: temp.path(),
+            database: &connection,
+            workspace_id,
+            memory_id: Some(memory_id),
+            stale_after_days: 7,
+            limit: 10,
+            allow_network: false,
+            dry_run: false,
+            now,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(&report.checked_count, &1, "checked")?;
+        ensure_equal(&report.verified_count, &1, "verified")?;
+        ensure_equal(&report.mutation_count, &1, "verification status mutation")?;
+        let mutation = report.records[0]
+            .mutation
+            .as_ref()
+            .ok_or_else(|| "expected verification status mutation".to_owned())?;
+        ensure(mutation.persisted, "verification status persisted")?;
+        ensure(
+            mutation.verification_status_updated,
+            "verification status updated",
+        )?;
+        ensure_equal(
+            &mutation.previous_verification_status.as_str(),
+            &"unverified",
+            "previous verification status",
+        )?;
+        ensure_equal(
+            &mutation.new_verification_status.as_str(),
+            &PROVENANCE_STATUS_VERIFIED,
+            "new verification status",
+        )?;
+        ensure_equal(
+            &mutation.new_verified_at.as_deref(),
+            &Some("2026-06-07T12:00:00+00:00"),
+            "new verified_at",
+        )?;
+        let stored = connection
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory removed".to_owned())?;
+        ensure_equal(
+            &stored.provenance_verification_status.as_str(),
+            &PROVENANCE_STATUS_VERIFIED,
+            "stored verification status",
+        )?;
+        ensure_equal(
+            &stored.provenance_verified_at.as_deref(),
+            &Some("2026-06-07T12:00:00+00:00"),
+            "stored verified_at",
+        )?;
+        ensure(
+            stored
+                .provenance_verification_note
+                .as_deref()
+                .is_some_and(|note| note.contains("file_span_present")),
+            "stored note mentions referent reason",
+        )?;
+
+        let later = DateTime::parse_from_rfc3339("2026-06-08T12:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+        let second_report = verify_bounded_provenance(VerifyProvenanceOptions {
+            workspace_path: temp.path(),
+            database: &connection,
+            workspace_id,
+            memory_id: None,
+            stale_after_days: 7,
+            limit: 10,
+            allow_network: false,
+            dry_run: false,
+            now: later,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(&second_report.inspected_count, &1, "second inspected")?;
+        ensure_equal(&second_report.due_count, &0, "second due")?;
+        ensure_equal(&second_report.checked_count, &0, "second checked")?;
+        ensure_equal(
+            &second_report.skipped_recent_count,
+            &1,
+            "second skipped recent",
         )
     }
 
@@ -2777,6 +3340,7 @@ mod tests {
             stale_after_days: 7,
             limit: 10,
             allow_network: false,
+            dry_run: false,
             now,
         })
         .map_err(|error| error.to_string())?;
@@ -2798,6 +3362,345 @@ mod tests {
             &report.data_json()["referents"][0]["action"],
             &serde_json::json!("demote_and_revalidate"),
             "flat referent action",
+        )?;
+        ensure_equal(&report.mutation_count, &1, "mutation count")?;
+        ensure_equal(&report.trust_demotion_count, &1, "trust demotion count")?;
+        ensure_equal(
+            &report.curation_candidate_count,
+            &1,
+            "curation candidate count",
+        )?;
+        ensure_equal(&report.audit_count, &2, "audit count")?;
+        let mutation = report.records[0]
+            .mutation
+            .as_ref()
+            .ok_or_else(|| "expected persisted provenance mutation".to_owned())?;
+        ensure(mutation.persisted, "mutation persisted")?;
+        ensure(mutation.trust_class_updated, "trust class updated")?;
+        ensure_equal(
+            &mutation.previous_trust_class.as_str(),
+            &"human_explicit",
+            "previous trust class",
+        )?;
+        ensure_equal(
+            &mutation.new_trust_class.as_str(),
+            &"agent_assertion",
+            "new trust class",
+        )?;
+        ensure_equal(
+            &mutation.candidate_status.as_deref(),
+            &Some("created"),
+            "candidate created",
+        )?;
+        let candidate_id = mutation
+            .candidate_id
+            .as_deref()
+            .ok_or_else(|| "candidate id missing".to_owned())?;
+        let stored = connection
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory removed".to_owned())?;
+        ensure(stored.tombstoned_at.is_none(), "memory not tombstoned")?;
+        ensure_equal(
+            &stored.trust_class.as_str(),
+            &"agent_assertion",
+            "stored trust class demoted",
+        )?;
+        ensure_equal(
+            &stored.provenance_chain_hash,
+            &Some(crate::db::compute_memory_provenance_chain_hash(&stored)),
+            "stored provenance chain hash tracks demoted trust class",
+        )?;
+        ensure_equal(
+            &stored.provenance_verification_status.as_str(),
+            &PROVENANCE_STATUS_MISMATCH,
+            "stored verification status mismatch",
+        )?;
+        ensure_equal(
+            &stored.provenance_verified_at.as_deref(),
+            &Some("2026-06-07T12:00:00+00:00"),
+            "drift verified_at persisted",
+        )?;
+        let candidates = connection
+            .list_curation_candidates(
+                workspace_id,
+                Some(CandidateType::Deprecate.as_str()),
+                Some("pending"),
+                Some(memory_id),
+            )
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&candidates.len(), &1, "one curation candidate")?;
+        ensure_equal(
+            &candidates[0].id.as_str(),
+            &candidate_id,
+            "candidate id persisted",
+        )?;
+        ensure(
+            candidates[0].reason.contains("Provenance re-verification"),
+            "candidate reason mentions provenance re-verification",
+        )?;
+        let memory_audits = connection
+            .list_audit_by_target("memory", memory_id, Some(10))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            memory_audits
+                .iter()
+                .any(|entry| entry.action == audit_actions::TRUST_CLASS_TRANSITION),
+            "trust transition audit persisted",
+        )?;
+        let candidate_audits = connection
+            .list_audit_by_target("curation_candidate", candidate_id, Some(10))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            candidate_audits
+                .iter()
+                .any(|entry| entry.action == audit_actions::CURATION_CANDIDATE_CREATE),
+            "candidate create audit persisted",
+        )?;
+
+        let second_now = DateTime::parse_from_rfc3339("2026-06-07T12:05:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+        let second_report = verify_bounded_provenance(VerifyProvenanceOptions {
+            workspace_path: temp.path(),
+            database: &connection,
+            workspace_id,
+            memory_id: Some(memory_id),
+            stale_after_days: 7,
+            limit: 10,
+            allow_network: false,
+            dry_run: false,
+            now: second_now,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure_equal(&second_report.mutation_count, &1, "repeat mutation report")?;
+        ensure_equal(&second_report.audit_count, &0, "repeat audit count")?;
+        ensure_equal(
+            &second_report.trust_demotion_count,
+            &0,
+            "repeat trust demotion count",
+        )?;
+        ensure_equal(
+            &second_report.curation_candidate_count,
+            &0,
+            "repeat curation candidate count",
+        )?;
+        let second_mutation = second_report.records[0]
+            .mutation
+            .as_ref()
+            .ok_or_else(|| "expected repeat provenance mutation report".to_owned())?;
+        ensure(
+            second_mutation.persisted,
+            "repeat mutation persists verification status",
+        )?;
+        ensure(
+            second_mutation.verification_status_updated,
+            "repeat mutation updates verification status",
+        )?;
+        ensure_equal(
+            &second_mutation.candidate_status.as_deref(),
+            &Some("already_exists"),
+            "repeat candidate status",
+        )
+    }
+
+    #[test]
+    fn bounded_provenance_does_not_mutate_tombstoned_memory() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(temp.path().join("source.md"), "original cited evidence\n")
+            .map_err(|error| error.to_string())?;
+        let connection = provenance_fixture_connection(temp.path())?;
+        let workspace_id = "wsp_verify_provenance_fixture";
+        let memory_id = "mem_00000000000000000000009105";
+        insert_provenance_fixture_memory_with_content(
+            &connection,
+            workspace_id,
+            memory_id,
+            "original cited evidence",
+            "file://source.md#L1",
+        )?;
+        ensure(
+            connection
+                .tombstone_memory(memory_id)
+                .map_err(|error| error.to_string())?,
+            "fixture memory tombstoned",
+        )?;
+        std::fs::write(temp.path().join("source.md"), "changed cited evidence\n")
+            .map_err(|error| error.to_string())?;
+        let now = DateTime::parse_from_rfc3339("2026-06-07T12:10:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+
+        let report = verify_bounded_provenance(VerifyProvenanceOptions {
+            workspace_path: temp.path(),
+            database: &connection,
+            workspace_id,
+            memory_id: Some(memory_id),
+            stale_after_days: 7,
+            limit: 10,
+            allow_network: false,
+            dry_run: false,
+            now,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &report.checked_count,
+            &1,
+            "explicit tombstoned memory checked",
+        )?;
+        ensure_equal(
+            &report.evidence_drift_count,
+            &1,
+            "tombstoned referent still classified",
+        )?;
+        ensure_equal(&report.mutation_count, &0, "no tombstoned mutation")?;
+        ensure_equal(&report.audit_count, &0, "no tombstoned audit")?;
+        ensure(
+            report.records[0].mutation.is_none(),
+            "tombstoned memory has no mutation report",
+        )?;
+        let candidates = connection
+            .list_curation_candidates(
+                workspace_id,
+                Some(CandidateType::Deprecate.as_str()),
+                Some("pending"),
+                Some(memory_id),
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            candidates.is_empty(),
+            "tombstoned memory does not get a curation candidate",
+        )?;
+        let audits = connection
+            .list_audit_by_target("memory", memory_id, Some(10))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            audits
+                .iter()
+                .all(|entry| entry.action != audit_actions::TRUST_CLASS_TRANSITION),
+            "tombstoned memory does not get a trust transition audit",
+        )
+    }
+
+    #[test]
+    fn provenance_reverify_rechecks_tombstone_state_inside_write_transaction() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let connection = provenance_fixture_connection(temp.path())?;
+        let workspace_id = "wsp_verify_provenance_fixture";
+        let memory_id = "mem_00000000000000000000009106";
+        insert_provenance_fixture_memory_with_content(
+            &connection,
+            workspace_id,
+            memory_id,
+            "original cited evidence",
+            "file://source.md#L1",
+        )?;
+        let stale_snapshot = connection
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "fixture memory missing".to_owned())?;
+        ensure(
+            stale_snapshot.tombstoned_at.is_none(),
+            "stale snapshot starts live",
+        )?;
+        ensure(
+            connection
+                .tombstone_memory(memory_id)
+                .map_err(|error| error.to_string())?,
+            "fixture memory tombstoned after snapshot",
+        )?;
+        let referent = provenance_referent_report(
+            "file://source.md#L1",
+            "file",
+            VerifyProvenanceReferentStatus::EvidenceDrift,
+            "file_referent_content_drift".to_owned(),
+            None,
+            None,
+        );
+
+        let mutation = apply_provenance_reverify_action(
+            &connection,
+            workspace_id,
+            &stale_snapshot,
+            &referent,
+            "2026-06-07T12:15:00Z",
+            false,
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            mutation.is_none(),
+            "stale snapshot does not mutate tombstoned memory",
+        )?;
+        let candidates = connection
+            .list_curation_candidates(
+                workspace_id,
+                Some(CandidateType::Deprecate.as_str()),
+                Some("pending"),
+                Some(memory_id),
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            candidates.is_empty(),
+            "stale snapshot does not create curation candidate",
+        )?;
+        let audits = connection
+            .list_audit_by_target("memory", memory_id, Some(10))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            audits
+                .iter()
+                .all(|entry| entry.action != audit_actions::TRUST_CLASS_TRANSITION),
+            "stale snapshot does not create trust transition audit",
+        )
+    }
+
+    #[test]
+    fn provenance_reverify_dry_run_rechecks_tombstone_state_before_planning() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let connection = provenance_fixture_connection(temp.path())?;
+        let workspace_id = "wsp_verify_provenance_fixture";
+        let memory_id = "mem_00000000000000000000009107";
+        insert_provenance_fixture_memory_with_content(
+            &connection,
+            workspace_id,
+            memory_id,
+            "original cited evidence",
+            "file://source.md#L1",
+        )?;
+        let stale_snapshot = connection
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "fixture memory missing".to_owned())?;
+        ensure(
+            connection
+                .tombstone_memory(memory_id)
+                .map_err(|error| error.to_string())?,
+            "fixture memory tombstoned after snapshot",
+        )?;
+        let referent = provenance_referent_report(
+            "file://source.md#L1",
+            "file",
+            VerifyProvenanceReferentStatus::EvidenceDrift,
+            "file_referent_content_drift".to_owned(),
+            None,
+            None,
+        );
+
+        let mutation = apply_provenance_reverify_action(
+            &connection,
+            workspace_id,
+            &stale_snapshot,
+            &referent,
+            "2026-06-07T12:20:00Z",
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            mutation.is_none(),
+            "dry run does not plan tombstoned memory mutation",
         )
     }
 
@@ -2851,7 +3754,7 @@ mod tests {
                     utility: 0.7,
                     importance: 0.6,
                     provenance_uri: Some(provenance_uri.to_owned()),
-                    trust_class: "agent_assertion".to_owned(),
+                    trust_class: "human_explicit".to_owned(),
                     trust_subclass: None,
                     tags: Vec::new(),
                     valid_from: None,
@@ -3190,7 +4093,7 @@ mod tests {
         // Conservatism: an unverifiable referent is advisory only, never demoted.
         assert_eq!(Status::Unverifiable.reverify_action(), Action::Advisory);
         assert!(!Status::Unverifiable.reverify_action().demotes());
-        // Gone / drifted -> audited demotion + revalidate candidate (never removal).
+        // Gone / drifted -> audited demotion + revalidation candidate (never removal).
         assert_eq!(
             Status::EvidenceMissing.reverify_action(),
             Action::DemoteAndRevalidate
