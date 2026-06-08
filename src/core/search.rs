@@ -11718,6 +11718,12 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
+        connection
+            .set_memory_typed_fields_json(
+                "mem_11000000000000000000000003",
+                Some(r#"{"options":["local cache","RCH remote"],"chosen":"RCH remote"}"#),
+            )
+            .map_err(|error| error.to_string())?;
 
         let mut report = SearchReport {
             status: SearchStatus::Success,
@@ -11783,6 +11789,43 @@ mod tests {
         .map_err(|error| error.to_string())?;
         assert_eq!(empty_report.status, SearchStatus::NoResults);
         assert!(empty_report.results.is_empty());
+
+        let mut list_value_report = SearchReport {
+            status: SearchStatus::Success,
+            query: "decision options".to_owned(),
+            requested_limit: 10,
+            results: vec![
+                synthetic_hit("mem_11000000000000000000000001", 0.9),
+                synthetic_hit("mem_11000000000000000000000003", 0.8),
+            ],
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+        let filters = [TypedMemoryFieldFilter::parse("options=RCH remote")?];
+        apply_memory_kind_and_typed_field_filters_to_report_with_connection(
+            &connection,
+            &mut list_value_report,
+            Some("decision"),
+            &filters,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(list_value_report.status, SearchStatus::Success);
+        assert_eq!(list_value_report.results.len(), 1);
+        assert_eq!(
+            list_value_report.results[0].doc_id,
+            "mem_11000000000000000000000003"
+        );
 
         connection.close().map_err(|error| error.to_string())
     }

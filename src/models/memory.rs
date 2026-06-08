@@ -1431,6 +1431,75 @@ mod tests {
     }
 
     #[test]
+    fn typed_memory_fields_extract_risk_patterns_from_body() {
+        let canonical = extract_typed_memory_fields_json_with_redactor(
+            &MemoryKind::Risk,
+            "Trigger: running local Cargo during RCH-only swarms. Blast radius: fills the internal SSD. Safer alternative: use RCH remote proof.",
+            str::to_owned,
+        )
+        .expect("risk body extracts")
+        .expect("risk body has typed fields");
+        let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("canonical JSON");
+
+        assert_eq!(parsed["schema"], TYPED_MEMORY_FIELDS_SCHEMA_V1);
+        assert_eq!(parsed["kind"], "risk");
+        assert_eq!(
+            parsed["fields"]["trigger"],
+            "running local Cargo during RCH-only swarms"
+        );
+        assert_eq!(parsed["fields"]["blast_radius"], "fills the internal SSD");
+        assert_eq!(
+            parsed["fields"]["safer_alternative"],
+            "use RCH remote proof"
+        );
+    }
+
+    #[test]
+    fn typed_memory_fields_do_not_fabricate_from_bare_bodies() {
+        for kind in [
+            MemoryKind::Failure,
+            MemoryKind::Decision,
+            MemoryKind::Command,
+            MemoryKind::Risk,
+            MemoryKind::AntiPattern,
+        ] {
+            let extracted = extract_typed_memory_fields_json_with_redactor(
+                &kind,
+                "This memory intentionally has no typed labels, no negative-evidence prefixes, and no command literal.",
+                str::to_owned,
+            )
+            .expect("bare body extraction is allowed");
+
+            assert_eq!(extracted, None, "kind {kind:?} fabricated typed fields");
+        }
+    }
+
+    #[test]
+    fn typed_memory_fields_extraction_is_idempotent_and_lossless() {
+        let canonical = extract_typed_memory_fields_json_with_redactor(
+            &MemoryKind::Decision,
+            "Options: local cache, RCH remote. Chosen: RCH remote. Rationale: avoids local Cargo. Supersedes: mem_00000000000000000000000001.",
+            str::to_owned,
+        )
+        .expect("decision body extracts")
+        .expect("decision body has typed fields");
+
+        let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("canonical JSON");
+        let serialized = serde_json::to_string(&parsed).expect("serialize parsed sidecar");
+        let recanonicalized =
+            canonicalize_typed_memory_fields_json(&MemoryKind::Decision, &serialized)
+                .expect("sidecar recanonicalizes");
+
+        assert_eq!(recanonicalized, canonical);
+        assert_eq!(parsed["fields"]["options"][0], "local cache");
+        assert_eq!(parsed["fields"]["options"][1], "RCH remote");
+        assert_eq!(
+            parsed["fields"]["supersedes"],
+            "mem_00000000000000000000000001"
+        );
+    }
+
+    #[test]
     fn typed_memory_fields_extract_returns_none_for_unsupported_kind() {
         let extracted = extract_typed_memory_fields_json_with_redactor(
             &MemoryKind::Rule,
