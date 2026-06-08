@@ -301,6 +301,7 @@ in the same commit, keeping the catalog complete by construction.
 | `agent_mail_semantic_readiness_failed` | swarm brief, swarm work-packet | warning | bd-2s48u |
 | `rch_remote_required_fallback_prevented` | swarm brief | warning | bd-1zb7k.13.4 (C4) |
 | `rch_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
+| `rch_verify_client_daemon_version_skew` | verify proofs, rch verifier | warning | bd-37ugy (RCH) |
 | `rch_verify_remote_transport_timeout` | verify proofs, rch verifier | warning | bd-37ugy (RCH) |
 | `rch_verify_worker_health_threshold_blocked` | verify proofs, rch verifier | warning | bd-37ugy (RCH) |
 | `rch_worker_topology_blocked` | swarm brief | warning | bd-1zb7k.13.4 (C4) |
@@ -368,6 +369,7 @@ in-band statuses, not top-level `degraded[]` entries:
   becomes a top-level degraded code.
 - RCH posture unavailable -> existing fixtures `rch_unavailable`,
   `rch_remote_required_fallback_prevented`, `rch_worker_topology_blocked`,
+  `rch_verify_client_daemon_version_skew`,
   `rch_verify_remote_transport_timeout`, and
   `rch_verify_worker_health_threshold_blocked`.
 - first-failure redacted -> `firstFailureSummaryRef.rawOutputIncluded: false`

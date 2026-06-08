@@ -187,6 +187,7 @@ const ENVIRONMENT_BLOCKER_DEGRADED_CODES: &[&str] = &[
     "rch_verify_build_admission_unavailable",
     "rch_verify_cargo_path_dependency_version_blocked",
     "rch_verify_topology_blocked",
+    "rch_verify_client_daemon_version_skew",
     "rch_verify_worker_disk_full",
     "rch_verify_worker_health_threshold_blocked",
     "rch_verify_remote_transport_timeout",

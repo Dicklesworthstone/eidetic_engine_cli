@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "rch_verify_client_daemon_version_skew",
+  "introduced_by": {
+    "bead": "bd-37ugy",
+    "epic_letter": "RCH"
+  },
+  "surfaces": [
+    "verify proofs",
+    "rch verifier"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "The RCH verifier sees a daemon response shape the selected client cannot parse, such as an unknown selector variant, so the proof is classified as an environment blocker before Cargo starts.",
+    "setup_commands": [
+      "# run scripts/rch_verify.sh while the RCH daemon emits a selector response variant newer than the verifier client understands"
+    ],
+    "invocation": "scripts/rch_verify.sh --summary --no-write -- cargo test --test contracts dueling_wizards_verify_wiring -- --nocapture"
+  },
+  "expected_emission": {
+    "code": "rch_verify_client_daemon_version_skew",
+    "severity": "warning",
+    "message_contains": [
+      "rch_verify_client_daemon_version_skew",
+      "unknown variant"
+    ],
+    "repair_contains": "bd-37ugy"
+  }
+}
