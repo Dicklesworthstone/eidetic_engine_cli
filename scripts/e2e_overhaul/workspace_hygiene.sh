@@ -896,7 +896,7 @@ validate_event_log_negative_contracts() {
     local raw_secret_artifact raw_secret_artifact_path raw_secret_late_artifact raw_secret_late_artifact_path
     local bad_artifact_reference missing_artifact_path external_artifact_reference external_artifact_path
     local traversal_artifact_reference traversal_artifact_path symlink_artifact_reference symlink_target_path symlink_artifact_path
-    local missing_mutation_contract bad_before_artifact bad_before_hash missing_fingerprint_artifact local_cargo_command
+    local missing_mutation_contract bad_before_artifact bad_before_hash missing_fingerprint_artifact local_cargo_command absolute_cargo_command
     : > "$diagnostics"
 
     missing_plan="$EVENT_ROOT/event_log_negative_missing_scenario_plan.jsonl"
@@ -1049,6 +1049,12 @@ validate_event_log_negative_contracts() {
     local_cargo_command="$EVENT_ROOT/event_log_negative_local_cargo_command.jsonl"
     jq -c 'if .phase == "scenario" and .scenario == "clean" then .command = "cargo test --lib workspace_hygiene -- --nocapture" else . end' "$EVENT_LOG" > "$local_cargo_command"
     if ! expect_local_cargo_guard_rejected "local_cargo_command" "$local_cargo_command" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    absolute_cargo_command="$EVENT_ROOT/event_log_negative_absolute_cargo_command.jsonl"
+    jq -c 'if .phase == "scenario" and .scenario == "clean" then .command = "/Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo test --lib workspace_hygiene -- --nocapture" else . end' "$EVENT_LOG" > "$absolute_cargo_command"
+    if ! expect_local_cargo_guard_rejected "absolute_cargo_command" "$absolute_cargo_command" >> "$diagnostics"; then
         failure_count=$((failure_count + 1))
     fi
 
@@ -1302,10 +1308,10 @@ validate_no_local_cargo_commands() {
     : > "$diagnostics"
 
     if ! jq -s -e '
-        all(.[]; ((.command // "") | test("(^|[[:space:]\"\\x27])(cargo|rustc|rustdoc)([[:space:]\"\\x27]|$)") | not))
+        all(.[]; ((.command // "") | test("(^|[[:space:]\"\\x27])([^[:space:]\"\\x27]*/)?(cargo|rustc|rustdoc)([[:space:]\"\\x27]|$)") | not))
     ' "$event_log" >/dev/null 2>"$diagnostics"; then
         jq -r '
-            select((.command // "") | test("(^|[[:space:]\"\\x27])(cargo|rustc|rustdoc)([[:space:]\"\\x27]|$)"))
+            select((.command // "") | test("(^|[[:space:]\"\\x27])([^[:space:]\"\\x27]*/)?(cargo|rustc|rustdoc)([[:space:]\"\\x27]|$)"))
             | "scenario=\(.scenario) phase=\(.phase) command=\(.command)"
         ' "$event_log" >> "$diagnostics" 2>/dev/null || true
         printf 'event log contains direct local Cargo/rustdoc/rustc command evidence; diagnostics=%s\n' "$diagnostics"
