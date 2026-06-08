@@ -20,6 +20,7 @@ OUTPUT_PATH="${ROOT}/.plan-drift-report.json"
 
 JSON_FLAG=""
 QUIET_FLAG=""
+SELF_TEST=""
 BEAD_FILTER=""
 
 while [ "$#" -gt 0 ]; do
@@ -30,6 +31,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --quiet)
       QUIET_FLAG="1"
+      shift
+      ;;
+    --self-test)
+      SELF_TEST="1"
       shift
       ;;
     --bead)
@@ -50,10 +55,11 @@ while [ "$#" -gt 0 ]; do
       ;;
     --help)
       cat <<'USAGE'
-Usage: scripts/plan-drift.sh [--json] [--quiet] [--bead <id>] [--plan <path>] [--beads <path>] [--output <path>]
+Usage: scripts/plan-drift.sh [--json] [--quiet] [--self-test] [--bead <id>] [--plan <path>] [--beads <path>] [--output <path>]
 
   --json          Emit only the JSON report to stdout; diagnostics on stderr.
   --quiet         Suppress human-readable summary (still writes JSON to disk).
+  --self-test     Run synthetic plan/bead fixture checks without reading the workspace.
   --bead <id>     Restrict the scan to one bead ID.
   --plan <path>   Read plan sections from this markdown file.
   --beads <path>  Read bead records from this JSONL file.
@@ -187,6 +193,68 @@ overlap_ratio() {
   '
 }
 
+assert_self_test() {
+  local condition="$1"
+  local message="$2"
+
+  if ! eval "$condition"; then
+    echo "error: plan-drift self-test failed: $message" >&2
+    return 1
+  fi
+}
+
+assert_report_jq() {
+  local report="$1"
+  local filter="$2"
+  local message="$3"
+
+  if ! printf '%s\n' "$report" | jq -e "$filter" >/dev/null; then
+    echo "error: plan-drift self-test failed: $message" >&2
+    echo "       jq filter: $filter" >&2
+    return 1
+  fi
+}
+
+run_self_test() {
+  local report
+  report=$(bash "${BASH_SOURCE[0]}" --json --quiet --output /dev/null \
+    --plan <(cat <<'PLAN'
+## 12 Current Surface
+current alpha beta gamma delta epsilon zeta retrieval context provenance section words
+
+## 13 Later Surface
+unrelated section that should not be captured
+PLAN
+    ) \
+    --beads <(cat <<'JSONL'
+{"id":"bd-3usjw.self-drift","title":"Synthetic drift","status":"open","labels":["implements-surface:fixture","plan_doc_section:12"],"created_at":"2000-01-01T00:00:00Z","description":"legacy queue wording only"}
+{"id":"bd-3usjw.self-missing-meta","title":"Synthetic missing metadata","status":"open","labels":["implements-surface:fixture"],"created_at":"2000-01-01T00:00:00Z","description":"current alpha beta gamma"}
+{"id":"bd-3usjw.self-missing-section","title":"Synthetic missing section","status":"open","labels":["implements-surface:fixture","plan_doc_section:99"],"created_at":"2000-01-01T00:00:00Z","description":"current alpha beta gamma"}
+{"id":"bd-3usjw.self-closed","title":"Synthetic closed","status":"closed","labels":["implements-surface:fixture","plan_doc_section:12"],"created_at":"2000-01-01T00:00:00Z","description":"closed beads are ignored"}
+JSONL
+    ))
+
+  assert_report_jq "$report" '.schema == "ee.plan_drift.v1"' "schema mismatch"
+  assert_report_jq "$report" '.inputs.planPresent == true' "synthetic plan should be present"
+  assert_report_jq "$report" '.inputs.beadsPresent == true' "synthetic beads should be present"
+  assert_report_jq "$report" '.inputs.candidateCount == 3' "expected three non-closed implements-surface candidates"
+  assert_report_jq "$report" '.inputs.driftWarningCount == 1' "expected one drift warning"
+  assert_report_jq "$report" '.inputs.missingMetadataCount == 1' "expected one missing metadata warning"
+  assert_report_jq "$report" '.inputs.missingSectionCount == 1' "expected one missing section warning"
+  assert_report_jq "$report" '(.warnings | map(.code) | index("plan_drift_warning")) != null' "missing drift warning code"
+  assert_report_jq "$report" '(.warnings | map(.code) | index("missing_plan_doc_section")) != null' "missing metadata warning code"
+  assert_report_jq "$report" '(.warnings | map(.code) | index("plan_doc_section_missing")) != null' "missing section warning code"
+  assert_report_jq "$report" '.bvRobotTriageHints | length == 1' "expected one BV triage hint"
+  assert_self_test 'canonical_section "plan_doc_section:part_ii_12_4" | grep -qx "12.4"' "canonical_section should normalize part/underscore labels"
+
+  echo "ok: plan-drift self-test passed"
+}
+
+if [ -n "$SELF_TEST" ]; then
+  run_self_test
+  exit 0
+fi
+
 warning_json="[]"
 candidate_count=0
 missing_metadata_count=0
@@ -196,11 +264,11 @@ plan_present=false
 beads_present=false
 plan_epoch=0
 
-if [ -f "$PLAN_PATH" ]; then
+if [ -r "$PLAN_PATH" ]; then
   plan_present=true
   plan_epoch=$(mtime_epoch "$PLAN_PATH")
 fi
-if [ -f "$BEADS_JSONL" ]; then
+if [ -r "$BEADS_JSONL" ]; then
   beads_present=true
 fi
 

@@ -44,6 +44,7 @@ set -euo pipefail
 #   3. Snapshot Proposal Guard - block unreviewed tracked insta proposals
 #   4. Untracked Work Audit    - advisory Beads FILE SURFACE coverage for dirty paths
 #   4.5. Bridge Staleness      - advisory signal when CLOSE_THE_GAP_PLAN needs refresh
+#   4.59. Plan Drift Contract  - no-Cargo plan/bead fixture scanner self-test
 #   4.6. Plan Drift Advisory   - advisory plan_doc_section drift hints for Beads triage
 #   4.65. Contract Drift Radar - advisory schema/docs/taxonomy drift scanner (bd-31nul.5)
 #   4.66. E2E Event Contract Radar - advisory shell evidence coverage scanner (bd-2ljka.4)
@@ -888,6 +889,11 @@ run_stage "Untracked Work Audit (advisory)" "with_beads_read_locks ./scripts/unt
 # .bridge-staleness-report.json so the trailing verify summary includes whether
 # Part II appears stale enough to plan the next bridge.
 run_stage "Bridge Staleness Advisory" "with_beads_read_locks ./scripts/bridge-staleness.sh --quiet"
+
+# Gate 3.69: Plan/bead drift contract. This no-Cargo fixture harness proves
+# warning classifications and BV hints before the live advisory scan reads
+# Beads state.
+run_stage "Plan Drift Contract" "./scripts/plan-drift.sh --self-test"
 
 # Gate 3.7: Advisory plan/bead drift. This always exits 0 and writes
 # .plan-drift-report.json with BV-friendly warning hints for active
