@@ -173,7 +173,9 @@ The static radar checks the `Cargo.toml` dependency line,
 `docs/dependency-research-notes.md` accepted-profile note. This is
 intentionally narrow: it catches the stale runtime-profile prose that agents use
 during dependency work, while Cargo-backed forbidden-dependency tests still
-prove the actual feature tree.
+prove the actual feature tree. The report includes
+`summary.dependencyDocsCheckedFiles` so a clean zero-violation run still records
+which dependency-contract files were actually scanned.
 
 **Fixes:**
 
@@ -253,7 +255,7 @@ include:
 
 - Static gate: `scripts/contract-drift-radar.sh --json > radar.json` →
   `verdict=<ok|violations>`, schemasLoaded=<n>, schemaIdViolations=<n>,
-  documentedMissingFixture=<n>.
+  documentedMissingFixture=<n>, dependencyDocsCheckedFiles=<files>.
 - Surviving violations (if any): list each `violations.*[]` entry by
   file:line + reason. Either include the fix in the same PR or open a
   follow-up bead with a clear reproduction step.

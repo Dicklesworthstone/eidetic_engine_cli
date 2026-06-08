@@ -336,6 +336,14 @@ accepted_asupersync_profile='asupersync = { version = "0.3.3", default-features 
 dependency_violations="[]"
 dependency_violation_count=0
 dependency_docs_checked=0
+dependency_docs_checked_files="[]"
+
+append_dependency_checked_file() {
+  local file="$1"
+  dependency_docs_checked_files=$(printf '%s' "$dependency_docs_checked_files" \
+    | jq --arg file "$file" '. + [$file]')
+  dependency_docs_checked=$((dependency_docs_checked + 1))
+}
 
 append_dependency_violation() {
   local file="$1"
@@ -356,7 +364,7 @@ append_dependency_violation() {
 }
 
 if [ -f "$CARGO_TOML" ]; then
-  dependency_docs_checked=$((dependency_docs_checked + 1))
+  append_dependency_checked_file "Cargo.toml"
   if ! grep -Fq "$accepted_asupersync_profile" "$CARGO_TOML"; then
     hit=$(grep -nE '^asupersync[[:space:]]*=' "$CARGO_TOML" 2>/dev/null | head -1 || true)
     append_dependency_violation \
@@ -369,7 +377,7 @@ if [ -f "$CARGO_TOML" ]; then
 fi
 
 if [ -f "$DEPENDENCY_RESEARCH_DOC" ]; then
-  dependency_docs_checked=$((dependency_docs_checked + 1))
+  append_dependency_checked_file "docs/dependency-research-notes.md"
   if ! grep -Fq "$accepted_asupersync_profile" "$DEPENDENCY_RESEARCH_DOC"; then
     hit=$(grep -nF 'asupersync = {' "$DEPENDENCY_RESEARCH_DOC" 2>/dev/null | head -1 || true)
     append_dependency_violation \
@@ -391,7 +399,7 @@ if [ -f "$DEPENDENCY_RESEARCH_DOC" ]; then
 fi
 
 if [ -f "$DEPENDENCY_MATRIX_DOC" ]; then
-  dependency_docs_checked=$((dependency_docs_checked + 1))
+  append_dependency_checked_file "docs/dependency-contract-matrix.md"
   matrix_line=$(grep -nE "^\| \`asupersync\` \|" "$DEPENDENCY_MATRIX_DOC" 2>/dev/null | head -1 || true)
   if ! printf '%s' "$matrix_line" | grep -Fq "registry \`0.3.3\`" \
     || ! printf '%s' "$matrix_line" | grep -Fq 'default-features = false' \
@@ -406,7 +414,7 @@ if [ -f "$DEPENDENCY_MATRIX_DOC" ]; then
 fi
 
 if [ -f "$COMPREHENSIVE_PLAN_DOC" ]; then
-  dependency_docs_checked=$((dependency_docs_checked + 1))
+  append_dependency_checked_file "COMPREHENSIVE_PLAN.md"
   plan_line=$(grep -nE '^asupersync[[:space:]]*=' "$COMPREHENSIVE_PLAN_DOC" 2>/dev/null | head -1 || true)
   if ! printf '%s' "$plan_line" | grep -Fq 'version = "0.3.3"' \
     || ! printf '%s' "$plan_line" | grep -Fq 'default-features = false' \
@@ -433,8 +441,8 @@ dependency_status="ok"
 [ "$dependency_violation_count" -gt 0 ] && dependency_status="violations"
 emit_event "dependency_xcheck" "$dependency_status" \
   "cross-checked accepted dependency profile prose against Cargo.toml" \
-  "$(jq -cn --argjson f "$dependency_docs_checked" --argjson v "$dependency_violation_count" \
-    '{dependencyDocsChecked: $f, dependencyProfileViolations: $v}')" \
+  "$(jq -cn --argjson f "$dependency_docs_checked" --argjson files "$dependency_docs_checked_files" --argjson v "$dependency_violation_count" \
+    '{dependencyDocsChecked: $f, dependencyDocsCheckedFiles: $files, dependencyProfileViolations: $v}')" \
   "[]"
 
 # ---- Phase 6: summary ------------------------------------------------------
@@ -460,6 +468,7 @@ report=$(jq -n \
   --argjson documented_codes "$documented_codes" \
   --argjson fixture_codes "$fixture_codes" \
   --argjson dependency_docs_checked "$dependency_docs_checked" \
+  --argjson dependency_docs_checked_files "$dependency_docs_checked_files" \
   --argjson dependency_violation_count "$dependency_violation_count" \
   --argjson docs_scanned "${#CURRENT_DOCS[@]}" \
   '{
@@ -477,6 +486,7 @@ report=$(jq -n \
       fixtureCodes: $fixture_codes,
       documentedMissingFixture: $taxonomy_orphan_count,
       dependencyDocsChecked: $dependency_docs_checked,
+      dependencyDocsCheckedFiles: $dependency_docs_checked_files,
       dependencyProfileViolations: $dependency_violation_count
     },
     schemaInventory: $schema_ids,

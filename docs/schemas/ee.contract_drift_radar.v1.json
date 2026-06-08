@@ -40,6 +40,11 @@
         "fixtureCodes": { "type": "integer", "minimum": 0 },
         "documentedMissingFixture": { "type": "integer", "minimum": 0 },
         "dependencyDocsChecked": { "type": "integer", "minimum": 0 },
+        "dependencyDocsCheckedFiles": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Repo-relative dependency-contract files actually checked by the dependency_xcheck phase."
+        },
         "dependencyProfileViolations": { "type": "integer", "minimum": 0 }
       }
     },
