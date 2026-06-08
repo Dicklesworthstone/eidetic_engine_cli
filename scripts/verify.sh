@@ -48,6 +48,7 @@ set -euo pipefail
 #   4.59. Plan Drift Contract  - no-Cargo plan/bead fixture scanner self-test
 #   4.6. Plan Drift Advisory   - advisory plan_doc_section drift hints for Beads triage
 #   4.65. Contract Drift Radar - advisory schema/docs/taxonomy drift scanner (bd-31nul.5)
+#   4.655. E2E Event Contract Radar Contract - no-Cargo golden report/schema harness
 #   4.66. E2E Event Contract Radar - advisory shell evidence coverage scanner (bd-2ljka.4)
 #   4.665. Work Packet No-Mutation - shell fixture matrix for claim-gate consumer safety
 #   4.67. Panic Helper Radar Contract - no-Cargo schema/golden scanner contract gate
@@ -918,6 +919,11 @@ run_stage "Contract Drift Radar Advisory" "./scripts/contract-drift-radar.sh --q
 # Gate 3.81: Deterministic self-test for the static radar's own report/event
 # contract. This is shell-only and does not run Cargo or RCH.
 run_stage "Contract Drift Radar Self-Test" "./scripts/contract-drift-radar.sh --self-test"
+
+# Gate 3.84: E2E event-contract radar golden contract. This no-Cargo harness
+# freezes the scanner report matrix, schema strictness, and negative fixture
+# before the live advisory scan reads the full shell E2E surface.
+run_stage "E2E Event Contract Radar Contract" "./scripts/e2e_event_contract_radar_golden.sh"
 
 # Gate 3.85: Advisory e2e event-contract radar (bd-2ljka.4). This is a
 # no-Cargo static scanner for shell E2E evidence logging. It writes
