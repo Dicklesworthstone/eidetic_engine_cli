@@ -308,6 +308,7 @@ use crate::steward::{
     MAINTENANCE_JOB_SHOW_SCHEMA_V1, MAINTENANCE_RUN_SCHEMA_V1, MAINTENANCE_STATUS_SCHEMA_V1,
 };
 
+mod conflict;
 mod insights;
 mod mesh;
 mod share;
@@ -803,6 +804,9 @@ pub enum Command {
     Install(InstallCommand),
     /// Bundle read-only operational insight sections for agents.
     Insights(insights::InsightsArgs),
+    /// Surface memory contradictions (read-only): list / explain / cluster.
+    #[command(subcommand)]
+    Conflict(conflict::ConflictCommand),
     /// Introspect ee's command, schema, and error maps.
     Introspect,
     /// Manage search indexes.
@@ -11308,6 +11312,7 @@ where
             handle_install_plan(&cli, args, stdout)
         }
         Some(Command::Insights(ref args)) => handle_insights(&cli, args, stdout, stderr),
+        Some(Command::Conflict(ref cmd)) => handle_conflict(&cli, cmd, stdout, stderr),
         Some(Command::Introspect) => match cli.renderer() {
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_introspect_human())
@@ -14241,6 +14246,41 @@ where
     };
     let report = plan_install(&options);
     render_install_plan(cli, &report, stdout)
+}
+
+/// `ee conflict list|explain|cluster` — read-only contradiction surface
+/// (bd-1n0np.7.3). Reuses the 7.2 gather + detector via
+/// `crate::core::contradiction_detect::assemble_conflict_surface`; never mutates.
+fn handle_conflict<W, E>(
+    cli: &Cli,
+    command: &conflict::ConflictCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli.resolve_workspace();
+    let surface = match command {
+        conflict::ConflictCommand::Explain(args) => {
+            conflict::build_conflict_surface_for_memory(&workspace, &args.memory_id)
+        }
+        conflict::ConflictCommand::List(_) | conflict::ConflictCommand::Cluster(_) => {
+            conflict::build_conflict_surface(&workspace)
+        }
+    };
+    let surface = match surface {
+        Ok(surface) => surface,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human => {
+            write_stdout(stdout, &conflict::render_conflict_human(&surface, command))
+        }
+        _ => write_stdout(stdout, &(conflict::render_conflict_json(&surface) + "\n")),
+    }
 }
 
 fn handle_insights<W, E>(
@@ -51083,6 +51123,11 @@ impl NormalizedInvocation {
                 Command::Help(_) => "help".to_string(),
                 Command::Init(_) => "init".to_string(),
                 Command::Insights(_) => "insights".to_string(),
+                Command::Conflict(conflict_cmd) => match conflict_cmd {
+                    conflict::ConflictCommand::List(_) => "conflict list".to_string(),
+                    conflict::ConflictCommand::Explain(_) => "conflict explain".to_string(),
+                    conflict::ConflictCommand::Cluster(_) => "conflict cluster".to_string(),
+                },
                 Command::Import(import) => match import {
                     ImportCommand::Cass(_) => "import cass".to_string(),
                     ImportCommand::Jsonl(_) => "import jsonl".to_string(),
