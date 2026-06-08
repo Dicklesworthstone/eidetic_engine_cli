@@ -53,6 +53,7 @@ pub mod duplicate_work_detector;
 pub mod economy;
 pub mod effect;
 pub mod environment_attestation;
+pub mod error_diagnosis;
 pub mod error_recall;
 pub mod explanation_latency_budget;
 pub mod feedback;
