@@ -288,14 +288,14 @@ use crate::models::preflight::{
     RiskCategory, RiskLevel, TripwireAction, TripwireState, TripwireType,
 };
 use crate::models::{
-    CertificateKind, CertificateStatus, DEMO_FILE_SCHEMA_V1, DEMO_RUN_RESULT_SCHEMA_V1, DemoEntry,
-    DemoFile, DemoId, DemoStatus, DomainError, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
-    CreateMemorySentinelSpecInput, FilterOperator, InstallOperation, LearningObservationSignal,
-    MemoryAnchorKind, MemoryScope, MemorySentinelKind, MemorySentinelResult,
-    MemorySentinelResultInput, MemorySentinelResultStatus, MemorySentinelSpec,
-    MemorySentinelValidationError, OutputVerification, ProcessExitCode, QUERY_SCHEMA_V1,
-    RedactionLevel, SentinelObservation, StoredMemorySentinelSpec, Tag, TaskLens, TaskLensCatalog,
-    TaskLensOverlay, is_valid_demo_artifact_path, parse_demo_file_yaml,
+    CertificateKind, CertificateStatus, CreateMemorySentinelSpecInput, DEMO_FILE_SCHEMA_V1,
+    DEMO_RUN_RESULT_SCHEMA_V1, DemoEntry, DemoFile, DemoId, DemoStatus, DomainError,
+    ExperimentOutcomeStatus, ExperimentSafetyBoundary, FilterOperator, InstallOperation,
+    LearningObservationSignal, MemoryAnchorKind, MemoryScope, MemorySentinelKind,
+    MemorySentinelResult, MemorySentinelResultInput, MemorySentinelResultStatus,
+    MemorySentinelSpec, MemorySentinelValidationError, OutputVerification, ProcessExitCode,
+    QUERY_SCHEMA_V1, RedactionLevel, SentinelObservation, StoredMemorySentinelSpec, Tag, TaskLens,
+    TaskLensCatalog, TaskLensOverlay, is_valid_demo_artifact_path, parse_demo_file_yaml,
     parse_memory_sentinel_spec,
 };
 use crate::output;
@@ -38233,12 +38233,11 @@ fn open_verify_provenance_database(
             repair: Some("ee init --workspace . --json".to_owned()),
         });
     }
-    let connection = DbConnection::open_file(&database_path).map_err(|error| {
-        DomainError::Storage {
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
             message: format!("Failed to open provenance verification database: {error}"),
             repair: Some("ee status --json".to_owned()),
-        }
-    })?;
+        })?;
     let workspace_path = workspace.to_string_lossy().into_owned();
     let workspace_id = connection
         .get_workspace_by_path(&workspace_path)
@@ -38290,9 +38289,7 @@ where
     }
 }
 
-fn render_verify_provenance_human(
-    report: &crate::core::verify::VerifyProvenanceReport,
-) -> String {
+fn render_verify_provenance_human(report: &crate::core::verify::VerifyProvenanceReport) -> String {
     format!(
         "verify provenance\n  Checked: {}\n  Verified: {}\n  Evidence missing: {}\n  Evidence drift: {}\n  Unverifiable: {}\n",
         report.checked_count,
@@ -39557,13 +39554,14 @@ fn why_sentinel_data(
     database_path: &Path,
     memory_id: &str,
 ) -> Result<serde_json::Value, DomainError> {
-    let connection = DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "Failed to open database {} for sentinel history: {error}",
-            database_path.display()
-        ),
-        repair: Some("ee doctor --workspace . --json".to_string()),
-    })?;
+    let connection =
+        DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to open database {} for sentinel history: {error}",
+                database_path.display()
+            ),
+            repair: Some("ee doctor --workspace . --json".to_string()),
+        })?;
     let specs = connection
         .list_memory_sentinel_specs(memory_id)
         .map_err(|error| DomainError::Storage {
@@ -39579,12 +39577,12 @@ fn why_sentinel_data(
     let mut missing_result_count = 0_u64;
     let mut spec_rows = Vec::with_capacity(specs.len());
     for spec in &specs {
-        let latest = connection.latest_memory_sentinel_result(&spec.spec_hash).map_err(|error| {
-            DomainError::Storage {
+        let latest = connection
+            .latest_memory_sentinel_result(&spec.spec_hash)
+            .map_err(|error| DomainError::Storage {
                 message: format!("Failed to load latest memory sentinel result: {error}"),
                 repair: Some("ee sentinel check --workspace . --json".to_string()),
-            }
-        })?;
+            })?;
         let freshness = sentinel_result_freshness(
             latest.as_ref(),
             spec.stale_threshold_seconds,
@@ -41994,12 +41992,14 @@ fn sentinel_check_data(
             repair: Some("ee init --workspace .".to_string()),
         });
     }
-    let connection = DbConnection::open_file(&database_path).map_err(|error| {
-        DomainError::Storage {
-            message: format!("Failed to open database {}: {error}", database_path.display()),
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to open database {}: {error}",
+                database_path.display()
+            ),
             repair: Some("ee doctor --workspace . --json".to_string()),
-        }
-    })?;
+        })?;
     let stored_specs = match args.memory_id.as_deref() {
         Some(memory_id) => connection.list_memory_sentinel_specs(memory_id),
         None => connection.list_all_memory_sentinel_specs(),
@@ -42024,7 +42024,9 @@ fn sentinel_check_data(
             MemorySentinelResultStatus::Pass => pass_count = pass_count.saturating_add(1),
             MemorySentinelResultStatus::Fail => fail_count = fail_count.saturating_add(1),
             MemorySentinelResultStatus::Unknown => unknown_count = unknown_count.saturating_add(1),
-            MemorySentinelResultStatus::Degraded => degraded_count = degraded_count.saturating_add(1),
+            MemorySentinelResultStatus::Degraded => {
+                degraded_count = degraded_count.saturating_add(1)
+            }
         }
         let result = MemorySentinelResult::new(MemorySentinelResultInput {
             spec_hash: stored.spec_hash.clone(),
@@ -42146,11 +42148,7 @@ fn memory_sentinel_validation_to_domain(error: MemorySentinelValidationError) ->
     }
 }
 
-fn write_sentinel_data<W>(
-    cli: &Cli,
-    data: serde_json::Value,
-    stdout: &mut W,
-) -> ProcessExitCode
+fn write_sentinel_data<W>(cli: &Cli, data: serde_json::Value, stdout: &mut W) -> ProcessExitCode
 where
     W: Write,
 {
@@ -42161,12 +42159,14 @@ where
         "degraded": [],
     });
     match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &render_sentinel_human(envelope.get("data").unwrap_or(&serde_json::Value::Null)))
-        }
-        output::Renderer::Toon => {
-            write_stdout(stdout, &(output::render_toon_from_json(&envelope.to_string()) + "\n"))
-        }
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &render_sentinel_human(envelope.get("data").unwrap_or(&serde_json::Value::Null)),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&envelope.to_string()) + "\n"),
+        ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
@@ -42222,8 +42222,9 @@ fn render_sentinel_check_human(data: &serde_json::Value) -> String {
         .get("unknown")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    let mut output =
-        format!("Sentinel check: {spec_count} spec(s), pass={pass}, fail={fail}, unknown={unknown}\n");
+    let mut output = format!(
+        "Sentinel check: {spec_count} spec(s), pass={pass}, fail={fail}, unknown={unknown}\n"
+    );
     if let Some(results) = data.get("results").and_then(serde_json::Value::as_array) {
         for item in results {
             let memory_id = item
@@ -42258,7 +42259,9 @@ fn validate_remember_sentinels(args: &RememberArgs) -> Result<(), DomainError> {
     if args.sentinel_stale_threshold_seconds == Some(0) {
         return Err(DomainError::Usage {
             message: "sentinel stale threshold must be greater than zero".to_string(),
-            repair: Some("Omit --sentinel-stale-threshold-seconds or provide a positive value.".to_string()),
+            repair: Some(
+                "Omit --sentinel-stale-threshold-seconds or provide a positive value.".to_string(),
+            ),
         });
     }
     for raw in &args.sentinels {

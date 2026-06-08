@@ -84,17 +84,18 @@ use crate::models::degradation::{
 };
 use crate::models::{
     AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
-    AgentContextProfileCounts, MemoryId, MemoryScope, MemoryScopeStats, PACK_SCHEMA_V2, PackId,
-    ProvenanceUri, RedactionLevel, TrustClass, UnitScore, WorkspaceId, posture_for_trust_class,
+    AgentContextProfileCounts, MemoryId, MemoryScope, MemoryScopeStats, MemorySentinelResultStatus,
+    PACK_SCHEMA_V2, PackId, ProvenanceUri, RedactionLevel, TrustClass, UnitScore, WorkspaceId,
+    posture_for_trust_class,
 };
 use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
     ContextRequest, ContextRequestInput, ContextResponse, ContextResponseDegradation,
     ContextResponseSeverity, PackAdmissionPosture, PackAssemblySlo, PackAssemblySloActuals,
     PackCandidate, PackCandidateInput, PackCoordinationSnapshot, PackDraft, PackItemLifecycle,
-    PackProvenance, PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal,
-    TokenBudget, WhyNotSelectedInput, WhyNotSelectedReport,
-    assemble_draft_with_profile_and_options_seeded,
+    PackOmission, PackOmissionReason, PackProvenance, PackRejectionStage, PackResourceProfile,
+    PackScoreBreakdown, PackSection, PackTrustSignal, TokenBudget, WhyNotSelectedInput,
+    WhyNotSelectedReport, assemble_draft_with_profile_and_options_seeded,
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
     estimate_tokens_default, explain_why_not_selected, pack_item_provenance_json,
     redact_pack_provenance_text,
@@ -619,6 +620,7 @@ pub struct ContextPackOptions {
     pub coordination_snapshot_path: Option<PathBuf>,
     pub coordination_stale_after_ms: u64,
     pub task_lens: Option<ContextTaskLens>,
+    pub require_fresh_sentinels: bool,
     pub output_options: ContextPackOutputOptions,
     pub persist_pack: bool,
 }
@@ -2239,6 +2241,20 @@ fn run_context_pack_with_performance_inner(
     }
     trace.record_elapsed("memoryTierAdmission", tier_admission_start);
 
+    let sentinel_omissions = if options.require_fresh_sentinels {
+        let reference_time =
+            context_validity_reference_time(options, &effective_filters).unwrap_or_else(Utc::now);
+        let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+        filter_candidates_by_required_fresh_sentinels(
+            read_connection,
+            &mut candidates,
+            reference_time,
+            &mut degraded,
+        )?
+    } else {
+        Vec::new()
+    };
+
     let ppr_rerank_start = Instant::now();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let configured_ppr_weight = if options.ppr_weight.is_some() {
@@ -2406,6 +2422,16 @@ fn run_context_pack_with_performance_inner(
     )
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     apply_context_pack_contradiction_guard(read_connection, &mut draft);
+    if !sentinel_omissions.is_empty() {
+        let omitted_count = sentinel_omissions.len();
+        draft.omitted.extend(sentinel_omissions);
+        draft.selection_audit.candidate_count = draft
+            .selection_audit
+            .candidate_count
+            .saturating_add(omitted_count);
+        draft.selection_audit.omitted_count = draft.omitted.len();
+        draft.hash = None;
+    }
     let candidate_token_costs_min = draft
         .selection_audit
         .steps
@@ -8161,6 +8187,143 @@ fn filter_candidates_by_memory_scope(
     stats
 }
 
+fn filter_candidates_by_required_fresh_sentinels(
+    connection: &DbConnection,
+    candidates: &mut Vec<PackCandidate>,
+    reference_time: DateTime<Utc>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Result<Vec<PackOmission>, ContextPackError> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut retained = Vec::with_capacity(candidates.len());
+    let mut omitted = Vec::new();
+    let mut failure_examples = Vec::new();
+    for candidate in std::mem::take(candidates) {
+        let memory_id = candidate.memory_id.to_string();
+        match sentinel_candidate_freshness(connection, &memory_id, reference_time)? {
+            SentinelCandidateFreshness::NoSentinels | SentinelCandidateFreshness::Fresh => {
+                retained.push(candidate);
+            }
+            SentinelCandidateFreshness::Blocked(reason) => {
+                if failure_examples.len() < 3 {
+                    failure_examples.push(format!("{memory_id}:{reason}"));
+                }
+                omitted.push(PackOmission {
+                    memory_id: candidate.memory_id,
+                    estimated_tokens: candidate.estimated_tokens,
+                    relevance: candidate.relevance,
+                    utility: candidate.utility,
+                    reason: PackOmissionReason::ExcludedByPolicy,
+                    rejected_at: PackRejectionStage::Selection,
+                    feasible: false,
+                    could_fit_with_budget: None,
+                });
+            }
+        }
+    }
+    let omitted_count = omitted.len();
+    *candidates = retained;
+    if omitted_count > 0 {
+        push_degradation(
+            degraded,
+            "context_filtered_results",
+            ContextResponseSeverity::Medium,
+            format!(
+                "{omitted_count} sentinel-backed candidate memor{} excluded by --require-fresh-sentinels{}.",
+                if omitted_count == 1 {
+                    "y was"
+                } else {
+                    "ies were"
+                },
+                if failure_examples.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", failure_examples.join(", "))
+                }
+            ),
+            Some(
+                "Run `ee sentinel check --workspace . --json` before requiring fresh sentinels."
+                    .to_string(),
+            ),
+        );
+    }
+    Ok(omitted)
+}
+
+enum SentinelCandidateFreshness {
+    NoSentinels,
+    Fresh,
+    Blocked(&'static str),
+}
+
+fn sentinel_candidate_freshness(
+    connection: &DbConnection,
+    memory_id: &str,
+    reference_time: DateTime<Utc>,
+) -> Result<SentinelCandidateFreshness, ContextPackError> {
+    let specs = connection
+        .list_memory_sentinel_specs(memory_id)
+        .map_err(|error| {
+            ContextPackError::Storage(format!("Failed to load sentinel specs: {error}"))
+        })?;
+    if specs.is_empty() {
+        return Ok(SentinelCandidateFreshness::NoSentinels);
+    }
+    for spec in specs {
+        let latest = connection
+            .latest_memory_sentinel_result(&spec.spec_hash)
+            .map_err(|error| {
+                ContextPackError::Storage(format!("Failed to load sentinel result: {error}"))
+            })?;
+        let Some(latest) = latest else {
+            return Ok(SentinelCandidateFreshness::Blocked("missing_result"));
+        };
+        match latest.status {
+            MemorySentinelResultStatus::Pass => {}
+            MemorySentinelResultStatus::Fail => {
+                return Ok(SentinelCandidateFreshness::Blocked("fail"));
+            }
+            MemorySentinelResultStatus::Unknown => {
+                return Ok(SentinelCandidateFreshness::Blocked("unknown"));
+            }
+            MemorySentinelResultStatus::Degraded => {
+                return Ok(SentinelCandidateFreshness::Blocked("degraded"));
+            }
+        }
+        if sentinel_result_stale(
+            &latest.checked_at,
+            latest
+                .stale_threshold_seconds
+                .or(spec.stale_threshold_seconds),
+            reference_time,
+        ) {
+            return Ok(SentinelCandidateFreshness::Blocked("stale"));
+        }
+    }
+    Ok(SentinelCandidateFreshness::Fresh)
+}
+
+fn sentinel_result_stale(
+    checked_at: &str,
+    stale_threshold_seconds: Option<u64>,
+    reference_time: DateTime<Utc>,
+) -> bool {
+    let Some(threshold) = stale_threshold_seconds else {
+        return false;
+    };
+    let Ok(checked_at) =
+        DateTime::parse_from_rfc3339(checked_at).map(|timestamp| timestamp.with_timezone(&Utc))
+    else {
+        return true;
+    };
+    reference_time
+        .signed_duration_since(checked_at)
+        .num_seconds()
+        > threshold as i64
+}
+
 fn filter_candidates_by_redaction_allow_categories(
     candidates: &mut Vec<PackCandidate>,
     filters: &crate::models::RedactionFilters,
@@ -9631,6 +9794,7 @@ mod tests {
             coordination_snapshot_path: Some(path),
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             task_lens: None,
+            require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
         }
@@ -12226,6 +12390,7 @@ pub fn unrelated_context() -> u64 {{
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             task_lens: None,
+            require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
         };
@@ -12391,6 +12556,7 @@ pub fn unrelated_context() -> u64 {{
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             task_lens: None,
+            require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
         };
@@ -12553,6 +12719,7 @@ pub fn unrelated_context() -> u64 {{
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             task_lens: None,
+            require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
         };
@@ -12682,6 +12849,7 @@ pub fn unrelated_context() -> u64 {{
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             task_lens: None,
+            require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
         })
@@ -12796,6 +12964,7 @@ pub fn unrelated_context() -> u64 {{
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             task_lens: None,
+            require_fresh_sentinels: false,
             output_options: super::ContextPackOutputOptions::default()
                 .with_cache_json_response(true),
             persist_pack: true,
@@ -12904,6 +13073,7 @@ pub fn unrelated_context() -> u64 {{
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             task_lens: None,
+            require_fresh_sentinels: false,
             output_options: super::ContextPackOutputOptions::default()
                 .with_cache_json_response(true),
             persist_pack: true,
@@ -13012,6 +13182,7 @@ pub fn unrelated_context() -> u64 {{
                     coordination_snapshot_path: None,
                     coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
                     task_lens: None,
+                    require_fresh_sentinels: false,
                     output_options: Default::default(),
                     persist_pack: true,
                 },
@@ -13123,6 +13294,7 @@ pub fn unrelated_context() -> u64 {{
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             task_lens: None,
+            require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
         };
@@ -13753,6 +13925,7 @@ pub fn unrelated_context() -> u64 {{
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             task_lens: None,
+            require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
         };
@@ -13921,6 +14094,7 @@ pub fn unrelated_context() -> u64 {{
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             task_lens: None,
+            require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
         };

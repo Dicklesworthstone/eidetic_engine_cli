@@ -10,15 +10,6 @@
 # unverifiable check is `unknown` (advisory), never `fail` (the SentinelObservation
 # contract, ab62aa56). No arbitrary shell — pure predicates + an allowlist only.
 #
-# The sentinel SURFACE is landed only as data model + storage + the decision
-# core today (MemorySentinelSpec/Result + db helpers + SentinelObservation,
-# commits fe3cf207/b830e0a3/ab62aa56). The `remember --sentinel` flag, the pure-
-# predicate checker (bd-1n0np.16.3), and the `ee sentinel check` / pack /
-# why integration (bd-1n0np.16.4) are not wired yet, so those assertions are
-# CAPABILITY-GUARDED: a missing surface records a visible `log_drop` (no-silent-
-# cap) carrying the exact assertion that activates once it lands. The init /
-# remember / fixture-mutation path runs for real.
-#
 # NOTE: no `set -e` — the harness assert_* helpers accumulate pass/fail and
 # `harness_summary` decides the exit code, so a single failing assert must not
 # abort the run before the summary is written.
@@ -29,12 +20,6 @@ E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$E2E_DIR/lib/e2e_harness.sh"
 
 harness_init "sentinels"
-
-# ee_supports <subcommand words...> — true when `<words> --help` is accepted.
-ee_supports() { "$EE_BIN" "$@" --help >/dev/null 2>&1; }
-
-# ee_flag_supported <subcommand> <flag> — true when `<subcommand> --help` lists <flag>.
-ee_flag_supported() { "$EE_BIN" "$1" --help 2>&1 | grep -- "$2" >/dev/null 2>&1; }
 
 # ee_json <args...> — run ee, tolerate nonzero exit (assertions inspect output).
 ee_json() { "$EE_BIN" "$@" 2>/dev/null || true; }
@@ -50,51 +35,61 @@ step "init workspace"
 init_out="$(ee_json init --workspace "$WS" --json)"
 assert_jq "$init_out" '.success == true' "ee init succeeds"
 
-step "remember a contract-shaped fact (sentinel target: schema field memoryId)"
+step "remember a sentinel-backed contract-shaped fact"
 mem="$(ee_json remember \
     "The demo.v1 schema defines the memoryId field." \
-    --workspace "$WS" --level procedural --kind fact --json)"
+    --workspace "$WS" --level procedural --kind fact \
+    --sentinel "json_schema_contains_field:docs/schemas/demo.v1.json#memoryId" \
+    --json)"
 assert_jq "$mem" '.success == true' "remember succeeds"
 mem_id="$(printf '%s' "$mem" | jq -r '.data.memory_id // empty')"
 assert_eq "$([ -n "$mem_id" ] && echo present || echo missing)" "present" \
     "memory id present"
 
-if ee_supports remember && ee_flag_supported remember "--sentinel"; then
-    step "attach a json_schema_contains_field sentinel via remember --sentinel"
-    s="$(ee_json remember "demo.v1 must keep memoryId." --workspace "$WS" \
-        --level procedural --kind fact \
-        --sentinel "json_schema_contains_field:docs/schemas/demo.v1.json#memoryId" --json)"
-    assert_jq "$s" '.success == true' "remember --sentinel succeeds"
-else
-    log_drop 1 "remember --sentinel flag absent (bd-1n0np.16.2 CLI wiring pending): when wired, assert the spec persists with sentinel_kind=json_schema_contains_field + the stable spec hash"
-fi
+step "reject arbitrary-shell sentinel targets before memory mutation"
+bad="$(ee_json remember "bad sentinel target" --workspace "$WS" --level procedural \
+    --kind fact --sentinel "command_help_contains_flag:sh -c --version;echo bad" --json)"
+assert_jq "$bad" '((.success == false) or (.schema == "ee.error.v2")) and (.error.message | test("sentinel|target|shell|ee"))' \
+    "arbitrary-shell sentinel target rejected"
 
-if ee_supports sentinel check; then
-    step "ee sentinel check passes while the field is present"
-    pass="$(ee_json sentinel check --workspace "$WS" --json)"
-    assert_jq "$pass" 'any(.data.results[]?; .status == "pass")' \
-        "sentinel check passes while memoryId present"
+step "allowlisted ee help introspection sentinel passes"
+help_mem="$(ee_json remember "pack exposes the fresh-sentinel gate." \
+    --workspace "$WS" --level procedural --kind fact \
+    --sentinel "command_help_contains_flag:ee pack --require-fresh-sentinels" --json)"
+assert_jq "$help_mem" '.success == true' "remember command-help sentinel succeeds"
+help_mem_id="$(printf '%s' "$help_mem" | jq -r '.data.memory_id // empty')"
+assert_eq "$([ -n "$help_mem_id" ] && echo present || echo missing)" "present" \
+    "command-help memory id present"
+help_pass="$(ee_json sentinel check "$help_mem_id" --workspace "$WS" --json)"
+assert_jq "$help_pass" 'any(.data.results[]?; .status == "pass")' \
+    "allowlisted command-help sentinel passes"
 
-    step "remove the schema field, then ee sentinel check FAILS (never mutates)"
-    printf '{"title":"demo.v1","properties":{}}\n' >"$WS/docs/schemas/demo.v1.json"
-    fail="$(ee_json sentinel check --workspace "$WS" --json)"
-    assert_jq "$fail" 'any(.data.results[]?; .status == "fail")' \
-        "sentinel check fails once memoryId is absent"
-    assert_jq "$fail" 'all(.data.results[]?; .status != "removed")' \
-        "no sentinel result implies memory removal (ee never mutates)"
-else
-    log_drop 1 "ee sentinel check absent (bd-1n0np.16.3/16.4 pending): when wired, assert pass while the schema field is present, then fail after removing it, with a 'revalidate' curation candidate raised and the memory NEVER removed"
-    log_drop 1 "conservatism not observable: when wired, assert an unverifiable check (e.g. unreadable target) yields status=unknown (advisory), NEVER fail"
-fi
+step "ee sentinel check passes while the field is present"
+pass="$(ee_json sentinel check "$mem_id" --workspace "$WS" --json)"
+assert_jq "$pass" 'any(.data.results[]?; .status == "pass" and (.resultHash | startswith("blake3:")))' \
+    "sentinel check passes with result hash while memoryId present"
 
-if ee_flag_supported pack "--require-fresh-sentinels"; then
-    step "ee pack --require-fresh-sentinels flags the failing sentinel"
-    pk="$(ee_json pack "demo schema" --workspace "$WS" --require-fresh-sentinels --json)"
-    assert_jq "$pk" '.success == true' "pack --require-fresh-sentinels runs"
-else
-    log_drop 1 "pack --require-fresh-sentinels absent (bd-1n0np.16.4): when wired, assert a memory with a failing sentinel is excluded/flagged in the pack"
-fi
+step "remove the schema field, then ee sentinel check FAILS without memory mutation"
+printf '{"title":"demo.v1","properties":{}}\n' >"$WS/docs/schemas/demo.v1.json"
+fail="$(ee_json sentinel check "$mem_id" --workspace "$WS" --json)"
+assert_jq "$fail" 'any(.data.results[]?; .status == "fail" and (.resultHash | startswith("blake3:")))' \
+    "sentinel check fails once memoryId is absent"
+assert_jq "$fail" 'all(.data.results[]?; .status != "removed")' \
+    "no sentinel result implies memory removal (ee never mutates)"
 
-log_drop 1 "why --include-sentinel absent (bd-1n0np.16.4): when wired, assert ee why --include-sentinel shows the memory's last-verified sentinel status"
+step "ee pack --require-fresh-sentinels omits the failing sentinel-backed memory"
+pk="$(ee_json pack "demo schema memoryId" --workspace "$WS" --require-fresh-sentinels --json)"
+assert_jq "$pk" '.success == true' "pack --require-fresh-sentinels runs"
+SENTINEL_ID="$mem_id" assert_jq "$pk" \
+    'any(.data.pack.omitted[]?; ((.memoryId // .memory_id) == env.SENTINEL_ID) and ((.reason // "") == "excluded_by_policy"))' \
+    "failing sentinel-backed memory is persisted as a pack omission"
+
+step "ee why --include-sentinel shows the latest failed sentinel result"
+why="$(ee_json why "$mem_id" --workspace "$WS" --include-sentinel --json)"
+assert_jq "$why" '.success == true' "why --include-sentinel runs"
+assert_jq "$why" \
+    '.data.sentinel.summary.failCount >= 1 and any(.data.sentinel.specs[]?; .latestResult.status == "fail")' \
+    "why reports latest failed sentinel status"
+
 
 harness_summary
