@@ -62,6 +62,7 @@ pub mod graph_memory_budget;
 pub mod graph_telemetry;
 pub mod handoff;
 pub mod health;
+pub mod house_rules;
 pub mod hygiene_beads_state;
 pub mod hygiene_classifier;
 pub mod hygiene_coordination;
