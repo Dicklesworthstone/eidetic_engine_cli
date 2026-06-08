@@ -2405,6 +2405,7 @@ fn run_context_pack_with_performance_inner(
         determinism,
     )
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    apply_context_pack_contradiction_guard(read_connection, &mut draft);
     let candidate_token_costs_min = draft
         .selection_audit
         .steps
@@ -9059,6 +9060,36 @@ fn push_degradation(
 ) {
     if let Ok(entry) = ContextResponseDegradation::new(code, severity, message, repair) {
         degraded.push(entry);
+    }
+}
+
+fn apply_context_pack_contradiction_guard(connection: &DbConnection, draft: &mut PackDraft) {
+    if draft.items.len() < 2 {
+        return;
+    }
+    let gathered = crate::core::contradiction_detect::gather_explicit_conflict_edges(connection);
+    if let Some(read_error) = gathered.read_error.as_deref() {
+        tracing::warn!(
+            target: "ee::pack::contradiction_guard",
+            error = read_error,
+            "skipping context pack contradiction guard because memory links could not be read"
+        );
+        return;
+    }
+    let detected = gathered
+        .edges
+        .iter()
+        .map(|edge| (edge.memory_a.clone(), edge.memory_b.clone()))
+        .collect::<Vec<_>>();
+    let unresolved =
+        crate::core::contradiction_guard::unresolved_contradiction_pairs(&detected, &[]);
+    let suppressed = draft.apply_contradiction_guard(&unresolved, false);
+    if suppressed > 0 {
+        tracing::debug!(
+            target: "ee::pack::contradiction_guard",
+            suppressed,
+            "suppressed unresolved contradiction sides from context pack"
+        );
     }
 }
 
