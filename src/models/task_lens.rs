@@ -864,6 +864,61 @@ mod tests {
     }
 
     #[test]
+    fn bugfix_builtin_has_expected_effective_overlay() -> TestResult {
+        let lens = builtin_task_lens("BugFix").map_err(|error| error.to_string())?;
+        ensure(lens.schema == TASK_LENS_SCHEMA_V1, "bugfix lens schema")?;
+        ensure(lens.id == "bugfix", "bugfix lens id normalization")?;
+        ensure(lens.version == TASK_LENS_VERSION, "bugfix lens version")?;
+        ensure(
+            lens.lens_hash.starts_with("blake3:"),
+            "bugfix lens hash prefix",
+        )?;
+        ensure(
+            lens.overlay.context_profile.as_deref() == Some("thorough"),
+            "bugfix context profile",
+        )?;
+        ensure(
+            lens.overlay.source_mode.as_deref() == Some("hybrid"),
+            "bugfix source mode",
+        )?;
+        ensure(
+            lens.overlay.pack_profile.as_deref() == Some("standard"),
+            "bugfix pack profile",
+        )?;
+        ensure(
+            lens.overlay.resource_profile.as_deref() == Some("standard"),
+            "bugfix resource profile",
+        )?;
+        ensure(
+            lens.overlay.redaction == Some(RedactionLevel::Minimal),
+            "bugfix redaction",
+        )?;
+        ensure(
+            lens.overlay.memory_scope.as_deref() == Some("workspace"),
+            "bugfix memory scope",
+        )?;
+        ensure(lens.overlay.max_tokens == Some(6_000), "bugfix token cap")?;
+        ensure(
+            lens.overlay.candidate_pool == Some(160),
+            "bugfix candidate pool",
+        )?;
+        ensure(
+            lens.overlay.coverage_facets
+                == strings(&["reproduction", "root-cause", "verification"]),
+            "bugfix coverage facets",
+        )?;
+        ensure(
+            lens.overlay.allowed_kinds
+                == strings(&["anti-pattern", "command", "decision", "failure", "risk"]),
+            "bugfix allowed kinds are normalized and stable",
+        )?;
+        ensure(
+            lens.overlay.deprioritized_kinds == strings(&["fact"]),
+            "bugfix deprioritized kinds",
+        )
+    }
+
+    #[test]
     fn workspace_override_replaces_builtin_by_id() -> TestResult {
         let override_lens = TaskLens::new(TaskLensInput {
             id: "BugFix".to_owned(),
@@ -910,6 +965,32 @@ mod tests {
                 error,
                 TaskLensValidationError::InvalidField {
                     field: "source_mode",
+                    ..
+                }
+            ),
+            format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn invalid_numeric_overlay_cap_is_rejected() -> TestResult {
+        let error = match TaskLens::new(TaskLensInput {
+            id: "oversized-review".to_owned(),
+            version: 1,
+            description: "Review with invalid cap.".to_owned(),
+            overlay: TaskLensOverlay {
+                max_results: Some(MAX_TASK_LENS_RESULTS + 1),
+                ..TaskLensOverlay::default()
+            },
+        }) {
+            Ok(_) => return Err("invalid max_results unexpectedly passed".to_owned()),
+            Err(error) => error,
+        };
+        ensure(
+            matches!(
+                error,
+                TaskLensValidationError::InvalidNumericField {
+                    field: "max_results",
                     ..
                 }
             ),

@@ -1,0 +1,44 @@
+{
+  "command": "lens explain",
+  "explanation": {
+    "determinism": "lensHash is a stable blake3 hash over schema, id, version, description, and normalized overlay fields.",
+    "override": "Explicit CLI flags and --no-lens can override lens-derived defaults when pack integration is enabled.",
+    "policy": "Task lenses are inspectable overlays compiled into existing pack, search, graph, redaction, and output knobs."
+  },
+  "lens": {
+    "id": "bugfix",
+    "lensHash": "<blake3>",
+    "overlay": {
+      "allowedKinds": [
+        "anti-pattern",
+        "command",
+        "decision",
+        "failure",
+        "risk"
+      ],
+      "candidatePool": 160,
+      "contextProfile": "thorough",
+      "coverageFacets": [
+        "reproduction",
+        "root-cause",
+        "verification"
+      ],
+      "deprioritizedKinds": [
+        "fact"
+      ],
+      "maxResults": null,
+      "maxTokens": 6000,
+      "memoryScope": "workspace",
+      "packProfile": "standard",
+      "redaction": "minimal",
+      "resourceProfile": "standard",
+      "sourceMode": "hybrid",
+      "strictSourceMode": null
+    },
+    "schema": "ee.task_lens.v1",
+    "version": 1
+  },
+  "requestedLens": "bugfix",
+  "schema": "ee.response.v2",
+  "success": true
+}
