@@ -209,6 +209,37 @@ step "remaining cross-cutting manifests pin conservative review posture"
 assert_jq_file "$DETERMINISM_MANIFEST" \
     '.schema == "ee.dueling_wizards.determinism_gate.v1" and .policy.localCargoProof == "invalid"' \
     "determinism manifest keeps local cargo proof invalid"
+assert_jq_file "$DETERMINISM_MANIFEST" \
+    '.initiativeBead == "bd-1n0np" and .gateBead == "bd-1n0np.15.2" and .implementationState == "planned_contract" and .determinismHarness == "scripts/e2e_overhaul/determinism.sh" and .determinismUnit == "tests/determinism_unit.rs" and .surfaceContract == "docs/agent-ux/dueling-wizards-surface-contract.md" and .migrationRegistry == "tests/fixtures/contracts/dueling_wizards_migration_registry.json"' \
+    "determinism manifest anchors harness, unit, surface, and migration contracts"
+assert_jq_file "$DETERMINISM_MANIFEST" \
+    '.policy.runCount == 3 and .policy.canonicalization == "explicit_volatile_field_removal" and .policy.byteStableJsonRequired == true and .policy.packHashReproRequiredWhenPackEmitted == true and .policy.stdoutMachineOnly == true and .policy.rchProofRequiredForRuntimeTests == true' \
+    "determinism policy keeps three-run byte-stable RCH proof posture"
+assert_jq_file "$DETERMINISM_MANIFEST" \
+    '(.requiredAssertions | sort) == ["byte_identical_json","stable_ordering","stderr_or_artifact_diagnostics","volatile_fields_explicit"] and (.packAssertions | sort) == ["pack_hash_absence_is_failure_not_skip","pack_hash_reproducible"]' \
+    "determinism shared assertion vocabularies are complete"
+# shellcheck disable=SC2016
+assert_jq_file "$DETERMINISM_MANIFEST" \
+    '["why_not","harvest","calibration","impact","error_recall","blind_spots","conflict","read_fence_consistency","pack_lod","feedback_roi"] as $surfaces | ([.surfaces[].id] | sort) == ($surfaces | sort) and ([.determinismMatrix[].surface] | sort) == ($surfaces | sort) and ([.surfaceCoverageMatrix[].surface] | sort) == ($surfaces | sort)' \
+    "determinism surfaces, matrix, and coverage rows stay in lockstep"
+# shellcheck disable=SC2016
+assert_jq_file "$DETERMINISM_MANIFEST" \
+    '["byte_identical_json","volatile_fields_explicit","stable_ordering","stderr_or_artifact_diagnostics"] as $required | ["pack_hash_reproducible","pack_hash_absence_is_failure_not_skip"] as $pack | all(.surfaces[]; (.ownerBeads | index("bd-1n0np.15.2")) and ((.command // "") | length > 0) and ((.schemaRefs // []) | length > 0) and ((.assertions | sort) == ($required | sort)) and (if (.id == "read_fence_consistency" or .id == "pack_lod") then ((.packAssertions | sort) == ($pack | sort)) else (.packAssertions == []) end))' \
+    "determinism surfaces declare owners, commands, schemas, assertions, and pack hash rows"
+# shellcheck disable=SC2016
+assert_jq_file "$DETERMINISM_MANIFEST" \
+    '.policy as $policy | ["byte_identical_json","volatile_fields_explicit","stable_ordering","stderr_or_artifact_diagnostics"] as $required | all(.determinismMatrix[]; .runCount == $policy.runCount and .canonicalization == $policy.canonicalization and .stdoutMachineOnly == $policy.stdoutMachineOnly and .diagnosticsChannel == "stderr_or_artifact" and .runtimeProof == "rch_only" and ((.requiredAssertions | sort) == ($required | sort)))' \
+    "determinism matrix rows mirror policy and RCH-only runtime proof"
+assert_jq_file "$DETERMINISM_MANIFEST" \
+    '([.determinismMatrix[] | select(.packHashExpected) | .surface] | sort) == ["pack_lod","read_fence_consistency"] and all(.determinismMatrix[]; if .packHashExpected then (.packHashAbsenceFailure == true and .packHashField == "data.pack.hash") else (.packHashAbsenceFailure == false and .packHashField == null) end)' \
+    "determinism pack hash absence is failure only for pack surfaces"
+assert_jq_file "$DETERMINISM_MANIFEST" \
+    'all(.surfaceCoverageMatrix[]; .mustClauses == 9 and .tested == 9 and .passing == 9 and .divergent == 0 and .scoreMilli == 1000 and .determinismStatus == "three_run_contract_declared" and .runtimeProofPolicy == "rch_required_local_invalid" and .complianceStatus == "declared_conformant" and (if (.surface == "read_fence_consistency" or .surface == "pack_lod") then .packHashStatus == "pack_hash_required" else .packHashStatus == "not_applicable" end))' \
+    "determinism coverage matrix is conformant and fail-closed on pack hashes"
+# shellcheck disable=SC2016
+assert_jq_file "$DETERMINISM_MANIFEST" \
+    '(.surfaces[] | select(.id == "impact") | .anchorDeterminism) as $anchor | (.determinismMatrix[] | select(.surface == "impact") | .volatileFields | sort) == ($anchor.volatileFields | sort) and $anchor.storageAssetKind == "memory_anchors" and $anchor.ownerBead == "bd-1n0np.3.2" and $anchor.hashInputMaterial == "normalized_anchor_value_with_anchor_kind_and_source_class" and $anchor.rawAnchorValueExcluded == true and $anchor.redactedValueDeterministic == true and $anchor.generationSource == "workspace_generation_not_wall_clock" and (($anchor.requiredAssertions | sort) == ["generation_not_wall_clock","raw_anchor_value_absent","stable_anchor_value_hash","stable_ordering","stable_redacted_anchor_value"])' \
+    "determinism impact anchor contract forbids raw values and mirrors volatile fields"
 assert_jq_file "$INGESTION_MANIFEST" \
     '.schema == "ee.dueling_wizards.ingestion_security.v1" and .gateBead == "bd-1n0np.23.3"' \
     "ingestion security manifest identity"

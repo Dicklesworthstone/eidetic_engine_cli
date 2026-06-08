@@ -29,6 +29,13 @@ surfaces have runtime three-run proofs. When an individual surface moves to
 `implemented`, its implementation slice must add the real command proof in this
 script or a focused companion test.
 
+`scripts/e2e_cross_cutting.sh` also validates the manifest from the
+cross-cutting gate. That static shell pass pins the required surface set,
+shared assertion vocabularies, three-run/RCH-only policy, pack-hash failure
+posture, coverage matrix conformance, and the `impact` memory-anchor volatility
+contract. It is intentionally a manifest contract only; runtime determinism
+still requires the three-run driver above once a surface exists.
+
 ## Required Surfaces
 
 Every row below must eventually be covered by the determinism shell gate or a
