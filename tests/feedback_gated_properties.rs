@@ -11,7 +11,9 @@
 //!   the TRAILING window so a flipped rule is caught despite a long helpful
 //!   history, stays quiet on recovery and on thin data, and is deterministic.
 
-use ee::core::outcome::{TokenRoiBucketInput, compute_token_roi, detect_regime_shift};
+use ee::core::outcome::{
+    TokenRoiBucketInput, calibration_honesty_report, compute_token_roi, detect_regime_shift,
+};
 use ee::core::sprt::SprtObservation;
 
 fn bucket(key: &str, helpful: u32, total: u32, tokens: u64) -> TokenRoiBucketInput {
@@ -162,4 +164,97 @@ fn regime_shift_keys_only_off_the_trailing_window() {
         "only the trailing window decides; the helpful prefix must not mask the flip"
     );
     assert!(with_prefix.proposed_demotion);
+}
+
+fn class_obs(class: &str, helpful: usize, total: usize) -> Vec<(String, bool)> {
+    (0..total)
+        .map(|i| (class.to_string(), i < helpful))
+        .collect()
+}
+
+#[test]
+fn calibration_honesty_abstains_loudly_on_thin_classes() {
+    // A class with too few samples must abstain LOUDLY: interval widens to the
+    // full [0, 1] and abstained is set, so it can never read as a confident claim.
+    let report = calibration_honesty_report(&class_obs("rare", 1, 5), 30);
+    let rare = report
+        .classes
+        .iter()
+        .find(|c| c.situation_class == "rare")
+        .expect("rare class present");
+    assert!(rare.abstained, "a thin class must abstain");
+    assert_eq!(rare.interval_lower, 0.0);
+    assert_eq!(rare.interval_upper, 1.0);
+    assert_eq!(report.schema, "ee.calibration_honesty.v1");
+}
+
+#[test]
+fn calibration_honesty_dense_class_reports_a_real_wilson_interval() {
+    // A dense class does not abstain and gets a genuine (sub-[0,1]) Wilson interval
+    // bracketing the empirical hit rate.
+    let report = calibration_honesty_report(&class_obs("common", 60, 100), 30);
+    let common = report
+        .classes
+        .iter()
+        .find(|c| c.situation_class == "common")
+        .expect("common class present");
+    assert!(!common.abstained, "a dense class must not abstain");
+    assert!(
+        (common.empirical_hit_rate - 0.6).abs() < 1e-9,
+        "hits/n = 60/100"
+    );
+    assert!(
+        common.interval_lower < common.empirical_hit_rate
+            && common.empirical_hit_rate < common.interval_upper,
+        "the Wilson interval must bracket the empirical rate"
+    );
+    assert!(
+        common.interval_lower > 0.0 && common.interval_upper < 1.0,
+        "a dense class yields a real interval narrower than [0, 1]"
+    );
+}
+
+#[test]
+fn calibration_honesty_aggregates_per_class_and_is_deterministic() {
+    let mut observations = class_obs("a_thin", 2, 4);
+    observations.extend(class_obs("b_dense", 25, 40));
+    let first = calibration_honesty_report(&observations, 30);
+    let second = calibration_honesty_report(&observations, 30);
+    assert_eq!(first, second, "same observations yield an identical report");
+    assert!(first.table_hash.starts_with("blake3:"));
+    assert_eq!(first.classes.len(), 2);
+    // Classes are emitted in sorted order (deterministic).
+    let names: Vec<&str> = first
+        .classes
+        .iter()
+        .map(|c| c.situation_class.as_str())
+        .collect();
+    assert_eq!(names, vec!["a_thin", "b_dense"]);
+    // Per-class sample counts are exact.
+    assert_eq!(
+        first
+            .classes
+            .iter()
+            .find(|c| c.situation_class == "a_thin")
+            .unwrap()
+            .sample_count,
+        4
+    );
+    // The thin class abstains; the dense one does not — the honesty contract.
+    assert!(
+        first
+            .classes
+            .iter()
+            .find(|c| c.situation_class == "a_thin")
+            .unwrap()
+            .abstained
+    );
+    assert!(
+        !first
+            .classes
+            .iter()
+            .find(|c| c.situation_class == "b_dense")
+            .unwrap()
+            .abstained
+    );
 }
