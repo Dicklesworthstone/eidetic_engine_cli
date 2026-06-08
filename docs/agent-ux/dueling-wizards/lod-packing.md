@@ -81,4 +81,4 @@ the knob is absent.
 ## See also
 
 - [`adaptive-pack-budget.md`](adaptive-pack-budget.md) — how the token budget LOD partitions is computed.
-- [`dueling-wizards-why-not.md`](dueling-wizards-why-not.md) — link-only items have a clear, explainable exclusion-from-full reason.
+- [`why-not.md`](why-not.md) — link-only items have a clear, explainable exclusion-from-full reason.

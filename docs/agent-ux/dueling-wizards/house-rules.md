@@ -68,5 +68,5 @@ filling the remaining room, and the section never overflows its quota.
 
 ## See also
 
-- [`dueling-wizards-store-integrity.md`](dueling-wizards-store-integrity.md) — write-immune + read-fence integrity for the shared store the global tier lives in.
-- [`dueling-wizards-why-not.md`](dueling-wizards-why-not.md) — explains when a global rule was or was not selected into a pack.
+- [`store-integrity.md`](store-integrity.md) — write-immune + read-fence integrity for the shared store the global tier lives in.
+- [`why-not.md`](why-not.md) — explains when a global rule was or was not selected into a pack.

@@ -51,4 +51,4 @@ rationale }`:
 ## See also
 
 - [`../adr/0035-structural-decay-policy.md`](../adr/0035-structural-decay-policy.md) — the structural decay policy this exemption extends.
-- [`dueling-wizards-causal-ppr.md`](dueling-wizards-causal-ppr.md) — the other graph-structure retrieval signal over the causal graph.
+- [`causal-ppr.md`](causal-ppr.md) — the other graph-structure retrieval signal over the causal graph.

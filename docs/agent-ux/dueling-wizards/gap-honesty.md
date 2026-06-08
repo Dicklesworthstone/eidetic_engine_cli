@@ -18,7 +18,7 @@ hide a truncation. A gap is a *prompt for review*, not a conclusion.
 | `docs/schemas/ee.insights.v1.json` | JSON contract for the insights bundle, incl. the blind-spots and knowledge-gaps sections. |
 | `src/core/query_miss_cluster.rs` | Pure, deterministic query-miss clustering (`cluster_query_misses`, `query_cluster_key`, `KnowledgeGapCandidate`). |
 | `scripts/e2e_gap_honesty.sh` | Real-binary, capability-guarded e2e for the whole gap-honesty path (`bd-1n0np.6.6`). |
-| `docs/agent-ux/dueling-wizards-determinism-gate.md` | Determinism requirements the blind-spots / knowledge-gaps JSON must satisfy. |
+| `docs/agent-ux/dueling-wizards/determinism-gate.md` | Determinism requirements the blind-spots / knowledge-gaps JSON must satisfy. |
 
 ## Blind-Spot Map (`ee insights --section blindSpots`)
 

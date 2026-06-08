@@ -203,5 +203,5 @@ are tracked under `bd-1n0np.3.7`/`bd-1n0np.3.8`.
 ## See also
 
 - [`insights-onboarding.md`](insights-onboarding.md) — `ee why` / `ee pack --explain` graph surfaces.
-- [`dueling-wizards-surface-contract.md`](dueling-wizards-surface-contract.md) — the new-surface registration contract.
+- [`surface-contract.md`](surface-contract.md) — the new-surface registration contract.
 - [ADR-0056](../adr/0056-code-anchoring-substrate-and-freshness.md) — the anchoring + freshness decision record.

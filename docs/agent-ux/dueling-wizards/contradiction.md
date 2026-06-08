@@ -89,5 +89,5 @@ fuzzy_near_conflict_skipped }`.
 
 ## See also
 
-- [`dueling-wizards-store-integrity.md`](dueling-wizards-store-integrity.md) — write-immune + read-fence integrity that keeps the conflict graph honest.
-- [`dueling-wizards-why-not.md`](dueling-wizards-why-not.md) — explaining why a memory was or was not selected, including contradiction holds.
+- [`store-integrity.md`](store-integrity.md) — write-immune + read-fence integrity that keeps the conflict graph honest.
+- [`why-not.md`](why-not.md) — explaining why a memory was or was not selected, including contradiction holds.

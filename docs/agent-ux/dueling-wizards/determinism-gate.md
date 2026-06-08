@@ -19,7 +19,7 @@ The initiative builds on the current determinism infrastructure:
 | `scripts/e2e_overhaul/determinism.sh` | Real-binary three-run determinism driver. |
 | `tests/determinism_unit.rs` | In-process contract tests for tie-breaks, pack hash reproduction, and DB JSON stability. |
 | `scripts/lib/e2e_harness.sh` | Feature e2e harness used by new scripts. |
-| `docs/agent-ux/dueling-wizards-surface-contract.md` | New-surface checklist that all planned JSON surfaces share. |
+| `docs/agent-ux/dueling-wizards/surface-contract.md` | New-surface checklist that all planned JSON surfaces share. |
 
 `scripts/e2e_overhaul/determinism.sh` now validates this manifest before it
 runs the older J7 real-binary surfaces. That shell check is a contract-presence

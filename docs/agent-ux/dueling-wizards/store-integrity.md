@@ -103,5 +103,5 @@ a stable reason code:
 
 ## See also
 
-- [`dueling-wizards-anchors-freshness.md`](dueling-wizards-anchors-freshness.md) — the freshness/staleness signals sentinels and write-immune both lean on.
-- [`dueling-wizards-why-not.md`](dueling-wizards-why-not.md) — read-side explainability for what a fenced read did and did not return.
+- [`anchors-freshness.md`](anchors-freshness.md) — the freshness/staleness signals sentinels and write-immune both lean on.
+- [`why-not.md`](why-not.md) — read-side explainability for what a fenced read did and did not return.

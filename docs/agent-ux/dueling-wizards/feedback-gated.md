@@ -79,5 +79,5 @@ codebase evolves). So this is the honest reframe — per-situation-class
 
 ## See also
 
-- [`dueling-wizards-why-packdna-signals.md`](dueling-wizards-why-packdna-signals.md) — the pack-DNA signals these outcomes are bucketed against.
-- [`dueling-wizards-store-integrity.md`](dueling-wizards-store-integrity.md) — write-immune quarantine, the other propose-don't-mutate feedback path.
+- [`why-packdna-signals.md`](why-packdna-signals.md) — the pack-DNA signals these outcomes are bucketed against.
+- [`store-integrity.md`](store-integrity.md) — write-immune quarantine, the other propose-don't-mutate feedback path.

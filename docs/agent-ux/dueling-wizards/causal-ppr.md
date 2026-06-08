@@ -61,5 +61,5 @@ engine, no petgraph**:
 
 ## See also
 
-- [`dueling-wizards-why-packdna-signals.md`](dueling-wizards-why-packdna-signals.md) — where the causal-ancestry citation surfaces.
-- [`dueling-wizards-contradiction.md`](dueling-wizards-contradiction.md) — the other graph-reuse retrieval signal (k-truss/Louvain over the conflict graph).
+- [`why-packdna-signals.md`](why-packdna-signals.md) — where the causal-ancestry citation surfaces.
+- [`contradiction.md`](contradiction.md) — the other graph-reuse retrieval signal (k-truss/Louvain over the conflict graph).
