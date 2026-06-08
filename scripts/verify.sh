@@ -52,6 +52,7 @@ set -euo pipefail
 #   4.655. E2E Event Contract Radar Contract - no-Cargo golden report/schema harness
 #   4.66. E2E Event Contract Radar - advisory shell evidence coverage scanner (bd-2ljka.4)
 #   4.665. Work Packet No-Mutation - shell fixture matrix for claim-gate consumer safety
+#   4.666. Agent Mail Snapshot Contract - no-Cargo redaction/coordination self-test
 #   4.67. Panic Helper Radar Contract - no-Cargo schema/golden scanner contract gate
 #   4.68. Swarm SLO Replay Contract - no-Cargo replay fixture/golden contract gate
 #   4.69. CI Proof-Lane Snapshot Contract - no-Cargo proof-lane fixture gate
@@ -944,6 +945,11 @@ run_stage "E2E Event Contract Radar Advisory" "e2e_event_contract_radar_advisory
 # packet generation and the agent-facing claim-gate consumer stay read-only,
 # refuse unsafe claim states, and include install-check freshness fixtures.
 run_stage "Work Packet No-Mutation Contract" "./scripts/e2e_swarm_work_packet_no_mutation.sh"
+
+# Gate 3.856: Agent Mail snapshot bridge contract. This no-Cargo self-test
+# verifies redaction, normalization, degradation, and companion coordination
+# output without requiring a live Agent Mail process.
+run_stage "Agent Mail Snapshot Contract" "./scripts/agent_mail_snapshot.sh --self-test"
 
 # Gate 3.86: Panic-helper radar contract (bd-ppbue.30). This no-Cargo harness
 # validates ee.panic_helper_radar.v1 schema/golden fixtures so scanner drift is
