@@ -17,7 +17,7 @@ type TestResult = Result<(), String>;
 const MANIFEST_REL: &str = "tests/fixtures/contracts/dueling_wizards_backup_coverage.json";
 const MIGRATION_REGISTRY_REL: &str =
     "tests/fixtures/contracts/dueling_wizards_migration_registry.json";
-const DOC_REL: &str = "docs/agent-ux/dueling-wizards-backup-coverage.md";
+const DOC_REL: &str = "docs/agent-ux/dueling-wizards/backup-coverage.md";
 const BACKUP_SOURCE_REL: &str = "src/core/backup.rs";
 
 const REQUIRED_COVERAGE_SURFACES: &[&str] = &[

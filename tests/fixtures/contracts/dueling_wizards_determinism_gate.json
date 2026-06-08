@@ -3,11 +3,11 @@
   "initiativeBead": "bd-1n0np",
   "gateBead": "bd-1n0np.15.2",
   "manifestOwner": "tests/contracts/dueling_wizards_determinism_gate.rs",
-  "doc": "docs/agent-ux/dueling-wizards-determinism-gate.md",
+  "doc": "docs/agent-ux/dueling-wizards/determinism-gate.md",
   "implementationState": "planned_contract",
   "determinismHarness": "scripts/e2e_overhaul/determinism.sh",
   "determinismUnit": "tests/determinism_unit.rs",
-  "surfaceContract": "docs/agent-ux/dueling-wizards-surface-contract.md",
+  "surfaceContract": "docs/agent-ux/dueling-wizards/surface-contract.md",
   "migrationRegistry": "tests/fixtures/contracts/dueling_wizards_migration_registry.json",
   "policy": {
     "runCount": 3,
@@ -560,7 +560,7 @@
       "needles": ["harness_init", "assert_jq", "harness_summary"]
     },
     {
-      "source": "docs/agent-ux/dueling-wizards-surface-contract.md",
+      "source": "docs/agent-ux/dueling-wizards/surface-contract.md",
       "needles": ["determinism", "e2e_harness", "Local Cargo fallback is not valid proof"]
     }
   ]

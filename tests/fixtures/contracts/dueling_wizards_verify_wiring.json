@@ -3,7 +3,7 @@
   "initiativeBead": "bd-1n0np",
   "gateBead": "bd-1n0np.15.4",
   "manifestOwner": "tests/contracts/dueling_wizards_verify_wiring.rs",
-  "doc": "docs/agent-ux/dueling-wizards-verify-wiring.md",
+  "doc": "docs/agent-ux/dueling-wizards/verify-wiring.md",
   "implementationState": "planned_contract",
   "verifyScript": "scripts/verify.sh",
   "harness": "scripts/lib/e2e_harness.sh",

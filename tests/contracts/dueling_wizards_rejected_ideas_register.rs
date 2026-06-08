@@ -13,7 +13,7 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const MANIFEST_REL: &str = "tests/fixtures/contracts/dueling_wizards_rejected_ideas_register.json";
-const DOC_REL: &str = "docs/agent-ux/dueling-wizards-rejected-ideas-register.md";
+const DOC_REL: &str = "docs/agent-ux/dueling-wizards/rejected-ideas-register.md";
 
 const REQUIRED_GUARDRAILS: &[&str] = &[
     "reopen_requires_new_evidence",

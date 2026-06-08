@@ -246,7 +246,7 @@
       "degradedCodes": [],
       "envVars": [],
       "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
-      "implementedArtifacts": ["scripts/lib/e2e_harness.sh", "docs/agent-ux/dueling-wizards-surface-contract.md", "tests/fixtures/contracts/dueling_wizards_surface_contract.json", "tests/contracts/dueling_wizards_surface_contract.rs"]
+      "implementedArtifacts": ["scripts/lib/e2e_harness.sh", "docs/agent-ux/dueling-wizards/surface-contract.md", "tests/fixtures/contracts/dueling_wizards_surface_contract.json", "tests/contracts/dueling_wizards_surface_contract.rs"]
     },
     {
       "id": "memory_sentinels",

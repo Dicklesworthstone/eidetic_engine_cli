@@ -13,7 +13,7 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const MANIFEST_REL: &str = "tests/fixtures/contracts/dueling_wizards_verify_wiring.json";
-const DOC_REL: &str = "docs/agent-ux/dueling-wizards-verify-wiring.md";
+const DOC_REL: &str = "docs/agent-ux/dueling-wizards/verify-wiring.md";
 const VERIFY_REL: &str = "scripts/verify.sh";
 const HARNESS_REL: &str = "scripts/lib/e2e_harness.sh";
 const EVENT_RADAR_REL: &str = "scripts/e2e_event_contract_radar.sh";

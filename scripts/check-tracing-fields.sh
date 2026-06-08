@@ -489,7 +489,7 @@ def validate_mesh_redaction_manifest(root_path, required):
         "initiativeBead": "bd-1n0np",
         "gateBead": "bd-1n0np.23.4",
         "manifestOwner": "tests/contracts/dueling_wizards_mesh_redaction.rs",
-        "doc": "docs/agent-ux/dueling-wizards-mesh-redaction.md",
+        "doc": "docs/agent-ux/dueling-wizards/mesh-redaction.md",
         "migrationRegistry": "tests/fixtures/contracts/dueling_wizards_migration_registry.json",
         "peerPolicyDoc": "docs/mesh/peer_policy.md",
         "sharePreviewSource": "src/policy/mod.rs",

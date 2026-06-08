@@ -14,7 +14,7 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const MANIFEST_REL: &str = "tests/fixtures/contracts/dueling_wizards_migration_registry.json";
-const DOC_REL: &str = "docs/agent-ux/dueling-wizards-migration-sequencing.md";
+const DOC_REL: &str = "docs/agent-ux/dueling-wizards/migration-sequencing.md";
 const DB_MOD_REL: &str = "src/db/mod.rs";
 
 const REQUIRED_ALLOCATIONS: &[&str] = &[

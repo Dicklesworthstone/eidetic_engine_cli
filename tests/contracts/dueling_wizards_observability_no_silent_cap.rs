@@ -15,7 +15,7 @@ type TestResult = Result<(), String>;
 
 const MANIFEST_REL: &str =
     "tests/fixtures/contracts/dueling_wizards_observability_no_silent_cap.json";
-const DOC_REL: &str = "docs/agent-ux/dueling-wizards-observability-no-silent-cap.md";
+const DOC_REL: &str = "docs/agent-ux/dueling-wizards/observability-no-silent-cap.md";
 
 const REQUIRED_SUBSYSTEMS: &[&str] = &[
     "evidence_harvester",

@@ -214,7 +214,7 @@ assert_jq_file "$DETERMINISM_MANIFEST" \
     '.schema == "ee.dueling_wizards.determinism_gate.v1" and .policy.localCargoProof == "invalid"' \
     "determinism manifest keeps local cargo proof invalid"
 assert_jq_file "$DETERMINISM_MANIFEST" \
-    '.initiativeBead == "bd-1n0np" and .gateBead == "bd-1n0np.15.2" and .implementationState == "planned_contract" and .determinismHarness == "scripts/e2e_overhaul/determinism.sh" and .determinismUnit == "tests/determinism_unit.rs" and .surfaceContract == "docs/agent-ux/dueling-wizards-surface-contract.md" and .migrationRegistry == "tests/fixtures/contracts/dueling_wizards_migration_registry.json"' \
+    '.initiativeBead == "bd-1n0np" and .gateBead == "bd-1n0np.15.2" and .implementationState == "planned_contract" and .determinismHarness == "scripts/e2e_overhaul/determinism.sh" and .determinismUnit == "tests/determinism_unit.rs" and .surfaceContract == "docs/agent-ux/dueling-wizards/surface-contract.md" and .migrationRegistry == "tests/fixtures/contracts/dueling_wizards_migration_registry.json"' \
     "determinism manifest anchors harness, unit, surface, and migration contracts"
 assert_jq_file "$DETERMINISM_MANIFEST" \
     '.policy.runCount == 3 and .policy.canonicalization == "explicit_volatile_field_removal" and .policy.byteStableJsonRequired == true and .policy.packHashReproRequiredWhenPackEmitted == true and .policy.stdoutMachineOnly == true and .policy.rchProofRequiredForRuntimeTests == true' \
@@ -290,7 +290,7 @@ assert_jq_file "$WHY_PACKDNA_MANIFEST" \
     'all(.signalCoverageMatrix[]; .compatibility == "stable_additive" and .redactionStatus == "redaction_safe" and .degradedHandlingStatus == "degraded_not_silent" and .runtimeProofPolicy == "rch_required_local_invalid" and .complianceStatus == "planned_conformant" and .scoreMilli >= 950 and .divergent == 0)' \
     "why/PackDna coverage matrix keeps conservative proof posture"
 assert_jq_file "$OBSERVABILITY_MANIFEST" \
-    '.schema == "ee.dueling_wizards.observability_no_silent_cap.v1" and .initiativeBead == "bd-1n0np" and .gateBead == "bd-1n0np.15.5" and .manifestOwner == "tests/contracts/dueling_wizards_observability_no_silent_cap.rs" and .doc == "docs/agent-ux/dueling-wizards-observability-no-silent-cap.md" and .implementationState == "planned_contract"' \
+    '.schema == "ee.dueling_wizards.observability_no_silent_cap.v1" and .initiativeBead == "bd-1n0np" and .gateBead == "bd-1n0np.15.5" and .manifestOwner == "tests/contracts/dueling_wizards_observability_no_silent_cap.rs" and .doc == "docs/agent-ux/dueling-wizards/observability-no-silent-cap.md" and .implementationState == "planned_contract"' \
     "observability manifest identity and owner are stable"
 assert_jq_file "$OBSERVABILITY_MANIFEST" \
     '.policy.structuredTracingRequired == true and .policy.noSilentCapRequired == true and .policy.capEventCompatibility == "stable_additive" and .policy.missingCapEventBehavior == "degraded_not_silent" and .policy.localCargoProof == "invalid" and .policy.rchProofRequiredForRuntimeTests == true' \

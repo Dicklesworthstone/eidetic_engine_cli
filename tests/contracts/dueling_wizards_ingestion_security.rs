@@ -14,7 +14,7 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const MANIFEST_REL: &str = "tests/fixtures/contracts/dueling_wizards_ingestion_security.json";
-const DOC_REL: &str = "docs/agent-ux/dueling-wizards-ingestion-security.md";
+const DOC_REL: &str = "docs/agent-ux/dueling-wizards/ingestion-security.md";
 const POLICY_SOURCE_REL: &str = "src/policy/mod.rs";
 const CURATE_SOURCE_REL: &str = "src/curate/mod.rs";
 const OUTCOME_SOURCE_REL: &str = "src/core/outcome.rs";

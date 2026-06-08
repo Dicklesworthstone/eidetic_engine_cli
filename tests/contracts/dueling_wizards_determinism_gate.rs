@@ -14,10 +14,10 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const MANIFEST_REL: &str = "tests/fixtures/contracts/dueling_wizards_determinism_gate.json";
-const DOC_REL: &str = "docs/agent-ux/dueling-wizards-determinism-gate.md";
+const DOC_REL: &str = "docs/agent-ux/dueling-wizards/determinism-gate.md";
 const DETERMINISM_SH_REL: &str = "scripts/e2e_overhaul/determinism.sh";
 const DETERMINISM_UNIT_REL: &str = "tests/determinism_unit.rs";
-const SURFACE_CONTRACT_REL: &str = "docs/agent-ux/dueling-wizards-surface-contract.md";
+const SURFACE_CONTRACT_REL: &str = "docs/agent-ux/dueling-wizards/surface-contract.md";
 const MIGRATION_REGISTRY_REL: &str =
     "tests/fixtures/contracts/dueling_wizards_migration_registry.json";
 

@@ -3,7 +3,7 @@
   "initiativeBead": "bd-1n0np",
   "gateBead": "bd-1n0np.14",
   "manifestOwner": "tests/contracts/dueling_wizards_rejected_ideas_register.rs",
-  "doc": "docs/agent-ux/dueling-wizards-rejected-ideas-register.md",
+  "doc": "docs/agent-ux/dueling-wizards/rejected-ideas-register.md",
   "implementationState": "decision_record",
   "policy": {
     "recordType": "rejected_ideas_register",

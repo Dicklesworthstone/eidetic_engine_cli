@@ -15,7 +15,7 @@ type TestResult = Result<(), String>;
 const MANIFEST_REL: &str = "tests/fixtures/contracts/dueling_wizards_mesh_redaction.json";
 const MIGRATION_REGISTRY_REL: &str =
     "tests/fixtures/contracts/dueling_wizards_migration_registry.json";
-const DOC_REL: &str = "docs/agent-ux/dueling-wizards-mesh-redaction.md";
+const DOC_REL: &str = "docs/agent-ux/dueling-wizards/mesh-redaction.md";
 const PEER_POLICY_DOC_REL: &str = "docs/mesh/peer_policy.md";
 const SHARE_PREVIEW_SOURCE_REL: &str = "src/policy/mod.rs";
 

@@ -15,7 +15,7 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const MANIFEST_REL: &str = "tests/fixtures/contracts/dueling_wizards_surface_contract.json";
-const DOC_REL: &str = "docs/agent-ux/dueling-wizards-surface-contract.md";
+const DOC_REL: &str = "docs/agent-ux/dueling-wizards/surface-contract.md";
 
 const REQUIRED_ARTIFACTS: &[&str] = &[
     "capabilities",

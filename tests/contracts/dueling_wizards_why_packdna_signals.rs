@@ -14,7 +14,7 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const MANIFEST_REL: &str = "tests/fixtures/contracts/dueling_wizards_why_packdna_signals.json";
-const DOC_REL: &str = "docs/agent-ux/dueling-wizards-why-packdna-signals.md";
+const DOC_REL: &str = "docs/agent-ux/dueling-wizards/why-packdna-signals.md";
 const WHY_SCHEMA_REL: &str = "docs/schemas/ee.why.v1.json";
 const PACK_DNA_SCHEMA_REL: &str = "docs/schemas/ee.context.pack_dna.v1.json";
 const CAUSAL_WHY_SCHEMA_REL: &str = "docs/schemas/ee.why.causal.v1.json";

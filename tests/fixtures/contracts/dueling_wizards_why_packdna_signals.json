@@ -3,7 +3,7 @@
   "initiativeBead": "bd-1n0np",
   "gateBead": "bd-1n0np.23.5",
   "manifestOwner": "tests/contracts/dueling_wizards_why_packdna_signals.rs",
-  "doc": "docs/agent-ux/dueling-wizards-why-packdna-signals.md",
+  "doc": "docs/agent-ux/dueling-wizards/why-packdna-signals.md",
   "implementationState": "planned_contract",
   "whySchema": "docs/schemas/ee.why.v1.json",
   "packDnaSchema": "docs/schemas/ee.context.pack_dna.v1.json",
