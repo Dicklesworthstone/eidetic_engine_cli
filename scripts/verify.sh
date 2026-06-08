@@ -1085,6 +1085,13 @@ run_stage "Dueling Wizards House Rules E2E" "./scripts/e2e_house_rules.sh"
 # decision supersedes graph projection, and unchanged bare --kind behavior.
 run_stage "Dueling Wizards Typed Kinds E2E" "./scripts/e2e_typed_kinds.sh"
 
+# Gate 6.13: Dueling Wizards docs-bootstrap real-binary E2E (bd-1n0np.11.5).
+# Proves ee bootstrap docs --dry-run structural candidates (spans/hashes/anchors/
+# specificity), determinism, guard-rail rejection (oversize/symlink/missing as
+# structured degraded rows), and apply-through-curation refusing without
+# --approved-only (no silent write).
+run_stage "Dueling Wizards Docs Bootstrap E2E" "./scripts/e2e_docs_bootstrap.sh"
+
 # Heavy gate block: skipped under --ci-smoke for fast swarm-CI / agent
 # pre-push runs. bd-2dgn0.5: see docs/operator-swarm-slo.md for which
 # gates are dropped and how to recover coverage in a follow-up
