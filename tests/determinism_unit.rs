@@ -242,6 +242,46 @@ fn context_pack_hash_reproduces_across_three_invocations() -> TestResult {
     Ok(())
 }
 
+// bd-1n0np.15.2 — determinism gate for the why-not surface (ee.why_not_selected.v1):
+// the counterfactual exclusion report is seeded deterministically (seed 0), so its
+// `data` subtree must reproduce byte-identically across repeated invocations.
+#[test]
+fn why_not_json_reproduces_across_three_invocations() -> TestResult {
+    let workspace = tmp_workspace("why_not")?;
+    init_workspace(&workspace)?;
+    let target = remember(&workspace, "Use cargo fmt before release.")?;
+    remember(&workspace, "Database connection pooling guide.")?;
+    remember(&workspace, "Migration 0042 added user_email column.")?;
+
+    let run_why_not = || -> Result<String, String> {
+        let output = run_ee(&[
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "why-not",
+            &target,
+            "--task",
+            "prepare release",
+            "--json",
+        ])?;
+        let value = parse_json(&output, "why-not")?;
+        // Compare the deterministic `data` subtree; the response envelope may
+        // carry run-specific timestamps, so canonicalize just `data`.
+        let data = value.pointer("/data").cloned().unwrap_or(Value::Null);
+        serde_json::to_string(&data).map_err(|error| error.to_string())
+    };
+
+    let r1 = run_why_not()?;
+    let r2 = run_why_not()?;
+    let r3 = run_why_not()?;
+    ensure(
+        !r1.is_empty() && r1 != "null",
+        format!("why-not data absent; determinism cannot be asserted: {r1}"),
+    )?;
+    ensure(r1 == r2, "why-not data run1 != run2")?;
+    ensure(r2 == r3, "why-not data run2 != run3")?;
+    Ok(())
+}
+
 fn run_ee_stdout(args: &[&str], context: &str) -> Result<String, String> {
     let output = run_ee(args)?;
     if !output.status.success() {
