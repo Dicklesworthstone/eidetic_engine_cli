@@ -135,6 +135,63 @@ the host, and `data.verification.checksumStatus=verified`. A plan with
 `checksumStatus=planned`, `manifestStatus=missing`, `targetStatus` other than
 `matched`, or any error finding is evidence for a blocked state.
 
+Machine-checkable adoption decision:
+
+```bash
+ee install check --json --offline --manifest <release-manifest.json> \
+  | jq -e '
+      .schema == "ee.response.v2"
+      and .success == true
+      and .data.schema == "ee.install.check.v1"
+      and .data.freshness.schema == "ee.install.freshness.v1"
+      and (.data.freshness.verdict == "fresh"
+        or .data.freshness.verdict == "stale")
+    '
+
+ee install plan --json --offline \
+  --manifest <release-manifest.json> \
+  --artifact-root <release-artifact-dir> \
+  --install-dir "$HOME/.local/bin" \
+  --target aarch64-apple-darwin \
+  | jq -e '
+      .schema == "ee.response.v2"
+      and .success == true
+      and .data.schema == "ee.install.plan.v1"
+      and (.data.status == "ready" or .data.status == "idempotent")
+      and .data.target.targetTriple == "aarch64-apple-darwin"
+      and .data.verification.targetStatus == "matched"
+      and .data.verification.checksumStatus == "verified"
+      and ([.data.findings[]? | select(.severity == "error")] | length) == 0
+    '
+```
+
+The first predicate only proves the installed binary can emit current
+install-freshness evidence. It is claim-safe only when the verdict is `fresh`.
+A `stale` verdict plus the second predicate means the adoption plan is ready for
+an explicitly approved operator install action. If either command fails the
+predicate, the adoption state is blocked. Preserve the stable fields instead of
+retrying with Cargo: `data.freshness.verdict`,
+`data.freshness.blockingFindings[]`, `data.findings[].code`,
+`data.verification.{manifestStatus,checksumStatus,targetStatus,overwriteStatus}`,
+`data.artifact.{artifactId,releaseVersion,targetTriple}`, and
+`data.idempotencyKey` when present.
+
+Use this compact blocked-state record in Agent Mail, Beads, or a handoff:
+
+```text
+install freshness/adoption blocked:
+- check_schema: <schema or missing>
+- freshness_verdict: <fresh|stale|unknown_source_version|...>
+- blocking_findings: <codes>
+- plan_schema: <schema or missing>
+- plan_status: <ready|idempotent|blocked|degraded|missing>
+- verification: manifest=<status> checksum=<status> target=<status>
+- artifact: id=<id or none> version=<version or none> target=<triple or none>
+- install_dir: $HOME/.local/bin
+- no_local_cargo: true
+- next_owner: release-operator|path-owner|artifact-builder|manual-review
+```
+
 Applying a plan is a mutating install action. Agents may report the exact
 operator command, but must not run it unless the user explicitly approves the
 overwrite path and artifact source:
@@ -153,6 +210,10 @@ binary for PATH. If no no-local-Cargo macOS artifact exists, send an operator
 exception request with `command -v ee`, `ee --version`, the `install check` or
 `install plan` JSON finding codes, and the reason a local build would violate
 the RCH-only policy. Do not silently build locally to unblock agent automation.
+The exception request must name the exact overwrite target, artifact source (or
+absence of one), whether a release manifest was checked, and the command the
+operator would need to approve. It must not include raw PATH dumps, private
+absolute paths beyond the approved install target, or copied binary contents.
 
 For shared-checkout commit readiness, see
 [`docs/agent-ux/workspace-hygiene.md`](agent-ux/workspace-hygiene.md). The

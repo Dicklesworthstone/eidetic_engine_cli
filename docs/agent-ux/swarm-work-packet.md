@@ -79,6 +79,24 @@ Running `ee update`, copying from `target/`, or using `cargo install` is an
 operator install action and requires explicit approval of the overwrite path and
 artifact source.
 
+For claim-gate handoffs, record the machine decision rather than prose:
+
+- Treat a stale installed binary plus a verified plan as operator-ready, not
+  claim-safe. The claim gate remains blocked until a post-install
+  `ee install check --json --offline` reports `data.freshness.verdict=fresh`.
+- Accept the adoption plan for operator action only when the check emits
+  `ee.install.check.v1` with `ee.install.freshness.v1` and the plan emits
+  `ee.install.plan.v1` with `status=ready|idempotent`,
+  `targetTriple=aarch64-apple-darwin`, `targetStatus=matched`, and
+  `checksumStatus=verified`.
+- Block the claim gate when freshness is not authoritative, the plan has any
+  error finding, the artifact target is not macOS for this host, checksum status
+  is `planned|failed|missing|not_checked`, or the installed binary is shadowed
+  by another PATH entry.
+- If no verified macOS artifact exists, send the operator-exception record from
+  `docs/agent_integration.md#no-local-cargo-install-freshness`; do not run local
+  Cargo or copy from `target/`.
+
 ## Intended Flow
 
 ```bash
