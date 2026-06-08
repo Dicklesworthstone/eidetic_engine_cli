@@ -148,6 +148,35 @@ else
     _harness_fail "typed supersedes graph projection missing one-edge path"
 fi
 
+step "persisted contradiction snapshot and export include typed failure-family edge"
+family_peer_out="$(ee_json --workspace "$WS" remember \
+    "Second failure in the same family. Family: aggressive prefetch. Cause: cache pollution. Regression surface: small-N reads." \
+    --level episodic --kind failure \
+    --source "bench-run://typed-kinds/failure-prefetch-peer" \
+    --json)"
+assert_jq "$family_peer_out" '.success == true and .data.kind == "failure" and .data.persisted == true' \
+    "failure peer memory persisted"
+family_peer_id="$(memory_id_from_remember "$family_peer_out")"
+
+family_path_out="$(ee_json --workspace "$WS" graph path "$failure_id" "$family_peer_id" --json)"
+assert_jq "$family_path_out" '.success == true and .data.status == "path_found" and .data.pathLength == 1' \
+    "live graph path sees typed failure-family edge"
+
+refresh_out="$(ee_json --workspace "$WS" graph snapshot refresh --graph contradictions --json)"
+assert_jq "$refresh_out" '.success == true' "contradiction snapshot refresh succeeds"
+assert_jq "$refresh_out" \
+    'any(.data.reports[]?; .graphType == "contradiction_subgraph" and .status == "refreshed" and .graph.nodeCount >= 2 and .graph.edgeCount >= 2 and .snapshot.graphType == "contradiction_subgraph")' \
+    "contradiction snapshot persists typed failure-family edge"
+
+export_out="$(ee_json --workspace "$WS" graph export --graph-type contradiction_subgraph --json)"
+assert_jq "$export_out" '.success == true and .data.status == "exported" and .data.graphType == "contradiction_subgraph" and .data.graph.edgeCount >= 2' \
+    "contradiction graph export uses persisted typed-edge snapshot"
+if printf '%s' "$export_out" | jq -e '(.data.artifact.content // "") | contains("failure_family")' >/dev/null 2>&1; then
+    _harness_pass "contradiction graph export labels typed failure-family edge"
+else
+    _harness_fail "contradiction graph export did not label typed failure-family edge"
+fi
+
 end_temp_workspace
 summary_rc=0
 harness_summary || summary_rc=$?
