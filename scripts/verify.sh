@@ -1092,6 +1092,13 @@ run_stage "Dueling Wizards Typed Kinds E2E" "./scripts/e2e_typed_kinds.sh"
 # --approved-only (no silent write).
 run_stage "Dueling Wizards Docs Bootstrap E2E" "./scripts/e2e_docs_bootstrap.sh"
 
+# Gate 6.14: Dueling Wizards attestation real-binary E2E (bd-1n0np.22.6).
+# Proves ee attest query/memory emit a deterministic, redaction-safe ee.attest.v1
+# bundle (blake3 bundleHash, rawTextIncluded false) with zero secret leakage; the
+# support-bundle/handoff embedding hash-equality is capability-guarded until
+# bd-1n0np.22.3 wires it.
+run_stage "Dueling Wizards Attestation E2E" "./scripts/e2e_attestation.sh"
+
 # Heavy gate block: skipped under --ci-smoke for fast swarm-CI / agent
 # pre-push runs. bd-2dgn0.5: see docs/operator-swarm-slo.md for which
 # gates are dropped and how to recover coverage in a follow-up
