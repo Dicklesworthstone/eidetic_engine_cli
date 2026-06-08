@@ -20,7 +20,14 @@
 
 use std::collections::BTreeMap;
 
+use crate::curate::CandidateType;
+use crate::db::CreateCurationCandidateInput;
+
 pub const TRAUMA_GUARD_BYPASS_EVIDENCE_SCHEMA_V1: &str = "ee.trauma_guard.bypass_evidence.v1";
+
+/// Source-type tag on calibration candidates this module proposes, so curate can
+/// distinguish trauma-guard-driven calibrations.
+pub const TRAUMA_GUARD_CALIBRATION_SOURCE_TYPE: &str = "trauma_guard_bypass_evidence";
 
 /// Default window: a bypass counts as resolving a halt only if it lands within
 /// this many seconds AFTER the halt (a human acting on the same denied command).
@@ -138,12 +145,72 @@ pub fn correlate_bypass_evidence(
     evidence
 }
 
+/// Propose a PENDING curate calibration candidate from bypass evidence
+/// (bd-1n0np.18.2 core). It records that this EXACT command was policy-denied then
+/// human-bypassed, as a derived context memory the guard can cite to calm the
+/// next prompt — `ee preflight learn`'s propose stage. NEVER auto-applied (status
+/// `pending`, applied only via an explicit `ee curate accept`); the bypass
+/// override itself stays one-shot (this never creates an auto-permanent allowlist).
+#[must_use]
+pub fn propose_calibration_candidate(
+    evidence: &CommandBypassEvidence,
+    workspace_id: &str,
+) -> CreateCurationCandidateInput {
+    let reason = format!(
+        "Trauma-guard calibration: command {} was policy-denied then human-bypassed {} time(s) within the evidence window (last at epoch {}). Cite this so the next preflight prompt for this exact command is calmer; the override stays one-shot.",
+        evidence.command_hash, evidence.correlated_bypass_count, evidence.last_bypass_at_epoch,
+    );
+    let proposed_content = format!(
+        "Preflight calibration context for command {}: {} human bypass(es) recorded after a policy-deny. Treat repeat prompts for this exact command as informed, not novel.",
+        evidence.command_hash, evidence.correlated_bypass_count,
+    );
+    CreateCurationCandidateInput {
+        workspace_id: workspace_id.to_string(),
+        candidate_type: CandidateType::CreateDerivedMemory.as_str().to_string(),
+        target_memory_id: None,
+        proposed_content: Some(proposed_content),
+        proposed_confidence: None,
+        proposed_trust_class: None,
+        source_type: TRAUMA_GUARD_CALIBRATION_SOURCE_TYPE.to_string(),
+        source_id: Some(evidence.command_hash.clone()),
+        reason,
+        confidence: 0.5,
+        status: Some("pending".to_string()),
+        created_at: None,
+        ttl_expires_at: None,
+        derivation_source_refs_json: None,
+        derivation_metadata_json: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BYPASS_EVIDENCE_CORRELATION_WINDOW_SECONDS, PreflightBypassEvent, PreflightHaltEvent,
-        correlate_bypass_evidence,
+        BYPASS_EVIDENCE_CORRELATION_WINDOW_SECONDS, CommandBypassEvidence, PreflightBypassEvent,
+        PreflightHaltEvent, TRAUMA_GUARD_CALIBRATION_SOURCE_TYPE, correlate_bypass_evidence,
+        propose_calibration_candidate,
     };
+
+    #[test]
+    fn calibration_candidate_is_pending_derived_memory_citing_the_command() {
+        let evidence = CommandBypassEvidence {
+            command_hash: "blake3:cmd_a".to_string(),
+            correlated_bypass_count: 3,
+            last_bypass_at_epoch: 1_500,
+        };
+        let input = propose_calibration_candidate(&evidence, "wsp_test");
+        assert_eq!(input.candidate_type, "create_derived_memory");
+        assert_eq!(input.source_type, TRAUMA_GUARD_CALIBRATION_SOURCE_TYPE);
+        assert_eq!(input.source_id.as_deref(), Some("blake3:cmd_a"));
+        // Never auto-applied: pending until an explicit curate accept.
+        assert_eq!(input.status.as_deref(), Some("pending"));
+        assert!(
+            input
+                .proposed_content
+                .unwrap_or_default()
+                .contains("3 human bypass")
+        );
+    }
 
     fn halt(hash: &str, at: i64) -> PreflightHaltEvent {
         PreflightHaltEvent {
