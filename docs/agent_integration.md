@@ -147,9 +147,11 @@ ee install plan --json --offline \
 
 The plan is only adoptable when `data.schema=ee.install.plan.v1`,
 `data.status` is `ready` or `idempotent`, the selected artifact target matches
-the host, and `data.verification.checksumStatus=verified`. A plan with
+the host, `data.verification.checksumStatus=verified`, and the `write_binary`
+operation mode is `operator_approval_required_no_local_cargo`. A plan with
 `checksumStatus=planned`, `manifestStatus=missing`, `targetStatus` other than
-`matched`, or any error finding is evidence for a blocked state.
+`matched`, a different write mode, or any error finding is evidence for a
+blocked state.
 
 Machine-checkable adoption decision:
 
@@ -177,6 +179,9 @@ ee install plan --json --offline \
       and .data.target.targetTriple == "aarch64-apple-darwin"
       and .data.verification.targetStatus == "matched"
       and .data.verification.checksumStatus == "verified"
+      and ([.data.plannedOperations[]?
+        | select(.action == "write_binary")
+        | .mode] == ["operator_approval_required_no_local_cargo"])
       and ([.data.findings[]? | select(.severity == "error")] | length) == 0
     '
 ```

@@ -241,7 +241,7 @@ pub fn check_install(options: &InstallCheckOptions) -> InstallCheckReport {
                 InstallFindingCode::NoUpdateSourceConfigured
             },
             "no release manifest source is configured for update checks",
-            "Pass --manifest for deterministic offline update planning.",
+            "Pass --manifest for deterministic no-local-Cargo freshness evidence; use install plan with --artifact-root before adoption.",
         ));
     }
 
@@ -369,7 +369,7 @@ pub fn plan_install(options: &InstallPlanOptions) -> InstallPlanReport {
                         findings.push(InstallFinding::warning(
                             InstallFindingCode::ChecksumVerificationPending,
                             "artifact checksum cannot be verified without --artifact-root",
-                            "Pass --artifact-root pointing at downloaded release artifacts before apply.",
+                            "Pass --artifact-root pointing at downloaded release artifacts before no-local-Cargo adoption.",
                         ));
                         "planned".to_owned()
                     };
@@ -394,7 +394,7 @@ pub fn plan_install(options: &InstallPlanOptions) -> InstallPlanReport {
                     findings.push(InstallFinding::error(
                         InstallFindingCode::TargetMismatch,
                         format!("manifest has no artifact for target '{}'", target_triple),
-                        "Choose a target from the manifest or build the missing artifact.",
+                        "Choose a target from the manifest or ask a release operator to publish the missing artifact; do not run local Cargo in agent automation.",
                     ));
                 }
             }
@@ -415,7 +415,7 @@ pub fn plan_install(options: &InstallPlanOptions) -> InstallPlanReport {
                 InstallFindingCode::ManifestMissing
             },
             "no release manifest was supplied",
-            "Pass --manifest to plan from a verified release manifest.",
+            "Pass --manifest to plan from a verified release artifact, or record an operator-exception request; do not run local Cargo.",
         ));
     }
 
@@ -462,7 +462,7 @@ pub fn plan_install(options: &InstallPlanOptions) -> InstallPlanReport {
             PlannedInstallOperation {
                 action: "write_binary".to_owned(),
                 path: target.install_path.clone(),
-                mode: "apply_requires_explicit_future_command".to_owned(),
+                mode: "operator_approval_required_no_local_cargo".to_owned(),
                 requires_verification: true,
             },
         ]
@@ -667,22 +667,22 @@ fn install_freshness_repair(verdict: InstallFreshnessVerdict) -> &'static str {
     match verdict {
         InstallFreshnessVerdict::Fresh => "No freshness repair required.",
         InstallFreshnessVerdict::Stale => {
-            "Rebuild and reinstall ee from the current source checkout before trusting agent automation."
+            "Plan no-local-Cargo adoption from a verified release artifact with ee install plan --manifest <release-manifest.json> --artifact-root <release-artifact-dir>, or file an operator exception; do not run local Cargo."
         }
         InstallFreshnessVerdict::UnknownSourceVersion => {
-            "Run the check from the eidetic-engine source checkout or pass a release manifest with a source version."
+            "Run the check from the eidetic-engine source checkout or pass a release manifest with a source version; if no artifact exists, record an operator-exception request instead of building locally."
         }
         InstallFreshnessVerdict::UnknownInstalledVersion => {
             "Run a normal ee binary with build version metadata before trusting install freshness."
         }
         InstallFreshnessVerdict::MissingRequiredSurface => {
-            "Upgrade or rebuild ee so it supports every required automation surface."
+            "Adopt a newer verified ee artifact that supports every required automation surface, or file an operator exception; do not run local Cargo."
         }
         InstallFreshnessVerdict::PathBinaryMissing => {
-            "Install ee into PATH or run the PATH-resolved ee binary before trusting agent automation."
+            "Plan adoption into PATH from a verified artifact or run the PATH-resolved ee binary before trusting agent automation; do not create it with local Cargo."
         }
         InstallFreshnessVerdict::ShadowedBinary => {
-            "Run the first ee binary found in PATH or fix PATH ordering before trusting agent automation."
+            "Run the first ee binary found in PATH or fix PATH ordering before trusting agent automation; if a newer binary is needed, use verified artifact adoption instead of local Cargo."
         }
     }
 }
@@ -2333,6 +2333,20 @@ mod tests {
         }
     }
 
+    fn ensure_no_local_cargo_adoption_guidance(value: &str, context: &str) -> TestResult {
+        ensure(
+            value.contains("local Cargo") || value.contains("no-local-Cargo"),
+            context,
+        )?;
+        ensure(
+            !value.contains("cargo build")
+                && !value.contains("cargo install")
+                && !value.contains("Rebuild")
+                && !value.contains("rebuild"),
+            context,
+        )
+    }
+
     fn executable_plan_for_artifact(
         artifact: InstallArtifactSelection,
         install_path: &Path,
@@ -2457,7 +2471,8 @@ mod tests {
                 .blocking_findings
                 .contains(&InstallFindingCode::InstalledBinaryStale),
             "stale finding code",
-        )
+        )?;
+        ensure_no_local_cargo_adoption_guidance(&report.repair, "stale repair")
     }
 
     #[test]
@@ -2483,7 +2498,8 @@ mod tests {
                 .blocking_findings
                 .contains(&InstallFindingCode::CurrentBinaryShadowed),
             "shadowed finding code",
-        )
+        )?;
+        ensure_no_local_cargo_adoption_guidance(&report.repair, "shadowed repair")
     }
 
     #[test]
@@ -2513,7 +2529,8 @@ mod tests {
                 .blocking_findings
                 .contains(&InstallFindingCode::RequiredSurfaceMissing),
             "missing-surface finding code",
-        )
+        )?;
+        ensure_no_local_cargo_adoption_guidance(&report.repair, "missing-surface repair")
     }
 
     #[test]
@@ -2544,7 +2561,8 @@ mod tests {
                 .blocking_findings
                 .contains(&InstallFindingCode::BinaryNotOnPath),
             "PATH-missing finding code",
-        )
+        )?;
+        ensure_no_local_cargo_adoption_guidance(&report.repair, "PATH-missing repair")
     }
 
     #[test]
@@ -2590,7 +2608,18 @@ mod tests {
                 .iter()
                 .any(|finding| matches!(finding.code, InstallFindingCode::OfflineNoManifest)),
             "offline_no_manifest finding",
-        )
+        )?;
+        let next_action = report
+            .findings
+            .iter()
+            .find(|finding| matches!(finding.code, InstallFindingCode::OfflineNoManifest))
+            .map(|finding| finding.next_action.as_str())
+            .unwrap_or_default();
+        ensure(
+            next_action.contains("operator-exception request"),
+            "offline plan points to operator-exception path",
+        )?;
+        ensure_no_local_cargo_adoption_guidance(next_action, "offline plan next action")
     }
 
     #[test]

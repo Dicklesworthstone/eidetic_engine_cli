@@ -31519,6 +31519,7 @@ where
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             task_lens: None,
+            require_fresh_sentinels: false,
             output_options,
             persist_pack: false,
         };
@@ -38186,6 +38187,122 @@ fn proof_check_status_label(status: ProofCheckStatus) -> &'static str {
     }
 }
 
+fn handle_verify_provenance<W, E>(
+    cli: &Cli,
+    args: &VerifyProvenanceArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id, workspace_path) =
+        match open_verify_provenance_database(cli, args.database.as_deref()) {
+            Ok(opened) => opened,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    let options = VerifyProvenanceOptions {
+        workspace_path: &workspace_path,
+        database: &connection,
+        workspace_id: &workspace_id,
+        memory_id: args.memory_id.as_deref(),
+        stale_after_days: args.stale_after_days,
+        limit: args.limit,
+        allow_network: args.allow_network,
+        now: chrono::Utc::now(),
+    };
+
+    match verify_bounded_provenance(options) {
+        Ok(report) => write_verify_provenance_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn open_verify_provenance_database(
+    cli: &Cli,
+    database: Option<&Path>,
+) -> Result<(DbConnection, String, PathBuf), DomainError> {
+    let workspace = cli.resolve_workspace();
+    let database_path = database
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace . --json".to_owned()),
+        });
+    }
+    let connection = DbConnection::open_file(&database_path).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to open provenance verification database: {error}"),
+            repair: Some("ee status --json".to_owned()),
+        }
+    })?;
+    let workspace_path = workspace.to_string_lossy().into_owned();
+    let workspace_id = connection
+        .get_workspace_by_path(&workspace_path)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query workspace row: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?
+        .map(|row| row.id)
+        .unwrap_or_else(|| workspace_core::stable_workspace_id(&workspace));
+    Ok((connection, workspace_id, workspace))
+}
+
+fn write_verify_provenance_report<W>(
+    cli: &Cli,
+    report: &crate::core::verify::VerifyProvenanceReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let mut data = report.data_json();
+    if let Some(object) = data.as_object_mut() {
+        object.insert(
+            "command".to_owned(),
+            serde_json::Value::String("verify provenance".to_owned()),
+        );
+        object.insert(
+            "version".to_owned(),
+            serde_json::Value::String(env!("CARGO_PKG_VERSION").to_owned()),
+        );
+        object.insert("readOnly".to_owned(), serde_json::Value::Bool(true));
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_verify_provenance_human(report))
+        }
+        output::Renderer::Toon => {
+            let json = verification_response_json(data).to_string();
+            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = verification_response_json(data);
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn render_verify_provenance_human(
+    report: &crate::core::verify::VerifyProvenanceReport,
+) -> String {
+    format!(
+        "verify provenance\n  Checked: {}\n  Verified: {}\n  Evidence missing: {}\n  Evidence drift: {}\n  Unverifiable: {}\n",
+        report.checked_count,
+        report.verified_count,
+        report.evidence_missing_count,
+        report.evidence_drift_count,
+        report.unverifiable_count
+    )
+}
+
 fn handle_proof_admit<W, E>(
     cli: &Cli,
     args: &ProofAdmitArgs,
@@ -39642,6 +39759,7 @@ where
         coordination_snapshot_path: None,
         coordination_stale_after_ms: 0,
         task_lens: None,
+        require_fresh_sentinels: false,
         output_options: ContextPackOutputOptions::default(),
         // why-not is read-only and never persists a pack record (reverse of `ee why`).
         persist_pack: false,
@@ -57349,6 +57467,40 @@ mod tests {
                 "proofs root",
             ),
             other => Err(format!("expected verify proofs, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_verify_provenance_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "verify",
+            "provenance",
+            "--memory-id",
+            "mem_00000000000000000000000001",
+            "--stale-after-days",
+            "0",
+            "--limit",
+            "3",
+            "--allow-network",
+            "--json",
+        ])
+        .map(|cli| (cli.wants_json(), cli.command))
+        .map_err(|error| format!("failed to parse verify provenance: {:?}", error.kind()))?;
+
+        ensure(parsed.0, "verify provenance honors json global")?;
+        match parsed.1 {
+            Some(Command::Verify(VerifyCommand::Provenance(args))) => {
+                ensure_equal(
+                    &args.memory_id.as_deref(),
+                    &Some("mem_00000000000000000000000001"),
+                    "memory id",
+                )?;
+                ensure_equal(&args.stale_after_days, &0, "stale-after-days")?;
+                ensure_equal(&args.limit, &3, "limit")?;
+                ensure(args.allow_network, "allow network")
+            }
+            other => Err(format!("expected verify provenance, got {other:?}")),
         }
     }
 

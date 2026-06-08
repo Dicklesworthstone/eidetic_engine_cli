@@ -964,7 +964,7 @@ fn verify_artifact_file(
             ReleaseVerificationCode::ChecksumMismatch,
             Some(artifact.artifact_id.clone()),
             format!("checksum mismatch for '{}'", artifact.file_name),
-            "Rebuild the archive or update the manifest checksum from trusted inputs.",
+            "Regenerate the archive or update the manifest checksum from trusted release inputs.",
         ));
     }
 }
