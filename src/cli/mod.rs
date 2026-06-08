@@ -234,6 +234,7 @@ use crate::core::search::{
     normalize_memory_kind_filter, recalibrate_search_score_calibration, run_diag_search,
     run_search, run_search_with_performance,
 };
+use crate::core::sentinel::{SentinelCheckContext, observe_sentinel_explicit};
 use crate::core::status::{
     StatusOptions, StatusReport, StatusSkylineReport, WalStatusReport,
     wal_checkpoint_bytes_threshold,
@@ -287,9 +288,13 @@ use crate::models::preflight::{
 use crate::models::{
     CertificateKind, CertificateStatus, DEMO_FILE_SCHEMA_V1, DEMO_RUN_RESULT_SCHEMA_V1, DemoEntry,
     DemoFile, DemoId, DemoStatus, DomainError, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
-    FilterOperator, InstallOperation, LearningObservationSignal, MemoryAnchorKind, MemoryScope,
-    OutputVerification, ProcessExitCode, QUERY_SCHEMA_V1, RedactionLevel, Tag, TaskLens,
-    TaskLensCatalog, TaskLensOverlay, is_valid_demo_artifact_path, parse_demo_file_yaml,
+    CreateMemorySentinelSpecInput, FilterOperator, InstallOperation, LearningObservationSignal,
+    MemoryAnchorKind, MemoryScope, MemorySentinelKind, MemorySentinelResult,
+    MemorySentinelResultInput, MemorySentinelResultStatus, MemorySentinelSpec,
+    MemorySentinelValidationError, OutputVerification, ProcessExitCode, QUERY_SCHEMA_V1,
+    RedactionLevel, SentinelObservation, StoredMemorySentinelSpec, Tag, TaskLens, TaskLensCatalog,
+    TaskLensOverlay, is_valid_demo_artifact_path, parse_demo_file_yaml,
+    parse_memory_sentinel_spec,
 };
 use crate::output;
 use crate::pack::{
@@ -906,6 +911,9 @@ pub enum Command {
     Schema(SchemaCommand),
     /// Search indexed memories and sessions.
     Search(SearchArgs),
+    /// Attach, explain, and run deterministic memory sentinel checks.
+    #[command(subcommand)]
+    Sentinel(SentinelCommand),
     /// Preview and consent-check outbound mesh sharing.
     #[command(subcommand)]
     Share(share::ShareCommand),
@@ -2513,6 +2521,10 @@ pub struct ContextArgs {
     #[arg(long = "read-only", alias = "no-persist", action = ArgAction::SetTrue)]
     pub read_only: bool,
 
+    /// Exclude sentinel-backed memories unless their latest sentinel checks are fresh and passing.
+    #[arg(long = "require-fresh-sentinels", action = ArgAction::SetTrue)]
+    pub require_fresh_sentinels: bool,
+
     /// Redaction level for context pack output.
     #[arg(long, value_enum)]
     pub redaction: Option<BackupRedaction>,
@@ -2744,6 +2756,10 @@ pub struct PackArgs {
     #[arg(long = "read-only", alias = "no-persist", action = ArgAction::SetTrue)]
     pub read_only: bool,
 
+    /// Exclude sentinel-backed memories unless their latest sentinel checks are fresh and passing.
+    #[arg(long = "require-fresh-sentinels", action = ArgAction::SetTrue)]
+    pub require_fresh_sentinels: bool,
+
     /// Redacted ee.coordination_snapshot.v1 JSON to embed in the pack.
     #[arg(long, value_name = "PATH")]
     pub coordination_snapshot: Option<PathBuf>,
@@ -2878,6 +2894,10 @@ pub struct PackBuildArgs {
     #[arg(long = "read-only", alias = "no-persist", action = ArgAction::SetTrue)]
     pub read_only: bool,
 
+    /// Exclude sentinel-backed memories unless their latest sentinel checks are fresh and passing.
+    #[arg(long = "require-fresh-sentinels", action = ArgAction::SetTrue)]
+    pub require_fresh_sentinels: bool,
+
     /// Redacted ee.coordination_snapshot.v1 JSON to embed in the pack.
     #[arg(long, value_name = "PATH")]
     pub coordination_snapshot: Option<PathBuf>,
@@ -2969,6 +2989,7 @@ impl PackArgs {
             no_skipped: self.no_skipped,
             no_meta: self.no_meta,
             read_only: self.read_only,
+            require_fresh_sentinels: self.require_fresh_sentinels,
             include_non_affecting_degradations: self.include_non_affecting_degradations,
             database: self.database.clone(),
             index_dir: self.index_dir.clone(),
@@ -7727,9 +7748,38 @@ pub struct RememberArgs {
     #[arg(long, value_name = "RFC3339")]
     pub valid_to: Option<String>,
 
+    /// Attach a deterministic sentinel predicate to this memory (`kind:target`).
+    #[arg(long = "sentinel", value_name = "KIND:TARGET", action = ArgAction::Append)]
+    pub sentinels: Vec<String>,
+
+    /// Mark sentinel check results stale after this many seconds.
+    #[arg(long = "sentinel-stale-threshold-seconds", value_name = "SECONDS")]
+    pub sentinel_stale_threshold_seconds: Option<u64>,
+
     /// Perform a dry run without storing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Memory sentinel commands.
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum SentinelCommand {
+    /// Run stored sentinel predicates and persist immutable check results.
+    Check(SentinelCheckArgs),
+    /// Explain supported sentinel kinds and declarative target syntax.
+    Explain,
+}
+
+/// Arguments for `ee sentinel check`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct SentinelCheckArgs {
+    /// Optional memory ID. Omit to check every stored sentinel spec.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: Option<String>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for experimental `ee note`.
@@ -8647,6 +8697,10 @@ pub struct WhyArgs {
     /// Include causal ancestry and min-cost path evidence from the causal graph.
     #[arg(long, action = ArgAction::SetTrue)]
     pub causal_explain: bool,
+
+    /// Include stored sentinel specs and latest check history.
+    #[arg(long = "include-sentinel", action = ArgAction::SetTrue)]
+    pub include_sentinel: bool,
 
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
@@ -11793,6 +11847,7 @@ where
         }
         Some(Command::Impact(ref args)) => handle_impact(&cli, args, stdout, stderr),
         Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
+        Some(Command::Sentinel(ref command)) => handle_sentinel(&cli, command, stdout, stderr),
         Some(Command::Share(ref command)) => share::handle_share(&cli, command, stdout, stderr),
         Some(Command::Mesh(ref command)) => mesh::handle_mesh(&cli, command, stdout, stderr),
         Some(Command::Situation(SituationCommand::Classify(ref args))) => {
@@ -31760,6 +31815,7 @@ where
         coordination_snapshot_path: args.coordination_snapshot.clone(),
         coordination_stale_after_ms: args.coordination_stale_after_ms,
         task_lens: args.task_lens.clone(),
+        require_fresh_sentinels: args.require_fresh_sentinels,
         filters,
         output_options,
         persist_pack: !args.read_only,
@@ -34730,6 +34786,7 @@ where
             no_skipped: args.no_skipped,
             no_meta: args.no_meta,
             read_only: args.read_only,
+            require_fresh_sentinels: args.require_fresh_sentinels,
             redaction: task_lens_redaction(resolved_lens.as_ref()),
             include_non_affecting_degradations: args.include_non_affecting_degradations,
             include_tombstoned: false,
@@ -34938,6 +34995,7 @@ where
         task_lens: resolved_lens
             .as_ref()
             .map(|resolved| resolved.task_lens.clone()),
+        require_fresh_sentinels: args.require_fresh_sentinels,
         output_options,
         persist_pack: !args.read_only,
     };
@@ -41499,6 +41557,8 @@ fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
         allow_secret_mention: args.allow_secret_mention,
         valid_from: args.valid_from.clone(),
         valid_to: args.valid_to.clone(),
+        sentinels: Vec::new(),
+        sentinel_stale_threshold_seconds: None,
         dry_run: args.dry_run,
     }
 }
@@ -51435,6 +51495,10 @@ impl NormalizedInvocation {
                 },
                 Command::Impact(_) => "impact".to_string(),
                 Command::Search(_) => "search".to_string(),
+                Command::Sentinel(command) => match command {
+                    SentinelCommand::Check(_) => "sentinel check".to_string(),
+                    SentinelCommand::Explain => "sentinel explain".to_string(),
+                },
                 Command::Share(share) => match share {
                     share::ShareCommand::Preview(_) => "share preview".to_string(),
                 },
