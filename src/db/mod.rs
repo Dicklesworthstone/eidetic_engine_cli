@@ -12181,6 +12181,19 @@ impl DbConnection {
             .collect()
     }
 
+    /// List all sentinel specs in deterministic order for the explicit
+    /// `ee sentinel check` sweep.
+    pub fn list_all_memory_sentinel_specs(&self) -> Result<Vec<StoredMemorySentinelSpec>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT spec_hash, memory_id, sentinel_kind, target, expected_predicate, safety_class, provenance, stale_threshold_seconds, created_at, updated_at FROM memory_sentinel_specs ORDER BY memory_id ASC, sentinel_kind ASC, target ASC, expected_predicate ASC, spec_hash ASC",
+            &[],
+        )?;
+        rows.iter()
+            .map(stored_memory_sentinel_spec_from_row)
+            .collect()
+    }
+
     /// Return the latest stored result for one sentinel spec, if any.
     pub fn latest_memory_sentinel_result(
         &self,

@@ -26,6 +26,7 @@
 //! and never a false fail.
 
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use crate::config::env_registry::EnvVar;
@@ -93,6 +94,26 @@ pub fn observe_sentinel(
         | MemorySentinelKind::DependencyCapabilityPresent
         | MemorySentinelKind::DegradedCodeFixtureExists
         | MemorySentinelKind::CommandHelpContainsFlag => SentinelObservation::Unverifiable,
+    }
+}
+
+/// Observe one sentinel spec from the explicit public `ee sentinel check`
+/// surface.
+///
+/// ADR 0060 permits the allowlisted command-help predicate only here. It still
+/// does not execute a shell or arbitrary binaries: the target must have already
+/// validated as an `ee ... --flag` predicate, and this function resolves the
+/// current executable directly.
+#[must_use]
+pub fn observe_sentinel_explicit(
+    spec: &MemorySentinelSpec,
+    ctx: SentinelCheckContext<'_>,
+) -> SentinelObservation {
+    match spec.sentinel_kind {
+        MemorySentinelKind::CommandHelpContainsFlag => {
+            observe_command_help_contains_flag(&spec.target)
+        }
+        _ => observe_sentinel(spec, ctx),
     }
 }
 
@@ -186,6 +207,45 @@ fn observe_json_schema_contains_field(
         return SentinelObservation::Unverifiable;
     };
     if json_has_dotted_field(&value, field) {
+        SentinelObservation::Satisfied
+    } else {
+        SentinelObservation::Unsatisfied
+    }
+}
+
+fn observe_command_help_contains_flag(target: &str) -> SentinelObservation {
+    let mut parts = target.split_whitespace();
+    if parts.next() != Some("ee") {
+        return SentinelObservation::Unverifiable;
+    }
+
+    let mut help_args = Vec::new();
+    let mut expected_flag = None;
+    for part in parts {
+        if part.starts_with("--") {
+            expected_flag = Some(part.to_string());
+            break;
+        }
+        help_args.push(part.to_string());
+    }
+    let Some(expected_flag) = expected_flag else {
+        return SentinelObservation::Unverifiable;
+    };
+
+    let Ok(exe) = std::env::current_exe() else {
+        return SentinelObservation::Unverifiable;
+    };
+    let output = Command::new(exe).args(help_args).arg("--help").output();
+    let Ok(output) = output else {
+        return SentinelObservation::Unverifiable;
+    };
+    if !output.status.success() {
+        return SentinelObservation::Unverifiable;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stdout.contains(&expected_flag) || stderr.contains(&expected_flag) {
         SentinelObservation::Satisfied
     } else {
         SentinelObservation::Unsatisfied
