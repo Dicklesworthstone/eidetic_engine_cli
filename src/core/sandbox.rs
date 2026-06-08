@@ -188,7 +188,7 @@ pub fn synthetic_memory_id(content: &str) -> String {
 
 /// One proposed, non-durable change accumulated in a sandbox session.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "proposal_type", rename_all = "snake_case")]
 pub enum SandboxProposal {
     /// Propose a new synthetic memory (`ee sandbox remember`). Carries the full
     /// content + level/kind so `ee sandbox apply` can promote it through the
