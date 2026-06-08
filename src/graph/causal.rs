@@ -439,6 +439,86 @@ fn causal_cost(contribution_score: f64) -> f64 {
     1.0 - contribution_score.clamp(0.0, 1.0)
 }
 
+/// Configuration for Causal-Ancestry PPR pre-warming (bd-1n0np.19.1): caps and
+/// the upstream weight decay used when turning query task/bead IDs into a
+/// Personalized PageRank seed map.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CausalPprSeedConfig {
+    /// Maximum query seed ids to expand (the rest are ignored).
+    pub max_seeds: usize,
+    /// Maximum backward-causal ancestors to boost per seed.
+    pub max_ancestors_per_seed: usize,
+    /// Seed weight for each query id in the PPR personalization vector.
+    pub seed_weight: f64,
+    /// Per-hop decay applied to an ancestor's weight (`decay^path_length`), so
+    /// nearer upstream tasks are boosted more than distant ones.
+    pub ancestor_decay: f64,
+}
+
+impl Default for CausalPprSeedConfig {
+    fn default() -> Self {
+        Self {
+            max_seeds: 8,
+            max_ancestors_per_seed: 16,
+            seed_weight: 1.0,
+            ancestor_decay: 0.5,
+        }
+    }
+}
+
+/// Extract bead/task ids (`bd-...`) from a free-text query (bd-1n0np.19.1).
+///
+/// Pure and deterministic: scans for `bd-` prefixed tokens (alphanumeric + `.`),
+/// trims trailing dots, deduplicates, and returns them sorted. These seed the
+/// Causal-Ancestry PPR pre-warming so a query that names upstream tasks pulls in
+/// their hard-won lessons.
+#[must_use]
+pub fn extract_causal_seed_ids(query: &str) -> Vec<String> {
+    let mut ids: BTreeSet<String> = BTreeSet::new();
+    for (start, _) in query.match_indices("bd-") {
+        let rest = &query[start..];
+        let end = rest
+            .char_indices()
+            .skip(3)
+            .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '.'))
+            .map_or(rest.len(), |(idx, _)| idx);
+        let id = rest[..end].trim_end_matches('.');
+        if id.len() > 3 {
+            ids.insert(id.to_owned());
+        }
+    }
+    ids.into_iter().collect()
+}
+
+/// Build a Personalized PageRank seed map from query bead ids by walking BACKWARD
+/// along causal-ancestry edges (bd-1n0np.19.1), reusing
+/// [`compute_causal_ancestry`]. Each query seed gets `seed_weight`; each upstream
+/// ancestor gets `ancestor_decay^path_length` so nearer lessons dominate. Caps
+/// bound the work; an empty `query_seed_ids` is a graceful no-op (empty map).
+/// Deterministic — the result feeds `graph::ppr::personalized_pagerank`.
+#[must_use]
+pub fn causal_ancestry_ppr_seed_map(
+    graph: &DiGraph,
+    query_seed_ids: &[String],
+    config: CausalPprSeedConfig,
+) -> BTreeMap<String, f64> {
+    let mut seed_map: BTreeMap<String, f64> = BTreeMap::new();
+    for seed in query_seed_ids.iter().take(config.max_seeds) {
+        *seed_map.entry(seed.clone()).or_insert(0.0) += config.seed_weight;
+        let ancestry = compute_causal_ancestry(graph, seed);
+        for ancestor in ancestry
+            .ancestors
+            .iter()
+            .take(config.max_ancestors_per_seed)
+        {
+            let exponent = i32::try_from(ancestor.path_length).unwrap_or(i32::MAX);
+            let weight = config.ancestor_decay.powi(exponent);
+            *seed_map.entry(ancestor.memory_id.clone()).or_insert(0.0) += weight;
+        }
+    }
+    seed_map
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -909,5 +989,83 @@ mod tests {
             cause_ids_a, cause_ids_b,
             "compare_explanation_cost must sort to the same order regardless of input permutation, even with NaN present"
         );
+    }
+
+    #[test]
+    fn extract_causal_seed_ids_parses_dedups_and_sorts() {
+        let query = "continue bd-1n0np.19.1 after bd-17c65.10.17 broke it; see bd-1n0np.19.1.";
+        assert_eq!(
+            extract_causal_seed_ids(query),
+            vec!["bd-17c65.10.17".to_owned(), "bd-1n0np.19.1".to_owned()],
+            "bead ids are parsed, trailing dot trimmed, deduped, and sorted"
+        );
+        assert!(
+            extract_causal_seed_ids("no ids in this query").is_empty(),
+            "a query with no bead ids yields no seeds"
+        );
+    }
+
+    #[test]
+    fn causal_ppr_seed_map_seeds_query_and_boosts_decaying_ancestors() {
+        // failure -> cause_a -> root: ancestry of `failure` is cause_a (1), root (2).
+        let mut graph = graph();
+        add_causal_edge(&mut graph, "failure", "cause_a", 0.8);
+        add_causal_edge(&mut graph, "cause_a", "root", 0.7);
+
+        let seed_map = causal_ancestry_ppr_seed_map(
+            &graph,
+            &["failure".to_owned()],
+            CausalPprSeedConfig::default(),
+        );
+        let weight = |id: &str| *seed_map.get(id).unwrap_or(&-1.0);
+        assert!((weight("failure") - 1.0).abs() < 1e-9, "seed weight is 1.0");
+        assert!(
+            (weight("cause_a") - 0.5).abs() < 1e-9,
+            "direct ancestor decays by 0.5^1"
+        );
+        assert!(
+            (weight("root") - 0.25).abs() < 1e-9,
+            "transitive ancestor decays by 0.5^2"
+        );
+    }
+
+    #[test]
+    fn causal_ppr_seed_map_is_graceful_no_op_on_empty_query() {
+        let graph = graph();
+        let seed_map = causal_ancestry_ppr_seed_map(&graph, &[], CausalPprSeedConfig::default());
+        assert!(seed_map.is_empty(), "no query seeds is a graceful no-op");
+    }
+
+    #[test]
+    fn causal_ppr_seed_map_respects_caps() {
+        let mut graph = graph();
+        add_causal_edge(&mut graph, "failure", "cause_a", 0.8);
+        add_causal_edge(&mut graph, "cause_a", "root", 0.7);
+
+        // Cap ancestors to 1: only the nearest ancestor is boosted, the seed stays.
+        let capped = causal_ancestry_ppr_seed_map(
+            &graph,
+            &["failure".to_owned()],
+            CausalPprSeedConfig {
+                max_ancestors_per_seed: 1,
+                ..CausalPprSeedConfig::default()
+            },
+        );
+        assert!(capped.contains_key("failure"));
+        assert!(
+            capped.len() <= 2,
+            "max_ancestors_per_seed=1 keeps the seed + at most one ancestor"
+        );
+
+        // Cap seeds to 0: nothing is expanded.
+        let none = causal_ancestry_ppr_seed_map(
+            &graph,
+            &["failure".to_owned()],
+            CausalPprSeedConfig {
+                max_seeds: 0,
+                ..CausalPprSeedConfig::default()
+            },
+        );
+        assert!(none.is_empty(), "max_seeds=0 expands nothing");
     }
 }
