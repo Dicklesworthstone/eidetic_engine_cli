@@ -878,7 +878,9 @@ fn hash_opt_u64(hasher: &mut blake3::Hasher, value: Option<u64>) {
             hasher.update(&[1]);
             hasher.update(&value.to_le_bytes());
         }
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
     };
 }
 
