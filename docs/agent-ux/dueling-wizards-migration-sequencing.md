@@ -56,6 +56,14 @@ allocation from `planned` to `implemented` requires the runtime migration,
 boundary migration coverage, backup coverage, and RCH-only proof to land in the
 same change.
 
+`scripts/e2e_cross_cutting.sh` statically pins the registry's conservative
+posture before runtime proof is available. The shell gate checks that migration
+versions stay contiguous from `V066` through `V076`, transition rows mirror
+allocation rows by ID, version, and status, implemented rows stay at or behind
+the compiled tail, planned rows stay at or beyond the next allocation, and
+backup assets mirror each allocation's asset kind, allocation ID, owner bead,
+hash policy, and fail-visible missing-asset policy.
+
 ### `V066_MEMORY_ANCHORS` Implemented Shape
 
 The `memory_anchors` allocation is owned by `bd-1n0np.3.2`. Its registry entry

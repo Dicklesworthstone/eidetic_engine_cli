@@ -107,6 +107,9 @@ assert_jq_file "$MIGRATION_MANIFEST" \
     '.schema == "ee.dueling_wizards.migration_registry.v1" and .gateBead == "bd-1n0np.23.1"' \
     "migration registry identity"
 assert_jq_file "$MIGRATION_MANIFEST" \
+    '.sourceOfTruth == "src/db/mod.rs::MIGRATIONS" and .boundaryMigrationE2e == "scripts/e2e_boundary_migration.sh" and .policy.ordering == "strictly_contiguous" and .policy.idempotency == "required" and .policy.rollbackPosture == "forward_only_reversible_where_safe"' \
+    "migration registry policy anchors runtime migration sequencing"
+assert_jq_file "$MIGRATION_MANIFEST" \
     '.backupCoverageBead == "bd-1n0np.23.2" and (.allocations | length) >= 11' \
     "migration registry declares backup coverage owner and allocations"
 assert_jq_file "$MIGRATION_MANIFEST" \
@@ -115,6 +118,26 @@ assert_jq_file "$MIGRATION_MANIFEST" \
 assert_jq_file "$MIGRATION_MANIFEST" \
     'all(.transitionMatrix[]; .proofPosture == "rch_only_no_local_fallback")' \
     "migration transition matrix keeps RCH-only proof posture"
+assert_jq_file "$MIGRATION_MANIFEST" \
+    '.currentLastCompiledMigration == 68 and .nextPlannedMigration == 69' \
+    "migration registry pins compiled tail and next planned migration"
+assert_jq_file "$MIGRATION_MANIFEST" \
+    '([.transitionMatrix[].version] | sort) == [66,67,68,69,70,71,72,73,74,75,76] and ([.transitionMatrix[].id] | unique | length) == (.transitionMatrix | length) and ([.transitionMatrix[].version] | unique | length) == (.transitionMatrix | length)' \
+    "migration transition versions are contiguous and unique"
+assert_jq_file "$MIGRATION_MANIFEST" \
+    '([.transitionMatrix[] | {id, version, status}] | sort_by(.id)) == ([.allocations[] | {id, version, status}] | sort_by(.id))' \
+    "migration allocations mirror transition ids, versions, and statuses"
+# shellcheck disable=SC2016
+assert_jq_file "$MIGRATION_MANIFEST" \
+    '.currentLastCompiledMigration as $tail | .nextPlannedMigration as $next | all(.transitionMatrix[]; if .status == "implemented" then (.version <= $tail and .runtimeRule == "compiled_migration_present" and (.migrationConstant | test("^V[0-9]{3}_[A-Z0-9_]+$")) and .boundaryMigrationEvidence == "required_and_current" and .backupCoverageEvidence == "required_and_current") elif .status == "planned" then (.version >= $next and .runtimeRule == "planned_allocation_only" and .migrationConstant == "required_before_implemented" and .boundaryMigrationEvidence == "required_before_implemented" and .backupCoverageEvidence == "required_before_implemented") else false end)' \
+    "migration transition status controls implemented vs planned evidence"
+assert_jq_file "$MIGRATION_MANIFEST" \
+    'all(.allocations[]; (.migrationName | test("^V[0-9]{3}_[A-Z0-9_]+$")) and (.tables | length > 0) and ((.idempotency // "") | length > 0) and ([.reversibleClass] | inside(["reversible_where_safe","forward_only"])))' \
+    "migration allocations name tables, migration constants, reversibility, and idempotency"
+# shellcheck disable=SC2016
+assert_jq_file "$MIGRATION_MANIFEST" \
+    '(.allocations[] | select(.id == "memory_anchors") | .plannedShape) as $shape | ($shape.anchorValueStorage == "hash_required_raw_value_forbidden" and $shape.meshExport == "redacted_or_hashed_values_only" and $shape.freshnessMutation == "rank_down_only_no_tombstone" and $shape.writePosture == "append_or_upsert_by_generation" and (($shape.columns | sort) == ["anchor_kind","anchor_value_hash","captured_span_hash","confidence","created_at","freshness_state","generation","memory_id","provenance","redacted_anchor_value","source","updated_at"]) and (($shape.indexes | sort) == ["anchor_kind_value_hash_lookup","freshness_state_generation_lookup","memory_id_anchor_kind_value_hash_unique"]))' \
+    "migration memory-anchor shape forbids raw anchor values and pins indexes"
 
 step "backup coverage mirrors migration allocation asset kinds"
 # shellcheck disable=SC2016
@@ -126,6 +149,20 @@ run_static_command \
     '($registry[0].allocations | map(.backupAssetKind) | sort) as $expected
      | ($backup[0].assets | map(.assetKind) | sort) as $actual
      | $expected == $actual'
+# shellcheck disable=SC2016
+run_static_command \
+    "backup assets mirror migration allocation ids and owner beads" \
+    jq -e -n \
+    --slurpfile registry "$MIGRATION_MANIFEST" \
+    --slurpfile backup "$BACKUP_MANIFEST" \
+    'all($registry[0].allocations[];
+       . as $allocation
+       | any($backup[0].assets[];
+           .assetKind == $allocation.backupAssetKind
+           and (.migrationAllocationIds | index($allocation.id))
+           and (.ownerBeads | index($allocation.ownerBead))
+           and .hashPolicy == "blake3_required"
+           and .missingAssetFailure == "degraded_not_silent_loss"))'
 assert_jq_file "$BACKUP_MANIFEST" \
     '.schema == "ee.dueling_wizards.backup_coverage.v1" and .gateBead == "bd-1n0np.23.2"' \
     "backup coverage identity"
