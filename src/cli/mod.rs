@@ -263,9 +263,11 @@ use crate::core::tripwire::{
     check_tripwire, list_tripwires,
 };
 use crate::core::verify::{
-    VerificationClosureGuidanceOptions, VerificationRecordOptions,
+    DEFAULT_VERIFY_PROVENANCE_LIMIT, DEFAULT_VERIFY_PROVENANCE_STALE_AFTER_DAYS,
+    VerificationClosureGuidanceOptions, VerificationRecordOptions, VerifyProvenanceOptions,
     default_rch_cargo_closure_requirements, record_verification_evidence,
     verification_closure_guidance_from_ledger, verification_response_json,
+    verify_bounded_provenance,
 };
 use crate::core::verify_ledger::{
     RchVerifyBlockersReport, RchVerifyIngestReport, RchVerifyLedgerError,
@@ -5077,6 +5079,8 @@ pub enum VerifyCommand {
     Record(VerifyIngestArgs),
     /// Check committed Lean4 and TLA+ proof artifacts.
     Proofs(VerifyProofsArgs),
+    /// Re-resolve memory provenance referents without removing memories.
+    Provenance(VerifyProvenanceArgs),
     /// Query reusable verification evidence without launching a build.
     #[command(subcommand)]
     Broker(VerifyBrokerCommand),
@@ -5089,6 +5093,30 @@ pub enum VerifyCommand {
     /// Evaluate whether recorded evidence satisfies bead closure gates.
     #[command(name = "closure-guidance")]
     ClosureGuidance(VerifyClosureGuidanceArgs),
+}
+
+/// Arguments for `ee verify provenance`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct VerifyProvenanceArgs {
+    /// Restrict verification to one memory ID. Without this, only due memories are scanned.
+    #[arg(long = "memory-id", value_name = "ID")]
+    pub memory_id: Option<String>,
+
+    /// Recheck memories whose last provenance verification is at least this many days old.
+    #[arg(long = "stale-after-days", default_value_t = DEFAULT_VERIFY_PROVENANCE_STALE_AFTER_DAYS)]
+    pub stale_after_days: u32,
+
+    /// Maximum due memories to re-resolve in one bounded scan.
+    #[arg(long, default_value_t = DEFAULT_VERIFY_PROVENANCE_LIMIT)]
+    pub limit: u32,
+
+    /// Permit network-backed provenance resolvers when implemented.
+    #[arg(long = "allow-network", action = ArgAction::SetTrue)]
+    pub allow_network: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Subcommands for `ee verify broker`.
@@ -12007,6 +12035,9 @@ where
         Some(Command::Verify(VerifyCommand::Proofs(ref args))) => {
             handle_verify_proofs(&cli, args, stdout, stderr)
         }
+        Some(Command::Verify(VerifyCommand::Provenance(ref args))) => {
+            handle_verify_provenance(&cli, args, stdout, stderr)
+        }
         Some(Command::Verify(VerifyCommand::Broker(VerifyBrokerCommand::Lookup(ref args)))) => {
             handle_verify_broker_lookup(&cli, args, stdout, stderr)
         }
@@ -12033,6 +12064,9 @@ where
         }
         Some(Command::Verification(VerifyCommand::Proofs(ref args))) => {
             handle_verify_proofs(&cli, args, stdout, stderr)
+        }
+        Some(Command::Verification(VerifyCommand::Provenance(ref args))) => {
+            handle_verify_provenance(&cli, args, stdout, stderr)
         }
         Some(Command::Verification(VerifyCommand::Broker(VerifyBrokerCommand::Lookup(
             ref args,
@@ -39363,31 +39397,168 @@ where
         };
         report = report.with_causal_explanation(causal_explanation);
     }
+    let sentinel_data = if args.include_sentinel {
+        match why_sentinel_data(&database_path, &args.memory_id) {
+            Ok(data) => Some(data),
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        }
+    } else {
+        None
+    };
 
     if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
         write_stdout(stdout, &(output::render_why_mermaid(&report) + "\n"))
     } else {
         match cli.renderer() {
             output::Renderer::Human => {
-                let output = format_why_human(&report);
+                let output = format_why_human_with_sentinel(&report, sentinel_data.as_ref());
                 write_stdout(stdout, &output)
             }
             output::Renderer::Markdown => {
-                let output = format_why_markdown(&report);
+                let output = format_why_markdown_with_sentinel(&report, sentinel_data.as_ref());
                 write_stdout(stdout, &output)
             }
             output::Renderer::Toon => {
-                let output = output::render_toon_from_json(&format_why_json(&report));
+                let output = output::render_toon_from_json(&format_why_json_with_sentinel(
+                    &report,
+                    sentinel_data.as_ref(),
+                ));
                 write_stdout(stdout, &(output + "\n"))
             }
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
-                let json = format_why_json(&report);
+                let json = format_why_json_with_sentinel(&report, sentinel_data.as_ref());
                 write_stdout(stdout, &(json + "\n"))
             }
         }
+    }
+}
+
+fn why_sentinel_data(
+    database_path: &Path,
+    memory_id: &str,
+) -> Result<serde_json::Value, DomainError> {
+    let connection = DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to open database {} for sentinel history: {error}",
+            database_path.display()
+        ),
+        repair: Some("ee doctor --workspace . --json".to_string()),
+    })?;
+    let specs = connection
+        .list_memory_sentinel_specs(memory_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load memory sentinel specs: {error}"),
+            repair: Some("ee migrate status --workspace . --json".to_string()),
+        })?;
+    let reference_time = chrono::Utc::now();
+    let mut latest_result_count = 0_u64;
+    let mut fresh_pass_count = 0_u64;
+    let mut fail_count = 0_u64;
+    let mut unknown_count = 0_u64;
+    let mut stale_count = 0_u64;
+    let mut missing_result_count = 0_u64;
+    let mut spec_rows = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        let latest = connection.latest_memory_sentinel_result(&spec.spec_hash).map_err(|error| {
+            DomainError::Storage {
+                message: format!("Failed to load latest memory sentinel result: {error}"),
+                repair: Some("ee sentinel check --workspace . --json".to_string()),
+            }
+        })?;
+        let freshness = sentinel_result_freshness(
+            latest.as_ref(),
+            spec.stale_threshold_seconds,
+            reference_time,
+        );
+        match latest.as_ref().map(|result| result.status) {
+            Some(MemorySentinelResultStatus::Pass) if freshness == "fresh" => {
+                latest_result_count = latest_result_count.saturating_add(1);
+                fresh_pass_count = fresh_pass_count.saturating_add(1);
+            }
+            Some(MemorySentinelResultStatus::Pass) => {
+                latest_result_count = latest_result_count.saturating_add(1);
+                stale_count = stale_count.saturating_add(1);
+            }
+            Some(MemorySentinelResultStatus::Fail) => {
+                latest_result_count = latest_result_count.saturating_add(1);
+                fail_count = fail_count.saturating_add(1);
+            }
+            Some(MemorySentinelResultStatus::Unknown | MemorySentinelResultStatus::Degraded) => {
+                latest_result_count = latest_result_count.saturating_add(1);
+                unknown_count = unknown_count.saturating_add(1);
+            }
+            None => missing_result_count = missing_result_count.saturating_add(1),
+        }
+        let latest_json = latest.as_ref().map(|result| {
+            serde_json::json!({
+                "schema": "ee.memory_sentinel.result.v1",
+                "resultHash": result.result_hash,
+                "specHash": result.spec_hash,
+                "status": result.status.as_str(),
+                "checkedAt": result.checked_at,
+                "evidenceSummary": result.evidence_summary,
+                "staleThresholdSeconds": result.stale_threshold_seconds,
+                "createdAt": result.created_at,
+                "freshness": freshness,
+            })
+        });
+        spec_rows.push(serde_json::json!({
+            "schema": "ee.memory_sentinel.spec.v1",
+            "memoryId": spec.memory_id,
+            "specHash": spec.spec_hash,
+            "kind": spec.sentinel_kind.as_str(),
+            "target": spec.target,
+            "expectedPredicate": spec.expected_predicate,
+            "safetyClass": spec.safety_class.as_str(),
+            "provenance": spec.provenance,
+            "staleThresholdSeconds": spec.stale_threshold_seconds,
+            "latestResult": latest_json,
+        }));
+    }
+    Ok(serde_json::json!({
+        "schema": "ee.memory_sentinel.why.v1",
+        "memoryId": memory_id,
+        "referenceTime": reference_time.to_rfc3339(),
+        "summary": {
+            "specCount": specs.len(),
+            "latestResultCount": latest_result_count,
+            "freshPassCount": fresh_pass_count,
+            "failCount": fail_count,
+            "unknownCount": unknown_count,
+            "staleCount": stale_count,
+            "missingResultCount": missing_result_count,
+        },
+        "specs": spec_rows,
+    }))
+}
+
+fn sentinel_result_freshness(
+    result: Option<&crate::models::StoredMemorySentinelResult>,
+    stale_threshold_seconds: Option<u64>,
+    reference_time: chrono::DateTime<chrono::Utc>,
+) -> &'static str {
+    let Some(result) = result else {
+        return "missing";
+    };
+    let Some(threshold) = stale_threshold_seconds else {
+        return "fresh";
+    };
+    let Ok(checked_at) = chrono::DateTime::parse_from_rfc3339(&result.checked_at)
+        .map(|value| value.with_timezone(&chrono::Utc))
+    else {
+        return "stale";
+    };
+    if reference_time
+        .signed_duration_since(checked_at)
+        .num_seconds()
+        > threshold as i64
+    {
+        "stale"
+    } else {
+        "fresh"
     }
 }
 
@@ -40086,6 +40257,101 @@ fn format_why_markdown(report: &crate::core::why::WhyReport) -> String {
         output.push_str(&output::render_why_causal_markdown(causal_explanation));
     }
     output
+}
+
+fn format_why_human_with_sentinel(
+    report: &crate::core::why::WhyReport,
+    sentinel: Option<&serde_json::Value>,
+) -> String {
+    let mut output = format_why_human(report);
+    if let Some(sentinel) = sentinel {
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push('\n');
+        output.push_str(&render_why_sentinel_human(sentinel));
+    }
+    output
+}
+
+fn format_why_markdown_with_sentinel(
+    report: &crate::core::why::WhyReport,
+    sentinel: Option<&serde_json::Value>,
+) -> String {
+    let mut output = format_why_markdown(report);
+    if let Some(sentinel) = sentinel {
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push('\n');
+        output.push_str(&render_why_sentinel_human(sentinel));
+    }
+    output
+}
+
+fn render_why_sentinel_human(sentinel: &serde_json::Value) -> String {
+    let spec_count = sentinel
+        .pointer("/summary/specCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let fresh_pass = sentinel
+        .pointer("/summary/freshPassCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let fail = sentinel
+        .pointer("/summary/failCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let missing = sentinel
+        .pointer("/summary/missingResultCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let mut output = format!(
+        "Sentinels:\n  specs: {spec_count}, fresh_pass: {fresh_pass}, fail: {fail}, missing_result: {missing}\n"
+    );
+    if let Some(specs) = sentinel.get("specs").and_then(serde_json::Value::as_array) {
+        for spec in specs {
+            let kind = spec
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            let target = spec
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            let latest = spec
+                .get("latestResult")
+                .and_then(serde_json::Value::as_object);
+            let status = latest
+                .and_then(|value| value.get("status"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("missing");
+            let freshness = latest
+                .and_then(|value| value.get("freshness"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("missing");
+            output.push_str(&format!("  {kind}:{target} -> {status} ({freshness})\n"));
+        }
+    }
+    output
+}
+
+fn format_why_json_with_sentinel(
+    report: &crate::core::why::WhyReport,
+    sentinel: Option<&serde_json::Value>,
+) -> String {
+    let Some(sentinel) = sentinel else {
+        return format_why_json(report);
+    };
+    let mut value = serde_json::from_str::<serde_json::Value>(&format_why_json(report))
+        .unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(data) = value
+        .get_mut("data")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        data.insert("sentinel".to_string(), sentinel.clone());
+    }
+    value.to_string()
 }
 
 fn format_why_json(report: &crate::core::why::WhyReport) -> String {
@@ -41575,9 +41841,318 @@ where
     }
 }
 
+fn handle_sentinel<W, E>(
+    cli: &Cli,
+    command: &SentinelCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let result = match command {
+        SentinelCommand::Check(args) => sentinel_check_data(cli, args),
+        SentinelCommand::Explain => Ok(sentinel_explain_data()),
+    };
+    match result {
+        Ok(data) => write_sentinel_data(cli, data, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn sentinel_check_data(
+    cli: &Cli,
+    args: &SentinelCheckArgs,
+) -> Result<serde_json::Value, DomainError> {
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        });
+    }
+    let connection = DbConnection::open_file(&database_path).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to open database {}: {error}", database_path.display()),
+            repair: Some("ee doctor --workspace . --json".to_string()),
+        }
+    })?;
+    let stored_specs = match args.memory_id.as_deref() {
+        Some(memory_id) => connection.list_memory_sentinel_specs(memory_id),
+        None => connection.list_all_memory_sentinel_specs(),
+    }
+    .map_err(|error| DomainError::Storage {
+        message: format!("Failed to load memory sentinel specs: {error}"),
+        repair: Some("ee migrate status --workspace . --json".to_string()),
+    })?;
+
+    let checked_at = chrono::Utc::now().to_rfc3339();
+    let ctx = SentinelCheckContext::new(&workspace_path);
+    let mut pass_count = 0_u64;
+    let mut fail_count = 0_u64;
+    let mut unknown_count = 0_u64;
+    let mut degraded_count = 0_u64;
+    let mut result_rows = Vec::with_capacity(stored_specs.len());
+    for stored in &stored_specs {
+        let spec = sentinel_spec_from_stored(stored)?;
+        let observation = observe_sentinel_explicit(&spec, ctx);
+        let status = observation.into_status();
+        match status {
+            MemorySentinelResultStatus::Pass => pass_count = pass_count.saturating_add(1),
+            MemorySentinelResultStatus::Fail => fail_count = fail_count.saturating_add(1),
+            MemorySentinelResultStatus::Unknown => unknown_count = unknown_count.saturating_add(1),
+            MemorySentinelResultStatus::Degraded => degraded_count = degraded_count.saturating_add(1),
+        }
+        let result = MemorySentinelResult::new(MemorySentinelResultInput {
+            spec_hash: stored.spec_hash.clone(),
+            status,
+            checked_at: checked_at.clone(),
+            evidence_summary: sentinel_evidence_summary(&spec, observation),
+            stale_threshold_seconds: stored.stale_threshold_seconds,
+        })
+        .map_err(memory_sentinel_validation_to_domain)?;
+        connection
+            .insert_memory_sentinel_result(&result)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to persist memory sentinel result: {error}"),
+                repair: Some("ee doctor --workspace . --json".to_string()),
+            })?;
+        result_rows.push(serde_json::json!({
+            "schema": result.schema,
+            "memoryId": stored.memory_id,
+            "specHash": stored.spec_hash,
+            "resultHash": result.result_hash,
+            "kind": stored.sentinel_kind.as_str(),
+            "target": stored.target,
+            "expectedPredicate": stored.expected_predicate,
+            "safetyClass": stored.safety_class.as_str(),
+            "status": result.status.as_str(),
+            "checkedAt": result.checked_at,
+            "evidenceSummary": result.evidence_summary,
+            "staleThresholdSeconds": result.stale_threshold_seconds,
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "schema": "ee.memory_sentinel.check.v1",
+        "command": "sentinel check",
+        "workspace": workspace_path,
+        "databasePath": database_path,
+        "memoryId": args.memory_id,
+        "checkedAt": checked_at,
+        "specCount": stored_specs.len(),
+        "resultCount": result_rows.len(),
+        "summary": {
+            "pass": pass_count,
+            "fail": fail_count,
+            "unknown": unknown_count,
+            "degraded": degraded_count,
+        },
+        "results": result_rows,
+    }))
+}
+
+fn sentinel_explain_data() -> serde_json::Value {
+    let kinds = MemorySentinelKind::all()
+        .iter()
+        .map(|kind| {
+            serde_json::json!({
+                "kind": kind.as_str(),
+                "safetyClass": kind.safety_class().as_str(),
+                "defaultPredicate": kind.default_predicate(),
+                "targetSyntax": sentinel_target_syntax(*kind),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema": "ee.memory_sentinel.explain.v1",
+        "command": "sentinel explain",
+        "specSyntax": "<kind>:<target>",
+        "safety": "Sentinel targets are declarative. Public checks run pure predicates plus allowlisted ee help introspection only; no arbitrary shell execution is supported.",
+        "kinds": kinds,
+    })
+}
+
+fn sentinel_target_syntax(kind: MemorySentinelKind) -> &'static str {
+    match kind {
+        MemorySentinelKind::PathExists => "relative/path",
+        MemorySentinelKind::FileHashOrMarker => "relative/path[#marker-or-blake3:<hex>]",
+        MemorySentinelKind::JsonSchemaContainsField => "relative/schema.json#dotted.field",
+        MemorySentinelKind::ConfigKeyExists => "lowercase.dotted.config.key",
+        MemorySentinelKind::EnvVarRegistered => "EE_REGISTERED_NAME",
+        MemorySentinelKind::DegradedCodeFixtureExists => "degraded_code_fixture_id",
+        MemorySentinelKind::DependencyCapabilityPresent => "capability:token",
+        MemorySentinelKind::CommandHelpContainsFlag => "ee <subcommand> --flag",
+    }
+}
+
+fn sentinel_spec_from_stored(
+    stored: &StoredMemorySentinelSpec,
+) -> Result<MemorySentinelSpec, DomainError> {
+    MemorySentinelSpec::new(CreateMemorySentinelSpecInput {
+        memory_id: stored.memory_id.clone(),
+        sentinel_kind: stored.sentinel_kind,
+        target: stored.target.clone(),
+        expected_predicate: Some(stored.expected_predicate.clone()),
+        provenance: stored.provenance.clone(),
+        stale_threshold_seconds: stored.stale_threshold_seconds,
+    })
+    .map_err(memory_sentinel_validation_to_domain)
+}
+
+fn sentinel_evidence_summary(
+    spec: &MemorySentinelSpec,
+    observation: SentinelObservation,
+) -> String {
+    let observed = match observation {
+        SentinelObservation::Satisfied => "satisfied",
+        SentinelObservation::Unsatisfied => "unsatisfied",
+        SentinelObservation::Unverifiable => "unverifiable",
+    };
+    format!(
+        "{} target `{}` was {observed}",
+        spec.sentinel_kind.as_str(),
+        spec.target
+    )
+}
+
+fn memory_sentinel_validation_to_domain(error: MemorySentinelValidationError) -> DomainError {
+    DomainError::Usage {
+        message: error.to_string(),
+        repair: Some(error.repair().to_string()),
+    }
+}
+
+fn write_sentinel_data<W>(
+    cli: &Cli,
+    data: serde_json::Value,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let envelope = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": [],
+    });
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_sentinel_human(envelope.get("data").unwrap_or(&serde_json::Value::Null)))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_toon_from_json(&envelope.to_string()) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(envelope.to_string() + "\n")),
+    }
+}
+
+fn render_sentinel_human(data: &serde_json::Value) -> String {
+    match data.get("command").and_then(serde_json::Value::as_str) {
+        Some("sentinel explain") => render_sentinel_explain_human(data),
+        Some("sentinel check") => render_sentinel_check_human(data),
+        _ => format!("{data}\n"),
+    }
+}
+
+fn render_sentinel_explain_human(data: &serde_json::Value) -> String {
+    let mut output = String::from("Memory sentinel kinds:\n");
+    if let Some(kinds) = data.get("kinds").and_then(serde_json::Value::as_array) {
+        for kind in kinds {
+            let name = kind
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            let safety = kind
+                .get("safetyClass")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            let syntax = kind
+                .get("targetSyntax")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            output.push_str(&format!("  {name} ({safety}): {syntax}\n"));
+        }
+    }
+    output
+}
+
+fn render_sentinel_check_human(data: &serde_json::Value) -> String {
+    let spec_count = data
+        .get("specCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let summary = data.get("summary").unwrap_or(&serde_json::Value::Null);
+    let pass = summary
+        .get("pass")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let fail = summary
+        .get("fail")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let unknown = summary
+        .get("unknown")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let mut output =
+        format!("Sentinel check: {spec_count} spec(s), pass={pass}, fail={fail}, unknown={unknown}\n");
+    if let Some(results) = data.get("results").and_then(serde_json::Value::as_array) {
+        for item in results {
+            let memory_id = item
+                .get("memoryId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            let kind = item
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            let target = item
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            let status = item
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            let result_hash = item
+                .get("resultHash")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            output.push_str(&format!(
+                "  {memory_id} {kind}:{target} -> {status} ({result_hash})\n"
+            ));
+        }
+    }
+    output
+}
+
+fn validate_remember_sentinels(args: &RememberArgs) -> Result<(), DomainError> {
+    if args.sentinel_stale_threshold_seconds == Some(0) {
+        return Err(DomainError::Usage {
+            message: "sentinel stale threshold must be greater than zero".to_string(),
+            repair: Some("Omit --sentinel-stale-threshold-seconds or provide a positive value.".to_string()),
+        });
+    }
+    for raw in &args.sentinels {
+        parse_memory_sentinel_spec(raw).map_err(memory_sentinel_validation_to_domain)?;
+    }
+    Ok(())
+}
+
 fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberMemoryReport, DomainError> {
     let workspace_path = cli.resolve_workspace();
-    remember_memory(&RememberMemoryOptions {
+    validate_remember_sentinels(args)?;
+    let report = remember_memory(&RememberMemoryOptions {
         workspace_path: &workspace_path,
         database_path: None,
         content: &args.content,
@@ -41593,7 +42168,39 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberMemoryRepor
         dry_run: args.dry_run,
         auto_link: !args.no_auto_link,
         propose_candidates: !args.no_propose_candidates,
-    })
+    })?;
+    if !args.sentinels.is_empty() && !report.dry_run {
+        let specs = args
+            .sentinels
+            .iter()
+            .map(|raw| {
+                MemorySentinelSpec::from_raw(
+                    &report.memory_id.to_string(),
+                    raw,
+                    None,
+                    "ee remember --sentinel",
+                    args.sentinel_stale_threshold_seconds,
+                )
+                .map_err(memory_sentinel_validation_to_domain)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let connection = DbConnection::open_file(&report.database_path).map_err(|error| {
+            DomainError::Storage {
+                message: format!(
+                    "Failed to open database {} for sentinel metadata: {error}",
+                    report.database_path.display()
+                ),
+                repair: Some("ee doctor --workspace . --json".to_string()),
+            }
+        })?;
+        connection
+            .upsert_memory_sentinel_specs(&specs)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to persist memory sentinel metadata: {error}"),
+                repair: Some("ee doctor --workspace . --json".to_string()),
+            })?;
+    }
+    Ok(report)
 }
 
 fn handle_curate_candidates<W, E>(
@@ -51581,6 +52188,7 @@ impl NormalizedInvocation {
                         "verify rch blockers".to_string()
                     }
                     VerifyCommand::Proofs(_) => "verify proofs".to_string(),
+                    VerifyCommand::Provenance(_) => "verify provenance".to_string(),
                     VerifyCommand::Broker(VerifyBrokerCommand::Lookup(_)) => {
                         "verify broker lookup".to_string()
                     }
@@ -51602,6 +52210,7 @@ impl NormalizedInvocation {
                         "verification rch blockers".to_string()
                     }
                     VerifyCommand::Proofs(_) => "verification proofs".to_string(),
+                    VerifyCommand::Provenance(_) => "verification provenance".to_string(),
                     VerifyCommand::Broker(VerifyBrokerCommand::Lookup(_)) => {
                         "verification broker lookup".to_string()
                     }

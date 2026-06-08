@@ -31,6 +31,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{build_info, duration_millis_saturating};
+use crate::core::memory::{EvidenceFreshnessStatus, assess_memory_evidence_freshness};
 use crate::db::{
     CreateAuditInput, CreateWorkspaceInput, DbConnection, WorkspaceScopeFields, audit_actions,
     generate_audit_id,
@@ -807,6 +808,7 @@ impl VerifyProvenanceReferentReport {
             "status": self.status.as_str(),
             "reason": self.reason,
             "referentHash": self.referent_hash,
+            "action": self.status.reverify_action().as_str(),
             "repair": self.repair,
         })
     }
@@ -877,6 +879,39 @@ impl VerifyProvenanceReport {
             .iter()
             .map(VerifyProvenanceMemoryReport::data_json)
             .collect::<Vec<_>>();
+        let referents = self
+            .records
+            .iter()
+            .map(|record| {
+                let mut referent = record.referent.data_json();
+                if let Some(object) = referent.as_object_mut() {
+                    object.insert(
+                        "memoryId".to_owned(),
+                        serde_json::Value::String(record.memory_id.clone()),
+                    );
+                    object.insert(
+                        "provenanceUri".to_owned(),
+                        serde_json::Value::String(record.provenance_uri.clone()),
+                    );
+                    object.insert(
+                        "previousStatus".to_owned(),
+                        serde_json::Value::String(record.previous_status.clone()),
+                    );
+                    object.insert(
+                        "previousVerifiedAt".to_owned(),
+                        record
+                            .previous_verified_at
+                            .clone()
+                            .map_or(serde_json::Value::Null, serde_json::Value::String),
+                    );
+                    object.insert(
+                        "checkedAt".to_owned(),
+                        serde_json::Value::String(record.checked_at.clone()),
+                    );
+                }
+                referent
+            })
+            .collect::<Vec<_>>();
         serde_json::json!({
             "schema": self.schema,
             "workspaceId": self.workspace_id,
@@ -894,6 +929,7 @@ impl VerifyProvenanceReport {
             "evidenceMissingCount": self.evidence_missing_count,
             "evidenceDriftCount": self.evidence_drift_count,
             "unverifiableCount": self.unverifiable_count,
+            "referents": referents,
             "records": records,
         })
     }
@@ -1033,7 +1069,11 @@ pub fn verify_bounded_provenance(
             report.bounded_skipped_count = report.bounded_skipped_count.saturating_add(1);
             continue;
         }
-        let referent = verify_provenance_referent(&provenance_uri, &referent_options);
+        let referent = verify_memory_provenance_referent(
+            &memory,
+            options.workspace_path,
+            verify_provenance_referent(&provenance_uri, &referent_options),
+        );
         report.push(VerifyProvenanceMemoryReport {
             memory_id: memory.id,
             provenance_uri,
@@ -1045,6 +1085,56 @@ pub fn verify_bounded_provenance(
     }
 
     Ok(report)
+}
+
+fn verify_memory_provenance_referent(
+    memory: &crate::db::StoredMemory,
+    workspace_path: &Path,
+    referent: VerifyProvenanceReferentReport,
+) -> VerifyProvenanceReferentReport {
+    if !matches!(referent.status, VerifyProvenanceReferentStatus::Verified) {
+        return referent;
+    }
+    let Some(raw_uri) = memory.provenance_uri.as_deref() else {
+        return referent;
+    };
+    if !matches!(
+        ProvenanceUri::from_str(raw_uri),
+        Ok(ProvenanceUri::File { .. })
+    ) {
+        return referent;
+    }
+
+    let freshness = assess_memory_evidence_freshness(memory, Some(workspace_path));
+    match freshness.status {
+        EvidenceFreshnessStatus::ChangedSource => provenance_referent_report(
+            raw_uri,
+            "file",
+            VerifyProvenanceReferentStatus::EvidenceDrift,
+            "file_referent_content_drift".to_owned(),
+            referent.referent_hash,
+            freshness.repair,
+        ),
+        EvidenceFreshnessStatus::MissingSource => provenance_referent_report(
+            raw_uri,
+            "file",
+            VerifyProvenanceReferentStatus::EvidenceMissing,
+            "file_referent_missing".to_owned(),
+            None,
+            freshness.repair,
+        ),
+        EvidenceFreshnessStatus::UnreachableSource => provenance_referent_report(
+            raw_uri,
+            "file",
+            VerifyProvenanceReferentStatus::Unverifiable,
+            "file_referent_unreachable".to_owned(),
+            None,
+            freshness.repair,
+        ),
+        EvidenceFreshnessStatus::Fresh
+        | EvidenceFreshnessStatus::UnsupportedSource
+        | EvidenceFreshnessStatus::Unknown => referent,
+    }
 }
 
 /// Re-resolve one provenance URI without mutating memories or evidence.
@@ -2658,6 +2748,59 @@ mod tests {
         )
     }
 
+    #[test]
+    fn bounded_provenance_marks_changed_file_span_as_drift() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(temp.path().join("source.md"), "original cited evidence\n")
+            .map_err(|error| error.to_string())?;
+        let connection = provenance_fixture_connection(temp.path())?;
+        let workspace_id = "wsp_verify_provenance_fixture";
+        let memory_id = "mem_00000000000000000000009104";
+        insert_provenance_fixture_memory_with_content(
+            &connection,
+            workspace_id,
+            memory_id,
+            "original cited evidence",
+            "file://source.md#L1",
+        )?;
+        std::fs::write(temp.path().join("source.md"), "changed cited evidence\n")
+            .map_err(|error| error.to_string())?;
+        let now = DateTime::parse_from_rfc3339("2026-06-07T12:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+
+        let report = verify_bounded_provenance(VerifyProvenanceOptions {
+            workspace_path: temp.path(),
+            database: &connection,
+            workspace_id,
+            memory_id: Some(memory_id),
+            stale_after_days: 7,
+            limit: 10,
+            allow_network: false,
+            now,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(&report.checked_count, &1, "checked")?;
+        ensure_equal(&report.evidence_drift_count, &1, "drift count")?;
+        let referent = &report.records[0].referent;
+        ensure_equal(
+            &referent.status,
+            &VerifyProvenanceReferentStatus::EvidenceDrift,
+            "changed cited content status",
+        )?;
+        ensure_equal(
+            &referent.reason.as_str(),
+            &"file_referent_content_drift",
+            "changed cited content reason",
+        )?;
+        ensure_equal(
+            &report.data_json()["referents"][0]["action"],
+            &serde_json::json!("demote_and_revalidate"),
+            "flat referent action",
+        )
+    }
+
     fn provenance_fixture_connection(workspace_path: &Path) -> Result<DbConnection, String> {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
@@ -2679,6 +2822,22 @@ mod tests {
         memory_id: &str,
         provenance_uri: &str,
     ) -> Result<(), String> {
+        insert_provenance_fixture_memory_with_content(
+            connection,
+            workspace_id,
+            memory_id,
+            &format!("fixture memory {memory_id}"),
+            provenance_uri,
+        )
+    }
+
+    fn insert_provenance_fixture_memory_with_content(
+        connection: &DbConnection,
+        workspace_id: &str,
+        memory_id: &str,
+        content: &str,
+        provenance_uri: &str,
+    ) -> Result<(), String> {
         connection
             .insert_memory(
                 memory_id,
@@ -2686,7 +2845,7 @@ mod tests {
                     workspace_id: workspace_id.to_owned(),
                     level: "episodic".to_owned(),
                     kind: "note".to_owned(),
-                    content: format!("fixture memory {memory_id}"),
+                    content: content.to_owned(),
                     workflow_id: None,
                     confidence: 0.8,
                     utility: 0.7,
