@@ -532,6 +532,193 @@ def coordination_snapshot(
     }
 
 
+def build_snapshot_output(
+    project: Path,
+    agent: str,
+    commands: list[dict[str, Any]],
+    thread_limit: int,
+) -> dict[str, Any]:
+    agents_cmd, reservations_cmd, inbox_cmd = commands
+
+    agents = normalize_agents(agents_cmd["json"]) if agents_cmd["ok"] else []
+    reservations = normalize_reservations(reservations_cmd["json"], project) if reservations_cmd["ok"] else []
+    if inbox_cmd["ok"]:
+        inbox, messages = normalize_inbox(inbox_cmd["json"], agent)
+        threads = normalize_threads(messages, thread_limit)
+    else:
+        inbox = []
+        threads = []
+
+    degraded = degraded_entries(commands, project)
+    fallback_active = bool(degraded)
+    return {
+        "schema": AGENT_MAIL_SNAPSHOT_SCHEMA,
+        "generated_at": utc_now(),
+        "project_key": "<workspace>",
+        "agent_name": redact_text(agent),
+        "redaction_status": REDACTION_STATUS,
+        "producer_status": "degraded" if fallback_active else "ok",
+        "source_commands": [command_display(command["argv"], project) for command in commands],
+        "command_statuses": [command_status(command, project) for command in commands],
+        "fallback_active": fallback_active,
+        "am_agents_list_ok": agents_cmd["ok"],
+        "summary": {
+            "agent_count": len(agents),
+            "file_reservation_count": len(reservations),
+            "inbox_mailbox_count": len(inbox),
+            "thread_count": len(threads),
+            "source_command_count": len(commands),
+            "degraded_count": len(degraded),
+        },
+        "degraded": degraded,
+        "file_reservations": reservations,
+        "agents": agents,
+        "inbox": inbox,
+        "threads": threads,
+    }
+
+
+def synthetic_command(
+    argv: list[str],
+    json_value: Any = None,
+    ok: bool = True,
+    exit_code: int | None = 0,
+    timed_out: bool = False,
+    error_class: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "argv": argv,
+        "ok": ok,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "json": json_value if ok else None,
+        "error_class": error_class if not ok else None,
+    }
+
+
+def assert_absent(rendered: str, forbidden: list[str]) -> None:
+    for needle in forbidden:
+        if needle in rendered:
+            raise AssertionError(f"snapshot leaked forbidden text: {needle}")
+
+
+def run_self_test() -> int:
+    project = Path("/Users/example/workspaces/eidetic_engine_cli").resolve()
+    agent = "AzureElm"
+    github_token = "ghp_" + ("A" * 24)
+    api_secret = "api_key=" + ("B" * 24)
+    commands = [
+        synthetic_command(
+            ["am", "agents", "list", "--project", str(project), "--json"],
+            {
+                "agents": [
+                    {"name": agent, "last_active_ts": "2026-06-08T00:00:00Z"},
+                    {"agent_name": "CreamSwan", "lastActiveAt": f"token={github_token}"},
+                ]
+            },
+        ),
+        synthetic_command(
+            ["am", "robot", "reservations", "--project", str(project), "--all", "--format", "json"],
+            {
+                "all_active": [
+                    {
+                        "path_pattern": str(project / "scripts" / "agent_mail_snapshot.sh"),
+                        "holder": "CreamSwan",
+                        "exclusive": "exclusive",
+                        "expires_ts": "2026-06-08T01:00:00Z",
+                    },
+                    {
+                        "path": "/Users/example/.ssh/id_rsa",
+                        "agent_name": "IcyCat",
+                        "exclusive": False,
+                    },
+                ]
+            },
+        ),
+        synthetic_command(
+            ["am", "mail", "inbox", "--project", str(project), "--agent", agent, "--limit", "20", "--json"],
+            {
+                "messages": [
+                    {
+                        "id": 1,
+                        "thread_id": "T-1",
+                        "subject": f"Review path /Users/example/private/file.rs and {api_secret}",
+                        "created_ts": "2026-06-08T01:00:00Z",
+                        "ack_required": True,
+                        "body_md": "body-only secret should never enter snapshot",
+                    },
+                    {
+                        "id": 2,
+                        "thread_id": "T-1",
+                        "subject": "Older thread message",
+                        "created_ts": "2026-06-08T00:30:00Z",
+                    },
+                    {
+                        "id": 3,
+                        "threadId": "T-2",
+                        "subject": "Claim gate handoff",
+                        "createdAt": "2026-06-08T01:15:00Z",
+                        "ackRequired": True,
+                    },
+                ]
+            },
+        ),
+    ]
+    output = build_snapshot_output(project, agent, commands, thread_limit=10)
+    coordination = coordination_snapshot(output, commands[0], commands[1], commands[2], project)
+
+    assert output["schema"] == AGENT_MAIL_SNAPSHOT_SCHEMA
+    assert output["producer_status"] == "ok"
+    assert output["summary"]["agent_count"] == 2
+    assert output["summary"]["file_reservation_count"] == 2
+    assert output["summary"]["inbox_mailbox_count"] == 1
+    assert output["summary"]["thread_count"] == 2
+    assert output["inbox"][0]["ack_required_count"] == 2
+    assert output["file_reservations"][0]["path_pattern"] == "[REDACTED:absolute_path]"
+    assert output["file_reservations"][1]["path_pattern"] == "scripts/agent_mail_snapshot.sh"
+    assert coordination["schema"] == "ee.coordination_snapshot.v1"
+    assert len(coordination["sources"]) == 5
+    assert coordination["sources"][0]["status"] == "fresh"
+    assert coordination["sources"][4]["status"] == "fresh"
+
+    degraded_commands = [
+        commands[0],
+        synthetic_command(
+            ["am", "robot", "reservations", "--project", str(project), "--all", "--format", "json"],
+            ok=False,
+            exit_code=1,
+            error_class="command_failed",
+        ),
+        commands[2],
+    ]
+    degraded_output = build_snapshot_output(project, agent, degraded_commands, thread_limit=10)
+    degraded_coordination = coordination_snapshot(
+        degraded_output,
+        degraded_commands[0],
+        degraded_commands[1],
+        degraded_commands[2],
+        project,
+    )
+    assert degraded_output["producer_status"] == "degraded"
+    assert degraded_output["summary"]["degraded_count"] == 1
+    assert degraded_coordination["sources"][0]["status"] == "unavailable"
+    assert degraded_coordination["sources"][4]["status"] == "degraded"
+
+    rendered = json.dumps({"snapshot": output, "coordination": coordination}, sort_keys=True)
+    assert_absent(
+        rendered,
+        [
+            str(project),
+            "/Users/example",
+            github_token,
+            api_secret,
+            "body-only secret",
+        ],
+    )
+    print("agent_mail_snapshot: self-test passed", file=sys.stderr)
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Emit a redacted read-only Agent Mail snapshot for ee swarm brief.",
@@ -540,7 +727,8 @@ def parse_args() -> argparse.Namespace:
             "examples:\n"
             "  scripts/agent_mail_snapshot.sh --project \"$PWD\" --agent \"$AGENT_NAME\" --json\n"
             "  scripts/agent_mail_snapshot.sh --project \"$PWD\" --agent \"$AGENT_NAME\" --output /private/tmp/ee-agent-mail-snapshot.json\n"
-            "  scripts/agent_mail_snapshot.sh --project \"$PWD\" --agent \"$AGENT_NAME\" --json --output /private/tmp/ee-agent-mail-snapshot.json"
+            "  scripts/agent_mail_snapshot.sh --project \"$PWD\" --agent \"$AGENT_NAME\" --json --output /private/tmp/ee-agent-mail-snapshot.json\n"
+            "  scripts/agent_mail_snapshot.sh --self-test"
         ),
     )
     parser.add_argument("--project", default=os.environ.get("AGENT_MAIL_PROJECT") or os.getcwd())
@@ -567,11 +755,19 @@ def parse_args() -> argparse.Namespace:
         "--coordination-output",
         help="Also write a pack-compatible ee.coordination_snapshot.v1 companion JSON file.",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run synthetic normalization, redaction, and coordination snapshot checks without calling Agent Mail.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.self_test:
+        return run_self_test()
+
     project = Path(args.project).resolve()
     agent = args.agent
     if not agent:
@@ -605,42 +801,7 @@ def main() -> int:
     ]
     agents_cmd, reservations_cmd, inbox_cmd = commands
 
-    agents = normalize_agents(agents_cmd["json"]) if agents_cmd["ok"] else []
-    reservations = normalize_reservations(reservations_cmd["json"], project) if reservations_cmd["ok"] else []
-    if inbox_cmd["ok"]:
-        inbox, messages = normalize_inbox(inbox_cmd["json"], agent)
-        threads = normalize_threads(messages, args.thread_limit)
-    else:
-        inbox = []
-        threads = []
-
-    degraded = degraded_entries(commands, project)
-    fallback_active = bool(degraded)
-    output = {
-        "schema": AGENT_MAIL_SNAPSHOT_SCHEMA,
-        "generated_at": utc_now(),
-        "project_key": "<workspace>",
-        "agent_name": redact_text(agent),
-        "redaction_status": REDACTION_STATUS,
-        "producer_status": "degraded" if fallback_active else "ok",
-        "source_commands": [command_display(command["argv"], project) for command in commands],
-        "command_statuses": [command_status(command, project) for command in commands],
-        "fallback_active": fallback_active,
-        "am_agents_list_ok": agents_cmd["ok"],
-        "summary": {
-            "agent_count": len(agents),
-            "file_reservation_count": len(reservations),
-            "inbox_mailbox_count": len(inbox),
-            "thread_count": len(threads),
-            "source_command_count": len(commands),
-            "degraded_count": len(degraded),
-        },
-        "degraded": degraded,
-        "file_reservations": reservations,
-        "agents": agents,
-        "inbox": inbox,
-        "threads": threads,
-    }
+    output = build_snapshot_output(project, agent, commands, args.thread_limit)
 
     rendered = json.dumps(output, sort_keys=True, separators=(",", ":")) + "\n"
     write_stdout = args.json or args.stdout or not args.output
