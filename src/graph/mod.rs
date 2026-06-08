@@ -5995,7 +5995,11 @@ fn parse_graph_snapshot_metrics(metrics_json: &str) -> GraphResult<ParsedGraphDo
 }
 
 fn first_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    first_string_at(value, keys).or_else(|| value.get("attrs").and_then(|attrs| first_string_at(attrs, keys)))
+    first_string_at(value, keys).or_else(|| {
+        value
+            .get("attrs")
+            .and_then(|attrs| first_string_at(attrs, keys))
+    })
 }
 
 fn first_string_at(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -6005,7 +6009,11 @@ fn first_string_at(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
 }
 
 fn first_bool(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
-    first_bool_at(value, keys).or_else(|| value.get("attrs").and_then(|attrs| first_bool_at(attrs, keys)))
+    first_bool_at(value, keys).or_else(|| {
+        value
+            .get("attrs")
+            .and_then(|attrs| first_bool_at(attrs, keys))
+    })
 }
 
 fn first_bool_at(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
