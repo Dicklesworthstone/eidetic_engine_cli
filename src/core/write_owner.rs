@@ -956,6 +956,85 @@ fn high_trust_missing_evidence_count(
         .fold(0_u32, u32::saturating_add)
 }
 
+/// Feedback-quarantine `signal` value used for write-immune advisory holds.
+///
+/// The write-immune system is the write-side analogue of the existing
+/// harmful-feedback burst quarantine, so it reuses the `harmful` signal already
+/// allowed by the `feedback_quarantine` table contract (bd-1n0np.8.6).
+pub const WRITE_IMMUNE_QUARANTINE_SIGNAL: &str = "harmful";
+
+/// Feedback-quarantine `source_type` value for write-immune advisory holds.
+///
+/// Write-immune quarantine is produced by a deterministic automated check, so it
+/// maps to the `automated_check` source type in the table contract.
+pub const WRITE_IMMUNE_QUARANTINE_SOURCE_TYPE: &str = "automated_check";
+
+/// Feedback-quarantine `target_type` value for write-immune advisory holds.
+///
+/// Quarantine holds the freshly-written memory back from packs/curation by
+/// targeting it directly; `curate` disqualifies any memory whose id appears in a
+/// pending `target_type = "memory"` quarantine row (the existing hold-from-packs
+/// mechanism — see `core::curate`).
+pub const WRITE_IMMUNE_QUARANTINE_TARGET_TYPE: &str = "memory";
+
+/// Default advisory weight for a write-immune quarantine row (within the table's
+/// `[0.0, 10.0]` weight bound).
+pub const WRITE_IMMUNE_QUARANTINE_WEIGHT: f32 = 1.0;
+
+/// Bridge a [`WriteImmuneQuarantineDecision`] onto the existing
+/// `feedback_quarantine` persistence contract (bd-1n0np.8.6).
+///
+/// This is a pure, deterministic mapping: no clock, no id generation, and no
+/// I/O. The caller supplies the (already-deterministic) `recorded_at`,
+/// `raw_event_hash`, and ids and passes the result to the existing audited
+/// insert (`core::outcome::insert_feedback_quarantine_audited_with_id`), which
+/// writes the quarantine row plus its audit row in one transaction. `curate`
+/// then holds the memory back from packs via the pending-quarantine disqualifier.
+///
+/// Returns `None` unless `decision.action == "quarantine"` — an `allow` decision
+/// (no tripped reasons, or an orchestrator-whitelisted source) never produces a
+/// quarantine row, preserving the per-source advisory / never-a-global-stall and
+/// whitelist-bypass invariants. When the decision quarantines, the tripped
+/// reason codes form a non-empty human-readable `reason`, and the full decision
+/// is serialized into `evidence_json` for the audit trail.
+#[must_use]
+pub fn build_write_immune_quarantine_input(
+    decision: &WriteImmuneQuarantineDecision,
+    workspace_id: &str,
+    memory_id: &str,
+    recorded_at: &str,
+    raw_event_hash: &str,
+    session_id: Option<&str>,
+) -> Option<crate::db::CreateFeedbackQuarantineInput> {
+    if decision.action != "quarantine" {
+        return None;
+    }
+    let reason_codes = decision
+        .reasons
+        .iter()
+        .map(|reason| reason.code)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let reason = format!("write-immune advisory quarantine: {reason_codes}");
+    let evidence_json = serde_json::to_string(decision).ok();
+    Some(crate::db::CreateFeedbackQuarantineInput {
+        workspace_id: workspace_id.to_owned(),
+        source_id: decision.source_id.clone(),
+        target_type: WRITE_IMMUNE_QUARANTINE_TARGET_TYPE.to_owned(),
+        target_id: memory_id.to_owned(),
+        signal: WRITE_IMMUNE_QUARANTINE_SIGNAL.to_owned(),
+        weight: WRITE_IMMUNE_QUARANTINE_WEIGHT,
+        source_type: WRITE_IMMUNE_QUARANTINE_SOURCE_TYPE.to_owned(),
+        proposed_event_id: None,
+        recorded_at: recorded_at.to_owned(),
+        reason,
+        event_reason: None,
+        evidence_json,
+        session_id: session_id.map(str::to_owned),
+        raw_event_hash: raw_event_hash.to_owned(),
+    })
+}
+
 /// Result of a write operation.
 #[derive(Clone, Debug)]
 pub enum WriteResult {
