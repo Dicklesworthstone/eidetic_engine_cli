@@ -678,7 +678,7 @@ mod tests {
                         "docs bootstrap command {expected} should be in capabilities; got {names:?}"
                     )
                 })?;
-            ensure(command.available, true, format!("{expected} is available"))?;
+            ensure(command.available, true, &format!("{expected} is available"))?;
         }
 
         Ok(())
