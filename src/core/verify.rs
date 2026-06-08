@@ -729,6 +729,61 @@ impl VerifyProvenanceReferentStatus {
             Self::Unverifiable => "unverifiable",
         }
     }
+
+    /// The maintenance action `ee verify provenance` proposes for a referent
+    /// (bd-1n0np.9.2). See [`ProvenanceReverifyAction`].
+    #[must_use]
+    pub const fn reverify_action(self) -> ProvenanceReverifyAction {
+        ProvenanceReverifyAction::for_status(self)
+    }
+}
+
+/// What `ee verify provenance` proposes when a cited evidence referent is
+/// re-resolved (bd-1n0np.9.2).
+///
+/// Enforces two invariants: ee NEVER removes a memory (RULE 1 / no silent
+/// mutation) — it demotes (audited) and raises a `revalidate` curation
+/// candidate; and an `Unverifiable` referent (e.g. cass down, network-gated) is
+/// advisory ONLY — never demoted, mirroring "cass missing -> unverifiable, not
+/// missing".
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ProvenanceReverifyAction {
+    /// Referent re-verified — no action.
+    None,
+    /// Referent could not be checked — advisory only: no demotion, no candidate.
+    Advisory,
+    /// Referent is gone or drifted — write an audited demotion (trust-class /
+    /// freshness transition) and raise a revalidate curation candidate. The
+    /// memory is never removed.
+    DemoteAndRevalidate,
+}
+
+impl ProvenanceReverifyAction {
+    /// Map a referent status to the proposed action.
+    #[must_use]
+    pub const fn for_status(status: VerifyProvenanceReferentStatus) -> Self {
+        match status {
+            VerifyProvenanceReferentStatus::Verified => Self::None,
+            VerifyProvenanceReferentStatus::Unverifiable => Self::Advisory,
+            VerifyProvenanceReferentStatus::EvidenceMissing
+            | VerifyProvenanceReferentStatus::EvidenceDrift => Self::DemoteAndRevalidate,
+        }
+    }
+
+    /// Whether this action writes an audited demotion + revalidate candidate.
+    #[must_use]
+    pub const fn demotes(self) -> bool {
+        matches!(self, Self::DemoteAndRevalidate)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Advisory => "advisory",
+            Self::DemoteAndRevalidate => "demote_and_revalidate",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2965,5 +3020,26 @@ mod tests {
             report.guidance.rejected_reasons[0].contains("local fallback"),
             "rejection explains fallback",
         )
+    }
+
+    #[test]
+    fn provenance_reverify_action_enforces_no_silent_mutation() {
+        use ProvenanceReverifyAction as Action;
+        use VerifyProvenanceReferentStatus as Status;
+
+        assert_eq!(Status::Verified.reverify_action(), Action::None);
+        // Conservatism: an unverifiable referent is advisory only, never demoted.
+        assert_eq!(Status::Unverifiable.reverify_action(), Action::Advisory);
+        assert!(!Status::Unverifiable.reverify_action().demotes());
+        // Gone / drifted -> audited demotion + revalidate candidate (never removal).
+        assert_eq!(
+            Status::EvidenceMissing.reverify_action(),
+            Action::DemoteAndRevalidate
+        );
+        assert_eq!(
+            Status::EvidenceDrift.reverify_action(),
+            Action::DemoteAndRevalidate
+        );
+        assert!(Status::EvidenceMissing.reverify_action().demotes());
     }
 }
