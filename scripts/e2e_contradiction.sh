@@ -63,9 +63,13 @@ id_b="$(printf '%s' "$rule_b" | jq -r '(.data.id // .data.memory.id // .data.mem
 e2e_log_note "rule_a_id=${id_a:-<none>} rule_b_id=${id_b:-<none>}"
 
 step "link the pair with an explicit contradiction edge (7.2 evidence)"
+link_created=0
 if ee_supports link && [ -n "$id_a" ] && [ -n "$id_b" ]; then
     linked="$(ee_json link "$id_a" "$id_b" --relation contradicts --workspace "$WS" --json)"
     assert_jq "$linked" '.success == true' "explicit contradicts link created"
+    if printf '%s' "$linked" | jq -e '.success == true' >/dev/null 2>&1; then
+        link_created=1
+    fi
 else
     log_drop 1 "ee link surface or memory ids unavailable: explicit contradiction edge skipped"
 fi
@@ -75,18 +79,28 @@ if ee_supports conflict list; then
     conflicts="$(ee_json conflict list --workspace "$WS" --json)"
     assert_jq "$conflicts" '.success == true' "conflict list succeeds"
     assert_jq "$conflicts" \
-        '((.data.conflicts // .data.clusters // []) | type) == "array"' \
+        '(.data | has("pairs")) and (.data.pairs | type == "array")' \
         "conflict list emits a ranked conflict array"
+    if [ "$link_created" -eq 1 ]; then
+        assert_jq "$conflicts" \
+            '(.data.pairs | length) >= 1' \
+            "conflict list includes the explicit contradiction pair"
+    fi
 else
     log_drop 1 "ee conflict list pending (bd-1n0np.7.3): ranking assertions skipped"
 fi
 
 step "conflict explain surfaces the evidence (bd-1n0np.7.3)"
-if ee_supports conflict explain; then
-    explained="$(ee_json conflict explain --workspace "$WS" --json)"
+if ee_supports conflict explain && [ -n "$id_a" ]; then
+    explained="$(ee_json conflict explain "$id_a" --workspace "$WS" --json)"
     assert_jq "$explained" '.success == true' "conflict explain succeeds"
+    if [ "$link_created" -eq 1 ]; then
+        assert_jq "$explained" \
+            '(.data | has("pairs")) and (.data.pairs | length >= 1)' \
+            "conflict explain includes evidence for the requested memory"
+    fi
 else
-    log_drop 1 "ee conflict explain pending (bd-1n0np.7.3): evidence assertions skipped"
+    log_drop 1 "ee conflict explain pending or memory id unavailable (bd-1n0np.7.3): evidence assertions skipped"
 fi
 
 step "curate contradictions + resolve (scope-split then supersede) (bd-1n0np.7.4)"
