@@ -101,6 +101,7 @@ pub mod repro;
 pub mod rule;
 pub mod sandbox;
 pub mod search;
+pub mod sentinel;
 pub mod singleflight;
 pub mod situation;
 pub mod source_run;
