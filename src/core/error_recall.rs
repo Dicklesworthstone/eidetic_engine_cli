@@ -543,10 +543,10 @@ impl ErrorFingerprint {
 #[cfg(test)]
 mod tests {
     use super::{
-        CanonicalDiagnostic, DiagnosticTool, ErrorFingerprint, ErrorRepairLinkKind,
-        FingerprintLayer, SIMHASH_TAIL_MAX_DISTANCE, canonical_message_template, from_cargo,
-        from_ee_error, from_rch_blocker, from_rustc, from_shell, plan_error_repair_links,
-        redact_diagnostic, redact_to_fingerprint, simhash_hamming_distance, simhash_tail_matches,
+        DiagnosticTool, ErrorFingerprint, ErrorRepairLinkKind, FingerprintLayer,
+        SIMHASH_TAIL_MAX_DISTANCE, canonical_message_template, from_cargo, from_ee_error,
+        from_rch_blocker, from_rustc, from_shell, plan_error_repair_links, redact_diagnostic,
+        redact_to_fingerprint, simhash_hamming_distance, simhash_tail_matches,
     };
 
     #[test]
