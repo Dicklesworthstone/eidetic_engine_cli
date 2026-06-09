@@ -267,9 +267,7 @@ pub const SNAPSHOT_PIN_FORCE_RELEASED: DegradationCode = DegradationCode {
     description: "Read snapshot pin was force-released during workspace close",
     behavior_change: "The remaining pinned reader is poisoned so shutdown can complete without leaking WAL frames",
     auto_recoverable: true,
-    repair: Some(
-        "ee status --workspace . --json # retry the read workflow after workspace close completes",
-    ),
+    repair: Some("ee status --workspace . --json"),
 };
 
 /// Response degraded code for advisory lock acquisition timeout.

@@ -40,12 +40,30 @@ pub fn build_memory_attestation(
     };
     let links = connection.list_memory_links_for_memory(memory_id, None)?;
     let anchors = connection.list_memory_anchors(memory_id)?;
-    let audits =
-        connection.list_audit_by_target("memory", memory_id, Some(ATTESTATION_AUDIT_LIMIT))?;
+    let audits = memory_attestation_audits(connection, memory_id)?;
 
     Ok(Some(build_memory_attestation_from_parts(
         &memory, &links, &anchors, &audits,
     )))
+}
+
+fn memory_attestation_audits(
+    connection: &DbConnection,
+    memory_id: &str,
+) -> db::Result<Vec<StoredAuditEntry>> {
+    connection
+        .list_audit_by_target("memory", memory_id, None)
+        .map(filter_memory_attestation_audits)
+}
+
+fn filter_memory_attestation_audits(
+    audits: impl IntoIterator<Item = StoredAuditEntry>,
+) -> Vec<StoredAuditEntry> {
+    audits
+        .into_iter()
+        .filter(|entry| entry.action != crate::db::audit_actions::WHY_INSPECTED)
+        .take(ATTESTATION_AUDIT_LIMIT as usize)
+        .collect()
 }
 
 /// Build an attestation bundle for a stored pack record, if the pack exists.
@@ -848,6 +866,32 @@ mod tests {
             prev_row_hash: Some("blake3:prev".to_owned()),
             this_row_hash: Some("blake3:this".to_owned()),
         }
+    }
+
+    #[test]
+    fn memory_attestation_filters_why_audits_before_evidence_limit() {
+        let mut audits = Vec::new();
+        for index in 0..ATTESTATION_AUDIT_LIMIT {
+            let mut audit = stored_audit_with_secret();
+            audit.id = format!("aud_why_{index:024}");
+            audit.action = crate::db::audit_actions::WHY_INSPECTED.to_owned();
+            audit.mutation_kind = crate::db::audit_actions::WHY_INSPECTED.to_owned();
+            audit.timestamp = format!("2026-06-07T00:00:00.{index:09}Z");
+            audits.push(audit);
+        }
+
+        let mut mutation = stored_audit_with_secret();
+        mutation.id = "aud_attest_real_mutation00000001".to_owned();
+        mutation.action = "memory.updated".to_owned();
+        mutation.mutation_kind = "memory.updated".to_owned();
+        mutation.timestamp = "2026-06-06T00:00:00Z".to_owned();
+        audits.push(mutation.clone());
+
+        let filtered = filter_memory_attestation_audits(audits);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, mutation.id);
+        assert_eq!(filtered[0].action, "memory.updated");
     }
 
     #[test]

@@ -7355,6 +7355,21 @@ mod tests {
         Ok(connection)
     }
 
+    fn open_empty_projection_db() -> Result<DbConnection, String> {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-graph-projection".to_string(),
+                    name: Some("graph projection".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(connection)
+    }
+
     fn open_revision_dag_db() -> Result<DbConnection, String> {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
@@ -8227,7 +8242,7 @@ mod tests {
     #[cfg(feature = "graph")]
     #[test]
     fn projection_derives_decision_supersedes_typed_edge() -> TestResult {
-        let connection = open_projection_db()?;
+        let connection = open_empty_projection_db()?;
         insert_memory_with_kind(
             &connection,
             MEMORY_A,
@@ -8303,7 +8318,7 @@ mod tests {
     #[cfg(feature = "graph")]
     #[test]
     fn typed_failure_edges_feed_projection_contradiction_and_causal_graphs() -> TestResult {
-        let connection = open_projection_db()?;
+        let connection = open_empty_projection_db()?;
         insert_memory_with_kind(
             &connection,
             MEMORY_A,

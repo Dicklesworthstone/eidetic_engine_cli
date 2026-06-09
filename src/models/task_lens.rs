@@ -633,7 +633,10 @@ fn hash_list(hasher: &mut blake3::Hasher, values: &[String]) {
 }
 
 fn normalize_lens_id(input: &str) -> String {
-    normalized_token(input, '-')
+    match normalized_token(input, '-').as_str() {
+        "bug-fix" => "bugfix".to_owned(),
+        normalized => normalized.to_owned(),
+    }
 }
 
 fn normalized_source_mode_token(input: String) -> String {

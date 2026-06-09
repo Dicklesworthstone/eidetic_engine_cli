@@ -11349,6 +11349,22 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         args: &[],
     },
     CommandEntry {
+        name: "lens",
+        description: "Inspect reusable task lens policies for pack/search",
+        available: true,
+        subcommands: &[
+            SubcommandEntry {
+                name: "list",
+                description: "List built-in and workspace task lenses",
+            },
+            SubcommandEntry {
+                name: "explain",
+                description: "Explain one task lens and its effective overlay",
+            },
+        ],
+        args: &[],
+    },
+    CommandEntry {
         name: "why",
         description: "Explain why a memory was stored, retrieved, or selected",
         available: true,
