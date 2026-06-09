@@ -7425,8 +7425,15 @@ pub struct SearchArgs {
     pub kind: Option<String>,
 
     /// Restrict results to a typed memory sidecar field value (`name=value`).
+    //
+    // NOTE: the Rust field name MUST NOT be `fields` — clap derives the arg id
+    // from the field identifier (not `long`), and a `fields` id collides with
+    // the `global = true` `--fields` (`output::FieldSelector`) on `Cli`. That
+    // collision registers the id as `FieldSelector` but accesses it as
+    // `Vec<String>`, panicking every `ee search` invocation with
+    // "Mismatch between definition and access of `fields`". Keep the id distinct.
     #[arg(long = "field", value_name = "NAME=VALUE")]
-    pub fields: Vec<String>,
+    pub field_filters: Vec<String>,
 
     /// Emit a redaction-safe query performance report instead of search hits.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -37646,7 +37653,7 @@ where
         }
     };
     let typed_field_filters = match args
-        .fields
+        .field_filters
         .iter()
         .map(|raw| TypedMemoryFieldFilter::parse(raw))
         .collect::<Result<Vec<_>, _>>()
@@ -65161,7 +65168,7 @@ mod tests {
                     "search kind filter",
                 )?;
                 ensure_equal(
-                    &args.fields,
+                    &args.field_filters,
                     &vec![
                         "family=aggressive prefetch".to_owned(),
                         "reverted-at-sha=9af3c21".to_owned(),
