@@ -36,6 +36,8 @@ const CARGO_TOML_MAX_BYTES: u64 = 1024 * 1024;
 const INSTALL_FRESHNESS_DEFAULT_REQUIRED_SURFACES: &[&str] = &["install_check"];
 const INSTALL_FRESHNESS_SUPPORTED_SURFACES: &[&str] =
     &["install_check", "claim_gate_install_freshness", "version"];
+pub const INSTALL_FRESHNESS_CLAIM_GATE_REQUIRED_SURFACES: &[&str] =
+    &["install_check", "claim_gate_install_freshness"];
 
 /// Hard upper bound on the byte length of a release manifest read from a
 /// user-supplied `--manifest <path>`. Realistic manifests are on the order
@@ -92,6 +94,14 @@ impl Default for InstallPlanOptions {
 
 #[must_use]
 pub fn check_install(options: &InstallCheckOptions) -> InstallCheckReport {
+    check_install_with_required_surfaces(options, INSTALL_FRESHNESS_DEFAULT_REQUIRED_SURFACES)
+}
+
+#[must_use]
+pub fn check_install_with_required_surfaces(
+    options: &InstallCheckOptions,
+    required_surfaces: &[&str],
+) -> InstallCheckReport {
     let info = build_info();
     let target_triple = selected_target_triple(options.target_triple.as_deref());
     let install_dir = options
@@ -256,7 +266,7 @@ pub fn check_install(options: &InstallCheckOptions) -> InstallCheckReport {
         &current_binary,
         &path,
         &findings,
-        INSTALL_FRESHNESS_DEFAULT_REQUIRED_SURFACES,
+        required_surfaces,
     );
     findings.extend(install_freshness_findings(&freshness));
 

@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "missing_required_surface",
+  "introduced_by": {
+    "bead": "bd-3utv2.3",
+    "epic_letter": "install-freshness"
+  },
+  "surfaces": [
+    "swarm work-packet"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Swarm work-packet claim-gate collection runs the offline install freshness probe and the installed ee binary lacks a surface required by the current claim-gate contract.",
+    "setup_commands": [
+      "# arrange an installed ee binary whose install check omits claim_gate_install_freshness support",
+      "# run the claim gate without adopting or overwriting the binary"
+    ],
+    "invocation": "ee swarm work-packet --workspace . --include-rch --claim-gate --json"
+  },
+  "expected_emission": {
+    "code": "missing_required_surface",
+    "severity": "warning",
+    "message_contains": [
+      "Installed ee claim-gate freshness verdict",
+      "not authoritative for claims"
+    ],
+    "repair_contains": "ee install check --json --offline",
+    "repair_string": "Run ee install check --json --offline, adopt a current artifact, or request an operator exception."
+  }
+}

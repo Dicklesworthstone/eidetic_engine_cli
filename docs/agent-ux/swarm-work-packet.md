@@ -31,6 +31,16 @@ also mirrors the compact environment-attestation verdict fields on
 `sourceAuthority.remoteVerificationAdmitted`, and
 `sourceAuthority.localCargoFallbackObserved` so stale binary, tracker, RCH, and
 local fallback evidence remains visible at the claim decision.
+The same source-authority object carries `installFreshnessVerdict`,
+`installFreshnessAuthoritative`, and `installFreshnessRepair`. The live
+work-packet collector runs the offline install freshness probe for the
+claim-gate surface; `fresh` clears only the binary-freshness precondition. A
+stale, shadowed, PATH-missing, or missing-surface installed binary must keep
+`safeToClaim=false`, emit no `claimCommandAction`, and include an
+install-freshness unsafe reason even when the Beads candidate itself is otherwise
+claimable. Inspect `recoveryActions[]` for the structured no-local-Cargo
+recovery sequence: verify the install check, plan adoption from a current
+artifact, or request an explicit operator exception.
 
 When the claim gate, support-bundle summary, or handoff evidence disagrees about
 which readiness source is authoritative, inspect

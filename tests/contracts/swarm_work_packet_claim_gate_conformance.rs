@@ -80,6 +80,7 @@ fn claim_gate_required_fields() -> Vec<String> {
         "degradedCodes",
         "nextCommandActions",
         "claimCommandAction",
+        "recoveryActions",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -260,6 +261,9 @@ fn claim_gate_sample_payloads_are_redacted_and_safe() -> TestResult {
             "sourceTestVerdict": "environment_blocked_before_source",
             "remoteVerificationAdmitted": false,
             "localCargoFallbackObserved": null,
+            "installFreshnessVerdict": "not_evaluated",
+            "installFreshnessAuthoritative": null,
+            "installFreshnessRepair": null,
             "sourceCount": 4
         },
         "unsafeReasons": ["active_claim", "reserved_file_overlap"],
@@ -279,7 +283,8 @@ fn claim_gate_sample_payloads_are_redacted_and_safe() -> TestResult {
                 "rationale": "Inspect the peer-owned candidate without changing tracker state."
             }
         ],
-        "claimCommandAction": null
+        "claimCommandAction": null,
+        "recoveryActions": []
     });
 
     for (context, sample) in [

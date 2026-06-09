@@ -63,6 +63,7 @@ CLAIM_GATE_REQUIRED_FIELDS = [
     ("degradedCodes", "missing_claim_gate_degraded_codes"),
     ("nextCommandActions", "missing_claim_gate_next_command_actions"),
     ("claimCommandAction", "missing_claim_gate_claim_command_action"),
+    ("recoveryActions", "missing_claim_gate_recovery_actions"),
 ]
 CLAIM_GATE_SOURCE_AUTHORITY_REQUIRED_FIELDS = [
     ("trackerAuthoritative", "missing_claim_gate_tracker_authoritative"),
@@ -75,6 +76,25 @@ CLAIM_GATE_SOURCE_AUTHORITY_REQUIRED_FIELDS = [
         "rchSafeToLaunchCargoVerification",
         "missing_claim_gate_rch_safe_to_launch_cargo_verification",
     ),
+    ("environmentVerdict", "missing_claim_gate_environment_verdict"),
+    ("sourceTestVerdict", "missing_claim_gate_source_test_verdict"),
+    (
+        "remoteVerificationAdmitted",
+        "missing_claim_gate_remote_verification_admitted",
+    ),
+    (
+        "localCargoFallbackObserved",
+        "missing_claim_gate_local_cargo_fallback_observed",
+    ),
+    (
+        "installFreshnessVerdict",
+        "missing_claim_gate_install_freshness_verdict",
+    ),
+    (
+        "installFreshnessAuthoritative",
+        "missing_claim_gate_install_freshness_authoritative",
+    ),
+    ("installFreshnessRepair", "missing_claim_gate_install_freshness_repair"),
     ("sourceCount", "missing_claim_gate_source_count"),
 ]
 CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS = [
@@ -343,12 +363,31 @@ def malformed_claim_gate_authority_reasons(gate):
                     "rchSafeToLaunchCargoVerification",
                     "malformed_claim_gate_rch_safe_to_launch_cargo_verification",
                 ),
+                (
+                    "remoteVerificationAdmitted",
+                    "malformed_claim_gate_remote_verification_admitted",
+                ),
+                (
+                    "localCargoFallbackObserved",
+                    "malformed_claim_gate_local_cargo_fallback_observed",
+                ),
+                (
+                    "installFreshnessAuthoritative",
+                    "malformed_claim_gate_install_freshness_authoritative",
+                ),
             ],
         )
     )
     for field, reason in [
         ("trackerHealth", "malformed_claim_gate_tracker_health"),
         ("agentMailStatus", "malformed_claim_gate_agent_mail_status"),
+        ("environmentVerdict", "malformed_claim_gate_environment_verdict"),
+        ("sourceTestVerdict", "malformed_claim_gate_source_test_verdict"),
+        (
+            "installFreshnessVerdict",
+            "malformed_claim_gate_install_freshness_verdict",
+        ),
+        ("installFreshnessRepair", "malformed_claim_gate_install_freshness_repair"),
     ]:
         value = authority.get(field)
         if field in authority and value is not None and not isinstance(value, str):
@@ -563,6 +602,7 @@ def malformed_claim_gate_reasons(gate):
         ("sourceRefs", "malformed_claim_gate_source_refs"),
         ("degradedCodes", "malformed_claim_gate_degraded_codes"),
         ("nextCommandActions", "malformed_claim_gate_next_command_actions"),
+        ("recoveryActions", "malformed_claim_gate_recovery_actions"),
     ]:
         value = gate.get(field)
         if field in gate and value is not None and not isinstance(value, list):
@@ -1317,6 +1357,12 @@ def claim_gate_consistency_reasons(gate, envelope_degraded=None):
         reasons.append("agent_mail_semantic_readiness_failed")
     if authority.get("rchSafeToLaunchCargoVerification") is False:
         reasons.append("rch_remote_verification_blocked")
+    if authority.get("installFreshnessAuthoritative") is False:
+        freshness_verdict = redact_text(
+            authority.get("installFreshnessVerdict") or "unknown",
+            64,
+        )
+        reasons.append(f"claim_gate_install_freshness_not_authoritative:{freshness_verdict}")
     if "rchRemoteOnlyRequired" not in authority:
         reasons.append("claim_gate_rch_remote_only_required_missing")
     elif (

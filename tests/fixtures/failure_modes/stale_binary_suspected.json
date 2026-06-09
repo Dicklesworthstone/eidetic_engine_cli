@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "stale_binary_suspected",
+  "introduced_by": {
+    "bead": "bd-3utv2.3",
+    "epic_letter": "install-freshness"
+  },
+  "surfaces": [
+    "swarm work-packet",
+    "diag environment-attestation"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Swarm work-packet claim-gate collection finds that the installed ee binary is stale, shadowed, missing from PATH, or otherwise not authoritative for the current claim-gate contract.",
+    "setup_commands": [
+      "# arrange a PATH where ee install check --json --offline reports a non-authoritative freshness verdict",
+      "# keep Cargo verification remote-only; do not rebuild or adopt a binary without operator approval"
+    ],
+    "invocation": "ee swarm work-packet --workspace . --include-rch --claim-gate --json"
+  },
+  "expected_emission": {
+    "code": "stale_binary_suspected",
+    "severity": "warning",
+    "message_contains": [
+      "Installed ee claim-gate freshness verdict",
+      "not authoritative for claims"
+    ],
+    "repair_contains": "ee install check --json --offline",
+    "repair_string": "Run ee install check --json --offline, adopt a current artifact, or request an operator exception."
+  }
+}

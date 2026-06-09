@@ -189,8 +189,8 @@ ee.swarm.work_packet.claim_gate.v1`, the source `packetId`, a deterministic
 reason arrays, and the verdict.
 
 `safeToClaim` is `true` only when the selected candidate decision is
-`safe_to_claim` and the source packet's `recommendedAction.safeToClaim` is
-`true`. `sourceAuthority.rchRemoteOnlyRequired` and
+`safe_to_claim`, the source packet's `recommendedAction.safeToClaim` is `true`,
+and source authority has no hard freshness blocker. `sourceAuthority.rchRemoteOnlyRequired` and
 `sourceAuthority.rchSafeToLaunchCargoVerification` are separate so harnesses can
 fail closed when remote-only verification is required but the positive RCH proof
 is missing or false; a green local compile posture is not enough to claim Rust
@@ -201,6 +201,20 @@ without replacing the gate verdict, candidate decision, unsafe reasons, or the
 full `ee diag environment-attestation` surface. `candidate_not_found` and
 `no_candidate` are explicit gate verdicts so
 harnesses do not infer safety from missing candidate data.
+
+Installed-binary freshness is carried beside the other authority fields as
+`installFreshnessVerdict`, `installFreshnessAuthoritative`, and
+`installFreshnessRepair`. Live work-packet collection runs the offline install
+freshness probe for the claim-gate surface; when it reports `fresh`, the gate
+may continue to ordinary Beads/coordination checks. If the gate sees
+`stale_binary_suspected`, a shadowed/path-missing binary, or a missing required
+claim-gate surface, it must emit `safeToClaim=false`, a non-safe verdict such as
+`blocked_by_verification`, `claimCommandAction=null`, and an unsafe reason such
+as `install_freshness:stale`. It must also populate `recoveryActions[]` with
+structured steps to verify the source/install version, plan adoption from a
+current artifact, or request an explicit operator exception. Consumers must treat
+`installFreshnessAuthoritative=false` as a hard claim blocker even when candidate
+evidence otherwise looks safe.
 
 For explicit `--candidate <bead-id>` queries, `recommendedSafeToClaim` must be
 candidate-scoped before `safeToClaim` can become `true`. A packet-level

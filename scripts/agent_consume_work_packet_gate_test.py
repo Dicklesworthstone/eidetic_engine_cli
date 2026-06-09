@@ -77,6 +77,13 @@ def safe_gate():
             "inboxAuthoritative": True,
             "rchRemoteOnlyRequired": True,
             "rchSafeToLaunchCargoVerification": True,
+            "environmentVerdict": "remote_verification_admitted",
+            "sourceTestVerdict": "not_evaluated",
+            "remoteVerificationAdmitted": True,
+            "localCargoFallbackObserved": None,
+            "installFreshnessVerdict": "not_evaluated",
+            "installFreshnessAuthoritative": None,
+            "installFreshnessRepair": None,
             "sourceCount": 4,
         },
         "unsafeReasons": [],
@@ -91,6 +98,7 @@ def safe_gate():
             ["br", "update", "bd-safe.1", "--status", "in_progress", "--json"],
             mutates=True,
         ),
+        "recoveryActions": [],
     }
 
 
@@ -312,6 +320,24 @@ class ClaimGateConsumer(unittest.TestCase):
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
         self.assertFalse(claim["runnable"])
 
+    def test_claim_gate_install_freshness_not_authoritative_fails_closed(self):
+        gate = safe_gate()
+        gate["sourceAuthority"]["installFreshnessVerdict"] = "stale"
+        gate["sourceAuthority"]["installFreshnessAuthoritative"] = False
+        gate["sourceAuthority"]["installFreshnessRepair"] = (
+            "Run ee install check --json --offline before claiming."
+        )
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_install_freshness_not_authoritative:stale",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+
     def test_missing_required_source_authority_fields_fail_closed(self):
         for field, reason in consumer.CLAIM_GATE_SOURCE_AUTHORITY_REQUIRED_FIELDS:
             with self.subTest(field=field):
@@ -340,6 +366,13 @@ class ClaimGateConsumer(unittest.TestCase):
                 "inboxAuthoritative": {"value": True},
                 "rchRemoteOnlyRequired": "true",
                 "rchSafeToLaunchCargoVerification": 1,
+                "environmentVerdict": ["remote_verification_admitted"],
+                "sourceTestVerdict": {"verdict": "not_evaluated"},
+                "remoteVerificationAdmitted": "true",
+                "localCargoFallbackObserved": "false",
+                "installFreshnessVerdict": ["not_evaluated"],
+                "installFreshnessAuthoritative": "false",
+                "installFreshnessRepair": ["Run install check."],
                 "sourceCount": -1,
             }
         )
@@ -363,6 +396,13 @@ class ClaimGateConsumer(unittest.TestCase):
             "malformed_claim_gate_inbox_authoritative",
             "malformed_claim_gate_rch_remote_only_required",
             "malformed_claim_gate_rch_safe_to_launch_cargo_verification",
+            "malformed_claim_gate_environment_verdict",
+            "malformed_claim_gate_source_test_verdict",
+            "malformed_claim_gate_remote_verification_admitted",
+            "malformed_claim_gate_local_cargo_fallback_observed",
+            "malformed_claim_gate_install_freshness_verdict",
+            "malformed_claim_gate_install_freshness_authoritative",
+            "malformed_claim_gate_install_freshness_repair",
             "malformed_claim_gate_source_count",
         ]:
             self.assertIn(reason, decision["whyNotSafe"])
@@ -383,6 +423,7 @@ class ClaimGateConsumer(unittest.TestCase):
                 "sourceRefs": "br://bd-safe.1",
                 "degradedCodes": {"code": "tracker_mismatch"},
                 "nextCommandActions": {"commandId": "bead_show_candidate"},
+                "recoveryActions": {"kind": "verify_source_version"},
             }
         )
         gate["selectedCandidate"]["id"] = ["bd-safe.1"]
@@ -403,6 +444,7 @@ class ClaimGateConsumer(unittest.TestCase):
             "malformed_claim_gate_source_refs",
             "malformed_claim_gate_degraded_codes",
             "malformed_claim_gate_next_command_actions",
+            "malformed_claim_gate_recovery_actions",
             "malformed_claim_gate_candidate_id",
             "malformed_claim_gate_candidate_decision",
         ]:

@@ -23,6 +23,10 @@ use crate::core::environment_attestation::{
     EnvironmentAttestationSummaryInputs, EnvironmentAttestationVerdict,
     environment_attestation_summary_from_inputs,
 };
+use crate::core::install::{
+    INSTALL_FRESHNESS_CLAIM_GATE_REQUIRED_SURFACES, InstallCheckOptions,
+    check_install_with_required_surfaces,
+};
 use crate::core::preflight_guard::classify_repair_command_for_preflight;
 use crate::core::swarm_brief::{
     SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandRunner, SwarmBriefCommit,
@@ -33,6 +37,7 @@ use crate::core::swarm_brief::{
 };
 use crate::core::verify_ledger::{RchVerifyRunView, list_rch_verify_blockers};
 use crate::db::DbConnection;
+use crate::models::InstallCheckReport;
 
 pub const SWARM_NEXT_ACTION_SCHEMA_V1: &str = "ee.swarm_next_action.v1";
 pub const SWARM_NEXT_ACTION_REDACTION_STATUS: &str =
@@ -46,6 +51,7 @@ const AGENT_MAIL_UNAVAILABLE_CODE: &str = "agent_mail_unavailable";
 const AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE: &str = "agent_mail_semantic_readiness_failed";
 const AGENT_MAIL_SNAPSHOT_TEMPLATE_AGENT: &str = "<AGENT_NAME>";
 const AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH: &str = "/private/tmp/ee-agent-mail-snapshot.json";
+const CLAIM_GATE_INSTALL_FRESHNESS_REPAIR: &str = "Run ee install check --json --offline, adopt a current artifact, or request an operator exception.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SwarmNextActionSnapshot {
@@ -651,6 +657,8 @@ pub struct SwarmWorkPacket {
     pub source_provenance: Vec<SwarmWorkPacketSourceProvenance>,
     pub mutation_policy: SwarmWorkPacketMutationPolicy,
     pub degraded: Vec<SwarmWorkPacketDegradation>,
+    #[serde(skip)]
+    claim_gate_install_freshness: SwarmWorkPacketClaimGateInstallFreshness,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -717,6 +725,7 @@ pub struct SwarmWorkPacketClaimGate {
     pub degraded_codes: Vec<String>,
     pub next_command_actions: Vec<SwarmWorkPacketCommandAction>,
     pub claim_command_action: Option<SwarmWorkPacketCommandAction>,
+    pub recovery_actions: Vec<SwarmWorkPacketClaimGateRecoveryAction>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -746,7 +755,49 @@ pub struct SwarmWorkPacketClaimGateSourceAuthority {
     pub source_test_verdict: &'static str,
     pub remote_verification_admitted: Option<bool>,
     pub local_cargo_fallback_observed: Option<bool>,
+    pub install_freshness_verdict: &'static str,
+    pub install_freshness_authoritative: Option<bool>,
+    pub install_freshness_repair: Option<&'static str>,
     pub source_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketClaimGateRecoveryAction {
+    pub priority: u8,
+    pub kind: &'static str,
+    pub command_action: Option<SwarmWorkPacketCommandAction>,
+    pub mutates_state: bool,
+    pub required_substrate: &'static str,
+    pub rationale: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SwarmWorkPacketClaimGateInstallFreshness {
+    verdict: &'static str,
+    authoritative: Option<bool>,
+    repair: Option<&'static str>,
+    blocks_claim: bool,
+}
+
+impl SwarmWorkPacketClaimGateInstallFreshness {
+    const fn not_evaluated() -> Self {
+        Self {
+            verdict: "not_evaluated",
+            authoritative: None,
+            repair: None,
+            blocks_claim: false,
+        }
+    }
+
+    const fn fresh() -> Self {
+        Self {
+            verdict: "fresh",
+            authoritative: Some(true),
+            repair: None,
+            blocks_claim: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -962,11 +1013,25 @@ pub fn collect_swarm_work_packet_with_verifier_evidence(
     verifier_evidence.extend(collect_work_packet_ledger_verifier_evidence(
         &options.workspace,
     ));
-    SwarmWorkPacket::from_swarm_brief_with_verifier_evidence_and_tracker_integrity(
+    let mut packet = SwarmWorkPacket::from_swarm_brief_with_verifier_evidence_and_tracker_integrity(
         &brief,
         &verifier_evidence,
         tracker_integrity,
-    )
+    );
+    packet.apply_claim_gate_install_freshness(collect_work_packet_claim_gate_install_freshness());
+    packet
+}
+
+fn collect_work_packet_claim_gate_install_freshness() -> SwarmWorkPacketClaimGateInstallFreshness {
+    let report = check_install_with_required_surfaces(
+        &InstallCheckOptions {
+            current_binary: env::current_exe().ok(),
+            offline: true,
+            ..InstallCheckOptions::default()
+        },
+        INSTALL_FRESHNESS_CLAIM_GATE_REQUIRED_SURFACES,
+    );
+    work_packet_claim_gate_install_freshness_from_report(&report)
 }
 
 fn collect_work_packet_ledger_verifier_evidence(
@@ -1234,9 +1299,25 @@ impl SwarmWorkPacket {
             source_provenance,
             mutation_policy: SwarmWorkPacketMutationPolicy::default_read_only(),
             degraded,
+            claim_gate_install_freshness: SwarmWorkPacketClaimGateInstallFreshness::not_evaluated(),
         };
         packet.packet_id = work_packet_id(&packet);
         packet
+    }
+
+    fn apply_claim_gate_install_freshness(
+        &mut self,
+        install_freshness: SwarmWorkPacketClaimGateInstallFreshness,
+    ) {
+        self.claim_gate_install_freshness = install_freshness;
+        if let Some(degradation) =
+            work_packet_claim_gate_install_freshness_degradation(install_freshness)
+        {
+            self.degraded.push(degradation);
+            self.degraded.sort();
+            self.degraded.dedup();
+        }
+        self.packet_id = work_packet_id(self);
     }
 
     #[must_use]
@@ -1245,7 +1326,14 @@ impl SwarmWorkPacket {
         let recommended_safe_to_claim = candidate.map(|candidate| {
             work_packet_claim_gate_candidate_recommended_safe_to_claim(self, candidate)
         });
-        let verdict = work_packet_claim_gate_verdict(self, requested_candidate_id, candidate);
+        let install_freshness = work_packet_claim_gate_install_freshness(self);
+        let source_authority_attestation = work_packet_claim_gate_attestation_summary(self);
+        let verdict = work_packet_claim_gate_verdict(
+            self,
+            requested_candidate_id,
+            candidate,
+            install_freshness,
+        );
         let safe_to_claim = verdict == "safe_to_claim" && recommended_safe_to_claim == Some(true);
         let actions = work_packet_suggested_command_actions(
             candidate
@@ -1298,7 +1386,7 @@ impl SwarmWorkPacket {
             verdict,
             safe_to_claim,
         );
-        let source_authority_attestation = work_packet_claim_gate_attestation_summary(self);
+        let recovery_actions = work_packet_claim_gate_recovery_actions(install_freshness);
 
         SwarmWorkPacketClaimGate {
             schema: SWARM_WORK_PACKET_CLAIM_GATE_SCHEMA_V1,
@@ -1333,6 +1421,9 @@ impl SwarmWorkPacket {
                 local_cargo_fallback_observed: Some(
                     source_authority_attestation.local_cargo_fallback_observed,
                 ),
+                install_freshness_verdict: install_freshness.verdict,
+                install_freshness_authoritative: install_freshness.authoritative,
+                install_freshness_repair: install_freshness.repair,
                 source_count: self.source_provenance.len(),
             },
             unsafe_reasons,
@@ -1341,6 +1432,7 @@ impl SwarmWorkPacket {
             degraded_codes,
             next_command_actions,
             claim_command_action,
+            recovery_actions,
         }
     }
 }
@@ -1445,6 +1537,7 @@ fn work_packet_claim_gate_verdict(
     packet: &SwarmWorkPacket,
     requested_candidate_id: Option<&str>,
     candidate: Option<&SwarmWorkPacketCandidate>,
+    install_freshness: SwarmWorkPacketClaimGateInstallFreshness,
 ) -> &'static str {
     let Some(candidate) = candidate else {
         return if requested_candidate_id.is_some() {
@@ -1457,6 +1550,9 @@ fn work_packet_claim_gate_verdict(
             "no_candidate"
         };
     };
+    if install_freshness.blocks_claim {
+        return "blocked_by_verification";
+    }
     if candidate.decision != "safe_to_claim" {
         return candidate.decision;
     }
@@ -1522,6 +1618,11 @@ fn work_packet_claim_gate_unsafe_reasons(
     if let Some(reason) = work_packet_rch_remote_verification_reason(&packet.rch_proof_posture) {
         reasons.push(reason.to_owned());
     }
+    let install_freshness = work_packet_claim_gate_install_freshness(packet);
+    if install_freshness.blocks_claim {
+        reasons.push(format!("install_freshness:{}", install_freshness.verdict));
+        reasons.push("claim_gate_install_freshness_not_authoritative".to_owned());
+    }
     if packet.recommended_action.safe_to_claim != Some(true) {
         reasons.push(format!(
             "packet_recommendation_not_claim_safe:{}",
@@ -1544,6 +1645,155 @@ fn work_packet_claim_gate_unsafe_reasons(
         reasons.push(format!("gate_verdict:{verdict}"));
     }
     reasons
+}
+
+fn work_packet_claim_gate_install_freshness(
+    packet: &SwarmWorkPacket,
+) -> SwarmWorkPacketClaimGateInstallFreshness {
+    if packet.claim_gate_install_freshness.blocks_claim {
+        return packet.claim_gate_install_freshness;
+    }
+    if let Some(degraded_freshness) = work_packet_claim_gate_install_freshness_from_degraded(packet)
+    {
+        return degraded_freshness;
+    }
+    if packet.claim_gate_install_freshness.authoritative.is_some() {
+        return packet.claim_gate_install_freshness;
+    }
+    SwarmWorkPacketClaimGateInstallFreshness::not_evaluated()
+}
+
+fn work_packet_claim_gate_install_freshness_from_degraded(
+    packet: &SwarmWorkPacket,
+) -> Option<SwarmWorkPacketClaimGateInstallFreshness> {
+    let stale_binary_suspected = packet
+        .degraded
+        .iter()
+        .any(|degradation| degradation.code == "stale_binary_suspected");
+    let stale_claim_gate_binary = packet
+        .degraded
+        .iter()
+        .any(|degradation| degradation.code == "stale_claim_gate_binary");
+    let unsupported_claim_gate_binary = packet.degraded.iter().any(|degradation| {
+        matches!(
+            degradation.code.as_str(),
+            "unsupported_claim_gate_binary" | "missing_required_surface"
+        )
+    });
+
+    if stale_binary_suspected || stale_claim_gate_binary {
+        return Some(SwarmWorkPacketClaimGateInstallFreshness {
+            verdict: "stale",
+            authoritative: Some(false),
+            repair: Some(CLAIM_GATE_INSTALL_FRESHNESS_REPAIR),
+            blocks_claim: true,
+        });
+    }
+    if unsupported_claim_gate_binary {
+        return Some(SwarmWorkPacketClaimGateInstallFreshness {
+            verdict: "missing_required_surface",
+            authoritative: Some(false),
+            repair: Some(CLAIM_GATE_INSTALL_FRESHNESS_REPAIR),
+            blocks_claim: true,
+        });
+    }
+    None
+}
+
+fn work_packet_claim_gate_install_freshness_from_report(
+    report: &InstallCheckReport,
+) -> SwarmWorkPacketClaimGateInstallFreshness {
+    if report.freshness.authoritative {
+        return SwarmWorkPacketClaimGateInstallFreshness::fresh();
+    }
+    SwarmWorkPacketClaimGateInstallFreshness {
+        verdict: report.freshness.verdict.as_str(),
+        authoritative: Some(false),
+        repair: Some(CLAIM_GATE_INSTALL_FRESHNESS_REPAIR),
+        blocks_claim: true,
+    }
+}
+
+fn work_packet_claim_gate_install_freshness_degradation(
+    install_freshness: SwarmWorkPacketClaimGateInstallFreshness,
+) -> Option<SwarmWorkPacketDegradation> {
+    if !install_freshness.blocks_claim {
+        return None;
+    }
+    let code = match install_freshness.verdict {
+        "missing_required_surface" => "missing_required_surface",
+        _ => "stale_binary_suspected",
+    };
+    Some(SwarmWorkPacketDegradation {
+        code: code.to_owned(),
+        source: "install-freshness".to_owned(),
+        severity: "warning",
+        message: format!(
+            "Installed ee claim-gate freshness verdict is `{}`; installed binary is not authoritative for claims.",
+            install_freshness.verdict
+        ),
+        repair: install_freshness.repair.map(str::to_owned),
+    })
+}
+
+fn work_packet_claim_gate_recovery_actions(
+    install_freshness: SwarmWorkPacketClaimGateInstallFreshness,
+) -> Vec<SwarmWorkPacketClaimGateRecoveryAction> {
+    if !install_freshness.blocks_claim {
+        return Vec::new();
+    }
+    vec![
+        SwarmWorkPacketClaimGateRecoveryAction {
+            priority: 0,
+            kind: "verify_source_version",
+            command_action: Some(work_packet_command_action(
+                "install_check_offline",
+                "ee install check --json --offline",
+                &["ee", "install", "check", "--json", "--offline"],
+                false,
+                "ee",
+                "before_claim_gate_retry",
+                "Verify installed binary freshness against the source checkout before trusting claim-gate authority.",
+            )),
+            mutates_state: false,
+            required_substrate: "ee",
+            rationale: "Confirm whether the installed ee binary is fresh enough for the current claim-gate contract.",
+        },
+        SwarmWorkPacketClaimGateRecoveryAction {
+            priority: 1,
+            kind: "plan_current_artifact_adoption",
+            command_action: Some(work_packet_command_action(
+                "install_plan_offline",
+                "ee install plan --json --offline --manifest <release-manifest.json> --artifact-root <release-artifact-dir>",
+                &[
+                    "ee",
+                    "install",
+                    "plan",
+                    "--json",
+                    "--offline",
+                    "--manifest",
+                    "<release-manifest.json>",
+                    "--artifact-root",
+                    "<release-artifact-dir>",
+                ],
+                false,
+                "ee",
+                "after_stale_install_check",
+                "Plan adoption from a verified current artifact without running local Cargo.",
+            )),
+            mutates_state: false,
+            required_substrate: "ee",
+            rationale: "Find a verified current artifact path before any operator-approved install action.",
+        },
+        SwarmWorkPacketClaimGateRecoveryAction {
+            priority: 2,
+            kind: "request_operator_exception",
+            command_action: None,
+            mutates_state: true,
+            required_substrate: "human",
+            rationale: "Adopting or overwriting an installed binary is an operator action and needs explicit approval.",
+        },
+    ]
 }
 
 fn work_packet_claim_gate_attestation_summary(
@@ -6808,6 +7058,13 @@ mod tests {
             gate.source_authority.local_cargo_fallback_observed,
             Some(false)
         );
+        assert!(gate.recovery_actions.is_empty());
+        assert_eq!(
+            gate.source_authority.install_freshness_verdict,
+            "not_evaluated"
+        );
+        assert_eq!(gate.source_authority.install_freshness_authoritative, None);
+        assert_eq!(gate.source_authority.install_freshness_repair, None);
     }
 
     #[test]
@@ -7315,6 +7572,161 @@ mod tests {
         assert_eq!(
             gate.source_authority.local_cargo_fallback_observed,
             Some(true)
+        );
+    }
+
+    #[test]
+    fn work_packet_claim_gate_blocks_stale_installed_binary_authority() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Gate safe work-packet candidate",
+            "beads_ready",
+            Some(2),
+        )]);
+        snapshot.degraded = vec![SwarmNextActionDegradation {
+            code: "stale_binary_suspected".to_owned(),
+            source: "install-freshness".to_owned(),
+            severity: "warning",
+            message: "Installed ee may be stale for the claim-gate contract.".to_owned(),
+            repair: Some("Run ee install check --json --offline.".to_owned()),
+        }];
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let summary = work_packet_claim_gate_attestation_summary(&packet);
+        let gate = packet.claim_gate(None);
+
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(true));
+        assert!(!summary.safe_to_claim);
+        assert_eq!(
+            summary.environment_verdict,
+            EnvironmentAttestationVerdict::StaleBinarySuspected
+        );
+        assert_eq!(gate.verdict, "blocked_by_verification");
+        assert!(!gate.safe_to_claim);
+        assert!(gate.claim_command_action.is_none());
+        assert_eq!(
+            gate.source_authority.environment_verdict,
+            "stale_binary_suspected"
+        );
+        assert_eq!(gate.source_authority.install_freshness_verdict, "stale");
+        assert_eq!(
+            gate.source_authority.install_freshness_authoritative,
+            Some(false)
+        );
+        assert!(
+            gate.source_authority
+                .install_freshness_repair
+                .is_some_and(|repair| repair.contains("ee install check"))
+        );
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"install_freshness:stale".to_owned())
+        );
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"claim_gate_install_freshness_not_authoritative".to_owned())
+        );
+        assert!(
+            gate.degraded_codes
+                .contains(&"stale_binary_suspected".to_owned())
+        );
+        assert_eq!(
+            gate.recovery_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                "verify_source_version",
+                "plan_current_artifact_adoption",
+                "request_operator_exception"
+            ]
+        );
+        assert!(gate.recovery_actions[0].command_action.is_some());
+        assert!(gate.recovery_actions[1].command_action.is_some());
+        assert!(gate.recovery_actions[2].command_action.is_none());
+    }
+
+    #[test]
+    fn work_packet_claim_gate_surfaces_collected_fresh_install_authority() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Gate safe work-packet candidate",
+            "beads_ready",
+            Some(2),
+        )]);
+
+        let mut packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        packet
+            .apply_claim_gate_install_freshness(SwarmWorkPacketClaimGateInstallFreshness::fresh());
+        let gate = packet.claim_gate(None);
+
+        assert_eq!(gate.verdict, "safe_to_claim");
+        assert!(gate.safe_to_claim);
+        assert_eq!(gate.source_authority.install_freshness_verdict, "fresh");
+        assert_eq!(
+            gate.source_authority.install_freshness_authoritative,
+            Some(true)
+        );
+        assert_eq!(gate.source_authority.install_freshness_repair, None);
+        assert!(gate.recovery_actions.is_empty());
+        assert!(
+            !packet
+                .degraded
+                .iter()
+                .any(|degradation| degradation.source == "install-freshness")
+        );
+    }
+
+    #[test]
+    fn work_packet_claim_gate_blocks_collected_non_authoritative_install_verdict() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Gate safe work-packet candidate",
+            "beads_ready",
+            Some(2),
+        )]);
+
+        let mut packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        packet.apply_claim_gate_install_freshness(SwarmWorkPacketClaimGateInstallFreshness {
+            verdict: "shadowed_binary",
+            authoritative: Some(false),
+            repair: Some(CLAIM_GATE_INSTALL_FRESHNESS_REPAIR),
+            blocks_claim: true,
+        });
+        let gate = packet.claim_gate(None);
+
+        assert_eq!(gate.verdict, "blocked_by_verification");
+        assert!(!gate.safe_to_claim);
+        assert!(gate.claim_command_action.is_none());
+        assert_eq!(
+            gate.source_authority.install_freshness_verdict,
+            "shadowed_binary"
+        );
+        assert_eq!(
+            gate.source_authority.install_freshness_authoritative,
+            Some(false)
+        );
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"install_freshness:shadowed_binary".to_owned())
+        );
+        assert!(
+            gate.degraded_codes
+                .contains(&"stale_binary_suspected".to_owned())
+        );
+        assert_eq!(
+            gate.recovery_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                "verify_source_version",
+                "plan_current_artifact_adoption",
+                "request_operator_exception"
+            ]
         );
     }
 

@@ -1106,6 +1106,9 @@
         "sourceTestVerdict": "not_evaluated",
         "remoteVerificationAdmitted": true,
         "localCargoFallbackObserved": null,
+        "installFreshnessVerdict": "not_evaluated",
+        "installFreshnessAuthoritative": null,
+        "installFreshnessRepair": null,
         "sourceCount": 4
       },
       "unsafeReasons": [],
@@ -1135,7 +1138,8 @@
         "requiredSubstrate": "beads",
         "when": "after_reservation",
         "rationale": "Claim only after the gate verdict is safe_to_claim and reservations are held."
-      }
+      },
+      "recoveryActions": []
     },
     "ee.swarm_incident.v1": {
       "schema": "ee.swarm_incident.v1",

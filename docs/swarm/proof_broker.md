@@ -37,6 +37,25 @@ source or environment is equivalent.
 | `proof_unusable` | Evidence exists but violates policy, such as local Cargo bypass. | Discard that evidence for closeout. |
 | `unknown_insufficient_evidence` | The broker lacks enough source, env, or tripwire data to decide. | Collect missing evidence before dispatch. |
 
+## Conformance Matrix
+
+The proof-broker conformance contract is intentionally split between
+Cargo-free public-surface checks and RCH-only source proof. Static/public
+coverage can be refreshed without launching Cargo; source closeout still needs
+an RCH verdict from the command recipe below.
+
+| Requirement | Level | Static/public harness | RCH/live harness | Status |
+| --- | --- | --- | --- | --- |
+| Completed equivalent proof returns `reuse_existing` and does not dispatch Cargo. | MUST | `scripts/e2e_overhaul/proof_broker_admission.sh` case `reuse_existing_admit`; `tests/rch_verify_contract.rs` `proof_broker_reuse_existing_skips_remote_dispatch` | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
+| Equivalent in-flight proof returns `wait_for_inflight` with owner/job metadata and no duplicate dispatch. | MUST | `wait_for_inflight_admit`; `proof_broker_wait_for_inflight_refuses_before_remote_dispatch` | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
+| No equivalent proof returns `dispatch_allowed` and launches exactly one remote proof lane. | MUST | `dispatch_allowed_admit`; `proof_broker_dispatch_allowed_launches_single_remote_proof` with fake RCH invocation log | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
+| Stale or dirty source evidence returns `source_state_mismatch`. | MUST | `source_state_mismatch_admit`; `proof_broker_source_mismatch_refuses_before_remote_dispatch` | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
+| RCH/runtime/worker blockers return `environment_blocked` and do not dispatch. | MUST | `environment_blocked_admit`; `proof_broker_environment_blocked_refuses_before_remote_dispatch` | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
+| Local Cargo bypass evidence returns `proof_unusable` and is not reusable for closeout. | MUST | `proof_unusable_admit`; `proof_broker_local_cargo_bypass_is_unusable_without_bypass` | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
+| Explicit operator bypass records the reason and still marks the broker verdict degradation. | SHOULD | `proof_broker_explicit_bypass_runs_remote_and_records_reason` with fake RCH output | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
+| Insufficient source/env/tripwire evidence returns `unknown_insufficient_evidence`. | MUST | `unknown_insufficient_evidence_admit`; golden ledger coverage in `tests/verification_evidence_schema_unit.rs` | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
+| Public event logs include command, cwd/workspace, sanitized env, elapsed time, exit code, artifact paths, schema/redaction status, broker verdict, fingerprint, reuse id/hash, and first-failure diagnosis. | SHOULD | `scripts/e2e_overhaul/proof_broker_admission.sh` `emit_broker_event` and `proof_broker_custom_event_rows` | RCH recipe for `tests/rch_verify_contract.rs` plus retained `ee.rch.verify.v1` artifacts | Static covered; live RCH pending. |
+
 ## Redaction
 
 Proof broker rows must not carry raw stdout, stderr, mail bodies, memory

@@ -22,7 +22,8 @@
     "sourceRefs",
     "degradedCodes",
     "nextCommandActions",
-    "claimCommandAction"
+    "claimCommandAction",
+    "recoveryActions"
   ],
   "additionalProperties": false,
   "properties": {
@@ -82,6 +83,11 @@
         {"$ref": "#/definitions/commandAction"}
       ],
       "description": "Mutating Beads claim guidance. Present only when safeToClaim is true and verdict is safe_to_claim."
+    },
+    "recoveryActions": {
+      "type": "array",
+      "description": "Structured recovery guidance for authority blockers. Entries may be read-only commands or human/operator actions; they are not claim permission.",
+      "items": {"$ref": "#/definitions/recoveryAction"}
     }
   },
   "allOf": [
@@ -209,6 +215,42 @@
         "mutatesState": {"const": false}
       }
     },
+    "recoveryAction": {
+      "type": "object",
+      "required": [
+        "priority",
+        "kind",
+        "commandAction",
+        "mutatesState",
+        "requiredSubstrate",
+        "rationale"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "priority": {"type": "integer", "minimum": 0, "maximum": 255},
+        "kind": {
+          "type": "string",
+          "enum": [
+            "verify_source_version",
+            "plan_current_artifact_adoption",
+            "request_operator_exception",
+            "retry_claim_gate"
+          ]
+        },
+        "commandAction": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/definitions/commandAction"}
+          ]
+        },
+        "mutatesState": {"type": "boolean"},
+        "requiredSubstrate": {"$ref": "#/definitions/commandSubstrate"},
+        "rationale": {
+          "allOf": [{"$ref": "#/definitions/safeString"}],
+          "maxLength": 240
+        }
+      }
+    },
     "gateVerdict": {
       "type": "string",
       "enum": [
@@ -265,6 +307,13 @@
         "inboxAuthoritative",
         "rchRemoteOnlyRequired",
         "rchSafeToLaunchCargoVerification",
+        "environmentVerdict",
+        "sourceTestVerdict",
+        "remoteVerificationAdmitted",
+        "localCargoFallbackObserved",
+        "installFreshnessVerdict",
+        "installFreshnessAuthoritative",
+        "installFreshnessRepair",
         "sourceCount"
       ],
       "additionalProperties": false,
@@ -305,6 +354,21 @@
         },
         "remoteVerificationAdmitted": {"type": ["boolean", "null"]},
         "localCargoFallbackObserved": {"type": ["boolean", "null"]},
+        "installFreshnessVerdict": {
+          "type": "string",
+          "enum": [
+            "not_evaluated",
+            "fresh",
+            "stale",
+            "shadowed_binary",
+            "path_binary_missing",
+            "missing_required_surface",
+            "unknown_source_version",
+            "unknown_installed_version"
+          ]
+        },
+        "installFreshnessAuthoritative": {"type": ["boolean", "null"]},
+        "installFreshnessRepair": {"type": ["string", "null"], "maxLength": 240},
         "sourceCount": {"type": "integer", "minimum": 0}
       }
     }
@@ -343,6 +407,9 @@
         "sourceTestVerdict": "not_evaluated",
         "remoteVerificationAdmitted": true,
         "localCargoFallbackObserved": null,
+        "installFreshnessVerdict": "not_evaluated",
+        "installFreshnessAuthoritative": null,
+        "installFreshnessRepair": null,
         "sourceCount": 4
       },
       "unsafeReasons": [],
@@ -372,7 +439,8 @@
         "requiredSubstrate": "beads",
         "when": "after_reservation",
         "rationale": "Claim only after the gate verdict is safe_to_claim and reservations are held."
-      }
+      },
+      "recoveryActions": []
     }
   ],
   "x-ee-status": {
