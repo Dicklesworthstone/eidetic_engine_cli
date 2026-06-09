@@ -1647,10 +1647,10 @@ fn assert_schema_basics(schema_id: &str, expected_id: &str, schema: &Value) -> T
         .and_then(Value::as_object)
         .ok_or_else(|| format!("{schema_id} missing field_presets"))?;
     for preset in ["minimal", "summary", "standard", "full"] {
-        if !presets
+        if presets
             .get(preset)
             .and_then(Value::as_array)
-            .is_some_and(|fields| !fields.is_empty())
+            .is_none_or(|fields| fields.is_empty())
         {
             return Err(format!("{schema_id} field_presets.{preset} is empty"));
         }
@@ -2220,10 +2220,10 @@ fn context_pack_dna_schema_example_matches_required_shape() -> TestResult {
         .and_then(Value::as_object)
         .ok_or_else(|| "egoSubgraph must be an object".to_string())?;
     for field in ["nodes", "edges"] {
-        if !ego_subgraph
+        if ego_subgraph
             .get(field)
             .and_then(Value::as_array)
-            .is_some_and(|items| !items.is_empty())
+            .is_none_or(|items| items.is_empty())
         {
             return Err(format!("egoSubgraph.{field} must be a non-empty array"));
         }

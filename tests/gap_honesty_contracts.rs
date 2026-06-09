@@ -17,6 +17,8 @@
 //! body are RCH-remote-regen only (Mac-local UPDATE_GOLDEN injects `/Users`
 //! paths + version drift that break server CI) and are owed there.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::fs;
 use std::path::PathBuf;
 

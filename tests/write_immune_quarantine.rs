@@ -10,6 +10,8 @@
 //!   abusive source's quarantine does not affect a clean source;
 //! - high-trust-without-evidence abuse trips the dedicated reason.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use ee::core::write_owner::{
     WriteImmuneQuarantineConfig, WriteStreamObservation, WriteStreamStatsConfig,
     build_write_immune_quarantine_input, compute_source_write_stats,

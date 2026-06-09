@@ -1624,7 +1624,7 @@ fn source_lines(content: &str) -> Vec<SourceLine<'_>> {
             number: index + 1,
             start_byte,
             end_byte,
-            text: segment.trim_end_matches(|character| matches!(character, '\r' | '\n')),
+            text: segment.trim_end_matches(['\r', '\n']),
         });
         start_byte = end_byte;
     }

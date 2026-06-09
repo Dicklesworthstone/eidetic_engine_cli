@@ -11,6 +11,8 @@
 //!   the TRAILING window so a flipped rule is caught despite a long helpful
 //!   history, stays quiet on recovery and on thin data, and is deterministic.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use ee::core::outcome::{
     TokenRoiBucketInput, calibration_honesty_report, compute_token_roi, detect_regime_shift,
 };

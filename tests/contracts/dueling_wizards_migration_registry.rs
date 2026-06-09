@@ -310,7 +310,9 @@ fn planned_allocations_are_contiguous_and_complete() -> TestResult {
         .first()
         .ok_or_else(|| "registry must contain at least one allocation".to_owned())?;
     for (offset, version) in versions.iter().enumerate() {
-        let expected = first + u64::try_from(offset).unwrap();
+        let expected = first
+            + u64::try_from(offset)
+                .map_err(|error| format!("offset {offset} exceeds u64: {error}"))?;
         if *version != expected {
             return Err(format!(
                 "migration allocations must be contiguous from V{first:03}; expected V{expected:03}, got V{version:03}"

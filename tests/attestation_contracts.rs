@@ -12,6 +12,8 @@
 //! the goldens RCH-remote-regen (bd-17c65.10.17), the cross-surface check once
 //! 22.3 lands.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use ee::core::attest::{
     ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1, attestation_surface_manifest, build_query_attestation,
 };

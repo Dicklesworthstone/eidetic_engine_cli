@@ -1319,6 +1319,7 @@ fn normalize_path_for_insights_order(workspace: &Path, path: &Path) -> String {
     normalize_insights_path(&relative.to_string_lossy())
 }
 
+#[cfg(test)]
 fn blind_spot_inputs_from_symbol_snapshot(
     snapshot: &crate::models::SymbolSnapshot,
     memories: &[StoredMemory],

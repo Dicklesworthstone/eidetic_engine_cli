@@ -2497,7 +2497,6 @@ fn run_context_pack_with_performance_inner(
             // `RequestScoped` lands with bd-1prrl.7.4 once the
             // golden harness proves byte-identical output.
             arena_mode: crate::pack::ArenaMode::Disabled,
-            ..crate::pack::PackAssemblyOptions::default()
         },
         determinism,
     )

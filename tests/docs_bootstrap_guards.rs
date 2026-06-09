@@ -13,6 +13,8 @@
 //!   extracted commands are agent_assertion);
 //! - specificity stays within the gated [40, 100] band and anchors are emitted.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::fs;
 use std::path::Path;
 
