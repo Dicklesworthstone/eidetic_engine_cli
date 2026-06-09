@@ -478,7 +478,7 @@
       "ownerBeads": ["bd-1n0np.4", "bd-1n0np.15.2"],
       "status": "planned",
       "command": "ee diagnose-error --json",
-      "schemaRefs": ["ee.error_recall.v1"],
+      "schemaRefs": ["ee.diagnose_error.v1"],
       "assertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
       "packAssertions": []
     },
@@ -531,7 +531,7 @@
       "id": "pack_lod",
       "ownerBeads": ["bd-1n0np.5", "bd-1n0np.15.2"],
       "status": "planned",
-      "command": "ee pack <task> --lod --json",
+      "command": "ee pack <task> --json",
       "schemaRefs": ["ee.pack.v2"],
       "assertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
       "packAssertions": ["pack_hash_reproducible", "pack_hash_absence_is_failure_not_skip"]

@@ -53,7 +53,7 @@ companion contract test before the corresponding implementation closes.
 | `attest` | `ee attest memory <id> --json` | byte-identical JSON and a deterministic `bundleHash` for a fixed subject + database. |
 | `docs_bootstrap` | `ee bootstrap docs --dry-run --json` | byte-identical JSON and a deterministic candidate-id set over a fixed doc tree. |
 | `read_fence_consistency` | `pack/search/why` consistency block | byte-identical JSON and stable generation verdicts. |
-| `pack_lod` | `ee pack --lod --json` | byte-identical JSON plus reproducible pack hash. |
+| `pack_lod` | `ee pack --json` | byte-identical JSON plus reproducible pack hash for the default LOD pack path. |
 | `feedback_roi` | `ee feedback roi --json` | byte-identical JSON and stable ROI bucket ordering. |
 
 ## Determinism Matrix

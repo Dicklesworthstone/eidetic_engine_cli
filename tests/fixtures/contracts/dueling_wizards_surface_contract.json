@@ -121,7 +121,7 @@
       "bead": "bd-1n0np.5",
       "status": "planned",
       "title": "Telescoping level-of-detail packing",
-      "plannedCommands": ["pack --lod"],
+      "plannedCommands": ["pack"],
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
