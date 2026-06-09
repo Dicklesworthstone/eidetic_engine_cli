@@ -524,6 +524,8 @@ fn pack_dna_orchestration_options(
         coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
         output_options: ContextPackOutputOptions::default(),
         persist_pack: true,
+        no_lod: false,
+        require_fresh_sentinels: false,
     }
 }
 
@@ -647,6 +649,8 @@ fn tiered_recall_options(
         coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
         output_options: ContextPackOutputOptions::default(),
         persist_pack: true,
+        no_lod: false,
+        require_fresh_sentinels: false,
     }
 }
 
@@ -887,6 +891,8 @@ fn bench_context(c: &mut Criterion) {
                         coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
                         output_options: Default::default(),
                         persist_pack: true,
+                        no_lod: false,
+                        require_fresh_sentinels: false,
                     };
                     run_context_pack(&options).expect("context pack");
                 });
@@ -946,6 +952,8 @@ fn bench_context_memory_scales(c: &mut Criterion) {
                     coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
                     output_options: Default::default(),
                     persist_pack: true,
+                    no_lod: false,
+                    require_fresh_sentinels: false,
                 };
                 run_context_pack(&options).expect("context pack");
             });
@@ -1004,6 +1012,8 @@ fn bench_context_s4_resource_scales(c: &mut Criterion) {
                         output_options: ContextPackOutputOptions::default()
                             .with_resource_profile(scale.resource_profile),
                         persist_pack: true,
+                        no_lod: false,
+                        require_fresh_sentinels: false,
                     };
                     let run = run_context_pack_with_performance(&options, "context")
                         .expect("context pack");

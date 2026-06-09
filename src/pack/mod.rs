@@ -8562,7 +8562,11 @@ mod tests {
             .iter()
             .map(|item| item.estimated_tokens)
             .sum::<u32>();
-        ensure_equal(&draft.used_tokens, &selected_token_sum, "used token accounting")?;
+        ensure_equal(
+            &draft.used_tokens,
+            &selected_token_sum,
+            "used token accounting",
+        )?;
         ensure_equal(
             &draft.selection_audit.selected_count,
             &draft.items.len(),

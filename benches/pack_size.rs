@@ -326,6 +326,8 @@ impl PackSizeFixture {
             coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             output_options: Default::default(),
             persist_pack: true,
+            no_lod: false,
+            require_fresh_sentinels: false,
         };
         let response =
             run_context_pack(&options).map_err(|error| format!("run context pack: {error}"))?;

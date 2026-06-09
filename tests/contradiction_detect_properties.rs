@@ -125,6 +125,8 @@ fn pack_guard_options(
         coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
         output_options: ContextPackOutputOptions::default(),
         persist_pack: false,
+        no_lod: false,
+        require_fresh_sentinels: false,
     }
 }
 
