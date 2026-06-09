@@ -50,6 +50,21 @@ fn parse_json(output: &Output, context: &str) -> Result<Value, String> {
         .map_err(|error| format!("{context}: stdout not JSON: {error}\nstdout: {stdout}"))
 }
 
+fn success_json(output: &Output, context: &str) -> Result<Value, String> {
+    if !output.status.success() {
+        return Err(format!(
+            "{context} failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    let value = parse_json(output, context)?;
+    if value.get("success").and_then(Value::as_bool) != Some(true) {
+        return Err(format!("{context} did not return success=true: {value}"));
+    }
+    Ok(value)
+}
+
 fn tmp_workspace(label: &str) -> Result<PathBuf, String> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -132,10 +147,91 @@ fn diagnose(workspace: &Path, code: &str, message: &str, record: bool) -> Result
     diagnose_tool(workspace, "rustc", Some(code), None, message, record)
 }
 
+fn diagnose_error_log(workspace: &Path, error_log: &Path, record: bool) -> Result<Value, String> {
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let error_log_arg = error_log.to_string_lossy().into_owned();
+    let mut args = vec![
+        "--workspace".to_string(),
+        workspace_arg,
+        "diagnose-error".to_string(),
+        "--error-log".to_string(),
+        error_log_arg,
+    ];
+    if record {
+        args.push("--record".to_string());
+    }
+    args.push("--json".to_string());
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = run_ee(&arg_refs)?;
+    if !output.status.success() {
+        return Err(format!(
+            "diagnose-error --error-log failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    let value = parse_json(&output, "diagnose-error --error-log")?;
+    if value.pointer("/data/schema").and_then(Value::as_str) != Some("ee.diagnose_error.v1") {
+        return Err(format!("unexpected diagnose-error schema: {value}"));
+    }
+    value
+        .pointer("/data")
+        .cloned()
+        .ok_or_else(|| format!("diagnose-error response had no data: {value}"))
+}
+
 fn flag(data: &Value, key: &str) -> Result<bool, String> {
     data.get(key)
         .and_then(Value::as_bool)
         .ok_or_else(|| format!("missing boolean field `{key}` in {data}"))
+}
+
+fn report(data: &Value) -> Result<&Value, String> {
+    data.get("report")
+        .ok_or_else(|| format!("missing error recall report in {data}"))
+}
+
+fn assert_report_shape(data: &Value, code: &str, expect_exact: bool) -> TestResult {
+    let report = report(data)?;
+    if report.get("schema").and_then(Value::as_str) != Some("ee.error_recall.report.v1") {
+        return Err(format!("unexpected report schema: {report}"));
+    }
+    if report.get("exact").and_then(Value::as_bool) != Some(expect_exact) {
+        return Err(format!(
+            "report exact flag mismatch; expected {expect_exact}: {report}"
+        ));
+    }
+    let derived = report
+        .get("derivedDocument")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing derivedDocument in {report}"))?;
+    let expected_parts = [
+        "tool:rustc".to_owned(),
+        "template:blake3:".to_owned(),
+        format!("code:{code}"),
+    ];
+    for expected in expected_parts {
+        if !derived.contains(expected.as_str()) {
+            return Err(format!("derivedDocument missing `{expected}`: {derived}"));
+        }
+    }
+    for array_field in [
+        "near",
+        "helpfulRepairs",
+        "harmfulRepairs",
+        "proofLinks",
+        "staleVersionWarnings",
+    ] {
+        if !report
+            .get(array_field)
+            .is_some_and(serde_json::Value::is_array)
+        {
+            return Err(format!(
+                "report field `{array_field}` must be an array: {report}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Recursively collect regular files under a directory.
@@ -180,6 +276,7 @@ fn diagnose_error_records_and_recalls_through_the_real_binary() -> TestResult {
             "fresh store must not recall an unseen class: {fresh}"
         ));
     }
+    assert_report_shape(&fresh, CODE, false)?;
     if flag(&fresh, "recorded")? {
         return Err(format!(
             "diagnosis without --record must not persist: {fresh}"
@@ -194,6 +291,16 @@ fn diagnose_error_records_and_recalls_through_the_real_binary() -> TestResult {
     if !flag(&recorded, "isKnown")? {
         return Err(format!("the just-recorded class must recall: {recorded}"));
     }
+    assert_report_shape(&recorded, CODE, true)?;
+    if recorded
+        .get("matches")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Err(format!(
+            "recorded class must emit at least one exact match: {recorded}"
+        ));
+    }
 
     // A later read-only diagnosis of the same class recalls the prior fingerprint.
     let again = diagnose(&workspace, CODE, &message, false)?;
@@ -202,12 +309,93 @@ fn diagnose_error_records_and_recalls_through_the_real_binary() -> TestResult {
             "a recorded class must recall on a later diagnosis: {again}"
         ));
     }
+    assert_report_shape(&again, CODE, true)?;
 
     // A different error class must not recall.
     let other = diagnose(&workspace, "E0308", "mismatched types", false)?;
     if flag(&other, "isKnown")? {
         return Err(format!("an unseen class must not recall: {other}"));
     }
+    assert_report_shape(&other, "E0308", false)?;
+
+    let error_log_path = workspace.join("rustc-error.json");
+    std::fs::write(
+        &error_log_path,
+        "error[E0277]: the trait bound `FilePathInput: SomeTrait` is not satisfied",
+    )
+    .map_err(|error| format!("write error log fixture: {error}"))?;
+    let from_file = diagnose_error_log(&workspace, &error_log_path, false)?;
+    if !flag(&from_file, "isKnown")? {
+        return Err(format!(
+            "--error-log file path should recall the recorded class: {from_file}"
+        ));
+    }
+    assert_report_shape(&from_file, CODE, true)?;
+
+    // `pack --error-log` should use the same explicit database/workspace routing
+    // as normal pack execution. In particular, `pack build --query-file` must
+    // honor the query document's workspace before deriving the recall seed.
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let database_arg = workspace
+        .join(".ee")
+        .join("ee.db")
+        .to_string_lossy()
+        .into_owned();
+    let remember = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "remember",
+        "Fix E0277 by importing the trait into scope.",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--json",
+    ])?;
+    success_json(&remember, "remember repair memory")?;
+    let error_log_arg = error_log_path.to_string_lossy().into_owned();
+
+    let direct_pack = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "pack",
+        "diagnose a build failure",
+        "--database",
+        &database_arg,
+        "--error-log",
+        &error_log_arg,
+        "--read-only",
+        "--json",
+    ])?;
+    success_json(&direct_pack, "pack --error-log with explicit database")?;
+
+    let query_file = workspace.join("error-recall-query.json");
+    let query_doc = serde_json::json!({
+        "version": "ee.query.v1",
+        "workspace": workspace_arg,
+        "query": {"text": "diagnose a build failure"}
+    });
+    let query_doc = serde_json::to_vec(&query_doc)
+        .map_err(|error| format!("serialize query document: {error}"))?;
+    std::fs::write(&query_file, query_doc)
+        .map_err(|error| format!("write query document: {error}"))?;
+    let query_file_arg = query_file.to_string_lossy().into_owned();
+    let query_pack = run_ee(&[
+        "pack",
+        "build",
+        "--query-file",
+        &query_file_arg,
+        "--database",
+        &database_arg,
+        "--error-log",
+        &error_log_arg,
+        "--read-only",
+        "--json",
+    ])?;
+    success_json(
+        &query_pack,
+        "pack build --query-file --error-log with explicit database",
+    )?;
 
     // Secret-like diagnostic payload must be redacted before recall keys are
     // derived. Otherwise two identical shell failures that differ only in the

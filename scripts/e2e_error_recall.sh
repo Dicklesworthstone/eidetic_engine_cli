@@ -30,6 +30,8 @@ ee_supports() { "$EE_BIN" "$@" --help >/dev/null 2>&1; }
 ee_pack_has_flag() { "$EE_BIN" pack --help 2>&1 | grep -qw "$1"; }
 
 with_temp_workspace WS
+ERR_LOG="$WS/rustc-error.log"
+printf '%s\n' 'error[E0277]: the trait bound is not satisfied' >"$ERR_LOG"
 
 step "init workspace"
 init_out="$(ee_json init --workspace "$WS" --json)"
@@ -57,10 +59,12 @@ fi
 step "diagnose-error recalls the repair (bd-1n0np.4.4)"
 if ee_supports diagnose-error; then
     diag="$(ee_json diagnose-error \
-        --error-log "error[E0277]: the trait bound is not satisfied" \
+        --error-log "$ERR_LOG" \
         --workspace "$WS" --json)"
     assert_jq "$diag" '.success == true' "diagnose-error succeeds"
     assert_jq "$diag" '(.data.matches | type) == "array"' "diagnose-error emits a matches array"
+    assert_jq "$diag" '.data.report.schema == "ee.error_recall.report.v1"' "diagnose-error emits recall report"
+    assert_jq "$diag" '(.data.report.derivedDocument | contains("tool:rustc"))' "recall report includes derived document"
 else
     log_drop 1 "diagnose-error CLI pending (bd-1n0np.4.4): recall assertions skipped"
 fi
@@ -68,7 +72,7 @@ fi
 step "pack --error-log integration (bd-1n0np.4.5)"
 if ee_pack_has_flag "error-log"; then
     packed="$(ee_json pack "diagnose a build failure" \
-        --workspace "$WS" --error-log "error[E0277]" --json)"
+        --workspace "$WS" --error-log "$ERR_LOG" --json)"
     assert_jq "$packed" '.success == true' "pack --error-log succeeds"
 else
     log_drop 1 "pack --error-log pending (bd-1n0np.4.5): integration assertions skipped"

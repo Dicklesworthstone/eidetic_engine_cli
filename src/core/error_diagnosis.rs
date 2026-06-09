@@ -60,6 +60,52 @@ impl ErrorRecallOutcome {
     }
 }
 
+/// Agent-facing recall summary for one diagnostic class (ADR 0057 /
+/// bd-uafu0). The current implementation supports exact layered-key recall;
+/// near/repair/proof fields are explicit empty arrays until graph-backed link
+/// traversal lands.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorRecallReport {
+    pub schema: &'static str,
+    pub fingerprint_key: String,
+    pub layer: &'static str,
+    pub exact: bool,
+    pub near: Vec<String>,
+    pub helpful_repairs: Vec<String>,
+    pub harmful_repairs: Vec<String>,
+    pub proof_links: Vec<String>,
+    pub stale_version_warnings: Vec<String>,
+    pub derived_document: String,
+}
+
+impl ErrorRecallReport {
+    #[must_use]
+    pub fn from_outcome(fingerprint: &ErrorFingerprint, outcome: &ErrorRecallOutcome) -> Self {
+        Self {
+            schema: "ee.error_recall.report.v1",
+            fingerprint_key: outcome.fingerprint_key.clone(),
+            layer: outcome.layer,
+            exact: outcome.is_known(),
+            near: Vec::new(),
+            helpful_repairs: Vec::new(),
+            harmful_repairs: Vec::new(),
+            proof_links: Vec::new(),
+            stale_version_warnings: Vec::new(),
+            derived_document: fingerprint.derived_document_text(),
+        }
+    }
+
+    #[must_use]
+    pub fn query_seed(&self) -> String {
+        let recall_status = if self.exact { "known" } else { "unseen" };
+        format!(
+            "error recall {recall_status} fingerprint:{} layer:{} derived:{}",
+            self.fingerprint_key, self.layer, self.derived_document
+        )
+    }
+}
+
 /// Diagnose a canonicalized error against the fingerprint store via exact
 /// layered-key recall (ADR-0057 reader). Read-only; performs no tool execution
 /// and no durable mutation.
@@ -80,6 +126,17 @@ pub fn diagnose_error(
         layer: key.layer.as_str(),
         matched,
     })
+}
+
+/// Build the structured recall report for a diagnostic without mutating state.
+pub fn error_recall_report(
+    connection: &DbConnection,
+    workspace_id: &str,
+    canonical: &CanonicalDiagnostic,
+) -> Result<ErrorRecallReport> {
+    let fingerprint = ErrorFingerprint::from_canonical(canonical);
+    let outcome = diagnose_error(connection, workspace_id, canonical)?;
+    Ok(ErrorRecallReport::from_outcome(&fingerprint, &outcome))
 }
 
 /// Project the library [`ErrorFingerprint`] onto the persistable

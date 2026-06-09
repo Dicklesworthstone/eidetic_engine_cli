@@ -1172,9 +1172,12 @@ pub struct DiagnoseErrorArgs {
     /// Shell exit status when `--tool shell` (folded into the fingerprint).
     #[arg(long, value_name = "N")]
     pub exit_code: Option<i32>,
+    /// Raw diagnostic text or a readable diagnostic log file path.
+    #[arg(long = "error-log", value_name = "TEXT")]
+    pub error_log: Option<String>,
     /// The raw diagnostic text. Masked before fingerprinting; never persisted raw.
     #[arg(value_name = "MESSAGE")]
-    pub message: String,
+    pub message: Option<String>,
     /// Persist this error's fingerprint so future diagnoses recall it.
     #[arg(long)]
     pub record: bool,
@@ -2727,6 +2730,10 @@ pub struct PackArgs {
     #[arg(value_name = "QUERY")]
     pub query: Option<String>,
 
+    /// Raw diagnostic text or file path to fingerprint as an error-recall pack seed.
+    #[arg(long = "error-log", value_name = "TEXT")]
+    pub error_log: Option<String>,
+
     /// Suppress data.pack.packDna in --explain JSON output (parity with `ee context`).
     #[arg(long = "no-pack-dna")]
     pub no_pack_dna: bool,
@@ -2877,6 +2884,10 @@ pub struct PackBuildArgs {
     #[arg(long, value_name = "PATH")]
     pub query_file: PathBuf,
 
+    /// Raw diagnostic text or file path to fingerprint as an error-recall pack seed.
+    #[arg(long = "error-log", value_name = "TEXT")]
+    pub error_log: Option<String>,
+
     /// Maximum token budget for the context pack. Overrides query-file budget.
     #[arg(long, short = 't')]
     pub max_tokens: Option<u32>,
@@ -3015,6 +3026,7 @@ impl PackArgs {
 
         Ok(PackBuildArgs {
             query_file,
+            error_log: self.error_log.clone(),
             max_tokens: self.max_tokens,
             candidate_pool: self.candidate_pool,
             speed: self.speed,
@@ -35054,6 +35066,13 @@ where
     W: Write,
     E: Write,
 {
+    if args.error_log.is_some() && args.query_file.is_some() {
+        let error = DomainError::Usage {
+            message: "`ee pack --error-log` is only supported with `ee pack <task>` or `ee pack build --query-file ... --error-log ...`, not legacy top-level --query-file.".to_string(),
+            repair: Some("Use `ee pack \"fix this\" --error-log \"error[E0277]...\" --json`.".to_string()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
     if let Some(query) = args.query.as_ref() {
         if args.query_file.is_some() {
             let error = DomainError::Usage {
@@ -35085,8 +35104,17 @@ where
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
         let lens_overlay = resolved_lens.as_ref().map(|resolved| &resolved.overlay);
+        let query = match error_recall_query_seed(
+            &workspace_path,
+            args.database.as_deref(),
+            args.error_log.as_deref(),
+        ) {
+            Ok(Some(seed)) => format!("{query}\n\n{seed}"),
+            Ok(None) => query.clone(),
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
         let context_args = ContextArgs {
-            query: query.clone(),
+            query,
             max_tokens: args
                 .max_tokens
                 .or_else(|| lens_overlay.and_then(|overlay| overlay.max_tokens)),
@@ -35207,6 +35235,19 @@ where
         .or_else(|| request.workspace_path.take())
         .unwrap_or_else(|| PathBuf::from("."));
     let workspace_root = resolve_cli_workspace_path(&workspace_path);
+
+    match error_recall_query_seed(
+        &workspace_root,
+        args.database.as_deref(),
+        args.error_log.as_deref(),
+    ) {
+        Ok(Some(seed)) => {
+            request.query = format!("{}\n\n{seed}", request.query);
+        }
+        Ok(None) => {}
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+
     let resolved_lens =
         match resolve_pack_task_lens(&workspace_root, args.lens.as_deref(), args.no_lens) {
             Ok(resolved_lens) => resolved_lens,
@@ -35389,6 +35430,44 @@ where
             )
         }
     }
+}
+
+fn error_recall_query_seed(
+    workspace: &Path,
+    database: Option<&Path>,
+    error_log: Option<&str>,
+) -> Result<Option<String>, DomainError> {
+    let Some(error_log) = error_log else {
+        return Ok(None);
+    };
+    let error_log = error_log_text(error_log)?;
+    let redacted_message = crate::policy::redact_secret_like_content(&error_log).content;
+    let code = rustc_code_from_message(&error_log);
+    let canonical = crate::core::error_recall::from_rustc(code.as_deref(), &redacted_message);
+    let connection = open_attest_database_for_workspace(workspace, database)?;
+    let workspace_path = workspace.to_string_lossy().into_owned();
+    let workspace_id = match connection.get_workspace_by_path(&workspace_path) {
+        Ok(Some(workspace)) => workspace.id,
+        Ok(None) => {
+            return Err(DomainError::Storage {
+                message: format!("No workspace registered at {workspace_path}"),
+                repair: Some("ee init --workspace . --json".to_owned()),
+            });
+        }
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!("Failed to query workspace row: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            });
+        }
+    };
+    let report =
+        crate::core::error_diagnosis::error_recall_report(&connection, &workspace_id, &canonical)
+            .map_err(|error| DomainError::Storage {
+            message: format!("Failed to build error recall report: {error}"),
+            repair: Some("ee diagnose-error --help".to_owned()),
+        })?;
+    Ok(Some(report.query_seed()))
 }
 
 /// Schema for pack replay response.
@@ -39693,10 +39772,9 @@ where
 }
 
 /// bd-1n0np.4.4 / 4.10: the public caller that makes the error-recall subsystem
-/// reachable. Canonicalizes a tool diagnostic (redaction happens inside the
-/// library — the raw message is never persisted), optionally records its
-/// fingerprint (`--record`), and reports whether this exact error class has been
-/// seen before via layered-key recall.
+/// reachable. Redacts and canonicalizes a tool diagnostic before fingerprinting,
+/// optionally records it (`--record`), and reports whether this exact error class
+/// has been seen before via layered-key recall.
 fn handle_diagnose_error<W, E>(
     cli: &Cli,
     args: &DiagnoseErrorArgs,
@@ -39711,16 +39789,25 @@ where
         from_cargo, from_ee_error, from_rch_blocker, from_rustc, from_shell,
     };
 
+    let raw_message = match diagnostic_message_from_args(args) {
+        Ok(message) => message,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let redacted_message = crate::policy::redact_secret_like_content(&raw_message).content;
+    let redacted_code = args
+        .code
+        .clone()
+        .or_else(|| rustc_code_from_message(&raw_message))
+        .as_deref()
+        .map(|code| crate::policy::redact_secret_like_content(code).content);
+    let code = redacted_code.as_deref();
+    let message = redacted_message.as_str();
     let canonical = match args.tool.as_str() {
-        "rustc" => from_rustc(args.code.as_deref(), &args.message),
-        "cargo" => from_cargo(args.code.as_deref(), &args.message),
-        "ee" => from_ee_error(args.code.as_deref().unwrap_or_default(), &args.message),
-        "rch" => from_rch_blocker(
-            args.code.as_deref().unwrap_or("blocker"),
-            "diagnose",
-            &args.message,
-        ),
-        "shell" => from_shell(args.exit_code.unwrap_or(1), &args.message),
+        "rustc" => from_rustc(code, message),
+        "cargo" => from_cargo(code, message),
+        "ee" => from_ee_error(code.unwrap_or_default(), message),
+        "rch" => from_rch_blocker(code.unwrap_or("blocker"), "diagnose", message),
+        "shell" => from_shell(args.exit_code.unwrap_or(1), message),
         other => {
             return write_domain_error(
                 &DomainError::Usage {
@@ -39805,6 +39892,33 @@ where
             );
         }
     };
+    let report = match crate::core::error_diagnosis::error_recall_report(
+        &connection,
+        &workspace_id,
+        &canonical,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Storage {
+                    message: format!("Failed to build error recall report: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    let matches = if report.exact {
+        serde_json::json!([{
+            "kind": "exact",
+            "fingerprintKey": &report.fingerprint_key,
+            "layer": report.layer,
+        }])
+    } else {
+        serde_json::json!([])
+    };
 
     let response = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
@@ -39812,14 +39926,63 @@ where
         "data": {
             "schema": "ee.diagnose_error.v1",
             "tool": canonical.tool.as_str(),
-            "fingerprintKey": outcome.fingerprint_key,
+            "fingerprintKey": outcome.fingerprint_key.clone(),
             "layer": outcome.layer,
             "isKnown": outcome.is_known(),
             "recorded": recorded,
+            "matches": matches,
+            "report": report,
         },
         "degraded": [],
     });
     write_stdout(stdout, &(response.to_string() + "\n"))
+}
+
+fn diagnostic_message_from_args(args: &DiagnoseErrorArgs) -> Result<String, DomainError> {
+    match (args.message.as_ref(), args.error_log.as_ref()) {
+        (Some(_), Some(_)) => Err(DomainError::Usage {
+            message: "`ee diagnose-error` accepts either MESSAGE or --error-log, not both."
+                .to_string(),
+            repair: Some(
+                "Use `ee diagnose-error --error-log \"error[E0277]...\" --json`.".to_string(),
+            ),
+        }),
+        (Some(message), None) => Ok(message.clone()),
+        (None, Some(error_log)) => error_log_text(error_log),
+        (None, None) => Err(DomainError::Usage {
+            message: "`ee diagnose-error` requires MESSAGE or --error-log.".to_string(),
+            repair: Some(
+                "Use `ee diagnose-error --error-log \"error[E0277]...\" --json`.".to_string(),
+            ),
+        }),
+    }
+}
+
+fn error_log_text(value: &str) -> Result<String, DomainError> {
+    let path = Path::new(value);
+    if path.exists() {
+        if !path.is_file() {
+            return Err(DomainError::Usage {
+                message: format!("--error-log path is not a regular file: {}", path.display()),
+                repair: Some(
+                    "Pass raw diagnostic text, or pass a readable error-log file path.".to_string(),
+                ),
+            });
+        }
+        return std::fs::read_to_string(path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to read --error-log {}: {error}", path.display()),
+            repair: Some("Check the path and file permissions, then retry.".to_string()),
+        });
+    }
+    Ok(value.to_string())
+}
+
+fn rustc_code_from_message(message: &str) -> Option<String> {
+    let start = message.find("error[")? + "error[".len();
+    let rest = &message[start..];
+    let end = rest.find(']')?;
+    let code = rest[..end].trim();
+    (!code.is_empty()).then(|| code.to_string())
 }
 
 fn open_attest_database(
@@ -39827,6 +39990,13 @@ fn open_attest_database(
     database: Option<&Path>,
 ) -> Result<crate::db::DbConnection, DomainError> {
     let workspace_path = cli.resolve_workspace();
+    open_attest_database_for_workspace(&workspace_path, database)
+}
+
+fn open_attest_database_for_workspace(
+    workspace_path: &Path,
+    database: Option<&Path>,
+) -> Result<crate::db::DbConnection, DomainError> {
     let database_path = database
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
@@ -55542,6 +55712,55 @@ mod tests {
 
     #[test]
     fn parser_accepts_explain_performance_on_context_pack_and_search() -> TestResult {
+        let pack_error_log = Cli::try_parse_from([
+            "ee",
+            "pack",
+            "fix build",
+            "--error-log",
+            "error[E0277]: trait bound not satisfied",
+            "--json",
+        ])
+        .map_err(|error| format!("pack error-log parse failed: {:?}", error.kind()))?;
+        match pack_error_log.command {
+            Some(Command::Pack(args)) => {
+                ensure_equal(
+                    &args.query.as_deref(),
+                    &Some("fix build"),
+                    "pack error-log task",
+                )?;
+                ensure_equal(
+                    &args.error_log.as_deref(),
+                    &Some("error[E0277]: trait bound not satisfied"),
+                    "pack error-log",
+                )?;
+            }
+            other => return Err(format!("expected pack command, got {other:?}")),
+        }
+
+        let diagnose_error_log = Cli::try_parse_from([
+            "ee",
+            "diagnose-error",
+            "--error-log",
+            "error[E0277]: trait bound not satisfied",
+            "--json",
+        ])
+        .map_err(|error| format!("diagnose-error error-log parse failed: {:?}", error.kind()))?;
+        match diagnose_error_log.command {
+            Some(Command::DiagnoseError(args)) => {
+                ensure_equal(
+                    &args.error_log.as_deref(),
+                    &Some("error[E0277]: trait bound not satisfied"),
+                    "diagnose-error error-log",
+                )?;
+                ensure_equal(
+                    &args.message,
+                    &Option::<String>::None,
+                    "diagnose-error positional message absent",
+                )?;
+            }
+            other => return Err(format!("expected diagnose-error command, got {other:?}")),
+        }
+
         let pack_query = Cli::try_parse_from(["ee", "pack", "release", "--explain-performance"])
             .map_err(|error| format!("pack query flag parse failed: {:?}", error.kind()))?;
         match pack_query.command {
