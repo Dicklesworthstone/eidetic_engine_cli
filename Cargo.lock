@@ -182,7 +182,7 @@ checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
 name = "asupersync"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1376,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "franken-decision"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -1385,7 +1385,7 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -1393,7 +1393,7 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde",
 ]
@@ -1514,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "fsqlite-core",
  "fsqlite-error",
@@ -1528,14 +1528,14 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ast"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "fsqlite-types",
 ]
 
 [[package]]
 name = "fsqlite-btree"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "foldhash 0.2.0",
  "fsqlite-error",
@@ -1551,7 +1551,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-core"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "asupersync",
  "blake3",
@@ -1587,14 +1587,14 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-error"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "fsqlite-ext-fts5"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1605,7 +1605,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-icu"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-json"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-misc"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1638,7 +1638,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-rtree"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-func"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "chrono",
  "fsqlite-error",
@@ -1657,7 +1657,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-mvcc"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "asupersync",
  "blake3",
@@ -1673,7 +1673,6 @@ dependencies = [
  "nix 0.29.0",
  "parking_lot",
  "serde",
- "serde_json",
  "smallvec",
  "tracing",
  "xxhash-rust",
@@ -1681,7 +1680,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-observability"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "fsqlite-types",
  "parking_lot",
@@ -1691,7 +1690,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-pager"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "argon2",
  "bumpalo",
@@ -1712,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-parser"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "fsqlite-ast",
  "fsqlite-error",
@@ -1724,7 +1723,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-planner"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "blake3",
  "fsqlite-ast",
@@ -1740,7 +1739,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-types"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "asupersync",
  "bitflags",
@@ -1757,7 +1756,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-vdbe"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "asupersync",
  "crossbeam-deque",
@@ -1778,7 +1777,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-vfs"
-version = "0.1.5"
+version = "0.1.8"
 dependencies = [
  "advisory-lock",
  "asupersync",
@@ -1794,7 +1793,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-wal"
-version = "0.1.3"
+version = "0.1.8"
 dependencies = [
  "asupersync",
  "blake3",
@@ -4487,7 +4486,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -5615,8 +5614,8 @@ version = "0.2.2"
 
 [[patch.unused]]
 name = "fsqlite-ext-fts3"
-version = "0.1.3"
+version = "0.1.8"
 
 [[patch.unused]]
 name = "fsqlite-ext-session"
-version = "0.1.3"
+version = "0.1.8"
