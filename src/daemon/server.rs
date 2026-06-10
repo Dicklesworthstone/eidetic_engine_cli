@@ -333,7 +333,7 @@ impl DaemonServerHandle {
             // Idempotent guarded unlink (bd-wj6v9, bd-2z3e8): tolerate
             // `NotFound`, but do not let shutdown delete an arbitrary
             // regular file if the socket path was swapped underneath us.
-            remove_owned_socket_file(&self.socket_path)
+            SocketBroker::new(self.socket_path.clone()).remove_owned_socket_file()
         } else {
             Ok(())
         };
@@ -367,38 +367,294 @@ impl Drop for DaemonServerHandle {
     }
 }
 
-fn remove_owned_socket_file(path: &Path) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if !metadata.file_type().is_socket() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "refusing to remove non-socket daemon path {}",
-                        path.display()
-                    ),
-                ));
-            }
-            let euid = current_euid();
-            if metadata.uid() != euid {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!(
-                        "refusing to remove daemon socket {} owned by uid {}, current uid {euid}",
-                        path.display(),
-                        metadata.uid()
-                    ),
-                ));
-            }
+#[derive(Debug)]
+/// Owns daemon UDS publication and guarded cleanup invariants.
+struct SocketBroker {
+    socket_path: PathBuf,
+}
+
+impl SocketBroker {
+    fn new(socket_path: impl Into<PathBuf>) -> Self {
+        Self {
+            socket_path: socket_path.into(),
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
     }
 
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
+    fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    fn publish_listener(
+        &self,
+    ) -> Result<(UnixListener, DaemonSocketPublishLock), DaemonStartError> {
+        self.ensure_private_parent()?;
+        let publish_lock = self.acquire_publish_lock()?;
+        self.refuse_non_socket_or_live_existing()?;
+        let listener = self.bind_secured_temp_listener()?;
+        Ok((listener, publish_lock))
+    }
+
+    fn ensure_private_parent(&self) -> Result<(), DaemonStartError> {
+        if let Some(parent) = self.socket_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            // The parent directory must be a same-user private boundary:
+            // it contains the publish lock, temp socket, and canonical
+            // socket path. `DirBuilder` applies 0o700 only to components it
+            // creates, so validate the resulting parent before opening the
+            // start lock or binding a socket inside it.
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
+                .map_err(|source| DaemonStartError::SocketDirCreate {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            Self::validate_socket_parent(parent)?;
+        }
+        Ok(())
+    }
+
+    fn acquire_publish_lock(&self) -> Result<DaemonSocketPublishLock, DaemonStartError> {
+        let lock_path = self.socket_publish_lock_path();
+        let file = Self::open_daemon_socket_lock_file(&lock_path).map_err(|source| {
+            DaemonStartError::Bind {
+                path: self.socket_path.clone(),
+                source,
+            }
+        })?;
+        flock(&file, FlockOperation::LockExclusive).map_err(|source| DaemonStartError::Bind {
+            path: self.socket_path.clone(),
+            source: io::Error::from(source),
+        })?;
+        Ok(DaemonSocketPublishLock { _file: file })
+    }
+
+    fn refuse_non_socket_or_live_existing(&self) -> Result<(), DaemonStartError> {
+        // Refuse to clobber a non-socket file already occupying the
+        // canonical path, but do NOT pre-`remove_file` it. The former
+        // stat -> remove_file -> bind sequence had two TOCTOU windows: an
+        // attacker with write access to the parent directory could swap
+        // the socket for a regular file between the `is_socket()` check
+        // and the `remove_file` (falsifying the daemon's "this is my
+        // stale socket" belief), or recreate the path between
+        // `remove_file` and `bind`. We instead bind a per-attempt temp
+        // path and `rename(2)` it onto the canonical name atomically
+        // (below); `rename` replaces any existing socket cleanly with no
+        // unlink step, collapsing both windows into one operation. The
+        // parent directory is per-UID 0o700 (bd-3j0td), so no other UID
+        // can race us inside it. Sentinel: bd-3ik2d atomic-rename.
+        match fs::symlink_metadata(&self.socket_path) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_socket() {
+                    return Err(DaemonStartError::SocketPathOccupied {
+                        path: self.socket_path.clone(),
+                    });
+                }
+                if self.existing_socket_accepts_connection() {
+                    return Err(DaemonStartError::AlreadyRunning {
+                        path: self.socket_path.clone(),
+                    });
+                }
+                // A dead socket from a prior daemon: the `rename` below
+                // atomically replaces it, so there is nothing to unlink.
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(DaemonStartError::Bind {
+                    path: self.socket_path.clone(),
+                    source,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn bind_secured_temp_listener(&self) -> Result<UnixListener, DaemonStartError> {
+        // Bind a per-attempt temporary path inside the same (per-UID
+        // 0o700) parent directory, tighten its mode to 0o600 BEFORE it is
+        // ever visible at the canonical name, then `rename(2)` it into
+        // place. Because the chmod happens on the temp path, the canonical
+        // path never exists in a world-connectable (0o755) state for even
+        // an instant — a strict improvement over chmod-after-bind. The
+        // temp name carries the pid plus a process-global counter so two
+        // concurrent binds (same process or across processes) never
+        // collide on the temp path and each `rename` is a clean atomic
+        // publish. Sentinel: bd-3ik2d atomic-rename.
+        let tmp_path = self.temp_bind_path();
+        // Clear any temp left by a crashed prior attempt that happened to
+        // reuse this pid+counter; best-effort, the bind below is the
+        // authoritative step.
+        let _ = fs::remove_file(&tmp_path);
+
+        let listener = UnixListener::bind(&tmp_path).map_err(|source| DaemonStartError::Bind {
+            path: self.socket_path.clone(),
+            source,
+        })?;
+
+        // Tighten the temp socket to mode 0o600 before it is published.
+        // `UnixListener::bind` honours the process umask (typically 0o022
+        // -> mode 0o755): world-connectable on every Unix host. Without
+        // this chmod, any local UID could `connect(2)` and reach the
+        // dispatch table — the attack surface documented in bd-3j0td. The
+        // chmod failure is surfaced (not swallowed) so an operator on a
+        // filesystem that rejects `chmod` sees the bind step error rather
+        // than a silently world-open socket. Sentinel: bd-3j0td chmod-0600.
+        if let Err(source) = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600)) {
+            // The temp socket is bound but world-open at this instant;
+            // remove it before returning so a half-secured artifact does
+            // not linger under the temp name.
+            let _ = fs::remove_file(&tmp_path);
+            return Err(DaemonStartError::Bind {
+                path: self.socket_path.clone(),
+                source,
+            });
+        }
+
+        // Atomically publish the secured socket at the canonical path.
+        // `rename(2)` is atomic and replaces a stale socket left by a
+        // prior daemon in a single step.
+        if let Err(source) = fs::rename(&tmp_path, &self.socket_path) {
+            // Publish failed (e.g. cross-device move, or the parent dir
+            // was removed underneath us). Drop the temp socket so it does
+            // not linger, then surface the failure.
+            let _ = fs::remove_file(&tmp_path);
+            return Err(DaemonStartError::Bind {
+                path: self.socket_path.clone(),
+                source,
+            });
+        }
+
+        Ok(listener)
+    }
+
+    fn remove_owned_socket_file(&self) -> io::Result<()> {
+        match fs::symlink_metadata(&self.socket_path) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_socket() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "refusing to remove non-socket daemon path {}",
+                            self.socket_path.display()
+                        ),
+                    ));
+                }
+                let euid = current_euid();
+                if metadata.uid() != euid {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "refusing to remove daemon socket {} owned by uid {}, current uid {euid}",
+                            self.socket_path.display(),
+                            metadata.uid()
+                        ),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+
+        match fs::remove_file(&self.socket_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Construct a per-attempt temporary socket path next to `socket_path`,
+    /// of the form `<socket>.tmp.<pid>.<counter>`. The pid plus a
+    /// process-global monotonic counter guarantees the path is unique to
+    /// this bind attempt, so two concurrent [`start_server`] calls — in the
+    /// same process or across processes — never collide on the temp name
+    /// and the subsequent `rename(2)` is always a clean atomic publish.
+    /// Sentinel: bd-3ik2d atomic-rename.
+    fn temp_bind_path(&self) -> PathBuf {
+        static TEMP_BIND_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let suffix = format!(
+            ".tmp.{}.{}",
+            std::process::id(),
+            TEMP_BIND_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut file_name = self
+            .socket_path
+            .file_name()
+            .map(|name| name.to_os_string())
+            .unwrap_or_default();
+        file_name.push(&suffix);
+        let mut tmp_path = self.socket_path.clone();
+        tmp_path.set_file_name(file_name);
+        tmp_path
+    }
+
+    fn socket_publish_lock_path(&self) -> PathBuf {
+        let mut file_name = self
+            .socket_path
+            .file_name()
+            .map(|name| name.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("daemon.sock"));
+        file_name.push(".start.lock");
+        let mut lock_path = self.socket_path.clone();
+        lock_path.set_file_name(file_name);
+        lock_path
+    }
+
+    fn validate_socket_parent(parent: &Path) -> Result<(), DaemonStartError> {
+        let metadata =
+            fs::symlink_metadata(parent).map_err(|source| DaemonStartError::SocketDirCreate {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        if !metadata.file_type().is_dir() {
+            return Err(DaemonStartError::InsecureSocketParent {
+                path: parent.to_path_buf(),
+                reason: "parent is not a real directory".to_owned(),
+            });
+        }
+
+        let euid = current_euid();
+        if metadata.uid() != euid {
+            return Err(DaemonStartError::InsecureSocketParent {
+                path: parent.to_path_buf(),
+                reason: format!(
+                    "parent is owned by uid {}, not current uid {euid}",
+                    metadata.uid()
+                ),
+            });
+        }
+
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(DaemonStartError::InsecureSocketParent {
+                path: parent.to_path_buf(),
+                reason: format!(
+                    "parent mode 0o{mode:o} grants group or other access; expected 0o700 or stricter"
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn open_daemon_socket_lock_file(path: &Path) -> io::Result<File> {
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        Self::configure_daemon_socket_lock_options(&mut options);
+        options.open(path)
+    }
+
+    fn configure_daemon_socket_lock_options(options: &mut OpenOptions) {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options
+            .mode(0o600)
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    }
+
+    fn existing_socket_accepts_connection(&self) -> bool {
+        UnixStream::connect(&self.socket_path).is_ok()
     }
 }
 
@@ -435,124 +691,9 @@ fn start_server_with_dispatch_policy(
     socket_path: impl Into<PathBuf>,
     dispatch_policy: DaemonDispatchPolicy,
 ) -> Result<DaemonServerHandle, DaemonStartError> {
-    let socket_path = socket_path.into();
-
-    if let Some(parent) = socket_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        // The parent directory must be a same-user private boundary:
-        // it contains the publish lock, temp socket, and canonical
-        // socket path. `DirBuilder` applies 0o700 only to components it
-        // creates, so validate the resulting parent before opening the
-        // start lock or binding a socket inside it.
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)
-            .map_err(|source| DaemonStartError::SocketDirCreate {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        validate_socket_parent(parent)?;
-    }
-
-    let _publish_lock = acquire_socket_publish_lock(&socket_path)?;
-
-    // Refuse to clobber a non-socket file already occupying the
-    // canonical path, but do NOT pre-`remove_file` it. The former
-    // stat → remove_file → bind sequence had two TOCTOU windows: an
-    // attacker with write access to the parent directory could swap
-    // the socket for a regular file between the `is_socket()` check
-    // and the `remove_file` (falsifying the daemon's "this is my
-    // stale socket" belief), or recreate the path between
-    // `remove_file` and `bind`. We instead bind a per-attempt temp
-    // path and `rename(2)` it onto the canonical name atomically
-    // (below); `rename` replaces any existing socket cleanly with no
-    // unlink step, collapsing both windows into one operation. The
-    // parent directory is per-UID 0o700 (bd-3j0td), so no other UID
-    // can race us inside it. Sentinel: bd-3ik2d atomic-rename.
-    match fs::symlink_metadata(&socket_path) {
-        Ok(metadata) => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::FileTypeExt;
-                if !metadata.file_type().is_socket() {
-                    return Err(DaemonStartError::SocketPathOccupied { path: socket_path });
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = metadata;
-                return Err(DaemonStartError::PlatformUnsupported);
-            }
-            if existing_socket_accepts_connection(&socket_path) {
-                return Err(DaemonStartError::AlreadyRunning { path: socket_path });
-            }
-            // A dead socket from a prior daemon: the `rename` below
-            // atomically replaces it, so there is nothing to unlink.
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(DaemonStartError::Bind {
-                path: socket_path,
-                source,
-            });
-        }
-    }
-
-    // Bind a per-attempt temporary path inside the same (per-UID
-    // 0o700) parent directory, tighten its mode to 0o600 BEFORE it is
-    // ever visible at the canonical name, then `rename(2)` it into
-    // place. Because the chmod happens on the temp path, the canonical
-    // path never exists in a world-connectable (0o755) state for even
-    // an instant — a strict improvement over chmod-after-bind. The
-    // temp name carries the pid plus a process-global counter so two
-    // concurrent binds (same process or across processes) never
-    // collide on the temp path and each `rename` is a clean atomic
-    // publish. Sentinel: bd-3ik2d atomic-rename.
-    let tmp_path = temp_bind_path(&socket_path);
-    // Clear any temp left by a crashed prior attempt that happened to
-    // reuse this pid+counter; best-effort, the bind below is the
-    // authoritative step.
-    let _ = fs::remove_file(&tmp_path);
-
-    let listener = UnixListener::bind(&tmp_path).map_err(|source| DaemonStartError::Bind {
-        path: socket_path.clone(),
-        source,
-    })?;
-
-    // Tighten the temp socket to mode 0o600 before it is published.
-    // `UnixListener::bind` honours the process umask (typically 0o022
-    // → mode 0o755): world-connectable on every Unix host. Without
-    // this chmod, any local UID could `connect(2)` and reach the
-    // dispatch table — the attack surface documented in bd-3j0td. The
-    // chmod failure is surfaced (not swallowed) so an operator on a
-    // filesystem that rejects `chmod` sees the bind step error rather
-    // than a silently world-open socket. Sentinel: bd-3j0td chmod-0600.
-    if let Err(source) = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600)) {
-        // The temp socket is bound but world-open at this instant;
-        // remove it before returning so a half-secured artifact does
-        // not linger under the temp name.
-        let _ = fs::remove_file(&tmp_path);
-        return Err(DaemonStartError::Bind {
-            path: socket_path,
-            source,
-        });
-    }
-
-    // Atomically publish the secured socket at the canonical path.
-    // `rename(2)` is atomic and replaces a stale socket left by a
-    // prior daemon in a single step.
-    if let Err(source) = fs::rename(&tmp_path, &socket_path) {
-        // Publish failed (e.g. cross-device move, or the parent dir
-        // was removed underneath us). Drop the temp socket so it does
-        // not linger, then surface the failure.
-        let _ = fs::remove_file(&tmp_path);
-        return Err(DaemonStartError::Bind {
-            path: socket_path,
-            source,
-        });
-    }
+    let broker = SocketBroker::new(socket_path);
+    let (listener, _publish_lock) = broker.publish_listener()?;
+    let socket_path = broker.socket_path().to_path_buf();
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_in_thread = Arc::clone(&shutdown);
@@ -597,113 +738,6 @@ fn start_server_with_dispatch_policy(
         shutdown_done: AtomicBool::new(false),
         workers_drained: AtomicBool::new(false),
     })
-}
-
-/// Construct a per-attempt temporary socket path next to `socket_path`,
-/// of the form `<socket>.tmp.<pid>.<counter>`. The pid plus a
-/// process-global monotonic counter guarantees the path is unique to
-/// this bind attempt, so two concurrent [`start_server`] calls — in the
-/// same process or across processes — never collide on the temp name
-/// and the subsequent `rename(2)` is always a clean atomic publish.
-/// Sentinel: bd-3ik2d atomic-rename.
-fn temp_bind_path(socket_path: &Path) -> PathBuf {
-    static TEMP_BIND_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let suffix = format!(
-        ".tmp.{}.{}",
-        std::process::id(),
-        TEMP_BIND_COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
-    let mut file_name = socket_path
-        .file_name()
-        .map(|name| name.to_os_string())
-        .unwrap_or_default();
-    file_name.push(&suffix);
-    let mut tmp_path = socket_path.to_path_buf();
-    tmp_path.set_file_name(file_name);
-    tmp_path
-}
-
-fn acquire_socket_publish_lock(
-    socket_path: &Path,
-) -> Result<DaemonSocketPublishLock, DaemonStartError> {
-    let lock_path = socket_publish_lock_path(socket_path);
-    let file =
-        open_daemon_socket_lock_file(&lock_path).map_err(|source| DaemonStartError::Bind {
-            path: socket_path.to_path_buf(),
-            source,
-        })?;
-    flock(&file, FlockOperation::LockExclusive).map_err(|source| DaemonStartError::Bind {
-        path: socket_path.to_path_buf(),
-        source: io::Error::from(source),
-    })?;
-    Ok(DaemonSocketPublishLock { _file: file })
-}
-
-fn socket_publish_lock_path(socket_path: &Path) -> PathBuf {
-    let mut file_name = socket_path
-        .file_name()
-        .map(|name| name.to_os_string())
-        .unwrap_or_else(|| std::ffi::OsString::from("daemon.sock"));
-    file_name.push(".start.lock");
-    let mut lock_path = socket_path.to_path_buf();
-    lock_path.set_file_name(file_name);
-    lock_path
-}
-
-fn validate_socket_parent(parent: &Path) -> Result<(), DaemonStartError> {
-    let metadata =
-        fs::symlink_metadata(parent).map_err(|source| DaemonStartError::SocketDirCreate {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    if !metadata.file_type().is_dir() {
-        return Err(DaemonStartError::InsecureSocketParent {
-            path: parent.to_path_buf(),
-            reason: "parent is not a real directory".to_owned(),
-        });
-    }
-
-    let euid = current_euid();
-    if metadata.uid() != euid {
-        return Err(DaemonStartError::InsecureSocketParent {
-            path: parent.to_path_buf(),
-            reason: format!(
-                "parent is owned by uid {}, not current uid {euid}",
-                metadata.uid()
-            ),
-        });
-    }
-
-    let mode = metadata.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
-        return Err(DaemonStartError::InsecureSocketParent {
-            path: parent.to_path_buf(),
-            reason: format!(
-                "parent mode 0o{mode:o} grants group or other access; expected 0o700 or stricter"
-            ),
-        });
-    }
-
-    Ok(())
-}
-
-fn open_daemon_socket_lock_file(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(false).read(true).write(true);
-    configure_daemon_socket_lock_options(&mut options);
-    options.open(path)
-}
-
-fn configure_daemon_socket_lock_options(options: &mut OpenOptions) {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    options
-        .mode(0o600)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
-}
-
-fn existing_socket_accepts_connection(socket_path: &Path) -> bool {
-    UnixStream::connect(socket_path).is_ok()
 }
 
 trait ConnectionWorkerSpawner {
@@ -3086,7 +3120,9 @@ mod tests {
         let path = temp.path().join("not-a-daemon-socket");
         fs::write(&path, b"operator data").expect("write regular file");
 
-        let error = remove_owned_socket_file(&path).expect_err("regular file must be refused");
+        let error = SocketBroker::new(path.clone())
+            .remove_owned_socket_file()
+            .expect_err("regular file must be refused");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(
@@ -3102,13 +3138,17 @@ mod tests {
         let listener = UnixListener::bind(&socket_path).expect("bind test socket");
         drop(listener);
 
-        remove_owned_socket_file(&socket_path).expect("owned socket cleanup must succeed");
+        SocketBroker::new(socket_path.clone())
+            .remove_owned_socket_file()
+            .expect("owned socket cleanup must succeed");
         assert!(
             !socket_path.exists(),
             "owned socket file must be removed by guarded cleanup"
         );
 
-        remove_owned_socket_file(&socket_path).expect("absent path is already clean");
+        SocketBroker::new(socket_path.clone())
+            .remove_owned_socket_file()
+            .expect("absent path is already clean");
     }
 
     struct FailingConnectionWorkerSpawner;
