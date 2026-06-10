@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.primer.v1.json",
+  "title": "ee.primer.v1",
+  "description": "Deterministic, cached, token-budgeted workspace charter assembled from the highest-value durable memory (ADR 0065). Carried under ee.response.v2 data.primer. cacheHit is set at response time; all other bytes are identical between a cache hit and a cold assembly for the same (workspace, dbGeneration, configHash, budget, format) key.",
+  "type": "object",
+  "required": [
+    "schema",
+    "budget_tokens",
+    "format",
+    "cache_hit",
+    "db_generation",
+    "config_hash",
+    "sections",
+    "degraded",
+    "meta"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.primer.v1"
+    },
+    "budget_tokens": {"type": "integer", "minimum": 0},
+    "format": {"type": "string", "enum": ["markdown", "json"]},
+    "cache_hit": {"type": "boolean"},
+    "db_generation": {"type": "integer", "minimum": 0},
+    "config_hash": {"type": "string", "pattern": "^blake3:[0-9a-f]{16}$"},
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "items"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": ["rules", "warnings", "decisions", "loadBearing"]
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["memory_id", "line", "level", "kind", "confidence", "provenance"],
+              "properties": {
+                "memory_id": {"type": "string"},
+                "line": {"type": "string", "maxLength": 256},
+                "level": {"type": "string"},
+                "kind": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "provenance": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["uri", "source_type"],
+                    "properties": {
+                      "uri": {"type": "string"},
+                      "source_type": {"type": "string"}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "message"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": ["primer_cache_cold", "primer_graph_unavailable", "primer_budget_floor"]
+          },
+          "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
+          "message": {"type": "string"},
+          "repair": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "required": ["tokens_used", "skipped", "floors_engaged"],
+      "properties": {
+        "tokens_used": {"type": "integer", "minimum": 0},
+        "skipped": {
+          "type": "object",
+          "required": ["redaction", "budget_floor"],
+          "properties": {
+            "redaction": {"type": "integer", "minimum": 0},
+            "budget_floor": {"type": "integer", "minimum": 0}
+          }
+        },
+        "floors_engaged": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "rendered_markdown": {"type": ["string", "null"]}
+  },
+  "x-ee-status": {
+    "shipped": false,
+    "available_in_build": false,
+    "tracking_bead": "bd-39tzu.3"
+  }
+}

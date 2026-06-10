@@ -518,6 +518,8 @@ pub enum JobType {
     BackupExport,
     /// Clean up expired or orphaned data.
     GarbageCollection,
+    /// Re-warm the ADR 0065 primer cache for the workspace (bd-39tzu.2).
+    PrimerRefresh,
     /// Custom job type for extensions.
     Custom,
 }
@@ -541,6 +543,7 @@ impl JobType {
             Self::IntegrityCheck => "integrity_check",
             Self::BackupExport => "backup_export",
             Self::GarbageCollection => "garbage_collection",
+            Self::PrimerRefresh => "primer_refresh",
             Self::Custom => "custom",
         }
     }
@@ -589,6 +592,7 @@ impl JobType {
             Self::IntegrityCheck => "Validate data integrity",
             Self::BackupExport => "Export backup snapshot",
             Self::GarbageCollection => "Clean up expired or orphaned data",
+            Self::PrimerRefresh => "Re-warm the workspace primer cache",
             Self::Custom => "Custom job type",
         }
     }
@@ -635,6 +639,7 @@ impl FromStr for JobType {
             "integrity_check" => Ok(Self::IntegrityCheck),
             "backup_export" => Ok(Self::BackupExport),
             "garbage_collection" => Ok(Self::GarbageCollection),
+            "primer_refresh" => Ok(Self::PrimerRefresh),
             "custom" => Ok(Self::Custom),
             _ => Err(ParseJobTypeError {
                 input: s.to_owned(),
@@ -1870,6 +1875,10 @@ pub fn default_budgets_for_job_type(job_type: JobType) -> Vec<ResourceBudget> {
         ],
         JobType::HealthCheck => vec![
             ResourceBudget::time_soft_limit_ms(10_000), // 10 seconds soft
+        ],
+        JobType::PrimerRefresh => vec![
+            ResourceBudget::time_limit_ms(30_000), // 30 seconds
+            ResourceBudget::item_limit(8),
         ],
         JobType::CachePruning => vec![
             ResourceBudget::time_limit_ms(60_000), // 1 minute
@@ -3215,12 +3224,25 @@ impl ManualRunner {
             }
             RunOutcome::TimedOut => job.fail(&completion_time, "timed out"),
         }
+        let duration_ms = job.duration_ms.unwrap_or(0);
+
+        // ADR 0065 §3: re-warm the primer cache after maintenance that
+        // mutates memory state, so the next session start is a cache hit.
+        if outcome == RunOutcome::Success
+            && matches!(job_type, JobType::DecaySweep | JobType::CurationReview)
+        {
+            self.schedule(
+                JobType::PrimerRefresh,
+                JobPriority::Low,
+                Some(format!("chained after {}", job_type.as_str())),
+            );
+        }
 
         Some(JobRunResult {
             job_id: job_id.to_owned(),
             job_type,
             outcome,
-            duration_ms: job.duration_ms.unwrap_or(0),
+            duration_ms,
             items_processed: items,
             error,
             budget_summary: Some(budget.summary()),
@@ -3250,6 +3272,7 @@ impl ManualRunner {
             JobType::IntegrityCheck => self.execute_integrity_check(budget),
             JobType::BackupExport => self.execute_backup_export(budget),
             JobType::GarbageCollection => self.execute_garbage_collection(budget),
+            JobType::PrimerRefresh => self.execute_primer_refresh(budget),
             JobType::Custom => self.execute_custom_job(),
         }
     }
@@ -3563,6 +3586,117 @@ impl ManualRunner {
                 ),
                 &qos_decision,
             )),
+        )
+    }
+
+    /// Re-warm the primer cache (ADR 0065 §3) so the next session start is
+    /// a byte-identical cache hit. Bounded: warms the default budget for
+    /// both formats; honors dry-run by skipping (the job is purely a cache
+    /// write). Failures degrade to a failed job, never a panic.
+    fn execute_primer_refresh(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        if self.options.dry_run {
+            return (
+                RunOutcome::Skipped,
+                None,
+                Some("primer refresh is a cache write; skipped in dry-run".to_owned()),
+                Some(json!({
+                    "schema": "ee.steward.primer_refresh.v1",
+                    "status": "skipped_dry_run",
+                })),
+            );
+        }
+        let Some(database_path) = self.resolve_database_path() else {
+            let message =
+                "Primer refresh requires a database path or workspace path with .ee/ee.db"
+                    .to_owned();
+            return (RunOutcome::Failed, None, Some(message), None);
+        };
+        if !database_path.exists() {
+            let message = format!(
+                "Primer refresh database does not exist: {}",
+                database_path.display()
+            );
+            return (RunOutcome::Failed, None, Some(message), None);
+        }
+        let connection = match DbConnection::open_file(&database_path) {
+            Ok(connection) => connection,
+            Err(error) => {
+                return (
+                    RunOutcome::Failed,
+                    None,
+                    Some(format!("Failed to open primer database: {error}")),
+                    None,
+                );
+            }
+        };
+        if let Err(error) = connection.migrate() {
+            return (
+                RunOutcome::Failed,
+                None,
+                Some(format!("Primer refresh migration failed: {error}")),
+                None,
+            );
+        }
+        let workspace_path = self.normalized_workspace_path();
+        let workspace_id = match connection.get_workspace_by_path(&workspace_path.to_string_lossy())
+        {
+            Ok(Some(workspace)) => workspace.id,
+            Ok(None) => {
+                return (
+                    RunOutcome::Skipped,
+                    None,
+                    Some("workspace is not registered; nothing to warm".to_owned()),
+                    None,
+                );
+            }
+            Err(error) => {
+                return (
+                    RunOutcome::Failed,
+                    None,
+                    Some(format!("Primer refresh workspace lookup failed: {error}")),
+                    None,
+                );
+            }
+        };
+        let mut warmed: u64 = 0;
+        for format in [
+            crate::core::primer::PrimerFormat::Markdown,
+            crate::core::primer::PrimerFormat::Json,
+        ] {
+            if budget.should_cancel() {
+                return (
+                    RunOutcome::Cancelled,
+                    Some(warmed),
+                    Some("primer refresh cancelled by job budget".to_owned()),
+                    None,
+                );
+            }
+            let settings =
+                crate::core::primer::primer_settings_from_workspace(&workspace_path, format, None);
+            match crate::core::primer::run_primer(&connection, &workspace_id, &settings, true) {
+                Ok(_) => warmed += 1,
+                Err(error) => {
+                    return (
+                        RunOutcome::Failed,
+                        Some(warmed),
+                        Some(format!("Primer refresh assembly failed: {error}")),
+                        None,
+                    );
+                }
+            }
+        }
+        (
+            RunOutcome::Success,
+            Some(warmed),
+            None,
+            Some(json!({
+                "schema": "ee.steward.primer_refresh.v1",
+                "status": "warmed",
+                "formatsWarmed": warmed,
+            })),
         )
     }
 

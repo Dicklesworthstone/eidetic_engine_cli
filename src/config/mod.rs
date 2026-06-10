@@ -20,9 +20,10 @@ pub use file::{
     LearnDecayConfig, MeshBodyFetchPolicyConfig, MeshCommandMode, MeshConfig, MeshLane,
     MeshLaneDecision, MeshLaneGrants, MeshPeerGroupBinding, MeshPeerPolicyConfig,
     MeshRedactionDecision, MeshRedactionPolicyConfig, MeshTrustLane, OutputRedactionConfig,
-    PackConfig, PackL2CacheConfig, PolicyConfig, PrivacyConfig, ReadPoolConfig, RedactionConfig,
-    RedactionDefaultsConfig, RuntimeConfig, SearchConfig, SearchLexicalRamTierConfig, SearchSpeed,
-    SecretDetectorConfig, StorageConfig, SwarmAdaptiveConfig, SwarmConfig, TrustConfig,
+    PackConfig, PackL2CacheConfig, PolicyConfig, PrimerConfig, PrivacyConfig, ReadPoolConfig,
+    RedactionConfig, RedactionDefaultsConfig, RuntimeConfig, SearchConfig,
+    SearchLexicalRamTierConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
+    SwarmAdaptiveConfig, SwarmConfig, TrustConfig,
 };
 pub use merge::{
     CACHE_PACK_L2_DIRECTORY_KEY, CACHE_PACK_L2_ENABLED_KEY, CACHE_PACK_L2_MAX_AGE_DAYS_KEY,

@@ -93,6 +93,7 @@ pub mod plan;
 pub mod preflight;
 pub mod preflight_guard;
 pub mod preflight_token;
+pub mod primer;
 pub mod procedure;
 pub mod profile;
 pub mod proof_verify;

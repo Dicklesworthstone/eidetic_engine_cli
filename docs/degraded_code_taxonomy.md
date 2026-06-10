@@ -466,6 +466,13 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `anchor_index_stale` | low | bd-u875s.2 — ADR 0064 §5: reverse-index generation < DB generation; repair `ee index rebuild --workspace .` |
 | `recall_filtered_empty` | info | bd-u875s.2 — ADR 0064 §5: anchored rows matched the surface but `--kind`/`--level`/`--stale` filters removed them all (distinct from empty-index so hook authors can tell the difference) |
 
+#### Workspace primer (3)
+| Code | Severity | Bead |
+|------|----------|------|
+| `primer_cache_cold` | info | bd-39tzu.2 — ADR 0065 §6: no primer_cache row for the (generation, config, budget, format) key; assembled fresh |
+| `primer_graph_unavailable` | info | bd-39tzu.2 — ADR 0065 §6: persisted centrality rows missing/unusable; loadBearing omitted, rules authority factor neutral; repair `ee graph centrality-refresh --workspace .` |
+| `primer_budget_floor` | info | bd-39tzu.2 — ADR 0065 §6: proportional shrink hit the rules floor; lower-priority items evicted |
+
 #### Feedback (5)
 | Code | Severity | Bead |
 |------|----------|------|

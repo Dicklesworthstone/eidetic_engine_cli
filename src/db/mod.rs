@@ -6331,6 +6331,29 @@ CREATE INDEX IF NOT EXISTS memory_anchor_index_symbol_lookup
     "blake3:v076_memory_anchor_index_2026_06_10",
 );
 
+/// V077: ADR 0065 primer cache — a derived, droppable cache of rendered
+/// workspace primers keyed by (workspace_id, db_generation, config_hash,
+/// budget, format). Byte-identical hits; any generation advance misses.
+/// Intentionally NO workspace_generations triggers (derived asset).
+pub const V077_PRIMER_CACHE: Migration = Migration::new(
+    77,
+    "primer_cache",
+    r#"
+CREATE TABLE IF NOT EXISTS primer_cache (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    db_generation INTEGER NOT NULL CHECK (db_generation >= 0),
+    config_hash TEXT NOT NULL CHECK (length(trim(config_hash)) > 0),
+    budget_tokens INTEGER NOT NULL CHECK (budget_tokens >= 0),
+    format TEXT NOT NULL CHECK (format IN ('markdown', 'json')),
+    report_json TEXT NOT NULL CHECK (length(trim(report_json)) > 0),
+    tokens_used INTEGER NOT NULL CHECK (tokens_used >= 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    PRIMARY KEY (workspace_id, db_generation, config_hash, budget_tokens, format)
+);
+"#,
+    "blake3:v077_primer_cache_2026_06_10",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -6409,6 +6432,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V074_JOURNAL_ENTRIES,
     V075_REMEMBER_IDEMPOTENCY_KEYS,
     V076_MEMORY_ANCHOR_INDEX,
+    V077_PRIMER_CACHE,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -12629,6 +12653,71 @@ impl DbConnection {
         rows.iter()
             .map(stored_anchor_index_candidate_from_row)
             .collect()
+    }
+
+    /// Read a cached primer payload for the exact ADR 0065 cache key.
+    pub fn get_primer_cache(
+        &self,
+        workspace_id: &str,
+        db_generation: i64,
+        config_hash: &str,
+        budget_tokens: u32,
+        format: &str,
+    ) -> Result<Option<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT report_json FROM primer_cache WHERE workspace_id = ?1 AND db_generation = ?2 AND config_hash = ?3 AND budget_tokens = ?4 AND format = ?5",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::BigInt(db_generation),
+                Value::Text(config_hash.to_string()),
+                Value::BigInt(i64::from(budget_tokens)),
+                Value::Text(format.to_string()),
+            ],
+        )?;
+        Ok(rows.first().and_then(|row| {
+            required_text(row, 0, DbOperation::Query, "report_json")
+                .ok()
+                .map(str::to_string)
+        }))
+    }
+
+    /// Store a rendered primer payload and prune rows from older
+    /// generations (the cache is a derived asset; dropping rows is safe).
+    pub fn put_primer_cache(
+        &self,
+        workspace_id: &str,
+        db_generation: i64,
+        config_hash: &str,
+        budget_tokens: u32,
+        format: &str,
+        report_json: &str,
+        tokens_used: u32,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO primer_cache (workspace_id, db_generation, config_hash, budget_tokens, format, report_json, tokens_used, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(workspace_id, db_generation, config_hash, budget_tokens, format) DO UPDATE SET report_json = excluded.report_json, tokens_used = excluded.tokens_used, created_at = excluded.created_at",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::BigInt(db_generation),
+                Value::Text(config_hash.to_string()),
+                Value::BigInt(i64::from(budget_tokens)),
+                Value::Text(format.to_string()),
+                Value::Text(report_json.to_string()),
+                Value::BigInt(i64::from(tokens_used)),
+                Value::Text(now),
+            ],
+        )?;
+        self.execute_for(
+            DbOperation::Execute,
+            "DELETE FROM primer_cache WHERE workspace_id = ?1 AND db_generation < ?2",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::BigInt(db_generation),
+            ],
+        )?;
+        Ok(())
     }
 
     /// List all anchors attached to one memory in deterministic order.

@@ -22,9 +22,10 @@ use super::file::{
     GraphHealthConfig, GraphHitsConfig, GraphMemoryConfig, GraphPackDnaConfig, GraphPprConfig,
     GraphWitnessesConfig, HandoffConfig, JournalConfig, LearnConfig, LearnDecayConfig,
     MeshCommandMode, MeshConfig, OutputRedactionConfig, PackConfig, PackL2CacheConfig,
-    PolicyConfig, PrivacyConfig, ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig,
-    RuntimeConfig, SearchConfig, SearchLexicalRamTierConfig, SearchSpeed, SecretDetectorConfig,
-    StorageConfig, SwarmAdaptiveConfig, SwarmConfig, TaskLensConfig, TrustConfig,
+    PolicyConfig, PrimerConfig, PrivacyConfig, ReadPoolConfig, RedactionConfig,
+    RedactionDefaultsConfig, RuntimeConfig, SearchConfig, SearchLexicalRamTierConfig, SearchSpeed,
+    SecretDetectorConfig, StorageConfig, SwarmAdaptiveConfig, SwarmConfig, TaskLensConfig,
+    TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -116,6 +117,7 @@ pub const CURATION_DECAY_HALF_LIFE_DAYS_KEY: &str = "curation.decay_half_life_da
 pub const CURATION_SPECIFICITY_MIN_KEY: &str = "curation.specificity_min";
 pub const JOURNAL_ENABLED_KEY: &str = "journal.enabled";
 pub const JOURNAL_RETENTION_DAYS_KEY: &str = "journal.retention_days";
+pub const PRIMER_DEFAULT_TOKENS_KEY: &str = "primer.default_tokens";
 pub const LEARN_DECAY_DEMOTE_THRESHOLD_KEY: &str = "learn.decay.demote_threshold";
 pub const LEARN_DECAY_FORGET_THRESHOLD_KEY: &str = "learn.decay.forget_threshold";
 pub const LEARN_DECAY_WORKING_HALF_LIFE_DAYS_KEY: &str = "learn.decay.working_half_life_days";
@@ -752,6 +754,15 @@ impl MergedConfig {
             ));
         }
 
+        // Primer section
+        if let Some(tokens) = self.values.primer.default_tokens {
+            entries.push(ConfigShowEntry::new(
+                PRIMER_DEFAULT_TOKENS_KEY,
+                tokens.to_string(),
+                self.source(PRIMER_DEFAULT_TOKENS_KEY),
+            ));
+        }
+
         // Learn section
         if let Some(threshold) = self.values.learn.cluster_coherence_threshold {
             entries.push(ConfigShowEntry::new(
@@ -1106,6 +1117,9 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             enabled: Some(true),
             retention_days: Some(14),
         },
+        primer: PrimerConfig {
+            default_tokens: Some(600),
+        },
         learn: LearnConfig {
             cluster_coherence_threshold: Some(0.55),
             decay: LearnDecayConfig {
@@ -1278,6 +1292,7 @@ pub fn config_from_env(
         task_lens: TaskLensConfig::default(),
         curation: CurationConfig::default(),
         journal: JournalConfig::default(),
+        primer: PrimerConfig::default(),
         learn: LearnConfig::default(),
         feedback: FeedbackConfig {
             harmful_per_source_per_hour: optional_env_u64(
@@ -2126,6 +2141,17 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.journal.retention_days,
                 &layers.user.journal.retention_days,
                 &layers.defaults.journal.retention_days,
+            ),
+        },
+        primer: PrimerConfig {
+            default_tokens: pick_field(
+                &mut sources,
+                PRIMER_DEFAULT_TOKENS_KEY,
+                &layers.cli.primer.default_tokens,
+                &layers.environment.primer.default_tokens,
+                &layers.project.primer.default_tokens,
+                &layers.user.primer.default_tokens,
+                &layers.defaults.primer.default_tokens,
             ),
         },
         learn: LearnConfig {

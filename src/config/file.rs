@@ -64,6 +64,7 @@ pub struct ConfigFile {
     pub graph: GraphConfig,
     pub curation: CurationConfig,
     pub journal: JournalConfig,
+    pub primer: PrimerConfig,
     pub learn: LearnConfig,
     pub feedback: FeedbackConfig,
     pub redaction: RedactionConfig,
@@ -121,6 +122,7 @@ impl ConfigFile {
             graph: GraphConfig::parse(&document)?,
             curation: CurationConfig::parse(&document)?,
             journal: JournalConfig::parse(&document)?,
+            primer: PrimerConfig::parse(&document)?,
             learn: LearnConfig::parse(&document)?,
             feedback: FeedbackConfig::parse(&document)?,
             redaction: RedactionConfig::parse(&document)?,
@@ -1025,6 +1027,22 @@ impl JournalConfig {
         Ok(Self {
             enabled: optional_bool(document, "journal", "enabled")?,
             retention_days: optional_u64(document, "journal", "retention_days")?,
+        })
+    }
+}
+
+/// `[primer]` — ADR 0065 workspace primer assembly defaults (bd-39tzu.2).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PrimerConfig {
+    /// Default token budget for `ee primer` when no explicit budget is
+    /// passed; the shipped default is 600.
+    pub default_tokens: Option<u64>,
+}
+
+impl PrimerConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            default_tokens: optional_u64(document, "primer", "default_tokens")?,
         })
     }
 }
