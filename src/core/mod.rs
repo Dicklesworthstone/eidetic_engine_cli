@@ -74,6 +74,7 @@ pub mod index;
 pub mod influence;
 pub mod init;
 pub mod install;
+pub mod journal;
 pub mod jsonl_import;
 pub mod lab;
 pub mod learn;

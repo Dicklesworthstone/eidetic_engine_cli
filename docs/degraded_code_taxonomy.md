@@ -452,6 +452,13 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `remember_auto_link_failed` | low | bd-17c65.7.3 (G3) |
 | `remember_link_suggestion_failed` | low | bd-17c65.7.3 (G3) |
 
+#### Journal capture (3)
+| Code | Severity | Bead |
+|------|----------|------|
+| `journal_disabled` | info | bd-1pi9m.2 — `[journal] enabled = false` config gate; ADR 0062 §7 classifies it build_time/config, but this implementation reads the workspace config per call so the emission varies at response time |
+| `journal_entry_truncated` | info | bd-1pi9m.2 — body/sidecar exceeded caps; deterministic truncation applied |
+| `journal_redaction_applied` | info | bd-1pi9m.2 — secret classes redacted before storage |
+
 #### Feedback (5)
 | Code | Severity | Bead |
 |------|----------|------|

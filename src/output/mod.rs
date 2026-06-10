@@ -9599,7 +9599,18 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             category: "ops",
             definition: preflight_guard_schema_definition,
         },
+        SchemaEntry {
+            id: crate::core::journal::JOURNAL_ENTRY_SCHEMA_V1,
+            version: "1",
+            description: "Append-only, redaction-screened agent journal entry emitted by ee journal append/list/show.",
+            category: "memory",
+            definition: journal_entry_schema_definition,
+        },
     ]
+}
+
+fn journal_entry_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.journal.entry.v1.json").to_string()
 }
 
 /// Render the schema list as JSON (ee.response.v2 envelope).
@@ -11123,6 +11134,26 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
             SubcommandEntry {
                 name: "status",
                 description: "Inspect index health and generation",
+            },
+        ],
+        args: &[],
+    },
+    CommandEntry {
+        name: "journal",
+        description: "Append-only agent observation journal",
+        available: true,
+        subcommands: &[
+            SubcommandEntry {
+                name: "append",
+                description: "Append one observation or a JSONL batch via --stdin",
+            },
+            SubcommandEntry {
+                name: "list",
+                description: "List journal entries newest-first with optional filters",
+            },
+            SubcommandEntry {
+                name: "show",
+                description: "Show one journal entry with structured sidecar",
             },
         ],
         args: &[],

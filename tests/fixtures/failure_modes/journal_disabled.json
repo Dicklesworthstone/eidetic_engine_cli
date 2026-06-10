@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "journal_disabled",
+  "introduced_by": {
+    "bead": "bd-1pi9m.2",
+    "epic_letter": "CAP"
+  },
+  "surfaces": [
+    "journal append",
+    "journal list",
+    "journal show"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "The workspace config sets [journal] enabled = false. Journal surfaces succeed with a clean refusal: no row is read or written, the data payload is empty, and an info-severity journal_disabled degraded entry explains the config gate (ADR 0062 §7).",
+    "setup_commands": [
+      "ee init --workspace .",
+      "printf '[journal]\\nenabled = false\\n' >> .ee/config.toml"
+    ],
+    "invocation": "ee journal append 'observation that will not land' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "journal_disabled",
+    "severity": "info",
+    "message_contains": [
+      "[journal] enabled = false",
+      "no journal rows"
+    ]
+  },
+  "notes": "Capture must not silently drop evidence: the refusal is explicit (status journal_disabled + degraded entry) so a harness hook can detect the gate instead of assuming the entry landed."
+}

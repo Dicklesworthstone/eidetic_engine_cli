@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "journal_redaction_applied",
+  "introduced_by": {
+    "bead": "bd-1pi9m.2",
+    "epic_letter": "CAP"
+  },
+  "surfaces": [
+    "journal append"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "An appended journal body (or structured sidecar field) contains secret-like content. The policy redaction screen runs BEFORE persistence (ADR 0062 §3): the stored entry holds placeholders only, the applied classes and span count land in redaction_report, and an info-severity journal_redaction_applied degraded entry surfaces the rewrite.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee journal append 'deploy failed with API_KEY=sk-ant-api03-FAKEFAKE retry later' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "journal_redaction_applied",
+    "severity": "info",
+    "message_contains": [
+      "secret-like span",
+      "before persistence"
+    ]
+  }
+}

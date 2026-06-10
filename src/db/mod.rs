@@ -6218,6 +6218,39 @@ END;
     "blake3:v073_error_repair_links_2026_06_09",
 );
 
+/// bd-1pi9m.2 / ADR 0062: append-only agent observation journal. Entries
+/// hold redaction-screened raw evidence (failures, surprises, notes) that
+/// distillation (bd-1pi9m.3) later promotes into curation candidates.
+/// Deliberately NO `workspace_generations` triggers: the journal is not in
+/// the search index and must not advance generations (ADR 0062 §2).
+pub const V074_JOURNAL_ENTRIES: Migration = Migration::new(
+    74,
+    "journal_entries",
+    r#"
+CREATE TABLE IF NOT EXISTS journal_entries (
+    entry_id TEXT PRIMARY KEY CHECK (length(trim(entry_id)) > 0),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    agent_name TEXT CHECK (agent_name IS NULL OR length(trim(agent_name)) > 0),
+    session_key TEXT CHECK (session_key IS NULL OR length(trim(session_key)) > 0),
+    kind TEXT NOT NULL CHECK (kind IN ('observation', 'command_failure', 'surprise', 'note')),
+    source TEXT NOT NULL CHECK (source IN ('hook', 'manual', 'stdin')),
+    body TEXT NOT NULL CHECK (length(body) > 0),
+    structured TEXT CHECK (structured IS NULL OR length(trim(structured)) > 0),
+    redaction_report TEXT NOT NULL CHECK (length(trim(redaction_report)) > 0),
+    instruction_risk TEXT NOT NULL CHECK (instruction_risk IN ('none', 'low', 'medium', 'high')),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    distilled_at TEXT CHECK (distilled_at IS NULL OR length(trim(distilled_at)) > 0),
+    tombstoned_at TEXT CHECK (tombstoned_at IS NULL OR length(trim(tombstoned_at)) > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_journal_entries_workspace_created
+    ON journal_entries(workspace_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_journal_entries_workspace_distilled
+    ON journal_entries(workspace_id, distilled_at);
+"#,
+    "blake3:v074_journal_entries_2026_06_10",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -6293,6 +6326,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V071_WORKSPACE_GENERATIONS,
     V072_ERROR_FINGERPRINTS,
     V073_ERROR_REPAIR_LINKS,
+    V074_JOURNAL_ENTRIES,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -12080,6 +12114,74 @@ fn stored_error_repair_link_from_row(row: &Row) -> Result<StoredErrorRepairLink>
     })
 }
 
+/// Input for one persisted journal entry (bd-1pi9m.2 / V074). `body`,
+/// `structured`, and `redaction_report` hold post-redaction content only;
+/// the journal core screens before any byte reaches this layer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateJournalEntryInput {
+    pub entry_id: String,
+    pub workspace_id: String,
+    pub agent_name: Option<String>,
+    pub session_key: Option<String>,
+    pub kind: String,
+    pub source: String,
+    pub body: String,
+    pub structured: Option<String>,
+    pub redaction_report: String,
+    pub instruction_risk: String,
+}
+
+/// A stored `journal_entries` row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredJournalEntry {
+    pub entry_id: String,
+    pub workspace_id: String,
+    pub agent_name: Option<String>,
+    pub session_key: Option<String>,
+    pub kind: String,
+    pub source: String,
+    pub body: String,
+    pub structured: Option<String>,
+    pub redaction_report: String,
+    pub instruction_risk: String,
+    pub created_at: String,
+    pub distilled_at: Option<String>,
+    pub tombstoned_at: Option<String>,
+}
+
+/// Filters for [`DbConnection::list_journal_entries`]. `since` is an
+/// RFC 3339 lower bound on `created_at` (inclusive); `undistilled_only`
+/// keeps rows whose `distilled_at` is still NULL.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct JournalEntryListFilter {
+    pub session_key: Option<String>,
+    pub agent_name: Option<String>,
+    pub since: Option<String>,
+    pub kind: Option<String>,
+    pub undistilled_only: bool,
+    pub limit: u32,
+}
+
+fn stored_journal_entry_from_row(row: &Row) -> Result<StoredJournalEntry> {
+    Ok(StoredJournalEntry {
+        entry_id: required_text(row, 0, DbOperation::Query, "entry_id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        agent_name: optional_text(row, 2)?.map(str::to_string),
+        session_key: optional_text(row, 3)?.map(str::to_string),
+        kind: required_text(row, 4, DbOperation::Query, "kind")?.to_string(),
+        source: required_text(row, 5, DbOperation::Query, "source")?.to_string(),
+        body: required_text(row, 6, DbOperation::Query, "body")?.to_string(),
+        structured: optional_text(row, 7)?.map(str::to_string),
+        redaction_report: required_text(row, 8, DbOperation::Query, "redaction_report")?
+            .to_string(),
+        instruction_risk: required_text(row, 9, DbOperation::Query, "instruction_risk")?
+            .to_string(),
+        created_at: required_text(row, 10, DbOperation::Query, "created_at")?.to_string(),
+        distilled_at: optional_text(row, 11)?.map(str::to_string),
+        tombstoned_at: optional_text(row, 12)?.map(str::to_string),
+    })
+}
+
 impl DbConnection {
     /// Insert a new memory and its tags.
     pub fn insert_memory(&self, id: &str, input: &CreateMemoryInput) -> Result<()> {
@@ -12443,6 +12545,107 @@ impl DbConnection {
             ],
         )?;
         rows.iter().map(stored_error_repair_link_from_row).collect()
+    }
+
+    /// Insert one journal entry (bd-1pi9m.2 / V074). The single INSERT is
+    /// its own implicit transaction, which is what gives the JSONL batch
+    /// surface per-line independent persistence (ADR 0062 §4).
+    pub fn insert_journal_entry(
+        &self,
+        input: &CreateJournalEntryInput,
+    ) -> Result<StoredJournalEntry> {
+        let now = Utc::now().to_rfc3339();
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO journal_entries (entry_id, workspace_id, agent_name, session_key, kind, source, body, structured, redaction_report, instruction_risk, created_at, distilled_at, tombstoned_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, NULL)",
+            &[
+                Value::Text(input.entry_id.clone()),
+                Value::Text(input.workspace_id.clone()),
+                input
+                    .agent_name
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .session_key
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.kind.clone()),
+                Value::Text(input.source.clone()),
+                Value::Text(input.body.clone()),
+                input
+                    .structured
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.redaction_report.clone()),
+                Value::Text(input.instruction_risk.clone()),
+                Value::Text(now.clone()),
+            ],
+        )?;
+        Ok(StoredJournalEntry {
+            entry_id: input.entry_id.clone(),
+            workspace_id: input.workspace_id.clone(),
+            agent_name: input.agent_name.clone(),
+            session_key: input.session_key.clone(),
+            kind: input.kind.clone(),
+            source: input.source.clone(),
+            body: input.body.clone(),
+            structured: input.structured.clone(),
+            redaction_report: input.redaction_report.clone(),
+            instruction_risk: input.instruction_risk.clone(),
+            created_at: now,
+            distilled_at: None,
+            tombstoned_at: None,
+        })
+    }
+
+    /// List journal entries for one workspace, newest first with a
+    /// deterministic tiebreak (ADR 0062 §2).
+    pub fn list_journal_entries(
+        &self,
+        workspace_id: &str,
+        filter: &JournalEntryListFilter,
+    ) -> Result<Vec<StoredJournalEntry>> {
+        let mut sql = String::from(
+            "SELECT entry_id, workspace_id, agent_name, session_key, kind, source, body, structured, redaction_report, instruction_risk, created_at, distilled_at, tombstoned_at FROM journal_entries WHERE workspace_id = ?1",
+        );
+        let mut params: Vec<Value> = vec![Value::Text(workspace_id.to_string())];
+        if let Some(session_key) = filter.session_key.as_deref() {
+            params.push(Value::Text(session_key.to_string()));
+            sql.push_str(&format!(" AND session_key = ?{}", params.len()));
+        }
+        if let Some(agent_name) = filter.agent_name.as_deref() {
+            params.push(Value::Text(agent_name.to_string()));
+            sql.push_str(&format!(" AND agent_name = ?{}", params.len()));
+        }
+        if let Some(since) = filter.since.as_deref() {
+            params.push(Value::Text(since.to_string()));
+            sql.push_str(&format!(" AND created_at >= ?{}", params.len()));
+        }
+        if let Some(kind) = filter.kind.as_deref() {
+            params.push(Value::Text(kind.to_string()));
+            sql.push_str(&format!(" AND kind = ?{}", params.len()));
+        }
+        if filter.undistilled_only {
+            sql.push_str(" AND distilled_at IS NULL");
+        }
+        params.push(Value::BigInt(i64::from(filter.limit)));
+        sql.push_str(&format!(
+            " ORDER BY created_at DESC, entry_id DESC LIMIT ?{}",
+            params.len()
+        ));
+
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter().map(stored_journal_entry_from_row).collect()
+    }
+
+    /// Get one journal entry by id.
+    pub fn get_journal_entry(&self, entry_id: &str) -> Result<Option<StoredJournalEntry>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT entry_id, workspace_id, agent_name, session_key, kind, source, body, structured, redaction_report, instruction_risk, created_at, distilled_at, tombstoned_at FROM journal_entries WHERE entry_id = ?1 ORDER BY entry_id ASC LIMIT 1",
+            &[Value::Text(entry_id.to_string())],
+        )?;
+        rows.first().map(stored_journal_entry_from_row).transpose()
     }
 
     /// Get a memory by ID.
@@ -23426,6 +23629,10 @@ mod tests {
         ensure(
             table_names.contains(&"error_repair_links"),
             "error_repair_links table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"journal_entries"),
+            "journal_entries table must exist",
         )?;
         ensure(
             table_names.contains(&"sessions"),

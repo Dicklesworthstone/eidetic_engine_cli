@@ -1,0 +1,27 @@
+---
+source: src/core/journal.rs, src/cli/mod.rs
+assertion: append-only agent observation journal captures redaction-screened evidence (ADR 0062 / bd-1pi9m.2)
+schema:
+  entry: ee.journal.entry.v1
+  envelope: ee.response.v2
+contracts:
+  - journal append screens body AND every structured string field BEFORE persistence; raw secrets never reach the DB file
+  - oversize bodies truncate deterministically at the last char boundary at or below 16 KiB and emit journal_entry_truncated (info); truncation never errors
+  - structured sidecar caps are per-field usage errors (cmd 2 KiB, cwd 1 KiB, stderr_tail 2 KiB, paths 16 x 1 KiB, serialized total 8 KiB)
+  - journal append --stdin persists each JSONL line independently (own transaction); one poisoned line cannot roll back a session flush
+  - --stdin batches cap at 512 lines; exit 0 when >=1 line lands, exit 5 when all lines fail, usage errors exit 1
+  - default kind is note, or command_failure when --cmd/--exit-code are present; default source is manual (hook passes --source hook, batch lines are stdin)
+  - agent_name attribution comes from EE_AGENT_NAME via memory_scope::current_agent_name
+  - "[journal] enabled = false" refuses cleanly: success envelope, no row written, journal_disabled (info) degraded entry
+  - journal list filters --session/--agent/--since/--kind/--undistilled and orders newest-first with a deterministic entry_id tiebreak
+  - journal entries are NOT in the search index and never advance workspace_generations (ADR 0062 section 2)
+degraded_codes:
+  - journal_disabled
+  - journal_entry_truncated
+  - journal_redaction_applied
+evidence:
+  - journal_entries.entry_id
+  - journal_entries.redaction_report
+  - journal_entries.instruction_risk
+  - journal_entries.distilled_at
+  - V074_JOURNAL_ENTRIES

@@ -1,0 +1,136 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/ee.journal.entry.v1.json",
+  "title": "ee.journal.entry.v1",
+  "description": "One append-only, redaction-screened agent journal entry (ADR 0062 Appendix A). Emitted under data.entry by `ee journal append`/`ee journal show` and under data.entries[] by `ee journal list`. body, structured, and redactionReport hold post-redaction content only; secrets never reach disk.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "entryId",
+    "workspaceId",
+    "agentName",
+    "sessionKey",
+    "kind",
+    "source",
+    "body",
+    "structured",
+    "redactionReport",
+    "instructionRisk",
+    "createdAt",
+    "distilledAt",
+    "tombstonedAt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.journal.entry.v1"
+    },
+    "entryId": {
+      "type": "string",
+      "pattern": "^jrn_[0-9a-fA-F-]{36}$",
+      "description": "UUIDv7 entry id with the jrn_ prefix; time-ordered within a process."
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agentName": {
+      "type": ["string", "null"],
+      "description": "EE_AGENT_NAME at append time; null when unset."
+    },
+    "sessionKey": {
+      "type": ["string", "null"],
+      "maxLength": 128,
+      "description": "Free-form harness session/run identifier (<= 128 bytes) for scoped distillation."
+    },
+    "kind": {
+      "enum": ["observation", "command_failure", "surprise", "note"]
+    },
+    "source": {
+      "enum": ["hook", "manual", "stdin"]
+    },
+    "body": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Redacted observation text; hard cap 16 KiB post-truncation (truncation is deterministic at the last char boundary at or below the cap and reported via the journal_entry_truncated degraded code)."
+    },
+    "structured": {
+      "description": "Bounded machine-field sidecar; null when no machine fields were supplied. Serialized total <= 8 KiB.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cmd": {
+              "type": ["string", "null"],
+              "description": "Failing command line (<= 2 KiB)."
+            },
+            "exitCode": {
+              "type": ["integer", "null"]
+            },
+            "cwd": {
+              "type": ["string", "null"],
+              "description": "Working directory (<= 1 KiB)."
+            },
+            "paths": {
+              "description": "Touched paths (<= 16 entries x 1 KiB each).",
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": { "type": "string" }
+                }
+              ]
+            },
+            "stderrTail": {
+              "type": ["string", "null"],
+              "description": "Trailing stderr excerpt (<= 2 KiB)."
+            }
+          }
+        }
+      ]
+    },
+    "redactionReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classesApplied", "spanCount"],
+      "properties": {
+        "classesApplied": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Sorted, deduplicated redaction class names applied at write time."
+        },
+        "spanCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total secret-like spans replaced across body and structured fields."
+        }
+      }
+    },
+    "instructionRisk": {
+      "enum": ["none", "low", "medium", "high"],
+      "description": "Policy-screen instruction-likeness grade; entries at or above the configured exclusion grade are skipped by distillation, never blocked at capture."
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "distilledAt": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "Set by `ee journal distill --apply` (bd-1pi9m.3 idempotency guard)."
+    },
+    "tombstonedAt": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "Set by retention phase 1 (bd-1pi9m.5); never set by this surface."
+    }
+  },
+  "x-ee-status": {
+    "shipped": true,
+    "available_in_build": true,
+    "tracking_bead": "bd-1pi9m.2"
+  }
+}

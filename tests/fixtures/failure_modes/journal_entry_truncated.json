@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "journal_entry_truncated",
+  "introduced_by": {
+    "bead": "bd-1pi9m.2",
+    "epic_letter": "CAP"
+  },
+  "surfaces": [
+    "journal append"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "An appended journal body exceeds the 16 KiB hard cap. The body is truncated deterministically at the last char boundary at or below the cap, the entry still lands, and an info-severity journal_entry_truncated degraded entry reports the stored/raw byte counts (ADR 0062 §1: truncation never errors).",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee journal append \"$(head -c 17000 /dev/zero | tr '\\0' 'a')\" --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "journal_entry_truncated",
+    "severity": "info",
+    "message_contains": [
+      "truncated deterministically",
+      "char boundary"
+    ]
+  }
+}

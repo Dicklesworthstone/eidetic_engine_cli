@@ -1256,6 +1256,10 @@ impl EffectManifest {
             ),
             CommandEffect::read_only_db("diag pack-latest", "Inspect latest pack diagnostics"),
             CommandEffect::read_only_db("diag pack-record", "Inspect pack-record diagnostics"),
+            CommandEffect::read_only(
+                "diag resource-admission",
+                "Preview a resource admission decision from explicit inputs",
+            ),
             CommandEffect::read_only_db("diag plan-cache", "Inspect plan-cache diagnostics"),
             CommandEffect::read_only_db("diag quarantine list", "List quarantine entries"),
             CommandEffect::read_only_db("diag quarantine show", "Show single quarantine entry"),
@@ -1377,6 +1381,14 @@ impl EffectManifest {
             CommandEffect::read_only(
                 "lab promote-workload",
                 "Preview workload promotion and admission without persisting it",
+            ),
+            CommandEffect::read_only_db(
+                "journal list",
+                "List append-only journal entries newest-first",
+            ),
+            CommandEffect::read_only_db(
+                "journal show",
+                "Show one journal entry with structured sidecar and redaction report",
             ),
             CommandEffect::read_only_db(
                 "learn agenda",
@@ -1981,6 +1993,11 @@ impl EffectManifest {
                     "audit_log",
                 ],
                 "Import portable playbook rules through audited procedural-rule writes",
+            ),
+            CommandEffect::durable_write(
+                "journal append",
+                vec!["journal_entries"],
+                "Append a redaction-screened observation to the agent journal",
             ),
             CommandEffect::durable_write(
                 "learn close",

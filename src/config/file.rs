@@ -63,6 +63,7 @@ pub struct ConfigFile {
     pub swarm: SwarmConfig,
     pub graph: GraphConfig,
     pub curation: CurationConfig,
+    pub journal: JournalConfig,
     pub learn: LearnConfig,
     pub feedback: FeedbackConfig,
     pub redaction: RedactionConfig,
@@ -119,6 +120,7 @@ impl ConfigFile {
             swarm: SwarmConfig::parse(&document)?,
             graph: GraphConfig::parse(&document)?,
             curation: CurationConfig::parse(&document)?,
+            journal: JournalConfig::parse(&document)?,
             learn: LearnConfig::parse(&document)?,
             feedback: FeedbackConfig::parse(&document)?,
             redaction: RedactionConfig::parse(&document)?,
@@ -1005,6 +1007,24 @@ impl CurationConfig {
             harmful_weight: optional_nonnegative_float(document, "curation", "harmful_weight")?,
             decay_half_life_days: optional_u64(document, "curation", "decay_half_life_days")?,
             specificity_min: optional_unit_float(document, "curation", "specificity_min")?,
+        })
+    }
+}
+
+/// `[journal]` capture settings (ADR 0062 §5 / bd-1pi9m.2). Defaults when
+/// absent: `enabled = true`, `retention_days = 14`. Retention enforcement
+/// itself is the `journal-retention` steward job (bd-1pi9m.5).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct JournalConfig {
+    pub enabled: Option<bool>,
+    pub retention_days: Option<u64>,
+}
+
+impl JournalConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            enabled: optional_bool(document, "journal", "enabled")?,
+            retention_days: optional_u64(document, "journal", "retention_days")?,
         })
     }
 }

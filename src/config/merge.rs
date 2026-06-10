@@ -20,11 +20,11 @@ use super::file::{
     CacheConfig, CassConfig, ConfigFile, CurationConfig, FeedbackConfig, GraphCausalConfig,
     GraphConfig, GraphCurateConfig, GraphFeatureFlagsConfig, GraphGomoryHuConfig,
     GraphHealthConfig, GraphHitsConfig, GraphMemoryConfig, GraphPackDnaConfig, GraphPprConfig,
-    GraphWitnessesConfig, HandoffConfig, LearnConfig, LearnDecayConfig, MeshCommandMode,
-    MeshConfig, OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig, PrivacyConfig,
-    ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig, RuntimeConfig, SearchConfig,
-    SearchLexicalRamTierConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
-    SwarmAdaptiveConfig, SwarmConfig, TaskLensConfig, TrustConfig,
+    GraphWitnessesConfig, HandoffConfig, JournalConfig, LearnConfig, LearnDecayConfig,
+    MeshCommandMode, MeshConfig, OutputRedactionConfig, PackConfig, PackL2CacheConfig,
+    PolicyConfig, PrivacyConfig, ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig,
+    RuntimeConfig, SearchConfig, SearchLexicalRamTierConfig, SearchSpeed, SecretDetectorConfig,
+    StorageConfig, SwarmAdaptiveConfig, SwarmConfig, TaskLensConfig, TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -114,6 +114,8 @@ pub const CURATION_DUPLICATE_SIMILARITY_KEY: &str = "curation.duplicate_similari
 pub const CURATION_HARMFUL_WEIGHT_KEY: &str = "curation.harmful_weight";
 pub const CURATION_DECAY_HALF_LIFE_DAYS_KEY: &str = "curation.decay_half_life_days";
 pub const CURATION_SPECIFICITY_MIN_KEY: &str = "curation.specificity_min";
+pub const JOURNAL_ENABLED_KEY: &str = "journal.enabled";
+pub const JOURNAL_RETENTION_DAYS_KEY: &str = "journal.retention_days";
 pub const LEARN_DECAY_DEMOTE_THRESHOLD_KEY: &str = "learn.decay.demote_threshold";
 pub const LEARN_DECAY_FORGET_THRESHOLD_KEY: &str = "learn.decay.forget_threshold";
 pub const LEARN_DECAY_WORKING_HALF_LIFE_DAYS_KEY: &str = "learn.decay.working_half_life_days";
@@ -734,6 +736,22 @@ impl MergedConfig {
             ));
         }
 
+        // Journal section
+        if let Some(enabled) = self.values.journal.enabled {
+            entries.push(ConfigShowEntry::new(
+                JOURNAL_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(JOURNAL_ENABLED_KEY),
+            ));
+        }
+        if let Some(days) = self.values.journal.retention_days {
+            entries.push(ConfigShowEntry::new(
+                JOURNAL_RETENTION_DAYS_KEY,
+                days.to_string(),
+                self.source(JOURNAL_RETENTION_DAYS_KEY),
+            ));
+        }
+
         // Learn section
         if let Some(threshold) = self.values.learn.cluster_coherence_threshold {
             entries.push(ConfigShowEntry::new(
@@ -1084,6 +1102,10 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             decay_half_life_days: Some(60),
             specificity_min: Some(0.45),
         },
+        journal: JournalConfig {
+            enabled: Some(true),
+            retention_days: Some(14),
+        },
         learn: LearnConfig {
             cluster_coherence_threshold: Some(0.55),
             decay: LearnDecayConfig {
@@ -1255,6 +1277,7 @@ pub fn config_from_env(
         },
         task_lens: TaskLensConfig::default(),
         curation: CurationConfig::default(),
+        journal: JournalConfig::default(),
         learn: LearnConfig::default(),
         feedback: FeedbackConfig {
             harmful_per_source_per_hour: optional_env_u64(
@@ -2083,6 +2106,26 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.curation.specificity_min,
                 &layers.user.curation.specificity_min,
                 &layers.defaults.curation.specificity_min,
+            ),
+        },
+        journal: JournalConfig {
+            enabled: pick_field(
+                &mut sources,
+                JOURNAL_ENABLED_KEY,
+                &layers.cli.journal.enabled,
+                &layers.environment.journal.enabled,
+                &layers.project.journal.enabled,
+                &layers.user.journal.enabled,
+                &layers.defaults.journal.enabled,
+            ),
+            retention_days: pick_field(
+                &mut sources,
+                JOURNAL_RETENTION_DAYS_KEY,
+                &layers.cli.journal.retention_days,
+                &layers.environment.journal.retention_days,
+                &layers.project.journal.retention_days,
+                &layers.user.journal.retention_days,
+                &layers.defaults.journal.retention_days,
             ),
         },
         learn: LearnConfig {

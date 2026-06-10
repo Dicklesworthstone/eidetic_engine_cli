@@ -350,7 +350,7 @@ const HELP_PRELUDE: &str = concat!(
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
     "  Inspect:        status, doctor, capabilities, insights, impact, lens, why-not, memory show, memory history\n",
-    "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome\n",
+    "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome, journal\n",
     "  Curate:         curate (candidates|validate|apply), reflect, playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
     "  Maintenance:    maintenance, job, index, steward, daemon\n",
@@ -832,6 +832,9 @@ pub enum Command {
     /// Manage search indexes.
     #[command(subcommand)]
     Index(IndexCommand),
+    /// Append-only agent observation journal (append, list, show).
+    #[command(subcommand)]
+    Journal(JournalCommand),
     /// Counterfactual memory lab: capture, replay, and counterfactual task episodes.
     #[command(subcommand)]
     Lab(LabCommand),
@@ -5334,6 +5337,112 @@ pub struct LabCounterfactualArgs {
     /// Report the counterfactual plan without executing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Subcommands for `ee journal` (ADR 0062 / bd-1pi9m.2).
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum JournalCommand {
+    /// Append one observation, or a JSONL batch via --stdin.
+    Append(JournalAppendArgs),
+    /// List journal entries newest-first with optional filters.
+    List(JournalListArgs),
+    /// Show one journal entry (full record incl. structured sidecar).
+    Show(JournalShowArgs),
+}
+
+/// Arguments for `ee journal append`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct JournalAppendArgs {
+    /// Observation text. Required unless --stdin is given.
+    #[arg(value_name = "TEXT")]
+    pub text: Option<String>,
+
+    /// Entry kind: observation, command_failure, surprise, or note.
+    /// Defaults to command_failure when --cmd/--exit-code are given,
+    /// note otherwise.
+    #[arg(long)]
+    pub kind: Option<String>,
+
+    /// Append source: hook, manual, or stdin. The harness hook passes
+    /// --source hook; defaults to manual.
+    #[arg(long)]
+    pub source: Option<String>,
+
+    /// Failing command line for the structured sidecar.
+    #[arg(long, value_name = "COMMAND")]
+    pub cmd: Option<String>,
+
+    /// Exit code of the failing command.
+    #[arg(long, value_name = "N")]
+    pub exit_code: Option<i64>,
+
+    /// Working directory of the failing command.
+    #[arg(long, value_name = "PATH")]
+    pub cwd: Option<String>,
+
+    /// Touched path for the structured sidecar; repeatable up to 16 times.
+    #[arg(long = "path", value_name = "PATH")]
+    pub paths: Vec<String>,
+
+    /// Trailing stderr excerpt for the structured sidecar.
+    #[arg(long, value_name = "TEXT")]
+    pub stderr_tail: Option<String>,
+
+    /// Session or run key for later scoped distillation.
+    #[arg(long, value_name = "KEY")]
+    pub session: Option<String>,
+
+    /// Read a JSONL batch (one entry object per line) from stdin.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub stdin: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee journal list`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct JournalListArgs {
+    /// Filter by session key.
+    #[arg(long, value_name = "KEY")]
+    pub session: Option<String>,
+
+    /// Filter by agent name.
+    #[arg(long, value_name = "AGENT")]
+    pub agent: Option<String>,
+
+    /// Only entries created at or after this RFC 3339 timestamp.
+    #[arg(long, value_name = "RFC3339")]
+    pub since: Option<String>,
+
+    /// Filter by entry kind.
+    #[arg(long, value_name = "KIND")]
+    pub kind: Option<String>,
+
+    /// Only entries not yet consumed by distillation.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub undistilled: bool,
+
+    /// Maximum entries to show.
+    #[arg(long, short = 'n', default_value_t = 50)]
+    pub limit: u32,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee journal show`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct JournalShowArgs {
+    /// Journal entry id (jrn_...).
+    #[arg(value_name = "ENTRY_ID")]
+    pub entry_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Subcommands for `ee learn`.
@@ -12146,6 +12255,15 @@ where
         }
         Some(Command::Index(IndexCommand::Vacuum(ref args))) => {
             handle_index_vacuum(&cli, args, stdout, stderr)
+        }
+        Some(Command::Journal(JournalCommand::Append(ref args))) => {
+            handle_journal_append(&cli, args, stdout, stderr)
+        }
+        Some(Command::Journal(JournalCommand::List(ref args))) => {
+            handle_journal_list(&cli, args, stdout, stderr)
+        }
+        Some(Command::Journal(JournalCommand::Show(ref args))) => {
+            handle_journal_show(&cli, args, stdout, stderr)
         }
         Some(Command::Lab(LabCommand::Capture(ref args))) => {
             handle_lab_capture(&cli, args, stdout, stderr)
@@ -38876,6 +38994,274 @@ where
     }
 }
 
+fn journal_append_options<'a>(
+    workspace_path: &'a Path,
+    database: Option<&'a Path>,
+    source: crate::core::journal::JournalSource,
+) -> crate::core::journal::JournalAppendOptions<'a> {
+    crate::core::journal::JournalAppendOptions {
+        workspace_path,
+        database_path: database,
+        agent_name: crate::core::memory_scope::current_agent_name(),
+        source,
+    }
+}
+
+fn write_journal_data_json<W>(stdout: &mut W, data: &serde_json::Value) -> ProcessExitCode
+where
+    W: Write,
+{
+    let json = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+    });
+    write_stdout(stdout, &(json.to_string() + "\n"))
+}
+
+fn handle_journal_append<W, E>(
+    cli: &Cli,
+    args: &JournalAppendArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::journal::{
+        JournalEntryDraft, JournalSource, append_journal_entries_stdin, append_journal_entry,
+    };
+
+    let workspace_path = cli.resolve_workspace();
+    let source = match args.source.as_deref() {
+        None => {
+            if args.stdin {
+                JournalSource::Stdin
+            } else {
+                JournalSource::Manual
+            }
+        }
+        Some(raw) => match JournalSource::parse(raw) {
+            Some(source) => source,
+            None => {
+                let error = DomainError::Usage {
+                    message: format!(
+                        "unknown journal source `{raw}`; expected hook, manual, or stdin"
+                    ),
+                    repair: Some("ee journal append --help".to_owned()),
+                };
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+        },
+    };
+    let options = journal_append_options(&workspace_path, args.database.as_deref(), source);
+
+    if args.stdin {
+        if args.text.is_some() {
+            let error = DomainError::Usage {
+                message: "pass either positional TEXT or --stdin, not both".to_owned(),
+                repair: Some("ee journal append --help".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        // Reading stdin would block forever if no input is piped; refuse on
+        // an interactive TTY (same guard as `ee preflight check --stdin`).
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            let error = DomainError::Usage {
+                message: "--stdin was given but stdin is a terminal; pipe the JSONL batch"
+                    .to_owned(),
+                repair: Some(
+                    "printf '%s\\n' '{\"body\":\"...\"}' | ee journal append --stdin --json"
+                        .to_owned(),
+                ),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        let mut input = String::new();
+        if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input)
+        {
+            let error = DomainError::Usage {
+                message: format!("failed to read JSONL batch from stdin: {error}"),
+                repair: Some("pipe UTF-8 JSONL, one entry object per line".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        return match append_journal_entries_stdin(&options, &input) {
+            Ok(report) if report.all_failed() => {
+                // ADR 0062 §4: exit 5 when every line failed. The per-line
+                // results ride in the error envelope details.
+                let details = serde_json::json!({ "results": report.results_json() });
+                let error = DomainError::ImportWithDetails {
+                    message: format!(
+                        "journal append --stdin stored 0 of {} lines",
+                        report.line_count
+                    ),
+                    repair: Some(
+                        "fix the per-line errors in details.results and re-pipe the failed lines"
+                            .to_owned(),
+                    ),
+                    details_json: details.to_string(),
+                };
+                write_domain_error(&error, cli.wants_json(), stdout, stderr)
+            }
+            Ok(report) => match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &report.human_summary())
+                }
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &(output::render_toon_from_json(
+                        &serde_json::json!({
+                            "schema": crate::models::RESPONSE_SCHEMA_V2,
+                            "success": true,
+                            "data": report.data_json(),
+                        })
+                        .to_string(),
+                    ) + "\n"),
+                ),
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => write_journal_data_json(stdout, &report.data_json()),
+            },
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    }
+
+    let Some(text) = args.text.as_deref() else {
+        let error = DomainError::Usage {
+            message: "journal append requires positional TEXT (or --stdin for a JSONL batch)"
+                .to_owned(),
+            repair: Some("ee journal append \"<text>\" --json".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    };
+    let draft = JournalEntryDraft {
+        body: text.to_owned(),
+        kind: args.kind.clone(),
+        session_key: args.session.clone(),
+        cmd: args.cmd.clone(),
+        exit_code: args.exit_code,
+        cwd: args.cwd.clone(),
+        paths: args.paths.clone(),
+        stderr_tail: args.stderr_tail.clone(),
+    };
+
+    match append_journal_entry(&options, &draft) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(
+                    &serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
+                        "success": true,
+                        "data": report.data_json(),
+                    })
+                    .to_string(),
+                ) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_journal_data_json(stdout, &report.data_json()),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_journal_list<W, E>(
+    cli: &Cli,
+    args: &JournalListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let options = crate::core::journal::JournalListOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        session_key: args.session.clone(),
+        agent_name: args.agent.clone(),
+        since: args.since.clone(),
+        kind: args.kind.clone(),
+        undistilled_only: args.undistilled,
+        limit: args.limit,
+    };
+
+    match crate::core::journal::list_journal_entries(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(
+                    &serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
+                        "success": true,
+                        "data": report.data_json(),
+                    })
+                    .to_string(),
+                ) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_journal_data_json(stdout, &report.data_json()),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_journal_show<W, E>(
+    cli: &Cli,
+    args: &JournalShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let options = crate::core::journal::JournalShowOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        entry_id: &args.entry_id,
+    };
+
+    match crate::core::journal::show_journal_entry(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(
+                    &serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
+                        "success": true,
+                        "data": report.data_json(),
+                    })
+                    .to_string(),
+                ) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_journal_data_json(stdout, &report.data_json()),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn handle_outcome_quarantine_list<W, E>(
     cli: &Cli,
     args: &OutcomeQuarantineListArgs,
@@ -53700,6 +54086,11 @@ impl NormalizedInvocation {
                     IndexCommand::Vacuum(_) => "index vacuum".to_string(),
                 },
                 Command::Introspect => "introspect".to_string(),
+                Command::Journal(journal) => match journal {
+                    JournalCommand::Append(_) => "journal append".to_string(),
+                    JournalCommand::List(_) => "journal list".to_string(),
+                    JournalCommand::Show(_) => "journal show".to_string(),
+                },
                 Command::Lab(lab) => match lab {
                     LabCommand::Capture(_) => "lab capture".to_string(),
                     LabCommand::Replay(_) => "lab replay".to_string(),
