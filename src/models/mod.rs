@@ -179,9 +179,9 @@ pub use memory::{
     canonicalize_typed_memory_fields_json, canonicalize_typed_memory_fields_json_with_redactor,
 };
 pub use memory_anchor::{
-    CreateMemoryAnchorInput, MEMORY_ANCHOR_SCHEMA_V1, MemoryAnchorFreshnessState, MemoryAnchorKind,
-    MemoryAnchorSource, StoredMemoryAnchor, extract_precision_memory_anchors,
-    memory_anchor_value_hash,
+    CreateMemoryAnchorInput, ExtractedAnchorSurface, MEMORY_ANCHOR_SCHEMA_V1,
+    MemoryAnchorFreshnessState, MemoryAnchorKind, MemoryAnchorSource, StoredMemoryAnchor,
+    extract_memory_anchor_surfaces, extract_precision_memory_anchors, memory_anchor_value_hash,
 };
 pub use memory_sentinel::{
     CreateMemorySentinelSpecInput, MAX_MEMORY_SENTINEL_EVIDENCE_BYTES,

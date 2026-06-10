@@ -28,8 +28,9 @@ use crate::models::{
     RationaleTraceVisibility, RedactionStatus, validate_rationale_summary,
 };
 use crate::models::{
-    CreateMemoryAnchorInput, MemoryAnchorFreshnessState, MemoryAnchorKind, MemoryAnchorSource,
-    StoredMemoryAnchor, extract_precision_memory_anchors,
+    CreateMemoryAnchorInput, ExtractedAnchorSurface, MemoryAnchorFreshnessState, MemoryAnchorKind,
+    MemoryAnchorSource, StoredMemoryAnchor, extract_memory_anchor_surfaces,
+    extract_precision_memory_anchors,
 };
 use crate::models::{MemoryKind, MemoryValidationError, canonicalize_typed_memory_fields_json};
 use crate::models::{
@@ -6281,6 +6282,55 @@ CREATE INDEX IF NOT EXISTS idx_remember_idempotency_keys_memory
     "blake3:v075_remember_idempotency_keys_2026_06_10",
 );
 
+/// V076: ADR 0064 derived anchor reverse index for code-anchored recall
+/// (bd-u875s.2). A derived, rebuildable asset — never a second source of
+/// truth: rows are rewritten from the shared extraction walk on memory
+/// create and on `ee index rebuild`. Stores the normalized value only for
+/// `path`/`symbol` anchors (workspace-relative repo paths and code
+/// identifiers; the CHECK constraints refuse absolute or traversal paths).
+/// Intentionally NO workspace_generations triggers: derived-table writes
+/// must not advance the generation they are compared against.
+pub const V076_MEMORY_ANCHOR_INDEX: Migration = Migration::new(
+    76,
+    "memory_anchor_index",
+    r#"
+CREATE TABLE IF NOT EXISTS memory_anchor_index (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    anchor_kind TEXT NOT NULL CHECK (anchor_kind IN ('path', 'symbol')),
+    anchor_value_hash TEXT NOT NULL CHECK (
+        length(anchor_value_hash) = 71 AND substr(anchor_value_hash, 1, 7) = 'blake3:'
+    ),
+    normalized_path TEXT CHECK (
+        normalized_path IS NULL OR (
+            length(trim(normalized_path)) > 0
+            AND substr(normalized_path, 1, 1) != '/'
+            AND normalized_path NOT GLOB '*..*'
+        )
+    ),
+    symbol TEXT CHECK (symbol IS NULL OR length(trim(symbol)) > 0),
+    freshness_state TEXT NOT NULL DEFAULT 'current' CHECK (
+        freshness_state IN ('current', 'suspect', 'stale')
+    ),
+    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    CHECK (
+        (anchor_kind = 'path' AND normalized_path IS NOT NULL AND symbol IS NULL)
+        OR (anchor_kind = 'symbol' AND symbol IS NOT NULL AND normalized_path IS NULL)
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS memory_anchor_index_identity_unique
+    ON memory_anchor_index(memory_id, anchor_kind, anchor_value_hash);
+CREATE INDEX IF NOT EXISTS memory_anchor_index_path_lookup
+    ON memory_anchor_index(workspace_id, normalized_path);
+CREATE INDEX IF NOT EXISTS memory_anchor_index_symbol_lookup
+    ON memory_anchor_index(workspace_id, symbol);
+"#,
+    "blake3:v076_memory_anchor_index_2026_06_10",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -6358,6 +6408,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V073_ERROR_REPAIR_LINKS,
     V074_JOURNAL_ENTRIES,
     V075_REMEMBER_IDEMPOTENCY_KEYS,
+    V076_MEMORY_ANCHOR_INDEX,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -12012,6 +12063,52 @@ fn stored_memory_anchor_from_row(row: &Row) -> Result<StoredMemoryAnchor> {
     })
 }
 
+/// Shared SELECT head for reverse-index candidate queries (ADR 0064).
+const ANCHOR_INDEX_CANDIDATE_SELECT: &str = "SELECT i.memory_id, i.anchor_kind, i.normalized_path, i.symbol, i.freshness_state, a.freshness_state, i.generation, m.level, m.kind, m.confidence, m.content, m.tombstoned_at, m.provenance_uri FROM memory_anchor_index i JOIN memories m ON m.id = i.memory_id LEFT JOIN memory_anchors a ON a.memory_id = i.memory_id AND a.anchor_kind = i.anchor_kind AND a.anchor_value_hash = i.anchor_value_hash";
+
+/// One ADR 0064 reverse-index candidate joined with its owning memory's
+/// ranking fields. Consumed by `core::recall::run_recall`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredAnchorIndexCandidate {
+    pub memory_id: String,
+    pub anchor_kind: MemoryAnchorKind,
+    pub normalized_path: Option<String>,
+    pub symbol: Option<String>,
+    pub freshness_state: MemoryAnchorFreshnessState,
+    pub generation: i64,
+    pub level: String,
+    pub kind: String,
+    pub confidence: f32,
+    pub content: String,
+    pub tombstoned: bool,
+    pub provenance_uri: Option<String>,
+}
+
+fn stored_anchor_index_candidate_from_row(row: &Row) -> Result<StoredAnchorIndexCandidate> {
+    let anchor_kind =
+        parse_memory_anchor_kind(required_text(row, 1, DbOperation::Query, "anchor_kind")?)?;
+    // Authoritative freshness lives on memory_anchors (drift transitions
+    // update it); the index column is the write-time snapshot fallback.
+    let snapshot_freshness = required_text(row, 4, DbOperation::Query, "freshness_state")?;
+    let authoritative_freshness = optional_text(row, 5)?;
+    let freshness_state =
+        parse_memory_anchor_freshness(authoritative_freshness.unwrap_or(snapshot_freshness))?;
+    Ok(StoredAnchorIndexCandidate {
+        memory_id: required_text(row, 0, DbOperation::Query, "memory_id")?.to_string(),
+        anchor_kind,
+        normalized_path: optional_text(row, 2)?.map(str::to_string),
+        symbol: optional_text(row, 3)?.map(str::to_string),
+        freshness_state,
+        generation: required_i64(row, 6, DbOperation::Query, "generation")?,
+        level: required_text(row, 7, DbOperation::Query, "level")?.to_string(),
+        kind: required_text(row, 8, DbOperation::Query, "kind")?.to_string(),
+        confidence: required_f32(row, 9, DbOperation::Query, "confidence")?,
+        content: required_text(row, 10, DbOperation::Query, "content")?.to_string(),
+        tombstoned: optional_text(row, 11)?.is_some(),
+        provenance_uri: optional_text(row, 12)?.map(str::to_string),
+    })
+}
+
 fn stored_memory_sentinel_spec_from_row(row: &Row) -> Result<StoredMemorySentinelSpec> {
     let sentinel_kind =
         parse_memory_sentinel_kind(required_text(row, 2, DbOperation::Query, "sentinel_kind")?)?;
@@ -12328,14 +12425,21 @@ impl DbConnection {
             )?;
         }
 
-        let anchors = extract_precision_memory_anchors(
+        let surfaces = extract_memory_anchor_surfaces(
             id,
             &input.content,
             memory_anchor_source_for_insert(input),
             input.provenance_uri.as_deref(),
         );
-        if !anchors.is_empty() {
+        if !surfaces.is_empty() {
+            let anchors: Vec<CreateMemoryAnchorInput> = surfaces
+                .iter()
+                .map(|surface| surface.anchor.clone())
+                .collect();
             self.upsert_memory_anchors(&anchors)?;
+            // ADR 0064: the derived reverse index rides the same extraction
+            // walk so it can never drift from the search-document anchors.
+            self.upsert_memory_anchor_index_surfaces(&input.workspace_id, &surfaces)?;
         }
 
         Ok(())
@@ -12378,6 +12482,153 @@ impl DbConnection {
             Some("index_rebuild"),
         );
         self.upsert_memory_anchors(&anchors)
+    }
+
+    /// Rebuild the ADR 0064 reverse-index rows for one memory from the shared
+    /// extraction walk (bd-u875s.2). Rows are replaced wholesale so anchors
+    /// that disappeared from the content do not linger. Only `path`/`symbol`
+    /// anchors are indexed; rows are stamped with the current workspace
+    /// generation so `MAX(generation)` tracks reverse-index freshness.
+    pub fn refresh_memory_anchor_index_for_memory(
+        &self,
+        workspace_id: &str,
+        memory_id: &str,
+        content: &str,
+    ) -> Result<u64> {
+        let surfaces = extract_memory_anchor_surfaces(
+            memory_id,
+            content,
+            MemoryAnchorSource::IndexRebuild,
+            Some("index_rebuild"),
+        );
+        self.execute_for(
+            DbOperation::Execute,
+            "DELETE FROM memory_anchor_index WHERE memory_id = ?1",
+            &[Value::Text(memory_id.to_string())],
+        )?;
+        self.upsert_memory_anchor_index_surfaces(workspace_id, &surfaces)
+    }
+
+    /// Upsert reverse-index rows for already-extracted anchor surfaces.
+    /// Shared by `insert_memory` (fresh rows) and the rebuild path (after a
+    /// wholesale delete). Non-path/non-symbol surfaces are skipped. Older
+    /// generations cannot overwrite newer rows.
+    fn upsert_memory_anchor_index_surfaces(
+        &self,
+        workspace_id: &str,
+        surfaces: &[ExtractedAnchorSurface],
+    ) -> Result<u64> {
+        let generation = i64::try_from(self.get_workspace_generation(workspace_id)?.unwrap_or(0))
+            .unwrap_or(i64::MAX);
+        let now = Utc::now().to_rfc3339();
+        let mut written = 0_u64;
+        for surface in surfaces {
+            let (normalized_path, symbol) = match surface.anchor.anchor_kind {
+                MemoryAnchorKind::Path => (Some(surface.normalized_value.as_str()), None),
+                MemoryAnchorKind::Symbol => (None, Some(surface.normalized_value.as_str())),
+                _ => continue,
+            };
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO memory_anchor_index (workspace_id, memory_id, anchor_kind, anchor_value_hash, normalized_path, symbol, freshness_state, generation, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT(memory_id, anchor_kind, anchor_value_hash) DO UPDATE SET workspace_id = excluded.workspace_id, normalized_path = excluded.normalized_path, symbol = excluded.symbol, freshness_state = excluded.freshness_state, generation = excluded.generation, updated_at = excluded.updated_at WHERE excluded.generation >= memory_anchor_index.generation",
+                &[
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(surface.anchor.memory_id.clone()),
+                    Value::Text(surface.anchor.anchor_kind.as_str().to_string()),
+                    Value::Text(surface.anchor.anchor_value_hash.clone()),
+                    optional_text_value(normalized_path),
+                    optional_text_value(symbol),
+                    Value::Text(surface.anchor.freshness_state.as_str().to_string()),
+                    Value::BigInt(generation),
+                    Value::Text(now.clone()),
+                    Value::Text(now.clone()),
+                ],
+            )?;
+            written += 1;
+        }
+        Ok(written)
+    }
+
+    /// `MAX(generation)` over a workspace's reverse-index rows; `None` when
+    /// the index has no rows (the `anchor_index_empty` case).
+    pub fn memory_anchor_index_generation(&self, workspace_id: &str) -> Result<Option<i64>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT MAX(generation) FROM memory_anchor_index WHERE workspace_id = ?1",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+        match rows.first() {
+            None => Ok(None),
+            Some(row) => match row.values().next() {
+                Some(Value::BigInt(value)) => Ok(Some(*value)),
+                Some(Value::Int(value)) => Ok(Some(i64::from(*value))),
+                _ => Ok(None),
+            },
+        }
+    }
+
+    /// Reverse-index path candidates for recall (ADR 0064), joined with the
+    /// owning memory's ranking fields. `exact_paths = None` fetches every
+    /// path row for the workspace (glob selectors filter in core);
+    /// `Some(paths)` does a narrow indexed IN lookup. Freshness prefers the
+    /// authoritative `memory_anchors` row (drift transitions update that
+    /// table) and falls back to the snapshot stamped at index-write time.
+    pub fn query_anchor_index_path_candidates(
+        &self,
+        workspace_id: &str,
+        exact_paths: Option<&[String]>,
+        limit: usize,
+    ) -> Result<Vec<StoredAnchorIndexCandidate>> {
+        let mut params: Vec<Value> = vec![Value::Text(workspace_id.to_string())];
+        let mut sql = String::from(ANCHOR_INDEX_CANDIDATE_SELECT);
+        sql.push_str(" WHERE i.workspace_id = ?1 AND i.anchor_kind = 'path'");
+        if let Some(paths) = exact_paths {
+            if paths.is_empty() {
+                return Ok(Vec::new());
+            }
+            let placeholders: Vec<String> = (0..paths.len())
+                .map(|index| format!("?{}", index + 2))
+                .collect();
+            sql.push_str(&format!(
+                " AND i.normalized_path IN ({})",
+                placeholders.join(", ")
+            ));
+            params.extend(paths.iter().map(|path| Value::Text(path.clone())));
+        }
+        sql.push_str(&format!(
+            " ORDER BY i.memory_id ASC, i.anchor_kind ASC, i.anchor_value_hash ASC LIMIT {}",
+            limit.min(8192)
+        ));
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter()
+            .map(stored_anchor_index_candidate_from_row)
+            .collect()
+    }
+
+    /// Reverse-index symbol candidates (exact-name IN lookup; ADR 0064).
+    pub fn query_anchor_index_symbol_candidates(
+        &self,
+        workspace_id: &str,
+        symbols: &[String],
+        limit: usize,
+    ) -> Result<Vec<StoredAnchorIndexCandidate>> {
+        if symbols.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders: Vec<String> = (0..symbols.len())
+            .map(|index| format!("?{}", index + 2))
+            .collect();
+        let sql = format!(
+            "{ANCHOR_INDEX_CANDIDATE_SELECT} WHERE i.workspace_id = ?1 AND i.anchor_kind = 'symbol' AND i.symbol IN ({}) ORDER BY i.memory_id ASC, i.anchor_kind ASC, i.anchor_value_hash ASC LIMIT {}",
+            placeholders.join(", "),
+            limit.min(8192)
+        );
+        let mut params: Vec<Value> = vec![Value::Text(workspace_id.to_string())];
+        params.extend(symbols.iter().map(|symbol| Value::Text(symbol.clone())));
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter()
+            .map(stored_anchor_index_candidate_from_row)
+            .collect()
     }
 
     /// List all anchors attached to one memory in deterministic order.

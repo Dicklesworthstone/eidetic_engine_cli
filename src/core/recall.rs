@@ -732,6 +732,122 @@ fn score_row(row: &RecallCandidateRow) -> RecallItem {
     }
 }
 
+/// Fetch candidates from the `memory_anchor_index` derived table and
+/// evaluate the query (bd-u875s.2 DB wiring). Narrow indexed lookups serve
+/// exact path selectors, diff path sets, and symbols; glob selectors fall
+/// back to a bounded scan of the workspace's path rows. Tags are
+/// batch-loaded; provenance maps the owning memory's provenance URI.
+pub fn run_recall(
+    connection: &crate::db::DbConnection,
+    workspace_id: &str,
+    query: &RecallQuery,
+) -> crate::db::Result<RecallReport> {
+    let db_generation = i64::try_from(
+        connection
+            .get_workspace_generation(workspace_id)?
+            .unwrap_or(0),
+    )
+    .unwrap_or(i64::MAX);
+    let index_generation = connection.memory_anchor_index_generation(workspace_id)?;
+
+    let normalized_selectors: Vec<String> = query
+        .paths
+        .iter()
+        .map(|selector| normalize_recall_path_selector(selector))
+        .collect();
+    let has_glob_selector = normalized_selectors
+        .iter()
+        .any(|selector| selector.contains(['*', '?', '[']));
+    let mut exact_paths: Vec<String> = normalized_selectors
+        .iter()
+        .filter(|selector| !selector.contains(['*', '?', '[']))
+        .cloned()
+        .chain(
+            query
+                .diff_paths
+                .iter()
+                .map(|selector| normalize_recall_path_selector(selector)),
+        )
+        .collect();
+    exact_paths.sort();
+    exact_paths.dedup();
+
+    let mut candidates = Vec::new();
+    if has_glob_selector {
+        candidates.extend(connection.query_anchor_index_path_candidates(
+            workspace_id,
+            None,
+            RECALL_CANDIDATE_SCAN_CAP,
+        )?);
+    } else if !exact_paths.is_empty() {
+        candidates.extend(connection.query_anchor_index_path_candidates(
+            workspace_id,
+            Some(&exact_paths),
+            RECALL_CANDIDATE_SCAN_CAP,
+        )?);
+    }
+    if !query.symbols.is_empty() {
+        candidates.extend(connection.query_anchor_index_symbol_candidates(
+            workspace_id,
+            &query.symbols,
+            RECALL_CANDIDATE_SCAN_CAP,
+        )?);
+    }
+
+    let memory_ids: Vec<&str> = {
+        let mut ids: Vec<&str> = candidates
+            .iter()
+            .map(|candidate| candidate.memory_id.as_str())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+    let tags_by_memory = connection.get_memory_tags_batch(&memory_ids)?;
+
+    let rows: Vec<RecallCandidateRow> = candidates
+        .into_iter()
+        .map(|candidate| {
+            let tags = tags_by_memory
+                .get(&candidate.memory_id)
+                .cloned()
+                .unwrap_or_default();
+            let provenance = candidate
+                .provenance_uri
+                .as_ref()
+                .map(|uri| {
+                    vec![RecallProvenanceRef {
+                        uri: uri.clone(),
+                        source_type: "memory_provenance".to_owned(),
+                    }]
+                })
+                .unwrap_or_default();
+            RecallCandidateRow {
+                memory_id: candidate.memory_id,
+                anchor_kind: candidate.anchor_kind,
+                normalized_path: candidate.normalized_path,
+                symbol: candidate.symbol,
+                freshness_state: candidate.freshness_state,
+                row_generation: candidate.generation,
+                level: candidate.level,
+                kind: candidate.kind,
+                confidence: candidate.confidence,
+                content: candidate.content,
+                tombstoned: candidate.tombstoned,
+                tags,
+                provenance,
+            }
+        })
+        .collect();
+
+    Ok(evaluate_recall(
+        query,
+        &rows,
+        index_generation,
+        db_generation,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1118,6 +1234,190 @@ mod tests {
         assert_eq!(report.total_matched, 0);
         // No surface was requested, so no filtered-empty degradation either.
         assert!(report.degraded.is_empty());
+    }
+
+    fn wrapper_test_db() -> (crate::db::DbConnection, String) {
+        let connection = crate::db::DbConnection::open_memory().expect("open in-memory db");
+        connection.migrate().expect("migrate");
+        let workspace_id = format!("wsp_{:026}", 1);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/recall-wrapper-test".to_owned(),
+                    name: Some("recall-wrapper-test".to_owned()),
+                },
+            )
+            .expect("insert workspace");
+        (connection, workspace_id)
+    }
+
+    fn wrapper_insert_memory(
+        connection: &crate::db::DbConnection,
+        workspace_id: &str,
+        id: &str,
+        content: &str,
+    ) {
+        connection
+            .insert_memory(
+                id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: content.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some("test://recall-wrapper".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["recall-test".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("insert memory");
+    }
+
+    #[test]
+    fn run_recall_round_trips_through_the_reverse_index() {
+        let (connection, workspace_id) = wrapper_test_db();
+        let memory_id = format!("mem_{:026}", 1);
+        wrapper_insert_memory(
+            &connection,
+            &workspace_id,
+            &memory_id,
+            "Check `src/db/mod.rs` and `DbConnection::open_memory()` before edits.",
+        );
+
+        // Exact path, glob, and symbol selectors all resolve through the
+        // derived table written by insert_memory's single extraction walk.
+        for query in [
+            RecallQuery {
+                paths: vec!["src/db/mod.rs".to_owned()],
+                ..RecallQuery::default()
+            },
+            RecallQuery {
+                paths: vec!["src/db/*.rs".to_owned()],
+                ..RecallQuery::default()
+            },
+            RecallQuery {
+                symbols: vec!["DbConnection::open_memory".to_owned()],
+                ..RecallQuery::default()
+            },
+        ] {
+            let report = run_recall(&connection, &workspace_id, &query).expect("run recall");
+            assert_eq!(report.items.len(), 1, "query {query:?} must match");
+            assert_eq!(report.items[0].memory_id, memory_id);
+            assert_eq!(report.items[0].tags, vec!["recall-test".to_owned()]);
+            assert_eq!(report.items[0].provenance.len(), 1);
+            // Freshly written rows carry the current generation: no
+            // degradations, index generation matches DB generation.
+            assert!(
+                report.degraded.is_empty(),
+                "unexpected: {:?}",
+                report.degraded
+            );
+            assert_eq!(report.index_generation, Some(report.db_generation));
+        }
+    }
+
+    #[test]
+    fn run_recall_reports_empty_then_stale_index_honestly() {
+        let (connection, workspace_id) = wrapper_test_db();
+
+        // No memories at all: empty-index degradation, never an error.
+        let empty = run_recall(
+            &connection,
+            &workspace_id,
+            &RecallQuery {
+                paths: vec!["src/**".to_owned()],
+                ..RecallQuery::default()
+            },
+        )
+        .expect("run recall on empty index");
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.degraded.len(), 1);
+        assert_eq!(empty.degraded[0].code, ANCHOR_INDEX_EMPTY_CODE);
+
+        // One anchored memory: fresh. A later anchorless write advances the
+        // DB generation without touching the reverse index, so recall
+        // reports the index stale until a rebuild re-stamps it.
+        let anchored = format!("mem_{:026}", 2);
+        wrapper_insert_memory(
+            &connection,
+            &workspace_id,
+            &anchored,
+            "Durable note about `src/core/recall.rs` ranking.",
+        );
+        let anchorless = format!("mem_{:026}", 3);
+        wrapper_insert_memory(
+            &connection,
+            &workspace_id,
+            &anchorless,
+            "Plain prose note with no code anchors at all.",
+        );
+        let query = RecallQuery {
+            paths: vec!["src/core/recall.rs".to_owned()],
+            ..RecallQuery::default()
+        };
+        let stale = run_recall(&connection, &workspace_id, &query).expect("run recall");
+        assert_eq!(
+            stale.items.len(),
+            1,
+            "stale detection must not block results"
+        );
+        assert_eq!(stale.degraded.len(), 1);
+        assert_eq!(stale.degraded[0].code, ANCHOR_INDEX_STALE_CODE);
+
+        // The rebuild path re-stamps rows at the current generation.
+        connection
+            .refresh_memory_anchor_index_for_memory(
+                &workspace_id,
+                &anchored,
+                "Durable note about `src/core/recall.rs` ranking.",
+            )
+            .expect("refresh reverse index");
+        let fresh = run_recall(&connection, &workspace_id, &query).expect("run recall");
+        assert!(
+            fresh.degraded.is_empty(),
+            "unexpected: {:?}",
+            fresh.degraded
+        );
+        assert_eq!(fresh.items.len(), 1);
+    }
+
+    #[test]
+    fn run_recall_excludes_tombstoned_memories() {
+        let (connection, workspace_id) = wrapper_test_db();
+        let memory_id = format!("mem_{:026}", 4);
+        wrapper_insert_memory(
+            &connection,
+            &workspace_id,
+            &memory_id,
+            "Tombstone target anchored to `src/db/migrate.rs`.",
+        );
+        let query = RecallQuery {
+            paths: vec!["src/db/migrate.rs".to_owned()],
+            ..RecallQuery::default()
+        };
+        assert_eq!(
+            run_recall(&connection, &workspace_id, &query)
+                .expect("run recall")
+                .items
+                .len(),
+            1
+        );
+        connection
+            .tombstone_memory(&memory_id)
+            .expect("tombstone memory");
+        let report = run_recall(&connection, &workspace_id, &query).expect("run recall");
+        assert!(
+            report.items.is_empty(),
+            "tombstoned memories must be excluded at query time"
+        );
     }
 
     #[test]

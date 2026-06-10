@@ -1328,6 +1328,14 @@ fn memory_documents_with_anchors(
                 db.refresh_memory_anchors_for_memory(&memory.id, &memory.content)?;
                 anchors = db.list_memory_anchors(&memory.id)?;
             }
+            // ADR 0064: the anchor reverse index is rebuilt alongside the
+            // search documents so `ee index rebuild` restores it from
+            // scratch and its MAX(generation) advances with the rebuild.
+            db.refresh_memory_anchor_index_for_memory(
+                &memory.workspace_id,
+                &memory.id,
+                &memory.content,
+            )?;
             Ok(memory_to_document_with_context_and_anchors(
                 memory,
                 None,
