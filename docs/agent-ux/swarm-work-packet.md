@@ -306,8 +306,8 @@ per-fixture decision summary.
 - Every included source has a provenance record, even when the source is
   degraded or unavailable.
 - Agent Mail archive/SQLite parity failures, semantic-readiness contradictions,
-  and timeout/database-contention states are represented as degraded source
-  evidence, not as an empty healthy inbox.
+  recovery/durability corruption, and timeout/database-contention states are
+  represented as degraded source evidence, not as an empty healthy inbox.
 - BV robot-source timeout/no-output states are represented as degraded source
   evidence and must recommend stale-safe Beads fallback, not bare interactive
   `bv`.
@@ -357,6 +357,7 @@ The contract is seeded by redacted examples:
 - `tests/fixtures/swarm_work_packet/degraded_mail_rch_topology.json`
 - `tests/fixtures/swarm_work_packet/agent_mail_degraded_read_only.json`
 - `tests/fixtures/swarm_work_packet/agent_mail_semantic_readiness_failed.json`
+- `tests/fixtures/swarm_work_packet/agent_mail_recovery_corrupt.json`
 - `tests/fixtures/swarm_work_packet/agent_mail_database_contention_timeout.json`
 - `tests/fixtures/swarm_work_packet/beads_command_timeout_no_output.json`
 - `tests/fixtures/swarm_work_packet/bv_timeout_no_output.json`

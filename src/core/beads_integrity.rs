@@ -13,8 +13,8 @@
 //! invariant for this module is therefore:
 //!
 //! - Inputs are *already-collected*, redacted summaries (record counts,
-//!   merge-artifact path patterns, the first malformed JSONL line,
-//!   etc.).
+//!   SQLite integrity status, merge-artifact path patterns, the first
+//!   malformed JSONL line, etc.).
 //! - Output is a deterministic [`BeadsIntegrityReport`] whose
 //!   serialization is byte-stable for the same inputs.
 //!
@@ -78,6 +78,28 @@ pub enum BeadsIntegrityHealth {
     /// Normal `br` reads are not authoritative until the bad line is
     /// inspected.
     JsonlParseError,
+}
+
+/// Repair-safety classification for JSONL parse-error diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeadsIntegrityRepairClassification {
+    /// A malformed row appears immediately after all parseable rows, DB
+    /// integrity is clean, and DB/JSONL valid counts agree.
+    InvalidTrailingLineDbHealthy,
+    /// SQLite integrity evidence failed, so DB export cannot be treated
+    /// as a safe repair candidate.
+    DbIntegrityFailed,
+    /// Merge-conflict artifacts make the correct repair source ambiguous.
+    MergeArtifactsPresent,
+    /// DB row count and parseable JSONL row count diverge.
+    DbJsonlCountMismatch,
+    /// Dirty Beads issues or pending-import metadata means the DB may
+    /// contain unexported or stale state.
+    StaleDbGuardRisk,
+    /// The parse error is not the narrow trailing-line shape, or the
+    /// evidence is otherwise insufficient for bounded repair advice.
+    UnknownDurableCorruption,
 }
 
 impl BeadsIntegrityHealth {
@@ -190,15 +212,33 @@ pub struct BeadsIntegrityReport {
     pub jsonl_path: String,
     pub db_path: String,
     pub jsonl_record_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jsonl_valid_record_count: Option<u64>,
     pub db_record_count: u64,
     pub pending_import_count: u64,
     pub external_changes_pending_import: bool,
     pub dirty_issue_count: u64,
     pub merge_artifact_paths: Vec<String>,
     pub merge_artifact_count: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub invalid_line_numbers: Vec<u64>,
     pub jsonl_parse_error: Option<JsonlParseError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db_integrity_ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_import_timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_export_timestamp: Option<String>,
     pub br_reads_authoritative: bool,
     pub requires_candidate_downgrade: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safe_repair_candidate: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_classification: Option<BeadsIntegrityRepairClassification>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mutation_must_stop: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_command_candidate: Option<&'static str>,
     pub recovery_hint: Option<&'static str>,
 }
 
@@ -213,6 +253,9 @@ pub struct OwnedBeadsIntegrityInputs {
     pub db_path: String,
     pub jsonl_record_count: u64,
     pub db_record_count: u64,
+    pub db_integrity_ok: bool,
+    pub last_import_timestamp: Option<String>,
+    pub last_export_timestamp: Option<String>,
     pub auto_import_enabled: bool,
     pub external_changes_pending_import: bool,
     pub dirty_issue_count: u64,
@@ -238,7 +281,12 @@ impl OwnedBeadsIntegrityInputs {
 
     #[must_use]
     pub fn compose_report(&self) -> BeadsIntegrityReport {
-        compose_integrity_report(self.as_inputs())
+        compose_integrity_report_with_metadata(
+            self.as_inputs(),
+            self.db_integrity_ok,
+            self.last_import_timestamp.as_deref(),
+            self.last_export_timestamp.as_deref(),
+        )
     }
 }
 
@@ -289,7 +337,21 @@ impl std::error::Error for BeadsDoctorJsonError {}
 /// 5. Otherwise → [`BeadsIntegrityHealth::Ok`].
 #[must_use]
 pub fn compose_integrity_report(inputs: BeadsIntegrityInputs<'_>) -> BeadsIntegrityReport {
+    compose_integrity_report_with_metadata(inputs, true, None, None)
+}
+
+fn compose_integrity_report_with_metadata(
+    inputs: BeadsIntegrityInputs<'_>,
+    db_integrity_ok: bool,
+    last_import_timestamp: Option<&str>,
+    last_export_timestamp: Option<&str>,
+) -> BeadsIntegrityReport {
     let parse_error = inputs.jsonl_parse_error.as_ref().map(truncate_parse_error);
+    let invalid_line_numbers = parse_error
+        .as_ref()
+        .map(|error| vec![error.line])
+        .unwrap_or_default();
+    let show_repair_context = parse_error.is_some();
     let pending_import_count = inputs
         .jsonl_record_count
         .saturating_sub(inputs.db_record_count);
@@ -318,21 +380,56 @@ pub fn compose_integrity_report(inputs: BeadsIntegrityInputs<'_>) -> BeadsIntegr
         inputs.dirty_issue_count,
         &merge_artifact_paths,
     );
+    let safe_repair_candidate = safe_repair_candidate_for_report(
+        &parse_error,
+        inputs.jsonl_record_count,
+        inputs.db_record_count,
+        db_integrity_ok,
+        inputs.dirty_issue_count,
+        &merge_artifact_paths,
+    );
+    let repair_classification = repair_classification_for_report(
+        &parse_error,
+        inputs.jsonl_record_count,
+        inputs.db_record_count,
+        db_integrity_ok,
+        inputs.external_changes_pending_import,
+        inputs.dirty_issue_count,
+        &merge_artifact_paths,
+    );
 
     BeadsIntegrityReport {
         health,
         jsonl_path: inputs.jsonl_path.to_owned(),
         db_path: inputs.db_path.to_owned(),
         jsonl_record_count: inputs.jsonl_record_count,
+        jsonl_valid_record_count: show_repair_context.then_some(inputs.jsonl_record_count),
         db_record_count: inputs.db_record_count,
         pending_import_count,
         external_changes_pending_import: inputs.external_changes_pending_import,
         dirty_issue_count: inputs.dirty_issue_count,
         merge_artifact_paths,
         merge_artifact_count,
+        invalid_line_numbers,
         jsonl_parse_error: parse_error,
+        db_integrity_ok: show_repair_context.then_some(db_integrity_ok),
+        last_import_timestamp: if show_repair_context {
+            last_import_timestamp.map(str::to_owned)
+        } else {
+            None
+        },
+        last_export_timestamp: if show_repair_context {
+            last_export_timestamp.map(str::to_owned)
+        } else {
+            None
+        },
         br_reads_authoritative,
         requires_candidate_downgrade: !br_reads_authoritative,
+        safe_repair_candidate: show_repair_context.then_some(safe_repair_candidate),
+        repair_classification,
+        mutation_must_stop: show_repair_context.then_some(!br_reads_authoritative),
+        repair_command_candidate: safe_repair_candidate
+            .then_some("br sync --flush-only --force --json"),
         recovery_hint: health.recovery_hint(),
     }
 }
@@ -380,6 +477,15 @@ pub fn beads_integrity_inputs_from_br_doctor_json(
     let counts_check = find_doctor_check(checks, "counts.db_vs_jsonl");
     let merge_check = find_doctor_check(checks, "jsonl.merge_artifacts");
     let sync_check = find_doctor_check(checks, "sync.metadata");
+    let db_integrity_check = find_first_doctor_check(
+        checks,
+        &[
+            "sqlite.integrity_check",
+            "sqlite.integrity",
+            "db.integrity_check",
+            "db.integrity",
+        ],
+    );
 
     let jsonl_record_count = doctor_u64_detail(jsonl_parse, &["records"])
         .or_else(|| first_u64_from_text(doctor_message(jsonl_parse)))
@@ -436,12 +542,21 @@ pub fn beads_integrity_inputs_from_br_doctor_json(
     let external_changes_pending_import =
         sync_check.is_some_and(doctor_message_indicates_external_pending_import);
     let jsonl_parse_error = doctor_parse_error(jsonl_parse);
+    let db_integrity_ok =
+        db_integrity_check.map_or(true, |check| doctor_status(check) == Some("ok"));
+    let last_import_timestamp =
+        sync_check.and_then(|check| doctor_string_detail(check, &["last_import", "lastImport"]));
+    let last_export_timestamp =
+        sync_check.and_then(|check| doctor_string_detail(check, &["last_export", "lastExport"]));
 
     Ok(OwnedBeadsIntegrityInputs {
         jsonl_path: jsonl_path.to_owned(),
         db_path: db_path.to_owned(),
         jsonl_record_count,
         db_record_count,
+        db_integrity_ok,
+        last_import_timestamp,
+        last_export_timestamp,
         auto_import_enabled,
         external_changes_pending_import,
         dirty_issue_count,
@@ -513,6 +628,59 @@ fn br_reads_authoritative_for_report(
     }
 }
 
+fn repair_classification_for_report(
+    parse_error: &Option<JsonlParseError>,
+    jsonl_record_count: u64,
+    db_record_count: u64,
+    db_integrity_ok: bool,
+    external_changes_pending_import: bool,
+    dirty_issue_count: u64,
+    merge_artifact_paths: &[String],
+) -> Option<BeadsIntegrityRepairClassification> {
+    use BeadsIntegrityRepairClassification::{
+        DbIntegrityFailed, DbJsonlCountMismatch, InvalidTrailingLineDbHealthy,
+        MergeArtifactsPresent, StaleDbGuardRisk, UnknownDurableCorruption,
+    };
+
+    let parse_error = parse_error.as_ref()?;
+    if !db_integrity_ok {
+        return Some(DbIntegrityFailed);
+    }
+    if !merge_artifact_paths.is_empty() {
+        return Some(MergeArtifactsPresent);
+    }
+    if jsonl_record_count != db_record_count {
+        return Some(DbJsonlCountMismatch);
+    }
+    if dirty_issue_count > 0 || external_changes_pending_import {
+        return Some(StaleDbGuardRisk);
+    }
+    if parse_error.line == jsonl_record_count.saturating_add(1) {
+        Some(InvalidTrailingLineDbHealthy)
+    } else {
+        Some(UnknownDurableCorruption)
+    }
+}
+
+fn safe_repair_candidate_for_report(
+    parse_error: &Option<JsonlParseError>,
+    jsonl_record_count: u64,
+    db_record_count: u64,
+    db_integrity_ok: bool,
+    dirty_issue_count: u64,
+    merge_artifact_paths: &[String],
+) -> bool {
+    let Some(parse_error) = parse_error else {
+        return false;
+    };
+
+    db_integrity_ok
+        && jsonl_record_count == db_record_count
+        && parse_error.line == jsonl_record_count.saturating_add(1)
+        && dirty_issue_count == 0
+        && merge_artifact_paths.is_empty()
+}
+
 fn is_benign_beads_merge_base_artifact(path: &str) -> bool {
     matches!(path, "beads.base.jsonl" | ".beads/beads.base.jsonl")
 }
@@ -524,6 +692,15 @@ fn find_doctor_check<'a>(
     checks
         .iter()
         .find(|check| check.get("name").and_then(serde_json::Value::as_str) == Some(name))
+}
+
+fn find_first_doctor_check<'a>(
+    checks: &'a [serde_json::Value],
+    names: &[&str],
+) -> Option<&'a serde_json::Value> {
+    names
+        .iter()
+        .find_map(|name| find_doctor_check(checks, name))
 }
 
 fn doctor_status(check: &serde_json::Value) -> Option<&str> {
@@ -789,6 +966,10 @@ mod tests {
                 "details": { "records": 2708 }
             },
             {
+                "name": "sqlite.integrity_check",
+                "status": "ok"
+            },
+            {
                 "name": "counts.db_vs_jsonl",
                 "status": "ok",
                 "message": "Both have 2708 records",
@@ -834,6 +1015,10 @@ mod tests {
                 "status": "ok",
                 "message": "Parsed 2708 records",
                 "details": { "records": 2708 }
+            },
+            {
+                "name": "sqlite.integrity_check",
+                "status": "ok"
             },
             {
                 "name": "counts.db_vs_jsonl",
@@ -926,6 +1111,10 @@ mod tests {
                 "details": { "records": 3347 }
             },
             {
+                "name": "sqlite.integrity_check",
+                "status": "ok"
+            },
+            {
                 "name": "counts.db_vs_jsonl",
                 "status": "ok",
                 "message": "Both have 3347 records",
@@ -990,6 +1179,10 @@ mod tests {
                 "details": { "records": 3590 }
             },
             {
+                "name": "sqlite.integrity_check",
+                "status": "ok"
+            },
+            {
                 "name": "counts.db_vs_jsonl",
                 "status": "ok",
                 "message": "Both have 3590 records",
@@ -1046,6 +1239,10 @@ mod tests {
                 "status": "ok",
                 "message": "Parsed 2708 records",
                 "details": { "records": 2708 }
+            },
+            {
+                "name": "sqlite.integrity_check",
+                "status": "ok"
             },
             {
                 "name": "counts.db_vs_jsonl",
@@ -1108,6 +1305,10 @@ mod tests {
                 }
             },
             {
+                "name": "sqlite.integrity_check",
+                "status": "ok"
+            },
+            {
                 "name": "counts.db_vs_jsonl",
                 "status": "ok",
                 "message": "Both have 2702 records",
@@ -1117,7 +1318,11 @@ mod tests {
                 "name": "sync.metadata",
                 "status": "ok",
                 "message": "No external changes pending import",
-                "details": { "dirty_issues": 0 }
+                "details": {
+                    "dirty_issues": 0,
+                    "last_import": "2026-06-09T14:12:50.120121+00:00",
+                    "last_export": "2026-06-09T15:40:14.092658+00:00"
+                }
             }
         ]));
         let report = compose_integrity_report_from_br_doctor_json(
@@ -1147,6 +1352,227 @@ mod tests {
             &report.requires_candidate_downgrade,
             &true,
             "parse errors must downgrade candidate safety",
+        )?;
+        ensure_equal(
+            &report.invalid_line_numbers,
+            &vec![2703],
+            "invalid line numbers",
+        )?;
+        ensure_equal(
+            &report.jsonl_valid_record_count,
+            &Some(2702),
+            "valid JSONL record count",
+        )?;
+        ensure_equal(&report.db_integrity_ok, &Some(true), "db integrity")?;
+        ensure_equal(
+            &report.last_import_timestamp,
+            &Some("2026-06-09T14:12:50.120121+00:00".to_owned()),
+            "last import timestamp",
+        )?;
+        ensure_equal(
+            &report.last_export_timestamp,
+            &Some("2026-06-09T15:40:14.092658+00:00".to_owned()),
+            "last export timestamp",
+        )?;
+        ensure_equal(
+            &report.safe_repair_candidate,
+            &Some(true),
+            "db-healthy invalid tail is a bounded repair candidate",
+        )?;
+        ensure_equal(
+            &report.repair_classification,
+            &Some(BeadsIntegrityRepairClassification::InvalidTrailingLineDbHealthy),
+            "repair classification",
+        )?;
+        ensure_equal(
+            &report.mutation_must_stop,
+            &Some(true),
+            "parse error stops tracker mutation",
+        )?;
+        ensure_equal(
+            &report.repair_command_candidate,
+            &Some("br sync --flush-only --force --json"),
+            "repair command candidate",
+        )
+    }
+
+    #[test]
+    fn parse_error_refuses_repair_when_db_integrity_fails() -> TestResult {
+        let raw = doctor_payload(serde_json::json!([
+            {
+                "name": "jsonl.parse",
+                "status": "error",
+                "message": "Invalid JSON at line 101",
+                "details": {
+                    "records": 100,
+                    "line": 101,
+                    "excerpt": "}]}"
+                }
+            },
+            {
+                "name": "sqlite.integrity_check",
+                "status": "error",
+                "message": "database disk image is malformed"
+            },
+            {
+                "name": "counts.db_vs_jsonl",
+                "status": "ok",
+                "message": "Both have 100 records",
+                "details": { "db": 100, "jsonl": 100 }
+            },
+            {
+                "name": "sync.metadata",
+                "status": "ok",
+                "message": "No external changes pending import",
+                "details": { "dirty_issues": 0 }
+            }
+        ]));
+        let report = compose_integrity_report_from_br_doctor_json(
+            &raw,
+            ".beads/issues.jsonl",
+            ".beads/beads.db",
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(&report.db_integrity_ok, &Some(false), "db integrity")?;
+        ensure_equal(
+            &report.safe_repair_candidate,
+            &Some(false),
+            "failed DB integrity refuses repair recommendation",
+        )?;
+        ensure_equal(
+            &report.repair_classification,
+            &Some(BeadsIntegrityRepairClassification::DbIntegrityFailed),
+            "failed DB integrity repair classification",
+        )?;
+        ensure_equal(
+            &report.repair_command_candidate,
+            &None,
+            "failed DB integrity has no repair command",
+        )
+    }
+
+    #[test]
+    fn parse_error_refuses_repair_when_merge_artifacts_exist() -> TestResult {
+        let artifacts = vec![".beads/issues.jsonl.orig".to_owned()];
+        let report = compose_integrity_report(BeadsIntegrityInputs {
+            jsonl_record_count: 100,
+            db_record_count: 100,
+            jsonl_parse_error: Some(JsonlParseError {
+                line: 101,
+                column: None,
+                excerpt: "}] }".to_owned(),
+            }),
+            ..base_inputs(&artifacts, None)
+        });
+
+        ensure_equal(
+            &report.safe_repair_candidate,
+            &Some(false),
+            "merge artifacts refuse repair recommendation",
+        )?;
+        ensure_equal(
+            &report.repair_classification,
+            &Some(BeadsIntegrityRepairClassification::MergeArtifactsPresent),
+            "merge artifact repair classification",
+        )?;
+        ensure_equal(
+            &report.repair_command_candidate,
+            &None,
+            "merge artifacts have no repair command",
+        )
+    }
+
+    #[test]
+    fn parse_error_refuses_repair_when_counts_are_ambiguous() -> TestResult {
+        let report = compose_integrity_report(BeadsIntegrityInputs {
+            jsonl_record_count: 100,
+            db_record_count: 99,
+            jsonl_parse_error: Some(JsonlParseError {
+                line: 101,
+                column: None,
+                excerpt: "}] }".to_owned(),
+            }),
+            ..base_inputs(&[], None)
+        });
+
+        ensure_equal(
+            &report.safe_repair_candidate,
+            &Some(false),
+            "count mismatch refuses repair recommendation",
+        )?;
+        ensure_equal(
+            &report.repair_classification,
+            &Some(BeadsIntegrityRepairClassification::DbJsonlCountMismatch),
+            "count mismatch repair classification",
+        )?;
+        ensure_equal(
+            &report.repair_command_candidate,
+            &None,
+            "count mismatch has no repair command",
+        )
+    }
+
+    #[test]
+    fn parse_error_refuses_repair_when_stale_guard_evidence_exists() -> TestResult {
+        let report = compose_integrity_report(BeadsIntegrityInputs {
+            jsonl_record_count: 100,
+            db_record_count: 100,
+            external_changes_pending_import: true,
+            dirty_issue_count: 1,
+            jsonl_parse_error: Some(JsonlParseError {
+                line: 101,
+                column: None,
+                excerpt: "}] }".to_owned(),
+            }),
+            ..base_inputs(&[], None)
+        });
+
+        ensure_equal(
+            &report.safe_repair_candidate,
+            &Some(false),
+            "stale guard evidence refuses repair recommendation",
+        )?;
+        ensure_equal(
+            &report.repair_classification,
+            &Some(BeadsIntegrityRepairClassification::StaleDbGuardRisk),
+            "stale guard repair classification",
+        )?;
+        ensure_equal(
+            &report.repair_command_candidate,
+            &None,
+            "stale guard evidence has no repair command",
+        )
+    }
+
+    #[test]
+    fn parse_error_refuses_repair_for_non_trailing_corruption() -> TestResult {
+        let report = compose_integrity_report(BeadsIntegrityInputs {
+            jsonl_record_count: 100,
+            db_record_count: 100,
+            jsonl_parse_error: Some(JsonlParseError {
+                line: 42,
+                column: Some(7),
+                excerpt: "{\"id\":".to_owned(),
+            }),
+            ..base_inputs(&[], None)
+        });
+
+        ensure_equal(
+            &report.safe_repair_candidate,
+            &Some(false),
+            "non-trailing parse error refuses repair recommendation",
+        )?;
+        ensure_equal(
+            &report.repair_classification,
+            &Some(BeadsIntegrityRepairClassification::UnknownDurableCorruption),
+            "non-trailing repair classification",
+        )?;
+        ensure_equal(
+            &report.repair_command_candidate,
+            &None,
+            "non-trailing parse error has no repair command",
         )
     }
 

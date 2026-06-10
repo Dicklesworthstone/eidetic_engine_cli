@@ -60,7 +60,7 @@ Required top-level metadata:
 | `project_key` | Redacted or workspace-relative project identifier. |
 | `agent_name` | Agent mailbox used for inbox and thread summaries. |
 | `summary` | Counts for agents, reservations, inbox mailboxes, threads, commands, and degraded records. |
-| `source_commands` | Redacted list of read-only commands/resources used. |
+| `source_commands` | Redacted list of read-only commands/resources used, including the local Agent Mail `/health` resource when available. |
 | `redaction_status` | Producer redaction posture, for example `paths_counts_subjects_only_no_content`. |
 | `fallback_active` | Agent Mail fallback state from the health probe. |
 | `producer_status` | `ok` or `degraded`. |
@@ -73,6 +73,24 @@ Optional legacy metadata still tolerated by consumers:
 | --- | --- |
 | `semantic_readiness` | Object or string describing semantic-readiness status. |
 | `healthLevel` | Health classification used in semantic-readiness diagnostics. |
+| `recovery` | Bounded recovery posture. Non-ok modes such as `corrupt` make reservation and inbox evidence non-authoritative. |
+| `durability_state` | Bounded durability posture. `corrupt` is equivalent to recovery corruption and must not leak raw storage details. |
+
+Authority precedence:
+
+1. A failed Agent Mail source command makes that source unavailable.
+2. `semantic_readiness.status=fail` makes reservation and inbox reads
+   non-authoritative even when health is green.
+3. `recovery.mode=corrupt`, non-ok `recovery.status`, or
+   `durability_state=corrupt` also makes reservation and inbox reads
+   non-authoritative, including when `semantic_readiness.status=ok`.
+4. Green transport health is only a transport signal; it does not override
+   semantic, recovery, durability, or read-API evidence.
+
+Recovery and durability snapshots must emit only bounded reason classes such as
+`archive_corruption` or `storage_recovery_required`. They must not include raw
+database paths, SQLite filenames, B-tree/page offsets, recovery bundle paths,
+raw next-action text, mail bodies, or stack traces.
 
 Unknown metadata is tolerated by current consumers for compatibility with older
 snapshots, but the shipped producer emits the versioned schema and required
@@ -465,6 +483,29 @@ Semantic readiness failed:
 
 The consumer classifies the reason without surfacing raw database paths or page
 details.
+
+Recovery or durability corrupt:
+
+```json
+{
+  "schema": "ee.swarm.coordination_health.v1",
+  "healthLevel": "green",
+  "semantic_readiness": {
+    "status": "ok"
+  },
+  "recovery": {
+    "mode": "corrupt",
+    "reason": "archive_corruption"
+  },
+  "durability_state": "corrupt"
+}
+```
+
+Recovery and durability corruption are authoritative even when transport health
+is green and semantic readiness passes. The consumer must keep reservation and
+inbox reads non-authoritative and surface only bounded reason classes such as
+`archive_corruption`, never raw database paths, page offsets, or repair bundle
+paths.
 
 ## Test Requirements
 

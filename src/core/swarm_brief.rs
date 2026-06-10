@@ -7343,12 +7343,14 @@ pub fn parse_agent_mail_snapshot_json(input: &str) -> Result<SwarmBriefAgentMail
 
 fn parse_agent_mail_health_degraded(value: &Value) -> Vec<SwarmBriefDegradation> {
     let semantic_readiness_degradation = parse_agent_mail_semantic_readiness_degradation(value);
+    let recovery_degradation = parse_agent_mail_recovery_degradation(value);
     let is_coordination_health = value
         .get("schema")
         .and_then(Value::as_str)
         .is_some_and(|schema| schema == "ee.swarm.coordination_health.v1")
         || value.get("fallback_active").is_some()
-        || semantic_readiness_degradation.is_some();
+        || semantic_readiness_degradation.is_some()
+        || recovery_degradation.is_some();
     if !is_coordination_health {
         return Vec::new();
     }
@@ -7374,7 +7376,11 @@ fn parse_agent_mail_health_degraded(value: &Value) -> Vec<SwarmBriefDegradation>
         .unwrap_or(false);
     let mut degraded = semantic_readiness_degradation
         .into_iter()
+        .chain(recovery_degradation)
         .collect::<Vec<_>>();
+    if failed_checks.is_empty() && !degraded.is_empty() {
+        return degraded;
+    }
     if !fallback_active && failed_checks.is_empty() {
         return degraded;
     }
@@ -7403,6 +7409,71 @@ fn parse_agent_mail_health_degraded(value: &Value) -> Vec<SwarmBriefDegradation>
         ),
     ));
     degraded
+}
+
+fn parse_agent_mail_recovery_degradation(value: &Value) -> Option<SwarmBriefDegradation> {
+    let recovery = value
+        .get("recovery")
+        .or_else(|| value.get("recoveryStatus"));
+    let (mode, reason) = match recovery {
+        Some(Value::Object(recovery)) => {
+            let mode = recovery
+                .get("mode")
+                .or_else(|| recovery.get("status"))
+                .and_then(Value::as_str)
+                .and_then(agent_mail_recovery_mode_class)?;
+            let reason = agent_mail_recovery_reason_class(mode, Some(recovery), value);
+            (mode, reason)
+        }
+        _ => {
+            let durability_state = value
+                .get("durability_state")
+                .or_else(|| value.get("durabilityState"))
+                .and_then(Value::as_str)
+                .and_then(agent_mail_recovery_mode_class)?;
+            let reason = agent_mail_recovery_reason_class(durability_state, None, value);
+            (durability_state, reason)
+        }
+    };
+    let health_level = value
+        .get("healthLevel")
+        .or_else(|| value.get("health_level"))
+        .and_then(Value::as_str)
+        .and_then(agent_mail_health_level_class);
+    let health_fragment = health_level
+        .map(|level| format!(" with healthLevel={level}"))
+        .unwrap_or_default();
+    let semantic_fragment = agent_mail_semantic_status_class(value)
+        .map(|status| format!(", semanticStatus={status}"))
+        .unwrap_or_default();
+    let message = format!(
+        "Agent Mail recovery posture is degraded{health_fragment} (mode={mode}, reason={reason}{semantic_fragment}); reservation and inbox reads are not authoritative."
+    );
+
+    Some(SwarmBriefDegradation::warning(
+        SwarmBriefSourceKind::AgentMail,
+        AGENT_MAIL_UNAVAILABLE_CODE,
+        message,
+        Some(
+            "Repair Agent Mail storage and provide a current redacted Agent Mail snapshot after recovery completes."
+                .to_string(),
+        ),
+    ))
+}
+
+fn agent_mail_semantic_status_class(value: &Value) -> Option<&'static str> {
+    let semantic = value
+        .get("semantic_readiness")
+        .or_else(|| value.get("semanticReadiness"))?;
+    let status = semantic
+        .as_str()
+        .or_else(|| semantic.get("status").and_then(Value::as_str))?;
+    match status.to_ascii_lowercase().as_str() {
+        "ok" | "pass" => Some("pass"),
+        "fail" => Some("fail"),
+        "unknown" => Some("unknown"),
+        _ => None,
+    }
 }
 
 fn parse_agent_mail_semantic_readiness_degradation(value: &Value) -> Option<SwarmBriefDegradation> {
@@ -7447,6 +7518,60 @@ fn parse_agent_mail_semantic_readiness_degradation(value: &Value) -> Option<Swar
                 .to_string(),
         ),
     ))
+}
+
+fn agent_mail_recovery_mode_class(value: &str) -> Option<&'static str> {
+    match value.to_ascii_lowercase().as_str() {
+        "" | "ok" | "none" | "normal" | "clean" | "idle" => None,
+        "corrupt" => Some("corrupt"),
+        "repair" | "repair_required" | "repairing" | "recover" | "recovering"
+        | "recovery_required" | "restore" | "restoring" | "reconstruct" => Some("repair_required"),
+        _ => Some("unknown_recovery"),
+    }
+}
+
+fn agent_mail_recovery_reason_class(
+    mode: &str,
+    recovery: Option<&serde_json::Map<String, Value>>,
+    value: &Value,
+) -> &'static str {
+    if mode == "corrupt" {
+        return "archive_corruption";
+    }
+    let mut text = String::new();
+    if let Some(recovery) = recovery {
+        for key in [
+            "reason",
+            "next_action",
+            "nextAction",
+            "detail",
+            "message",
+            "bundle_path",
+            "bundlePath",
+        ] {
+            if let Some(fragment) = recovery.get(key).and_then(Value::as_str) {
+                text.push(' ');
+                text.push_str(fragment);
+            }
+        }
+    }
+    for key in ["detail", "message", "status"] {
+        if let Some(fragment) = value.get(key).and_then(Value::as_str) {
+            text.push(' ');
+            text.push_str(fragment);
+        }
+    }
+    let normalized = text.to_ascii_lowercase();
+    if normalized.contains("doctor repair")
+        || normalized.contains("restore")
+        || normalized.contains("reconstruct")
+    {
+        "storage_recovery_required"
+    } else if normalized.contains("permission denied") || normalized.contains("access denied") {
+        "permission_denied"
+    } else {
+        "unknown"
+    }
 }
 
 fn agent_mail_health_level_class(value: &str) -> Option<&'static str> {
@@ -11384,6 +11509,98 @@ mod tests {
         assert!(!degradation.message.contains("/Users/"));
         assert!(!degradation.message.contains("page 283"));
         assert!(!degradation.message.contains("mail.db"));
+    }
+
+    #[test]
+    fn agent_mail_health_snapshot_degrades_recovery_corrupt_without_raw_storage_leaks() {
+        let snapshot = require_ok(
+            parse_agent_mail_snapshot_json(
+                r#"{
+              "schema":"ee.swarm.coordination_health.v1",
+              "health_level":"green",
+              "semantic_readiness":{
+                "status":"ok"
+              },
+              "recovery":{
+                "mode":"corrupt",
+                "next_action":"Run am doctor repair --yes or restore from /Users/example/.local/share/mcp_agent_mail/storage.sqlite3 after B-tree page 283 failed",
+                "bundle_path":"/Users/example/.local/share/mcp_agent_mail/doctor/forensics/storage.sqlite3/reconstruct-20260602_030410_115"
+              }
+            }"#,
+            ),
+            "valid Agent Mail recovery-corrupt health JSON",
+        );
+
+        assert_eq!(snapshot.degraded.len(), 1);
+        let degradation = &snapshot.degraded[0];
+        assert_eq!(degradation.code, AGENT_MAIL_UNAVAILABLE_CODE);
+        assert_eq!(degradation.source, SwarmBriefSourceKind::AgentMail);
+        assert!(degradation.message.contains("healthLevel=green"));
+        assert!(degradation.message.contains("mode=corrupt"));
+        assert!(degradation.message.contains("archive_corruption"));
+        assert!(!degradation.message.contains("/Users/"));
+        assert!(!degradation.message.contains("storage.sqlite3"));
+        assert!(!degradation.message.contains("B-tree"));
+        assert!(!degradation.message.contains("page 283"));
+        assert!(
+            !degradation
+                .message
+                .contains("reconstruct-20260602_030410_115")
+        );
+    }
+
+    #[test]
+    fn agent_mail_health_snapshot_preserves_explicit_repair_required_mode() {
+        let snapshot = require_ok(
+            parse_agent_mail_snapshot_json(
+                r#"{
+              "schema":"ee.swarm.coordination_health.v1",
+              "health_level":"yellow",
+              "semantic_readiness":{
+                "status":"ok"
+              },
+              "recovery":{
+                "mode":"repair_required"
+              }
+            }"#,
+            ),
+            "valid Agent Mail repair-required health JSON",
+        );
+
+        assert_eq!(snapshot.degraded.len(), 1);
+        let degradation = &snapshot.degraded[0];
+        assert_eq!(degradation.code, AGENT_MAIL_UNAVAILABLE_CODE);
+        assert_eq!(degradation.source, SwarmBriefSourceKind::AgentMail);
+        assert!(degradation.message.contains("healthLevel=yellow"));
+        assert!(degradation.message.contains("mode=repair_required"));
+        assert!(!degradation.message.contains("mode=unknown_recovery"));
+    }
+
+    #[test]
+    fn agent_mail_health_snapshot_degrades_durability_corrupt_without_semantic_failure() {
+        let snapshot = require_ok(
+            parse_agent_mail_snapshot_json(
+                r#"{
+              "schema":"ee.swarm.coordination_health.v1",
+              "status":"degraded",
+              "durability_state":"corrupt",
+              "database_path":"storage.sqlite3",
+              "detail":"open /Users/example/.local/share/mcp_agent_mail/storage.sqlite3 failed at B-tree page 283"
+            }"#,
+            ),
+            "valid Agent Mail durability-corrupt health JSON",
+        );
+
+        assert_eq!(snapshot.degraded.len(), 1);
+        let degradation = &snapshot.degraded[0];
+        assert_eq!(degradation.code, AGENT_MAIL_UNAVAILABLE_CODE);
+        assert_eq!(degradation.source, SwarmBriefSourceKind::AgentMail);
+        assert!(degradation.message.contains("mode=corrupt"));
+        assert!(degradation.message.contains("archive_corruption"));
+        assert!(!degradation.message.contains("/Users/"));
+        assert!(!degradation.message.contains("storage.sqlite3"));
+        assert!(!degradation.message.contains("B-tree"));
+        assert!(!degradation.message.contains("page 283"));
     }
 
     #[cfg(unix)]

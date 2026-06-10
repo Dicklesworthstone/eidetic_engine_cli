@@ -68,6 +68,7 @@
       "description": "Whether the selected or requested candidate is safe under the packet recommendation, candidate identity, tracker authority, Agent Mail authority, and RCH posture."
     },
     "sourceAuthority": {"$ref": "#/definitions/sourceAuthority"},
+    "resourceAdmission": {"$ref": "#/definitions/resourceAdmission"},
     "unsafeReasons": {"$ref": "#/definitions/stringArray"},
     "staleReasons": {"$ref": "#/definitions/stringArray"},
     "sourceRefs": {"$ref": "#/definitions/stringArray"},
@@ -369,6 +370,95 @@
         },
         "installFreshnessAuthoritative": {"type": ["boolean", "null"]},
         "installFreshnessRepair": {"type": ["string", "null"], "maxLength": 240},
+        "sourceCount": {"type": "integer", "minimum": 0}
+      }
+    },
+    "resourceAdmission": {
+      "type": "object",
+      "description": "Side-effect-free advisory resource-profile admission copied into the claim gate. This block can suggest waiting for RCH or using a lean profile, but canAuthorizeClaim is always false and cannot make an unsafe claim safe.",
+      "required": [
+        "schema",
+        "policyDomain",
+        "policyId",
+        "sideEffectFree",
+        "advisoryOnly",
+        "canAuthorizeClaim",
+        "surface",
+        "commandClass",
+        "decision",
+        "requestedProfile",
+        "effectiveProfile",
+        "recommendedProfile",
+        "estimatedCostClass",
+        "sourcePosture",
+        "evidenceFreshness",
+        "reasonCodes",
+        "abstentionReasons",
+        "nextCommands",
+        "nextCommandActions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.resource_admission.v1"},
+        "policyDomain": {"type": "string", "const": "resource_profile_budget_admission"},
+        "policyId": {"type": "string", "const": "candidate.resource_profile_budget_admission"},
+        "sideEffectFree": {"type": "boolean", "const": true},
+        "advisoryOnly": {"type": "boolean", "const": true},
+        "canAuthorizeClaim": {"type": "boolean", "const": false},
+        "surface": {"type": "string", "enum": ["claim_gate", "work_packet"]},
+        "commandClass": {"type": "string", "enum": ["coordination", "read_only"]},
+        "decision": {
+          "type": "string",
+          "enum": [
+            "admit",
+            "degrade_to_lean",
+            "queue",
+            "wait_for_rch",
+            "split_workload",
+            "refuse_local_cargo",
+            "abstain"
+          ]
+        },
+        "requestedProfile": {"type": ["string", "null"], "enum": ["constrained", "portable", "workstation", "swarm", null]},
+        "effectiveProfile": {"type": "string", "enum": ["constrained", "portable", "workstation", "swarm"]},
+        "recommendedProfile": {"type": "string", "enum": ["constrained", "portable", "workstation", "swarm"]},
+        "estimatedCostClass": {"type": "string", "enum": ["tiny", "small", "standard", "swarm_heavy", "unknown"]},
+        "sourcePosture": {"$ref": "#/definitions/resourceAdmissionSourcePosture"},
+        "evidenceFreshness": {"type": "string", "enum": ["fresh", "partial", "degraded", "unsafe"]},
+        "reasonCodes": {"$ref": "#/definitions/stringArray"},
+        "abstentionReasons": {"$ref": "#/definitions/stringArray"},
+        "nextCommands": {"$ref": "#/definitions/stringArray"},
+        "nextCommandActions": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/inspectionCommandAction"}
+        }
+      }
+    },
+    "resourceAdmissionSourcePosture": {
+      "type": "object",
+      "required": [
+        "hostCalibration",
+        "resourceBudget",
+        "rch",
+        "localCargo",
+        "lanePressure",
+        "workloadPressure",
+        "daemon",
+        "replay",
+        "redactionPostureVerified",
+        "sourceCount"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "hostCalibration": {"type": "string"},
+        "resourceBudget": {"type": "string"},
+        "rch": {"type": "string"},
+        "localCargo": {"type": "string"},
+        "lanePressure": {"type": "string"},
+        "workloadPressure": {"type": "string"},
+        "daemon": {"type": "string"},
+        "replay": {"type": "string"},
+        "redactionPostureVerified": {"type": "boolean"},
         "sourceCount": {"type": "integer", "minimum": 0}
       }
     }

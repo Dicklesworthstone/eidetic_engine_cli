@@ -45,7 +45,9 @@ extract_panic() {
 }
 
 if command -v curl >/dev/null 2>&1; then
-    run_joined mcp curl -fsS --max-time 2 "$HEALTH_URL"
+    run_joined mcp curl -sS --max-time 2 \
+        --write-out $'\n__EE_HTTP_STATUS__:%{http_code}' \
+        "$HEALTH_URL"
 else
     mcp_status=127
     mcp_output="curl not found"
@@ -105,6 +107,22 @@ def env_int(name: str) -> int:
     except ValueError:
         return 0
 
+def split_http_output(value):
+    if not isinstance(value, str):
+        return "", None
+    marker = "\n__EE_HTTP_STATUS__:"
+    if marker not in value:
+        return value, None
+    body, status_text = value.rsplit(marker, 1)
+    try:
+        status = int(status_text.strip().splitlines()[0])
+    except (IndexError, ValueError):
+        status = None
+    return body, status
+
+def http_status_requires_fallback(status):
+    return isinstance(status, int) and not (200 <= status < 400)
+
 def bounded_health_level(value):
     if not isinstance(value, str):
         return None
@@ -117,6 +135,8 @@ def bounded_semantic_readiness_status(value):
     if not isinstance(value, str):
         return None
     normalized = value.lower()
+    if normalized == "ok":
+        return "pass"
     if normalized in {"pass", "fail"}:
         return normalized
     return None
@@ -152,11 +172,49 @@ def semantic_readiness_reason_class(value):
         return "permission_denied"
     return "unknown"
 
+def bounded_recovery_mode(value):
+    if not isinstance(value, str):
+        return None
+    normalized = value.lower()
+    if normalized in {"", "ok", "none", "normal", "clean", "idle"}:
+        return "ok"
+    if normalized == "corrupt":
+        return "corrupt"
+    if normalized in {"repair", "repairing", "recovering", "restore", "restoring", "reconstruct"}:
+        return "repair_required"
+    return "unknown_recovery"
+
+def recovery_reason_class(recovery):
+    if not isinstance(recovery, dict):
+        return "unknown"
+    mode = bounded_recovery_mode(recovery.get("mode") or recovery.get("status"))
+    if mode == "corrupt":
+        return "archive_corruption"
+    text = " ".join(
+        str(recovery.get(key, ""))
+        for key in ("next_action", "nextAction", "detail", "message", "bundle_path", "bundlePath")
+    ).lower()
+    if "doctor repair" in text or "restore" in text or "reconstruct" in text:
+        return "storage_recovery_required"
+    if "permission denied" in text:
+        return "permission_denied"
+    return "unknown"
+
+def recovery_summary_from_mode(mode, recovery):
+    recovery_mode = bounded_recovery_mode(mode)
+    if not recovery_mode or recovery_mode == "ok":
+        return None
+    return {
+        "mode": recovery_mode,
+        "reason": recovery_reason_class(recovery),
+    }
+
 def mcp_health_summary():
     if env_int("mcp_status") != 0:
         return {}
+    body, _http_status = split_http_output(os.environ.get("mcp_output", ""))
     try:
-        value = json.loads(os.environ.get("mcp_output", ""))
+        value = json.loads(body)
     except json.JSONDecodeError:
         return {}
     if not isinstance(value, dict):
@@ -196,13 +254,40 @@ def mcp_health_summary():
             readiness["reason"] = semantic_readiness_reason_class(semantic_reason)
         summary["semantic_readiness"] = readiness
 
+    recovery = value.get("recovery")
+    if isinstance(recovery, dict):
+        recovery_summary = recovery_summary_from_mode(
+            recovery.get("mode") or recovery.get("status"),
+            recovery,
+        )
+        if recovery_summary:
+            summary["recovery"] = recovery_summary
+
+    if "recovery" not in summary:
+        durability_state = value.get("durability_state") or value.get("durabilityState")
+        recovery_summary = recovery_summary_from_mode(
+            durability_state,
+            {
+                "mode": durability_state,
+                "status": value.get("status"),
+                "detail": value.get("detail") or value.get("message"),
+            },
+        )
+        if recovery_summary:
+            summary["recovery"] = recovery_summary
+
     return summary
 
 panic = os.environ.get("observed_panic", "")
 health_summary = mcp_health_summary()
+_mcp_body, mcp_http_status = split_http_output(os.environ.get("mcp_output", ""))
 semantic_readiness_failed = (
     health_summary.get("semantic_readiness", {}).get("status") == "fail"
 )
+recovery_requires_fallback = (
+    health_summary.get("recovery", {}).get("mode") not in {None, "ok"}
+)
+mcp_http_status_failed = http_status_requires_fallback(mcp_http_status)
 event = {
     "schema": os.environ["SCHEMA"],
     "timestamp": os.environ["timestamp"],
@@ -211,11 +296,15 @@ event = {
     "am_send_single_recipient_ok": env_bool("single_ok"),
     "am_send_multi_recipient_ok": env_bool("multi_ok"),
     "observed_panic": panic or None,
-    "fallback_active": env_bool("fallback_active") or semantic_readiness_failed,
+    "fallback_active": env_bool("fallback_active")
+    or mcp_http_status_failed
+    or semantic_readiness_failed
+    or recovery_requires_fallback,
     "checks": {
         "mcp_http": {
             "url": os.environ["HEALTH_URL"],
             "exit_code": env_int("mcp_status"),
+            "http_status": mcp_http_status,
         },
         "am_agents_list": {
             "binary": os.environ["AM_BIN"],

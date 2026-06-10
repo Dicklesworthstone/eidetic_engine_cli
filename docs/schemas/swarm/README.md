@@ -79,6 +79,7 @@ Contract examples:
 | reservation-conflict | `file_reservations` entry with overlapping `path_pattern`, holder, exclusive flag, and expiry | surface risk or claim gate should require coordination before editing |
 | inbox-unavailable | roster/reservations present plus a degraded entry or diagnostic saying inbox read failed | reservations may be usable, but unread-message evidence is incomplete |
 | semantic-readiness-failed | `semantic_readiness.status = "fail"` with a classified reason and health level | `agent_mail_semantic_readiness_failed`; reservation and inbox reads are not authoritative |
+| recovery-corrupt | `recovery.mode = "corrupt"` or `durabilityState = "corrupt"` with a bounded reason class while semantic readiness can still pass | `agent_mail_recovery_corrupt`; reservation and inbox reads are not authoritative |
 
 Implementation beads must add parser fixtures and logged tests covering the
 examples above, stdout/stderr isolation for any producer command, redaction

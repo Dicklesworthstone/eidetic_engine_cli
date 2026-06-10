@@ -58,9 +58,10 @@ Fixture scenarios:
   `coordinate_before_claim`.
 - `degraded_mail_rch_topology`: Agent Mail is degraded and remote-only Cargo
   proof is blocked, so only static or docs work can proceed until RCH recovers.
-- `agent_mail_degraded_read_only`, `agent_mail_semantic_readiness_failed`, and
-  `agent_mail_database_contention_timeout`: Agent Mail evidence is present but
-  not authoritative enough to infer reservation or inbox safety.
+- `agent_mail_degraded_read_only`, `agent_mail_semantic_readiness_failed`,
+  `agent_mail_recovery_corrupt`, and `agent_mail_database_contention_timeout`:
+  Agent Mail evidence is present but not authoritative enough to infer
+  reservation or inbox safety.
 - `beads_command_timeout_no_output` and `bv_timeout_no_output`: tracker or
   graph-triage sources timed out or emitted no output; Beads fallback rows are
   advisory until a bounded retry or manual inspection succeeds.
@@ -126,6 +127,12 @@ re-parsing raw tracker rows inside the work-packet layer.
 - `jsonlParseError` carries only the first invalid line/column plus a redacted,
   length-capped excerpt. It must never include raw issue bodies beyond that
   bounded diagnostic.
+- JSONL parse-error diagnostics may also include `invalidLineNumbers`,
+  `jsonlValidRecordCount`, `dbIntegrityOk`, sync timestamps, `mutationMustStop`,
+  `safeRepairCandidate`, `repairClassification`, and `repairCommandCandidate`.
+  The flush-only forced export command is only a candidate when DB integrity is
+  clean, DB/JSONL valid counts agree, the malformed line is a trailing row, and
+  no dirty or merge evidence makes repair ambiguous.
 
 The work-packet generator never repairs Beads state. Recovery remains explicit:
 inspect the malformed row, run `br doctor --json`, use
@@ -283,6 +290,14 @@ ever reading mail bodies or raw inbox contents:
   When either flag is `false` or `null`, candidate safety MUST downgrade
   confidence rather than treating a missing or zero count as evidence that no
   peer conflict exists.
+- Recovery and durability signals have the same authority as semantic
+  readiness. If Agent Mail reports `recovery.mode=corrupt`, a non-ok
+  `recovery.status`, or `durability_state=corrupt`, reservation and inbox
+  evidence are non-authoritative even when transport health is green and
+  `semantic_readiness.status` is `ok`. Emit bounded reason classes such as
+  `archive_corruption` or `storage_recovery_required`; never expose database
+  paths, SQLite filenames, B-tree/page offsets, recovery bundle paths, or raw
+  repair text.
 - `fallbackActions` is an ordered, structured workflow keyed by `kind`. The
   array is sorted lexicographically by `kind` so the packet stays deterministic
   across runs. Action kinds: `beads_comment`, `manual_coordination`,
@@ -293,8 +308,8 @@ ever reading mail bodies or raw inbox contents:
 Redaction invariant: `fallbackActions[].summary`, `command`, and `manualStep`
 MUST NOT include raw inbox bodies, message IDs, headers (`From:`, `Subject:`,
 `Message-ID:`), agent identities, or unredacted reservation paths. The
-`agent_mail_degraded_read_only` fixture under
-`tests/fixtures/swarm_work_packet/` shows the canonical degraded shape; the
+`agent_mail_degraded_read_only` and `agent_mail_recovery_corrupt` fixtures under
+`tests/fixtures/swarm_work_packet/` show the canonical degraded shapes; the
 `work_packet_agent_mail_fallback_semantics_are_contractual` lifecycle test
 fences these properties.
 

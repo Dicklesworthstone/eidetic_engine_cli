@@ -1102,6 +1102,21 @@ mod tests {
                     }
                 }"#,
             )?,
+            agent_mail_snapshot_parser_case(
+                "recovery_corrupt_semantic_ok",
+                r#"{
+                    "schema": "ee.swarm.coordination_health.v1",
+                    "health_level": "green",
+                    "semantic_readiness": {
+                        "status": "ok"
+                    },
+                    "recovery": {
+                        "mode": "corrupt",
+                        "next_action": "Run am doctor repair --yes or restore from /Users/example/.local/share/mcp_agent_mail/storage.sqlite3 after B-tree page 283 failed",
+                        "bundle_path": "/Users/example/.local/share/mcp_agent_mail/doctor/forensics/storage.sqlite3/reconstruct-20260602_030410_115"
+                    }
+                }"#,
+            )?,
             agent_mail_snapshot_parser_case("missing_optional_arrays", r#"{}"#)?,
         ];
         let matrix = serde_json::json!({

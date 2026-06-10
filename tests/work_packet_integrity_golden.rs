@@ -20,7 +20,8 @@
 use std::path::PathBuf;
 
 use ee::core::beads_integrity::{
-    BeadsIntegrityHealth, BeadsIntegrityInputs, JsonlParseError, compose_integrity_report,
+    BeadsIntegrityHealth, BeadsIntegrityInputs, BeadsIntegrityRepairClassification,
+    JsonlParseError, compose_integrity_report,
 };
 
 type TestResult = Result<(), String>;
@@ -86,6 +87,29 @@ fn malformed_tail_classifies_as_jsonl_parse_error() -> TestResult {
     }
     if report.recovery_hint.is_none() {
         return Err("malformed-tail must carry a recovery hint".into());
+    }
+    if report.invalid_line_numbers != vec![2703] {
+        return Err(format!(
+            "malformed-tail invalid line numbers drifted: {:?}",
+            report.invalid_line_numbers
+        ));
+    }
+    if report.safe_repair_candidate != Some(true) {
+        return Err("malformed-tail with DB/count evidence should be a repair candidate".into());
+    }
+    if report.repair_command_candidate != Some("br sync --flush-only --force --json") {
+        return Err(format!(
+            "malformed-tail repair command drifted: {:?}",
+            report.repair_command_candidate
+        ));
+    }
+    if report.repair_classification
+        != Some(BeadsIntegrityRepairClassification::InvalidTrailingLineDbHealthy)
+    {
+        return Err("malformed-tail repair classification drifted".into());
+    }
+    if report.mutation_must_stop != Some(true) {
+        return Err("malformed-tail must stop tracker mutation until repair".into());
     }
     Ok(())
 }

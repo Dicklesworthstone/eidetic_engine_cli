@@ -38,6 +38,12 @@ use crate::core::swarm_brief::{
 use crate::core::verify_ledger::{RchVerifyRunView, list_rch_verify_blockers};
 use crate::db::DbConnection;
 use crate::models::InstallCheckReport;
+use crate::shadow::{
+    ResourceAdmissionInput, ResourceAdmissionReport, ResourceBudgetPosture, ResourceCostClass,
+    ResourceDaemonPosture, ResourceHostCalibrationPosture, ResourceLanePressurePosture,
+    ResourceLocalCargoPosture, ResourceOperatingProfile, ResourceRchPosture, ResourceReplayPosture,
+    ResourceWorkloadPressurePosture, evaluate_resource_profile_budget_admission,
+};
 
 pub const SWARM_NEXT_ACTION_SCHEMA_V1: &str = "ee.swarm_next_action.v1";
 pub const SWARM_NEXT_ACTION_REDACTION_STATUS: &str =
@@ -655,6 +661,7 @@ pub struct SwarmWorkPacket {
     pub rch_proof_posture: SwarmWorkPacketRchProofPosture,
     pub verification: SwarmWorkPacketVerification,
     pub source_provenance: Vec<SwarmWorkPacketSourceProvenance>,
+    pub resource_admission: SwarmWorkPacketResourceAdmission,
     pub mutation_policy: SwarmWorkPacketMutationPolicy,
     pub degraded: Vec<SwarmWorkPacketDegradation>,
     #[serde(skip)]
@@ -719,6 +726,7 @@ pub struct SwarmWorkPacketClaimGate {
     pub recommended_action: &'static str,
     pub recommended_safe_to_claim: Option<bool>,
     pub source_authority: SwarmWorkPacketClaimGateSourceAuthority,
+    pub resource_admission: SwarmWorkPacketResourceAdmission,
     pub unsafe_reasons: Vec<String>,
     pub stale_reasons: Vec<String>,
     pub source_refs: Vec<String>,
@@ -758,6 +766,45 @@ pub struct SwarmWorkPacketClaimGateSourceAuthority {
     pub install_freshness_verdict: &'static str,
     pub install_freshness_authoritative: Option<bool>,
     pub install_freshness_repair: Option<&'static str>,
+    pub source_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketResourceAdmission {
+    pub schema: &'static str,
+    pub policy_domain: &'static str,
+    pub policy_id: &'static str,
+    pub side_effect_free: bool,
+    pub advisory_only: bool,
+    pub can_authorize_claim: bool,
+    pub surface: &'static str,
+    pub command_class: &'static str,
+    pub decision: &'static str,
+    pub requested_profile: Option<&'static str>,
+    pub effective_profile: &'static str,
+    pub recommended_profile: &'static str,
+    pub estimated_cost_class: &'static str,
+    pub source_posture: SwarmWorkPacketResourceAdmissionSourcePosture,
+    pub evidence_freshness: &'static str,
+    pub reason_codes: Vec<String>,
+    pub abstention_reasons: Vec<String>,
+    pub next_commands: Vec<String>,
+    pub next_command_actions: Vec<SwarmWorkPacketCommandAction>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketResourceAdmissionSourcePosture {
+    pub host_calibration: &'static str,
+    pub resource_budget: &'static str,
+    pub rch: &'static str,
+    pub local_cargo: &'static str,
+    pub lane_pressure: &'static str,
+    pub workload_pressure: &'static str,
+    pub daemon: &'static str,
+    pub replay: &'static str,
+    pub redaction_posture_verified: bool,
     pub source_count: usize,
 }
 
@@ -825,6 +872,10 @@ pub struct SwarmWorkPacketAgentMail {
     pub inbox_authoritative: Option<bool>,
     pub fallback_actions: Vec<SwarmWorkPacketAgentMailFallbackAction>,
     pub semantic_readiness: Option<SwarmWorkPacketAgentMailSemanticReadiness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<SwarmWorkPacketAgentMailRecovery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub durability_state: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -859,6 +910,14 @@ pub struct SwarmWorkPacketRepairSafety {
 #[serde(rename_all = "camelCase")]
 pub struct SwarmWorkPacketAgentMailSemanticReadiness {
     pub status: &'static str,
+    pub reason: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketAgentMailRecovery {
+    pub mode: &'static str,
+    pub status: Option<&'static str>,
     pub reason: Option<&'static str>,
 }
 
@@ -900,6 +959,46 @@ pub struct SwarmWorkPacketRchProofPosture {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketRchSelectorAdmissionBlocker {
+    pub kind: String,
+    pub retry_guidance: String,
+    pub evidence: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_build_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_command_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_command_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_posture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat_age_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_age_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_age_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slots_owned: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workers_healthy: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workers_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slots_available: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slots_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_escalation: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SwarmWorkPacketRchSelectorAdmissionProbe {
     pub schema: &'static str,
     pub status: Option<String>,
@@ -914,6 +1013,7 @@ pub struct SwarmWorkPacketRchSelectorAdmissionProbe {
     pub path_normalization_warning: Option<String>,
     pub remote_required: bool,
     pub local_fallback_refused: bool,
+    pub admission_blocker: Option<SwarmWorkPacketRchSelectorAdmissionBlocker>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -1283,6 +1383,16 @@ impl SwarmWorkPacket {
         );
         let observed_state_class =
             work_packet_observed_state_class(&coordination, &rch_proof_posture, &degraded);
+        let resource_admission = work_packet_resource_admission(
+            "work_packet",
+            "read_only",
+            &coordination,
+            &tracker_integrity,
+            &rch_proof_posture,
+            &degraded,
+            observed_state_class,
+            source_provenance.len(),
+        );
 
         let mut packet = Self {
             schema: SWARM_WORK_PACKET_SCHEMA_V1,
@@ -1297,6 +1407,7 @@ impl SwarmWorkPacket {
             rch_proof_posture,
             verification,
             source_provenance,
+            resource_admission,
             mutation_policy: SwarmWorkPacketMutationPolicy::default_read_only(),
             degraded,
             claim_gate_install_freshness: SwarmWorkPacketClaimGateInstallFreshness::not_evaluated(),
@@ -1328,6 +1439,16 @@ impl SwarmWorkPacket {
         });
         let install_freshness = work_packet_claim_gate_install_freshness(self);
         let source_authority_attestation = work_packet_claim_gate_attestation_summary(self);
+        let resource_admission = work_packet_resource_admission(
+            "claim_gate",
+            "coordination",
+            &self.coordination,
+            &self.tracker_integrity,
+            &self.rch_proof_posture,
+            &self.degraded,
+            self.observed_state_class,
+            self.source_provenance.len(),
+        );
         let verdict = work_packet_claim_gate_verdict(
             self,
             requested_candidate_id,
@@ -1426,6 +1547,7 @@ impl SwarmWorkPacket {
                 install_freshness_repair: install_freshness.repair,
                 source_count: self.source_provenance.len(),
             },
+            resource_admission,
             unsafe_reasons,
             stale_reasons,
             source_refs,
@@ -1661,6 +1783,409 @@ fn work_packet_claim_gate_install_freshness(
         return packet.claim_gate_install_freshness;
     }
     SwarmWorkPacketClaimGateInstallFreshness::not_evaluated()
+}
+
+fn work_packet_resource_admission(
+    surface: &'static str,
+    command_class: &'static str,
+    coordination: &SwarmWorkPacketCoordination,
+    tracker_integrity: &BeadsIntegrityReport,
+    rch: &SwarmWorkPacketRchProofPosture,
+    degraded: &[SwarmWorkPacketDegradation],
+    observed_state_class: &'static str,
+    source_count: usize,
+) -> SwarmWorkPacketResourceAdmission {
+    let input = work_packet_resource_admission_input(
+        coordination,
+        tracker_integrity,
+        rch,
+        degraded,
+        observed_state_class,
+    );
+    let report = evaluate_resource_profile_budget_admission(input);
+    work_packet_resource_admission_from_report(surface, command_class, input, report, source_count)
+}
+
+fn work_packet_resource_admission_input(
+    coordination: &SwarmWorkPacketCoordination,
+    tracker_integrity: &BeadsIntegrityReport,
+    rch: &SwarmWorkPacketRchProofPosture,
+    degraded: &[SwarmWorkPacketDegradation],
+    observed_state_class: &'static str,
+) -> ResourceAdmissionInput {
+    ResourceAdmissionInput {
+        requested_profile: Some(ResourceOperatingProfile::Workstation),
+        effective_profile: ResourceOperatingProfile::Workstation,
+        estimated_cost_class: work_packet_resource_cost_class(coordination),
+        host_calibration: ResourceHostCalibrationPosture::Fresh,
+        resource_budget: work_packet_resource_budget(coordination, degraded),
+        rch: work_packet_resource_rch_posture(rch),
+        local_cargo: work_packet_resource_local_cargo_posture(rch, degraded),
+        lane_pressure: work_packet_resource_lane_pressure(rch, coordination),
+        workload_pressure: work_packet_resource_workload_pressure(
+            coordination,
+            observed_state_class,
+        ),
+        daemon: ResourceDaemonPosture::NotRequired,
+        replay: ResourceReplayPosture::NotRequired,
+        redaction_posture_verified: tracker_integrity.br_reads_authoritative
+            && coordination.agent_mail.reservation_authoritative != Some(false)
+            && coordination.agent_mail.inbox_authoritative != Some(false),
+    }
+}
+
+fn work_packet_resource_cost_class(
+    coordination: &SwarmWorkPacketCoordination,
+) -> ResourceCostClass {
+    let pressure_count = coordination.dirty_path_count
+        + coordination.active_claim_count
+        + coordination.file_collision_count;
+    if pressure_count >= 25 {
+        ResourceCostClass::SwarmHeavy
+    } else {
+        ResourceCostClass::Standard
+    }
+}
+
+fn work_packet_resource_budget(
+    coordination: &SwarmWorkPacketCoordination,
+    degraded: &[SwarmWorkPacketDegradation],
+) -> ResourceBudgetPosture {
+    if degraded
+        .iter()
+        .any(|entry| entry.code == "disk_pressure" || entry.code == "cache_pressure")
+        || coordination.dirty_path_count >= 5
+        || coordination.file_collision_count >= 3
+    {
+        ResourceBudgetPosture::RecommendDecrease
+    } else {
+        ResourceBudgetPosture::WithinBudget
+    }
+}
+
+fn work_packet_resource_rch_posture(rch: &SwarmWorkPacketRchProofPosture) -> ResourceRchPosture {
+    if !rch.remote_only_required && !rch.source_enabled {
+        return ResourceRchPosture::NotRequired;
+    }
+    if rch.safe_to_launch_cargo_verification == Some(true) {
+        return ResourceRchPosture::RemoteReady;
+    }
+    if rch
+        .selector_admission_probe
+        .as_ref()
+        .and_then(|probe| probe.admission_blocker.as_ref())
+        .is_some_and(|blocker| blocker.kind == "active_project_exclusion")
+    {
+        return ResourceRchPosture::ActiveProjectExclusion;
+    }
+    if rch.retry_after.is_some() {
+        return ResourceRchPosture::ProgressStale;
+    }
+    if rch.safe_to_launch_cargo_verification == Some(false)
+        || rch.remote_only_required
+        || !rch.blocker_codes.is_empty()
+    {
+        return ResourceRchPosture::Blocked;
+    }
+    ResourceRchPosture::NotRequired
+}
+
+fn work_packet_resource_local_cargo_posture(
+    rch: &SwarmWorkPacketRchProofPosture,
+    degraded: &[SwarmWorkPacketDegradation],
+) -> ResourceLocalCargoPosture {
+    if degraded
+        .iter()
+        .any(|entry| entry.code == "local_cargo_bypass_detected")
+    {
+        ResourceLocalCargoPosture::Unsafe
+    } else if rch.local_fallback_prevented || rch.remote_only_required {
+        ResourceLocalCargoPosture::Refused
+    } else {
+        ResourceLocalCargoPosture::NotRequired
+    }
+}
+
+fn work_packet_resource_lane_pressure(
+    rch: &SwarmWorkPacketRchProofPosture,
+    coordination: &SwarmWorkPacketCoordination,
+) -> ResourceLanePressurePosture {
+    if work_packet_rch_remote_verification_reason(rch).is_some() {
+        ResourceLanePressurePosture::VerificationPressure
+    } else if coordination.active_claim_count > 0 {
+        ResourceLanePressurePosture::ForegroundPressure
+    } else {
+        ResourceLanePressurePosture::Clear
+    }
+}
+
+fn work_packet_resource_workload_pressure(
+    coordination: &SwarmWorkPacketCoordination,
+    observed_state_class: &'static str,
+) -> ResourceWorkloadPressurePosture {
+    if observed_state_class == "crowded_checkout" || coordination.dirty_path_count > 0 {
+        ResourceWorkloadPressurePosture::CachePressure
+    } else if observed_state_class == "degraded_mail_rch_topology" {
+        ResourceWorkloadPressurePosture::MixedPressure
+    } else {
+        ResourceWorkloadPressurePosture::WithinBudget
+    }
+}
+
+fn work_packet_resource_admission_from_report(
+    surface: &'static str,
+    command_class: &'static str,
+    input: ResourceAdmissionInput,
+    report: ResourceAdmissionReport,
+    source_count: usize,
+) -> SwarmWorkPacketResourceAdmission {
+    let mut next_command_actions =
+        work_packet_resource_admission_command_actions(surface, command_class, input, &report);
+    sort_work_packet_command_actions(&mut next_command_actions);
+    SwarmWorkPacketResourceAdmission {
+        schema: report.schema,
+        policy_domain: report.policy_domain,
+        policy_id: report.policy_id,
+        side_effect_free: report.side_effect_free,
+        advisory_only: report.advisory_only,
+        can_authorize_claim: false,
+        surface,
+        command_class,
+        decision: report.decision.as_str(),
+        requested_profile: report
+            .requested_profile
+            .map(ResourceOperatingProfile::as_str),
+        effective_profile: report.effective_profile.as_str(),
+        recommended_profile: report.recommended_profile.as_str(),
+        estimated_cost_class: input.estimated_cost_class.as_str(),
+        source_posture: SwarmWorkPacketResourceAdmissionSourcePosture {
+            host_calibration: resource_host_calibration_label(input.host_calibration),
+            resource_budget: resource_budget_label(input.resource_budget),
+            rch: resource_rch_label(input.rch),
+            local_cargo: resource_local_cargo_label(input.local_cargo),
+            lane_pressure: resource_lane_pressure_label(input.lane_pressure),
+            workload_pressure: resource_workload_pressure_label(input.workload_pressure),
+            daemon: resource_daemon_label(input.daemon),
+            replay: resource_replay_label(input.replay),
+            redaction_posture_verified: input.redaction_posture_verified,
+            source_count,
+        },
+        evidence_freshness: resource_admission_evidence_freshness(&input),
+        reason_codes: report.reason_codes,
+        abstention_reasons: report.abstention_reasons,
+        next_commands: report.next_commands,
+        next_command_actions,
+    }
+}
+
+fn work_packet_resource_admission_command_actions(
+    surface: &'static str,
+    command_class: &'static str,
+    input: ResourceAdmissionInput,
+    report: &ResourceAdmissionReport,
+) -> Vec<SwarmWorkPacketCommandAction> {
+    let mut actions = vec![resource_admission_diag_command_action(
+        surface,
+        command_class,
+        input,
+    )];
+    match report.decision.as_str() {
+        "wait_for_rch" => actions.push(work_packet_command_action(
+            "resource_admission_rch_status",
+            "rch status --json",
+            &["rch", "status", "--json"],
+            false,
+            "rch",
+            "before_claim_or_verification",
+            "Refresh RCH lane pressure before retrying remote-required work.",
+        )),
+        "refuse_local_cargo" => actions.push(work_packet_command_action(
+            "resource_admission_local_cargo_tripwire",
+            "scripts/check-local-cargo-tripwire.sh --probe-processes --json",
+            &[
+                "scripts/check-local-cargo-tripwire.sh",
+                "--probe-processes",
+                "--json",
+            ],
+            false,
+            "static_local",
+            "before_verification",
+            "Refresh local Cargo tripwire evidence before deciding on verification work.",
+        )),
+        _ => {}
+    }
+    actions
+}
+
+fn resource_admission_diag_command_action(
+    surface: &'static str,
+    command_class: &'static str,
+    input: ResourceAdmissionInput,
+) -> SwarmWorkPacketCommandAction {
+    let mut argv = vec![
+        "ee".to_owned(),
+        "diag".to_owned(),
+        "resource-admission".to_owned(),
+        "--surface".to_owned(),
+        resource_cli_label(surface),
+        "--command-class".to_owned(),
+        resource_cli_label(command_class),
+        "--effective-profile".to_owned(),
+        resource_cli_label(input.effective_profile.as_str()),
+        "--estimated-cost-class".to_owned(),
+        resource_cli_label(input.estimated_cost_class.as_str()),
+        "--host-calibration".to_owned(),
+        resource_cli_label(resource_host_calibration_label(input.host_calibration)),
+        "--resource-budget".to_owned(),
+        resource_cli_label(resource_budget_label(input.resource_budget)),
+        "--rch".to_owned(),
+        resource_cli_label(resource_rch_label(input.rch)),
+        "--local-cargo".to_owned(),
+        resource_cli_label(resource_local_cargo_label(input.local_cargo)),
+        "--lane-pressure".to_owned(),
+        resource_cli_label(resource_lane_pressure_label(input.lane_pressure)),
+        "--workload-pressure".to_owned(),
+        resource_cli_label(resource_workload_pressure_label(input.workload_pressure)),
+        "--daemon".to_owned(),
+        resource_cli_label(resource_daemon_label(input.daemon)),
+        "--replay".to_owned(),
+        resource_cli_label(resource_replay_label(input.replay)),
+        "--json".to_owned(),
+    ];
+    if let Some(requested_profile) = input.requested_profile {
+        argv.insert(5, resource_cli_label(requested_profile.as_str()));
+        argv.insert(5, "--requested-profile".to_owned());
+    }
+    SwarmWorkPacketCommandAction {
+        command_id: "resource_admission_diag",
+        display_command: argv.join(" "),
+        argv,
+        shell_required: false,
+        copy_safety: "safe_structured_argv",
+        mutates_state: false,
+        required_substrate: "ee",
+        when: "inspect_resource_admission_advice",
+        rationale: "Reproduce the side-effect-free resource admission advice with bounded posture inputs.",
+    }
+}
+
+fn resource_cli_label(value: &str) -> String {
+    value.replace('_', "-")
+}
+
+fn resource_admission_evidence_freshness(input: &ResourceAdmissionInput) -> &'static str {
+    if !input.redaction_posture_verified {
+        "unsafe"
+    } else if matches!(
+        input.rch,
+        ResourceRchPosture::Blocked
+            | ResourceRchPosture::ActiveProjectExclusion
+            | ResourceRchPosture::ProgressStale
+    ) {
+        "degraded"
+    } else if matches!(
+        input.host_calibration,
+        ResourceHostCalibrationPosture::Partial | ResourceHostCalibrationPosture::SyntheticOnly
+    ) || matches!(
+        input.resource_budget,
+        ResourceBudgetPosture::RecommendDecrease | ResourceBudgetPosture::OverrideClamped
+    ) {
+        "partial"
+    } else {
+        "fresh"
+    }
+}
+
+fn resource_host_calibration_label(posture: ResourceHostCalibrationPosture) -> &'static str {
+    match posture {
+        ResourceHostCalibrationPosture::Fresh => "fresh",
+        ResourceHostCalibrationPosture::Stale => "stale",
+        ResourceHostCalibrationPosture::Partial => "partial",
+        ResourceHostCalibrationPosture::SyntheticOnly => "synthetic_only",
+        ResourceHostCalibrationPosture::Contradictory => "contradictory",
+        ResourceHostCalibrationPosture::Missing => "missing",
+        ResourceHostCalibrationPosture::Unavailable => "unavailable",
+        ResourceHostCalibrationPosture::NotApplicable => "not_applicable",
+    }
+}
+
+fn resource_budget_label(posture: ResourceBudgetPosture) -> &'static str {
+    match posture {
+        ResourceBudgetPosture::WithinBudget => "within_budget",
+        ResourceBudgetPosture::RecommendDecrease => "recommend_decrease",
+        ResourceBudgetPosture::RecommendIncrease => "recommend_increase",
+        ResourceBudgetPosture::OverrideClamped => "override_clamped",
+        ResourceBudgetPosture::Missing => "missing",
+        ResourceBudgetPosture::Contradictory => "contradictory",
+    }
+}
+
+fn resource_rch_label(posture: ResourceRchPosture) -> &'static str {
+    match posture {
+        ResourceRchPosture::RemoteReady => "remote_ready",
+        ResourceRchPosture::ActiveProjectExclusion => "active_project_exclusion",
+        ResourceRchPosture::ProgressStale => "progress_stale",
+        ResourceRchPosture::Blocked => "blocked",
+        ResourceRchPosture::NotRequired => "not_required",
+        ResourceRchPosture::Unknown => "unknown",
+    }
+}
+
+fn resource_local_cargo_label(posture: ResourceLocalCargoPosture) -> &'static str {
+    match posture {
+        ResourceLocalCargoPosture::Clean => "clean",
+        ResourceLocalCargoPosture::Refused => "refused",
+        ResourceLocalCargoPosture::Unsafe => "unsafe",
+        ResourceLocalCargoPosture::Unknown => "unknown",
+        ResourceLocalCargoPosture::NotRequired => "not_required",
+    }
+}
+
+fn resource_lane_pressure_label(posture: ResourceLanePressurePosture) -> &'static str {
+    match posture {
+        ResourceLanePressurePosture::Clear => "clear",
+        ResourceLanePressurePosture::ForegroundPressure => "foreground_pressure",
+        ResourceLanePressurePosture::BackgroundPressure => "background_pressure",
+        ResourceLanePressurePosture::VerificationPressure => "verification_pressure",
+        ResourceLanePressurePosture::MaintenancePressure => "maintenance_pressure",
+        ResourceLanePressurePosture::MixedPressure => "mixed_pressure",
+        ResourceLanePressurePosture::Unknown => "unknown",
+    }
+}
+
+fn resource_workload_pressure_label(posture: ResourceWorkloadPressurePosture) -> &'static str {
+    match posture {
+        ResourceWorkloadPressurePosture::WithinBudget => "within_budget",
+        ResourceWorkloadPressurePosture::CachePressure => "cache_pressure",
+        ResourceWorkloadPressurePosture::WriteSpoolPressure => "write_spool_pressure",
+        ResourceWorkloadPressurePosture::ReadPoolPressure => "read_pool_pressure",
+        ResourceWorkloadPressurePosture::PackSloPressure => "pack_slo_pressure",
+        ResourceWorkloadPressurePosture::IndexPressure => "index_pressure",
+        ResourceWorkloadPressurePosture::GraphPressure => "graph_pressure",
+        ResourceWorkloadPressurePosture::MixedPressure => "mixed_pressure",
+        ResourceWorkloadPressurePosture::Unknown => "unknown",
+    }
+}
+
+fn resource_daemon_label(posture: ResourceDaemonPosture) -> &'static str {
+    match posture {
+        ResourceDaemonPosture::Available => "available",
+        ResourceDaemonPosture::Unavailable => "unavailable",
+        ResourceDaemonPosture::Degraded => "degraded",
+        ResourceDaemonPosture::NotRequired => "not_required",
+        ResourceDaemonPosture::Unknown => "unknown",
+    }
+}
+
+fn resource_replay_label(posture: ResourceReplayPosture) -> &'static str {
+    match posture {
+        ResourceReplayPosture::Healthy => "healthy",
+        ResourceReplayPosture::Regression => "regression",
+        ResourceReplayPosture::Stale => "stale",
+        ResourceReplayPosture::Missing => "missing",
+        ResourceReplayPosture::NotRequired => "not_required",
+        ResourceReplayPosture::Unknown => "unknown",
+    }
 }
 
 fn work_packet_claim_gate_install_freshness_from_degraded(
@@ -1991,6 +2516,11 @@ fn apply_agent_mail_authority_candidate_downgrade(
             candidate.decision = "external_state_required";
         }
         candidate.unsafe_reasons.push(unsafe_reason.to_owned());
+        if agent_mail_recovery_is_corrupt(agent_mail) {
+            candidate
+                .unsafe_reasons
+                .push("agent_mail_recovery_corrupt".to_owned());
+        }
         candidate.unsafe_reasons.sort();
         candidate.unsafe_reasons.dedup();
     }
@@ -2387,11 +2917,17 @@ fn work_packet_agent_mail(
     });
     let unavailable_reason = agent_mail_unavailable_reason(snapshot);
     let semantic_failure_reason = agent_mail_semantic_failure_reason(snapshot);
+    let recovery = agent_mail_recovery_from_degraded(snapshot);
+    let recovery_blocks_authority = recovery
+        .as_ref()
+        .is_some_and(agent_mail_recovery_blocks_authority);
     let agent_mail_unavailable_degraded = degraded_codes
         .iter()
         .any(|code| code == AGENT_MAIL_UNAVAILABLE_CODE);
     let status = if semantic_failure_reason.is_some() {
         "semantic_readiness_failed"
+    } else if recovery_blocks_authority {
+        "unavailable"
     } else if agent_mail_unavailable_degraded {
         "unavailable"
     } else {
@@ -2409,17 +2945,29 @@ fn work_packet_agent_mail(
     let health_level = match status {
         "fresh" => Some("green"),
         "semantic_readiness_failed" => agent_mail_health_level_from_semantic_failure(snapshot),
+        "unavailable" if recovery_blocks_authority => {
+            agent_mail_health_level_from_recovery(snapshot).or(Some("green"))
+        }
         "degraded_read_only" | "unavailable" => Some("red"),
         _ => None,
     };
     let counts_available = status == "fresh";
     let reservation_authoritative = agent_mail_authoritative_flag(status);
     let inbox_authoritative = agent_mail_authoritative_flag(status);
-    let semantic_readiness =
-        semantic_failure_reason.map(|reason| SwarmWorkPacketAgentMailSemanticReadiness {
+    let semantic_readiness = if let Some(reason) = semantic_failure_reason {
+        Some(SwarmWorkPacketAgentMailSemanticReadiness {
             status: "fail",
             reason: Some(reason),
-        });
+        })
+    } else {
+        agent_mail_semantic_status_from_recovery(snapshot).map(|status| {
+            SwarmWorkPacketAgentMailSemanticReadiness {
+                status,
+                reason: None,
+            }
+        })
+    };
+    let durability_state = agent_mail_durability_state_from_recovery(recovery.as_ref());
     SwarmWorkPacketAgentMail {
         status,
         health_level,
@@ -2430,8 +2978,14 @@ fn work_packet_agent_mail(
         archive_index_parity: agent_mail_archive_index_parity(status, snapshot),
         reservation_authoritative,
         inbox_authoritative,
-        fallback_actions: agent_mail_fallback_actions(status, unavailable_reason),
+        fallback_actions: agent_mail_fallback_actions(
+            status,
+            unavailable_reason,
+            recovery.as_ref(),
+        ),
         semantic_readiness,
+        recovery,
+        durability_state,
     }
 }
 
@@ -2496,6 +3050,130 @@ fn agent_mail_semantic_reason_from_message(message: &str) -> &'static str {
     } else {
         "unknown"
     }
+}
+
+fn agent_mail_recovery_from_degraded(
+    snapshot: &SwarmNextActionSnapshot,
+) -> Option<SwarmWorkPacketAgentMailRecovery> {
+    snapshot.degraded.iter().find_map(|degradation| {
+        if degradation.source != "agent_mail" || degradation.code != AGENT_MAIL_UNAVAILABLE_CODE {
+            return None;
+        }
+        let message = degradation.message.as_str();
+        if !message.contains("recovery posture is degraded") && !message.contains("mode=") {
+            return None;
+        }
+        let mode = agent_mail_recovery_mode_from_message(message)?;
+        Some(SwarmWorkPacketAgentMailRecovery {
+            mode,
+            status: agent_mail_recovery_status_from_mode(mode),
+            reason: Some(agent_mail_recovery_reason_from_message(message)),
+        })
+    })
+}
+
+fn agent_mail_recovery_mode_from_message(message: &str) -> Option<&'static str> {
+    if message.contains("mode=corrupt") {
+        Some("corrupt")
+    } else if message.contains("mode=repair_required") {
+        Some("repair")
+    } else if message.contains("mode=unknown_recovery") {
+        Some("unknown")
+    } else {
+        None
+    }
+}
+
+fn agent_mail_recovery_status_from_mode(mode: &str) -> Option<&'static str> {
+    match mode {
+        "corrupt" => Some("corrupt"),
+        "repair" | "recover" | "restore" => Some("repair_required"),
+        "unknown" => Some("unknown"),
+        _ => None,
+    }
+}
+
+fn agent_mail_recovery_reason_from_message(message: &str) -> &'static str {
+    if message.contains("archive_corruption") {
+        "archive_corruption"
+    } else if message.contains("storage_recovery_required") {
+        "storage_recovery_required"
+    } else if message.contains("repair_required") {
+        "repair_required"
+    } else {
+        "unknown"
+    }
+}
+
+fn agent_mail_recovery_blocks_authority(recovery: &SwarmWorkPacketAgentMailRecovery) -> bool {
+    matches!(
+        recovery.mode,
+        "corrupt" | "repair" | "recover" | "restore" | "unknown"
+    ) || recovery
+        .status
+        .is_some_and(|status| status != "ok" && status != "healthy")
+}
+
+fn agent_mail_recovery_is_corrupt(agent_mail: &SwarmWorkPacketAgentMail) -> bool {
+    agent_mail
+        .recovery
+        .as_ref()
+        .is_some_and(|recovery| recovery.mode == "corrupt" || recovery.status == Some("corrupt"))
+        || agent_mail.durability_state == Some("corrupt")
+}
+
+fn agent_mail_durability_state_from_recovery(
+    recovery: Option<&SwarmWorkPacketAgentMailRecovery>,
+) -> Option<&'static str> {
+    recovery
+        .filter(|recovery| recovery.mode == "corrupt" || recovery.status == Some("corrupt"))
+        .map(|_| "corrupt")
+}
+
+fn agent_mail_health_level_from_recovery(
+    snapshot: &SwarmNextActionSnapshot,
+) -> Option<&'static str> {
+    snapshot
+        .degraded
+        .iter()
+        .filter(|degradation| {
+            degradation.source == "agent_mail" && degradation.code == AGENT_MAIL_UNAVAILABLE_CODE
+        })
+        .find_map(|degradation| {
+            let message = degradation.message.as_str();
+            if message.contains("healthLevel=green") {
+                Some("green")
+            } else if message.contains("healthLevel=yellow") {
+                Some("yellow")
+            } else if message.contains("healthLevel=red") {
+                Some("red")
+            } else {
+                None
+            }
+        })
+}
+
+fn agent_mail_semantic_status_from_recovery(
+    snapshot: &SwarmNextActionSnapshot,
+) -> Option<&'static str> {
+    snapshot
+        .degraded
+        .iter()
+        .filter(|degradation| {
+            degradation.source == "agent_mail" && degradation.code == AGENT_MAIL_UNAVAILABLE_CODE
+        })
+        .find_map(|degradation| {
+            let message = degradation.message.as_str();
+            if message.contains("semanticStatus=pass") {
+                Some("pass")
+            } else if message.contains("semanticStatus=fail") {
+                Some("fail")
+            } else if message.contains("semanticStatus=unknown") {
+                Some("unknown")
+            } else {
+                None
+            }
+        })
 }
 
 fn agent_mail_health_level_from_semantic_failure(
@@ -2574,13 +3252,16 @@ fn agent_mail_archive_index_parity(
 fn agent_mail_fallback_actions(
     status: &str,
     unavailable_reason: &'static str,
+    recovery: Option<&SwarmWorkPacketAgentMailRecovery>,
 ) -> Vec<SwarmWorkPacketAgentMailFallbackAction> {
     if status == "fresh" || status == "healthy" || status == "skipped" {
         return Vec::new();
     }
 
     let mut actions = Vec::new();
-    if status == "unavailable" {
+    let recovery_corrupt = recovery
+        .is_some_and(|recovery| recovery.mode == "corrupt" || recovery.status == Some("corrupt"));
+    if status == "unavailable" && !recovery_corrupt {
         let generate = agent_mail_snapshot_generate_command_action();
         let retry_brief = agent_mail_snapshot_retry_brief_command_action();
         let retry_work_packet = agent_mail_snapshot_retry_work_packet_command_action(None);
@@ -2632,20 +3313,33 @@ fn agent_mail_fallback_actions(
             Some("Avoid claiming peer-touched lanes until Agent Mail reads recover."),
         ),
     ]);
-    if status == "semantic_readiness_failed" {
+    if status == "semantic_readiness_failed" || recovery_corrupt {
+        let (comment_summary, comment_step, support_when, support_summary) = if recovery_corrupt {
+            (
+                "Record the Agent Mail recovery-corrupt authority loss in Beads with bounded reason archive_corruption.",
+                "Add a Beads comment before claiming work so peers can see the coordination fallback.",
+                "after_recovery_corrupt",
+                "Plan a redacted support bundle for recovery reason archive_corruption without raw paths or page offsets.",
+            )
+        } else {
+            (
+                "Record the Agent Mail semantic-readiness failure in Beads and coordinate there until storage repair completes.",
+                "Add a Beads comment before claiming work so peers can see the coordination fallback.",
+                "after_semantic_readiness_failure",
+                "Plan a redacted support bundle so the storage class and reason can be triaged without raw paths or page offsets.",
+            )
+        };
         actions.push(agent_mail_fallback_action(
             "beads_comment",
-            "Record the Agent Mail semantic-readiness failure in Beads and coordinate there until storage repair completes.",
+            comment_summary,
             None,
             None,
-            Some(
-                "Add a Beads comment before claiming work so peers can see the coordination fallback.",
-            ),
+            Some(comment_step),
         ));
         let support_bundle_command = "ee support bundle --workspace . --redacted --dry-run --json";
         actions.push(agent_mail_fallback_action(
             "support_bundle",
-            "Plan a redacted support bundle so the storage class and reason can be triaged without raw paths or page offsets.",
+            support_summary,
             Some(support_bundle_command.to_owned()),
             Some(work_packet_command_action(
                 "agent_mail_support_bundle",
@@ -2662,7 +3356,7 @@ fn agent_mail_fallback_actions(
                 ],
                 false,
                 "ee_cli",
-                "after_semantic_readiness_failure",
+                support_when,
                 "Plan bounded support diagnostics without shell evaluation.",
             )),
             None,
@@ -3225,6 +3919,11 @@ fn work_packet_recommended_action(
         if agent_mail.status == "semantic_readiness_failed" {
             reasons.push("green_transport_does_not_imply_authoritative_reads".to_owned());
         }
+        if agent_mail_recovery_is_corrupt(agent_mail) {
+            reasons.push("agent_mail_recovery_corrupt".to_owned());
+            reasons.push("archive_corruption".to_owned());
+            reasons.push("green_transport_does_not_imply_authoritative_reads".to_owned());
+        }
         if agent_mail.reservation_authoritative != Some(true) {
             reasons.push("reservation_evidence_not_authoritative".to_owned());
         }
@@ -3259,6 +3958,13 @@ fn work_packet_recommended_action(
                 .push("do_not_treat_green_health_level_as_coordination_authority".to_owned());
             proof_obligations
                 .push("record_agent_mail_semantic_readiness_failure_in_beads".to_owned());
+        }
+        if agent_mail_recovery_is_corrupt(agent_mail) {
+            proof_obligations
+                .push("do_not_treat_green_health_level_as_coordination_authority".to_owned());
+            proof_obligations
+                .push("do_not_treat_semantic_readiness_pass_as_durability_authority".to_owned());
+            proof_obligations.push("record_agent_mail_recovery_corrupt_in_beads".to_owned());
         }
     }
     if !tracker_integrity.br_reads_authoritative {
@@ -3306,7 +4012,9 @@ fn work_packet_action(
     rch: &SwarmWorkPacketRchProofPosture,
     tracker_integrity: &BeadsIntegrityReport,
 ) -> &'static str {
-    if agent_mail.status == "semantic_readiness_failed" {
+    if agent_mail.status == "semantic_readiness_failed"
+        || agent_mail_recovery_is_corrupt(agent_mail)
+    {
         return "prefer_static_docs_work";
     }
     if agent_mail_blocks_claim(agent_mail) {
@@ -3487,12 +4195,33 @@ fn work_packet_suggested_command_actions(
                 "Record that Beads is the coordination fallback while Agent Mail is not authoritative.",
             ));
         }
+        if agent_mail_recovery_is_corrupt(agent_mail) {
+            actions.push(work_packet_command_action(
+                "bead_comment_agent_mail_recovery_corrupt",
+                format!(
+                    "br comments add {candidate_id} --message 'agent_mail recovery_corrupt archive_corruption; coordinating via beads'"
+                ),
+                &[
+                    "br",
+                    "comments",
+                    "add",
+                    candidate_id,
+                    "--message",
+                    "agent_mail recovery_corrupt archive_corruption; coordinating via beads",
+                ],
+                true,
+                "beads",
+                "before_claim",
+                "Record that Beads is the coordination fallback while Agent Mail recovery is corrupt.",
+            ));
+        }
     }
     if agent_mail
         .degraded_codes
         .iter()
         .any(|code| code == AGENT_MAIL_UNAVAILABLE_CODE)
         && agent_mail.status != "fresh"
+        && !agent_mail_recovery_is_corrupt(agent_mail)
     {
         actions.push(agent_mail_snapshot_generate_command_action());
         actions.push(agent_mail_snapshot_retry_work_packet_command_action(
@@ -3543,7 +4272,9 @@ fn work_packet_observed_state_class(
         "degraded_read_only" | "semantic_readiness_failed" | "unavailable"
     );
     let rch_degraded = matches!(rch.posture, "topology_blocked" | "degraded_capacity");
-    if agent_mail_degraded || rch_degraded {
+    if agent_mail_recovery_is_corrupt(&coordination.agent_mail) {
+        "agent_mail_recovery_corrupt"
+    } else if agent_mail_degraded || rch_degraded {
         "degraded_mail_rch_topology"
     } else if coordination.active_claim_count > 0
         || coordination.file_collision_count > 0
@@ -3958,6 +4689,48 @@ fn selector_admission_probe_from_evidence_object(
             &["local_fallback_refused", "localFallbackRefused"],
         )
         .unwrap_or(false),
+        admission_blocker: selector_admission_blocker_from_probe(probe),
+    })
+}
+
+fn selector_admission_blocker_from_probe(
+    probe: &serde_json::Map<String, Value>,
+) -> Option<SwarmWorkPacketRchSelectorAdmissionBlocker> {
+    let blocker = value_from_object_or_fields(probe, "admission_blocker")
+        .or_else(|| value_from_object_or_fields(probe, "admissionBlocker"))?
+        .as_object()?;
+    let kind = string_value_from_keys(blocker, &["kind"])?;
+    let retry_guidance = string_value_from_keys(blocker, &["retry_guidance", "retryGuidance"])?;
+    let evidence = string_value_from_keys(blocker, &["evidence"])?;
+    Some(SwarmWorkPacketRchSelectorAdmissionBlocker {
+        kind,
+        retry_guidance,
+        evidence,
+        active_build_id: u64_value_from_keys(blocker, &["active_build_id", "activeBuildId"]),
+        active_command_preview: string_value_from_keys(
+            blocker,
+            &["active_command_preview", "activeCommandPreview"],
+        ),
+        active_command_hash: string_value_from_keys(
+            blocker,
+            &["active_command_hash", "activeCommandHash"],
+        ),
+        worker_id: string_value_from_keys(blocker, &["worker_id", "workerId"]),
+        worker_posture: string_value_from_keys(blocker, &["worker_posture", "workerPosture"]),
+        heartbeat_age_secs: u64_value_from_keys(
+            blocker,
+            &["heartbeat_age_secs", "heartbeatAgeSecs"],
+        ),
+        progress_age_secs: u64_value_from_keys(blocker, &["progress_age_secs", "progressAgeSecs"]),
+        build_age_secs: u64_value_from_keys(blocker, &["build_age_secs", "buildAgeSecs"]),
+        slots_owned: u64_value_from_keys(blocker, &["slots_owned", "slotsOwned"]),
+        workers_healthy: u64_value_from_keys(blocker, &["workers_healthy", "workersHealthy"]),
+        workers_total: u64_value_from_keys(blocker, &["workers_total", "workersTotal"]),
+        slots_available: u64_value_from_keys(blocker, &["slots_available", "slotsAvailable"]),
+        slots_total: u64_value_from_keys(blocker, &["slots_total", "slotsTotal"]),
+        retry_after_hint: string_value_from_keys(blocker, &["retry_after_hint", "retryAfterHint"]),
+        next_action: string_value_from_keys(blocker, &["next_action", "nextAction"]),
+        owner_escalation: string_value_from_keys(blocker, &["owner_escalation", "ownerEscalation"]),
     })
 }
 
@@ -6535,10 +7308,13 @@ mod tests {
         assert!(!packet.mutation_policy.runs_cargo);
         assert!(!packet.mutation_policy.stages_git);
         assert!(!packet.mutation_policy.deletes_files);
+        assert_eq!(packet.resource_admission.surface, "work_packet");
+        assert_eq!(packet.resource_admission.decision, "admit");
+        assert!(!packet.resource_admission.can_authorize_claim);
     }
 
     #[test]
-    fn work_packet_requires_positive_remote_proof_when_remote_only_required() {
+    fn work_packet_resource_admission_waits_for_rch_when_remote_proof_missing() {
         let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
         let mut snapshot = snapshot_with_candidates(vec![candidate(
             "bd-safe",
@@ -6589,6 +7365,54 @@ mod tests {
             gate.unsafe_reasons
                 .contains(&"rch_remote_verification_required".to_owned())
         );
+        assert_eq!(packet.resource_admission.decision, "wait_for_rch");
+        assert_eq!(gate.resource_admission.surface, "claim_gate");
+        assert_eq!(gate.resource_admission.decision, "wait_for_rch");
+        assert!(!gate.resource_admission.can_authorize_claim);
+        assert!(
+            gate.resource_admission
+                .next_command_actions
+                .iter()
+                .all(|action| !action.mutates_state)
+        );
+        assert!(
+            gate.resource_admission
+                .next_command_actions
+                .iter()
+                .any(|action| action.command_id == "resource_admission_rch_status")
+        );
+    }
+
+    #[test]
+    fn work_packet_resource_admission_degrades_to_lean_without_claim_authority() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Document isolated resource-admission fixture",
+            "beads_ready",
+            Some(2),
+        )]);
+        snapshot.checkout.dirty_path_count = 1;
+        snapshot.checkout.dirty_paths = vec!["docs/unrelated.md".to_owned()];
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let gate = packet.claim_gate(Some("bd-safe"));
+
+        assert_eq!(packet.resource_admission.decision, "degrade_to_lean");
+        assert_eq!(
+            packet.resource_admission.recommended_profile,
+            ResourceOperatingProfile::Constrained.as_str()
+        );
+        assert_eq!(
+            packet.resource_admission.source_posture.workload_pressure,
+            "cache_pressure"
+        );
+        assert!(!packet.resource_admission.can_authorize_claim);
+        assert_eq!(gate.verdict, "safe_to_claim");
+        assert!(gate.safe_to_claim);
+        assert_eq!(gate.resource_admission.decision, "degrade_to_lean");
+        assert!(!gate.resource_admission.can_authorize_claim);
+        assert!(gate.unsafe_reasons.is_empty());
     }
 
     #[test]
@@ -6861,6 +7685,111 @@ mod tests {
             "unavailable_or_manual_only"
         );
         assert_eq!(manual_coordination.repair_safety.next_action, "manual_only");
+    }
+
+    #[test]
+    fn work_packet_preserves_agent_mail_recovery_corrupt_authority_loss() {
+        let recovery_corrupt = degradation(
+            SwarmBriefSourceKind::AgentMail,
+            AGENT_MAIL_UNAVAILABLE_CODE,
+            "Agent Mail recovery posture is degraded with healthLevel=green (mode=corrupt, reason=archive_corruption, semanticStatus=pass); reservation and inbox reads are not authoritative.",
+            Some("Repair Agent Mail storage.".to_owned()),
+        );
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.sources.push(SwarmBriefSourceSnapshot {
+            source: SwarmBriefSourceKind::AgentMail,
+            status: SwarmBriefSourceStatus::Degraded,
+            freshness: SwarmBriefSourceFreshness::unknown(),
+            provenance: SwarmBriefSourceProvenance::local_probe(),
+            item_count: 0,
+            degraded: vec![recovery_corrupt.clone()],
+        });
+        brief.degraded = vec![recovery_corrupt];
+        let mut snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-docs.1",
+            "Document a redaction-safe coordination contract",
+            "beads_ready",
+            Some(2),
+        )]);
+        snapshot.degraded = brief
+            .degraded
+            .iter()
+            .map(SwarmNextActionDegradation::from_brief)
+            .collect();
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let agent_mail = &packet.coordination.agent_mail;
+
+        assert_eq!(packet.observed_state_class, "agent_mail_recovery_corrupt");
+        assert_eq!(agent_mail.status, "unavailable");
+        assert_eq!(agent_mail.health_level, Some("green"));
+        assert_eq!(agent_mail.reservation_authoritative, Some(false));
+        assert_eq!(agent_mail.inbox_authoritative, Some(false));
+        assert_eq!(
+            agent_mail
+                .semantic_readiness
+                .as_ref()
+                .map(|readiness| (readiness.status, readiness.reason)),
+            Some(("pass", None))
+        );
+        assert_eq!(
+            agent_mail.recovery.as_ref().map(|recovery| (
+                recovery.mode,
+                recovery.status,
+                recovery.reason
+            )),
+            Some(("corrupt", Some("corrupt"), Some("archive_corruption")))
+        );
+        assert_eq!(agent_mail.durability_state, Some("corrupt"));
+        assert_eq!(packet.recommended_action.action, "prefer_static_docs_work");
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+        assert!(
+            packet
+                .recommended_action
+                .reasons
+                .contains(&"agent_mail_recovery_corrupt".to_owned())
+        );
+        assert!(
+            packet.recommended_action.proof_obligations.contains(
+                &"do_not_treat_semantic_readiness_pass_as_durability_authority".to_owned()
+            )
+        );
+        assert_eq!(packet.candidates[0].decision, "external_state_required");
+        assert!(
+            packet.candidates[0]
+                .unsafe_reasons
+                .contains(&"agent_mail_recovery_corrupt".to_owned())
+        );
+        let fallback_kinds = agent_mail
+            .fallback_actions
+            .iter()
+            .map(|action| action.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fallback_kinds,
+            vec![
+                "beads_comment",
+                "manual_coordination",
+                "retry_later",
+                "support_bundle",
+                "switch_to_static_work",
+            ]
+        );
+        assert!(
+            packet
+                .recommended_action
+                .suggested_commands
+                .iter()
+                .any(|command| command.contains("agent_mail recovery_corrupt archive_corruption"))
+        );
+        assert!(
+            packet
+                .recommended_action
+                .suggested_commands
+                .iter()
+                .all(|command| !command.contains("agent_mail_snapshot.sh")
+                    && !command.contains("--agent-mail-snapshot"))
+        );
     }
 
     #[test]
@@ -7283,7 +8212,8 @@ mod tests {
                 "workers_vs_selection_contradiction": true,
                 "path_normalization_warning": null,
                 "remote_required": true,
-                "local_fallback_refused": true
+                "local_fallback_refused": true,
+                "admission_blocker": null
             }
         }));
 
@@ -7312,6 +8242,7 @@ mod tests {
             selector.selection_failure_reason.as_deref(),
             Some("no_workers_with_rust_installed")
         );
+        assert!(selector.admission_blocker.is_none());
         assert_eq!(packet.recommended_action.action, "prefer_static_docs_work");
         assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
         assert!(
@@ -7330,6 +8261,77 @@ mod tests {
             gate.unsafe_reasons
                 .contains(&"rch_remote_verification_blocked".to_owned())
         );
+    }
+
+    #[test]
+    fn work_packet_preserves_selector_admission_blocker_details() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.beads.ready = vec![bead("bd-active", "Needs active-project blocker proof", 2)];
+        let evidence = verifier_evidence_from_json(&serde_json::json!({
+            "schema": "ee.rch.verify.v1",
+            "status": "rch_environment_failure",
+            "command_text": "cargo test --test error_recall_e2e -- --nocapture",
+            "command_kind": "cargo_test",
+            "command_hash": "selector-active-project",
+            "remote_required": true,
+            "selector_admission_probe": {
+                "schema": "ee.rch.selector_admission_probe.v1",
+                "status": "selection_failed",
+                "required_runtime": "Rust",
+                "workers_reported": ["trj"],
+                "daemon_workers_reported": ["trj"],
+                "workers_reported_count": 1,
+                "daemon_workers_reported_count": 1,
+                "selected_worker": null,
+                "selection_failure_reason": "active_project_exclusion",
+                "workers_vs_selection_contradiction": false,
+                "path_normalization_warning": null,
+                "remote_required": true,
+                "local_fallback_refused": true,
+                "admission_blocker": {
+                    "kind": "active_project_exclusion",
+                    "retry_guidance": "wait_for_active_build_or_coordinate_with_owner",
+                    "evidence": "[RCH] selection blocked: active_project_exclusion=1",
+                    "active_build_id": 29879340221071367_u64,
+                    "active_command_preview": "cargo test --test error_recall_e2e -- --nocapture",
+                    "active_command_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                    "worker_id": "trj",
+                    "worker_posture": "active",
+                    "progress_age_secs": 7,
+                    "next_action": "wait_for_active_build_or_contact_owner_before_retry"
+                }
+            }
+        }));
+
+        let packet = SwarmWorkPacket::from_swarm_brief_with_verifier_evidence(&brief, &evidence);
+        let selector = packet
+            .rch_proof_posture
+            .selector_admission_probe
+            .as_ref()
+            .expect("selector admission probe should be preserved");
+        let blocker = selector
+            .admission_blocker
+            .as_ref()
+            .expect("admission blocker should be preserved");
+
+        assert_eq!(blocker.kind, "active_project_exclusion");
+        assert_eq!(blocker.active_build_id, Some(29879340221071367));
+        assert_eq!(blocker.worker_id.as_deref(), Some("trj"));
+        assert_eq!(blocker.worker_posture.as_deref(), Some("active"));
+        assert_eq!(blocker.progress_age_secs, Some(7));
+        assert_eq!(
+            blocker.next_action.as_deref(),
+            Some("wait_for_active_build_or_contact_owner_before_retry")
+        );
+
+        let packet_json = serde_json::to_value(&packet).expect("serialize work packet");
+        let serialized_blocker = packet_json
+            .pointer("/rchProofPosture/selectorAdmissionProbe/admissionBlocker")
+            .and_then(Value::as_object)
+            .expect("serialized blocker");
+        assert!(serialized_blocker.get("activeBuildId").is_some());
+        assert!(serialized_blocker.get("heartbeatAgeSecs").is_none());
+        assert!(serialized_blocker.get("ownerEscalation").is_none());
     }
 
     #[test]

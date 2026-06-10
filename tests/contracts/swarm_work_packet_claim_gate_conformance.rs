@@ -60,6 +60,61 @@ fn bool_at(value: &Value, pointer: &str, context: &str) -> Result<bool, String> 
         .ok_or_else(|| format!("{context} missing boolean {pointer}"))
 }
 
+fn resource_admission_sample(decision: &str, recommended_profile: &str) -> Value {
+    json!({
+        "schema": "ee.resource_admission.v1",
+        "policyDomain": "resource_profile_budget_admission",
+        "policyId": "candidate.resource_profile_budget_admission",
+        "sideEffectFree": true,
+        "advisoryOnly": true,
+        "canAuthorizeClaim": false,
+        "surface": "claim_gate",
+        "commandClass": "coordination",
+        "decision": decision,
+        "requestedProfile": "workstation",
+        "effectiveProfile": "workstation",
+        "recommendedProfile": recommended_profile,
+        "estimatedCostClass": "standard",
+        "sourcePosture": {
+            "hostCalibration": "fresh",
+            "resourceBudget": if decision == "degrade_to_lean" { "recommend_decrease" } else { "within_budget" },
+            "rch": if decision == "wait_for_rch" { "blocked" } else { "remote_ready" },
+            "localCargo": "refused",
+            "lanePressure": if decision == "wait_for_rch" { "verification_pressure" } else { "clear" },
+            "workloadPressure": if decision == "degrade_to_lean" { "cache_pressure" } else { "within_budget" },
+            "daemon": "not_required",
+            "replay": "not_required",
+            "redactionPostureVerified": true,
+            "sourceCount": 4
+        },
+        "evidenceFreshness": if decision == "wait_for_rch" { "degraded" } else { "partial" },
+        "reasonCodes": if decision == "wait_for_rch" {
+            json!(["rch_blocked", "local_cargo_refused", "redaction_posture_verified"])
+        } else {
+            json!(["budget_delta_recommends_decrease", "cache_pressure", "redaction_posture_verified"])
+        },
+        "abstentionReasons": [],
+        "nextCommands": if decision == "wait_for_rch" {
+            json!(["rch status --json"])
+        } else {
+            json!(["ee pack <task> --resource-profile constrained --json"])
+        },
+        "nextCommandActions": [
+            {
+                "commandId": "resource_admission_diag",
+                "displayCommand": "ee diag resource-admission --surface claim-gate --command-class coordination --json",
+                "argv": ["ee", "diag", "resource-admission", "--surface", "claim-gate", "--command-class", "coordination", "--json"],
+                "shellRequired": false,
+                "copySafety": "safe_structured_argv",
+                "mutatesState": false,
+                "requiredSubstrate": "ee",
+                "when": "inspect_resource_admission_advice",
+                "rationale": "Reproduce the advisory resource admission decision."
+            }
+        ]
+    })
+}
+
 fn claim_gate_required_fields() -> Vec<String> {
     [
         "schema",
@@ -137,6 +192,40 @@ fn assert_next_actions_are_read_only(payload: &Value, context: &str) -> TestResu
         if action.pointer("/mutatesState").and_then(Value::as_bool) != Some(false) {
             return Err(format!(
                 "{context} nextCommandActions[{index}] must set mutatesState=false"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn assert_resource_admission_is_advisory(payload: &Value, context: &str) -> TestResult {
+    let Some(admission) = payload.get("resourceAdmission") else {
+        return Ok(());
+    };
+    if admission
+        .pointer("/canAuthorizeClaim")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        return Err(format!(
+            "{context} resourceAdmission must set canAuthorizeClaim=false"
+        ));
+    }
+    for pointer in ["/sideEffectFree", "/advisoryOnly"] {
+        if admission.pointer(pointer).and_then(Value::as_bool) != Some(true) {
+            return Err(format!(
+                "{context} resourceAdmission must set {pointer}=true"
+            ));
+        }
+    }
+    let actions = admission
+        .pointer("/nextCommandActions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context} resourceAdmission missing nextCommandActions"))?;
+    for (index, action) in actions.iter().enumerate() {
+        if action.pointer("/mutatesState").and_then(Value::as_bool) != Some(false) {
+            return Err(format!(
+                "{context} resourceAdmission.nextCommandActions[{index}] must be read-only"
             ));
         }
     }
@@ -228,6 +317,14 @@ fn claim_gate_sample_payloads_are_redacted_and_safe() -> TestResult {
         .pointer("/examples/0")
         .cloned()
         .ok_or_else(|| "claim gate payload schema missing first example".to_owned())?;
+    let mut lean_sample = safe_sample.clone();
+    lean_sample
+        .as_object_mut()
+        .ok_or_else(|| "safe claim-gate sample must be object".to_owned())?
+        .insert(
+            "resourceAdmission".to_owned(),
+            resource_admission_sample("degrade_to_lean", "constrained"),
+        );
     let unsafe_sample = json!({
         "schema": "ee.swarm.work_packet.claim_gate.v1",
         "gateId": "swarm_work_packet_claim_gate_333333333333333333333333",
@@ -266,6 +363,7 @@ fn claim_gate_sample_payloads_are_redacted_and_safe() -> TestResult {
             "installFreshnessRepair": null,
             "sourceCount": 4
         },
+        "resourceAdmission": resource_admission_sample("wait_for_rch", "workstation"),
         "unsafeReasons": ["active_claim", "reserved_file_overlap"],
         "staleReasons": [],
         "sourceRefs": ["br://bd-owned.1", "reservation://source-file"],
@@ -289,11 +387,13 @@ fn claim_gate_sample_payloads_are_redacted_and_safe() -> TestResult {
 
     for (context, sample) in [
         ("safe claim-gate sample", safe_sample),
+        ("lean-advice claim-gate sample", lean_sample),
         ("unsafe claim-gate sample", unsafe_sample),
     ] {
         assert_payload_has_required_fields(&sample, &required, context)?;
         assert_no_forbidden_markers(&sample, context)?;
         assert_next_actions_are_read_only(&sample, context)?;
+        assert_resource_admission_is_advisory(&sample, context)?;
         if sample.pointer("/safeToClaim").and_then(Value::as_bool) == Some(true)
             && sample
                 .pointer("/recommendedSafeToClaim")
@@ -313,6 +413,25 @@ fn claim_gate_sample_payloads_are_redacted_and_safe() -> TestResult {
                 "{context} must set claimCommandAction=null when unsafe"
             ));
         }
+    }
+
+    let lean_admission = resource_admission_sample("degrade_to_lean", "constrained");
+    let lean_decision = string_at(
+        &lean_admission,
+        "/decision",
+        "lean-advice claim-gate resourceAdmission",
+    )?;
+    if lean_decision != "degrade_to_lean" {
+        return Err("claim gate contract sample must cover degrade_to_lean".into());
+    }
+    let wait_admission = resource_admission_sample("wait_for_rch", "workstation");
+    let wait_decision = string_at(
+        &wait_admission,
+        "/decision",
+        "wait-for-rch claim-gate resourceAdmission",
+    )?;
+    if wait_decision != "wait_for_rch" {
+        return Err("claim gate contract sample must cover wait_for_rch".into());
     }
 
     Ok(())

@@ -43,6 +43,13 @@
     },
     "fallback_active": { "type": "boolean" },
     "am_agents_list_ok": { "type": "boolean" },
+    "health_level": { "type": "string", "enum": ["green", "yellow", "red"] },
+    "semantic_readiness": { "$ref": "#/$defs/semanticReadiness" },
+    "durability_state": {
+      "type": "string",
+      "enum": ["ok", "corrupt", "repair_required", "unknown_recovery"]
+    },
+    "recovery": { "$ref": "#/$defs/recovery" },
     "summary": { "$ref": "#/$defs/summary" },
     "degraded": {
       "type": "array",
@@ -123,6 +130,39 @@
         "timed_out": { "type": "boolean" }
       }
     },
+    "semanticReadiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pass", "fail", "unknown"] },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "malformed_sqlite",
+            "archive_corruption",
+            "index_rebuild_required",
+            "permission_denied",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "reason"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["corrupt", "repair_required", "unknown_recovery"]
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["archive_corruption", "storage_recovery_required", "permission_denied", "unknown"]
+        }
+      }
+    },
     "fileReservation": {
       "type": "object",
       "additionalProperties": false,
@@ -176,7 +216,8 @@
       "source_commands": [
         "am agents list --project '<workspace>' --json",
         "am robot reservations --project '<workspace>' --all --format json",
-        "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json"
+        "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json",
+        "agent-mail-health http://127.0.0.1:8765/health"
       ],
       "command_statuses": [
         {
@@ -189,12 +230,16 @@
       ],
       "fallback_active": false,
       "am_agents_list_ok": true,
+      "health_level": "green",
+      "semantic_readiness": {
+        "status": "pass"
+      },
       "summary": {
         "agent_count": 1,
         "file_reservation_count": 1,
         "inbox_mailbox_count": 1,
         "thread_count": 1,
-        "source_command_count": 3,
+        "source_command_count": 4,
         "degraded_count": 0
       },
       "degraded": [],

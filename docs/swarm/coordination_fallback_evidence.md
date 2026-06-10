@@ -31,6 +31,11 @@ handled. The intended default is labels and counts only.
   content hashes only; it does not include raw inboxes, raw logs, full paths, or
   fallback summary text.
 
+Agent Mail recovery and durability corruption use the same fallback evidence
+posture as unavailable coordination reads. Summaries should carry bounded reason
+codes such as `archive_corruption` or `storage_recovery_required`; they must not
+carry raw SQLite paths, page offsets, recovery bundle paths, or raw repair logs.
+
 ## Fixture
 
 The canonical example is duplicated in

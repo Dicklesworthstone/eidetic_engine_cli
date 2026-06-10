@@ -1844,6 +1844,229 @@ fn work_packet_agent_mail_semantic_readiness_gate_is_contractual() -> TestResult
 }
 
 #[test]
+fn work_packet_agent_mail_recovery_corrupt_is_contractual() -> TestResult {
+    // bd-18jfx: Agent Mail recovery/durability corruption has the same
+    // authority as semantic readiness. A green transport health level and a
+    // semanticReadiness pass cannot make reservation or inbox reads
+    // authoritative while recovery.mode or durability state says corrupt.
+    let case = SCHEMA_CASES
+        .iter()
+        .copied()
+        .find(|case| case.id == "ee.swarm.work_packet.v1")
+        .ok_or_else(|| "ee.swarm.work_packet.v1 schema case missing".to_owned())?;
+    let schema = schema_doc(case)?;
+    let agent_mail = schema
+        .pointer("/definitions/agentMail")
+        .ok_or_else(|| "agentMail definition missing".to_owned())?;
+
+    let properties = agent_mail
+        .pointer("/properties")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "agentMail properties missing".to_owned())?
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for required in ["recovery", "durabilityState"] {
+        if !properties.contains(required) {
+            return Err(format!("agentMail must expose {required} for bd-18jfx"));
+        }
+    }
+
+    let recovery = agent_mail
+        .pointer("/properties/recovery")
+        .ok_or_else(|| "agentMail.recovery missing".to_owned())?;
+    let recovery_mode_enum = recovery
+        .pointer("/properties/mode/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "agentMail.recovery.mode enum missing".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    if !recovery_mode_enum.contains("corrupt") {
+        return Err("agentMail.recovery.mode enum must include corrupt".into());
+    }
+    let recovery_reason_enum = recovery
+        .pointer("/properties/reason/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "agentMail.recovery.reason enum missing".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    if !recovery_reason_enum.contains("archive_corruption") {
+        return Err("agentMail.recovery.reason enum must include archive_corruption".into());
+    }
+    let durability_state_enum = agent_mail
+        .pointer("/properties/durabilityState/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "agentMail.durabilityState enum missing".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    if !durability_state_enum.contains("corrupt") {
+        return Err("agentMail.durabilityState enum must include corrupt".into());
+    }
+
+    let fixture_path = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("swarm_work_packet")
+        .join("agent_mail_recovery_corrupt.json");
+    let fixture = read_json(&fixture_path)?;
+    if string_field(&fixture, "/schema", "agent_mail_recovery_corrupt fixture")?
+        != "ee.swarm.work_packet.v1"
+    {
+        return Err("agent_mail_recovery_corrupt fixture schema drifted".into());
+    }
+    if string_field(
+        &fixture,
+        "/observedStateClass",
+        "agent_mail_recovery_corrupt fixture",
+    )? != "agent_mail_recovery_corrupt"
+    {
+        return Err(
+            "agent_mail_recovery_corrupt fixture must use a distinct observedStateClass".into(),
+        );
+    }
+
+    let fixture_agent_mail = fixture.pointer("/coordination/agentMail").ok_or_else(|| {
+        "agent_mail_recovery_corrupt fixture missing coordination.agentMail".to_owned()
+    })?;
+    if string_field(
+        fixture_agent_mail,
+        "/healthLevel",
+        "agent_mail_recovery_corrupt fixture agentMail",
+    )? != "green"
+        || string_field(
+            fixture_agent_mail,
+            "/semanticReadiness/status",
+            "agent_mail_recovery_corrupt fixture agentMail",
+        )? != "pass"
+    {
+        return Err(
+            "agent_mail_recovery_corrupt fixture must prove green transport and semantic pass are insufficient"
+                .into(),
+        );
+    }
+    if string_field(
+        fixture_agent_mail,
+        "/recovery/mode",
+        "agent_mail_recovery_corrupt fixture agentMail",
+    )? != "corrupt"
+        || string_field(
+            fixture_agent_mail,
+            "/recovery/reason",
+            "agent_mail_recovery_corrupt fixture agentMail",
+        )? != "archive_corruption"
+        || string_field(
+            fixture_agent_mail,
+            "/durabilityState",
+            "agent_mail_recovery_corrupt fixture agentMail",
+        )? != "corrupt"
+    {
+        return Err(
+            "agent_mail_recovery_corrupt fixture must carry bounded recovery and durability corruption classes"
+                .into(),
+        );
+    }
+    if string_field(
+        fixture_agent_mail,
+        "/recoveryMode",
+        "agent_mail_recovery_corrupt fixture agentMail",
+    )? != "wait_for_repair"
+    {
+        return Err(
+            "agent_mail_recovery_corrupt fixture must set recoveryMode=wait_for_repair".into(),
+        );
+    }
+    if fixture_agent_mail
+        .pointer("/reservationAuthoritative")
+        .and_then(Value::as_bool)
+        != Some(false)
+        || fixture_agent_mail
+            .pointer("/inboxAuthoritative")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err(
+            "agent_mail_recovery_corrupt fixture must mark reservation/inbox as non-authoritative"
+                .into(),
+        );
+    }
+
+    let degraded_codes = fixture_agent_mail
+        .pointer("/degradedCodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "agent_mail_recovery_corrupt fixture missing degradedCodes".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    if !degraded_codes.contains("agent_mail_unavailable") {
+        return Err(
+            "agent_mail_recovery_corrupt fixture must include agent_mail_unavailable in degradedCodes"
+                .into(),
+        );
+    }
+
+    if fixture
+        .pointer("/recommendedAction/safeToClaim")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        return Err(
+            "agent_mail_recovery_corrupt fixture must not recommend safeToClaim=true".into(),
+        );
+    }
+    let fallback_actions = fixture_agent_mail
+        .pointer("/fallbackActions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "agent_mail_recovery_corrupt fixture missing fallbackActions".to_owned())?;
+    if fallback_actions.is_empty() {
+        return Err("agent_mail_recovery_corrupt fixture must enumerate fallback actions".into());
+    }
+    let mut last_kind: Option<&str> = None;
+    for (index, action) in fallback_actions.iter().enumerate() {
+        let context = format!("recoveryCorruptFallbackActions[{index}]");
+        let kind = string_field(action, "/kind", &context)?;
+        if let Some(previous) = last_kind
+            && kind < previous
+        {
+            return Err(format!(
+                "recovery-corrupt fallbackActions must be sorted by kind; saw {previous} before {kind}"
+            ));
+        }
+        last_kind = Some(kind);
+    }
+
+    let rendered = serde_json::to_string(fixture_agent_mail)
+        .map_err(|error| format!("serialize recovery_corrupt agentMail: {error}"))?;
+    let lowered = rendered.to_ascii_lowercase();
+    for forbidden in [
+        "/private/",
+        "/users/",
+        "/var/",
+        ".sqlite-shm",
+        ".sqlite-wal",
+        "page 283",
+        "page_283",
+        "btree page",
+        "stack trace",
+        "support-bundle/",
+        "from: ",
+        "subject: ",
+        "message-id:",
+        "begin pgp",
+    ] {
+        if lowered.contains(forbidden) {
+            return Err(format!(
+                "agent_mail_recovery_corrupt fixture must not leak raw path or error marker {forbidden}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn work_packet_agent_mail_database_contention_timeout_is_contractual() -> TestResult {
     // bd-2z5ly.3.1: Agent Mail timeout/database-contention is distinct from
     // degraded_read_only and semantic_readiness_failed. The fixture pins the

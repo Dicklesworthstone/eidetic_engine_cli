@@ -7,6 +7,7 @@ exec "${PYTHON:-python3}" - "$@" <<'PY'
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -24,6 +25,9 @@ AGENT_MAIL_SNAPSHOT_SCHEMA = "ee.agent_mail.snapshot.v1"
 DEFAULT_TIMEOUT_SEC = 5.0
 DEFAULT_INBOX_LIMIT = 20
 DEFAULT_THREAD_LIMIT = 20
+HEALTH_HOST = "127.0.0.1"
+HEALTH_PORT = 8765
+HEALTH_PATH = "/health"
 SECRET_PATTERNS = [
     (re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"), "[REDACTED:github_token]"),
     (re.compile(r"sk-[A-Za-z0-9]{20,}"), "[REDACTED:secret]"),
@@ -217,6 +221,51 @@ def run_json_command(argv: list[str], timeout_sec: float) -> dict[str, Any]:
     }
 
 
+def run_health_probe(timeout_sec: float) -> dict[str, Any]:
+    argv = ["agent-mail-health", f"http://{HEALTH_HOST}:{HEALTH_PORT}{HEALTH_PATH}"]
+    conn: http.client.HTTPConnection | None = None
+    try:
+        conn = http.client.HTTPConnection(HEALTH_HOST, HEALTH_PORT, timeout=timeout_sec)
+        conn.request("GET", HEALTH_PATH, headers={"Host": f"{HEALTH_HOST}:{HEALTH_PORT}"})
+        response = conn.getresponse()
+        status = int(response.status)
+        raw = response.read(128 * 1024)
+    except TimeoutError:
+        return {
+            "argv": argv,
+            "ok": False,
+            "exit_code": None,
+            "timed_out": True,
+            "json": None,
+            "error_class": "timeout",
+        }
+    except OSError:
+        return {
+            "argv": argv,
+            "ok": False,
+            "exit_code": None,
+            "timed_out": False,
+            "json": None,
+            "error_class": "command_failed",
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+
+    parsed = load_json(raw.decode("utf-8", "replace"))
+    parsed_ok = isinstance(parsed, dict)
+    status_ok = 200 <= status < 400
+    ok = parsed_ok and status_ok
+    return {
+        "argv": argv,
+        "ok": ok,
+        "exit_code": status,
+        "timed_out": False,
+        "json": parsed if parsed_ok else None,
+        "error_class": None if ok else ("http_status" if parsed_ok else "invalid_json"),
+    }
+
+
 def normalize_agents(value: Any) -> list[dict[str, Any]]:
     rows = []
     for item in list_from_json(value, ["agents", "result", "items"]):
@@ -319,6 +368,153 @@ def normalize_threads(messages: list[dict[str, Any]], limit: int) -> list[dict[s
         rows.append(row)
     rows.sort(key=lambda row: (row.get("last_activity_at") or "", row.get("thread_id") or ""), reverse=True)
     return rows[:limit]
+
+
+def bounded_health_level(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"green", "yellow", "red"}:
+        return normalized
+    return None
+
+
+def bounded_semantic_readiness_status(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized == "ok":
+        return "pass"
+    if normalized in {"pass", "fail", "unknown"}:
+        return normalized
+    return None
+
+
+def semantic_readiness_reason_class(value: Any) -> str:
+    if not isinstance(value, str):
+        return "unknown"
+    normalized = value.lower()
+    if (
+        normalized == "malformed_sqlite"
+        or ("sqlite" in normalized and "malformed" in normalized)
+        or "database disk image is malformed" in normalized
+    ):
+        return "malformed_sqlite"
+    if (
+        normalized == "archive_corruption"
+        or (
+            "archive" in normalized
+            and ("corrupt" in normalized or "parse" in normalized or "jsonl" in normalized)
+        )
+    ):
+        return "archive_corruption"
+    if normalized == "index_rebuild_required" or (
+        "index" in normalized and ("rebuild" in normalized or "missing" in normalized or "stale" in normalized)
+    ):
+        return "index_rebuild_required"
+    if normalized == "permission_denied" or "permission denied" in normalized:
+        return "permission_denied"
+    return "unknown"
+
+
+def bounded_recovery_mode(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"", "ok", "none", "normal", "clean", "idle"}:
+        return "ok"
+    if normalized == "corrupt":
+        return "corrupt"
+    if normalized in {
+        "repair",
+        "repair_required",
+        "repairing",
+        "recover",
+        "recovering",
+        "recovery_required",
+        "restore",
+        "restoring",
+        "reconstruct",
+    }:
+        return "repair_required"
+    return "unknown_recovery"
+
+
+def recovery_reason_class(mode: str, health: dict[str, Any], recovery: dict[str, Any] | None) -> str:
+    if mode == "corrupt":
+        return "archive_corruption"
+    text_parts: list[str] = []
+    if recovery:
+        for key in ("reason", "next_action", "nextAction", "detail", "message", "bundle_path", "bundlePath"):
+            value = recovery.get(key)
+            if isinstance(value, str):
+                text_parts.append(value)
+    for key in ("detail", "message", "status"):
+        value = health.get(key)
+        if isinstance(value, str):
+            text_parts.append(value)
+    normalized = " ".join(text_parts).lower()
+    if "doctor repair" in normalized or "restore" in normalized or "reconstruct" in normalized:
+        return "storage_recovery_required"
+    if "permission denied" in normalized:
+        return "permission_denied"
+    return "unknown"
+
+
+def normalize_health(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    summary: dict[str, Any] = {}
+
+    health_level = bounded_health_level(value.get("health_level") or value.get("healthLevel"))
+    if health_level:
+        summary["health_level"] = health_level
+
+    semantic = value.get("semantic_readiness") or value.get("semanticReadiness")
+    if isinstance(semantic, dict):
+        semantic_status = bounded_semantic_readiness_status(semantic.get("status"))
+        semantic_reason = semantic.get("reason") or semantic.get("detail") or semantic.get("message")
+    else:
+        semantic_status = bounded_semantic_readiness_status(semantic)
+        semantic_reason = value.get("semantic_readiness_reason") or value.get("semanticReadinessReason")
+    if semantic_status:
+        readiness = {"status": semantic_status}
+        if semantic_status == "fail":
+            readiness["reason"] = semantic_readiness_reason_class(semantic_reason)
+        summary["semantic_readiness"] = readiness
+
+    recovery = value.get("recovery")
+    recovery_mode = None
+    recovery_reason = None
+    if isinstance(recovery, dict):
+        recovery_mode = bounded_recovery_mode(recovery.get("mode") or recovery.get("status"))
+        if recovery_mode and recovery_mode != "ok":
+            recovery_reason = recovery_reason_class(recovery_mode, value, recovery)
+    if not recovery_mode or recovery_mode == "ok":
+        durability_state = bounded_recovery_mode(value.get("durability_state") or value.get("durabilityState"))
+        if durability_state:
+            summary["durability_state"] = durability_state
+        if durability_state and durability_state != "ok":
+            recovery_mode = durability_state
+            recovery_reason = recovery_reason_class(recovery_mode, value, None)
+
+    if recovery_mode and recovery_mode != "ok":
+        summary["recovery"] = {
+            "mode": recovery_mode,
+            "reason": recovery_reason or "unknown",
+        }
+    return summary
+
+
+def health_requires_fallback(health: dict[str, Any]) -> bool:
+    semantic = health.get("semantic_readiness")
+    if isinstance(semantic, dict) and semantic.get("status") == "fail":
+        return True
+    recovery = health.get("recovery")
+    if isinstance(recovery, dict) and recovery.get("mode") not in {None, "ok"}:
+        return True
+    durability_state = health.get("durability_state")
+    return isinstance(durability_state, str) and durability_state not in {"", "ok"}
 
 
 def command_status(command: dict[str, Any], project: Path) -> dict[str, Any]:
@@ -538,7 +734,8 @@ def build_snapshot_output(
     commands: list[dict[str, Any]],
     thread_limit: int,
 ) -> dict[str, Any]:
-    agents_cmd, reservations_cmd, inbox_cmd = commands
+    agents_cmd, reservations_cmd, inbox_cmd = commands[:3]
+    health_cmd = commands[3] if len(commands) > 3 else synthetic_command(["agent-mail-health"], {})
 
     agents = normalize_agents(agents_cmd["json"]) if agents_cmd["ok"] else []
     reservations = normalize_reservations(reservations_cmd["json"], project) if reservations_cmd["ok"] else []
@@ -549,9 +746,10 @@ def build_snapshot_output(
         inbox = []
         threads = []
 
+    health = normalize_health(health_cmd["json"])
     degraded = degraded_entries(commands, project)
-    fallback_active = bool(degraded)
-    return {
+    fallback_active = bool(degraded) or health_requires_fallback(health)
+    output = {
         "schema": AGENT_MAIL_SNAPSHOT_SCHEMA,
         "generated_at": utc_now(),
         "project_key": "<workspace>",
@@ -576,6 +774,8 @@ def build_snapshot_output(
         "inbox": inbox,
         "threads": threads,
     }
+    output.update(health)
+    return output
 
 
 def synthetic_command(
@@ -663,6 +863,14 @@ def run_self_test() -> int:
                 ]
             },
         ),
+        synthetic_command(
+            ["agent-mail-health", "http://127.0.0.1:8765/health"],
+            {
+                "health_level": "green",
+                "semantic_readiness": {"status": "ok"},
+                "recovery": {"mode": "ok"},
+            },
+        ),
     ]
     output = build_snapshot_output(project, agent, commands, thread_limit=10)
     coordination = coordination_snapshot(output, commands[0], commands[1], commands[2], project)
@@ -673,6 +881,9 @@ def run_self_test() -> int:
     assert output["summary"]["file_reservation_count"] == 2
     assert output["summary"]["inbox_mailbox_count"] == 1
     assert output["summary"]["thread_count"] == 2
+    assert output["summary"]["source_command_count"] == 4
+    assert output["health_level"] == "green"
+    assert output["semantic_readiness"]["status"] == "pass"
     assert output["inbox"][0]["ack_required_count"] == 2
     assert output["file_reservations"][0]["path_pattern"] == "[REDACTED:absolute_path]"
     assert output["file_reservations"][1]["path_pattern"] == "scripts/agent_mail_snapshot.sh"
@@ -690,6 +901,7 @@ def run_self_test() -> int:
             error_class="command_failed",
         ),
         commands[2],
+        commands[3],
     ]
     degraded_output = build_snapshot_output(project, agent, degraded_commands, thread_limit=10)
     degraded_coordination = coordination_snapshot(
@@ -704,15 +916,90 @@ def run_self_test() -> int:
     assert degraded_coordination["sources"][0]["status"] == "unavailable"
     assert degraded_coordination["sources"][4]["status"] == "degraded"
 
+    recovery_output = build_snapshot_output(
+        project,
+        agent,
+        [
+            commands[0],
+            commands[1],
+            commands[2],
+            synthetic_command(
+                ["agent-mail-health", "http://127.0.0.1:8765/health"],
+                {
+                    "health_level": "green",
+                    "semantic_readiness": {"status": "ok"},
+                    "recovery": {
+                        "mode": "corrupt",
+                        "next_action": "Run am doctor repair --yes or restore from /Users/example/.local/share/mcp_agent_mail/storage.sqlite3 after B-tree page 283 failed",
+                        "bundle_path": "/Users/example/.local/share/mcp_agent_mail/doctor/forensics/storage.sqlite3/reconstruct-20260602_030410_115",
+                    },
+                },
+            ),
+        ],
+        thread_limit=10,
+    )
+    assert recovery_output["producer_status"] == "degraded"
+    assert recovery_output["fallback_active"] is True
+    assert recovery_output["recovery"]["mode"] == "corrupt"
+    assert recovery_output["recovery"]["reason"] == "archive_corruption"
+
+    repair_output = build_snapshot_output(
+        project,
+        agent,
+        [
+            commands[0],
+            commands[1],
+            commands[2],
+            synthetic_command(
+                ["agent-mail-health", "http://127.0.0.1:8765/health"],
+                {
+                    "health_level": "yellow",
+                    "semantic_readiness": {"status": "ok"},
+                    "recovery": {"mode": "repair_required"},
+                },
+            ),
+        ],
+        thread_limit=10,
+    )
+    assert repair_output["producer_status"] == "degraded"
+    assert repair_output["fallback_active"] is True
+    assert repair_output["recovery"]["mode"] == "repair_required"
+
+    http_error_output = build_snapshot_output(
+        project,
+        agent,
+        [
+            commands[0],
+            commands[1],
+            commands[2],
+            synthetic_command(
+                ["agent-mail-health", "http://127.0.0.1:8765/health"],
+                {"status": "internal_error"},
+                ok=False,
+                exit_code=500,
+                error_class="http_status",
+            ),
+        ],
+        thread_limit=10,
+    )
+    assert http_error_output["producer_status"] == "degraded"
+    assert http_error_output["fallback_active"] is True
+    assert http_error_output["summary"]["degraded_count"] == 1
+
     rendered = json.dumps({"snapshot": output, "coordination": coordination}, sort_keys=True)
+    recovery_rendered = json.dumps(recovery_output, sort_keys=True)
     assert_absent(
-        rendered,
+        rendered + recovery_rendered,
         [
             str(project),
             "/Users/example",
             github_token,
             api_secret,
             "body-only secret",
+            "storage.sqlite3",
+            "B-tree",
+            "page 283",
+            "reconstruct-20260602_030410_115",
         ],
     )
     print("agent_mail_snapshot: self-test passed", file=sys.stderr)
@@ -798,8 +1085,9 @@ def main() -> int:
         run_json_command([am_bin, "agents", "list", "--project", str(project), "--json"], args.timeout_sec),
         run_json_command([am_bin, "robot", "reservations", "--project", str(project), "--all", "--format", "json"], args.timeout_sec),
         run_json_command([am_bin, "mail", "inbox", "--project", str(project), "--agent", agent, "--limit", str(args.inbox_limit), "--json"], args.timeout_sec),
+        run_health_probe(args.timeout_sec),
     ]
-    agents_cmd, reservations_cmd, inbox_cmd = commands
+    agents_cmd, reservations_cmd, inbox_cmd = commands[:3]
 
     output = build_snapshot_output(project, agent, commands, args.thread_limit)
 

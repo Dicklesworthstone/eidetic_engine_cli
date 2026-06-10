@@ -52,6 +52,7 @@
       "type": "array",
       "items": {"$ref": "#/definitions/sourceProvenance"}
     },
+    "resourceAdmission": {"$ref": "#/definitions/resourceAdmission"},
     "mutationPolicy": {"$ref": "#/definitions/mutationPolicy"},
     "degraded": {
       "type": "array",
@@ -326,7 +327,7 @@
     },
     "agentMail": {
       "type": "object",
-      "description": "bd-2z5ly.8: redacted Agent Mail coordination health. `status` carries the broad availability and recovery class; the `*Authoritative` flags and `archiveIndexParity` tell a downstream candidate-safety classifier whether reservation or inbox evidence can be trusted. `fallbackActions` is an ordered, structured recovery workflow that replaces prose-only repair strings so agents do not parse natural language. No mail bodies, raw inbox contents, agent identities, or unredacted reservation paths may appear in this block.",
+      "description": "bd-2z5ly.8: redacted Agent Mail coordination health. `status` carries the broad availability and recovery class; the `*Authoritative` flags, `archiveIndexParity`, `semanticReadiness`, `recovery`, and `durabilityState` tell a downstream candidate-safety classifier whether reservation or inbox evidence can be trusted. `fallbackActions` is an ordered, structured recovery workflow that replaces prose-only repair strings so agents do not parse natural language. No mail bodies, raw inbox contents, agent identities, or unredacted reservation paths may appear in this block.",
       "required": ["status", "healthLevel", "unreadCount", "ackRequiredCount", "degradedCodes"],
       "additionalProperties": false,
       "properties": {
@@ -345,7 +346,7 @@
             "unavailable",
             "skipped"
           ],
-          "description": "bd-2z5ly.8: broad Agent Mail health class. `fresh` and `healthy` are aliases; `healthy` is preferred for new emitters. `degraded_read_only` keeps the index queryable but blocks writes. `archive_ahead_of_sqlite` flags archive/index parity drift. `inbox_unavailable` and `reservation_unavailable` are sub-component failures where partial coordination evidence remains. `outbox_only` allows sends but not reads. bd-2z5ly.8.1: `semantic_readiness_failed` covers the green-transport contradiction where the health endpoint responds with `healthLevel=green` but `semantic_readiness.status=fail` (for example malformed SQLite storage) so reservation/inbox reads cannot be trusted. `unreachable` means the transport itself is down. `unavailable` and `skipped` retain their legacy `swarm brief` meaning."
+          "description": "bd-2z5ly.8: broad Agent Mail health class. `fresh` and `healthy` are aliases; `healthy` is preferred for new emitters. `degraded_read_only` keeps the index queryable but blocks writes. `archive_ahead_of_sqlite` flags archive/index parity drift. `inbox_unavailable` and `reservation_unavailable` are sub-component failures where partial coordination evidence remains. `outbox_only` allows sends but not reads. bd-2z5ly.8.1: `semantic_readiness_failed` covers the green-transport contradiction where the health endpoint responds with `healthLevel=green` but `semantic_readiness.status=fail` (for example malformed SQLite storage) so reservation/inbox reads cannot be trusted. bd-18jfx: a corrupt `recovery.mode`, non-ok `recovery.status`, or `durabilityState=corrupt` keeps Agent Mail `unavailable` for reservation/inbox authority even when healthLevel is green and semanticReadiness passes. `unreachable` means the transport itself is down. `unavailable` and `skipped` retain their legacy `swarm brief` meaning."
         },
         "healthLevel": {"type": ["string", "null"], "enum": ["green", "yellow", "red", null]},
         "unreadCount": {"type": ["integer", "null"], "minimum": 0},
@@ -354,7 +355,7 @@
         "recoveryMode": {
           "type": ["string", "null"],
           "enum": ["none", "wait_for_repair", "proceed_via_beads", "static_work_only", "manual_coordination", null],
-          "description": "bd-2z5ly.8: structured recovery posture for downstream candidate-safety logic. `null` when status is fresh/healthy or evidence is insufficient to recommend a specific recovery path."
+          "description": "bd-2z5ly.8: structured recovery posture for downstream candidate-safety logic. `wait_for_repair` is required when `recovery.mode=corrupt`, `recovery.status` is non-ok, or `durabilityState=corrupt`; those cases must also set reservationAuthoritative=false and inboxAuthoritative=false. `null` when status is fresh/healthy or evidence is insufficient to recommend a specific recovery path."
         },
         "archiveIndexParity": {
           "type": ["string", "null"],
@@ -397,6 +398,32 @@
               "description": "bd-2z5ly.8.1: bounded reason class for a semantic-readiness failure. Use `malformed_sqlite` when the SQLite storage image is corrupt, `archive_corruption` when the JSONL archive cannot be parsed, `index_rebuild_required` when the index is missing or out of date, `permission_denied` when the process cannot open the store, and `unknown` when classification was not possible. MUST NOT carry raw error text, file paths, or page offsets."
             }
           }
+        },
+        "recovery": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["mode"],
+          "description": "bd-18jfx: bounded recovery block from Agent Mail health/durability evidence. This is authoritative for reservation/inbox trust even when transport health is green and semanticReadiness passes. `mode=corrupt`, non-ok `status`, or a corrupt durability state means reads are not authoritative. Emit only reason classes; never include raw database paths, B-tree/page offsets, bundle paths, PIDs, stack frames, or raw repair output.",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["ok", "healthy", "none", "repair", "recover", "restore", "corrupt", "unknown"]
+            },
+            "status": {
+              "type": ["string", "null"],
+              "enum": ["ok", "healthy", "repair_required", "corrupt", "unknown", null]
+            },
+            "reason": {
+              "type": ["string", "null"],
+              "enum": ["archive_corruption", "storage_recovery_required", "repair_required", "unknown", null],
+              "description": "bd-18jfx: bounded recovery reason. Use `archive_corruption` for corrupt archive/index durability, `storage_recovery_required` when the store needs repair without a narrower class, `repair_required` for explicit repair/recover/restore modes, and `unknown` when classification was not possible."
+            }
+          }
+        },
+        "durabilityState": {
+          "type": ["string", "null"],
+          "enum": ["ok", "healthy", "corrupt", "unknown", null],
+          "description": "bd-18jfx: bounded durability state from Agent Mail health or HTTP body fields such as durability_state/durabilityState. `corrupt` downgrades reservation and inbox authority even if `semanticReadiness.status=pass` and `healthLevel=green`."
         }
       }
     },
@@ -487,12 +514,22 @@
         "jsonlPath": {"type": "string"},
         "dbPath": {"type": "string"},
         "jsonlRecordCount": {"type": "integer", "minimum": 0},
+        "jsonlValidRecordCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Parseable JSONL row count when a JSONL parse-error diagnostic needs explicit valid-row evidence."
+        },
         "dbRecordCount": {"type": "integer", "minimum": 0},
         "pendingImportCount": {"type": "integer", "minimum": 0},
         "externalChangesPendingImport": {"type": "boolean"},
         "dirtyIssueCount": {"type": "integer", "minimum": 0},
         "mergeArtifactPaths": {"$ref": "#/definitions/stringArray"},
         "mergeArtifactCount": {"type": "integer", "minimum": 0},
+        "invalidLineNumbers": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 1},
+          "description": "Bounded list of malformed JSONL line numbers observed by the collector."
+        },
         "jsonlParseError": {
           "type": ["object", "null"],
           "additionalProperties": false,
@@ -506,6 +543,18 @@
             }
           }
         },
+        "dbIntegrityOk": {
+          "type": "boolean",
+          "description": "Whether the collector's SQLite integrity check was clean for a JSONL repair-safety diagnostic."
+        },
+        "lastImportTimestamp": {
+          "type": "string",
+          "description": "Last Beads import timestamp from sync metadata, when available for a repair-safety diagnostic."
+        },
+        "lastExportTimestamp": {
+          "type": "string",
+          "description": "Last Beads export timestamp from sync metadata, when available for a repair-safety diagnostic."
+        },
         "brReadsAuthoritative": {
           "type": "boolean",
           "description": "True only when the tracker health is `ok`; consumers must not treat ready-work or zero-conflict evidence as authoritative when false."
@@ -513,6 +562,30 @@
         "requiresCandidateDowngrade": {
           "type": "boolean",
           "description": "True for parse errors and DB/JSONL count mismatches. Candidate-safety logic must refuse auto-claim style recommendations while true."
+        },
+        "safeRepairCandidate": {
+          "type": "boolean",
+          "description": "True only for a DB-integrity-ok malformed JSONL tail where valid JSONL rows and DB rows agree and no merge/dirty evidence blocks DB export repair."
+        },
+        "repairClassification": {
+          "type": "string",
+          "enum": [
+            "invalid_trailing_line_db_healthy",
+            "db_integrity_failed",
+            "merge_artifacts_present",
+            "db_jsonl_count_mismatch",
+            "stale_db_guard_risk",
+            "unknown_durable_corruption"
+          ],
+          "description": "Stable repair-safety reason for JSONL parse-error diagnostics."
+        },
+        "mutationMustStop": {
+          "type": "boolean",
+          "description": "True when Beads mutation must stop until the JSONL/DB integrity issue is repaired."
+        },
+        "repairCommandCandidate": {
+          "type": "string",
+          "description": "Bounded candidate repair command. This is advice only and is omitted unless repair evidence is strong."
         },
         "recoveryHint": {"type": ["string", "null"]}
       }
@@ -571,7 +644,8 @@
         "workersVsSelectionContradiction",
         "pathNormalizationWarning",
         "remoteRequired",
-        "localFallbackRefused"
+        "localFallbackRefused",
+        "admissionBlocker"
       ],
       "additionalProperties": false,
       "properties": {
@@ -590,10 +664,12 @@
           "type": ["string", "null"],
           "enum": [
             "no_workers_with_rust_installed",
+            "no_workers_passed_health",
             "topology_blocked",
             "capacity_or_timeout",
             "all_workers_preflight_failed",
             "command_not_offloaded",
+            "active_project_exclusion",
             "remote_marker_missing",
             "no_worker_selected",
             null
@@ -602,7 +678,68 @@
         "workersVsSelectionContradiction": {"type": "boolean"},
         "pathNormalizationWarning": {"type": ["string", "null"]},
         "remoteRequired": {"type": "boolean"},
-        "localFallbackRefused": {"type": "boolean"}
+        "localFallbackRefused": {"type": "boolean"},
+        "admissionBlocker": {
+          "anyOf": [
+            {"$ref": "#/definitions/rchSelectorAdmissionBlocker"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "rchSelectorAdmissionBlocker": {
+      "type": "object",
+      "required": ["kind", "retryGuidance", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["active_project_exclusion"]
+        },
+        "retryGuidance": {
+          "type": "string",
+          "enum": ["wait_for_active_build_or_coordinate_with_owner"]
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 320
+        },
+        "activeBuildId": {"type": "integer", "minimum": 0},
+        "activeCommandPreview": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 180
+        },
+        "activeCommandHash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "workerId": {"type": "string", "minLength": 1},
+        "workerPosture": {
+          "type": "string",
+          "enum": ["active", "progress_stale", "heartbeat_stale", "hook_inactive"]
+        },
+        "heartbeatAgeSecs": {"type": "integer", "minimum": 0},
+        "progressAgeSecs": {"type": "integer", "minimum": 0},
+        "buildAgeSecs": {"type": "integer", "minimum": 0},
+        "slotsOwned": {"type": "integer", "minimum": 0},
+        "workersHealthy": {"type": "integer", "minimum": 0},
+        "workersTotal": {"type": "integer", "minimum": 0},
+        "slotsAvailable": {"type": "integer", "minimum": 0},
+        "slotsTotal": {"type": "integer", "minimum": 0},
+        "retryAfterHint": {
+          "type": "string",
+          "enum": ["after_active_build_completes"]
+        },
+        "nextAction": {
+          "type": "string",
+          "enum": ["wait_for_active_build_or_contact_owner_before_retry"]
+        },
+        "ownerEscalation": {
+          "type": "string",
+          "enum": ["identify_or_contact_active_build_owner_before_cancelling_or_retrying"]
+        }
       }
     },
     "knownBlocker": {
@@ -682,6 +819,95 @@
         "freshness": {"type": ["string", "null"]},
         "digest": {"type": ["string", "null"]},
         "redaction": {"type": "string"}
+      }
+    },
+    "resourceAdmission": {
+      "type": "object",
+      "description": "Side-effect-free advisory resource-profile admission copied into the work packet. This block can shape timing/profile guidance but canAuthorizeClaim is always false and never changes candidate safety.",
+      "required": [
+        "schema",
+        "policyDomain",
+        "policyId",
+        "sideEffectFree",
+        "advisoryOnly",
+        "canAuthorizeClaim",
+        "surface",
+        "commandClass",
+        "decision",
+        "requestedProfile",
+        "effectiveProfile",
+        "recommendedProfile",
+        "estimatedCostClass",
+        "sourcePosture",
+        "evidenceFreshness",
+        "reasonCodes",
+        "abstentionReasons",
+        "nextCommands",
+        "nextCommandActions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.resource_admission.v1"},
+        "policyDomain": {"type": "string", "const": "resource_profile_budget_admission"},
+        "policyId": {"type": "string", "const": "candidate.resource_profile_budget_admission"},
+        "sideEffectFree": {"type": "boolean", "const": true},
+        "advisoryOnly": {"type": "boolean", "const": true},
+        "canAuthorizeClaim": {"type": "boolean", "const": false},
+        "surface": {"type": "string", "enum": ["work_packet", "claim_gate"]},
+        "commandClass": {"type": "string", "enum": ["read_only", "coordination"]},
+        "decision": {
+          "type": "string",
+          "enum": [
+            "admit",
+            "degrade_to_lean",
+            "queue",
+            "wait_for_rch",
+            "split_workload",
+            "refuse_local_cargo",
+            "abstain"
+          ]
+        },
+        "requestedProfile": {"type": ["string", "null"], "enum": ["constrained", "portable", "workstation", "swarm", null]},
+        "effectiveProfile": {"type": "string", "enum": ["constrained", "portable", "workstation", "swarm"]},
+        "recommendedProfile": {"type": "string", "enum": ["constrained", "portable", "workstation", "swarm"]},
+        "estimatedCostClass": {"type": "string", "enum": ["tiny", "small", "standard", "swarm_heavy", "unknown"]},
+        "sourcePosture": {"$ref": "#/definitions/resourceAdmissionSourcePosture"},
+        "evidenceFreshness": {"type": "string", "enum": ["fresh", "partial", "degraded", "unsafe"]},
+        "reasonCodes": {"$ref": "#/definitions/stringArray"},
+        "abstentionReasons": {"$ref": "#/definitions/stringArray"},
+        "nextCommands": {"$ref": "#/definitions/stringArray"},
+        "nextCommandActions": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/commandAction"}
+        }
+      }
+    },
+    "resourceAdmissionSourcePosture": {
+      "type": "object",
+      "required": [
+        "hostCalibration",
+        "resourceBudget",
+        "rch",
+        "localCargo",
+        "lanePressure",
+        "workloadPressure",
+        "daemon",
+        "replay",
+        "redactionPostureVerified",
+        "sourceCount"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "hostCalibration": {"type": "string"},
+        "resourceBudget": {"type": "string"},
+        "rch": {"type": "string"},
+        "localCargo": {"type": "string"},
+        "lanePressure": {"type": "string"},
+        "workloadPressure": {"type": "string"},
+        "daemon": {"type": "string"},
+        "replay": {"type": "string"},
+        "redactionPostureVerified": {"type": "boolean"},
+        "sourceCount": {"type": "integer", "minimum": 0}
       }
     },
     "mutationPolicy": {
