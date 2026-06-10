@@ -67,12 +67,15 @@ surfaces:
 | `GET` | `/v1/context?task=...` | `ee pack "<task>" --json` |
 | `GET` | `/v1/why/{memory_id}` | `ee why <memory-id> --json` |
 | `GET` | `/v1/swarm/brief` | `ee swarm brief --json` |
-| `POST` | `/v1/durable-write` | Durable write envelope for future write APIs |
+| `POST` | `/v1/durable-write` | Durable write envelope; first concrete operation is `remember` |
 | `GET` | `/v1/events` | SSE stream for read-only progress events |
 
-`POST /v1/durable-write` is a placeholder envelope, not a license to add many
-write endpoints. Each concrete write surface still needs its own design, policy
-checks, audit behavior, and parity tests.
+`POST /v1/durable-write` is a single mutable envelope, not a license to add many
+write endpoints. The first concrete operation is a JSON `remember` request that
+routes through the same durable memory service as `ee remember`, including
+policy checks, audit metadata, and index-job reporting. Each additional write
+operation still needs its own design, policy checks, audit behavior, and parity
+tests before it can be accepted by this endpoint.
 
 ## Security Policy
 

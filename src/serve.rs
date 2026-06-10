@@ -12,6 +12,7 @@ use serde_json::{Value as JsonValue, json};
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
 };
+use crate::core::memory::{RememberMemoryOptions, RememberMemoryReport, remember_memory};
 use crate::models::DomainError;
 use crate::steward::{DaemonForegroundOptions, DaemonForegroundReport, JobRunResult, JobType};
 
@@ -166,6 +167,7 @@ pub struct ServeHttpRequest {
     pub query: BTreeMap<String, Vec<String>>,
     pub headers: BTreeMap<String, String>,
     pub body_bytes: usize,
+    pub body: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -456,7 +458,7 @@ pub fn serve_dispatch_plan(request: &ServeHttpRequest) -> Result<ServeDispatchPl
         )),
         ServeEndpoint::DurableWrite => Ok(ServeDispatchPlan {
             endpoint: ServeEndpoint::DurableWrite,
-            handler_surface: "serve.durable_write_placeholder",
+            handler_surface: "serve.durable_write",
             cli_argv: Vec::new(),
             payload_schema: "ee.response.v2",
             mutable: true,
@@ -660,6 +662,7 @@ pub fn parse_serve_http_request(
         query,
         headers,
         body_bytes: declared_body_bytes,
+        body: body[..declared_body_bytes].to_vec(),
     })
 }
 
@@ -908,13 +911,19 @@ pub fn render_serve_transport_exchange(
         return render_serve_http_sse_response(&frame);
     }
 
-    let payload = match serve_dispatch_payload_for_plan(&plan) {
+    let payload = match serve_dispatch_payload_for_plan(&plan, &request) {
         Ok(payload) => payload,
         Err(error) => {
+            let status_code = serve_status_code_for_payload_error(&error);
             return render_serve_http_json_response(
-                500,
+                status_code,
                 &serve_error_exchange_envelope(
-                    request_id, &request, auth_state, 500, &error, elapsed_ms,
+                    request_id,
+                    &request,
+                    auth_state,
+                    status_code,
+                    &error,
+                    elapsed_ms,
                 ),
             );
         }
@@ -1307,11 +1316,291 @@ fn serve_dispatch_payload_json(plan: &ServeDispatchPlan, execution: &'static str
     })
 }
 
-fn serve_dispatch_payload_for_plan(plan: &ServeDispatchPlan) -> Result<JsonValue, DomainError> {
+fn serve_dispatch_payload_for_plan(
+    plan: &ServeDispatchPlan,
+    request: &ServeHttpRequest,
+) -> Result<JsonValue, DomainError> {
     match plan.endpoint {
         ServeEndpoint::Status => serve_status_payload_json(),
+        ServeEndpoint::DurableWrite => serve_durable_write_payload_json(plan, request),
         _ => Ok(serve_dispatch_payload_json(plan, "not_started")),
     }
+}
+
+fn serve_status_code_for_payload_error(error: &DomainError) -> u16 {
+    match error {
+        DomainError::Usage { .. }
+        | DomainError::UsageWithDetails { .. }
+        | DomainError::UsageCodeWithDetails { .. } => 400,
+        DomainError::NotFound { .. } => 404,
+        DomainError::PolicyDenied { .. } | DomainError::PolicyDeniedWithDetails { .. } => 403,
+        _ => 500,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ServeDurableWriteRequest {
+    operation: String,
+    workspace: PathBuf,
+    content: Option<String>,
+    level: Option<String>,
+    kind: Option<String>,
+    tags: Option<Vec<String>>,
+    workflow: Option<String>,
+    confidence: Option<f32>,
+    source: Option<String>,
+    allow_secret_mention: Option<bool>,
+    valid_from: Option<String>,
+    valid_to: Option<String>,
+    dry_run: Option<bool>,
+    auto_link: Option<bool>,
+    propose_candidates: Option<bool>,
+}
+
+fn serve_durable_write_payload_json(
+    plan: &ServeDispatchPlan,
+    request: &ServeHttpRequest,
+) -> Result<JsonValue, DomainError> {
+    let durable_request = parse_serve_durable_write_request(request)?;
+    match durable_request.operation.trim() {
+        "remember" => serve_durable_write_remember_payload_json(plan, &durable_request),
+        operation => Err(DomainError::UsageCodeWithDetails {
+            code: "serve_durable_write_unsupported_operation",
+            message: format!(
+                "Unsupported /v1/durable-write operation `{operation}`; only `remember` is implemented."
+            ),
+            repair: Some(
+                "POST JSON with {\"operation\":\"remember\",\"workspace\":\"/path\",\"content\":\"...\"}."
+                    .to_owned(),
+            ),
+            details_json: json!({
+                "supportedOperations": ["remember"],
+                "endpoint": "/v1/durable-write"
+            })
+            .to_string(),
+        }),
+    }
+}
+
+fn parse_serve_durable_write_request(
+    request: &ServeHttpRequest,
+) -> Result<ServeDurableWriteRequest, DomainError> {
+    if request.body.is_empty() {
+        return Err(DomainError::UsageWithDetails {
+            message: "/v1/durable-write requires a JSON request body.".to_owned(),
+            repair: Some(
+                "POST JSON with {\"operation\":\"remember\",\"workspace\":\"/path\",\"content\":\"...\"}."
+                    .to_owned(),
+            ),
+            details_json: durable_write_request_contract_json().to_string(),
+        });
+    }
+    serde_json::from_slice(&request.body).map_err(|error| DomainError::UsageWithDetails {
+        message: format!("Failed to parse /v1/durable-write JSON body: {error}"),
+        repair: Some(
+            "POST JSON with {\"operation\":\"remember\",\"workspace\":\"/path\",\"content\":\"...\"}."
+                .to_owned(),
+        ),
+        details_json: durable_write_request_contract_json().to_string(),
+    })
+}
+
+fn serve_durable_write_remember_payload_json(
+    plan: &ServeDispatchPlan,
+    request: &ServeDurableWriteRequest,
+) -> Result<JsonValue, DomainError> {
+    let content = required_non_empty_durable_write_string(
+        request.content.as_deref(),
+        "content",
+        "remember operations require non-empty `content`.",
+    )?;
+    if request.workspace.as_os_str().is_empty() {
+        return Err(DomainError::Usage {
+            message: "remember operations require a non-empty `workspace` path.".to_owned(),
+            repair: Some(
+                "Set `workspace` to the target workspace root for the memory write.".to_owned(),
+            ),
+        });
+    }
+    let level = optional_non_empty_durable_write_string(request.level.as_deref(), "episodic");
+    let kind = optional_non_empty_durable_write_string(request.kind.as_deref(), "fact");
+    let tags = normalize_durable_write_tags(request.tags.as_ref())?;
+    let report = remember_memory(&RememberMemoryOptions {
+        workspace_path: &request.workspace,
+        database_path: None,
+        content,
+        workflow_id: request
+            .workflow
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()),
+        level,
+        kind,
+        tags: tags.as_deref(),
+        confidence: request.confidence.unwrap_or(0.8),
+        source: request
+            .source
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()),
+        allow_secret_mention: request.allow_secret_mention.unwrap_or(false),
+        valid_from: request
+            .valid_from
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()),
+        valid_to: request
+            .valid_to
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()),
+        dry_run: request.dry_run.unwrap_or(false),
+        auto_link: request.auto_link.unwrap_or(true),
+        propose_candidates: request.propose_candidates.unwrap_or(true),
+    })?;
+    let degraded = remember_report_degraded_entries_json(&report);
+    Ok(json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": {
+            "execution": if report.dry_run { "dry_run" } else { "executed" },
+            "executionBoundary": "serve_durable_write",
+            "businessLogicExecuted": true,
+            "operation": "remember",
+            "handlerSurface": "serve.durable_write.remember",
+            "dispatchPlan": plan.to_json(),
+            "result": remember_report_summary_json(&report),
+            "degraded": degraded.clone()
+        },
+        "degraded": degraded
+    }))
+}
+
+fn durable_write_request_contract_json() -> JsonValue {
+    json!({
+        "endpoint": "/v1/durable-write",
+        "supportedOperations": ["remember"],
+        "remember": {
+            "required": ["operation", "workspace", "content"],
+            "optional": [
+                "level",
+                "kind",
+                "tags",
+                "workflow",
+                "confidence",
+                "source",
+                "allowSecretMention",
+                "validFrom",
+                "validTo",
+                "dryRun",
+                "autoLink",
+                "proposeCandidates"
+            ]
+        }
+    })
+}
+
+fn required_non_empty_durable_write_string<'a>(
+    value: Option<&'a str>,
+    field: &str,
+    message: &'static str,
+) -> Result<&'a str, DomainError> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| DomainError::Usage {
+            message: message.to_owned(),
+            repair: Some(format!("Set `{field}` in the /v1/durable-write JSON body.")),
+        })
+}
+
+fn optional_non_empty_durable_write_string<'a>(
+    value: Option<&'a str>,
+    default: &'static str,
+) -> &'a str {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default)
+}
+
+fn normalize_durable_write_tags(tags: Option<&Vec<String>>) -> Result<Option<String>, DomainError> {
+    let Some(tags) = tags else {
+        return Ok(None);
+    };
+    let normalized = tags
+        .iter()
+        .map(|tag| tag.trim())
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    if normalized.is_empty() {
+        return Err(DomainError::Usage {
+            message: "`tags` must contain at least one non-empty string when provided.".to_owned(),
+            repair: Some("Omit `tags` or provide non-empty tag strings.".to_owned()),
+        });
+    }
+    Ok(Some(normalized.join(",")))
+}
+
+fn remember_report_summary_json(report: &RememberMemoryReport) -> JsonValue {
+    json!({
+        "command": "remember",
+        "version": report.version,
+        "memoryId": report.memory_id.to_string(),
+        "workspaceId": &report.workspace_id,
+        "workspacePath": report.workspace_path.display().to_string(),
+        "databasePath": report.database_path.display().to_string(),
+        "content": &report.content,
+        "workflowId": &report.workflow_id,
+        "level": report.level.as_str(),
+        "kind": report.kind.as_str(),
+        "confidence": report.confidence,
+        "tags": &report.tags,
+        "source": &report.source,
+        "validFrom": &report.valid_from,
+        "validTo": &report.valid_to,
+        "validityStatus": &report.validity_status,
+        "validityWindowKind": &report.validity_window_kind,
+        "dryRun": report.dry_run,
+        "persisted": report.persisted,
+        "revisionNumber": report.revision_number,
+        "revisionGroupId": &report.revision_group_id,
+        "auditId": &report.audit_id,
+        "indexJobId": &report.index_job_id,
+        "indexStatus": &report.index_status,
+        "effectIds": &report.effect_ids,
+        "suggestedLinkStatus": &report.suggested_link_status,
+        "autoLinkStatus": &report.auto_link_status,
+        "curationCandidateStatus": &report.curation_candidate_status,
+        "redactionStatus": &report.redaction_status,
+        "policyBypassUsed": report.policy_bypass.is_some()
+    })
+}
+
+fn remember_report_degraded_entries_json(report: &RememberMemoryReport) -> Vec<JsonValue> {
+    let mut degraded = Vec::new();
+    if let Some(bypass) = &report.policy_bypass {
+        degraded.push(json!({
+            "code": &bypass.code,
+            "severity": &bypass.severity,
+            "message": &bypass.message,
+            "repair": &bypass.repair,
+            "kind": &bypass.kind
+        }));
+    }
+    degraded.extend(
+        report
+            .suggested_link_degradations
+            .iter()
+            .chain(report.auto_link_degradations.iter())
+            .chain(report.curation_candidate_degradations.iter())
+            .map(|degradation| {
+                json!({
+                    "code": &degradation.code,
+                    "severity": &degradation.severity,
+                    "message": &degradation.message,
+                    "repair": &degradation.repair
+                })
+            }),
+    );
+    degraded
 }
 
 fn serve_status_payload_json() -> Result<JsonValue, DomainError> {
@@ -2546,7 +2835,7 @@ mod tests {
         )?;
         ensure(
             durable.handler_surface,
-            "serve.durable_write_placeholder",
+            "serve.durable_write",
             "durable handler",
         )?;
         ensure(durable.mutable, true, "durable write is mutable")?;

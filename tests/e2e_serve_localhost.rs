@@ -3,7 +3,7 @@ use std::net::{Shutdown, TcpStream};
 use std::process::{Command, Stdio};
 
 use ee::serve::{SERVE_ENDPOINT_SCHEMA_V1, ServeLimits, render_serve_transport_exchange};
-use serde_json::Value as JsonValue;
+use serde_json::{Value as JsonValue, json};
 
 #[path = "support/test_tracing.rs"]
 mod test_tracing;
@@ -945,21 +945,33 @@ fn serve_unknown_endpoint_returns_404_with_endpoint_discovery_error() -> TestRes
     Ok(())
 }
 
-// bd-3uvoo: POST /v1/durable-write is the only mutable endpoint in the v2
-// surface. Its happy-path transport dispatch (with a valid bearer token and
-// an empty Content-Length: 0 body) returns a placeholder-handler dispatch
-// plan whose mutable=true and handlerSurface='serve.durable_write_placeholder'
-// shapes are not exercised at transport level by any other test. Pin the
-// 200 envelope contract so the placeholder dispatch is anchored before the
-// real durable-write handler lands.
+// bd-3sqfi: POST /v1/durable-write is the only mutable endpoint in the v2
+// surface. Its first concrete operation is a narrow `remember` write that
+// routes through ee's existing memory service instead of returning the old
+// transport-only dispatch envelope.
 #[test]
-fn serve_durable_write_endpoint_routes_empty_body_to_placeholder_dispatch_plan() -> TestResult {
+fn serve_durable_write_endpoint_remembers_memory_with_audited_handler() -> TestResult {
     let token = "01234567890123456789012345678901";
+    let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let body = json!({
+        "operation": "remember",
+        "workspace": workspace.path().display().to_string(),
+        "content": "Serve durable-write remembered this fact.",
+        "level": "episodic",
+        "kind": "fact",
+        "tags": ["serve", "durable-write"],
+        "confidence": 0.73,
+        "source": "serve://e2e/durable-write",
+        "autoLink": false,
+        "proposeCandidates": false
+    })
+    .to_string();
     let raw = format!(
-        "POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\n\r\n"
+        "POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
     );
     let response = render_serve_transport_exchange(
-        "req-durable-write-empty",
+        "req-durable-write-remember",
         raw.as_bytes(),
         &ServeLimits::default(),
         Some(token),
@@ -982,7 +994,7 @@ fn serve_durable_write_endpoint_routes_empty_body_to_placeholder_dispatch_plan()
     // DurableWrite has no CLI equivalent (yet) — cliEquivalent must be null.
     if !envelope["request"]["cliEquivalent"].is_null() {
         return Err(format!(
-            "/v1/durable-write must not expose a cliEquivalent yet (placeholder dispatch); got {envelope}"
+            "/v1/durable-write must not expose a CLI equivalent; got {envelope}"
         ));
     }
     // POST endpoints carry contentLengthRequired=true.
@@ -990,7 +1002,10 @@ fn serve_durable_write_endpoint_routes_empty_body_to_placeholder_dispatch_plan()
         envelope["request"]["contentLengthRequired"].as_bool(),
         Some(true),
     );
-    assert_eq!(envelope["request"]["bodyBytes"].as_u64(), Some(0));
+    assert_eq!(
+        envelope["request"]["bodyBytes"].as_u64(),
+        Some(body.len() as u64),
+    );
     assert_eq!(envelope["response"]["statusCode"].as_u64(), Some(200));
     assert_eq!(
         envelope["response"]["payloadSchema"].as_str(),
@@ -999,27 +1014,127 @@ fn serve_durable_write_endpoint_routes_empty_body_to_placeholder_dispatch_plan()
     let payload = &envelope["response"]["payload"];
     assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
     assert_eq!(payload["success"].as_bool(), Some(true));
-    assert_eq!(payload["data"]["execution"].as_str(), Some("not_started"),);
+    assert_eq!(payload["data"]["execution"].as_str(), Some("executed"),);
+    assert_eq!(
+        payload["data"]["executionBoundary"].as_str(),
+        Some("serve_durable_write"),
+    );
     assert_eq!(
         payload["data"]["businessLogicExecuted"].as_bool(),
-        Some(false),
+        Some(true),
+    );
+    assert_eq!(payload["data"]["operation"].as_str(), Some("remember"));
+    assert_eq!(
+        payload["data"]["handlerSurface"].as_str(),
+        Some("serve.durable_write.remember"),
     );
     let plan = &payload["data"]["dispatchPlan"];
     assert_eq!(plan["endpoint"].as_str(), Some("durableWrite"));
-    assert_eq!(
-        plan["handlerSurface"].as_str(),
-        Some("serve.durable_write_placeholder"),
-    );
+    assert_eq!(plan["handlerSurface"].as_str(), Some("serve.durable_write"));
     // mutable=true is the structural promise that downstream agents inspect
-    // before treating the response as a write-effect handshake.
+    // before treating the response as a write-effect result.
     assert_eq!(plan["mutable"].as_bool(), Some(true));
     assert_eq!(plan["sseStream"].as_bool(), Some(false));
     let argv = json_string_array(&plan["cliArgv"])?;
     if !argv.is_empty() {
         return Err(format!(
-            "durable-write placeholder must expose no CLI argv: {argv:?}"
+            "durable-write handler must expose no CLI argv: {argv:?}"
         ));
     }
+    let result = &payload["data"]["result"];
+    assert_eq!(result["command"].as_str(), Some("remember"));
+    assert_eq!(
+        result["content"].as_str(),
+        Some("Serve durable-write remembered this fact."),
+    );
+    assert_eq!(result["level"].as_str(), Some("episodic"));
+    assert_eq!(result["kind"].as_str(), Some("fact"));
+    assert_eq!(result["persisted"].as_bool(), Some(true));
+    assert_eq!(result["dryRun"].as_bool(), Some(false));
+    assert_eq!(result["redactionStatus"].as_str(), Some("accepted"));
+    if result["memoryId"].as_str().is_none() {
+        return Err(format!(
+            "durable remember must return a memoryId: {payload}"
+        ));
+    }
+    if result["auditId"].as_str().is_none() {
+        return Err(format!(
+            "durable remember must return an auditId: {payload}"
+        ));
+    }
+    if result["indexJobId"].as_str().is_none() {
+        return Err(format!(
+            "durable remember must return an indexJobId: {payload}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn serve_durable_write_endpoint_payload_errors_return_usage_400_envelope() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let empty_body = format!(
+        "POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\n\r\n"
+    );
+    let empty_response = render_serve_transport_exchange(
+        "req-durable-write-empty-body",
+        empty_body.as_bytes(),
+        &ServeLimits::default(),
+        Some(token),
+        0,
+    );
+    if !empty_response.starts_with("HTTP/1.1 400 Bad Request\r\n") {
+        return Err(format!(
+            "empty durable-write body must return 400, got {empty_response}"
+        ));
+    }
+    let empty_envelope = response_body_json(&empty_response)?;
+    assert_eq!(empty_envelope["response"]["statusCode"].as_u64(), Some(400));
+    assert_eq!(
+        empty_envelope["response"]["payloadSchema"].as_str(),
+        Some("ee.error.v2"),
+    );
+    let empty_payload = &empty_envelope["response"]["payload"];
+    assert_eq!(empty_payload["schema"].as_str(), Some("ee.error.v2"));
+    assert_eq!(empty_payload["error"]["code"].as_str(), Some("usage"));
+
+    let unsupported_body = json!({
+        "operation": "replace",
+        "workspace": "/tmp/ee-serve-durable-write",
+        "content": "unsupported operation"
+    })
+    .to_string();
+    let unsupported_raw = format!(
+        "POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{unsupported_body}",
+        unsupported_body.len()
+    );
+    let unsupported_response = render_serve_transport_exchange(
+        "req-durable-write-unsupported-operation",
+        unsupported_raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(token),
+        0,
+    );
+    if !unsupported_response.starts_with("HTTP/1.1 400 Bad Request\r\n") {
+        return Err(format!(
+            "unsupported durable-write operation must return 400, got {unsupported_response}"
+        ));
+    }
+    let unsupported_envelope = response_body_json(&unsupported_response)?;
+    assert_eq!(
+        unsupported_envelope["response"]["statusCode"].as_u64(),
+        Some(400),
+    );
+    assert_eq!(
+        unsupported_envelope["response"]["payloadSchema"].as_str(),
+        Some("ee.error.v2"),
+    );
+    let unsupported_payload = &unsupported_envelope["response"]["payload"];
+    assert_eq!(unsupported_payload["schema"].as_str(), Some("ee.error.v2"),);
+    assert_eq!(
+        unsupported_payload["error"]["code"].as_str(),
+        Some("serve_durable_write_unsupported_operation"),
+    );
     Ok(())
 }
 
@@ -1068,12 +1183,12 @@ fn serve_durable_write_endpoint_missing_auth_short_circuits_with_auth_failure_en
         payload["error"]["details"]["tokenMaterialExposed"].as_bool(),
         Some(false),
     );
-    // The placeholder dispatch must NOT run for auth-rejected POSTs — the
+    // The durable-write handler must NOT run for auth-rejected POSTs — the
     // mutable=true flag from the dispatch plan would otherwise mislead a
-    // downstream observer into believing a write was queued.
+    // downstream observer into believing a write was performed.
     if payload["data"]["dispatchPlan"]["mutable"].as_bool() == Some(true) {
         return Err(format!(
-            "auth-missing POST /v1/durable-write must NOT surface the placeholder mutable=true dispatch plan; got {payload}"
+            "auth-missing POST /v1/durable-write must NOT surface the mutable dispatch plan; got {payload}"
         ));
     }
     Ok(())
