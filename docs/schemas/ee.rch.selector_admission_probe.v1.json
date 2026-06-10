@@ -17,7 +17,8 @@
     "workers_vs_selection_contradiction",
     "path_normalization_warning",
     "remote_required",
-    "local_fallback_refused"
+    "local_fallback_refused",
+    "admission_blocker"
   ],
   "additionalProperties": false,
   "properties": {
@@ -82,6 +83,7 @@
             "capacity_or_timeout",
             "all_workers_preflight_failed",
             "command_not_offloaded",
+            "active_project_exclusion",
             "remote_marker_missing",
             "no_worker_selected"
           ]
@@ -106,6 +108,121 @@
     },
     "local_fallback_refused": {
       "type": "boolean"
+    },
+    "admission_blocker": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "retry_guidance",
+            "evidence"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "active_project_exclusion"
+              ]
+            },
+            "retry_guidance": {
+              "type": "string",
+              "enum": [
+                "wait_for_active_build_or_coordinate_with_owner"
+              ]
+            },
+            "evidence": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 320,
+              "description": "One redacted, bounded transcript line describing why selector admission was blocked."
+            },
+            "active_build_id": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "RCH queue build id for the active same-project build that blocked selector admission, when queue evidence was available."
+            },
+            "active_command_preview": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 180,
+              "description": "Redacted, bounded preview of the active build command."
+            },
+            "active_command_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "description": "Hash of the full active build command before preview truncation."
+            },
+            "worker_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "worker_posture": {
+              "type": "string",
+              "enum": [
+                "active",
+                "progress_stale",
+                "heartbeat_stale",
+                "hook_inactive"
+              ]
+            },
+            "heartbeat_age_secs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "progress_age_secs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "build_age_secs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "slots_owned": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "workers_healthy": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "workers_total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "slots_available": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "slots_total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "retry_after_hint": {
+              "type": "string",
+              "enum": [
+                "after_active_build_completes"
+              ]
+            },
+            "next_action": {
+              "type": "string",
+              "enum": [
+                "wait_for_active_build_or_contact_owner_before_retry"
+              ]
+            },
+            "owner_escalation": {
+              "type": "string",
+              "enum": [
+                "identify_or_contact_active_build_owner_before_cancelling_or_retrying"
+              ]
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "examples": [
@@ -127,7 +244,8 @@
       "workers_vs_selection_contradiction": true,
       "path_normalization_warning": "[RCH] project root normalization warning: canonical /Users/<redacted>/projects/eidetic_engine_cli -> /data/projects/eidetic_engine_cli",
       "remote_required": true,
-      "local_fallback_refused": true
+      "local_fallback_refused": true,
+      "admission_blocker": null
     }
   ]
 }

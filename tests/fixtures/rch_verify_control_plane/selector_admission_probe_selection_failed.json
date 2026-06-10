@@ -16,5 +16,6 @@
   "workers_vs_selection_contradiction": true,
   "path_normalization_warning": "[RCH] project root normalization warning: canonical /Users/<redacted>/projects/eidetic_engine_cli -> /data/projects/eidetic_engine_cli",
   "remote_required": true,
-  "local_fallback_refused": true
+  "local_fallback_refused": true,
+  "admission_blocker": null
 }

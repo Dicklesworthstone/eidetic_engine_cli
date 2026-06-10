@@ -1321,6 +1321,10 @@ is_no_workers_passed_health_output() {
     grep -Eiq "no workers passed health thresholds|no_workers_passed_health"
 }
 
+is_active_project_exclusion_output() {
+    grep -Eiq "active_project_exclusion|active project exclusion"
+}
+
 is_client_daemon_unknown_variant_output() {
     grep -Eiq "Failed to parse daemon response: unknown variant"
 }
@@ -2324,6 +2328,64 @@ run_rch_invocation_retry() {
     return "$status"
 }
 
+rch_queue_snapshot_json() {
+    local queue_output queue_status queue_timed_out queue_elapsed queue_probe
+    if [ -n "${RCH_VERIFY_FAKE_QUEUE_JSON:-}" ]; then
+        queue_output="$RCH_VERIFY_FAKE_QUEUE_JSON"
+        queue_status=0
+        queue_timed_out=false
+        queue_elapsed=0
+    elif [ -n "${RCH_VERIFY_FAKE_OUTPUT:-}" ]; then
+        printf 'null'
+        return 0
+    else
+        queue_probe="$(capture_command_with_timeout "$RCH_VERIFY_PREFLIGHT_TIMEOUT_MS" "$PROJECT_ROOT" "$RCH_BIN" queue --json)"
+        queue_output="$(json_text_field "$queue_probe" output)"
+        queue_status="$(json_text_field "$queue_probe" status)"
+        queue_timed_out="$(json_text_field "$queue_probe" timed_out)"
+        queue_elapsed="$(json_text_field "$queue_probe" elapsed_ms)"
+    fi
+
+    RCH_QUEUE_OUTPUT="$queue_output" \
+    RCH_QUEUE_STATUS="$queue_status" \
+    RCH_QUEUE_TIMED_OUT="$queue_timed_out" \
+    RCH_QUEUE_ELAPSED="$queue_elapsed" \
+    python3 - <<'PY'
+import json
+import os
+
+def parse_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+status = parse_int(os.environ.get("RCH_QUEUE_STATUS"))
+timed_out = (os.environ.get("RCH_QUEUE_TIMED_OUT") or "").lower() == "true"
+elapsed_ms = parse_int(os.environ.get("RCH_QUEUE_ELAPSED"))
+raw_output = os.environ.get("RCH_QUEUE_OUTPUT") or ""
+
+try:
+    parsed = json.loads(raw_output)
+except Exception:
+    parsed = None
+
+if isinstance(parsed, dict):
+    data = parsed.get("data") if isinstance(parsed.get("data"), dict) else parsed
+else:
+    data = {}
+
+payload = {
+    "status": "ok" if status == 0 and isinstance(data, dict) else "unavailable",
+    "exit_code": status,
+    "timed_out": timed_out,
+    "elapsed_ms": elapsed_ms,
+    "data": data if isinstance(data, dict) else {},
+}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
 now_iso() {
     if [ -n "${RCH_VERIFY_NOW:-}" ]; then
         printf '%s' "$RCH_VERIFY_NOW"
@@ -2408,6 +2470,7 @@ EOF
     KNOWN_BLOCKER_MAX_ENTRIES="$KNOWN_BLOCKER_MAX_ENTRIES" \
     KNOWN_BLOCKER_FAKE_OUTPUT_PRESENT="${RCH_VERIFY_FAKE_OUTPUT:+1}" \
     PROOF_BROKER_LEDGER_PATH="$PROOF_BROKER_LEDGER" \
+    RCH_QUEUE_SNAPSHOT_JSON="${RCH_QUEUE_SNAPSHOT_JSON:-null}" \
     RUN_STARTED_AT="$RUN_STARTED_AT" \
     python3 - <<'PY'
 import datetime as dt
@@ -2592,17 +2655,157 @@ def blocker_kind_for(degraded_codes):
         return "local_fallback_refused"
     return None
 
+def parse_queue_snapshot():
+    raw = os.environ.get("RCH_QUEUE_SNAPSHOT_JSON") or "null"
+    try:
+        snapshot = json.loads(raw)
+    except Exception:
+        return {}
+    if not isinstance(snapshot, dict):
+        return {}
+    data = snapshot.get("data")
+    if isinstance(data, dict):
+        return data
+    return snapshot
+
+def int_or_none(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+def active_project_build_ids_from_tail(combined_tail):
+    ordered_ids = []
+    seen = set()
+    for pattern in (
+        r"\bactive_build(?:_id)?\s*[=:]\s*(\d+)\b",
+        r"\bactive build(?: id)?\s*[=:]\s*(\d+)\b",
+    ):
+        for match in re.finditer(pattern, combined_tail, flags=re.IGNORECASE):
+            parsed = int_or_none(match.group(1))
+            if parsed is not None and parsed not in seen:
+                seen.add(parsed)
+                ordered_ids.append(parsed)
+    return ordered_ids
+
+def active_project_queue_details(combined_tail):
+    tail_build_ids = active_project_build_ids_from_tail(combined_tail)
+    queue_data = parse_queue_snapshot()
+    details = {}
+    if tail_build_ids:
+        details["active_build_id"] = tail_build_ids[0]
+
+    global_numeric_fields = {
+        "workers_healthy": queue_data.get("workers_healthy") if isinstance(queue_data, dict) else None,
+        "workers_total": queue_data.get("workers_total") if isinstance(queue_data, dict) else None,
+        "slots_available": queue_data.get("slots_available") if isinstance(queue_data, dict) else None,
+        "slots_total": queue_data.get("slots_total") if isinstance(queue_data, dict) else None,
+    }
+    for key, value in global_numeric_fields.items():
+        parsed = int_or_none(value)
+        if parsed is not None:
+            details[key] = parsed
+
+    active_builds = queue_data.get("active_builds") if isinstance(queue_data, dict) else None
+    if not isinstance(active_builds, list) or not active_builds:
+        return details
+
+    build = None
+    if tail_build_ids:
+        tail_build_id_set = set(tail_build_ids)
+        build = next(
+            (
+                item
+                for item in active_builds
+                if isinstance(item, dict) and int_or_none(item.get("id")) in tail_build_id_set
+            ),
+            None,
+        )
+    else:
+        build = next((item for item in active_builds if isinstance(item, dict)), None)
+    if not isinstance(build, dict):
+        return details
+
+    numeric_fields = {
+        "active_build_id": build.get("id"),
+        "heartbeat_age_secs": build.get("heartbeat_age_secs"),
+        "progress_age_secs": build.get("progress_age_secs"),
+        "build_age_secs": build.get("detector_build_age_secs"),
+        "slots_owned": build.get("detector_slots_owned") if build.get("detector_slots_owned") is not None else build.get("slots"),
+    }
+    for key, value in numeric_fields.items():
+        parsed = int_or_none(value)
+        if parsed is not None:
+            details[key] = parsed
+
+    command = build.get("command")
+    if isinstance(command, str) and command.strip():
+        details["active_command_preview"] = redact(command.strip())[:180]
+        details["active_command_hash"] = "sha256:" + hashlib.sha256(command.encode("utf-8")).hexdigest()
+    worker_id = build.get("worker_id")
+    if isinstance(worker_id, str) and worker_id.strip():
+        details["worker_id"] = worker_id.strip()
+
+    if build.get("detector_heartbeat_stale") is True:
+        worker_posture = "heartbeat_stale"
+    elif build.get("detector_progress_stale") is True:
+        worker_posture = "progress_stale"
+    elif build.get("detector_hook_alive") is False:
+        worker_posture = "hook_inactive"
+    else:
+        worker_posture = "active"
+    details["worker_posture"] = worker_posture
+    details["retry_after_hint"] = "after_active_build_completes"
+    details["next_action"] = "wait_for_active_build_or_contact_owner_before_retry"
+    details["owner_escalation"] = "identify_or_contact_active_build_owner_before_cancelling_or_retrying"
+    return details
+
 def selector_admission_probe(proof, degraded_codes, combined_tail):
     command_kind = proof.get("command_kind") or ""
     required_runtime = "Rust" if command_kind.startswith("cargo_") else None
     workers_reported = [str(item) for item in proof.get("configured_workers") or []]
     daemon_workers_reported = [str(item) for item in proof.get("daemon_workers") or []]
     selected_worker = proof.get("worker_id")
+    lowered_tail = combined_tail.lower()
     known_blocker_active = "rch_verify_known_blocker_active" in degraded_codes
     local_fallback_refused = (
         "rch_verify_local_fallback_refused" in degraded_codes
         or "remote required; refusing local fallback" in combined_tail
     )
+    active_project_exclusion = (
+        "active_project_exclusion" in lowered_tail
+        or "active project exclusion" in lowered_tail
+    )
+    admission_blocker = None
+    if active_project_exclusion:
+        evidence_line = None
+        for line in combined_tail.splitlines():
+            lowered = line.lower()
+            if (
+                "active_project_exclusion" in lowered
+                or "active project exclusion" in lowered
+                or (
+                    "active build" in lowered
+                    and ("stale" in lowered or "progress" in lowered or "running" in lowered)
+                )
+            ):
+                evidence_line = redact(line.strip())[:320]
+                break
+        admission_blocker = {
+            "kind": "active_project_exclusion",
+            "retry_guidance": "wait_for_active_build_or_coordinate_with_owner",
+            "evidence": evidence_line or "active_project_exclusion observed",
+            "retry_after_hint": "after_active_build_completes",
+            "next_action": "wait_for_active_build_or_contact_owner_before_retry",
+            "owner_escalation": "identify_or_contact_active_build_owner_before_cancelling_or_retrying",
+        }
+        admission_blocker.update(active_project_queue_details(combined_tail))
     path_warning = None
     for line in combined_tail.splitlines():
         lowered = line.lower()
@@ -2622,11 +2825,12 @@ def selector_admission_probe(proof, degraded_codes, combined_tail):
         status = "selected"
     else:
         status = "selection_failed"
-        lowered_tail = combined_tail.lower()
         if "no workers with rust installed" in lowered_tail:
             selection_failure_reason = "no_workers_with_rust_installed"
         elif "no workers passed health thresholds" in lowered_tail or "no_workers_passed_health" in lowered_tail:
             selection_failure_reason = "no_workers_passed_health"
+        elif active_project_exclusion:
+            selection_failure_reason = "active_project_exclusion"
         elif "rch_verify_topology_blocked" in degraded_codes or "RCH-E327" in combined_tail:
             selection_failure_reason = "topology_blocked"
         elif "rch_verify_all_workers_preflight_failed" in degraded_codes:
@@ -2664,6 +2868,7 @@ def selector_admission_probe(proof, degraded_codes, combined_tail):
         "path_normalization_warning": path_warning,
         "remote_required": proof.get("remote_required") is True,
         "local_fallback_refused": bool(local_fallback_refused),
+        "admission_blocker": admission_blocker,
     }
 
 def remediation_bead_for(blocker_kind):
@@ -3075,6 +3280,8 @@ if build_admission.get("status") not in (None, "not_run"):
     admitted = build_admission.get("admitted")
     if isinstance(admitted, bool):
         admitted = str(admitted).lower()
+    elif admitted is None:
+        admitted = "unknown"
     summary_lines.append(
         f"- build_admission: `{build_admission.get('status')}`"
         f" admitted=`{admitted}`"
@@ -3118,6 +3325,26 @@ if selector_probe.get("status") not in (None, "not_applicable"):
         f" failure_reason=`{selector_probe.get('selection_failure_reason') or 'none'}`"
         f" local_fallback_refused=`{str(bool(selector_probe.get('local_fallback_refused'))).lower()}`"
     )
+    admission_blocker = selector_probe.get("admission_blocker") or {}
+    if isinstance(admission_blocker, dict) and admission_blocker.get("kind"):
+        detail_parts = [
+            f"retry_guidance=`{admission_blocker.get('retry_guidance') or 'unknown'}`",
+        ]
+        for field in (
+            "active_build_id",
+            "worker_id",
+            "worker_posture",
+            "heartbeat_age_secs",
+            "progress_age_secs",
+            "next_action",
+        ):
+            value = admission_blocker.get(field)
+            if value is not None:
+                detail_parts.append(f"{field}=`{value}`")
+        summary_lines.append(
+            f"- selector_blocker: `{admission_blocker.get('kind')}` "
+            + " ".join(detail_parts)
+        )
 if bead_id:
     summary_lines.insert(1, f"- bead_id: `{bead_id}`")
 if first_error_file:
@@ -3630,6 +3857,10 @@ if printf '%s' "$combined_output" | is_all_workers_preflight_failed_output; then
 fi
 if printf '%s' "$combined_output" | is_no_workers_passed_health_output; then
     degraded+=("rch_verify_worker_health_threshold_blocked")
+fi
+if printf '%s' "$combined_output" | is_active_project_exclusion_output; then
+    degraded+=("rch_verify_capacity_or_timeout")
+    RCH_QUEUE_SNAPSHOT_JSON="$(rch_queue_snapshot_json)"
 fi
 if printf '%s' "$combined_output" | is_client_daemon_unknown_variant_output; then
     degraded+=("rch_verify_client_daemon_version_skew")

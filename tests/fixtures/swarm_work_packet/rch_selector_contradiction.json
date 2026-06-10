@@ -153,7 +153,8 @@
         "workersVsSelectionContradiction": true,
         "pathNormalizationWarning": null,
         "remoteRequired": true,
-        "localFallbackRefused": true
+        "localFallbackRefused": true,
+        "admissionBlocker": null
       }
     },
     "verification": {

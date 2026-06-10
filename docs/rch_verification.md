@@ -137,14 +137,25 @@ future replay ledgers. Its standalone contract fixture is
 - `selection_failure_reason`: one of the coarse pre-Cargo reasons such as
   `no_workers_with_rust_installed`, `topology_blocked`,
   `capacity_or_timeout`, `all_workers_preflight_failed`,
-  `command_not_offloaded`, `remote_marker_missing`, or
-  `no_worker_selected`.
+  `command_not_offloaded`, `active_project_exclusion`,
+  `remote_marker_missing`, or `no_worker_selected`.
 - `workers_vs_selection_contradiction`: true when workers were reported but no
   worker was selected for an applicable Rust command.
 - `path_normalization_warning`: a redacted transcript line when RCH reports a
   project-root, alias-root, or path-normalization warning.
 - `remote_required` and `local_fallback_refused`: policy posture flags. A true
   `local_fallback_refused` means no local Cargo fallback was accepted.
+- `admission_blocker`: a bounded, redacted blocker detail when selector
+  admission found a first-class pre-Cargo condition. Today this is populated for
+  `active_project_exclusion` with retry guidance to wait for the active build or
+  coordinate with its owner. When `rch queue --json` is available at the moment
+  the wrapper observes the exclusion, the blocker also carries bounded
+  operator-facing fields such as `active_build_id`, `active_command_preview`,
+  `active_command_hash`, `worker_id`, heartbeat/progress ages, `worker_posture`,
+  `retry_after_hint`, `next_action`, and `owner_escalation`. If the transcript
+  names an `active_build` id, queue enrichment prefers that matching build over
+  unrelated active queue entries. The raw queue snapshot is not embedded in the
+  proof.
 
 Known-blocker refusals still include the probe for schema stability, but set
 `status=not_applicable`, `selection_failure_reason=null`, and

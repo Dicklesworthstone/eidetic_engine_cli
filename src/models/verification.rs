@@ -103,6 +103,46 @@ impl VerificationOffload {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VerificationSelectorAdmissionBlocker {
+    pub kind: String,
+    pub retry_guidance: String,
+    pub evidence: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_build_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_command_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_command_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_posture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat_age_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_age_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_age_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slots_owned: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workers_healthy: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workers_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slots_available: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slots_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_escalation: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VerificationSelectorAdmission {
     pub status: Option<String>,
     pub required_runtime: Option<String>,
@@ -114,6 +154,8 @@ pub struct VerificationSelectorAdmission {
     pub path_normalization_warning: Option<String>,
     pub remote_required: bool,
     pub local_fallback_refused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission_blocker: Option<VerificationSelectorAdmissionBlocker>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -912,6 +954,40 @@ pub fn verification_evidence_beads_summary(record: &VerificationEvidenceRecord) 
         }
         if selector.local_fallback_refused {
             parts.push("selector_local_fallback_refused=true".to_owned());
+        }
+        if let Some(blocker) = selector.admission_blocker.as_ref() {
+            parts.push(format!(
+                "selector_blocker={}",
+                shell_safe_beads_summary_value(&blocker.kind)
+            ));
+            parts.push(format!(
+                "selector_retry_guidance={}",
+                shell_safe_beads_summary_value(&blocker.retry_guidance)
+            ));
+            if let Some(active_build_id) = blocker.active_build_id {
+                parts.push(format!("selector_active_build_id={active_build_id}"));
+            }
+            if let Some(worker_id) = blocker.worker_id.as_deref() {
+                parts.push(format!(
+                    "selector_worker_id={}",
+                    shell_safe_beads_summary_value(worker_id)
+                ));
+            }
+            if let Some(worker_posture) = blocker.worker_posture.as_deref() {
+                parts.push(format!(
+                    "selector_worker_posture={}",
+                    shell_safe_beads_summary_value(worker_posture)
+                ));
+            }
+            if let Some(progress_age_secs) = blocker.progress_age_secs {
+                parts.push(format!("selector_progress_age_secs={progress_age_secs}"));
+            }
+            if let Some(next_action) = blocker.next_action.as_deref() {
+                parts.push(format!(
+                    "selector_next_action={}",
+                    shell_safe_beads_summary_value(next_action)
+                ));
+            }
         }
     }
     if let Some(workspace) = record.environment.workspace_fingerprint.as_deref() {
@@ -2543,6 +2619,47 @@ fn rch_selector_admission(value: &JsonValue) -> Option<VerificationSelectorAdmis
             .get("local_fallback_refused")
             .and_then(JsonValue::as_bool)
             .unwrap_or(false),
+        admission_blocker: rch_selector_admission_blocker(probe),
+    })
+}
+
+fn rch_selector_admission_blocker(
+    probe: &serde_json::Map<String, JsonValue>,
+) -> Option<VerificationSelectorAdmissionBlocker> {
+    let blocker = probe.get("admission_blocker")?.as_object()?;
+    let kind = blocker
+        .get("kind")
+        .and_then(JsonValue::as_str)
+        .and_then(|raw| normalized_non_empty(Some(raw)))?;
+    let retry_guidance = blocker
+        .get("retry_guidance")
+        .and_then(JsonValue::as_str)
+        .and_then(|raw| normalized_non_empty(Some(raw)))?;
+    let evidence = blocker
+        .get("evidence")
+        .and_then(JsonValue::as_str)
+        .and_then(|raw| normalized_non_empty(Some(raw)))?;
+    let blocker_value = JsonValue::Object(blocker.clone());
+    Some(VerificationSelectorAdmissionBlocker {
+        kind,
+        retry_guidance,
+        evidence,
+        active_build_id: rch_u64(&blocker_value, "active_build_id"),
+        active_command_preview: rch_string(&blocker_value, "active_command_preview"),
+        active_command_hash: rch_string(&blocker_value, "active_command_hash"),
+        worker_id: rch_string(&blocker_value, "worker_id"),
+        worker_posture: rch_string(&blocker_value, "worker_posture"),
+        heartbeat_age_secs: rch_u64(&blocker_value, "heartbeat_age_secs"),
+        progress_age_secs: rch_u64(&blocker_value, "progress_age_secs"),
+        build_age_secs: rch_u64(&blocker_value, "build_age_secs"),
+        slots_owned: rch_u64(&blocker_value, "slots_owned"),
+        workers_healthy: rch_u64(&blocker_value, "workers_healthy"),
+        workers_total: rch_u64(&blocker_value, "workers_total"),
+        slots_available: rch_u64(&blocker_value, "slots_available"),
+        slots_total: rch_u64(&blocker_value, "slots_total"),
+        retry_after_hint: rch_string(&blocker_value, "retry_after_hint"),
+        next_action: rch_string(&blocker_value, "next_action"),
+        owner_escalation: rch_string(&blocker_value, "owner_escalation"),
     })
 }
 
@@ -3933,12 +4050,15 @@ mod tests {
                 "required_runtime": "Rust",
                 "workers_reported": ["vmi123", "vmi456"],
                 "daemon_workers_reported": ["vmi123"],
+                "workers_reported_count": 2,
+                "daemon_workers_reported_count": 1,
                 "selected_worker": "vmi123",
                 "selection_failure_reason": null,
                 "workers_vs_selection_contradiction": false,
                 "path_normalization_warning": null,
                 "remote_required": true,
-                "local_fallback_refused": false
+                "local_fallback_refused": false,
+                "admission_blocker": null
             },
             "rch_runtime": {
                 "client_version": "1.0.24",
@@ -4028,11 +4148,32 @@ mod tests {
                 "workers_reported": ["vmi1227854", "vmi1264463"],
                 "daemon_workers_reported": ["vmi1227854"],
                 "selected_worker": null,
-                "selection_failure_reason": "no_workers_with_rust_installed",
-                "workers_vs_selection_contradiction": true,
+                "selection_failure_reason": "active_project_exclusion",
+                "workers_vs_selection_contradiction": false,
                 "path_normalization_warning": "[RCH] project root normalization warning: canonical /Users/<redacted>/projects/eidetic_engine_cli -> /data/projects/eidetic_engine_cli",
                 "remote_required": true,
-                "local_fallback_refused": true
+                "local_fallback_refused": true,
+                "admission_blocker": {
+                    "kind": "active_project_exclusion",
+                    "retry_guidance": "wait_for_active_build_or_coordinate_with_owner",
+                    "evidence": "[RCH] selection blocked: active_project_exclusion=1 active_build=29879340221071365 progress=stale",
+                    "active_build_id": 29879340221071365_u64,
+                    "active_command_preview": "cargo test --test error_recall_e2e -- --nocapture",
+                    "active_command_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                    "worker_id": "trj",
+                    "worker_posture": "progress_stale",
+                    "heartbeat_age_secs": 4,
+                    "progress_age_secs": 93,
+                    "build_age_secs": 120,
+                    "slots_owned": 2,
+                    "workers_healthy": 1,
+                    "workers_total": 1,
+                    "slots_available": 2,
+                    "slots_total": 4,
+                    "retry_after_hint": "after_active_build_completes",
+                    "next_action": "wait_for_active_build_or_contact_owner_before_retry",
+                    "owner_escalation": "identify_or_contact_active_build_owner_before_cancelling_or_retrying"
+                }
             }
         });
 
@@ -4049,13 +4190,36 @@ mod tests {
         assert_eq!(selector.status.as_deref(), Some("selection_failed"));
         assert_eq!(
             selector.selection_failure_reason.as_deref(),
-            Some("no_workers_with_rust_installed")
+            Some("active_project_exclusion")
         );
         assert_eq!(selector.workers_reported, ["vmi1227854", "vmi1264463"]);
         assert_eq!(selector.daemon_workers_reported, ["vmi1227854"]);
-        assert!(selector.workers_vs_selection_contradiction);
+        assert!(!selector.workers_vs_selection_contradiction);
         assert!(selector.remote_required);
         assert!(selector.local_fallback_refused);
+        let blocker = selector
+            .admission_blocker
+            .as_ref()
+            .ok_or_else(|| "selector admission blocker should parse".to_owned())?;
+        assert_eq!(blocker.kind.as_str(), "active_project_exclusion");
+        assert_eq!(
+            blocker.retry_guidance.as_str(),
+            "wait_for_active_build_or_coordinate_with_owner"
+        );
+        assert!(blocker.evidence.contains("progress=stale"));
+        assert_eq!(blocker.active_build_id, Some(29879340221071365));
+        assert_eq!(blocker.worker_id.as_deref(), Some("trj"));
+        assert_eq!(blocker.worker_posture.as_deref(), Some("progress_stale"));
+        assert_eq!(blocker.heartbeat_age_secs, Some(4));
+        assert_eq!(blocker.progress_age_secs, Some(93));
+        assert_eq!(
+            blocker.next_action.as_deref(),
+            Some("wait_for_active_build_or_contact_owner_before_retry")
+        );
+        assert_eq!(
+            blocker.owner_escalation.as_deref(),
+            Some("identify_or_contact_active_build_owner_before_cancelling_or_retrying")
+        );
         assert!(
             selector
                 .path_normalization_warning
@@ -4065,8 +4229,22 @@ mod tests {
 
         let summary = verification_evidence_beads_summary(&record);
         assert!(summary.contains("selector_admission=selection_failed"));
-        assert!(summary.contains("selector_failure_reason=no_workers_with_rust_installed"));
+        assert!(summary.contains("selector_failure_reason=active_project_exclusion"));
         assert!(summary.contains("selector_local_fallback_refused=true"));
+        assert!(summary.contains("selector_blocker=active_project_exclusion"));
+        assert!(summary.contains("selector_active_build_id=29879340221071365"));
+        assert!(summary.contains("selector_worker_id=trj"));
+        assert!(summary.contains("selector_worker_posture=progress_stale"));
+        assert!(summary.contains("selector_progress_age_secs=93"));
+        assert!(
+            summary
+                .contains("selector_retry_guidance=wait_for_active_build_or_coordinate_with_owner")
+        );
+        assert!(
+            summary.contains(
+                "selector_next_action=wait_for_active_build_or_contact_owner_before_retry"
+            )
+        );
         Ok(())
     }
 

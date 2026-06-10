@@ -1922,6 +1922,7 @@ fn selector_admission_probe_schema_pins_required_fields_and_enums() -> TestResul
         "path_normalization_warning",
         "remote_required",
         "local_fallback_refused",
+        "admission_blocker",
     ]);
     if required != expected_required {
         return Err(format!(
@@ -1945,12 +1946,36 @@ fn selector_admission_probe_schema_pins_required_fields_and_enums() -> TestResul
         "capacity_or_timeout",
         "all_workers_preflight_failed",
         "command_not_offloaded",
+        "active_project_exclusion",
         "remote_marker_missing",
         "no_worker_selected",
     ]);
     if failure_enum != expected_failures {
         return Err(format!(
             "selector admission failure enum drifted:\nexpected={expected_failures:?}\nactual={failure_enum:?}"
+        ));
+    }
+    let blocker_required =
+        string_set_at(&schema, "/properties/admission_blocker/oneOf/0/required")?;
+    let expected_blocker_required = string_set(&["kind", "retry_guidance", "evidence"]);
+    if blocker_required != expected_blocker_required {
+        return Err(format!(
+            "selector blocker required fields drifted:\nexpected={expected_blocker_required:?}\nactual={blocker_required:?}"
+        ));
+    }
+    let worker_posture_enum = string_set_at(
+        &schema,
+        "/properties/admission_blocker/oneOf/0/properties/worker_posture/enum",
+    )?;
+    let expected_worker_posture = string_set(&[
+        "active",
+        "progress_stale",
+        "heartbeat_stale",
+        "hook_inactive",
+    ]);
+    if worker_posture_enum != expected_worker_posture {
+        return Err(format!(
+            "selector blocker worker posture enum drifted:\nexpected={expected_worker_posture:?}\nactual={worker_posture_enum:?}"
         ));
     }
 
@@ -3168,6 +3193,167 @@ fn selector_admission_probe_classifies_worker_health_threshold_block() -> TestRe
         return Err(format!(
             "selector probe did not preserve health-threshold reason: {probe}"
         ));
+    }
+    Ok(())
+}
+
+#[test]
+fn selector_admission_probe_classifies_active_project_exclusion() -> TestResult {
+    let (status, stdout, stderr) = run_script_with_env(
+        &["--summary", "--no-write", "--", "cargo", "test", "--lib"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "[RCH] selection blocked: active_project_exclusion=1 active_build=29879340221071365 progress=stale\n[RCH] remote required; refusing local fallback (no worker assigned)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "21"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_FAKE_QUEUE_JSON",
+                r#"{
+  "api_version": "1.0",
+  "command": "queue",
+  "success": true,
+    "data": {
+    "active_builds": [
+      {
+        "id": 29879340221071367,
+        "command": "cargo test --test unrelated_e2e -- --nocapture",
+        "detector_build_age_secs": 999,
+        "detector_heartbeat_stale": false,
+        "detector_hook_alive": true,
+        "detector_progress_stale": false,
+        "detector_slots_owned": 1,
+        "heartbeat_age_secs": 1,
+        "progress_age_secs": 2,
+        "worker_id": "unrelated"
+      },
+      {
+        "id": 29879340221071365,
+        "command": "cargo test --test error_recall_e2e -- --nocapture",
+        "detector_build_age_secs": 327,
+        "detector_heartbeat_stale": false,
+        "detector_hook_alive": true,
+        "detector_progress_stale": true,
+        "detector_slots_owned": 2,
+        "heartbeat_age_secs": 3,
+        "progress_age_secs": 7,
+        "worker_id": "trj"
+      }
+    ],
+    "slots_available": 2,
+    "slots_total": 4,
+    "workers_healthy": 1,
+    "workers_total": 1
+  }
+}"#,
+            ),
+        ],
+    )?;
+    if status.success() {
+        return Err("active-project exclusion should preserve non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout).map_err(|error| {
+        format!("parse active-project selector report: {error}\nstderr:\n{stderr}")
+    })?;
+    if report["status"] != "rch_environment_failure" {
+        return Err(format!(
+            "active-project exclusion should be an environment failure: {report}"
+        ));
+    }
+    for expected in [
+        "rch_verify_local_fallback_refused",
+        "rch_verify_capacity_or_timeout",
+        "rch_verify_remote_marker_missing",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!(
+                "missing {expected} in active-project exclusion proof: {report}"
+            ));
+        }
+    }
+    let probe = selector_probe(&report)?;
+    if probe["status"] != "selection_failed"
+        || probe["selection_failure_reason"] != "active_project_exclusion"
+        || probe["workers_vs_selection_contradiction"] != false
+        || probe["local_fallback_refused"] != true
+    {
+        return Err(format!(
+            "selector probe did not preserve active-project exclusion: {probe}"
+        ));
+    }
+    let blocker = probe["admission_blocker"]
+        .as_object()
+        .ok_or_else(|| format!("missing active admission blocker: {probe}"))?;
+    if blocker.get("kind").and_then(Value::as_str) != Some("active_project_exclusion")
+        || blocker.get("retry_guidance").and_then(Value::as_str)
+            != Some("wait_for_active_build_or_coordinate_with_owner")
+    {
+        return Err(format!(
+            "active admission blocker had unexpected shape: {probe}"
+        ));
+    }
+    let evidence = blocker
+        .get("evidence")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("active blocker evidence missing: {probe}"))?;
+    if !evidence.contains("active_project_exclusion=1")
+        || !evidence.contains("progress=stale")
+        || evidence.len() > 320
+    {
+        return Err(format!("active blocker evidence was not bounded: {probe}"));
+    }
+    if blocker.get("active_build_id").and_then(Value::as_u64) != Some(29879340221071365)
+        || blocker.get("worker_id").and_then(Value::as_str) != Some("trj")
+        || blocker.get("worker_posture").and_then(Value::as_str) != Some("progress_stale")
+        || blocker.get("heartbeat_age_secs").and_then(Value::as_u64) != Some(3)
+        || blocker.get("progress_age_secs").and_then(Value::as_u64) != Some(7)
+    {
+        return Err(format!(
+            "active blocker did not preserve queue build details: {probe}"
+        ));
+    }
+    let command_preview = blocker
+        .get("active_command_preview")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("active command preview missing: {probe}"))?;
+    let command_hash = blocker
+        .get("active_command_hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("active command hash missing: {probe}"))?;
+    if !command_preview.contains("cargo test --test error_recall_e2e")
+        || command_preview.len() > 180
+        || !command_hash.starts_with("sha256:")
+        || command_hash.len() != "sha256:".len() + 64
+        || blocker.get("retry_after_hint").and_then(Value::as_str)
+            != Some("after_active_build_completes")
+        || blocker.get("next_action").and_then(Value::as_str)
+            != Some("wait_for_active_build_or_contact_owner_before_retry")
+        || blocker.get("owner_escalation").and_then(Value::as_str)
+            != Some("identify_or_contact_active_build_owner_before_cancelling_or_retrying")
+    {
+        return Err(format!(
+            "active blocker did not preserve operator guidance: {probe}"
+        ));
+    }
+    let summary = report["summary_markdown"]
+        .as_str()
+        .ok_or_else(|| "summary missing".to_owned())?;
+    for expected in [
+        "failure_reason=`active_project_exclusion`",
+        "selector_blocker: `active_project_exclusion`",
+        "retry_guidance=`wait_for_active_build_or_coordinate_with_owner`",
+        "active_build_id=`29879340221071365`",
+        "worker_id=`trj`",
+        "worker_posture=`progress_stale`",
+        "progress_age_secs=`7`",
+        "next_action=`wait_for_active_build_or_contact_owner_before_retry`",
+    ] {
+        if !summary.contains(expected) {
+            return Err(format!("summary missing {expected}: {summary}"));
+        }
     }
     Ok(())
 }

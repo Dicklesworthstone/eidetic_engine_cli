@@ -138,7 +138,8 @@ fn remote_pass_proof() -> Value {
             "workers_vs_selection_contradiction": false,
             "path_normalization_warning": null,
             "remote_required": true,
-            "local_fallback_refused": false
+            "local_fallback_refused": false,
+            "admission_blocker": null
         },
         "local_cargo_processes": {
             "schema": "ee.rch_local_cargo_tripwire.v1",
@@ -182,7 +183,8 @@ fn precargo_selector_failure_proof() -> Value {
             "workers_vs_selection_contradiction": true,
             "path_normalization_warning": "RCH_TOPOLOGY_ERR_ALIAS_NOT_SYMLINK:path=/Users/alice/projects",
             "remote_required": true,
-            "local_fallback_refused": true
+            "local_fallback_refused": true,
+            "admission_blocker": null
         },
         "known_blocker": {
             "schema": "ee.rch.known_blocker.v1",
@@ -230,7 +232,8 @@ fn local_fallback_contamination_proof() -> Value {
             "workers_vs_selection_contradiction": false,
             "path_normalization_warning": null,
             "remote_required": true,
-            "local_fallback_refused": false
+            "local_fallback_refused": false,
+            "admission_blocker": null
         },
         "local_cargo_processes": {
             "schema": "ee.rch_local_cargo_tripwire.v1",
