@@ -10,6 +10,7 @@ Usage: scripts/br_retry.sh <br-subcommand> [args...]
 
 Examples:
   scripts/br_retry.sh ready --json
+  scripts/br_retry.sh actionable --json
   scripts/br_retry.sh list --status open --json
   scripts/br_retry.sh stats --json
 
@@ -23,6 +24,8 @@ Retries only transient Beads JSONL partial-write parse signatures:
   - invalid type: ..., expected struct Issue
 
 All stdout from the successful br invocation is passed through unchanged.
+The synthetic `actionable --json` mode runs `br ready --json` through the same
+retry guard, then emits only open, unassigned, non-epic rows as a JSON array.
 Diagnostics are emitted to stderr as ee.beads_retry.v1 JSON lines.
 EOF
 }
@@ -150,6 +153,42 @@ classify_error() {
     return 1
 }
 
+filter_actionable_ready() {
+    local input_path="$1"
+    python3 - "$input_path" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as input_file:
+    payload = json.load(input_file)
+if isinstance(payload, list):
+    rows = payload
+elif isinstance(payload, dict) and isinstance(payload.get("issues"), list):
+    rows = payload["issues"]
+elif isinstance(payload, dict) and isinstance(payload.get("data"), list):
+    rows = payload["data"]
+else:
+    rows = []
+
+def is_actionable(row):
+    if not isinstance(row, dict):
+        return False
+    status = str(row.get("status", "")).lower()
+    if status != "open":
+        return False
+    assignee = row.get("assignee")
+    if assignee not in (None, ""):
+        return False
+    issue_type = str(row.get("issue_type", row.get("type", ""))).lower()
+    if issue_type == "epic":
+        return False
+    return True
+
+json.dump([row for row in rows if is_actionable(row)], sys.stdout, separators=(",", ":"))
+sys.stdout.write("\n")
+PY
+}
+
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
     usage
     exit 0
@@ -176,7 +215,19 @@ BR_RETRY_TMPDIR="${BR_RETRY_TMPDIR:-/tmp}"
 positive_integer_or_die "BR_RETRY_ATTEMPT_TIMEOUT_MS" "$BR_RETRY_ATTEMPT_TIMEOUT_MS"
 positive_integer_or_die "BR_RETRY_TAIL_BYTES" "$BR_RETRY_TAIL_BYTES"
 
+filter_actionable=false
 subcommand="$1"
+if [ "$subcommand" = "actionable" ]; then
+    filter_actionable=true
+    shift
+    if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "--json" ]; }; then
+        echo "br_retry: actionable only supports --json" >&2
+        usage >&2
+        exit 2
+    fi
+    set -- ready --json
+fi
+
 backoffs_ms=(0 50 200 500)
 attempt=0
 last_error_class=""
@@ -208,7 +259,11 @@ PY
     fi
 
     if [ "$status" -eq 0 ]; then
-        cat "$stdout_file"
+        if [ "$filter_actionable" = true ]; then
+            filter_actionable_ready "$stdout_file"
+        else
+            cat "$stdout_file"
+        fi
         if [ "$attempt" -gt 0 ]; then
             end_ms="$(now_ms)"
             emit_event "$subcommand" "$((attempt + 1))" "$last_error_class" "$last_stderr" "true" "$((end_ms - start_ms))" "$attempt_elapsed_ms" "false" "beads_jsonl_partial_write_transient" "$stdout_file" "$stderr_file"

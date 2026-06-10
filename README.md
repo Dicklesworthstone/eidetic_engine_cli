@@ -834,7 +834,17 @@ Operator workflow for crowded repos:
 
 1. Run `ee swarm brief --workspace . --json`.
 2. Inspect recommendations, blocked beads, degraded sources, and file-surface risks.
-3. Choose a candidate from Beads/BV, then run the read-only claim gate before any mutation:
+3. Choose a candidate from the fail-closed Beads queue first:
+   ```bash
+   scripts/br_retry.sh actionable --json
+   ```
+   The wrapper reports open, unassigned, non-epic rows after retrying
+   transient Beads JSONL read races. Treat `[]` as no safe claimable leaf.
+   Raw `br ready --json` is still useful for broad inspection, and
+   `bv --robot-triage` is still useful for ranking, but BV claim commands are
+   advisory until the candidate also appears in the actionable queue and
+   passes the read-only claim gate.
+4. Run the read-only claim gate before any mutation:
    ```bash
    ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json
    ```
@@ -851,7 +861,7 @@ Operator workflow for crowded repos:
    ```
    See [`docs/environment_attestation.md`](docs/environment_attestation.md) for
    `sourceAuthority`, verdict, severity, and recovery-action interpretation.
-4. Reserve edit surfaces through Agent Mail and mark the bead with
+5. Reserve edit surfaces through Agent Mail and mark the bead with
    `br update <id> --status in_progress --json` only when the gate reports
    `safeToClaim=true`, `verdict=safe_to_claim`, and a structured
    `claimCommandAction` for that candidate.
@@ -867,12 +877,15 @@ Operator workflow for crowded repos:
    Rust work.
    The reference consumer output schema is
    `docs/schemas/ee.agent.work_packet_gate_decision.v1.json`.
-5. Use RCH for Cargo verification, especially when the brief reports `rec.resource_pressure.use_rch_for_cargo`.
-6. Rerun the brief after large edits, after reservation changes, and before handoff.
+6. Use RCH for Cargo verification, especially when the brief reports `rec.resource_pressure.use_rch_for_cargo`.
+7. Rerun the brief after large edits, after reservation changes, and before handoff.
 
-The brief sits beside the existing tools. `br ready --json` remains the source
-of ready-work records, and `bv --robot-triage` remains the graph-aware ranking
-engine. `ee swarm work-packet --claim-gate --json` is the claim-safety gate
+The brief sits beside the existing tools. The `scripts/br_retry.sh actionable --json`
+command is the safe claim queue for open, unassigned, non-epic leaves. Raw
+`br ready --json` remains a broad source of ready-work records and can include
+parent epics or rows that should not be claimed without cross-checking.
+`bv --robot-triage` remains the graph-aware ranking engine. The
+`ee swarm work-packet --claim-gate --json` command is the claim-safety gate
 that must agree before an agent uses a BV copy-paste claim command or mutates
 Beads in a shared checkout. Agent Mail remains the authority for reservations
 and coordination messages. Handoff capsules and support bundles carry
@@ -888,9 +901,10 @@ explicit external timeout, or route work selection through `ee swarm brief` /
 `ee swarm work-packet`, which converts timeout or no-output cases into
 `bv_command_timeout` / `bv_no_output` degradations. Those degradations make
 BV ranking advisory only: continue from bounded stale-safe Beads evidence such
-as `br --no-auto-import --allow-stale ready --json`, and do not use a BV claim
-command unless the claim gate later reports `safeToClaim=true` with a
-structured `claimCommandAction`.
+as `br --no-auto-import --allow-stale ready --json`, cross-check with
+`scripts/br_retry.sh actionable --json`, and do not use a BV claim command
+unless the same candidate is present in the actionable queue and the claim gate
+later reports `safeToClaim=true` with a structured `claimCommandAction`.
 
 The command never claims work, never reserves files, never releases files,
 never sends mail, never runs builds, never edits files, never mutates Beads,

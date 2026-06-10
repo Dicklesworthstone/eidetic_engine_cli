@@ -930,6 +930,7 @@ work selection is:
 
 ```bash
 scripts/br_retry.sh ready --json
+scripts/br_retry.sh actionable --json
 scripts/br_retry.sh list --status open --json
 scripts/br_retry.sh stats --json
 ```
@@ -939,6 +940,14 @@ The wrapper retries only the transient partial-write signatures, backs off for
 to stderr. The degraded code for this condition is
 `beads_jsonl_partial_write_transient` with low severity. Permanent JSONL
 corruption, missing workspaces, and ordinary `br` usage errors are not retried.
+
+Use `scripts/br_retry.sh actionable --json` as the claimable leaf queue. It
+runs `br ready --json` through the retry guard, then filters to open,
+unassigned, non-epic rows. Treat `[]` as "no safe claimable leaf right now";
+do not fall back to a parent epic, a raw `br ready` row, or a BV copy-paste
+claim command without explicit cross-checking. Raw `br ready` remains useful
+for broad inspection, but current tool output may include parent epics or rows
+whose status/assignment makes them unsafe to claim.
 
 ### Conventions
 
@@ -967,8 +976,9 @@ These two labels are **mutually exclusive** and govern what "closing a bead" mea
 
 1. **Pick candidate work (Beads/BV):**
    ```bash
-   br ready --json      # Authoritative ready-work records
-   bv --robot-triage    # Graph-aware ranking and planning, robot mode only
+   scripts/br_retry.sh actionable --json  # Claimable open, unassigned, non-epic leaves
+   br ready --json                        # Broad ready-work inspection records
+   bv --robot-triage                      # Graph-aware ranking and planning, robot mode only
    ```
 
 2. **Gate the claim (read-only work packet):**
@@ -1058,7 +1068,9 @@ bv --robot-next          # Minimal: just the single top pick + claim command
 ```
 
 The `claim_command` field in BV robot output is advisory. Before mutating
-Beads in a shared checkout, check the candidate with:
+Beads in a shared checkout, first cross-check that the candidate appears in
+`scripts/br_retry.sh actionable --json`; if it is absent, treat the BV claim as
+unsafe stale/advisory output. Then check the same candidate with:
 
 ```bash
 ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json
@@ -1382,7 +1394,8 @@ The last bridge began on 2026-05-14. The next scheduled bridge target is
 bv
 
 # CLI commands for agents (use these instead)
-br ready              # Show issues ready to work (no blockers)
+scripts/br_retry.sh actionable --json # Show claimable open, unassigned, non-epic leaves
+br ready              # Broad ready-work inspection; cross-check before claiming
 br list --status=open # All open issues
 br show <id>          # Full issue details with dependencies
 br create --title="..." --type=task --priority=2
@@ -1394,7 +1407,9 @@ br sync --flush-only  # Export to JSONL (NO git operations)
 
 ### Workflow Pattern
 
-1. **Start**: Run `br ready --json` and `bv --robot-triage` to find candidate work.
+1. **Start**: Run `scripts/br_retry.sh actionable --json` for claimable leaves,
+   then use `br ready --json` and `bv --robot-triage` for broader
+   inspection/ranking.
 2. **Gate**: Run `ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json`.
 3. **Reserve**: Reserve the intended edit paths through Agent Mail.
 4. **Claim**: Use `br update <id> --status=in_progress --json` only after the gate and reservation are safe.
@@ -1427,7 +1442,7 @@ git push                # Push to remote
 
 ### Best Practices
 
-- Check `br ready` at session start to find available work
+- Check `scripts/br_retry.sh actionable --json` at session start to find claimable work
 - Update status as you work (in_progress -> closed)
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type

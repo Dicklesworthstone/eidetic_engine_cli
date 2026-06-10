@@ -38,6 +38,21 @@ case "$mode" in
         fi
         printf '{"schema":"br.ready.v1","workspace_id":"%s","request_id":"%s","issues":[],"attempt":%s}\n' "${EE_FAKE_BR_WORKSPACE_ID:-br-race-fixture}" "${EE_FAKE_BR_REQUEST_ID:-bd-3usjw.73-e2e}" "$count"
         ;;
+    actionable)
+        if [ "${1:-}" != "ready" ] || [ "${2:-}" != "--json" ]; then
+            printf 'expected br ready --json, got: %s\n' "$*" >&2
+            exit 67
+        fi
+        cat <<'JSON'
+[
+  {"id":"bd-safe","status":"open","assignee":null,"issue_type":"task","title":"Safe implementation leaf"},
+  {"id":"bd-epic","status":"open","assignee":null,"issue_type":"epic","title":"Open parent epic"},
+  {"id":"bd-progress","status":"in_progress","assignee":"OtherAgent","issue_type":"task","title":"Owned in-progress leaf"},
+  {"id":"bd-blocked","status":"blocked","assignee":null,"issue_type":"bug","title":"Blocked high-priority bug"},
+  {"id":"bd-assigned","status":"open","assignee":"OtherAgent","issue_type":"task","title":"Assigned open task"}
+]
+JSON
+        ;;
     hang)
         printf '{"schema":"br.ready.v1","partial":true'
         printf 'fake br emitted a partial diagnostic before hanging\n' >&2
@@ -135,12 +150,39 @@ if [ ! -f "$retained_stdout" ] || [ ! -f "$retained_stderr" ]; then
     exit 1
 fi
 
+actionable_stdout_path="$artifact_root/actionable_stdout.json"
+actionable_stderr_path="$artifact_root/actionable_stderr.jsonl"
+PATH="$fake_bin:$PATH" \
+EE_FAKE_BR_STATE="$state_file.actionable" \
+EE_FAKE_BR_MODE="actionable" \
+BR_RETRY_TMPDIR="$artifact_root" \
+    "$REPO_ROOT/scripts/br_retry.sh" actionable --json >"$actionable_stdout_path" 2>"$actionable_stderr_path"
+
+actionable_count="$(jq 'length' "$actionable_stdout_path")"
+actionable_id="$(jq -r '.[0].id // ""' "$actionable_stdout_path")"
+filtered_unsafe_count="$(jq '[.[] | select(.id == "bd-epic" or .id == "bd-progress" or .id == "bd-blocked" or .id == "bd-assigned")] | length' "$actionable_stdout_path")"
+
+if [ "$actionable_count" -ne 1 ] || [ "$actionable_id" != "bd-safe" ]; then
+    echo "expected actionable filter to keep only bd-safe" >&2
+    cat "$actionable_stdout_path" >&2
+    cat "$actionable_stderr_path" >&2
+    exit 1
+fi
+
+if [ "$filtered_unsafe_count" -ne 0 ]; then
+    echo "expected actionable filter to remove epic/in_progress/blocked/assigned rows" >&2
+    cat "$actionable_stdout_path" >&2
+    exit 1
+fi
+
 jq -c -n \
     --arg artifactRoot "$artifact_root" \
     --arg stdout "$stdout_path" \
     --arg stderr "$stderr_path" \
     --arg hangStdout "$hang_stdout_path" \
     --arg hangStderr "$hang_stderr_path" \
+    --arg actionableStdout "$actionable_stdout_path" \
+    --arg actionableStderr "$actionable_stderr_path" \
     --arg workspaceId "$workspace_id" \
     --arg requestId "$request_id" \
     --arg beadId "bd-3usjw.73" \
@@ -163,9 +205,12 @@ jq -c -n \
       stderrPath: $stderr,
       hangStdoutPath: $hangStdout,
       hangStderrPath: $hangStderr,
+      actionableStdoutPath: $actionableStdout,
+      actionableStderrPath: $actionableStderr,
       hang_elapsed_ms: $hangElapsedMs,
       race_observed: true,
       hang_guard_observed: true,
+      actionable_filter_observed: true,
       retry_attempts: $recoveredAttempts,
       recovered_attempts: $recoveredAttempts,
       degraded_codes: ["beads_jsonl_partial_write_transient", "beads_command_timeout"],
