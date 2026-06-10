@@ -1,0 +1,712 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.resource_admission.v1.json",
+  "title": "ee.resource_admission.v1",
+  "description": "Side-effect-free, advisory resource-profile admission decision for agent workloads. The decision consumes existing host calibration, budget delta, RCH, lane pressure, daemon, replay, and local Cargo posture evidence without mutating config, Beads, Agent Mail, RCH jobs, caches, or source-of-truth memory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "sideEffectFree",
+    "advisoryOnly",
+    "mutationPolicy",
+    "policyDomain",
+    "policyId",
+    "decision",
+    "subject",
+    "sourcePosture",
+    "reasonCodes",
+    "abstentionReasons",
+    "nextCommands",
+    "evidence",
+    "redactionPosture",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.resource_admission.v1"
+    },
+    "sideEffectFree": {
+      "type": "boolean",
+      "const": true
+    },
+    "advisoryOnly": {
+      "type": "boolean",
+      "const": true
+    },
+    "mutationPolicy": {
+      "type": "string",
+      "const": "never_mutates_state"
+    },
+    "policyDomain": {
+      "type": "string",
+      "const": "resource_profile_budget_admission"
+    },
+    "policyId": {
+      "type": "string",
+      "enum": [
+        "candidate.resource_profile_budget_admission",
+        "unsupported.resource_profile_budget_admission"
+      ]
+    },
+    "decision": {
+      "$ref": "#/$defs/decision"
+    },
+    "subject": {
+      "$ref": "#/$defs/subject"
+    },
+    "sourcePosture": {
+      "$ref": "#/$defs/sourcePosture"
+    },
+    "reasonCodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/reasonCode"
+      },
+      "uniqueItems": true
+    },
+    "abstentionReasons": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/abstentionReason"
+      },
+      "uniqueItems": true
+    },
+    "nextCommands": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/nextCommand"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidenceRef"
+      },
+      "maxItems": 32
+    },
+    "redactionPosture": {
+      "$ref": "#/$defs/redactionPosture"
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degradedEntry"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "abstain"
+          }
+        },
+        "required": ["decision"]
+      },
+      "then": {
+        "properties": {
+          "abstentionReasons": {
+            "minItems": 1
+          },
+          "nextCommands": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "admit"
+          }
+        },
+        "required": ["decision"]
+      },
+      "then": {
+        "properties": {
+          "abstentionReasons": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "refuse_local_cargo"
+          }
+        },
+        "required": ["decision"]
+      },
+      "then": {
+        "properties": {
+          "reasonCodes": {
+            "contains": {
+              "const": "local_cargo_refused"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "decision": {
+      "type": "string",
+      "enum": [
+        "admit",
+        "degrade_to_lean",
+        "queue",
+        "wait_for_rch",
+        "split_workload",
+        "refuse_local_cargo",
+        "abstain"
+      ]
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "surface",
+        "commandClass",
+        "requestedProfile",
+        "effectiveProfile",
+        "estimatedCostClass"
+      ],
+      "properties": {
+        "surface": {
+          "type": "string",
+          "enum": [
+            "search",
+            "pack",
+            "cache",
+            "write_spool",
+            "steward",
+            "verification",
+            "diagnostics",
+            "graph",
+            "index",
+            "burst_admission",
+            "claim_gate",
+            "work_packet",
+            "support_bundle",
+            "daemon",
+            "replay"
+          ]
+        },
+        "commandClass": {
+          "type": "string",
+          "enum": [
+            "read_only",
+            "write_path",
+            "derived_asset",
+            "verification",
+            "diagnostic",
+            "coordination"
+          ]
+        },
+        "requestedProfile": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/operatingProfile"
+            }
+          ]
+        },
+        "effectiveProfile": {
+          "$ref": "#/$defs/operatingProfile"
+        },
+        "estimatedCostClass": {
+          "type": "string",
+          "enum": [
+            "tiny",
+            "small",
+            "standard",
+            "swarm_heavy",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "sourcePosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hostCalibration",
+        "resourceBudget",
+        "rch",
+        "localCargo",
+        "lanePressure",
+        "workloadPressure",
+        "daemon",
+        "replay"
+      ],
+      "properties": {
+        "hostCalibration": {
+          "$ref": "#/$defs/hostCalibrationPosture"
+        },
+        "resourceBudget": {
+          "$ref": "#/$defs/resourceBudgetPosture"
+        },
+        "rch": {
+          "$ref": "#/$defs/rchPosture"
+        },
+        "localCargo": {
+          "$ref": "#/$defs/localCargoPosture"
+        },
+        "lanePressure": {
+          "$ref": "#/$defs/lanePressurePosture"
+        },
+        "workloadPressure": {
+          "$ref": "#/$defs/workloadPressurePosture"
+        },
+        "daemon": {
+          "$ref": "#/$defs/daemonPosture"
+        },
+        "replay": {
+          "$ref": "#/$defs/replayPosture"
+        }
+      }
+    },
+    "hostCalibrationPosture": {
+      "type": "string",
+      "enum": [
+        "fresh",
+        "stale",
+        "partial",
+        "synthetic_only",
+        "contradictory",
+        "missing",
+        "unavailable",
+        "not_applicable"
+      ]
+    },
+    "resourceBudgetPosture": {
+      "type": "string",
+      "enum": [
+        "within_budget",
+        "recommend_decrease",
+        "recommend_increase",
+        "override_clamped",
+        "missing",
+        "contradictory"
+      ]
+    },
+    "rchPosture": {
+      "type": "string",
+      "enum": [
+        "remote_ready",
+        "active_project_exclusion",
+        "progress_stale",
+        "blocked",
+        "not_required",
+        "unknown"
+      ]
+    },
+    "localCargoPosture": {
+      "type": "string",
+      "enum": [
+        "clean",
+        "refused",
+        "unsafe",
+        "unknown",
+        "not_required"
+      ]
+    },
+    "lanePressurePosture": {
+      "type": "string",
+      "enum": [
+        "clear",
+        "foreground_pressure",
+        "background_pressure",
+        "verification_pressure",
+        "maintenance_pressure",
+        "mixed_pressure",
+        "unknown"
+      ]
+    },
+    "workloadPressurePosture": {
+      "type": "string",
+      "enum": [
+        "within_budget",
+        "cache_pressure",
+        "write_spool_pressure",
+        "read_pool_pressure",
+        "pack_slo_pressure",
+        "index_pressure",
+        "graph_pressure",
+        "mixed_pressure",
+        "unknown"
+      ]
+    },
+    "daemonPosture": {
+      "type": "string",
+      "enum": [
+        "available",
+        "unavailable",
+        "degraded",
+        "not_required",
+        "unknown"
+      ]
+    },
+    "replayPosture": {
+      "type": "string",
+      "enum": [
+        "healthy",
+        "regression",
+        "stale",
+        "missing",
+        "not_required",
+        "unknown"
+      ]
+    },
+    "operatingProfile": {
+      "type": "string",
+      "enum": [
+        "constrained",
+        "portable",
+        "workstation",
+        "swarm"
+      ]
+    },
+    "reasonCode": {
+      "type": "string",
+      "enum": [
+        "host_calibration_fresh",
+        "host_calibration_stale",
+        "host_calibration_partial",
+        "host_calibration_synthetic_only",
+        "host_calibration_contradictory",
+        "host_calibration_missing",
+        "host_calibration_unavailable",
+        "budget_within_profile",
+        "budget_delta_recommends_increase",
+        "budget_delta_recommends_decrease",
+        "budget_override_clamped",
+        "swarm_host_headroom",
+        "conservative_profile_ceiling",
+        "rch_remote_ready",
+        "rch_active_project_exclusion",
+        "rch_progress_stale",
+        "rch_blocked",
+        "rch_not_required",
+        "local_cargo_clean",
+        "local_cargo_refused",
+        "local_cargo_unsafe",
+        "lane_pressure_clear",
+        "lane_pressure_foreground",
+        "lane_pressure_background",
+        "lane_pressure_verification",
+        "lane_pressure_maintenance",
+        "cache_pressure",
+        "write_spool_pressure",
+        "read_pool_pressure",
+        "pack_slo_pressure",
+        "index_pressure",
+        "graph_pressure",
+        "daemon_available",
+        "daemon_degraded",
+        "daemon_not_required",
+        "replay_slo_healthy",
+        "replay_slo_regression",
+        "replay_slo_stale",
+        "missing_required_signal",
+        "stale_source_authority",
+        "contradictory_evidence",
+        "redaction_posture_verified",
+        "redaction_posture_unknown"
+      ]
+    },
+    "abstentionReason": {
+      "type": "string",
+      "enum": [
+        "missing_required_signal",
+        "stale_source_authority",
+        "contradictory_evidence",
+        "unsupported_policy_domain",
+        "redaction_posture_unknown",
+        "unsafe_local_cargo_posture",
+        "rch_blocked",
+        "no_safe_advice"
+      ]
+    },
+    "nextCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "priority",
+        "kind",
+        "command",
+        "destructive",
+        "rationale"
+      ],
+      "properties": {
+        "priority": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "refresh_evidence",
+            "wait",
+            "rerun_with_profile",
+            "split_workload",
+            "route_remote",
+            "inspect_support_bundle",
+            "coordinate_owner"
+          ]
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 240
+        },
+        "destructive": {
+          "type": "boolean",
+          "const": false
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 320
+        }
+      }
+    },
+    "evidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "freshness",
+        "confidence",
+        "hash",
+        "boundedPreview"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "host_calibration_posture",
+            "host_calibration_recommendation",
+            "resource_profile",
+            "budget_delta",
+            "rch_status",
+            "rch_selector_admission_probe",
+            "verification_ledger",
+            "proof_broker",
+            "qos_lane_summary",
+            "swarm_brief",
+            "swarm_work_packet",
+            "write_spool",
+            "cache_hotset",
+            "search_pack_slo",
+            "daemon_posture",
+            "replay_slo",
+            "support_bundle",
+            "local_cargo_tripwire",
+            "manual_fixture"
+          ]
+        },
+        "sourceSchema": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^ee\\.[A-Za-z0-9_.-]+\\.v[0-9]+$"
+        },
+        "freshness": {
+          "type": "string",
+          "enum": [
+            "fresh",
+            "stale",
+            "missing",
+            "unavailable",
+            "contradictory"
+          ]
+        },
+        "confidence": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "hash": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/hashRef"
+            }
+          ]
+        },
+        "boundedPreview": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 240
+        }
+      }
+    },
+    "redactionPosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rawMemoryBodyPresent",
+        "rawMailBodyPresent",
+        "rawCommandOutputPresent",
+        "absoluteHostPathPresent",
+        "fullEnvironmentPresent",
+        "secretsPresent"
+      ],
+      "properties": {
+        "rawMemoryBodyPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawMailBodyPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawCommandOutputPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "absoluteHostPathPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "fullEnvironmentPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "secretsPresent": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    },
+    "degradedEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "message",
+        "repair"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "low",
+            "warning",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        },
+        "repair": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 240
+        }
+      }
+    },
+    "hashRef": {
+      "type": "string",
+      "pattern": "^(blake3|sha256):[A-Fa-f0-9]{16,128}$"
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.resource_admission.v1",
+      "sideEffectFree": true,
+      "advisoryOnly": true,
+      "mutationPolicy": "never_mutates_state",
+      "policyDomain": "resource_profile_budget_admission",
+      "policyId": "candidate.resource_profile_budget_admission",
+      "decision": "wait_for_rch",
+      "subject": {
+        "surface": "verification",
+        "commandClass": "verification",
+        "requestedProfile": "swarm",
+        "effectiveProfile": "swarm",
+        "estimatedCostClass": "swarm_heavy"
+      },
+      "sourcePosture": {
+        "hostCalibration": "fresh",
+        "resourceBudget": "within_budget",
+        "rch": "active_project_exclusion",
+        "localCargo": "refused",
+        "lanePressure": "verification_pressure",
+        "workloadPressure": "within_budget",
+        "daemon": "not_required",
+        "replay": "not_required"
+      },
+      "reasonCodes": [
+        "host_calibration_fresh",
+        "budget_within_profile",
+        "rch_active_project_exclusion",
+        "local_cargo_refused",
+        "lane_pressure_verification",
+        "redaction_posture_verified"
+      ],
+      "abstentionReasons": [],
+      "nextCommands": [
+        {
+          "priority": 10,
+          "kind": "wait",
+          "command": "rch status --json",
+          "destructive": false,
+          "rationale": "Remote-required verification is blocked by an active same-project build; local Cargo remains refused."
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "rch_status",
+          "sourceSchema": null,
+          "freshness": "fresh",
+          "confidence": "high",
+          "hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "boundedPreview": "active_project_exclusion on worker trj; command preview redacted"
+        }
+      ],
+      "redactionPosture": {
+        "rawMemoryBodyPresent": false,
+        "rawMailBodyPresent": false,
+        "rawCommandOutputPresent": false,
+        "absoluteHostPathPresent": false,
+        "fullEnvironmentPresent": false,
+        "secretsPresent": false
+      },
+      "degraded": []
+    }
+  ]
+}

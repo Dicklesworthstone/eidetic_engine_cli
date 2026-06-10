@@ -531,6 +531,11 @@ pub const VERIFICATION_SCHEMAS: &[SchemaEntry] = &[
         "ee.ci_proof_lane_snapshot.v1",
         SchemaCategory::Verification,
     ),
+    SchemaEntry::new(
+        "resource_admission",
+        "ee.resource_admission.v1",
+        SchemaCategory::Verification,
+    ),
 ];
 
 /// Backup schemas.

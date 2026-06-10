@@ -8740,6 +8740,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: rch_selector_admission_probe_schema_definition,
         },
         SchemaEntry {
+            id: "ee.resource_admission.v1",
+            version: "1",
+            description: "Side-effect-free advisory resource-profile admission decision for agent workloads",
+            category: "ops",
+            definition: resource_admission_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::swarm_next_action::SWARM_NEXT_ACTION_SCHEMA_V1,
             version: "1",
             description: "Read-only swarm next-action input snapshot for agent work selection",
@@ -9756,6 +9763,10 @@ fn host_profile_schema_definition() -> String {
 
 fn rch_selector_admission_probe_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.rch.selector_admission_probe.v1.json").to_string()
+}
+
+fn resource_admission_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.resource_admission.v1.json").to_string()
 }
 
 fn swarm_next_action_schema_definition() -> String {

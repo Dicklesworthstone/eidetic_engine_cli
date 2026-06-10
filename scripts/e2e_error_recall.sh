@@ -42,7 +42,7 @@ remembered="$(ee_json remember "Fix E0277 trait-bound error by importing the tra
     --workspace "$WS" --level procedural --kind rule --tags rust,error --json)"
 assert_jq "$remembered" '.success == true' "remember repair memory"
 
-step "fingerprint store present (bd-1n0np.4.3 / V069)"
+step "fingerprint store present (bd-1n0np.4.3 / V072)"
 if ee_supports db inspect; then
     fp="$(ee_json db inspect error_fingerprints --workspace "$WS" --json)"
     if printf '%s' "$fp" | jq -e '.success == true' >/dev/null 2>&1; then
@@ -50,7 +50,7 @@ if ee_supports db inspect; then
             '((.data.rowCount // 0) >= 0) or (((.data.rows // []) | length) >= 0)' \
             "error_fingerprints store is queryable"
     else
-        log_drop 1 "error_fingerprints store absent (bd-1n0np.4.3 / V069 not built)"
+        log_drop 1 "error_fingerprints store absent (bd-1n0np.4.3 / V072 not built)"
     fi
 else
     log_drop 1 "ee db inspect surface unavailable in binary under test"

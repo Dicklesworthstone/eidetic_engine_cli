@@ -188,7 +188,13 @@ const CACHE_ADMISSION_INPUTS: &[&str] = &["cache_workload", "capacity", "key_tra
 const CURATION_FILTER_INPUTS: &[&str] = &["candidate_memories", "risk_scores"];
 const VERIFICATION_ADMISSION_INPUTS: &[&str] =
     &["source_authority", "rch_posture", "local_cargo_tripwire"];
-const RESOURCE_BUDGET_INPUTS: &[&str] = &["host_profile", "resource_budget"];
+const RESOURCE_ADMISSION_INPUTS: &[&str] = &[
+    "host_profile",
+    "resource_budget",
+    "rch_posture",
+    "local_cargo_tripwire",
+    "source_authority",
+];
 
 const ALL_COHORTS: &[&str] = &["ci_smoke", "small", "standard", "swarm_heavy"];
 const FIXTURE_COHORTS: &[&str] = &["ci_smoke", "small"];
@@ -198,6 +204,11 @@ const PACK_DEGRADED_MODES: &[&str] = &["no_relevant_results", "weak_query_recall
 const CACHE_DEGRADED_MODES: &[&str] = &["cache_admission_unavailable"];
 const CURATION_DEGRADED_MODES: &[&str] = &["insufficient_evidence"];
 const VERIFICATION_DEGRADED_MODES: &[&str] = &[
+    "rch_blocked",
+    "unsafe_local_cargo_posture",
+    "stale_source_authority",
+];
+const RESOURCE_ADMISSION_DEGRADED_MODES: &[&str] = &[
     "rch_blocked",
     "unsafe_local_cargo_posture",
     "stale_source_authority",
@@ -290,11 +301,23 @@ pub const SHADOW_POLICY_INVENTORY: &[ShadowPolicyInventoryEntry] = &[
         abstention_reason: None,
     },
     ShadowPolicyInventoryEntry {
+        policy_id: "candidate.resource_profile_budget_admission",
+        policy_domain: "resource_profile_budget_admission",
+        status: PolicyInventoryStatus::Candidate,
+        maturity: PolicyMaturity::Experimental,
+        required_inputs: RESOURCE_ADMISSION_INPUTS,
+        supported_cohorts: ALL_COHORTS,
+        known_degraded_modes: RESOURCE_ADMISSION_DEGRADED_MODES,
+        side_effect_free: true,
+        shadowable_without_mutation: true,
+        abstention_reason: None,
+    },
+    ShadowPolicyInventoryEntry {
         policy_id: "unsupported.resource_profile_budget_admission",
         policy_domain: "resource_profile_budget_admission",
         status: PolicyInventoryStatus::Unsupported,
         maturity: PolicyMaturity::Unsupported,
-        required_inputs: RESOURCE_BUDGET_INPUTS,
+        required_inputs: RESOURCE_ADMISSION_INPUTS,
         supported_cohorts: NO_COHORTS,
         known_degraded_modes: UNSUPPORTED_DEGRADED_MODES,
         side_effect_free: true,
@@ -315,6 +338,512 @@ pub fn find_shadow_policy_inventory_entry(
     SHADOW_POLICY_INVENTORY
         .iter()
         .find(|entry| entry.policy_id == policy_id)
+}
+
+pub const RESOURCE_ADMISSION_SCHEMA_V1: &str = "ee.resource_admission.v1";
+pub const RESOURCE_ADMISSION_POLICY_DOMAIN: &str = "resource_profile_budget_admission";
+pub const RESOURCE_ADMISSION_CANDIDATE_POLICY_ID: &str =
+    "candidate.resource_profile_budget_admission";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceOperatingProfile {
+    Constrained,
+    Portable,
+    Workstation,
+    Swarm,
+}
+
+impl ResourceOperatingProfile {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Constrained => "constrained",
+            Self::Portable => "portable",
+            Self::Workstation => "workstation",
+            Self::Swarm => "swarm",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceCostClass {
+    Tiny,
+    Small,
+    Standard,
+    SwarmHeavy,
+    Unknown,
+}
+
+impl ResourceCostClass {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tiny => "tiny",
+            Self::Small => "small",
+            Self::Standard => "standard",
+            Self::SwarmHeavy => "swarm_heavy",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceAdmissionDecision {
+    Admit,
+    DegradeToLean,
+    Queue,
+    WaitForRch,
+    SplitWorkload,
+    RefuseLocalCargo,
+    Abstain,
+}
+
+impl ResourceAdmissionDecision {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admit => "admit",
+            Self::DegradeToLean => "degrade_to_lean",
+            Self::Queue => "queue",
+            Self::WaitForRch => "wait_for_rch",
+            Self::SplitWorkload => "split_workload",
+            Self::RefuseLocalCargo => "refuse_local_cargo",
+            Self::Abstain => "abstain",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceHostCalibrationPosture {
+    Fresh,
+    Stale,
+    Partial,
+    SyntheticOnly,
+    Contradictory,
+    Missing,
+    Unavailable,
+    NotApplicable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceBudgetPosture {
+    WithinBudget,
+    RecommendDecrease,
+    RecommendIncrease,
+    OverrideClamped,
+    Missing,
+    Contradictory,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceRchPosture {
+    RemoteReady,
+    ActiveProjectExclusion,
+    ProgressStale,
+    Blocked,
+    NotRequired,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceLocalCargoPosture {
+    Clean,
+    Refused,
+    Unsafe,
+    Unknown,
+    NotRequired,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceLanePressurePosture {
+    Clear,
+    ForegroundPressure,
+    BackgroundPressure,
+    VerificationPressure,
+    MaintenancePressure,
+    MixedPressure,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceWorkloadPressurePosture {
+    WithinBudget,
+    CachePressure,
+    WriteSpoolPressure,
+    ReadPoolPressure,
+    PackSloPressure,
+    IndexPressure,
+    GraphPressure,
+    MixedPressure,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceDaemonPosture {
+    Available,
+    Unavailable,
+    Degraded,
+    NotRequired,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceReplayPosture {
+    Healthy,
+    Regression,
+    Stale,
+    Missing,
+    NotRequired,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceAdmissionInput {
+    pub requested_profile: Option<ResourceOperatingProfile>,
+    pub effective_profile: ResourceOperatingProfile,
+    pub estimated_cost_class: ResourceCostClass,
+    pub host_calibration: ResourceHostCalibrationPosture,
+    pub resource_budget: ResourceBudgetPosture,
+    pub rch: ResourceRchPosture,
+    pub local_cargo: ResourceLocalCargoPosture,
+    pub lane_pressure: ResourceLanePressurePosture,
+    pub workload_pressure: ResourceWorkloadPressurePosture,
+    pub daemon: ResourceDaemonPosture,
+    pub replay: ResourceReplayPosture,
+    pub redaction_posture_verified: bool,
+}
+
+impl Default for ResourceAdmissionInput {
+    fn default() -> Self {
+        Self {
+            requested_profile: Some(ResourceOperatingProfile::Workstation),
+            effective_profile: ResourceOperatingProfile::Workstation,
+            estimated_cost_class: ResourceCostClass::Standard,
+            host_calibration: ResourceHostCalibrationPosture::Fresh,
+            resource_budget: ResourceBudgetPosture::WithinBudget,
+            rch: ResourceRchPosture::NotRequired,
+            local_cargo: ResourceLocalCargoPosture::Clean,
+            lane_pressure: ResourceLanePressurePosture::Clear,
+            workload_pressure: ResourceWorkloadPressurePosture::WithinBudget,
+            daemon: ResourceDaemonPosture::Available,
+            replay: ResourceReplayPosture::Healthy,
+            redaction_posture_verified: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceAdmissionReport {
+    pub schema: &'static str,
+    pub policy_domain: &'static str,
+    pub policy_id: &'static str,
+    pub side_effect_free: bool,
+    pub advisory_only: bool,
+    pub decision: ResourceAdmissionDecision,
+    pub requested_profile: Option<ResourceOperatingProfile>,
+    pub effective_profile: ResourceOperatingProfile,
+    pub recommended_profile: ResourceOperatingProfile,
+    pub reason_codes: Vec<String>,
+    pub abstention_reasons: Vec<String>,
+    pub next_commands: Vec<String>,
+}
+
+/// Evaluate resource-profile admission as a pure shadow candidate.
+#[must_use]
+pub fn evaluate_resource_profile_budget_admission(
+    input: ResourceAdmissionInput,
+) -> ResourceAdmissionReport {
+    let mut reason_codes = resource_admission_reason_codes(&input);
+    let abstention_reasons = resource_admission_abstention_reasons(&input);
+    let mut next_commands = Vec::new();
+
+    let decision = if !abstention_reasons.is_empty() {
+        push_unique(
+            &mut next_commands,
+            "ee support bundle --include resource-admission --json",
+        );
+        ResourceAdmissionDecision::Abstain
+    } else if input.local_cargo == ResourceLocalCargoPosture::Unsafe {
+        push_unique(&mut reason_codes, "local_cargo_refused");
+        push_unique(
+            &mut next_commands,
+            "scripts/check-local-cargo-tripwire.sh --probe-processes --json",
+        );
+        if input.rch == ResourceRchPosture::RemoteReady {
+            push_unique(&mut next_commands, "scripts/rch_verify.sh -- <command>");
+        }
+        ResourceAdmissionDecision::RefuseLocalCargo
+    } else if rch_requires_wait(input.rch) {
+        push_unique(&mut next_commands, "rch status --json");
+        ResourceAdmissionDecision::WaitForRch
+    } else if should_degrade_to_lean(&input) {
+        push_unique(
+            &mut next_commands,
+            "ee pack <task> --resource-profile constrained --json",
+        );
+        ResourceAdmissionDecision::DegradeToLean
+    } else if should_split_workload(&input) {
+        push_unique(&mut reason_codes, "conservative_profile_ceiling");
+        push_unique(
+            &mut next_commands,
+            "ee lab swarm replay --split-workload --dry-run --json",
+        );
+        ResourceAdmissionDecision::SplitWorkload
+    } else if should_queue(&input) {
+        push_unique(&mut next_commands, "ee swarm brief --json");
+        ResourceAdmissionDecision::Queue
+    } else {
+        ResourceAdmissionDecision::Admit
+    };
+
+    let recommended_profile = match decision {
+        ResourceAdmissionDecision::DegradeToLean => ResourceOperatingProfile::Constrained,
+        _ => input.effective_profile,
+    };
+
+    ResourceAdmissionReport {
+        schema: RESOURCE_ADMISSION_SCHEMA_V1,
+        policy_domain: RESOURCE_ADMISSION_POLICY_DOMAIN,
+        policy_id: RESOURCE_ADMISSION_CANDIDATE_POLICY_ID,
+        side_effect_free: true,
+        advisory_only: true,
+        decision,
+        requested_profile: input.requested_profile,
+        effective_profile: input.effective_profile,
+        recommended_profile,
+        reason_codes,
+        abstention_reasons,
+        next_commands,
+    }
+}
+
+fn resource_admission_reason_codes(input: &ResourceAdmissionInput) -> Vec<String> {
+    let mut reason_codes = Vec::new();
+    push_unique(
+        &mut reason_codes,
+        host_calibration_reason(input.host_calibration),
+    );
+    push_unique(
+        &mut reason_codes,
+        resource_budget_reason(input.resource_budget),
+    );
+    push_unique(&mut reason_codes, rch_reason(input.rch));
+    push_unique(&mut reason_codes, local_cargo_reason(input.local_cargo));
+    push_unique(&mut reason_codes, lane_pressure_reason(input.lane_pressure));
+    push_unique(
+        &mut reason_codes,
+        workload_pressure_reason(input.workload_pressure),
+    );
+    push_unique(&mut reason_codes, daemon_reason(input.daemon));
+    push_unique(&mut reason_codes, replay_reason(input.replay));
+    push_unique(
+        &mut reason_codes,
+        if input.redaction_posture_verified {
+            "redaction_posture_verified"
+        } else {
+            "redaction_posture_unknown"
+        },
+    );
+    reason_codes
+}
+
+fn resource_admission_abstention_reasons(input: &ResourceAdmissionInput) -> Vec<String> {
+    let mut reasons = Vec::new();
+
+    match input.host_calibration {
+        ResourceHostCalibrationPosture::Missing | ResourceHostCalibrationPosture::Unavailable => {
+            push_unique(&mut reasons, "missing_required_signal");
+        }
+        ResourceHostCalibrationPosture::Stale => {
+            push_unique(&mut reasons, "stale_source_authority");
+        }
+        ResourceHostCalibrationPosture::Contradictory => {
+            push_unique(&mut reasons, "contradictory_evidence");
+        }
+        ResourceHostCalibrationPosture::Fresh
+        | ResourceHostCalibrationPosture::Partial
+        | ResourceHostCalibrationPosture::SyntheticOnly
+        | ResourceHostCalibrationPosture::NotApplicable => {}
+    }
+
+    match input.resource_budget {
+        ResourceBudgetPosture::Missing => {
+            push_unique(&mut reasons, "missing_required_signal");
+        }
+        ResourceBudgetPosture::Contradictory => {
+            push_unique(&mut reasons, "contradictory_evidence");
+        }
+        ResourceBudgetPosture::WithinBudget
+        | ResourceBudgetPosture::RecommendDecrease
+        | ResourceBudgetPosture::RecommendIncrease
+        | ResourceBudgetPosture::OverrideClamped => {}
+    }
+
+    if input.rch == ResourceRchPosture::Unknown {
+        push_unique(&mut reasons, "missing_required_signal");
+    }
+
+    if input.local_cargo == ResourceLocalCargoPosture::Unknown {
+        push_unique(&mut reasons, "missing_required_signal");
+    }
+
+    match input.replay {
+        ResourceReplayPosture::Stale => {
+            push_unique(&mut reasons, "stale_source_authority");
+        }
+        ResourceReplayPosture::Missing
+            if input.estimated_cost_class == ResourceCostClass::Unknown =>
+        {
+            push_unique(&mut reasons, "missing_required_signal");
+        }
+        ResourceReplayPosture::Healthy
+        | ResourceReplayPosture::Regression
+        | ResourceReplayPosture::Missing
+        | ResourceReplayPosture::NotRequired
+        | ResourceReplayPosture::Unknown => {}
+    }
+
+    if !input.redaction_posture_verified {
+        push_unique(&mut reasons, "redaction_posture_unknown");
+    }
+
+    reasons
+}
+
+fn should_degrade_to_lean(input: &ResourceAdmissionInput) -> bool {
+    matches!(
+        input.resource_budget,
+        ResourceBudgetPosture::RecommendDecrease | ResourceBudgetPosture::OverrideClamped
+    ) || matches!(
+        input.host_calibration,
+        ResourceHostCalibrationPosture::Partial | ResourceHostCalibrationPosture::SyntheticOnly
+    ) || matches!(
+        input.workload_pressure,
+        ResourceWorkloadPressurePosture::CachePressure
+            | ResourceWorkloadPressurePosture::WriteSpoolPressure
+            | ResourceWorkloadPressurePosture::ReadPoolPressure
+            | ResourceWorkloadPressurePosture::PackSloPressure
+            | ResourceWorkloadPressurePosture::IndexPressure
+            | ResourceWorkloadPressurePosture::GraphPressure
+            | ResourceWorkloadPressurePosture::MixedPressure
+    ) || input.replay == ResourceReplayPosture::Regression
+}
+
+fn should_split_workload(input: &ResourceAdmissionInput) -> bool {
+    input.estimated_cost_class == ResourceCostClass::SwarmHeavy
+        && input.effective_profile != ResourceOperatingProfile::Swarm
+        && input.rch == ResourceRchPosture::NotRequired
+}
+
+fn should_queue(input: &ResourceAdmissionInput) -> bool {
+    matches!(
+        input.lane_pressure,
+        ResourceLanePressurePosture::BackgroundPressure
+            | ResourceLanePressurePosture::MaintenancePressure
+            | ResourceLanePressurePosture::MixedPressure
+    )
+}
+
+fn rch_requires_wait(posture: ResourceRchPosture) -> bool {
+    matches!(
+        posture,
+        ResourceRchPosture::ActiveProjectExclusion
+            | ResourceRchPosture::ProgressStale
+            | ResourceRchPosture::Blocked
+    )
+}
+
+fn host_calibration_reason(posture: ResourceHostCalibrationPosture) -> &'static str {
+    match posture {
+        ResourceHostCalibrationPosture::Fresh => "host_calibration_fresh",
+        ResourceHostCalibrationPosture::Stale => "host_calibration_stale",
+        ResourceHostCalibrationPosture::Partial => "host_calibration_partial",
+        ResourceHostCalibrationPosture::SyntheticOnly => "host_calibration_synthetic_only",
+        ResourceHostCalibrationPosture::Contradictory => "host_calibration_contradictory",
+        ResourceHostCalibrationPosture::Missing => "host_calibration_missing",
+        ResourceHostCalibrationPosture::Unavailable => "host_calibration_unavailable",
+        ResourceHostCalibrationPosture::NotApplicable => "host_calibration_unavailable",
+    }
+}
+
+fn resource_budget_reason(posture: ResourceBudgetPosture) -> &'static str {
+    match posture {
+        ResourceBudgetPosture::WithinBudget => "budget_within_profile",
+        ResourceBudgetPosture::RecommendDecrease => "budget_delta_recommends_decrease",
+        ResourceBudgetPosture::RecommendIncrease => "budget_delta_recommends_increase",
+        ResourceBudgetPosture::OverrideClamped => "budget_override_clamped",
+        ResourceBudgetPosture::Missing => "missing_required_signal",
+        ResourceBudgetPosture::Contradictory => "contradictory_evidence",
+    }
+}
+
+fn rch_reason(posture: ResourceRchPosture) -> &'static str {
+    match posture {
+        ResourceRchPosture::RemoteReady => "rch_remote_ready",
+        ResourceRchPosture::ActiveProjectExclusion => "rch_active_project_exclusion",
+        ResourceRchPosture::ProgressStale => "rch_progress_stale",
+        ResourceRchPosture::Blocked => "rch_blocked",
+        ResourceRchPosture::NotRequired => "rch_not_required",
+        ResourceRchPosture::Unknown => "rch_blocked",
+    }
+}
+
+fn local_cargo_reason(posture: ResourceLocalCargoPosture) -> &'static str {
+    match posture {
+        ResourceLocalCargoPosture::Clean => "local_cargo_clean",
+        ResourceLocalCargoPosture::Refused | ResourceLocalCargoPosture::Unsafe => {
+            "local_cargo_refused"
+        }
+        ResourceLocalCargoPosture::Unknown => "local_cargo_unsafe",
+        ResourceLocalCargoPosture::NotRequired => "local_cargo_clean",
+    }
+}
+
+fn lane_pressure_reason(posture: ResourceLanePressurePosture) -> &'static str {
+    match posture {
+        ResourceLanePressurePosture::Clear => "lane_pressure_clear",
+        ResourceLanePressurePosture::ForegroundPressure => "lane_pressure_foreground",
+        ResourceLanePressurePosture::BackgroundPressure => "lane_pressure_background",
+        ResourceLanePressurePosture::VerificationPressure => "lane_pressure_verification",
+        ResourceLanePressurePosture::MaintenancePressure => "lane_pressure_maintenance",
+        ResourceLanePressurePosture::MixedPressure => "lane_pressure_background",
+        ResourceLanePressurePosture::Unknown => "lane_pressure_background",
+    }
+}
+
+fn workload_pressure_reason(posture: ResourceWorkloadPressurePosture) -> &'static str {
+    match posture {
+        ResourceWorkloadPressurePosture::WithinBudget => "budget_within_profile",
+        ResourceWorkloadPressurePosture::CachePressure => "cache_pressure",
+        ResourceWorkloadPressurePosture::WriteSpoolPressure => "write_spool_pressure",
+        ResourceWorkloadPressurePosture::ReadPoolPressure => "read_pool_pressure",
+        ResourceWorkloadPressurePosture::PackSloPressure => "pack_slo_pressure",
+        ResourceWorkloadPressurePosture::IndexPressure => "index_pressure",
+        ResourceWorkloadPressurePosture::GraphPressure => "graph_pressure",
+        ResourceWorkloadPressurePosture::MixedPressure => "cache_pressure",
+        ResourceWorkloadPressurePosture::Unknown => "missing_required_signal",
+    }
+}
+
+fn daemon_reason(posture: ResourceDaemonPosture) -> &'static str {
+    match posture {
+        ResourceDaemonPosture::Available => "daemon_available",
+        ResourceDaemonPosture::Unavailable => "daemon_degraded",
+        ResourceDaemonPosture::Degraded => "daemon_degraded",
+        ResourceDaemonPosture::NotRequired => "daemon_not_required",
+        ResourceDaemonPosture::Unknown => "daemon_degraded",
+    }
+}
+
+fn replay_reason(posture: ResourceReplayPosture) -> &'static str {
+    match posture {
+        ResourceReplayPosture::Healthy => "replay_slo_healthy",
+        ResourceReplayPosture::Regression => "replay_slo_regression",
+        ResourceReplayPosture::Stale => "replay_slo_stale",
+        ResourceReplayPosture::Missing => "missing_required_signal",
+        ResourceReplayPosture::NotRequired => "replay_slo_healthy",
+        ResourceReplayPosture::Unknown => "missing_required_signal",
+    }
 }
 
 /// Verdict from comparing incumbent and candidate outputs.

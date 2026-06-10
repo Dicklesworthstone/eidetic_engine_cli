@@ -127,6 +127,64 @@ The recommender is side-effect-free. It never writes `.ee/config.toml`, changes
 profile settings, starts RCH work, or mutates caches. Operators apply changes
 only through the existing `ee profile config plan/apply` workflow.
 
+## Resource Admission Contract
+
+Resource-admission reports use `ee.resource_admission.v1`. They consume the
+host-calibration recommendation and other existing posture surfaces, but they do
+not apply profile changes. The report is advisory evidence for agents deciding
+whether to run, degrade, queue, wait for RCH, split a workload, refuse local
+Cargo fallback, or abstain because evidence is missing.
+
+The contract deliberately stays below scheduling authority:
+
+- `sideEffectFree` is always `true`.
+- `advisoryOnly` is always `true`.
+- `mutationPolicy` is always `never_mutates_state`.
+- `policyDomain` is always `resource_profile_budget_admission`.
+
+Allowed decisions are schema-pinned: `admit`, `degrade_to_lean`, `queue`,
+`wait_for_rch`, `split_workload`, `refuse_local_cargo`, and `abstain`.
+Admission advice must preserve the normal safety gates for Beads freshness,
+Agent Mail reservations, RCH ownership, redaction posture, and local Cargo
+policy. It cannot convert an unsafe claim into a safe claim.
+
+### Resource-Admission Signal Inventory
+
+The resource-admission policy consumes existing posture reports. It must not
+probe new live state from inside the policy body; caller surfaces gather inputs
+and pass redacted summaries into the admission report.
+
+| Input signal | Source surface or schema | Normalized field | Freshness and confidence rule | Redaction rule | Reason-code family |
+|--------------|--------------------------|------------------|-------------------------------|----------------|--------------------|
+| Host calibration posture | `ee.host_calibration.posture.v1` from status, doctor, or support-bundle profile evidence | `sourcePosture.hostCalibration` | Fresh/partial/stale/missing/contradictory/unavailable map directly; missing or unavailable is low confidence | Use redacted profile labels and posture fields only | `host_calibration_*` |
+| Budget deltas | `ee.host_calibration.recommendation.v1` and `budgetDeltas[]` | `sourcePosture.resourceBudget` | Current recommendation is high confidence; stale or missing calibration lowers confidence before budget advice is trusted | Include surface, unit, direction, and reason codes; do not include raw host paths | `budget_*`, `swarm_host_headroom`, `conservative_profile_ceiling` |
+| Requested and effective profile | CLI/config profile, `ee.profile.runtime.v1`, or `--resource-profile` on pack-like surfaces | `subject.requestedProfile`, `subject.effectiveProfile` | Explicit profile is current for that command; absent request is `null` and must not be treated as swarm intent | Record profile names only | `budget_within_profile`, `budget_override_clamped` |
+| RCH worker and selector posture | `rch status --json`, `ee.rch.selector_admission_probe.v1`, verification ledger, and proof-broker summaries | `sourcePosture.rch` | Active-build and worker-pressure data is fresh only for the current status snapshot; stale blockers lower confidence or force wait/abstain | Use active build id, worker id, bounded command preview/hash, heartbeat/progress ages | `rch_*` |
+| Local Cargo posture | `ee.rch_local_cargo_tripwire.v1` from `scripts/check-local-cargo-tripwire.sh --probe-processes --json` | `sourcePosture.localCargo` | Clean tripwire is high confidence for the scan instant; observed Cargo metadata is not proof and cannot authorize fallback | Redact paths and record process kind/subcommand only | `local_cargo_*` |
+| QoS lane pressure | `ee.qos.active_lane_summary.v1`, swarm brief, or work-packet lane summary | `sourcePosture.lanePressure` | Fresh when generated with the work-packet or status snapshot; stale lane data cannot make a queued workload safe | Counts and lane names only | `lane_pressure_*` |
+| Workload pressure | Cache/hotset reports, write-spool reports, read/search/pack SLO reports, graph/index refresh posture | `sourcePosture.workloadPressure` | Caller decides whether the source report is fresh enough for the requested surface; missing optional pressure inputs degrade to `unknown` | Include bounded counts, profile labels, and hashes; no raw memory bodies | `cache_pressure`, `write_spool_pressure`, `read_pool_pressure`, `pack_slo_pressure`, `index_pressure`, `graph_pressure` |
+| Daemon posture | Daemon status, daemon RPC schemas, or support-bundle daemon evidence | `sourcePosture.daemon` | `not_required` for one-shot CLI reads; daemon-required surfaces must report unavailable/degraded honestly | Socket paths are labels or redacted paths only | `daemon_*` |
+| Replay and SLO evidence | `ee.agent_workload_replay.v1`, `ee.swarm_slo.scorecard.v1`, replay lab artifacts | `sourcePosture.replay` | Fresh only when the replay input hash matches the requested workload class; stale or missing replay evidence cannot prove admission safety | Include scorecard ids, hashes, and summary metrics only | `replay_slo_*` |
+| Coordination and claim evidence | `ee.swarm.work_packet.v1`, claim-gate reports, Beads freshness, Agent Mail snapshot status | `evidence[]` and caller-specific safety gates | Admission advice is advisory and never overrides stale tracker state, reservation collisions, or live owner evidence | No raw mail bodies, raw Beads JSONL excerpts, or unbounded command output | `missing_required_signal`, `stale_source_authority`, `contradictory_evidence` |
+
+Normalization rules:
+
+- Missing required evidence becomes `freshness = missing`, `confidence = low`,
+  and reason `missing_required_signal`; it never becomes a healthy default.
+- Stale evidence becomes reason `stale_source_authority`. A caller may still
+  emit lean advice for optional stale inputs, but safety-critical stale inputs
+  force `abstain`.
+- Contradictory evidence becomes reason `contradictory_evidence` and should
+  force `abstain` unless the decision is only to collect more evidence.
+- Unknown redaction posture becomes reason `redaction_posture_unknown` and
+  forces `abstain`; support-safe evidence is required before handoff.
+- Local Cargo observations can explain `refuse_local_cargo`, but they never
+  provide proof that a Rust check passed. Remote-required proof must come from
+  RCH.
+- Work-packet and claim-gate consumers must apply their existing safety gates
+  after reading admission advice. Admission reports shape timing and workload
+  size; they do not grant ownership.
+
 ### Reason-Code Taxonomy
 
 Reason codes are schema-pinned strings. New codes require a schema update and a
@@ -238,6 +296,7 @@ ee profile config plan --json | jq '{
 | `ee.host_profile.v1` | Host resource probe results |
 | `ee.host_calibration.host_class.v1` | Pure host-class classifier output for recommender internals |
 | `ee.host_calibration.recommendation.v1` | Calibrated profile recommendation and budget deltas |
+| `ee.resource_admission.v1` | Advisory resource-profile admission decision for agent workloads |
 | `ee.profile.config.plan.v1` | Config plan/apply report |
 | `ee.profile.runtime.v1` | Runtime profile status |
 

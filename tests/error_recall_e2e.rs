@@ -102,6 +102,18 @@ fn diagnose_tool(
     message: &str,
     record: bool,
 ) -> Result<Value, String> {
+    diagnose_tool_with_args(workspace, tool, code, exit_code, message, record, &[])
+}
+
+fn diagnose_tool_with_args(
+    workspace: &Path,
+    tool: &str,
+    code: Option<&str>,
+    exit_code: Option<i32>,
+    message: &str,
+    record: bool,
+    extra_args: &[(&str, &str)],
+) -> Result<Value, String> {
     let workspace_arg = workspace.to_string_lossy().into_owned();
     let mut args = vec![
         "--workspace".to_string(),
@@ -122,6 +134,10 @@ fn diagnose_tool(
     if record {
         args.push("--record".to_string());
     }
+    for (flag, value) in extra_args {
+        args.push((*flag).to_string());
+        args.push((*value).to_string());
+    }
     args.push("--json".to_string());
     let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let output = run_ee(&arg_refs)?;
@@ -141,6 +157,28 @@ fn diagnose_tool(
         .pointer("/data")
         .cloned()
         .ok_or_else(|| format!("diagnose-error response had no data: {value}"))
+}
+
+fn remember_memory(workspace: &Path, content: &str) -> Result<String, String> {
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "remember",
+        content,
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--json",
+    ])?;
+    let value = success_json(&output, "remember memory")?;
+    value["data"]["memory_id"]
+        .as_str()
+        .or_else(|| value["data"]["public_id"].as_str())
+        .or_else(|| value["data"]["id"].as_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("remember response missing memory id: {value}"))
 }
 
 fn diagnose(workspace: &Path, code: &str, message: &str, record: bool) -> Result<Value, String> {
@@ -283,8 +321,28 @@ fn diagnose_error_records_and_recalls_through_the_real_binary() -> TestResult {
         ));
     }
 
+    let helpful_repair_id =
+        remember_memory(&workspace, "Fix E0277 by importing the trait into scope.")?;
+    let harmful_repair_id = remember_memory(
+        &workspace,
+        "Do not suppress E0277 by deleting the trait bound from the API.",
+    )?;
+    let proof_id = "rch-proof-error-recall-e2e";
+
     // Record the class: it persists and recalls within the same invocation.
-    let recorded = diagnose(&workspace, CODE, &message, true)?;
+    let recorded = diagnose_tool_with_args(
+        &workspace,
+        "rustc",
+        Some(CODE),
+        None,
+        &message,
+        true,
+        &[
+            ("--helpful-repair", helpful_repair_id.as_str()),
+            ("--harmful-repair", harmful_repair_id.as_str()),
+            ("--proof-link", proof_id),
+        ],
+    )?;
     if !flag(&recorded, "recorded")? {
         return Err(format!("--record must persist a fingerprint: {recorded}"));
     }
@@ -292,6 +350,52 @@ fn diagnose_error_records_and_recalls_through_the_real_binary() -> TestResult {
         return Err(format!("the just-recorded class must recall: {recorded}"));
     }
     assert_report_shape(&recorded, CODE, true)?;
+    let recorded_report = report(&recorded)?;
+    if recorded_report
+        .get("helpfulRepairs")
+        .and_then(Value::as_array)
+        .and_then(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|id| *id == helpful_repair_id.as_str())
+        })
+        .is_none()
+    {
+        return Err(format!(
+            "recorded report must hydrate helpful repair link {helpful_repair_id}: {recorded_report}"
+        ));
+    }
+    if recorded_report
+        .get("harmfulRepairs")
+        .and_then(Value::as_array)
+        .and_then(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|id| *id == harmful_repair_id.as_str())
+        })
+        .is_none()
+    {
+        return Err(format!(
+            "recorded report must hydrate harmful repair link {harmful_repair_id}: {recorded_report}"
+        ));
+    }
+    if recorded_report
+        .get("proofLinks")
+        .and_then(Value::as_array)
+        .and_then(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|id| *id == proof_id)
+        })
+        .is_none()
+    {
+        return Err(format!(
+            "recorded report must hydrate proof link {proof_id}: {recorded_report}"
+        ));
+    }
     if recorded
         .get("matches")
         .and_then(Value::as_array)
@@ -310,6 +414,22 @@ fn diagnose_error_records_and_recalls_through_the_real_binary() -> TestResult {
         ));
     }
     assert_report_shape(&again, CODE, true)?;
+    let again_report = report(&again)?;
+    if again_report
+        .get("helpfulRepairs")
+        .and_then(Value::as_array)
+        .and_then(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|id| *id == helpful_repair_id.as_str())
+        })
+        .is_none()
+    {
+        return Err(format!(
+            "later report must hydrate persisted helpful repair link {helpful_repair_id}: {again_report}"
+        ));
+    }
 
     // A different error class must not recall.
     let other = diagnose(&workspace, "E0308", "mismatched types", false)?;
@@ -341,18 +461,6 @@ fn diagnose_error_records_and_recalls_through_the_real_binary() -> TestResult {
         .join("ee.db")
         .to_string_lossy()
         .into_owned();
-    let remember = run_ee(&[
-        "--workspace",
-        &workspace_arg,
-        "remember",
-        "Fix E0277 by importing the trait into scope.",
-        "--level",
-        "procedural",
-        "--kind",
-        "rule",
-        "--json",
-    ])?;
-    success_json(&remember, "remember repair memory")?;
     let error_log_arg = error_log_path.to_string_lossy().into_owned();
 
     let direct_pack = run_ee(&[

@@ -26,6 +26,6 @@
       "snapshot pin",
       "force released"
     ],
-    "repair_contains": "retry"
+    "repair_contains": "ee status --workspace . --json"
   }
 }

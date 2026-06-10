@@ -10,11 +10,15 @@ use ee::models::{DecisionPlane, DecisionRecord};
 use ee::output::{ShadowRunReport, render_shadow_run_json};
 use ee::shadow::pack::{PackShadowOutput, compare_outputs};
 use ee::shadow::{
-    PolicyDomain, PolicyInventoryStatus, PolicyMaturity, ShadowEvidenceKind, ShadowEvidencePosture,
-    ShadowGateConfig, ShadowPolicyEvidencePoint, ShadowPolicyPromotionConfig,
-    ShadowPolicyPromotionPosture, ShadowPolicyPromotionVerdict, ShadowPolicyScoreReport,
-    ShadowPolicyScoreVerdict, ShadowPolicyScoringConfig, ShadowPromotionGuards, ShadowVerdict,
-    candidate_promotion_allowed, find_shadow_policy_inventory_entry,
+    PolicyDomain, PolicyInventoryStatus, PolicyMaturity, ResourceAdmissionDecision,
+    ResourceAdmissionInput, ResourceBudgetPosture, ResourceCostClass,
+    ResourceHostCalibrationPosture, ResourceLanePressurePosture, ResourceLocalCargoPosture,
+    ResourceOperatingProfile, ResourceRchPosture, ResourceReplayPosture,
+    ResourceWorkloadPressurePosture, ShadowEvidenceKind, ShadowEvidencePosture, ShadowGateConfig,
+    ShadowPolicyEvidencePoint, ShadowPolicyPromotionConfig, ShadowPolicyPromotionPosture,
+    ShadowPolicyPromotionVerdict, ShadowPolicyScoreReport, ShadowPolicyScoreVerdict,
+    ShadowPolicyScoringConfig, ShadowPromotionGuards, ShadowVerdict, candidate_promotion_allowed,
+    evaluate_resource_profile_budget_admission, find_shadow_policy_inventory_entry,
     promote_shadow_policy_from_score, render_shadow_policy_promotion_json,
     render_shadow_policy_score_json, score_shadow_policy_cohort, shadow_policy_inventory,
 };
@@ -265,7 +269,7 @@ fn gate14_policy_domain_includes_verification_admission() -> TestResult {
 #[test]
 fn gate14_shadow_policy_inventory_lists_pack_and_cache_incumbents_and_candidates() -> TestResult {
     ensure(
-        shadow_policy_inventory().len() >= 8,
+        shadow_policy_inventory().len() >= 9,
         "inventory includes all currently documented shadow surfaces",
     )?;
 
@@ -333,7 +337,38 @@ fn gate14_shadow_policy_inventory_lists_pack_and_cache_incumbents_and_candidates
 }
 
 #[test]
-fn gate14_shadow_policy_inventory_abstains_for_unsupported_resource_budget_domain() -> TestResult {
+fn gate14_shadow_policy_inventory_lists_resource_budget_candidate_and_legacy_abstention()
+-> TestResult {
+    let candidate =
+        find_shadow_policy_inventory_entry("candidate.resource_profile_budget_admission")
+            .ok_or_else(|| "missing resource-budget candidate".to_string())?;
+
+    ensure(
+        candidate.policy_domain == "resource_profile_budget_admission",
+        "resource-budget candidate domain is stable",
+    )?;
+    ensure(
+        candidate.status == PolicyInventoryStatus::Candidate,
+        "resource-budget candidate status is stable",
+    )?;
+    ensure(
+        candidate.maturity == PolicyMaturity::Experimental,
+        "resource-budget candidate maturity is stable",
+    )?;
+    ensure(
+        candidate.required_inputs.contains(&"local_cargo_tripwire")
+            && candidate.required_inputs.contains(&"rch_posture"),
+        "resource-budget candidate records required normalized inputs",
+    )?;
+    ensure(
+        candidate.shadowable_without_mutation,
+        "resource-budget candidate is shadowable without mutation",
+    )?;
+    ensure(
+        candidate.abstention_reason.is_none(),
+        "resource-budget candidate does not pre-abstain",
+    )?;
+
     let unsupported =
         find_shadow_policy_inventory_entry("unsupported.resource_profile_budget_admission")
             .ok_or_else(|| "missing unsupported resource-budget policy".to_string())?;
@@ -357,6 +392,166 @@ fn gate14_shadow_policy_inventory_abstains_for_unsupported_resource_budget_domai
     ensure(
         unsupported.abstention_reason == Some("unsupported_policy_domain"),
         "unsupported domain abstains instead of promoting or rejecting",
+    )
+}
+
+#[test]
+fn gate14_resource_admission_candidate_admits_clear_budget() -> TestResult {
+    let report = evaluate_resource_profile_budget_admission(ResourceAdmissionInput {
+        requested_profile: Some(ResourceOperatingProfile::Swarm),
+        effective_profile: ResourceOperatingProfile::Swarm,
+        estimated_cost_class: ResourceCostClass::SwarmHeavy,
+        rch: ResourceRchPosture::RemoteReady,
+        local_cargo: ResourceLocalCargoPosture::Refused,
+        ..ResourceAdmissionInput::default()
+    });
+
+    ensure(
+        report.decision == ResourceAdmissionDecision::Admit,
+        "remote-ready swarm-heavy workload should be admitted without local Cargo",
+    )?;
+    ensure(
+        report.side_effect_free,
+        "resource admission is side-effect-free",
+    )?;
+    ensure(report.advisory_only, "resource admission is advisory-only")?;
+    ensure(
+        report.reason_codes
+            == vec![
+                "host_calibration_fresh".to_string(),
+                "budget_within_profile".to_string(),
+                "rch_remote_ready".to_string(),
+                "local_cargo_refused".to_string(),
+                "lane_pressure_clear".to_string(),
+                "daemon_available".to_string(),
+                "replay_slo_healthy".to_string(),
+                "redaction_posture_verified".to_string(),
+            ],
+        "admit reason order is deterministic",
+    )?;
+    ensure(
+        report.abstention_reasons.is_empty() && report.next_commands.is_empty(),
+        "admit does not invent repair commands",
+    )
+}
+
+#[test]
+fn gate14_resource_admission_candidate_degrades_to_lean_under_pressure() -> TestResult {
+    let report = evaluate_resource_profile_budget_admission(ResourceAdmissionInput {
+        resource_budget: ResourceBudgetPosture::RecommendDecrease,
+        workload_pressure: ResourceWorkloadPressurePosture::PackSloPressure,
+        ..ResourceAdmissionInput::default()
+    });
+
+    ensure(
+        report.decision == ResourceAdmissionDecision::DegradeToLean,
+        "budget pressure should degrade to a constrained profile",
+    )?;
+    ensure(
+        report.recommended_profile == ResourceOperatingProfile::Constrained,
+        "degrade_to_lean recommends the constrained profile",
+    )?;
+    ensure(
+        report
+            .reason_codes
+            .contains(&"budget_delta_recommends_decrease".to_string()),
+        "budget decrease reason is retained",
+    )?;
+    ensure(
+        report
+            .next_commands
+            .iter()
+            .any(|command| command.contains("--resource-profile constrained")),
+        "degrade_to_lean tells callers how to rerun leanly",
+    )
+}
+
+#[test]
+fn gate14_resource_admission_candidate_waits_for_rch_without_local_fallback() -> TestResult {
+    let report = evaluate_resource_profile_budget_admission(ResourceAdmissionInput {
+        estimated_cost_class: ResourceCostClass::SwarmHeavy,
+        rch: ResourceRchPosture::ActiveProjectExclusion,
+        local_cargo: ResourceLocalCargoPosture::Refused,
+        lane_pressure: ResourceLanePressurePosture::VerificationPressure,
+        ..ResourceAdmissionInput::default()
+    });
+
+    ensure(
+        report.decision == ResourceAdmissionDecision::WaitForRch,
+        "active project exclusion should wait for the remote lane",
+    )?;
+    ensure(
+        report
+            .reason_codes
+            .contains(&"rch_active_project_exclusion".to_string()),
+        "wait_for_rch records the active-project exclusion",
+    )?;
+    ensure(
+        report
+            .next_commands
+            .iter()
+            .any(|command| command == "rch status --json"),
+        "wait_for_rch suggests a read-only RCH status check",
+    )
+}
+
+#[test]
+fn gate14_resource_admission_candidate_refuses_unsafe_local_cargo() -> TestResult {
+    let report = evaluate_resource_profile_budget_admission(ResourceAdmissionInput {
+        rch: ResourceRchPosture::RemoteReady,
+        local_cargo: ResourceLocalCargoPosture::Unsafe,
+        ..ResourceAdmissionInput::default()
+    });
+
+    ensure(
+        report.decision == ResourceAdmissionDecision::RefuseLocalCargo,
+        "unsafe local Cargo posture must be refused",
+    )?;
+    ensure(
+        report
+            .reason_codes
+            .contains(&"local_cargo_refused".to_string()),
+        "refuse_local_cargo records the refusal reason",
+    )?;
+    ensure(
+        report
+            .next_commands
+            .iter()
+            .any(|command| command.contains("check-local-cargo-tripwire")),
+        "refuse_local_cargo points at the tripwire probe",
+    )
+}
+
+#[test]
+fn gate14_resource_admission_candidate_abstains_on_stale_or_unsafe_evidence() -> TestResult {
+    let report = evaluate_resource_profile_budget_admission(ResourceAdmissionInput {
+        host_calibration: ResourceHostCalibrationPosture::Stale,
+        resource_budget: ResourceBudgetPosture::Contradictory,
+        replay: ResourceReplayPosture::Stale,
+        redaction_posture_verified: false,
+        ..ResourceAdmissionInput::default()
+    });
+
+    ensure(
+        report.decision == ResourceAdmissionDecision::Abstain,
+        "stale, contradictory, or redaction-unsafe evidence must abstain",
+    )?;
+    for reason in [
+        "stale_source_authority",
+        "contradictory_evidence",
+        "redaction_posture_unknown",
+    ] {
+        ensure(
+            report.abstention_reasons.contains(&reason.to_string()),
+            format!("abstain includes {reason}"),
+        )?;
+    }
+    ensure(
+        report
+            .next_commands
+            .iter()
+            .any(|command| command.contains("support bundle")),
+        "abstain gives a support-bundle-safe evidence refresh command",
     )
 }
 
@@ -932,6 +1127,7 @@ fn gate14_shadow_policy_inventory_schema_pins_policy_ids_and_abstention_contract
             "incumbent.cache.no_cache",
             "candidate.cache.s3_fifo",
             "candidate.verification.environment_attestation",
+            "candidate.resource_profile_budget_admission",
             "unsupported.resource_profile_budget_admission",
         ],
         "policy id",

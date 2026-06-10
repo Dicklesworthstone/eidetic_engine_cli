@@ -840,7 +840,7 @@ dispatch executes the canonical pack path instead.
 | `lab_counterfactual_multi_swap_unsupported` | medium | bd-17c65.14.15.6 (N15.5) — multi-swap rejected by ADR 0028 |
 | `lab_replay_determinism_violation` | high | bd-17c65.14.15.5 (N15.4) — same-query replay hash differs from frozen capture |
 | `lab_replay_nondeterministic` | high | bd-17c65.14.15.5 (N15.4) — --verify-determinism replay runs diverged |
-| `lab_replay_unavailable` | medium | bd-17c65.14.15.5 (N15.4) — slated for retirement once N15 lands |
+| `lab_replay_unavailable` | medium | bd-17c65.14.15.5 (N15.4) — runtime missing-evidence degradation when frozen replay artifacts are absent or untrusted |
 | `legacy_memory` | info | (TBD) — legacy import marker |
 | `manual_heavy_strategy` | warning | bd-17c65.10.6 (J6) |
 | `profile_mismatch` | medium | bd-17c65.10.6 (J6) |

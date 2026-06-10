@@ -6138,6 +6138,86 @@ CREATE INDEX IF NOT EXISTS idx_error_fingerprints_simhash
     "blake3:v072_error_fingerprints_2026_06_07",
 );
 
+/// bd-uafu0 / ADR 0057: persisted links from an error fingerprint to the
+/// repair, proof, outcome, or curation artifact that should hydrate recall
+/// reports. Targets are intentionally string IDs because repairs are memories,
+/// proofs are verifier/run IDs, and outcomes can be ledger/evidence rows.
+pub const V073_ERROR_REPAIR_LINKS: Migration = Migration::new(
+    73,
+    "error_repair_links",
+    r#"
+CREATE TABLE IF NOT EXISTS error_repair_links (
+    link_id TEXT PRIMARY KEY CHECK (length(trim(link_id)) > 0),
+    workspace_id TEXT NOT NULL,
+    fingerprint_key TEXT NOT NULL,
+    link_kind TEXT NOT NULL CHECK (
+        link_kind IN ('repair', 'proof', 'outcome', 'curation_candidate')
+    ),
+    target_id TEXT NOT NULL CHECK (length(trim(target_id)) > 0),
+    outcome TEXT NOT NULL DEFAULT 'unknown' CHECK (
+        outcome IN ('helpful', 'harmful', 'neutral', 'unknown')
+    ),
+    evidence_ref TEXT CHECK (evidence_ref IS NULL OR length(trim(evidence_ref)) > 0),
+    stale_version_warning TEXT CHECK (
+        stale_version_warning IS NULL OR length(trim(stale_version_warning)) > 0
+    ),
+    created_by TEXT CHECK (created_by IS NULL OR length(trim(created_by)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    FOREIGN KEY (workspace_id, fingerprint_key)
+        REFERENCES error_fingerprints(workspace_id, fingerprint_key)
+        ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_error_repair_links_unique
+    ON error_repair_links(workspace_id, fingerprint_key, link_kind, target_id, outcome);
+CREATE INDEX IF NOT EXISTS idx_error_repair_links_fingerprint
+    ON error_repair_links(workspace_id, fingerprint_key, link_kind, outcome, target_id);
+CREATE INDEX IF NOT EXISTS idx_error_repair_links_target
+    ON error_repair_links(target_id, link_kind);
+
+CREATE TRIGGER trg_workspace_generations_error_repair_links_insert
+AFTER INSERT ON error_repair_links
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.created_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.created_at
+     WHERE workspace_id = NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_error_repair_links_update
+AFTER UPDATE ON error_repair_links
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.updated_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = NEW.workspace_id;
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = OLD.workspace_id
+       AND OLD.workspace_id <> NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_error_repair_links_delete
+AFTER DELETE ON error_repair_links
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id = OLD.workspace_id;
+END;
+"#,
+    "blake3:v073_error_repair_links_2026_06_09",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -6212,6 +6292,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V070_MEMORY_TYPED_FIELDS,
     V071_WORKSPACE_GENERATIONS,
     V072_ERROR_FINGERPRINTS,
+    V073_ERROR_REPAIR_LINKS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -11932,6 +12013,36 @@ pub struct StoredErrorFingerprint {
     pub updated_at: String,
 }
 
+/// Input for one persisted error-repair link (bd-uafu0 / V073).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateErrorRepairLinkInput {
+    pub link_id: String,
+    pub workspace_id: String,
+    pub fingerprint_key: String,
+    pub link_kind: String,
+    pub target_id: String,
+    pub outcome: String,
+    pub evidence_ref: Option<String>,
+    pub stale_version_warning: Option<String>,
+    pub created_by: Option<String>,
+}
+
+/// A stored `error_repair_links` row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredErrorRepairLink {
+    pub link_id: String,
+    pub workspace_id: String,
+    pub fingerprint_key: String,
+    pub link_kind: String,
+    pub target_id: String,
+    pub outcome: String,
+    pub evidence_ref: Option<String>,
+    pub stale_version_warning: Option<String>,
+    pub created_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 fn stored_error_fingerprint_from_row(row: &Row) -> Result<StoredErrorFingerprint> {
     Ok(StoredErrorFingerprint {
         fingerprint_key: required_text(row, 0, DbOperation::Query, "fingerprint_key")?.to_string(),
@@ -11950,6 +12061,22 @@ fn stored_error_fingerprint_from_row(row: &Row) -> Result<StoredErrorFingerprint
         version_hints: optional_text(row, 7)?.map(str::to_string),
         created_at: required_text(row, 8, DbOperation::Query, "created_at")?.to_string(),
         updated_at: required_text(row, 9, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+fn stored_error_repair_link_from_row(row: &Row) -> Result<StoredErrorRepairLink> {
+    Ok(StoredErrorRepairLink {
+        link_id: required_text(row, 0, DbOperation::Query, "link_id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        fingerprint_key: required_text(row, 2, DbOperation::Query, "fingerprint_key")?.to_string(),
+        link_kind: required_text(row, 3, DbOperation::Query, "link_kind")?.to_string(),
+        target_id: required_text(row, 4, DbOperation::Query, "target_id")?.to_string(),
+        outcome: required_text(row, 5, DbOperation::Query, "outcome")?.to_string(),
+        evidence_ref: optional_text(row, 6)?.map(str::to_string),
+        stale_version_warning: optional_text(row, 7)?.map(str::to_string),
+        created_by: optional_text(row, 8)?.map(str::to_string),
+        created_at: required_text(row, 9, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 10, DbOperation::Query, "updated_at")?.to_string(),
     })
 }
 
@@ -12258,6 +12385,64 @@ impl DbConnection {
         rows.first()
             .map(stored_error_fingerprint_from_row)
             .transpose()
+    }
+
+    /// Upsert one error-repair link (bd-uafu0 / V073). Re-observing the same
+    /// `(workspace, fingerprint, kind, target, outcome)` refreshes metadata
+    /// without duplicating the link.
+    pub fn upsert_error_repair_link(&self, link: &CreateErrorRepairLinkInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO error_repair_links (link_id, workspace_id, fingerprint_key, link_kind, target_id, outcome, evidence_ref, stale_version_warning, created_by, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) ON CONFLICT(workspace_id, fingerprint_key, link_kind, target_id, outcome) DO UPDATE SET evidence_ref = excluded.evidence_ref, stale_version_warning = excluded.stale_version_warning, created_by = excluded.created_by, updated_at = excluded.updated_at",
+            &[
+                Value::Text(link.link_id.clone()),
+                Value::Text(link.workspace_id.clone()),
+                Value::Text(link.fingerprint_key.clone()),
+                Value::Text(link.link_kind.clone()),
+                Value::Text(link.target_id.clone()),
+                Value::Text(link.outcome.clone()),
+                link.evidence_ref
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                link.stale_version_warning
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                link.created_by
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(now.clone()),
+                Value::Text(now),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Upsert a deterministic batch of error-repair links.
+    pub fn upsert_error_repair_links(&self, links: &[CreateErrorRepairLinkInput]) -> Result<u64> {
+        let mut written = 0_u64;
+        for link in links {
+            self.upsert_error_repair_link(link)?;
+            written += 1;
+        }
+        Ok(written)
+    }
+
+    /// List persisted repair/proof/outcome links for a fingerprint.
+    pub fn list_error_repair_links(
+        &self,
+        workspace_id: &str,
+        fingerprint_key: &str,
+    ) -> Result<Vec<StoredErrorRepairLink>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT link_id, workspace_id, fingerprint_key, link_kind, target_id, outcome, evidence_ref, stale_version_warning, created_by, created_at, updated_at FROM error_repair_links WHERE workspace_id = ?1 AND fingerprint_key = ?2 ORDER BY link_kind ASC, outcome ASC, target_id ASC, link_id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(fingerprint_key.to_string()),
+            ],
+        )?;
+        rows.iter().map(stored_error_repair_link_from_row).collect()
     }
 
     /// Get a memory by ID.
@@ -23239,6 +23424,10 @@ mod tests {
             "memory_links table must exist",
         )?;
         ensure(
+            table_names.contains(&"error_repair_links"),
+            "error_repair_links table must exist",
+        )?;
+        ensure(
             table_names.contains(&"sessions"),
             "sessions table must exist",
         )?;
@@ -30661,6 +30850,89 @@ mod tests {
             created_by: Some("agent:test".to_string()),
             metadata_json: Some(r#"{"reason":"explicit"}"#.to_string()),
         }
+    }
+
+    fn setup_error_fingerprint(connection: &DbConnection) -> TestResult {
+        setup_workspace(connection)?;
+        connection.upsert_error_fingerprint(&super::StoredErrorFingerprint {
+            fingerprint_key: "rustc:E0277".to_string(),
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            tool: "rustc".to_string(),
+            canonical_code: Some("E0277".to_string()),
+            message_template_signature:
+                "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
+            location_shape: None,
+            stderr_simhash: "0123456789abcdef0123456789abcdef".to_string(),
+            version_hints: None,
+            created_at: "2026-06-09T00:00:00Z".to_string(),
+            updated_at: "2026-06-09T00:00:00Z".to_string(),
+        })?;
+        Ok(())
+    }
+
+    fn error_repair_link_input(
+        link_id: &str,
+        link_kind: &str,
+        target_id: &str,
+        outcome: &str,
+    ) -> super::CreateErrorRepairLinkInput {
+        super::CreateErrorRepairLinkInput {
+            link_id: link_id.to_string(),
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            fingerprint_key: "rustc:E0277".to_string(),
+            link_kind: link_kind.to_string(),
+            target_id: target_id.to_string(),
+            outcome: outcome.to_string(),
+            evidence_ref: Some("rch:proof-1".to_string()),
+            stale_version_warning: None,
+            created_by: Some("agent:test".to_string()),
+        }
+    }
+
+    #[test]
+    fn error_repair_links_upsert_and_list_deterministically() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_error_fingerprint(&connection)?;
+
+        let helpful = error_repair_link_input(
+            "erl_00000000000000000000000001",
+            "repair",
+            "mem_fix",
+            "helpful",
+        );
+        let proof = error_repair_link_input(
+            "erl_00000000000000000000000002",
+            "proof",
+            "proof_rch_pass",
+            "unknown",
+        );
+        connection.upsert_error_repair_links(&[helpful.clone(), proof])?;
+
+        let mut refreshed = helpful;
+        refreshed.evidence_ref = Some("rch:proof-2".to_string());
+        connection.upsert_error_repair_link(&refreshed)?;
+
+        let links =
+            connection.list_error_repair_links("wsp_01234567890123456789012345", "rustc:E0277")?;
+        ensure_equal(&links.len(), &2, "deduped error repair link count")?;
+        ensure_equal(&links[0].link_kind.as_str(), &"proof", "proof sorts first")?;
+        ensure_equal(
+            &links[0].target_id.as_str(),
+            &"proof_rch_pass",
+            "proof target",
+        )?;
+        ensure_equal(&links[1].link_kind.as_str(), &"repair", "repair kind")?;
+        ensure_equal(&links[1].outcome.as_str(), &"helpful", "repair outcome")?;
+        ensure_equal(
+            &links[1].evidence_ref,
+            &Some("rch:proof-2".to_string()),
+            "upsert refreshes metadata",
+        )?;
+
+        connection.close()?;
+        Ok(())
     }
 
     #[test]

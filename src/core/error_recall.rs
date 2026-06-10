@@ -10,7 +10,7 @@
 //!
 //! This module is pure and deterministic: the same diagnostic always yields the
 //! same canonical form and the same layered key. The fingerprint store
-//! (bd-1n0np.4.3 / V069) and redaction defaults (bd-1n0np.4.6) build on these.
+//! (bd-1n0np.4.3 / V072) and redaction defaults (bd-1n0np.4.6) build on these.
 
 /// The tool a diagnostic originated from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -344,7 +344,7 @@ pub fn redact_to_fingerprint(
 
 /// The kind of downstream artifact an error fingerprint links to (bd-1n0np.4.3):
 /// the failure → repair → proof → outcome chain. Persisted in the
-/// `error_repair_links` table (V069) once the store lands; this models the
+/// `error_repair_links` table (V073) once the store lands; this models the
 /// link semantics so the planner below stays pure and testable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorRepairLinkKind {
@@ -392,7 +392,7 @@ pub struct ErrorRepairLink {
 /// Plan the failure → repair → proof → outcome links for a fingerprint from the
 /// already-known target ids (bd-1n0np.4.3). Pure: blank ids are dropped, output
 /// is deduplicated and ordered deterministically by `(kind, target_id)`. The
-/// caller persists the result into `error_repair_links` (V069) + the graph; this
+/// caller persists the result into `error_repair_links` (V073) + the graph; this
 /// keeps the link semantics verifiable without the migration.
 #[must_use]
 pub fn plan_error_repair_links(
@@ -436,11 +436,11 @@ pub fn plan_error_repair_links(
 
 /// Persistable error-fingerprint row model (bd-1n0np.4.1/4.3, ADR 0057). The
 /// canonical projection of a [`CanonicalDiagnostic`] that the fingerprint store
-/// (V069) persists as truth and indexes as a derived Frankensearch document.
+/// (V072) persists as truth and indexes as a derived Frankensearch document.
 ///
 /// Pure value type: derived deterministically from a canonicalized diagnostic,
 /// carrying signatures/codes only (never raw log content) per the ADR 0057
-/// redaction-by-default rule. The migration + repo (bd-1n0np.4.3 / V069) build
+/// redaction-by-default rule. The migration + repo (bd-1n0np.4.3 / V072) build
 /// on this; the model and its derivation stay verifiable without the migration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErrorFingerprint {

@@ -310,6 +310,12 @@ use crate::search::{
     CanonicalSearchDocument, DocumentSource, Embedder, EmbedderStack, HashEmbedder, IndexBuilder,
     SpeedMode,
 };
+use crate::shadow::{
+    ResourceAdmissionDecision, ResourceAdmissionInput, ResourceBudgetPosture, ResourceCostClass,
+    ResourceDaemonPosture, ResourceHostCalibrationPosture, ResourceLanePressurePosture,
+    ResourceLocalCargoPosture, ResourceOperatingProfile, ResourceRchPosture, ResourceReplayPosture,
+    ResourceWorkloadPressurePosture, evaluate_resource_profile_budget_admission,
+};
 use crate::steward::{
     JobType, MAINTENANCE_JOB_LIST_SCHEMA_V1, MAINTENANCE_JOB_ROW_SCHEMA_V1,
     MAINTENANCE_JOB_SHOW_SCHEMA_V1, MAINTENANCE_RUN_SCHEMA_V1, MAINTENANCE_STATUS_SCHEMA_V1,
@@ -1181,6 +1187,18 @@ pub struct DiagnoseErrorArgs {
     /// Persist this error's fingerprint so future diagnoses recall it.
     #[arg(long)]
     pub record: bool,
+    /// Persist a memory ID that repaired this error class.
+    #[arg(long = "helpful-repair", value_name = "MEMORY_ID")]
+    pub helpful_repairs: Vec<String>,
+    /// Persist a memory ID that was harmful for this error class.
+    #[arg(long = "harmful-repair", value_name = "MEMORY_ID")]
+    pub harmful_repairs: Vec<String>,
+    /// Persist a proof or verifier run ID for this error class.
+    #[arg(long = "proof-link", value_name = "PROOF_ID")]
+    pub proof_links: Vec<String>,
+    /// Persist a stale tool/version warning for this error class.
+    #[arg(long = "stale-version-warning", value_name = "TEXT")]
+    pub stale_version_warnings: Vec<String>,
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
@@ -3097,6 +3115,8 @@ pub enum DiagCommand {
     Artifacts(DiagArtifactsArgs),
     /// Preflight build and artifact sync paths before expensive work starts.
     BuildAdmission(DiagBuildAdmissionArgs),
+    /// Report side-effect-free resource-profile admission advice.
+    ResourceAdmission(DiagResourceAdmissionArgs),
     /// Report claim verification posture: unverified, stale, and regressed claims.
     Claims(DiagClaimsArgs),
     /// Seed deterministic causal evidence for diagnostic fixture replay.
@@ -3321,6 +3341,495 @@ pub struct DiagBuildAdmissionArgs {
     /// Artifact sync-down destination to preflight. May be repeated.
     #[arg(long = "artifact-destination", value_name = "PATH")]
     pub artifact_destinations: Vec<PathBuf>,
+}
+
+/// Arguments for `ee diag resource-admission`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagResourceAdmissionArgs {
+    /// Workload surface being evaluated.
+    #[arg(long, value_enum, default_value_t = DiagResourceSurfaceArg::Diagnostics)]
+    pub surface: DiagResourceSurfaceArg,
+
+    /// Command class for the proposed work.
+    #[arg(long = "command-class", value_enum, default_value_t = DiagResourceCommandClassArg::Diagnostic)]
+    pub command_class: DiagResourceCommandClassArg,
+
+    /// Requested operating profile. Omit when no explicit profile was requested.
+    #[arg(long = "requested-profile", value_enum)]
+    pub requested_profile: Option<DiagResourceOperatingProfileArg>,
+
+    /// Effective operating profile after config/default resolution.
+    #[arg(long = "effective-profile", value_enum, default_value_t = DiagResourceOperatingProfileArg::Workstation)]
+    pub effective_profile: DiagResourceOperatingProfileArg,
+
+    /// Estimated resource cost class for the proposed workload.
+    #[arg(long = "estimated-cost-class", value_enum, default_value_t = DiagResourceCostClassArg::Standard)]
+    pub estimated_cost_class: DiagResourceCostClassArg,
+
+    /// Host calibration posture from status, doctor, or support-bundle evidence.
+    #[arg(long = "host-calibration", value_enum, default_value_t = DiagResourceHostCalibrationArg::Fresh)]
+    pub host_calibration: DiagResourceHostCalibrationArg,
+
+    /// Budget posture from calibration/profile evidence.
+    #[arg(long = "resource-budget", value_enum, default_value_t = DiagResourceBudgetArg::WithinBudget)]
+    pub resource_budget: DiagResourceBudgetArg,
+
+    /// RCH worker/admission posture.
+    #[arg(long, value_enum, default_value_t = DiagResourceRchPostureArg::NotRequired)]
+    pub rch: DiagResourceRchPostureArg,
+
+    /// Local Cargo posture from the tripwire process scan.
+    #[arg(long = "local-cargo", value_enum, default_value_t = DiagResourceLocalCargoArg::Clean)]
+    pub local_cargo: DiagResourceLocalCargoArg,
+
+    /// QoS or swarm lane pressure posture.
+    #[arg(long = "lane-pressure", value_enum, default_value_t = DiagResourceLanePressureArg::Clear)]
+    pub lane_pressure: DiagResourceLanePressureArg,
+
+    /// Workload pressure posture from cache, spool, pack/search, graph, or index evidence.
+    #[arg(long = "workload-pressure", value_enum, default_value_t = DiagResourceWorkloadPressureArg::WithinBudget)]
+    pub workload_pressure: DiagResourceWorkloadPressureArg,
+
+    /// Daemon posture for daemon-dependent surfaces.
+    #[arg(long, value_enum, default_value_t = DiagResourceDaemonArg::Available)]
+    pub daemon: DiagResourceDaemonArg,
+
+    /// Replay or SLO evidence posture.
+    #[arg(long, value_enum, default_value_t = DiagResourceReplayArg::Healthy)]
+    pub replay: DiagResourceReplayArg,
+
+    /// Mark redaction posture as unknown/unsafe, forcing advisory abstention.
+    #[arg(long = "redaction-posture-unknown", action = ArgAction::SetTrue)]
+    pub redaction_posture_unknown: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiagResourceSurfaceArg {
+    Search,
+    Pack,
+    Cache,
+    WriteSpool,
+    Steward,
+    Verification,
+    Diagnostics,
+    Graph,
+    Index,
+    BurstAdmission,
+    ClaimGate,
+    WorkPacket,
+    SupportBundle,
+    Daemon,
+    Replay,
+}
+
+impl DiagResourceSurfaceArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::Pack => "pack",
+            Self::Cache => "cache",
+            Self::WriteSpool => "write_spool",
+            Self::Steward => "steward",
+            Self::Verification => "verification",
+            Self::Diagnostics => "diagnostics",
+            Self::Graph => "graph",
+            Self::Index => "index",
+            Self::BurstAdmission => "burst_admission",
+            Self::ClaimGate => "claim_gate",
+            Self::WorkPacket => "work_packet",
+            Self::SupportBundle => "support_bundle",
+            Self::Daemon => "daemon",
+            Self::Replay => "replay",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiagResourceCommandClassArg {
+    ReadOnly,
+    WritePath,
+    DerivedAsset,
+    Verification,
+    Diagnostic,
+    Coordination,
+}
+
+impl DiagResourceCommandClassArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::WritePath => "write_path",
+            Self::DerivedAsset => "derived_asset",
+            Self::Verification => "verification",
+            Self::Diagnostic => "diagnostic",
+            Self::Coordination => "coordination",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiagResourceOperatingProfileArg {
+    Constrained,
+    Portable,
+    Workstation,
+    Swarm,
+}
+
+impl DiagResourceOperatingProfileArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Constrained => "constrained",
+            Self::Portable => "portable",
+            Self::Workstation => "workstation",
+            Self::Swarm => "swarm",
+        }
+    }
+
+    #[must_use]
+    pub const fn to_shadow(self) -> ResourceOperatingProfile {
+        match self {
+            Self::Constrained => ResourceOperatingProfile::Constrained,
+            Self::Portable => ResourceOperatingProfile::Portable,
+            Self::Workstation => ResourceOperatingProfile::Workstation,
+            Self::Swarm => ResourceOperatingProfile::Swarm,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiagResourceCostClassArg {
+    Tiny,
+    Small,
+    Standard,
+    SwarmHeavy,
+    Unknown,
+}
+
+impl DiagResourceCostClassArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tiny => "tiny",
+            Self::Small => "small",
+            Self::Standard => "standard",
+            Self::SwarmHeavy => "swarm_heavy",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub const fn to_shadow(self) -> ResourceCostClass {
+        match self {
+            Self::Tiny => ResourceCostClass::Tiny,
+            Self::Small => ResourceCostClass::Small,
+            Self::Standard => ResourceCostClass::Standard,
+            Self::SwarmHeavy => ResourceCostClass::SwarmHeavy,
+            Self::Unknown => ResourceCostClass::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiagResourceHostCalibrationArg {
+    Fresh,
+    Stale,
+    Partial,
+    SyntheticOnly,
+    Contradictory,
+    Missing,
+    Unavailable,
+    NotApplicable,
+}
+
+impl DiagResourceHostCalibrationArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Stale => "stale",
+            Self::Partial => "partial",
+            Self::SyntheticOnly => "synthetic_only",
+            Self::Contradictory => "contradictory",
+            Self::Missing => "missing",
+            Self::Unavailable => "unavailable",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+
+    #[must_use]
+    pub const fn to_shadow(self) -> ResourceHostCalibrationPosture {
+        match self {
+            Self::Fresh => ResourceHostCalibrationPosture::Fresh,
+            Self::Stale => ResourceHostCalibrationPosture::Stale,
+            Self::Partial => ResourceHostCalibrationPosture::Partial,
+            Self::SyntheticOnly => ResourceHostCalibrationPosture::SyntheticOnly,
+            Self::Contradictory => ResourceHostCalibrationPosture::Contradictory,
+            Self::Missing => ResourceHostCalibrationPosture::Missing,
+            Self::Unavailable => ResourceHostCalibrationPosture::Unavailable,
+            Self::NotApplicable => ResourceHostCalibrationPosture::NotApplicable,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiagResourceBudgetArg {
+    WithinBudget,
+    RecommendDecrease,
+    RecommendIncrease,
+    OverrideClamped,
+    Missing,
+    Contradictory,
+}
+
+impl DiagResourceBudgetArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WithinBudget => "within_budget",
+            Self::RecommendDecrease => "recommend_decrease",
+            Self::RecommendIncrease => "recommend_increase",
+            Self::OverrideClamped => "override_clamped",
+            Self::Missing => "missing",
+            Self::Contradictory => "contradictory",
+        }
+    }
+
+    #[must_use]
+    pub const fn to_shadow(self) -> ResourceBudgetPosture {
+        match self {
+            Self::WithinBudget => ResourceBudgetPosture::WithinBudget,
+            Self::RecommendDecrease => ResourceBudgetPosture::RecommendDecrease,
+            Self::RecommendIncrease => ResourceBudgetPosture::RecommendIncrease,
+            Self::OverrideClamped => ResourceBudgetPosture::OverrideClamped,
+            Self::Missing => ResourceBudgetPosture::Missing,
+            Self::Contradictory => ResourceBudgetPosture::Contradictory,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiagResourceRchPostureArg {
+    RemoteReady,
+    ActiveProjectExclusion,
+    ProgressStale,
+    Blocked,
+    NotRequired,
+    Unknown,
+}
+
+impl DiagResourceRchPostureArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RemoteReady => "remote_ready",
+            Self::ActiveProjectExclusion => "active_project_exclusion",
+            Self::ProgressStale => "progress_stale",
+            Self::Blocked => "blocked",
+            Self::NotRequired => "not_required",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub const fn to_shadow(self) -> ResourceRchPosture {
+        match self {
+            Self::RemoteReady => ResourceRchPosture::RemoteReady,
+            Self::ActiveProjectExclusion => ResourceRchPosture::ActiveProjectExclusion,
+            Self::ProgressStale => ResourceRchPosture::ProgressStale,
+            Self::Blocked => ResourceRchPosture::Blocked,
+            Self::NotRequired => ResourceRchPosture::NotRequired,
+            Self::Unknown => ResourceRchPosture::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiagResourceLocalCargoArg {
+    Clean,
+    Refused,
+    Unsafe,
+    Unknown,
+    NotRequired,
+}
+
+impl DiagResourceLocalCargoArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Refused => "refused",
+            Self::Unsafe => "unsafe",
+            Self::Unknown => "unknown",
+            Self::NotRequired => "not_required",
+        }
+    }
+
+    #[must_use]
+    pub const fn to_shadow(self) -> ResourceLocalCargoPosture {
+        match self {
+            Self::Clean => ResourceLocalCargoPosture::Clean,
+            Self::Refused => ResourceLocalCargoPosture::Refused,
+            Self::Unsafe => ResourceLocalCargoPosture::Unsafe,
+            Self::Unknown => ResourceLocalCargoPosture::Unknown,
+            Self::NotRequired => ResourceLocalCargoPosture::NotRequired,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiagResourceLanePressureArg {
+    Clear,
+    ForegroundPressure,
+    BackgroundPressure,
+    VerificationPressure,
+    MaintenancePressure,
+    MixedPressure,
+    Unknown,
+}
+
+impl DiagResourceLanePressureArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Clear => "clear",
+            Self::ForegroundPressure => "foreground_pressure",
+            Self::BackgroundPressure => "background_pressure",
+            Self::VerificationPressure => "verification_pressure",
+            Self::MaintenancePressure => "maintenance_pressure",
+            Self::MixedPressure => "mixed_pressure",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub const fn to_shadow(self) -> ResourceLanePressurePosture {
+        match self {
+            Self::Clear => ResourceLanePressurePosture::Clear,
+            Self::ForegroundPressure => ResourceLanePressurePosture::ForegroundPressure,
+            Self::BackgroundPressure => ResourceLanePressurePosture::BackgroundPressure,
+            Self::VerificationPressure => ResourceLanePressurePosture::VerificationPressure,
+            Self::MaintenancePressure => ResourceLanePressurePosture::MaintenancePressure,
+            Self::MixedPressure => ResourceLanePressurePosture::MixedPressure,
+            Self::Unknown => ResourceLanePressurePosture::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiagResourceWorkloadPressureArg {
+    WithinBudget,
+    CachePressure,
+    WriteSpoolPressure,
+    ReadPoolPressure,
+    PackSloPressure,
+    IndexPressure,
+    GraphPressure,
+    MixedPressure,
+    Unknown,
+}
+
+impl DiagResourceWorkloadPressureArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WithinBudget => "within_budget",
+            Self::CachePressure => "cache_pressure",
+            Self::WriteSpoolPressure => "write_spool_pressure",
+            Self::ReadPoolPressure => "read_pool_pressure",
+            Self::PackSloPressure => "pack_slo_pressure",
+            Self::IndexPressure => "index_pressure",
+            Self::GraphPressure => "graph_pressure",
+            Self::MixedPressure => "mixed_pressure",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub const fn to_shadow(self) -> ResourceWorkloadPressurePosture {
+        match self {
+            Self::WithinBudget => ResourceWorkloadPressurePosture::WithinBudget,
+            Self::CachePressure => ResourceWorkloadPressurePosture::CachePressure,
+            Self::WriteSpoolPressure => ResourceWorkloadPressurePosture::WriteSpoolPressure,
+            Self::ReadPoolPressure => ResourceWorkloadPressurePosture::ReadPoolPressure,
+            Self::PackSloPressure => ResourceWorkloadPressurePosture::PackSloPressure,
+            Self::IndexPressure => ResourceWorkloadPressurePosture::IndexPressure,
+            Self::GraphPressure => ResourceWorkloadPressurePosture::GraphPressure,
+            Self::MixedPressure => ResourceWorkloadPressurePosture::MixedPressure,
+            Self::Unknown => ResourceWorkloadPressurePosture::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiagResourceDaemonArg {
+    Available,
+    Unavailable,
+    Degraded,
+    NotRequired,
+    Unknown,
+}
+
+impl DiagResourceDaemonArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Unavailable => "unavailable",
+            Self::Degraded => "degraded",
+            Self::NotRequired => "not_required",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub const fn to_shadow(self) -> ResourceDaemonPosture {
+        match self {
+            Self::Available => ResourceDaemonPosture::Available,
+            Self::Unavailable => ResourceDaemonPosture::Unavailable,
+            Self::Degraded => ResourceDaemonPosture::Degraded,
+            Self::NotRequired => ResourceDaemonPosture::NotRequired,
+            Self::Unknown => ResourceDaemonPosture::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiagResourceReplayArg {
+    Healthy,
+    Regression,
+    Stale,
+    Missing,
+    NotRequired,
+    Unknown,
+}
+
+impl DiagResourceReplayArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Regression => "regression",
+            Self::Stale => "stale",
+            Self::Missing => "missing",
+            Self::NotRequired => "not_required",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub const fn to_shadow(self) -> ResourceReplayPosture {
+        match self {
+            Self::Healthy => ResourceReplayPosture::Healthy,
+            Self::Regression => ResourceReplayPosture::Regression,
+            Self::Stale => ResourceReplayPosture::Stale,
+            Self::Missing => ResourceReplayPosture::Missing,
+            Self::NotRequired => ResourceReplayPosture::NotRequired,
+            Self::Unknown => ResourceReplayPosture::Unknown,
+        }
+    }
 }
 
 /// Arguments for `ee diag environment-attestation`.
@@ -10948,6 +11457,9 @@ where
             }
             DiagCommand::Graph => handle_diag_graph(&cli, stdout),
             DiagCommand::HostProfile(args) => handle_diag_host_profile(&cli, args, stdout),
+            DiagCommand::ResourceAdmission(args) => {
+                handle_diag_resource_admission(&cli, args, stdout)
+            }
             DiagCommand::GraphSnapshot(args) => {
                 handle_diag_graph_snapshot(&cli, args, stdout, stderr)
             }
@@ -23952,6 +24464,448 @@ where
         | output::Renderer::Hook => {
             write_stdout(stdout, &(workspace_response_json_v2(&report) + "\n"))
         }
+    }
+}
+
+fn handle_diag_resource_admission<W>(
+    cli: &Cli,
+    args: &DiagResourceAdmissionArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let input = diag_resource_admission_input(args);
+    let report = evaluate_resource_profile_budget_admission(input);
+    let data = diag_resource_admission_value(args, &report);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_diag_resource_admission_human(&data))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&workspace_response_json_v2(&data)) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(workspace_response_json_v2(&data) + "\n"))
+        }
+    }
+}
+
+fn diag_resource_admission_input(args: &DiagResourceAdmissionArgs) -> ResourceAdmissionInput {
+    ResourceAdmissionInput {
+        requested_profile: args
+            .requested_profile
+            .map(DiagResourceOperatingProfileArg::to_shadow),
+        effective_profile: args.effective_profile.to_shadow(),
+        estimated_cost_class: args.estimated_cost_class.to_shadow(),
+        host_calibration: args.host_calibration.to_shadow(),
+        resource_budget: args.resource_budget.to_shadow(),
+        rch: args.rch.to_shadow(),
+        local_cargo: args.local_cargo.to_shadow(),
+        lane_pressure: args.lane_pressure.to_shadow(),
+        workload_pressure: args.workload_pressure.to_shadow(),
+        daemon: args.daemon.to_shadow(),
+        replay: args.replay.to_shadow(),
+        redaction_posture_verified: !args.redaction_posture_unknown,
+    }
+}
+
+fn diag_resource_admission_value(
+    args: &DiagResourceAdmissionArgs,
+    report: &crate::shadow::ResourceAdmissionReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": report.schema,
+        "sideEffectFree": report.side_effect_free,
+        "advisoryOnly": report.advisory_only,
+        "mutationPolicy": "never_mutates_state",
+        "policyDomain": report.policy_domain,
+        "policyId": report.policy_id,
+        "decision": report.decision.as_str(),
+        "subject": {
+            "surface": args.surface.as_str(),
+            "commandClass": args.command_class.as_str(),
+            "requestedProfile": args.requested_profile.map(DiagResourceOperatingProfileArg::as_str),
+            "effectiveProfile": args.effective_profile.as_str(),
+            "estimatedCostClass": args.estimated_cost_class.as_str(),
+        },
+        "sourcePosture": {
+            "hostCalibration": args.host_calibration.as_str(),
+            "resourceBudget": args.resource_budget.as_str(),
+            "rch": args.rch.as_str(),
+            "localCargo": args.local_cargo.as_str(),
+            "lanePressure": args.lane_pressure.as_str(),
+            "workloadPressure": args.workload_pressure.as_str(),
+            "daemon": args.daemon.as_str(),
+            "replay": args.replay.as_str(),
+        },
+        "reasonCodes": report.reason_codes,
+        "abstentionReasons": report.abstention_reasons,
+        "nextCommands": diag_resource_admission_next_commands(&report.next_commands),
+        "evidence": diag_resource_admission_evidence(args),
+        "redactionPosture": {
+            "rawMemoryBodyPresent": false,
+            "rawMailBodyPresent": false,
+            "rawCommandOutputPresent": false,
+            "absoluteHostPathPresent": false,
+            "fullEnvironmentPresent": false,
+            "secretsPresent": false,
+        },
+        "degraded": diag_resource_admission_degraded(args, report),
+    })
+}
+
+fn render_diag_resource_admission_human(data: &serde_json::Value) -> String {
+    let decision = data
+        .get("decision")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let reason_count = data
+        .get("reasonCodes")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let next_count = data
+        .get("nextCommands")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let degraded_count = data
+        .get("degraded")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let mut out = format!(
+        "resource admission diagnostics\n\ndecision: {decision}\nreason codes: {reason_count}\nnext commands: {next_count}\ndegraded: {degraded_count}\n"
+    );
+    if let Some(next_commands) = data
+        .get("nextCommands")
+        .and_then(serde_json::Value::as_array)
+    {
+        for command in next_commands {
+            if let Some(command_text) = command.get("command").and_then(serde_json::Value::as_str) {
+                out.push_str(&format!("\nNext: {command_text}\n"));
+            }
+        }
+    }
+    out
+}
+
+fn diag_resource_admission_next_commands(commands: &[String]) -> Vec<serde_json::Value> {
+    commands
+        .iter()
+        .enumerate()
+        .map(|(index, command)| {
+            let (kind, rationale) = diag_resource_admission_next_command_shape(command);
+            serde_json::json!({
+                "priority": (index + 1) * 10,
+                "kind": kind,
+                "command": command,
+                "destructive": false,
+                "rationale": rationale,
+            })
+        })
+        .collect()
+}
+
+fn diag_resource_admission_next_command_shape(command: &str) -> (&'static str, &'static str) {
+    match command {
+        "rch status --json" => (
+            "wait",
+            "Remote-required work should wait for the RCH lane to clear before retrying.",
+        ),
+        "scripts/check-local-cargo-tripwire.sh --probe-processes --json" => (
+            "refresh_evidence",
+            "Refresh the local Cargo tripwire posture before deciding on verification work.",
+        ),
+        "scripts/rch_verify.sh -- <command>" => (
+            "route_remote",
+            "Route Rust verification through the remote verifier instead of local Cargo.",
+        ),
+        "ee pack <task> --resource-profile constrained --json" => (
+            "rerun_with_profile",
+            "Use the constrained resource profile for the requested work.",
+        ),
+        "ee lab swarm replay --split-workload --dry-run --json" => (
+            "split_workload",
+            "Inspect a split-workload plan before running a swarm-heavy workload.",
+        ),
+        "ee swarm brief --json" => (
+            "refresh_evidence",
+            "Refresh swarm lane pressure before starting queued work.",
+        ),
+        "ee support bundle --include resource-admission --json" => (
+            "inspect_support_bundle",
+            "Collect bounded support evidence because required admission signals are unsafe.",
+        ),
+        _ => (
+            "refresh_evidence",
+            "Refresh bounded source evidence before retrying the resource-admission decision.",
+        ),
+    }
+}
+
+fn diag_resource_admission_evidence(args: &DiagResourceAdmissionArgs) -> Vec<serde_json::Value> {
+    vec![
+        diag_resource_admission_evidence_ref(
+            "host_calibration_posture",
+            Some("ee.host_calibration.posture.v1"),
+            freshness_from_host_calibration(args.host_calibration),
+            confidence_from_freshness(freshness_from_host_calibration(args.host_calibration)),
+            format!("host_calibration={}", args.host_calibration.as_str()),
+        ),
+        diag_resource_admission_evidence_ref(
+            "resource_profile",
+            None,
+            "fresh",
+            "high",
+            format!(
+                "requested_profile={}; effective_profile={}",
+                args.requested_profile
+                    .map(DiagResourceOperatingProfileArg::as_str)
+                    .unwrap_or("none"),
+                args.effective_profile.as_str()
+            ),
+        ),
+        diag_resource_admission_evidence_ref(
+            "budget_delta",
+            Some("ee.host_calibration.recommendation.v1"),
+            freshness_from_budget(args.resource_budget),
+            confidence_from_freshness(freshness_from_budget(args.resource_budget)),
+            format!("resource_budget={}", args.resource_budget.as_str()),
+        ),
+        diag_resource_admission_evidence_ref(
+            "rch_status",
+            None,
+            freshness_from_rch(args.rch),
+            confidence_from_freshness(freshness_from_rch(args.rch)),
+            format!("rch={}", args.rch.as_str()),
+        ),
+        diag_resource_admission_evidence_ref(
+            "local_cargo_tripwire",
+            Some("ee.rch_local_cargo_tripwire.v1"),
+            freshness_from_local_cargo(args.local_cargo),
+            confidence_from_freshness(freshness_from_local_cargo(args.local_cargo)),
+            format!("local_cargo={}", args.local_cargo.as_str()),
+        ),
+        diag_resource_admission_evidence_ref(
+            "qos_lane_summary",
+            None,
+            freshness_from_lane_pressure(args.lane_pressure),
+            confidence_from_freshness(freshness_from_lane_pressure(args.lane_pressure)),
+            format!("lane_pressure={}", args.lane_pressure.as_str()),
+        ),
+        diag_resource_admission_evidence_ref(
+            "daemon_posture",
+            None,
+            freshness_from_daemon(args.daemon),
+            confidence_from_freshness(freshness_from_daemon(args.daemon)),
+            format!("daemon={}", args.daemon.as_str()),
+        ),
+        diag_resource_admission_evidence_ref(
+            "replay_slo",
+            Some("ee.agent_workload_replay.v1"),
+            freshness_from_replay(args.replay),
+            confidence_from_freshness(freshness_from_replay(args.replay)),
+            format!("replay={}", args.replay.as_str()),
+        ),
+    ]
+}
+
+fn diag_resource_admission_evidence_ref(
+    kind: &'static str,
+    source_schema: Option<&'static str>,
+    freshness: &'static str,
+    confidence: &'static str,
+    bounded_preview: String,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": kind,
+        "sourceSchema": source_schema,
+        "freshness": freshness,
+        "confidence": confidence,
+        "hash": serde_json::Value::Null,
+        "boundedPreview": bounded_preview,
+    })
+}
+
+fn diag_resource_admission_degraded(
+    args: &DiagResourceAdmissionArgs,
+    report: &crate::shadow::ResourceAdmissionReport,
+) -> Vec<serde_json::Value> {
+    let mut degraded = Vec::new();
+    for reason in &report.abstention_reasons {
+        let (severity, message, repair) = match reason.as_str() {
+            "missing_required_signal" => (
+                "high",
+                "Resource-admission input evidence is missing.",
+                "ee support bundle --include resource-admission --json",
+            ),
+            "stale_source_authority" => (
+                "warning",
+                "Resource-admission source authority is stale.",
+                "ee support bundle --include resource-admission --json",
+            ),
+            "contradictory_evidence" => (
+                "high",
+                "Resource-admission source evidence is contradictory.",
+                "ee support bundle --include resource-admission --json",
+            ),
+            "redaction_posture_unknown" => (
+                "medium",
+                "Resource-admission redaction posture is not verified.",
+                "ee support bundle --include resource-admission --json",
+            ),
+            _ => (
+                "warning",
+                "Resource-admission evidence degraded the advisory decision.",
+                "ee support bundle --include resource-admission --json",
+            ),
+        };
+        degraded.push(serde_json::json!({
+            "code": reason,
+            "severity": severity,
+            "message": message,
+            "repair": repair,
+        }));
+    }
+
+    if matches!(
+        report.decision,
+        ResourceAdmissionDecision::WaitForRch | ResourceAdmissionDecision::RefuseLocalCargo
+    ) {
+        let code = match report.decision {
+            ResourceAdmissionDecision::WaitForRch => args.rch.as_str(),
+            ResourceAdmissionDecision::RefuseLocalCargo => "local_cargo_refused",
+            _ => "resource_admission_degraded",
+        };
+        let (message, repair) = match report.decision {
+            ResourceAdmissionDecision::WaitForRch => (
+                "RCH posture prevents the requested work from starting now.",
+                "rch status --json",
+            ),
+            ResourceAdmissionDecision::RefuseLocalCargo => (
+                "Local Cargo posture is unsafe or refused for this workload.",
+                "scripts/check-local-cargo-tripwire.sh --probe-processes --json",
+            ),
+            _ => (
+                "Resource admission degraded.",
+                "ee diag resource-admission --json",
+            ),
+        };
+        push_json_degraded_unique(
+            &mut degraded,
+            serde_json::json!({
+                "code": code,
+                "severity": "warning",
+                "message": message,
+                "repair": repair,
+            }),
+        );
+    }
+
+    degraded
+}
+
+fn push_json_degraded_unique(degraded: &mut Vec<serde_json::Value>, entry: serde_json::Value) {
+    let code = entry
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if degraded
+        .iter()
+        .any(|existing| existing.get("code").and_then(serde_json::Value::as_str) == Some(code))
+    {
+        return;
+    }
+    degraded.push(entry);
+}
+
+fn confidence_from_freshness(freshness: &'static str) -> &'static str {
+    match freshness {
+        "fresh" => "high",
+        "stale" => "medium",
+        "missing" | "unavailable" | "contradictory" => "low",
+        _ => "low",
+    }
+}
+
+const fn freshness_from_host_calibration(posture: DiagResourceHostCalibrationArg) -> &'static str {
+    match posture {
+        DiagResourceHostCalibrationArg::Fresh
+        | DiagResourceHostCalibrationArg::Partial
+        | DiagResourceHostCalibrationArg::SyntheticOnly
+        | DiagResourceHostCalibrationArg::NotApplicable => "fresh",
+        DiagResourceHostCalibrationArg::Stale => "stale",
+        DiagResourceHostCalibrationArg::Contradictory => "contradictory",
+        DiagResourceHostCalibrationArg::Missing => "missing",
+        DiagResourceHostCalibrationArg::Unavailable => "unavailable",
+    }
+}
+
+const fn freshness_from_budget(posture: DiagResourceBudgetArg) -> &'static str {
+    match posture {
+        DiagResourceBudgetArg::WithinBudget
+        | DiagResourceBudgetArg::RecommendDecrease
+        | DiagResourceBudgetArg::RecommendIncrease
+        | DiagResourceBudgetArg::OverrideClamped => "fresh",
+        DiagResourceBudgetArg::Missing => "missing",
+        DiagResourceBudgetArg::Contradictory => "contradictory",
+    }
+}
+
+const fn freshness_from_rch(posture: DiagResourceRchPostureArg) -> &'static str {
+    match posture {
+        DiagResourceRchPostureArg::ProgressStale => "stale",
+        DiagResourceRchPostureArg::Unknown => "missing",
+        DiagResourceRchPostureArg::RemoteReady
+        | DiagResourceRchPostureArg::ActiveProjectExclusion
+        | DiagResourceRchPostureArg::Blocked
+        | DiagResourceRchPostureArg::NotRequired => "fresh",
+    }
+}
+
+const fn freshness_from_local_cargo(posture: DiagResourceLocalCargoArg) -> &'static str {
+    match posture {
+        DiagResourceLocalCargoArg::Unknown => "missing",
+        DiagResourceLocalCargoArg::Clean
+        | DiagResourceLocalCargoArg::Refused
+        | DiagResourceLocalCargoArg::Unsafe
+        | DiagResourceLocalCargoArg::NotRequired => "fresh",
+    }
+}
+
+const fn freshness_from_lane_pressure(posture: DiagResourceLanePressureArg) -> &'static str {
+    match posture {
+        DiagResourceLanePressureArg::Unknown => "missing",
+        DiagResourceLanePressureArg::Clear
+        | DiagResourceLanePressureArg::ForegroundPressure
+        | DiagResourceLanePressureArg::BackgroundPressure
+        | DiagResourceLanePressureArg::VerificationPressure
+        | DiagResourceLanePressureArg::MaintenancePressure
+        | DiagResourceLanePressureArg::MixedPressure => "fresh",
+    }
+}
+
+const fn freshness_from_daemon(posture: DiagResourceDaemonArg) -> &'static str {
+    match posture {
+        DiagResourceDaemonArg::Unavailable => "unavailable",
+        DiagResourceDaemonArg::Unknown => "missing",
+        DiagResourceDaemonArg::Available
+        | DiagResourceDaemonArg::Degraded
+        | DiagResourceDaemonArg::NotRequired => "fresh",
+    }
+}
+
+const fn freshness_from_replay(posture: DiagResourceReplayArg) -> &'static str {
+    match posture {
+        DiagResourceReplayArg::Stale => "stale",
+        DiagResourceReplayArg::Missing | DiagResourceReplayArg::Unknown => "missing",
+        DiagResourceReplayArg::Healthy
+        | DiagResourceReplayArg::Regression
+        | DiagResourceReplayArg::NotRequired => "fresh",
     }
 }
 
@@ -39861,8 +40815,10 @@ where
         }
     };
 
+    let link_recording = error_repair_link_recording_from_args(args);
     let mut recorded = false;
-    if args.record {
+    let mut recorded_link_count = 0_usize;
+    if args.record && link_recording.is_empty() {
         if let Err(error) = crate::core::error_diagnosis::record_error_fingerprint(
             &connection,
             &workspace_id,
@@ -39877,6 +40833,28 @@ where
                 stdout,
                 stderr,
             );
+        }
+        recorded = true;
+    }
+    if !link_recording.is_empty() {
+        match crate::core::error_diagnosis::record_error_repair_links(
+            &connection,
+            &workspace_id,
+            &canonical,
+            &link_recording,
+        ) {
+            Ok(links) => recorded_link_count = links.len(),
+            Err(error) => {
+                return write_domain_error(
+                    &DomainError::Storage {
+                        message: format!("Failed to record error repair links: {error}"),
+                        repair: Some("ee doctor --json".to_owned()),
+                    },
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
         }
         recorded = true;
     }
@@ -39937,12 +40915,25 @@ where
             "layer": outcome.layer,
             "isKnown": outcome.is_known(),
             "recorded": recorded,
+            "recordedLinkCount": recorded_link_count,
             "matches": matches,
             "report": report,
         },
         "degraded": [],
     });
     write_stdout(stdout, &(response.to_string() + "\n"))
+}
+
+fn error_repair_link_recording_from_args(
+    args: &DiagnoseErrorArgs,
+) -> crate::core::error_diagnosis::ErrorRepairLinkRecording {
+    crate::core::error_diagnosis::ErrorRepairLinkRecording {
+        helpful_repairs: args.helpful_repairs.clone(),
+        harmful_repairs: args.harmful_repairs.clone(),
+        proof_links: args.proof_links.clone(),
+        stale_version_warnings: args.stale_version_warnings.clone(),
+        created_by: Some("ee diagnose-error".to_string()),
+    }
 }
 
 fn diagnostic_message_from_args(args: &DiagnoseErrorArgs) -> Result<String, DomainError> {
@@ -52608,6 +53599,7 @@ impl NormalizedInvocation {
                     }
                     DiagCommand::Graph => "diag graph".to_string(),
                     DiagCommand::HostProfile(_) => "diag host-profile".to_string(),
+                    DiagCommand::ResourceAdmission(_) => "diag resource-admission".to_string(),
                     DiagCommand::GraphSnapshot(_) => "diag graph-snapshot".to_string(),
                     DiagCommand::Integrity(_) => "diag integrity".to_string(),
                     DiagCommand::Incident(_) => "diag incident".to_string(),
@@ -53716,6 +54708,10 @@ mod tests {
         BackupRedaction, BootstrapCommand, COORDINATION_FALLBACK_INGEST_SCHEMA_V1,
         COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command, ContextPackProfile, CurateCommand,
         DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand, DiagCommand, DiagQuarantineCommand,
+        DiagResourceBudgetArg, DiagResourceCommandClassArg, DiagResourceCostClassArg,
+        DiagResourceDaemonArg, DiagResourceHostCalibrationArg, DiagResourceLanePressureArg,
+        DiagResourceLocalCargoArg, DiagResourceOperatingProfileArg, DiagResourceRchPostureArg,
+        DiagResourceReplayArg, DiagResourceSurfaceArg, DiagResourceWorkloadPressureArg,
         DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES, EconomyCommand,
         EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand, GraphSnapshotCommand,
         HandoffCommand, HookCommand, LabCommand, LabSwarmCommand, LabSwarmWorkloadProfile,
@@ -62527,6 +63523,382 @@ mod tests {
             }
             _ => Err("expected diag build-admission command".to_string()),
         }
+    }
+
+    #[test]
+    fn diag_resource_admission_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "resource-admission",
+            "--surface",
+            "verification",
+            "--command-class",
+            "verification",
+            "--requested-profile",
+            "swarm",
+            "--effective-profile",
+            "swarm",
+            "--estimated-cost-class",
+            "swarm-heavy",
+            "--host-calibration",
+            "partial",
+            "--resource-budget",
+            "recommend-decrease",
+            "--rch",
+            "active-project-exclusion",
+            "--local-cargo",
+            "refused",
+            "--lane-pressure",
+            "verification-pressure",
+            "--workload-pressure",
+            "pack-slo-pressure",
+            "--daemon",
+            "not-required",
+            "--replay",
+            "not-required",
+            "--redaction-posture-unknown",
+        ])
+        .map_err(|e| format!("failed to parse diag resource-admission: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::ResourceAdmission(args))) => {
+                ensure_equal(
+                    &args.surface,
+                    &DiagResourceSurfaceArg::Verification,
+                    "surface",
+                )?;
+                ensure_equal(
+                    &args.command_class,
+                    &DiagResourceCommandClassArg::Verification,
+                    "command class",
+                )?;
+                ensure_equal(
+                    &args.requested_profile,
+                    &Some(DiagResourceOperatingProfileArg::Swarm),
+                    "requested profile",
+                )?;
+                ensure_equal(
+                    &args.effective_profile,
+                    &DiagResourceOperatingProfileArg::Swarm,
+                    "effective profile",
+                )?;
+                ensure_equal(
+                    &args.estimated_cost_class,
+                    &DiagResourceCostClassArg::SwarmHeavy,
+                    "estimated cost class",
+                )?;
+                ensure_equal(
+                    &args.host_calibration,
+                    &DiagResourceHostCalibrationArg::Partial,
+                    "host calibration",
+                )?;
+                ensure_equal(
+                    &args.lane_pressure,
+                    &DiagResourceLanePressureArg::VerificationPressure,
+                    "lane pressure",
+                )?;
+                ensure_equal(
+                    &args.local_cargo,
+                    &DiagResourceLocalCargoArg::Refused,
+                    "local Cargo",
+                )?;
+                ensure_equal(
+                    &args.workload_pressure,
+                    &DiagResourceWorkloadPressureArg::PackSloPressure,
+                    "workload pressure",
+                )?;
+                ensure_equal(&args.daemon, &DiagResourceDaemonArg::NotRequired, "daemon")?;
+                ensure_equal(&args.replay, &DiagResourceReplayArg::NotRequired, "replay")?;
+                ensure_equal(
+                    &args.rch,
+                    &DiagResourceRchPostureArg::ActiveProjectExclusion,
+                    "rch",
+                )?;
+                ensure_equal(
+                    &args.resource_budget,
+                    &DiagResourceBudgetArg::RecommendDecrease,
+                    "resource budget",
+                )?;
+                ensure_equal(
+                    &args.redaction_posture_unknown,
+                    &true,
+                    "redaction posture unknown",
+                )
+            }
+            _ => Err("expected diag resource-admission command".to_string()),
+        }
+    }
+
+    #[test]
+    fn diag_resource_admission_json_is_schema_shaped() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "diag",
+            "resource-admission",
+            "--surface",
+            "verification",
+            "--command-class",
+            "verification",
+            "--requested-profile",
+            "swarm",
+            "--effective-profile",
+            "swarm",
+            "--estimated-cost-class",
+            "swarm-heavy",
+            "--rch",
+            "active-project-exclusion",
+            "--local-cargo",
+            "refused",
+            "--lane-pressure",
+            "verification-pressure",
+            "--daemon",
+            "not-required",
+            "--replay",
+            "not-required",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "exit")?;
+        ensure_equal(&stderr, &String::new(), "stderr")?;
+        let expected = serde_json::json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": {
+                "schema": "ee.resource_admission.v1",
+                "sideEffectFree": true,
+                "advisoryOnly": true,
+                "mutationPolicy": "never_mutates_state",
+                "policyDomain": "resource_profile_budget_admission",
+                "policyId": "candidate.resource_profile_budget_admission",
+                "decision": "wait_for_rch",
+                "subject": {
+                    "surface": "verification",
+                    "commandClass": "verification",
+                    "requestedProfile": "swarm",
+                    "effectiveProfile": "swarm",
+                    "estimatedCostClass": "swarm_heavy",
+                },
+                "sourcePosture": {
+                    "hostCalibration": "fresh",
+                    "resourceBudget": "within_budget",
+                    "rch": "active_project_exclusion",
+                    "localCargo": "refused",
+                    "lanePressure": "verification_pressure",
+                    "workloadPressure": "within_budget",
+                    "daemon": "not_required",
+                    "replay": "not_required",
+                },
+                "reasonCodes": [
+                    "host_calibration_fresh",
+                    "budget_within_profile",
+                    "rch_active_project_exclusion",
+                    "local_cargo_refused",
+                    "lane_pressure_verification",
+                    "daemon_not_required",
+                    "replay_slo_healthy",
+                    "redaction_posture_verified",
+                ],
+                "abstentionReasons": [],
+                "nextCommands": [
+                    {
+                        "priority": 10,
+                        "kind": "wait",
+                        "command": "rch status --json",
+                        "destructive": false,
+                        "rationale": "Remote-required work should wait for the RCH lane to clear before retrying.",
+                    }
+                ],
+                "evidence": [
+                    {
+                        "kind": "host_calibration_posture",
+                        "sourceSchema": "ee.host_calibration.posture.v1",
+                        "freshness": "fresh",
+                        "confidence": "high",
+                        "hash": null,
+                        "boundedPreview": "host_calibration=fresh",
+                    },
+                    {
+                        "kind": "resource_profile",
+                        "sourceSchema": null,
+                        "freshness": "fresh",
+                        "confidence": "high",
+                        "hash": null,
+                        "boundedPreview": "requested_profile=swarm; effective_profile=swarm",
+                    },
+                    {
+                        "kind": "budget_delta",
+                        "sourceSchema": "ee.host_calibration.recommendation.v1",
+                        "freshness": "fresh",
+                        "confidence": "high",
+                        "hash": null,
+                        "boundedPreview": "resource_budget=within_budget",
+                    },
+                    {
+                        "kind": "rch_status",
+                        "sourceSchema": null,
+                        "freshness": "fresh",
+                        "confidence": "high",
+                        "hash": null,
+                        "boundedPreview": "rch=active_project_exclusion",
+                    },
+                    {
+                        "kind": "local_cargo_tripwire",
+                        "sourceSchema": "ee.rch_local_cargo_tripwire.v1",
+                        "freshness": "fresh",
+                        "confidence": "high",
+                        "hash": null,
+                        "boundedPreview": "local_cargo=refused",
+                    },
+                    {
+                        "kind": "qos_lane_summary",
+                        "sourceSchema": null,
+                        "freshness": "fresh",
+                        "confidence": "high",
+                        "hash": null,
+                        "boundedPreview": "lane_pressure=verification_pressure",
+                    },
+                    {
+                        "kind": "daemon_posture",
+                        "sourceSchema": null,
+                        "freshness": "fresh",
+                        "confidence": "high",
+                        "hash": null,
+                        "boundedPreview": "daemon=not_required",
+                    },
+                    {
+                        "kind": "replay_slo",
+                        "sourceSchema": "ee.agent_workload_replay.v1",
+                        "freshness": "fresh",
+                        "confidence": "high",
+                        "hash": null,
+                        "boundedPreview": "replay=not_required",
+                    },
+                ],
+                "redactionPosture": {
+                    "rawMemoryBodyPresent": false,
+                    "rawMailBodyPresent": false,
+                    "rawCommandOutputPresent": false,
+                    "absoluteHostPathPresent": false,
+                    "fullEnvironmentPresent": false,
+                    "secretsPresent": false,
+                },
+                "degraded": [
+                    {
+                        "code": "active_project_exclusion",
+                        "severity": "warning",
+                        "message": "RCH posture prevents the requested work from starting now.",
+                        "repair": "rch status --json",
+                    }
+                ],
+            },
+            "degraded": [],
+        });
+        let expected_stdout = expected.to_string() + "\n";
+        ensure_equal(
+            &stdout,
+            &expected_stdout,
+            "resource-admission stable JSON bytes",
+        )?;
+        let value = serde_json::from_str::<serde_json::Value>(&stdout)
+            .map_err(|error| format!("resource-admission JSON should parse: {error}"))?;
+        let data = value
+            .get("data")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "resource-admission data must be an object".to_owned())?;
+
+        for field in [
+            "schema",
+            "sideEffectFree",
+            "advisoryOnly",
+            "mutationPolicy",
+            "policyDomain",
+            "policyId",
+            "decision",
+            "subject",
+            "sourcePosture",
+            "reasonCodes",
+            "abstentionReasons",
+            "nextCommands",
+            "evidence",
+            "redactionPosture",
+            "degraded",
+        ] {
+            ensure(
+                data.contains_key(field),
+                format!("resource-admission data missing required field {field}"),
+            )?;
+        }
+
+        ensure_equal(
+            &value.pointer("/schema"),
+            &Some(&serde_json::json!("ee.response.v2")),
+            "envelope schema",
+        )?;
+        ensure_equal(
+            &value.pointer("/data/schema"),
+            &Some(&serde_json::json!("ee.resource_admission.v1")),
+            "data schema",
+        )?;
+        ensure_equal(
+            &value.pointer("/data/decision"),
+            &Some(&serde_json::json!("wait_for_rch")),
+            "decision",
+        )?;
+        ensure_equal(
+            &value.pointer("/data/subject/surface"),
+            &Some(&serde_json::json!("verification")),
+            "surface",
+        )?;
+        ensure_equal(
+            &value.pointer("/data/sourcePosture/rch"),
+            &Some(&serde_json::json!("active_project_exclusion")),
+            "rch posture",
+        )?;
+        ensure_equal(
+            &value.pointer("/data/nextCommands/0/kind"),
+            &Some(&serde_json::json!("wait")),
+            "next command kind",
+        )?;
+        ensure_equal(
+            &value.pointer("/data/nextCommands/0/destructive"),
+            &Some(&serde_json::json!(false)),
+            "next command is non-destructive",
+        )?;
+        ensure_equal(
+            &value.pointer("/data/redactionPosture/secretsPresent"),
+            &Some(&serde_json::json!(false)),
+            "redaction posture",
+        )?;
+        let redaction = value
+            .pointer("/data/redactionPosture")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "redactionPosture must be an object".to_owned())?;
+        for field in [
+            "rawMemoryBodyPresent",
+            "rawMailBodyPresent",
+            "rawCommandOutputPresent",
+            "absoluteHostPathPresent",
+            "fullEnvironmentPresent",
+            "secretsPresent",
+        ] {
+            ensure_equal(
+                &redaction.get(field),
+                &Some(&serde_json::json!(false)),
+                "redaction posture must be default-deny",
+            )?;
+        }
+        ensure(
+            value
+                .pointer("/data/evidence")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry.pointer("/kind") == Some(&serde_json::json!("rch_status"))
+                            && entry.pointer("/freshness") == Some(&serde_json::json!("fresh"))
+                    })
+                }),
+            "evidence includes fresh rch_status",
+        )
     }
 
     #[test]

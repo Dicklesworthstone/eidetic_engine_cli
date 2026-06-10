@@ -11587,7 +11587,7 @@ ee status --workspace . --json
 
 **Expected emission.** Message contains: `snapshot pin ... force released`
 
-**Repair hint.** `retry`
+**Repair hint.** `ee status --workspace . --json`
 
 **Fixture.** [`tests/fixtures/failure_modes/snapshot_pin_force_released.json`](../tests/fixtures/failure_modes/snapshot_pin_force_released.json)
 
