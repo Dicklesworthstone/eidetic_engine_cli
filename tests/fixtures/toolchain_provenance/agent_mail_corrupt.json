@@ -1,0 +1,45 @@
+{
+  "schema": "ee.toolchain_provenance.v1",
+  "collectedAt": "2026-06-10T21:10:00Z",
+  "workspaceFingerprint": "d37f1e828e51",
+  "redactionStatus": "paths_workspace_relative_or_hashed_no_content",
+  "tools": [
+    {
+      "tool": "agent_mail",
+      "kind": "service",
+      "resolvedPath": null,
+      "version": "1.3.0",
+      "binaryHash": null,
+      "sourceHint": "unknown",
+      "freshness": "health_corrupt",
+      "degraded": [
+        {
+          "code": "health_corrupt",
+          "severity": "high",
+          "message": "Agent Mail health reports recovery.mode=corrupt; write/query paths intermittently fail and pre-commit hooks may hang.",
+          "repair": "Coordinate an operator-run store repair before relying on live reservations."
+        }
+      ],
+      "checkedAt": "2026-06-10T21:10:00Z"
+    },
+    {
+      "tool": "ee",
+      "kind": "binary",
+      "resolvedPath": "hashed:a1b2c3d4e5f6",
+      "version": "0.8.1",
+      "binaryHash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sourceHint": "release_install",
+      "freshness": "current",
+      "degraded": [],
+      "checkedAt": "2026-06-10T21:10:00Z"
+    }
+  ],
+  "scriptHashes": [
+    {
+      "script": "scripts/agent_mail_snapshot.sh",
+      "blake3": "blake3:3333333333333333333333333333333333333333333333333333333333333333",
+      "tracked": true
+    }
+  ],
+  "degraded": []
+}

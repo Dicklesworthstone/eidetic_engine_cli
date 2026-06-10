@@ -1,0 +1,70 @@
+{
+  "schema": "ee.toolchain_provenance.v1",
+  "collectedAt": "2026-06-10T21:15:00Z",
+  "workspaceFingerprint": "d37f1e828e51",
+  "redactionStatus": "paths_workspace_relative_or_hashed_no_content",
+  "tools": [
+    {
+      "tool": "bv",
+      "kind": "binary",
+      "resolvedPath": "hashed:456789abcdef",
+      "version": null,
+      "binaryHash": "blake3:4444444444444444444444444444444444444444444444444444444444444444",
+      "sourceHint": "release_install",
+      "freshness": "command_timeout",
+      "degraded": [
+        {
+          "code": "command_timeout",
+          "severity": "low",
+          "message": "bv --robot-triage produced no output inside the bounded probe window; ranking treated as advisory-unavailable.",
+          "repair": "Route work selection through ee swarm brief / work-packet instead of raw bv probes."
+        }
+      ],
+      "checkedAt": "2026-06-10T21:15:00Z"
+    },
+    {
+      "tool": "rch",
+      "kind": "binary",
+      "resolvedPath": "hashed:0f9e8d7c6b5a",
+      "version": "0.4.2",
+      "binaryHash": "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sourceHint": "release_install",
+      "freshness": "command_timeout",
+      "degraded": [
+        {
+          "code": "command_timeout",
+          "severity": "warning",
+          "message": "rch status probe timed out; remote verification posture unknown.",
+          "repair": "Retry rch status with a bounded timeout before launching Cargo verification."
+        }
+      ],
+      "checkedAt": "2026-06-10T21:15:00Z"
+    },
+    {
+      "tool": "cass",
+      "kind": "binary",
+      "resolvedPath": "hashed:abcdef012345",
+      "version": null,
+      "binaryHash": null,
+      "sourceHint": "unknown",
+      "freshness": "version_unknown",
+      "degraded": [
+        {
+          "code": "toolchain_hash_unavailable",
+          "severity": "info",
+          "message": "cass binary resolved but could not be hashed inside the probe budget."
+        }
+      ],
+      "checkedAt": "2026-06-10T21:15:00Z"
+    }
+  ],
+  "scriptHashes": [],
+  "degraded": [
+    {
+      "code": "toolchain_probe_timeout",
+      "severity": "low",
+      "message": "2 of 8 tool probes exceeded the bounded timeout; rows carry command_timeout freshness.",
+      "repair": null
+    }
+  ]
+}

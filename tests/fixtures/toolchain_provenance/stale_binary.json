@@ -1,0 +1,39 @@
+{
+  "schema": "ee.toolchain_provenance.v1",
+  "collectedAt": "2026-06-10T21:05:00Z",
+  "workspaceFingerprint": "d37f1e828e51",
+  "redactionStatus": "paths_workspace_relative_or_hashed_no_content",
+  "tools": [
+    {
+      "tool": "ee",
+      "kind": "binary",
+      "resolvedPath": "hashed:a1b2c3d4e5f6",
+      "version": "0.5.0",
+      "binaryHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+      "sourceHint": "release_install",
+      "freshness": "stale_binary",
+      "degraded": [
+        {
+          "code": "stale_binary",
+          "severity": "medium",
+          "message": "Installed ee 0.5.0 rejects --claim-gate; source/docs contract requires 0.8.x.",
+          "repair": "Coordinate an approved RCH/release-path rebuild; do not cargo-install locally."
+        }
+      ],
+      "checkedAt": "2026-06-10T21:05:00Z"
+    },
+    {
+      "tool": "cargo",
+      "kind": "binary",
+      "resolvedPath": "hashed:fedcba987654",
+      "version": "1.92.0-nightly",
+      "binaryHash": "blake3:2222222222222222222222222222222222222222222222222222222222222222",
+      "sourceHint": "system_package",
+      "freshness": "current",
+      "degraded": [],
+      "checkedAt": "2026-06-10T21:05:00Z"
+    }
+  ],
+  "scriptHashes": [],
+  "degraded": []
+}

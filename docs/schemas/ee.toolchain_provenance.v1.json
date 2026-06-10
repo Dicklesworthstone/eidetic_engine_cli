@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.toolchain_provenance.v1.json",
+  "title": "ee.toolchain_provenance.v1",
+  "description": "Redaction-safe capsule recording the observed coordination toolchain (ee, rch, br, bv, Agent Mail, cass, git, cargo, scripts) at evidence-collection time. ADR 0072. Observations only: per ADR 0072 §5 a capsule can remove claim authority in consumers but never adds it; a fully current capsule is never sufficient evidence to claim work.",
+  "type": "object",
+  "required": [
+    "schema",
+    "collectedAt",
+    "workspaceFingerprint",
+    "redactionStatus",
+    "tools",
+    "scriptHashes",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.toolchain_provenance.v1"
+    },
+    "collectedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "workspaceFingerprint": {
+      "type": "string",
+      "description": "Existing short workspace fingerprint (hex); never the raw workspace path.",
+      "pattern": "^[0-9a-f]{12,64}$"
+    },
+    "redactionStatus": {
+      "type": "string",
+      "const": "paths_workspace_relative_or_hashed_no_content"
+    },
+    "tools": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/toolRow"}
+    },
+    "scriptHashes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/scriptHashRow"}
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradedEntry"}
+    }
+  },
+  "$defs": {
+    "freshnessState": {
+      "type": "string",
+      "enum": [
+        "current",
+        "stale_binary",
+        "source_mismatch",
+        "wrapper_missing",
+        "health_corrupt",
+        "command_timeout",
+        "version_unknown",
+        "unsupported_platform"
+      ]
+    },
+    "redactedPath": {
+      "type": "string",
+      "description": "Workspace-relative path, or hashed:<blake3-12> for paths outside the workspace. Absolute paths are forbidden.",
+      "pattern": "^(hashed:[0-9a-f]{12}|[^/].*)$",
+      "not": {"pattern": "^/"}
+    },
+    "toolRow": {
+      "type": "object",
+      "required": [
+        "tool",
+        "kind",
+        "resolvedPath",
+        "version",
+        "binaryHash",
+        "sourceHint",
+        "freshness",
+        "degraded",
+        "checkedAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tool": {
+          "type": "string",
+          "enum": ["ee", "rch", "br", "bv", "agent_mail", "cass", "git", "cargo"]
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["binary", "service", "script_suite"]
+        },
+        "resolvedPath": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/redactedPath"}
+          ]
+        },
+        "version": {
+          "type": ["string", "null"],
+          "maxLength": 128
+        },
+        "binaryHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^blake3:[0-9a-f]{64}$"}
+          ]
+        },
+        "sourceHint": {
+          "type": "string",
+          "enum": ["release_install", "cargo_target", "system_package", "unknown"]
+        },
+        "freshness": {"$ref": "#/$defs/freshnessState"},
+        "degraded": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/degradedEntry"}
+        },
+        "checkedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "scriptHashRow": {
+      "type": "object",
+      "required": ["script", "blake3", "tracked"],
+      "additionalProperties": false,
+      "properties": {
+        "script": {
+          "type": "string",
+          "description": "Workspace-relative scripts/ path.",
+          "pattern": "^scripts/[^ ]+$"
+        },
+        "blake3": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "tracked": {
+          "type": "boolean",
+          "description": "True when the script is tracked at the collected git revision."
+        }
+      }
+    },
+    "degradedEntry": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "toolchain_probe_timeout",
+            "toolchain_tool_unresolved",
+            "toolchain_hash_unavailable",
+            "stale_binary",
+            "source_mismatch",
+            "wrapper_missing",
+            "health_corrupt",
+            "command_timeout",
+            "version_unknown",
+            "unsupported_platform"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "repair": {
+          "type": ["string", "null"],
+          "maxLength": 256
+        }
+      }
+    }
+  },
+  "x-ee-status": {
+    "shipped": false,
+    "available_in_build": false,
+    "tracking_bead": "bd-aunn3.2"
+  }
+}

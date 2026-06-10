@@ -1,0 +1,65 @@
+{
+  "schema": "ee.toolchain_provenance.v1",
+  "collectedAt": "2026-06-10T21:00:00Z",
+  "workspaceFingerprint": "d37f1e828e51",
+  "redactionStatus": "paths_workspace_relative_or_hashed_no_content",
+  "tools": [
+    {
+      "tool": "ee",
+      "kind": "binary",
+      "resolvedPath": "hashed:a1b2c3d4e5f6",
+      "version": "0.8.1",
+      "binaryHash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sourceHint": "release_install",
+      "freshness": "current",
+      "degraded": [],
+      "checkedAt": "2026-06-10T21:00:00Z"
+    },
+    {
+      "tool": "rch",
+      "kind": "binary",
+      "resolvedPath": "hashed:0f9e8d7c6b5a",
+      "version": "0.4.2",
+      "binaryHash": "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sourceHint": "release_install",
+      "freshness": "current",
+      "degraded": [],
+      "checkedAt": "2026-06-10T21:00:00Z"
+    },
+    {
+      "tool": "br",
+      "kind": "binary",
+      "resolvedPath": "hashed:123456789abc",
+      "version": "0.9.0",
+      "binaryHash": "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "sourceHint": "release_install",
+      "freshness": "current",
+      "degraded": [],
+      "checkedAt": "2026-06-10T21:00:00Z"
+    },
+    {
+      "tool": "agent_mail",
+      "kind": "service",
+      "resolvedPath": null,
+      "version": "1.3.0",
+      "binaryHash": null,
+      "sourceHint": "unknown",
+      "freshness": "current",
+      "degraded": [],
+      "checkedAt": "2026-06-10T21:00:00Z"
+    }
+  ],
+  "scriptHashes": [
+    {
+      "script": "scripts/br_retry.sh",
+      "blake3": "blake3:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "tracked": true
+    },
+    {
+      "script": "scripts/rch_verify.sh",
+      "blake3": "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "tracked": true
+    }
+  ],
+  "degraded": []
+}
