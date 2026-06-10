@@ -100,6 +100,7 @@ pub mod qos;
 pub mod quarantine;
 pub mod query_miss_cluster;
 pub mod read_fence;
+pub mod recall;
 pub mod recorder;
 pub mod rehearse;
 pub mod repro;

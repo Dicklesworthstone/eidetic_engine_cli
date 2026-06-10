@@ -3,6 +3,14 @@
 //! Anchors are intentionally metadata-only. Raw anchor values never become
 //! durable payloads; callers store a domain-separated BLAKE3 hash plus a short
 //! redacted display token.
+//!
+//! One scoped exception (ADR 0064): the derived, rebuildable
+//! `memory_anchor_index` reverse index persists the *normalized* value for
+//! `Path` and `Symbol` anchors only — workspace-relative repo paths and code
+//! identifiers, never commands, env vars, or free text — because glob/exact
+//! reverse lookup cannot run against hashes. [`extract_memory_anchor_surfaces`]
+//! is the single extraction walk both consumers share, so the search-document
+//! metadata and the reverse index cannot drift from each other.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -168,22 +176,51 @@ impl CreateMemoryAnchorInput {
         provenance: impl Into<String>,
         generation: i64,
     ) -> Option<Self> {
+        Self::from_raw_with_normalized(
+            memory_id,
+            anchor_kind,
+            raw_value,
+            confidence,
+            source,
+            provenance,
+            generation,
+        )
+        .map(|(anchor, _normalized)| anchor)
+    }
+
+    /// Like [`Self::from_raw`], but also returns the normalized anchor value
+    /// the hash was computed over. The normalized value is what the ADR 0064
+    /// reverse index persists for `Path`/`Symbol` anchors; it never enters the
+    /// `memory_anchors` row itself.
+    #[must_use]
+    pub fn from_raw_with_normalized(
+        memory_id: &str,
+        anchor_kind: MemoryAnchorKind,
+        raw_value: &str,
+        confidence: f32,
+        source: MemoryAnchorSource,
+        provenance: impl Into<String>,
+        generation: i64,
+    ) -> Option<(Self, String)> {
         let normalized = normalize_anchor_value(anchor_kind, raw_value)?;
         let anchor_value_hash = memory_anchor_value_hash(anchor_kind, &normalized);
         let captured_span_hash = memory_anchor_span_hash(anchor_kind, &normalized);
         let redacted_anchor_value = redacted_anchor_value(anchor_kind, &anchor_value_hash);
-        Some(Self {
-            memory_id: memory_id.to_owned(),
-            anchor_kind,
-            anchor_value_hash,
-            redacted_anchor_value,
-            confidence: bounded_confidence(confidence),
-            source,
-            provenance: provenance.into(),
-            captured_span_hash,
-            freshness_state: MemoryAnchorFreshnessState::Current,
-            generation: generation.max(0),
-        })
+        Some((
+            Self {
+                memory_id: memory_id.to_owned(),
+                anchor_kind,
+                anchor_value_hash,
+                redacted_anchor_value,
+                confidence: bounded_confidence(confidence),
+                source,
+                provenance: provenance.into(),
+                captured_span_hash,
+                freshness_state: MemoryAnchorFreshnessState::Current,
+                generation: generation.max(0),
+            },
+            normalized,
+        ))
     }
 }
 
@@ -338,13 +375,28 @@ pub fn memory_anchor_value_hash(anchor_kind: MemoryAnchorKind, normalized_value:
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 
+/// One extracted anchor together with the normalized value its hash was
+/// computed over. The `anchor` half is the durable, redaction-safe
+/// `memory_anchors` payload; `normalized_value` is consumed only by the
+/// ADR 0064 derived reverse index (and only for `Path`/`Symbol` kinds).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtractedAnchorSurface {
+    pub anchor: CreateMemoryAnchorInput,
+    pub normalized_value: String,
+}
+
+/// Single anchor-extraction walk shared by the search-document builder and the
+/// ADR 0064 reverse index ("single extractor, two consumers"). Returns each
+/// anchor with its normalized value so reverse-index maintenance can persist
+/// `normalized_path`/`symbol` without re-deriving (and drifting from) the
+/// normalization rules.
 #[must_use]
-pub fn extract_precision_memory_anchors(
+pub fn extract_memory_anchor_surfaces(
     memory_id: &str,
     content: &str,
     source: MemoryAnchorSource,
     provenance: Option<&str>,
-) -> Vec<CreateMemoryAnchorInput> {
+) -> Vec<ExtractedAnchorSurface> {
     let mut anchors = BTreeMap::new();
     let provenance = provenance.unwrap_or("memory.content");
 
@@ -358,11 +410,24 @@ pub fn extract_precision_memory_anchors(
     anchors.into_values().collect()
 }
 
+#[must_use]
+pub fn extract_precision_memory_anchors(
+    memory_id: &str,
+    content: &str,
+    source: MemoryAnchorSource,
+    provenance: Option<&str>,
+) -> Vec<CreateMemoryAnchorInput> {
+    extract_memory_anchor_surfaces(memory_id, content, source, provenance)
+        .into_iter()
+        .map(|surface| surface.anchor)
+        .collect()
+}
+
 fn extract_explicit_anchors(
     memory_id: &str,
     content: &str,
     provenance: &str,
-    anchors: &mut BTreeMap<(MemoryAnchorKind, String), CreateMemoryAnchorInput>,
+    anchors: &mut BTreeMap<(MemoryAnchorKind, String), ExtractedAnchorSurface>,
 ) {
     for token in content.split_whitespace() {
         let cleaned = trim_token(token);
@@ -396,7 +461,7 @@ fn extract_schema_anchors(
     content: &str,
     source: MemoryAnchorSource,
     provenance: &str,
-    anchors: &mut BTreeMap<(MemoryAnchorKind, String), CreateMemoryAnchorInput>,
+    anchors: &mut BTreeMap<(MemoryAnchorKind, String), ExtractedAnchorSurface>,
 ) {
     for token in content.split_whitespace() {
         let cleaned = trim_token(token);
@@ -420,7 +485,7 @@ fn extract_code_fragment_anchors(
     fragment: &str,
     source: MemoryAnchorSource,
     provenance: &str,
-    anchors: &mut BTreeMap<(MemoryAnchorKind, String), CreateMemoryAnchorInput>,
+    anchors: &mut BTreeMap<(MemoryAnchorKind, String), ExtractedAnchorSurface>,
 ) {
     for line in fragment
         .lines()
@@ -535,7 +600,7 @@ fn extract_code_fragment_anchors(
 }
 
 fn push_raw_anchor(
-    anchors: &mut BTreeMap<(MemoryAnchorKind, String), CreateMemoryAnchorInput>,
+    anchors: &mut BTreeMap<(MemoryAnchorKind, String), ExtractedAnchorSurface>,
     memory_id: &str,
     anchor_kind: MemoryAnchorKind,
     raw_value: &str,
@@ -544,7 +609,7 @@ fn push_raw_anchor(
     provenance: &str,
     generation: i64,
 ) {
-    let Some(anchor) = CreateMemoryAnchorInput::from_raw(
+    let Some((anchor, normalized_value)) = CreateMemoryAnchorInput::from_raw_with_normalized(
         memory_id,
         anchor_kind,
         raw_value,
@@ -557,7 +622,10 @@ fn push_raw_anchor(
     };
     anchors
         .entry((anchor.anchor_kind, anchor.anchor_value_hash.clone()))
-        .or_insert(anchor);
+        .or_insert(ExtractedAnchorSurface {
+            anchor,
+            normalized_value,
+        });
 }
 
 fn code_fragments(content: &str) -> Vec<&str> {
@@ -898,6 +966,58 @@ mod tests {
             anchors
                 .iter()
                 .all(|anchor| !anchor.redacted_anchor_value.contains("src/db/mod.rs"))
+        );
+    }
+
+    #[test]
+    fn surface_extractor_carries_normalized_values_and_matches_precision_anchors() {
+        let memory_id = "mem_01234567890123456789012345";
+        let content =
+            "Touch `src/core/recall.rs` near `DbConnection::open_memory()` before `cargo check`.";
+        let surfaces = extract_memory_anchor_surfaces(
+            memory_id,
+            content,
+            MemoryAnchorSource::Remember,
+            Some("test://surface"),
+        );
+        let anchors = extract_precision_memory_anchors(
+            memory_id,
+            content,
+            MemoryAnchorSource::Remember,
+            Some("test://surface"),
+        );
+        // Same walk, same anchors: the precision extractor is exactly the
+        // surface extractor minus the normalized values.
+        assert_eq!(
+            surfaces
+                .iter()
+                .map(|surface| surface.anchor.clone())
+                .collect::<Vec<_>>(),
+            anchors
+        );
+        let path_surface = surfaces
+            .iter()
+            .find(|surface| surface.anchor.anchor_kind == MemoryAnchorKind::Path)
+            .expect("path anchor extracted");
+        assert_eq!(path_surface.normalized_value, "src/core/recall.rs");
+        // The durable anchor payload stays redacted even though the surface
+        // carries the raw normalized value for the reverse index.
+        assert!(
+            !path_surface
+                .anchor
+                .redacted_anchor_value
+                .contains("recall.rs")
+        );
+        let symbol_surface = surfaces
+            .iter()
+            .find(|surface| surface.anchor.anchor_kind == MemoryAnchorKind::Symbol)
+            .expect("symbol anchor extracted");
+        assert_eq!(symbol_surface.normalized_value, "DbConnection::open_memory");
+        // Normalized hash agreement: hashing the carried value reproduces the
+        // anchor's stored hash, so reverse-index rows can be re-derived.
+        assert_eq!(
+            memory_anchor_value_hash(MemoryAnchorKind::Path, &path_surface.normalized_value),
+            path_surface.anchor.anchor_value_hash
         );
     }
 

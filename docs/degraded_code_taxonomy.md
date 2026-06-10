@@ -459,6 +459,13 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `journal_entry_truncated` | info | bd-1pi9m.2 — body/sidecar exceeded caps; deterministic truncation applied |
 | `journal_redaction_applied` | info | bd-1pi9m.2 — secret classes redacted before storage |
 
+#### Code-anchored recall (3)
+| Code | Severity | Bead |
+|------|----------|------|
+| `anchor_index_empty` | info | bd-u875s.2 — ADR 0064 §5: the anchor reverse index has no rows for this workspace (nothing anchored yet); never a hard error |
+| `anchor_index_stale` | low | bd-u875s.2 — ADR 0064 §5: reverse-index generation < DB generation; repair `ee index rebuild --workspace .` |
+| `recall_filtered_empty` | info | bd-u875s.2 — ADR 0064 §5: anchored rows matched the surface but `--kind`/`--level`/`--stale` filters removed them all (distinct from empty-index so hook authors can tell the difference) |
+
 #### Feedback (5)
 | Code | Severity | Bead |
 |------|----------|------|

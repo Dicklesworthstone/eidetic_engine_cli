@@ -182,6 +182,10 @@ name = "tiered_recall"
 harness = false
 
 [[bench]]
+name = "recall"
+harness = false
+
+[[bench]]
 name = "context_stream_bench"
 path = "benches/context_stream.rs"
 harness = false
