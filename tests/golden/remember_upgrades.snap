@@ -1,0 +1,25 @@
+---
+source: src/core/memory.rs, src/cli/mod.rs, src/db/mod.rs
+assertion: ergonomic remember upgrades — JSONL batch input, near-duplicate reinforcement, idempotent replay (bd-1pi9m.4)
+schema:
+  envelope: ee.response.v2
+  reinforce_audit_details: ee.audit.memory_reinforce.v1
+  reinforce_evidence_metadata: ee.remember.reinforce_evidence.v1
+contracts:
+  - remember --batch --stdin reads JSONL (one remember input object per line, `content` required) and validates + persists each line INDEPENDENTLY; one poisoned line cannot drop the rest of a harness flush
+  - batch responses carry data.results[] with per-line {line, status, memoryId|errorCode, errorMessage, reinforced, similarity, suggestedLinks}
+  - --stdin batches cap at 512 lines (REMEMBER_BATCH_MAX_LINES, mirrors the journal batch bound); exit 0 when >=1 line lands, exit 5 when all lines fail, usage errors exit 1 (--batch without --stdin, positional CONTENT with --batch)
+  - per-line `idempotencyKey` (or --idempotency-key in single mode) mirrors the ee outcome --event-id pattern; replaying the same key + content hash returns the original memoryId with status=already_recorded, the same key with different content is a per-line remember_idempotency_conflict usage error
+  - idempotency keys persist in remember_idempotency_keys (V075) keyed on (workspace_id, idempotency_key) with the BLAKE3 content hash of the canonical (trimmed) content
+  - remember --reinforce strengthens the top near-duplicate neighbor instead of inserting a new row when its cosine similarity >= [curation] duplicate_similarity (default 0.92; >= so exactly-at reinforces); below threshold falls through to the normal create path
+  - a reinforce write is one transaction: evidence span attached to the surviving memory (synthetic ee-remember-reinforce session), helpful-equivalent Beta-Bernoulli posterior update (alpha += 1), bounded confidence bump (monotonic non-decreasing, never above 1.0), memory.reinforce audit row
+  - memory.reinforce audit details carry similarity, threshold, sourceUris, contentHash, evidenceSpanId, prior/new confidence, prior/posterior (alpha, beta), reinforcedAt (the memories table has no last_reinforced_at column; updated_at is stamped with the same timestamp)
+  - reinforce responses report reinforced=true, the surviving memoryId, and the measured similarity; --reinforce composes with --batch (per-line reinforce override) and with --dry-run (would_reinforce, zero writes)
+  - batch --dry-run previews every line (would_store / would_reinforce) and never creates the database
+evidence:
+  - remember_idempotency_keys.idempotency_key
+  - remember_idempotency_keys.content_hash
+  - V075_REMEMBER_IDEMPOTENCY_KEYS
+  - audit_actions::MEMORY_REINFORCE
+  - remember_memory_batch_stdin
+  - remember_memory_with_controls

@@ -17,6 +17,7 @@ use serde::Serialize;
 use super::audit_lane::{
     AuditEvent as AuditLaneEvent, AuditLaneHandle, emit_with_direct_fallback, insert_audit_event,
 };
+use super::bayes::BetaPosterior;
 use super::config_surface::{ConfigSurfaceOptions, get_config};
 use super::index::{
     DEFAULT_INDEX_SUBDIR, IndexProcessingJobReport, process_index_job_for_connection,
@@ -31,10 +32,11 @@ use crate::curate::cluster_coherence::{ClusterCoherenceConfig, EmbeddingPoint, a
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
     AdvisoryLockId, ApplyMemoryLevelTransitionInput, CreateAuditInput,
-    CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
-    CreateSearchIndexJobInput, CreateWorkspaceInput, DbConnection, DbOperation,
-    MemoryContentSimHash, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType, StoredMemory,
-    StoredMemoryLink, audit_actions, generate_audit_id, generate_audit_id_seeded,
+    CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateMemoryInput,
+    CreateMemoryLinkInput, CreateRememberIdempotencyKeyInput, CreateSearchIndexJobInput,
+    CreateSessionInput, CreateWorkspaceInput, DbConnection, DbOperation, MemoryContentSimHash,
+    MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType, StoredMemory, StoredMemoryLink,
+    audit_actions, generate_audit_id, generate_audit_id_seeded,
 };
 use crate::models::{
     DomainError, MAX_TAG_BYTES, MemoryContent, MemoryId, MemoryKind, MemoryLevel,
@@ -45,7 +47,8 @@ use crate::obs::{AuditEvent, AuditOutcome, now_rfc3339_nanos};
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::search::HashEmbedder;
 use crate::search::simhash::{
-    EmbedDedupConfig, SimHash128, first_confirmed_simhash_candidate, ranked_simhash_candidates,
+    EmbedDedupConfig, SimHash128, cosine_similarity, first_confirmed_simhash_candidate,
+    ranked_simhash_candidates,
 };
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
@@ -4319,6 +4322,1182 @@ fn remember_usage_error(message: String) -> DomainError {
         message,
         repair: Some("ee remember --help".to_owned()),
     }
+}
+
+// =============================================================================
+// Remember ergonomic upgrades (bd-1pi9m.4)
+//
+// 1. `ee remember --batch --stdin`: JSONL batch input with per-line
+//    INDEPENDENT validation + persistence — one poisoned line cannot drop
+//    the rest of a harness flush (mirrors the journal batch surface,
+//    ADR 0062 §4).
+// 2. `ee remember --reinforce`: when the top near-duplicate neighbor's
+//    cosine similarity is at or above `[curation] duplicate_similarity`
+//    (default 0.92), strengthen the existing memory (evidence span +
+//    bounded Bayesian confidence bump + `memory.reinforce` audit row)
+//    instead of inserting a new row. Below threshold falls through to the
+//    normal create path.
+// 3. Idempotency keys: replaying the same key + content hash returns the
+//    original memory id with `status=already_recorded` (mirrors the
+//    `ee outcome --event-id` idempotency pattern).
+// =============================================================================
+
+/// Max JSONL lines accepted by `ee remember --batch --stdin` per invocation
+/// (mirrors the journal `--stdin` bound, ADR 0062 §4).
+pub const REMEMBER_BATCH_MAX_LINES: usize = 512;
+
+/// Default `[curation] duplicate_similarity` threshold used by
+/// `ee remember --reinforce` when the workspace config does not override it.
+pub const REMEMBER_DEFAULT_DUPLICATE_SIMILARITY: f32 = 0.92;
+
+/// Audit details schema for `memory.reinforce` rows.
+pub const REMEMBER_REINFORCE_AUDIT_SCHEMA_V1: &str = "ee.audit.memory_reinforce.v1";
+
+/// Per-line error code for an idempotency key replayed with different content.
+pub const REMEMBER_IDEMPOTENCY_CONFLICT_CODE: &str = "remember_idempotency_conflict";
+
+/// Metadata schema for evidence spans attached by `ee remember --reinforce`.
+const REMEMBER_REINFORCE_EVIDENCE_SCHEMA_V1: &str = "ee.remember.reinforce_evidence.v1";
+const REMEMBER_REINFORCE_CANDIDATE_LIMIT: usize = 16;
+/// Most recent live memories scanned for reinforce neighbor discovery.
+/// Bounds in-process SimHash fingerprinting on large workspaces.
+const REMEMBER_REINFORCE_SCAN_LIMIT: usize = 256;
+/// SimHash candidate gate for reinforce neighbor discovery. Wider than the
+/// embed-dedup gate (12) because the reinforce cosine threshold (0.92
+/// default) admits softer near-duplicates than dedup's 0.97 floor.
+const REMEMBER_REINFORCE_HAMMING_K: u32 = 32;
+/// Synthetic per-workspace session that owns `ee remember --reinforce`
+/// evidence spans (`evidence_spans.session_id` is NOT NULL).
+const REMEMBER_REINFORCE_SESSION_KEY: &str = "ee-remember-reinforce";
+const REMEMBER_IDEMPOTENCY_KEY_MAX_BYTES: usize = 128;
+
+/// Write-control toggles layered over [`RememberMemoryOptions`] (bd-1pi9m.4).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RememberWriteControls<'a> {
+    /// Strengthen the top near-duplicate neighbor instead of creating a new
+    /// row when its similarity clears the configured threshold.
+    pub reinforce: bool,
+    /// Optional idempotency key for replay-safe writes.
+    pub idempotency_key: Option<&'a str>,
+}
+
+/// Outcome of one controlled remember write (bd-1pi9m.4).
+#[derive(Clone, Debug, PartialEq)]
+pub enum RememberOutcome {
+    /// A new memory row was created (or previewed under `--dry-run`).
+    Created(Box<RememberMemoryReport>),
+    /// The idempotency key + content hash matched a prior write; the
+    /// original memory id is returned and nothing is written.
+    AlreadyRecorded(RememberAlreadyRecordedReport),
+    /// The top near-duplicate neighbor absorbed this write.
+    Reinforced(RememberReinforceReport),
+}
+
+/// Result of an idempotent `ee remember` replay (bd-1pi9m.4): the key and
+/// content hash matched a prior write, so no new row was created.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RememberAlreadyRecordedReport {
+    /// Package version for stable output.
+    pub version: &'static str,
+    /// Canonical workspace ID.
+    pub workspace_id: String,
+    /// Resolved database path.
+    pub database_path: PathBuf,
+    /// Memory id recorded by the original write.
+    pub memory_id: String,
+    /// Idempotency key that matched.
+    pub idempotency_key: String,
+    /// Whether the replay ran under `--dry-run`.
+    pub dry_run: bool,
+}
+
+impl RememberAlreadyRecordedReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "command": "remember",
+            "version": self.version,
+            "mode": "idempotent_replay",
+            "status": "already_recorded",
+            "memoryId": &self.memory_id,
+            "workspaceId": &self.workspace_id,
+            "databasePath": self.database_path.display().to_string(),
+            "idempotencyKey": &self.idempotency_key,
+            "reinforced": false,
+            "persisted": false,
+            "dryRun": self.dry_run,
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        format!(
+            "Already recorded: {} (idempotency key `{}`)\n  No new memory row was written.\n",
+            self.memory_id, self.idempotency_key
+        )
+    }
+}
+
+/// Result of a remember-time reinforcement (bd-1pi9m.4): the top
+/// near-duplicate neighbor absorbed this write instead of a new row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RememberReinforceReport {
+    /// Package version for stable output.
+    pub version: &'static str,
+    /// Canonical workspace ID.
+    pub workspace_id: String,
+    /// Canonical workspace path.
+    pub workspace_path: PathBuf,
+    /// Resolved database path.
+    pub database_path: PathBuf,
+    /// Surviving (reinforced) memory id.
+    pub memory_id: String,
+    /// Cosine similarity between the new content and the surviving memory.
+    pub similarity: f32,
+    /// Threshold the similarity was measured against.
+    pub threshold: f32,
+    /// Always `true`; mirrors the per-line batch field.
+    pub reinforced: bool,
+    /// Whether this was a dry run.
+    pub dry_run: bool,
+    /// Whether the reinforcement transaction was committed.
+    pub persisted: bool,
+    /// Memory confidence before the bounded bump.
+    pub confidence_before: f32,
+    /// Memory confidence after the bounded bump (monotonic, <= 1.0).
+    pub confidence_after: f32,
+    /// Evidence span attached to the surviving memory.
+    pub evidence_span_id: Option<String>,
+    /// `memory.reinforce` audit row id.
+    pub audit_id: Option<String>,
+    /// Provenance URIs folded into the surviving memory's evidence.
+    pub source_uris: Vec<String>,
+    /// Reinforcement timestamp stamped on the memory row's `updated_at`
+    /// and recorded in the audit details (the memories table carries no
+    /// dedicated `last_reinforced_at` column).
+    pub last_reinforced_at: Option<String>,
+}
+
+impl RememberReinforceReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "command": "remember",
+            "version": self.version,
+            "mode": "reinforce",
+            "status": if self.dry_run { "would_reinforce" } else { "reinforced" },
+            "reinforced": self.reinforced,
+            "dryRun": self.dry_run,
+            "persisted": self.persisted,
+            "memoryId": &self.memory_id,
+            "workspaceId": &self.workspace_id,
+            "databasePath": self.database_path.display().to_string(),
+            "similarity": self.similarity,
+            "threshold": self.threshold,
+            "confidenceBefore": self.confidence_before,
+            "confidenceAfter": self.confidence_after,
+            "evidenceSpanId": &self.evidence_span_id,
+            "auditId": &self.audit_id,
+            "sourceUris": &self.source_uris,
+            "lastReinforcedAt": &self.last_reinforced_at,
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = if self.dry_run {
+            format!(
+                "DRY RUN: Would reinforce {} (similarity {:.4} >= threshold {:.4})\n",
+                self.memory_id, self.similarity, self.threshold
+            )
+        } else {
+            format!(
+                "Reinforced {} (similarity {:.4} >= threshold {:.4})\n",
+                self.memory_id, self.similarity, self.threshold
+            )
+        };
+        output.push_str(&format!(
+            "  Confidence: {:.4} -> {:.4}\n",
+            self.confidence_before, self.confidence_after
+        ));
+        if let Some(evidence_span_id) = &self.evidence_span_id {
+            output.push_str(&format!("  Evidence span: {evidence_span_id}\n"));
+        }
+        if let Some(audit_id) = &self.audit_id {
+            output.push_str(&format!("  Audit: {audit_id}\n"));
+        }
+        output
+    }
+}
+
+/// `>=` so a similarity exactly at the configured threshold reinforces.
+#[must_use]
+pub fn remember_reinforce_should_apply(similarity: f32, threshold: f32) -> bool {
+    similarity >= threshold
+}
+
+fn remember_content_hash(content: &str) -> String {
+    format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex())
+}
+
+fn remember_duplicate_similarity_threshold(workspace_path: &Path) -> f32 {
+    crate::config::workspace_config(workspace_path)
+        .and_then(|config| config.curation.duplicate_similarity)
+        .map_or(REMEMBER_DEFAULT_DUPLICATE_SIMILARITY, |value| value as f32)
+}
+
+fn validate_remember_idempotency_key(raw: &str) -> Result<String, DomainError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(remember_usage_error(
+            "idempotency key cannot be empty".to_owned(),
+        ));
+    }
+    if trimmed.len() > REMEMBER_IDEMPOTENCY_KEY_MAX_BYTES {
+        return Err(remember_usage_error(format!(
+            "idempotency key exceeds the {REMEMBER_IDEMPOTENCY_KEY_MAX_BYTES}-byte cap ({} bytes)",
+            trimmed.len()
+        )));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(remember_usage_error(
+            "idempotency key must not contain control characters".to_owned(),
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn remember_idempotency_conflict_error(idempotency_key: &str) -> DomainError {
+    DomainError::UsageCodeWithDetails {
+        code: REMEMBER_IDEMPOTENCY_CONFLICT_CODE,
+        message: format!(
+            "idempotency key already exists with different content: {idempotency_key}"
+        ),
+        repair: Some(
+            "Replay the original content for this key, or supply a new --idempotency-key."
+                .to_owned(),
+        ),
+        details_json: serde_json::json!({ "idempotencyKey": idempotency_key }).to_string(),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RememberReinforceNeighbor {
+    memory_id: String,
+    similarity: f32,
+    hamming_distance: u32,
+}
+
+/// Find the top near-duplicate neighbor for `content`. SimHash fingerprints
+/// computed in-process over the most recent live memories gate the search
+/// (the stored `content_simhash` column is only populated when embed-dedup
+/// is enabled, so it cannot be relied on here); cosine similarity ranks
+/// the gated candidates. Deterministic: ties on similarity break on
+/// (hamming distance, memory id) ascending.
+fn remember_reinforce_top_neighbor(
+    connection: &DbConnection,
+    workspace_id: &str,
+    content: &str,
+) -> Result<Option<RememberReinforceNeighbor>, DomainError> {
+    let memories = connection
+        .list_memories(workspace_id, None, false)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list reinforce candidate memories: {error}"),
+            repair: Some("Run `ee doctor --json` and inspect the memories table.".to_owned()),
+        })?;
+    if memories.is_empty() {
+        return Ok(None);
+    }
+
+    // `list_memories` orders by id ascending; mem_ ids carry ULID payloads,
+    // so the tail of the list is the most recent window.
+    let window_start = memories.len().saturating_sub(REMEMBER_REINFORCE_SCAN_LIMIT);
+    let query_fingerprint = crate::search::simhash::simhash_128(content);
+    let mut gated: Vec<(u32, &StoredMemory)> = memories[window_start..]
+        .iter()
+        .filter_map(|memory| {
+            let fingerprint = crate::search::simhash::simhash_128(&memory.content);
+            let distance = crate::search::simhash::hamming_distance(query_fingerprint, fingerprint);
+            (distance <= REMEMBER_REINFORCE_HAMMING_K).then_some((distance, memory))
+        })
+        .collect();
+    gated.sort_by(|(left_distance, left), (right_distance, right)| {
+        left_distance
+            .cmp(right_distance)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    gated.truncate(REMEMBER_REINFORCE_CANDIDATE_LIMIT);
+
+    let embedder = HashEmbedder::default_256();
+    let query_embedding = embedder.embed_sync(content);
+    let mut top: Option<RememberReinforceNeighbor> = None;
+    for (hamming_distance, memory) in gated {
+        let candidate_embedding = embedder.embed_sync(&memory.content);
+        let Some(similarity) = cosine_similarity(&query_embedding, &candidate_embedding) else {
+            continue;
+        };
+        let better = match &top {
+            None => true,
+            Some(current) => match similarity.partial_cmp(&current.similarity) {
+                Some(Ordering::Greater) => true,
+                Some(Ordering::Equal) => {
+                    (hamming_distance, memory.id.as_str())
+                        < (current.hamming_distance, current.memory_id.as_str())
+                }
+                _ => false,
+            },
+        };
+        if better {
+            top = Some(RememberReinforceNeighbor {
+                memory_id: memory.id.clone(),
+                similarity,
+                hamming_distance,
+            });
+        }
+    }
+    Ok(top)
+}
+
+fn generate_remember_reinforce_session_id() -> String {
+    let memory_id = MemoryId::now().to_string();
+    let payload = memory_id.trim_start_matches("mem_");
+    format!("sess_{payload}")
+}
+
+fn generate_remember_evidence_span_id() -> String {
+    let memory_id = MemoryId::now().to_string();
+    let payload = memory_id.trim_start_matches("mem_");
+    format!("ev_{payload}")
+}
+
+struct RememberReinforceContext<'a> {
+    workspace_id: &'a str,
+    workspace_path: &'a Path,
+    database_path: &'a Path,
+    target_memory_id: &'a str,
+    similarity: f32,
+    threshold: f32,
+    canonical_content: &'a str,
+    content_hash: &'a str,
+    source: Option<&'a str>,
+    idempotency_key: Option<&'a str>,
+    dry_run: bool,
+}
+
+fn remember_reinforce_storage_error(
+    error: impl std::fmt::Display,
+    target_memory_id: &str,
+) -> DomainError {
+    DomainError::Storage {
+        message: format!("Failed to reinforce memory {target_memory_id}: {error}"),
+        repair: Some("ee doctor --json".to_owned()),
+    }
+}
+
+/// Apply (or preview, under `--dry-run`) one reinforcement: attach the new
+/// source as an evidence span on the surviving memory, apply a bounded
+/// helpful-equivalent Bayesian confidence bump, and write the
+/// `memory.reinforce` audit row — all in one transaction.
+fn apply_remember_reinforce(
+    connection: &DbConnection,
+    context: &RememberReinforceContext<'_>,
+) -> Result<RememberReinforceReport, DomainError> {
+    let existing = connection
+        .get_memory(context.target_memory_id)
+        .map_err(|error| remember_reinforce_storage_error(error, context.target_memory_id))?
+        .ok_or_else(|| DomainError::Storage {
+            message: format!(
+                "Reinforce target memory {} disappeared before the write",
+                context.target_memory_id
+            ),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    let confidence_before = existing.confidence;
+    let prior = connection
+        .get_memory_bayes_posterior(context.target_memory_id)
+        .map_err(|error| remember_reinforce_storage_error(error, context.target_memory_id))?
+        .and_then(|(alpha, beta)| BetaPosterior::new(alpha, beta))
+        .unwrap_or_else(BetaPosterior::jeffreys);
+    // Helpful-equivalent weight: the same `alpha += 1` update the feedback
+    // path applies for an `ee outcome --signal helpful` event.
+    let posterior = prior.update_helpful();
+    // Bounded, monotonic non-decreasing confidence bump: add the posterior
+    // mean gain from one helpful-equivalent observation, never exceed 1.0,
+    // never decrease.
+    let mean_gain = (posterior.mean() - prior.mean()).max(0.0) as f32;
+    let confidence_after = (confidence_before + mean_gain).clamp(confidence_before, 1.0_f32);
+    let source_uris = context
+        .source
+        .map(|source| {
+            ProvenanceUri::from_str(source)
+                .map(|uri| uri.to_string())
+                .map_err(|error| remember_usage_error(format!("invalid provenance URI: {error}")))
+        })
+        .transpose()?
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    if context.dry_run {
+        return Ok(RememberReinforceReport {
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: context.workspace_id.to_owned(),
+            workspace_path: context.workspace_path.to_path_buf(),
+            database_path: context.database_path.to_path_buf(),
+            memory_id: context.target_memory_id.to_owned(),
+            similarity: context.similarity,
+            threshold: context.threshold,
+            reinforced: true,
+            dry_run: true,
+            persisted: false,
+            confidence_before,
+            confidence_after,
+            evidence_span_id: None,
+            audit_id: None,
+            source_uris,
+            last_reinforced_at: None,
+        });
+    }
+
+    let reinforced_at = Utc::now().to_rfc3339();
+    let audit_id = generate_audit_id();
+    let evidence_span_id = generate_remember_evidence_span_id();
+    let existing_session = connection
+        .get_session_by_cass_id(context.workspace_id, REMEMBER_REINFORCE_SESSION_KEY)
+        .map_err(|error| remember_reinforce_storage_error(error, context.target_memory_id))?;
+    let (session_id, session_exists) = match existing_session {
+        Some(session) => (session.id, true),
+        None => (generate_remember_reinforce_session_id(), false),
+    };
+    let evidence_metadata = serde_json::json!({
+        "schema": REMEMBER_REINFORCE_EVIDENCE_SCHEMA_V1,
+        "command": "ee remember --reinforce",
+        "targetMemoryId": context.target_memory_id,
+        "similarity": context.similarity,
+        "threshold": context.threshold,
+        "sourceUris": &source_uris,
+        "reinforcedAt": &reinforced_at,
+    })
+    .to_string();
+    let evidence_input = CreateEvidenceSpanInput {
+        workspace_id: context.workspace_id.to_owned(),
+        session_id: session_id.clone(),
+        memory_id: Some(context.target_memory_id.to_owned()),
+        cass_span_id: format!("reinforce:{evidence_span_id}"),
+        span_kind: "summary".to_owned(),
+        start_line: 1,
+        end_line: 1,
+        start_byte: None,
+        end_byte: None,
+        role: Some("reinforcement".to_owned()),
+        excerpt: context.canonical_content.to_owned(),
+        content_hash: context.content_hash.to_owned(),
+        metadata_json: Some(evidence_metadata),
+    };
+    let audit_details = serde_json::json!({
+        "schema": REMEMBER_REINFORCE_AUDIT_SCHEMA_V1,
+        "command": "ee remember --reinforce",
+        "memoryId": context.target_memory_id,
+        "similarity": context.similarity,
+        "threshold": context.threshold,
+        "sourceUris": &source_uris,
+        "contentHash": context.content_hash,
+        "evidenceSpanId": &evidence_span_id,
+        "priorConfidence": confidence_before,
+        "newConfidence": confidence_after,
+        "priorAlpha": prior.alpha(),
+        "priorBeta": prior.beta(),
+        "posteriorAlpha": posterior.alpha(),
+        "posteriorBeta": posterior.beta(),
+        "reinforcedAt": &reinforced_at,
+        "idempotencyKey": context.idempotency_key,
+    })
+    .to_string();
+    let audit_input = CreateAuditInput {
+        workspace_id: Some(context.workspace_id.to_owned()),
+        actor: Some("ee remember".to_owned()),
+        action: audit_actions::MEMORY_REINFORCE.to_owned(),
+        target_type: Some("memory".to_owned()),
+        target_id: Some(context.target_memory_id.to_owned()),
+        details: Some(audit_details),
+    };
+
+    connection
+        .with_transaction(|| {
+            if !session_exists {
+                connection.insert_session(
+                    &session_id,
+                    &CreateSessionInput {
+                        workspace_id: context.workspace_id.to_owned(),
+                        cass_session_id: REMEMBER_REINFORCE_SESSION_KEY.to_owned(),
+                        source_path: None,
+                        agent_name: None,
+                        model: None,
+                        started_at: None,
+                        ended_at: None,
+                        message_count: 0,
+                        token_count: None,
+                        content_hash: remember_content_hash(REMEMBER_REINFORCE_SESSION_KEY),
+                        metadata_json: None,
+                    },
+                )?;
+            }
+            connection.insert_evidence_span(&evidence_span_id, &evidence_input)?;
+            let posterior_updated = connection.update_memory_bayes_posterior(
+                context.target_memory_id,
+                posterior.alpha(),
+                posterior.beta(),
+            )?;
+            let reinforcement_applied = connection.apply_memory_reinforcement(
+                context.target_memory_id,
+                context.workspace_id,
+                confidence_after,
+                &reinforced_at,
+            )?;
+            if !posterior_updated || !reinforcement_applied {
+                return Err(crate::db::DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: format!(
+                        "reinforce target memory {} vanished or was tombstoned mid-transaction",
+                        context.target_memory_id
+                    ),
+                });
+            }
+            connection.insert_audit(&audit_id, &audit_input)?;
+            if let Some(key) = context.idempotency_key {
+                connection.insert_remember_idempotency_key(&CreateRememberIdempotencyKeyInput {
+                    workspace_id: context.workspace_id.to_owned(),
+                    idempotency_key: key.to_owned(),
+                    content_hash: context.content_hash.to_owned(),
+                    memory_id: context.target_memory_id.to_owned(),
+                })?;
+            }
+            Ok(())
+        })
+        .map_err(|error| remember_reinforce_storage_error(error, context.target_memory_id))?;
+
+    Ok(RememberReinforceReport {
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: context.workspace_id.to_owned(),
+        workspace_path: context.workspace_path.to_path_buf(),
+        database_path: context.database_path.to_path_buf(),
+        memory_id: context.target_memory_id.to_owned(),
+        similarity: context.similarity,
+        threshold: context.threshold,
+        reinforced: true,
+        dry_run: false,
+        persisted: true,
+        confidence_before,
+        confidence_after,
+        evidence_span_id: Some(evidence_span_id),
+        audit_id: Some(audit_id),
+        source_uris,
+        last_reinforced_at: Some(reinforced_at),
+    })
+}
+
+fn record_remember_idempotency_key(
+    report: &RememberMemoryReport,
+    idempotency_key: &str,
+) -> Result<(), DomainError> {
+    let connection = open_remember_database_with_retry(&report.database_path)?;
+    connection
+        .insert_remember_idempotency_key(&CreateRememberIdempotencyKeyInput {
+            workspace_id: report.workspace_id.clone(),
+            idempotency_key: idempotency_key.to_owned(),
+            content_hash: remember_content_hash(&report.content),
+            memory_id: report.memory_id.to_string(),
+        })
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Memory {} was stored, but recording idempotency key `{idempotency_key}` failed: {error}",
+                report.memory_id
+            ),
+            repair: Some("ee doctor --json".to_owned()),
+        })
+        .map(|_| ())
+}
+
+/// `remember_memory` layered with the bd-1pi9m.4 write controls:
+/// idempotent replay detection and near-duplicate reinforcement. With
+/// default controls this is exactly the plain create path.
+pub fn remember_memory_with_controls(
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+) -> Result<RememberOutcome, DomainError> {
+    let idempotency_key = controls
+        .idempotency_key
+        .map(validate_remember_idempotency_key)
+        .transpose()?;
+
+    if idempotency_key.is_some() || controls.reinforce {
+        let canonical_content = MemoryContent::parse(options.content)
+            .map_err(|error| remember_usage_error(error.to_string()))?
+            .as_str()
+            .to_owned();
+        let workspace_path = resolve_workspace_path(options.workspace_path, options.dry_run)?;
+        let database_path = options
+            .database_path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+        let workspace_id = stable_workspace_id(&workspace_path);
+        let content_hash = remember_content_hash(&canonical_content);
+
+        if database_path.exists() {
+            let connection = open_remember_database_with_retry(&database_path)?;
+            migrate_remember_database_with_retry(&connection)?;
+
+            if let Some(key) = idempotency_key.as_deref() {
+                let existing = connection
+                    .get_remember_idempotency_key(&workspace_id, key)
+                    .map_err(|error| DomainError::Storage {
+                        message: format!("Failed to look up idempotency key: {error}"),
+                        repair: Some("ee doctor --json".to_owned()),
+                    })?;
+                if let Some(existing) = existing {
+                    if existing.content_hash == content_hash {
+                        return Ok(RememberOutcome::AlreadyRecorded(
+                            RememberAlreadyRecordedReport {
+                                version: env!("CARGO_PKG_VERSION"),
+                                workspace_id,
+                                database_path,
+                                memory_id: existing.memory_id,
+                                idempotency_key: existing.idempotency_key,
+                                dry_run: options.dry_run,
+                            },
+                        ));
+                    }
+                    return Err(remember_idempotency_conflict_error(key));
+                }
+            }
+
+            if controls.reinforce {
+                let threshold = remember_duplicate_similarity_threshold(&workspace_path);
+                let neighbor = remember_reinforce_top_neighbor(
+                    &connection,
+                    &workspace_id,
+                    &canonical_content,
+                )?;
+                if let Some(neighbor) = neighbor
+                    && remember_reinforce_should_apply(neighbor.similarity, threshold)
+                {
+                    let report = apply_remember_reinforce(
+                        &connection,
+                        &RememberReinforceContext {
+                            workspace_id: &workspace_id,
+                            workspace_path: &workspace_path,
+                            database_path: &database_path,
+                            target_memory_id: &neighbor.memory_id,
+                            similarity: neighbor.similarity,
+                            threshold,
+                            canonical_content: &canonical_content,
+                            content_hash: &content_hash,
+                            source: options.source,
+                            idempotency_key: idempotency_key.as_deref(),
+                            dry_run: options.dry_run,
+                        },
+                    )?;
+                    return Ok(RememberOutcome::Reinforced(report));
+                }
+                // Below threshold (or no neighbor): fall through to create.
+            }
+        }
+    }
+
+    let report = remember_memory(options)?;
+    if let Some(key) = idempotency_key.as_deref()
+        && !options.dry_run
+    {
+        record_remember_idempotency_key(&report, key)?;
+    }
+    Ok(RememberOutcome::Created(Box::new(report)))
+}
+
+// -----------------------------------------------------------------------------
+// `ee remember --batch --stdin` (bd-1pi9m.4)
+// -----------------------------------------------------------------------------
+
+/// Options for one `ee remember --batch --stdin` invocation.
+#[derive(Clone, Copy, Debug)]
+pub struct RememberBatchOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Batch-level `--reinforce`; each line may override with its own
+    /// `reinforce` field.
+    pub reinforce: bool,
+    /// Validate and report without writing anything.
+    pub dry_run: bool,
+    /// Create bounded workflow-local auto-links after successful writes.
+    pub auto_link: bool,
+    /// Propose curation candidates after persistence.
+    pub propose_candidates: bool,
+}
+
+/// Per-line outcome for `ee remember --batch --stdin`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RememberBatchLineResult {
+    /// 1-based line number in the piped JSONL input.
+    pub line: usize,
+    /// `stored`, `already_recorded`, `reinforced`, `failed`, or the
+    /// dry-run previews `would_store` / `would_reinforce`.
+    pub status: &'static str,
+    /// Created or surviving memory id when the line landed.
+    pub memory_id: Option<String>,
+    pub error_code: Option<&'static str>,
+    pub error_message: Option<String>,
+    /// Whether this line strengthened an existing memory.
+    pub reinforced: bool,
+    /// Similarity to the surviving memory when reinforced.
+    pub similarity: Option<f32>,
+    /// Staged adjacency suggestions from the create path.
+    pub suggested_links: Vec<RememberSuggestedLink>,
+}
+
+impl RememberBatchLineResult {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "line": self.line,
+            "status": self.status,
+            "memoryId": &self.memory_id,
+            "errorCode": &self.error_code,
+            "errorMessage": &self.error_message,
+            "reinforced": self.reinforced,
+            "similarity": self.similarity,
+            "suggestedLinks": self
+                .suggested_links
+                .iter()
+                .map(remember_suggested_link_json)
+                .collect::<Vec<_>>(),
+        })
+    }
+}
+
+fn remember_suggested_link_json(link: &RememberSuggestedLink) -> serde_json::Value {
+    serde_json::json!({
+        "schema": link.schema,
+        "relation": &link.relation,
+        "targetMemoryId": &link.target_memory_id,
+        "score": link.score,
+        "confidence": link.confidence,
+        "evidenceCount": link.evidence_count,
+        "evidenceSummary": &link.evidence_summary,
+        "source": &link.source,
+        "matchedTags": &link.matched_tags,
+        "nextAction": &link.next_action,
+    })
+}
+
+/// Result of one `ee remember --batch --stdin` invocation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RememberBatchReport {
+    /// Package version for stable output.
+    pub version: &'static str,
+    /// `stored` for live batches, `dry_run` for previews.
+    pub status: &'static str,
+    pub dry_run: bool,
+    pub line_count: usize,
+    pub stored_count: usize,
+    pub reinforced_count: usize,
+    pub already_recorded_count: usize,
+    pub failed_count: usize,
+    pub results: Vec<RememberBatchLineResult>,
+}
+
+impl RememberBatchReport {
+    /// `true` when every supplied line failed (exit 5 at the handler,
+    /// mirroring the journal batch contract).
+    #[must_use]
+    pub const fn all_failed(&self) -> bool {
+        self.line_count > 0 && self.failed_count == self.line_count
+    }
+
+    #[must_use]
+    pub fn results_json(&self) -> serde_json::Value {
+        serde_json::Value::Array(
+            self.results
+                .iter()
+                .map(RememberBatchLineResult::data_json)
+                .collect(),
+        )
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "command": "remember",
+            "version": self.version,
+            "mode": "batch",
+            "status": self.status,
+            "dryRun": self.dry_run,
+            "lineCount": self.line_count,
+            "storedCount": self.stored_count,
+            "reinforcedCount": self.reinforced_count,
+            "alreadyRecordedCount": self.already_recorded_count,
+            "failedCount": self.failed_count,
+            "results": self.results_json(),
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = format!(
+            "Remember batch: {} stored, {} reinforced, {} already recorded, {} failed ({} lines{})\n",
+            self.stored_count,
+            self.reinforced_count,
+            self.already_recorded_count,
+            self.failed_count,
+            self.line_count,
+            if self.dry_run { ", dry run" } else { "" }
+        );
+        for result in &self.results {
+            match result.status {
+                "failed" => output.push_str(&format!(
+                    "  line {}: failed [{}] {}\n",
+                    result.line,
+                    result.error_code.unwrap_or("unknown"),
+                    result.error_message.as_deref().unwrap_or("")
+                )),
+                status => output.push_str(&format!(
+                    "  line {}: {status} {}\n",
+                    result.line,
+                    result.memory_id.as_deref().unwrap_or("")
+                )),
+            }
+        }
+        output
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct RememberBatchLineDraft {
+    content: String,
+    level: Option<String>,
+    kind: Option<String>,
+    tags: Option<String>,
+    workflow: Option<String>,
+    confidence: Option<f32>,
+    source: Option<String>,
+    allow_secret_mention: bool,
+    valid_from: Option<String>,
+    valid_to: Option<String>,
+    idempotency_key: Option<String>,
+    reinforce: Option<bool>,
+}
+
+struct RememberBatchLineError {
+    code: &'static str,
+    message: String,
+}
+
+impl RememberBatchLineError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+fn remember_batch_string_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    camel: &str,
+    snake: &str,
+) -> Result<Option<String>, RememberBatchLineError> {
+    for key in [camel, snake] {
+        match object.get(key) {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::String(text)) => return Ok(Some(text.clone())),
+            Some(_) => {
+                return Err(RememberBatchLineError::new(
+                    "remember_invalid_json",
+                    format!("`{key}` must be a string"),
+                ));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn remember_batch_bool_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    camel: &str,
+    snake: &str,
+) -> Result<Option<bool>, RememberBatchLineError> {
+    for key in [camel, snake] {
+        match object.get(key) {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::Bool(value)) => return Ok(Some(*value)),
+            Some(_) => {
+                return Err(RememberBatchLineError::new(
+                    "remember_invalid_json",
+                    format!("`{key}` must be a boolean"),
+                ));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn parse_remember_batch_line(line: &str) -> Result<RememberBatchLineDraft, RememberBatchLineError> {
+    let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+        RememberBatchLineError::new(
+            "remember_invalid_json",
+            format!("invalid JSONL line: {error}"),
+        )
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        RememberBatchLineError::new(
+            "remember_invalid_json",
+            "each JSONL line must be one remember input object",
+        )
+    })?;
+
+    let content = remember_batch_string_field(object, "content", "content")?.ok_or_else(|| {
+        RememberBatchLineError::new(
+            "remember_content_required",
+            "JSONL entry is missing the required `content` string",
+        )
+    })?;
+    let tags = match object.get("tags") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(text)) => Some(text.clone()),
+        Some(serde_json::Value::Array(items)) => {
+            let mut parsed = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(tag) = item.as_str() else {
+                    return Err(RememberBatchLineError::new(
+                        "remember_invalid_json",
+                        "`tags` must be a comma-separated string or an array of strings",
+                    ));
+                };
+                parsed.push(tag.to_owned());
+            }
+            if parsed.is_empty() {
+                None
+            } else {
+                Some(parsed.join(","))
+            }
+        }
+        Some(_) => {
+            return Err(RememberBatchLineError::new(
+                "remember_invalid_json",
+                "`tags` must be a comma-separated string or an array of strings",
+            ));
+        }
+    };
+    let confidence = match object.get("confidence") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Number(number)) => match number.as_f64() {
+            Some(value) => Some(value as f32),
+            None => {
+                return Err(RememberBatchLineError::new(
+                    "remember_invalid_json",
+                    "`confidence` must be a number",
+                ));
+            }
+        },
+        Some(_) => {
+            return Err(RememberBatchLineError::new(
+                "remember_invalid_json",
+                "`confidence` must be a number",
+            ));
+        }
+    };
+
+    Ok(RememberBatchLineDraft {
+        content,
+        level: remember_batch_string_field(object, "level", "level")?,
+        kind: remember_batch_string_field(object, "kind", "kind")?,
+        tags,
+        workflow: remember_batch_string_field(object, "workflow", "workflow")?,
+        confidence,
+        source: remember_batch_string_field(object, "source", "source")?,
+        allow_secret_mention: remember_batch_bool_field(
+            object,
+            "allowSecretMention",
+            "allow_secret_mention",
+        )?
+        .unwrap_or(false),
+        valid_from: remember_batch_string_field(object, "validFrom", "valid_from")?,
+        valid_to: remember_batch_string_field(object, "validTo", "valid_to")?,
+        idempotency_key: remember_batch_string_field(object, "idempotencyKey", "idempotency_key")?,
+        reinforce: remember_batch_bool_field(object, "reinforce", "reinforce")?,
+    })
+}
+
+fn remember_batch_error_code(error: &DomainError) -> &'static str {
+    match error {
+        DomainError::UsageCodeWithDetails { code, .. } => code,
+        DomainError::Usage { .. }
+        | DomainError::UsageWithDetails { .. }
+        | DomainError::NotFound { .. } => "remember_validation_failed",
+        DomainError::PolicyDenied { .. } | DomainError::PolicyDeniedWithDetails { .. } => {
+            "remember_policy_denied"
+        }
+        DomainError::Configuration { .. } => "remember_configuration_failed",
+        _ => "remember_storage_failed",
+    }
+}
+
+/// Append a JSONL batch of remember inputs (the `ee remember --batch
+/// --stdin` surface). Each line is validated and persisted INDEPENDENTLY —
+/// a harness flushing 12 lessons must not lose 11 because one was oversize.
+pub fn remember_memory_batch_stdin(
+    options: &RememberBatchOptions<'_>,
+    input: &str,
+) -> Result<RememberBatchReport, DomainError> {
+    let lines: Vec<&str> = input
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return Err(DomainError::Usage {
+            message: "remember --batch --stdin requires at least one JSONL line".to_owned(),
+            repair: Some(
+                "printf '%s\\n' '{\"content\":\"...\"}' | ee remember --batch --stdin --json"
+                    .to_owned(),
+            ),
+        });
+    }
+    if lines.len() > REMEMBER_BATCH_MAX_LINES {
+        return Err(DomainError::Usage {
+            message: format!(
+                "remember --batch --stdin accepts at most {REMEMBER_BATCH_MAX_LINES} lines per \
+                 invocation; got {}",
+                lines.len()
+            ),
+            repair: Some("split the JSONL input into smaller batches".to_owned()),
+        });
+    }
+
+    let mut results = Vec::with_capacity(lines.len());
+    let mut stored_count = 0_usize;
+    let mut reinforced_count = 0_usize;
+    let mut already_recorded_count = 0_usize;
+    let mut failed_count = 0_usize;
+
+    for (index, line) in lines.iter().enumerate() {
+        let line_number = index + 1;
+        let draft = match parse_remember_batch_line(line) {
+            Ok(draft) => draft,
+            Err(error) => {
+                failed_count += 1;
+                results.push(RememberBatchLineResult {
+                    line: line_number,
+                    status: "failed",
+                    memory_id: None,
+                    error_code: Some(error.code),
+                    error_message: Some(error.message),
+                    reinforced: false,
+                    similarity: None,
+                    suggested_links: Vec::new(),
+                });
+                continue;
+            }
+        };
+
+        let line_options = RememberMemoryOptions {
+            workspace_path: options.workspace_path,
+            database_path: options.database_path,
+            content: &draft.content,
+            workflow_id: draft.workflow.as_deref(),
+            level: draft.level.as_deref().unwrap_or("episodic"),
+            kind: draft.kind.as_deref().unwrap_or("fact"),
+            tags: draft.tags.as_deref(),
+            confidence: draft.confidence.unwrap_or(0.8),
+            source: draft.source.as_deref(),
+            allow_secret_mention: draft.allow_secret_mention,
+            valid_from: draft.valid_from.as_deref(),
+            valid_to: draft.valid_to.as_deref(),
+            dry_run: options.dry_run,
+            auto_link: options.auto_link,
+            propose_candidates: options.propose_candidates,
+        };
+        let line_controls = RememberWriteControls {
+            reinforce: draft.reinforce.unwrap_or(options.reinforce),
+            idempotency_key: draft.idempotency_key.as_deref(),
+        };
+
+        // Per-line independent persistence: each line runs its own full
+        // remember flow, so a failure here reports on this line without
+        // touching earlier or later lines.
+        match remember_memory_with_controls(&line_options, &line_controls) {
+            Ok(RememberOutcome::Created(report)) => {
+                stored_count += 1;
+                results.push(RememberBatchLineResult {
+                    line: line_number,
+                    status: if options.dry_run {
+                        "would_store"
+                    } else {
+                        "stored"
+                    },
+                    memory_id: Some(report.memory_id.to_string()),
+                    error_code: None,
+                    error_message: None,
+                    reinforced: false,
+                    similarity: None,
+                    suggested_links: report.suggested_links,
+                });
+            }
+            Ok(RememberOutcome::AlreadyRecorded(report)) => {
+                already_recorded_count += 1;
+                results.push(RememberBatchLineResult {
+                    line: line_number,
+                    status: "already_recorded",
+                    memory_id: Some(report.memory_id),
+                    error_code: None,
+                    error_message: None,
+                    reinforced: false,
+                    similarity: None,
+                    suggested_links: Vec::new(),
+                });
+            }
+            Ok(RememberOutcome::Reinforced(report)) => {
+                reinforced_count += 1;
+                results.push(RememberBatchLineResult {
+                    line: line_number,
+                    status: if options.dry_run {
+                        "would_reinforce"
+                    } else {
+                        "reinforced"
+                    },
+                    memory_id: Some(report.memory_id),
+                    error_code: None,
+                    error_message: None,
+                    reinforced: true,
+                    similarity: Some(report.similarity),
+                    suggested_links: Vec::new(),
+                });
+            }
+            Err(error) => {
+                failed_count += 1;
+                results.push(RememberBatchLineResult {
+                    line: line_number,
+                    status: "failed",
+                    memory_id: None,
+                    error_code: Some(remember_batch_error_code(&error)),
+                    error_message: Some(error.message()),
+                    reinforced: false,
+                    similarity: None,
+                    suggested_links: Vec::new(),
+                });
+            }
+        }
+    }
+
+    Ok(RememberBatchReport {
+        version: env!("CARGO_PKG_VERSION"),
+        status: if options.dry_run { "dry_run" } else { "stored" },
+        dry_run: options.dry_run,
+        line_count: lines.len(),
+        stored_count,
+        reinforced_count,
+        already_recorded_count,
+        failed_count,
+        results,
+    })
 }
 
 /// Options for retrieving a memory.
@@ -11366,5 +12545,595 @@ mod tests {
                 Err(error) => panic!("benign content `{content}` rejected: {error:?}"),
             }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // bd-1pi9m.4: `--batch --stdin`, `--reinforce`, idempotency keys.
+    // -------------------------------------------------------------------------
+
+    fn upgrade_test_workspace() -> Result<tempfile::TempDir, String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        Ok(temp)
+    }
+
+    fn set_workspace_duplicate_similarity(workspace: &Path, threshold: f64) -> TestResult {
+        std::fs::write(
+            workspace.join(".ee").join("config.toml"),
+            format!("[curation]\nduplicate_similarity = {threshold}\n"),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn upgrade_remember_options<'a>(
+        workspace_path: &'a Path,
+        content: &'a str,
+        confidence: f32,
+        source: Option<&'a str>,
+        dry_run: bool,
+    ) -> RememberMemoryOptions<'a> {
+        RememberMemoryOptions {
+            workspace_path,
+            database_path: None,
+            content,
+            workflow_id: None,
+            level: "semantic",
+            kind: "fact",
+            tags: None,
+            confidence,
+            source,
+            allow_secret_mention: false,
+            valid_from: None,
+            valid_to: None,
+            dry_run,
+            auto_link: false,
+            propose_candidates: false,
+        }
+    }
+
+    fn upgrade_batch_options(workspace_path: &Path, dry_run: bool) -> RememberBatchOptions<'_> {
+        RememberBatchOptions {
+            workspace_path,
+            database_path: None,
+            reinforce: false,
+            dry_run,
+            auto_link: false,
+            propose_candidates: false,
+        }
+    }
+
+    fn open_upgrade_test_db(workspace_path: &Path) -> Result<DbConnection, String> {
+        DbConnection::open_file(&workspace_path.join(".ee").join("ee.db"))
+            .map_err(|error| error.to_string())
+    }
+
+    fn upgrade_created_report(
+        outcome: RememberOutcome,
+        ctx: &str,
+    ) -> Result<Box<RememberMemoryReport>, String> {
+        match outcome {
+            RememberOutcome::Created(report) => Ok(report),
+            other => Err(format!("{ctx}: expected Created outcome, got {other:?}")),
+        }
+    }
+
+    fn upgrade_reinforced_report(
+        outcome: RememberOutcome,
+        ctx: &str,
+    ) -> Result<RememberReinforceReport, String> {
+        match outcome {
+            RememberOutcome::Reinforced(report) => Ok(report),
+            other => Err(format!("{ctx}: expected Reinforced outcome, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn remember_batch_isolates_invalid_lines() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let input = concat!(
+            "{\"content\":\"Batch line one survives the poisoned neighbor.\"}\n",
+            "{\"level\":\"episodic\"}\n",
+            "{\"content\":\"Batch line three survives the poisoned neighbor.\"}\n",
+        );
+        let report = remember_memory_batch_stdin(&upgrade_batch_options(temp.path(), false), input)
+            .map_err(|error| error.message())?;
+
+        ensure(report.line_count, 3, "line count")?;
+        ensure(report.stored_count, 2, "stored count")?;
+        ensure(report.failed_count, 1, "failed count")?;
+        ensure(
+            report.all_failed(),
+            false,
+            "partial success is not all_failed",
+        )?;
+        ensure(report.results[0].status, "stored", "line 1 status")?;
+        ensure(report.results[1].status, "failed", "line 2 status")?;
+        ensure(
+            report.results[1].error_code,
+            Some("remember_content_required"),
+            "line 2 error code",
+        )?;
+        ensure(report.results[2].status, "stored", "line 3 status")?;
+
+        let connection = open_upgrade_test_db(temp.path())?;
+        for line in [&report.results[0], &report.results[2]] {
+            let memory_id = line
+                .memory_id
+                .clone()
+                .ok_or_else(|| format!("line {} memory id missing", line.line))?;
+            ensure(
+                connection
+                    .get_memory(&memory_id)
+                    .map_err(|error| error.to_string())?
+                    .is_some(),
+                true,
+                "stored line persisted a row",
+            )?;
+        }
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn remember_batch_all_failed_drives_exit_five_signal() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let input = "not-json\n{\"level\":\"episodic\"}\n";
+        let report = remember_memory_batch_stdin(&upgrade_batch_options(temp.path(), false), input)
+            .map_err(|error| error.message())?;
+
+        ensure(report.line_count, 2, "line count")?;
+        ensure(report.failed_count, 2, "failed count")?;
+        ensure(
+            report.all_failed(),
+            true,
+            "all_failed drives the exit-5 path",
+        )?;
+        ensure(
+            report.results[0].error_code,
+            Some("remember_invalid_json"),
+            "line 1 error code",
+        )
+    }
+
+    #[test]
+    fn remember_batch_rejects_oversize_batches() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let input = "{\"content\":\"x\"}\n".repeat(REMEMBER_BATCH_MAX_LINES + 1);
+        match remember_memory_batch_stdin(&upgrade_batch_options(temp.path(), false), &input) {
+            Err(DomainError::Usage { message, .. }) => ensure(
+                message.contains(&REMEMBER_BATCH_MAX_LINES.to_string()),
+                true,
+                "oversize error names the line cap",
+            ),
+            other => Err(format!(
+                "expected usage error for oversize batch, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn remember_idempotency_replay_returns_original_memory() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let content = "Idempotent lesson: pin the schema before regenerating goldens.";
+        let controls = RememberWriteControls {
+            reinforce: false,
+            idempotency_key: Some("lesson-001"),
+        };
+
+        let created = upgrade_created_report(
+            remember_memory_with_controls(
+                &upgrade_remember_options(temp.path(), content, 0.8, None, false),
+                &controls,
+            )
+            .map_err(|error| error.message())?,
+            "first write",
+        )?;
+
+        let replay = remember_memory_with_controls(
+            &upgrade_remember_options(temp.path(), content, 0.8, None, false),
+            &controls,
+        )
+        .map_err(|error| error.message())?;
+        match replay {
+            RememberOutcome::AlreadyRecorded(report) => {
+                ensure(
+                    report.memory_id,
+                    created.memory_id.to_string(),
+                    "replay returns the original memory id",
+                )?;
+                ensure(
+                    report.idempotency_key,
+                    "lesson-001".to_owned(),
+                    "replay echoes the key",
+                )?;
+            }
+            other => return Err(format!("expected already_recorded, got {other:?}")),
+        }
+
+        match remember_memory_with_controls(
+            &upgrade_remember_options(
+                temp.path(),
+                "Different content under the same idempotency key.",
+                0.8,
+                None,
+                false,
+            ),
+            &controls,
+        ) {
+            Err(DomainError::UsageCodeWithDetails { code, .. }) => ensure(
+                code,
+                REMEMBER_IDEMPOTENCY_CONFLICT_CODE,
+                "same key with different content is a per-line usage error",
+            ),
+            other => Err(format!("expected idempotency conflict, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn remember_reinforce_above_threshold_strengthens_existing_memory() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        set_workspace_duplicate_similarity(temp.path(), 0.5)?;
+        let content = "Reinforce target: always run the drift radar before pushing.";
+
+        let created = upgrade_created_report(
+            remember_memory_with_controls(
+                &upgrade_remember_options(temp.path(), content, 0.8, None, false),
+                &RememberWriteControls::default(),
+            )
+            .map_err(|error| error.message())?,
+            "seed write",
+        )?;
+
+        let report = upgrade_reinforced_report(
+            remember_memory_with_controls(
+                &upgrade_remember_options(temp.path(), content, 0.8, None, false),
+                &RememberWriteControls {
+                    reinforce: true,
+                    idempotency_key: None,
+                },
+            )
+            .map_err(|error| error.message())?,
+            "reinforce write",
+        )?;
+
+        ensure(
+            report.memory_id.clone(),
+            created.memory_id.to_string(),
+            "surviving memory id",
+        )?;
+        ensure(report.reinforced, true, "reinforced flag")?;
+        ensure(report.persisted, true, "persisted flag")?;
+        ensure(
+            remember_reinforce_should_apply(report.similarity, 0.5),
+            true,
+            "similarity cleared the threshold",
+        )?;
+
+        let connection = open_upgrade_test_db(temp.path())?;
+        let memories = connection
+            .list_memories(&created.workspace_id, None, true)
+            .map_err(|error| error.to_string())?;
+        ensure(memories.len(), 1, "no new memory row was created")?;
+        let spans = connection
+            .list_evidence_spans_for_memory(&created.memory_id.to_string())
+            .map_err(|error| error.to_string())?;
+        ensure(spans.len(), 1, "evidence span attached to surviving memory")?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn remember_reinforce_below_threshold_creates_new_memory() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        set_workspace_duplicate_similarity(temp.path(), 0.99)?;
+
+        let created = upgrade_created_report(
+            remember_memory_with_controls(
+                &upgrade_remember_options(
+                    temp.path(),
+                    "Run cargo fmt --check before cutting a release tag.",
+                    0.8,
+                    None,
+                    false,
+                ),
+                &RememberWriteControls::default(),
+            )
+            .map_err(|error| error.message())?,
+            "seed write",
+        )?;
+
+        let second = upgrade_created_report(
+            remember_memory_with_controls(
+                &upgrade_remember_options(
+                    temp.path(),
+                    "Journal retention sweeps tombstone undistilled entries after ninety days.",
+                    0.8,
+                    None,
+                    false,
+                ),
+                &RememberWriteControls {
+                    reinforce: true,
+                    idempotency_key: None,
+                },
+            )
+            .map_err(|error| error.message())?,
+            "below-threshold write falls through to create",
+        )?;
+
+        let connection = open_upgrade_test_db(temp.path())?;
+        let memories = connection
+            .list_memories(&created.workspace_id, None, true)
+            .map_err(|error| error.to_string())?;
+        ensure(memories.len(), 2, "below threshold created a second row")?;
+        ensure(
+            second.memory_id == created.memory_id,
+            false,
+            "second row has its own id",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn remember_reinforce_exactly_at_threshold_counts_as_reinforce() -> TestResult {
+        ensure(
+            remember_reinforce_should_apply(0.92, 0.92),
+            true,
+            "exactly-at threshold reinforces (>=)",
+        )?;
+        ensure(
+            remember_reinforce_should_apply(0.9199, 0.92),
+            false,
+            "below threshold falls through",
+        )?;
+        ensure(
+            remember_reinforce_should_apply(0.93, 0.92),
+            true,
+            "above threshold reinforces",
+        )
+    }
+
+    #[test]
+    fn remember_reinforce_audit_row_shape() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        set_workspace_duplicate_similarity(temp.path(), 0.5)?;
+        let content = "Audit shape target: verify the reinforce details payload.";
+
+        let created = upgrade_created_report(
+            remember_memory_with_controls(
+                &upgrade_remember_options(temp.path(), content, 0.8, None, false),
+                &RememberWriteControls::default(),
+            )
+            .map_err(|error| error.message())?,
+            "seed write",
+        )?;
+        let report = upgrade_reinforced_report(
+            remember_memory_with_controls(
+                &upgrade_remember_options(
+                    temp.path(),
+                    content,
+                    0.8,
+                    Some("file://docs/notes.md#L1"),
+                    false,
+                ),
+                &RememberWriteControls {
+                    reinforce: true,
+                    idempotency_key: None,
+                },
+            )
+            .map_err(|error| error.message())?,
+            "reinforce write",
+        )?;
+
+        let connection = open_upgrade_test_db(temp.path())?;
+        let audits = connection
+            .list_audit_by_action(audit_actions::MEMORY_REINFORCE, None)
+            .map_err(|error| error.to_string())?;
+        ensure(audits.len(), 1, "one memory.reinforce audit row")?;
+        let audit = &audits[0];
+        ensure(
+            audit.action.clone(),
+            audit_actions::MEMORY_REINFORCE.to_owned(),
+            "audit action",
+        )?;
+        ensure(
+            audit.target_type.clone(),
+            Some("memory".to_owned()),
+            "audit target type",
+        )?;
+        ensure(
+            audit.target_id.clone(),
+            Some(created.memory_id.to_string()),
+            "audit target id",
+        )?;
+        let details: serde_json::Value = serde_json::from_str(
+            audit
+                .details
+                .as_deref()
+                .ok_or_else(|| "audit details missing".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            details["schema"].as_str(),
+            Some(REMEMBER_REINFORCE_AUDIT_SCHEMA_V1),
+            "details schema",
+        )?;
+        ensure(
+            details["similarity"].is_number(),
+            true,
+            "details similarity",
+        )?;
+        let source_uris = details["sourceUris"]
+            .as_array()
+            .ok_or_else(|| "details sourceUris missing".to_owned())?;
+        ensure(source_uris.len(), 1, "one source uri folded in")?;
+        ensure(
+            source_uris[0]
+                .as_str()
+                .is_some_and(|uri| uri.contains("notes.md")),
+            true,
+            "source uri content",
+        )?;
+        ensure(
+            details["evidenceSpanId"].as_str(),
+            report.evidence_span_id.as_deref(),
+            "details evidence span id",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn remember_reinforce_confidence_bump_is_bounded_and_monotonic() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        set_workspace_duplicate_similarity(temp.path(), 0.5)?;
+        let content = "Confidence bound target: the bump must never exceed one.";
+
+        let created = upgrade_created_report(
+            remember_memory_with_controls(
+                &upgrade_remember_options(temp.path(), content, 0.95, None, false),
+                &RememberWriteControls::default(),
+            )
+            .map_err(|error| error.message())?,
+            "seed write",
+        )?;
+
+        let mut last_confidence = 0.95_f32;
+        for round in 0..3 {
+            let report = upgrade_reinforced_report(
+                remember_memory_with_controls(
+                    &upgrade_remember_options(temp.path(), content, 0.95, None, false),
+                    &RememberWriteControls {
+                        reinforce: true,
+                        idempotency_key: None,
+                    },
+                )
+                .map_err(|error| error.message())?,
+                "reinforce write",
+            )?;
+            ensure(
+                report.confidence_after <= 1.0,
+                true,
+                &format!("round {round}: confidence stays bounded"),
+            )?;
+            ensure(
+                report.confidence_after >= report.confidence_before,
+                true,
+                &format!("round {round}: bump never decreases within a write"),
+            )?;
+            ensure(
+                report.confidence_after >= last_confidence,
+                true,
+                &format!("round {round}: repeated reinforce is monotonic non-decreasing"),
+            )?;
+            last_confidence = report.confidence_after;
+        }
+
+        let connection = open_upgrade_test_db(temp.path())?;
+        let memory = connection
+            .get_memory(&created.memory_id.to_string())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "reinforced memory missing".to_owned())?;
+        ensure(
+            (memory.confidence - last_confidence).abs() <= 1e-5,
+            true,
+            "row confidence matches the last reported bump",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn remember_batch_dry_run_writes_nothing() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let input = concat!(
+            "{\"content\":\"Dry-run batch line one.\"}\n",
+            "{\"content\":\"Dry-run batch line two.\"}\n",
+        );
+        let report = remember_memory_batch_stdin(&upgrade_batch_options(temp.path(), true), input)
+            .map_err(|error| error.message())?;
+
+        ensure(report.status, "dry_run", "batch status")?;
+        ensure(report.dry_run, true, "dry run flag")?;
+        ensure(report.stored_count, 2, "previewed line count")?;
+        ensure(
+            report.results[0].status,
+            "would_store",
+            "line 1 preview status",
+        )?;
+        ensure(
+            report.results[1].status,
+            "would_store",
+            "line 2 preview status",
+        )?;
+        ensure(
+            temp.path().join(".ee").join("ee.db").exists(),
+            false,
+            "dry run never creates the database",
+        )
+    }
+
+    #[test]
+    fn remember_reinforce_dry_run_reports_without_writes() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        set_workspace_duplicate_similarity(temp.path(), 0.5)?;
+        let content = "Dry-run reinforce target: report only, write nothing.";
+
+        let created = upgrade_created_report(
+            remember_memory_with_controls(
+                &upgrade_remember_options(temp.path(), content, 0.9, None, false),
+                &RememberWriteControls::default(),
+            )
+            .map_err(|error| error.message())?,
+            "seed write",
+        )?;
+
+        let report = upgrade_reinforced_report(
+            remember_memory_with_controls(
+                &upgrade_remember_options(temp.path(), content, 0.9, None, true),
+                &RememberWriteControls {
+                    reinforce: true,
+                    idempotency_key: None,
+                },
+            )
+            .map_err(|error| error.message())?,
+            "dry-run reinforce",
+        )?;
+
+        ensure(report.dry_run, true, "dry run flag")?;
+        ensure(report.persisted, false, "nothing persisted")?;
+        ensure(report.evidence_span_id, None, "no evidence span id")?;
+        ensure(report.audit_id, None, "no audit id")?;
+        ensure(
+            report.memory_id.clone(),
+            created.memory_id.to_string(),
+            "preview names the surviving memory",
+        )?;
+
+        let connection = open_upgrade_test_db(temp.path())?;
+        let memories = connection
+            .list_memories(&created.workspace_id, None, true)
+            .map_err(|error| error.to_string())?;
+        ensure(memories.len(), 1, "memory row count unchanged")?;
+        ensure(
+            connection
+                .count_evidence_spans_for_workspace(&created.workspace_id)
+                .map_err(|error| error.to_string())?,
+            0,
+            "no evidence spans written",
+        )?;
+        ensure(
+            connection
+                .list_audit_by_action(audit_actions::MEMORY_REINFORCE, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            0,
+            "no reinforce audit rows written",
+        )?;
+        let memory = connection
+            .get_memory(&created.memory_id.to_string())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "seed memory missing".to_owned())?;
+        ensure(
+            (memory.confidence - 0.9).abs() <= 1e-5,
+            true,
+            "confidence unchanged by dry run",
+        )?;
+        connection.close().map_err(|error| error.to_string())
     }
 }

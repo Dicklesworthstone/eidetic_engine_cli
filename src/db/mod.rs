@@ -97,6 +97,12 @@ pub mod audit_actions {
     pub const MEMORY_TAG_REMOVE: &str = "memory.tag.remove";
     pub const MEMORY_TAG_SET: &str = "memory.tag.set";
     pub const MEMORY_LINK_CREATE: &str = "memory.link.create";
+    /// `ee remember --reinforce` strengthened an existing near-duplicate
+    /// memory instead of inserting a new row (bd-1pi9m.4). Details carry
+    /// `ee.audit.memory_reinforce.v1`: similarity, threshold, sourceUris,
+    /// the attached evidence span id, prior/new confidence, and the
+    /// helpful-equivalent Beta-Bernoulli posterior update.
+    pub const MEMORY_REINFORCE: &str = "memory.reinforce";
 
     /// Beta-Bernoulli posterior updated on a feedback/outcome event
     /// (N7.1 / ADR 0032). Details carry prior (alpha, beta), event
@@ -6251,6 +6257,30 @@ CREATE INDEX IF NOT EXISTS idx_journal_entries_workspace_distilled
     "blake3:v074_journal_entries_2026_06_10",
 );
 
+/// V075: Remember idempotency keys (bd-1pi9m.4). One row per
+/// `(workspace, idempotency_key)`; replaying `ee remember` with the same
+/// key and content hash returns the original memory id with
+/// `status=already_recorded` instead of inserting a duplicate row
+/// (mirrors the `ee outcome --event-id` idempotency contract).
+pub const V075_REMEMBER_IDEMPOTENCY_KEYS: Migration = Migration::new(
+    75,
+    "remember_idempotency_keys",
+    r#"
+CREATE TABLE IF NOT EXISTS remember_idempotency_keys (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    idempotency_key TEXT NOT NULL CHECK (length(trim(idempotency_key)) > 0 AND length(idempotency_key) <= 128),
+    content_hash TEXT NOT NULL CHECK (length(trim(content_hash)) > 0),
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    PRIMARY KEY (workspace_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_remember_idempotency_keys_memory
+    ON remember_idempotency_keys(memory_id);
+"#,
+    "blake3:v075_remember_idempotency_keys_2026_06_10",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -6327,6 +6357,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V072_ERROR_FINGERPRINTS,
     V073_ERROR_REPAIR_LINKS,
     V074_JOURNAL_ENTRIES,
+    V075_REMEMBER_IDEMPOTENCY_KEYS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -12162,6 +12193,38 @@ pub struct JournalEntryListFilter {
     pub limit: u32,
 }
 
+/// Input for one persisted remember idempotency key (bd-1pi9m.4 / V075).
+/// `content_hash` is the BLAKE3 hash of the canonical (trimmed) memory
+/// content submitted with the key; replays compare against it to decide
+/// between `already_recorded` and a per-line key-conflict usage error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateRememberIdempotencyKeyInput {
+    pub workspace_id: String,
+    pub idempotency_key: String,
+    pub content_hash: String,
+    pub memory_id: String,
+}
+
+/// A stored `remember_idempotency_keys` row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredRememberIdempotencyKey {
+    pub workspace_id: String,
+    pub idempotency_key: String,
+    pub content_hash: String,
+    pub memory_id: String,
+    pub created_at: String,
+}
+
+fn stored_remember_idempotency_key_from_row(row: &Row) -> Result<StoredRememberIdempotencyKey> {
+    Ok(StoredRememberIdempotencyKey {
+        workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
+        idempotency_key: required_text(row, 1, DbOperation::Query, "idempotency_key")?.to_string(),
+        content_hash: required_text(row, 2, DbOperation::Query, "content_hash")?.to_string(),
+        memory_id: required_text(row, 3, DbOperation::Query, "memory_id")?.to_string(),
+        created_at: required_text(row, 4, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
 fn stored_journal_entry_from_row(row: &Row) -> Result<StoredJournalEntry> {
     Ok(StoredJournalEntry {
         entry_id: required_text(row, 0, DbOperation::Query, "entry_id")?.to_string(),
@@ -12646,6 +12709,54 @@ impl DbConnection {
             &[Value::Text(entry_id.to_string())],
         )?;
         rows.first().map(stored_journal_entry_from_row).transpose()
+    }
+
+    /// Insert one remember idempotency key row (bd-1pi9m.4 / V075). The
+    /// `(workspace_id, idempotency_key)` primary key rejects replays at
+    /// the storage layer; callers look the key up first and treat a
+    /// matching `content_hash` as `already_recorded`.
+    pub fn insert_remember_idempotency_key(
+        &self,
+        input: &CreateRememberIdempotencyKeyInput,
+    ) -> Result<StoredRememberIdempotencyKey> {
+        let now = Utc::now().to_rfc3339();
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO remember_idempotency_keys (workspace_id, idempotency_key, content_hash, memory_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            &[
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.idempotency_key.clone()),
+                Value::Text(input.content_hash.clone()),
+                Value::Text(input.memory_id.clone()),
+                Value::Text(now.clone()),
+            ],
+        )?;
+        Ok(StoredRememberIdempotencyKey {
+            workspace_id: input.workspace_id.clone(),
+            idempotency_key: input.idempotency_key.clone(),
+            content_hash: input.content_hash.clone(),
+            memory_id: input.memory_id.clone(),
+            created_at: now,
+        })
+    }
+
+    /// Get one remember idempotency key row by `(workspace, key)`.
+    pub fn get_remember_idempotency_key(
+        &self,
+        workspace_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<StoredRememberIdempotencyKey>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, idempotency_key, content_hash, memory_id, created_at FROM remember_idempotency_keys WHERE workspace_id = ?1 AND idempotency_key = ?2 ORDER BY idempotency_key ASC LIMIT 1",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(idempotency_key.to_string()),
+            ],
+        )?;
+        rows.first()
+            .map(stored_remember_idempotency_key_from_row)
+            .transpose()
     }
 
     /// Get a memory by ID.
@@ -14522,6 +14633,47 @@ impl DbConnection {
                 source_action: input.source_action.clone(),
             })?;
         Ok(Some(audit_id))
+    }
+
+    /// Apply a remember-time reinforcement score update (bd-1pi9m.4).
+    /// Sets the bounded new confidence and stamps `updated_at` with the
+    /// reinforcement timestamp. Returns `false` when the memory does not
+    /// exist, lives in another workspace, or is tombstoned. The caller
+    /// emits the matching `audit_actions::MEMORY_REINFORCE` audit entry —
+    /// this helper does NOT touch the audit log so the write can compose
+    /// within a larger transaction.
+    pub fn apply_memory_reinforcement(
+        &self,
+        memory_id: &str,
+        workspace_id: &str,
+        confidence: f32,
+        reinforced_at: &str,
+    ) -> Result<bool> {
+        let Some(existing) = self.get_memory(memory_id)? else {
+            return Ok(false);
+        };
+        if !text_matches(&existing.workspace_id, workspace_id) || existing.tombstoned_at.is_some() {
+            return Ok(false);
+        }
+
+        let mut updated = existing.clone();
+        updated.confidence = confidence;
+        let provenance_chain_hash = compute_memory_provenance_chain_hash(&updated);
+
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET confidence = ?1, updated_at = ?2, provenance_chain_hash = ?3, provenance_chain_hash_version = ?4, provenance_verification_status = ?5, provenance_verified_at = NULL, provenance_verification_note = NULL WHERE id = ?6 AND workspace_id = ?7 AND tombstoned_at IS NULL",
+            &[
+                Value::Float(confidence),
+                Value::Text(reinforced_at.to_string()),
+                Value::Text(provenance_chain_hash),
+                Value::Text(PROVENANCE_CHAIN_HASH_VERSION.to_string()),
+                Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
+                Value::Text(memory_id.to_string()),
+                Value::Text(workspace_id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
     }
 
     /// Apply a maintenance score update to a memory and record an audit entry.

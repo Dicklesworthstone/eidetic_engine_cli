@@ -163,11 +163,12 @@ use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_so
 use crate::core::memory::{
     ExpireMemoryOptions, GetMemoryOptions, ListMemoriesOptions, MemoryExpireReport,
     MemoryLevelOptions, MemoryLevelReport, MemoryLinkMode, MemoryLinkOptions, MemoryLinkReport,
-    MemoryReviseReport, MemoryTagsMode, MemoryTagsOptions, MemoryTagsReport, RememberMemoryOptions,
-    RememberMemoryReport, ReviseMemoryOptions, ReviseReason, WorkflowCloseOptions,
-    WorkflowCloseReport, WorkflowCreateOptions, close_workflow, create_workflow, expire_memory,
-    get_memory_details, list_memories, remember_memory, revise_memory, update_memory_level,
-    update_memory_link, update_memory_tags,
+    MemoryReviseReport, MemoryTagsMode, MemoryTagsOptions, MemoryTagsReport, RememberBatchOptions,
+    RememberMemoryOptions, RememberMemoryReport, RememberOutcome, RememberWriteControls,
+    ReviseMemoryOptions, ReviseReason, WorkflowCloseOptions, WorkflowCloseReport,
+    WorkflowCreateOptions, close_workflow, create_workflow, expire_memory, get_memory_details,
+    list_memories, remember_memory_batch_stdin, remember_memory_with_controls, revise_memory,
+    update_memory_level, update_memory_link, update_memory_tags,
 };
 use crate::core::outcome::{
     DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
@@ -8510,9 +8511,9 @@ pub struct WorkflowCreateArgs {
 /// Arguments for the remember command.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct RememberArgs {
-    /// Memory content to store.
+    /// Memory content to store. Required unless --batch --stdin is given.
     #[arg(value_name = "CONTENT")]
-    pub content: String,
+    pub content: Option<String>,
 
     /// Memory level (working, episodic, semantic, procedural).
     #[arg(long, short = 'l', default_value = "episodic")]
@@ -8569,6 +8570,28 @@ pub struct RememberArgs {
     /// Mark sentinel check results stale after this many seconds.
     #[arg(long = "sentinel-stale-threshold-seconds", value_name = "SECONDS")]
     pub sentinel_stale_threshold_seconds: Option<u64>,
+
+    /// Read a JSONL batch of remember inputs (one object per line, content
+    /// required per line) from stdin. Requires --stdin; each line is
+    /// validated and persisted independently.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub batch: bool,
+
+    /// Read the --batch JSONL payload from stdin.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub stdin: bool,
+
+    /// Strengthen the closest near-duplicate memory (evidence span +
+    /// bounded confidence bump + memory.reinforce audit row) instead of
+    /// creating a new row when its similarity reaches the
+    /// `[curation] duplicate_similarity` threshold (default 0.92).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub reinforce: bool,
+
+    /// Idempotency key: replaying the same key with the same content
+    /// returns the original memory id with status=already_recorded.
+    #[arg(long = "idempotency-key", value_name = "KEY")]
+    pub idempotency_key: Option<String>,
 
     /// Perform a dry run without storing.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -12560,10 +12583,7 @@ where
             },
         },
         Some(Command::Note(ref args)) => handle_note(&cli, args, stdout, stderr),
-        Some(Command::Remember(ref args)) => match handle_remember(&cli, args) {
-            Ok(result) => write_remember_report(&cli, &result, stdout),
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        },
+        Some(Command::Remember(ref args)) => handle_remember_command(&cli, args, stdout, stderr),
         Some(Command::Curate(CurateCommand::Candidates(ref args))) => {
             handle_curate_candidates(&cli, args, stdout, stderr)
         }
@@ -43975,7 +43995,7 @@ fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
     };
 
     RememberArgs {
-        content: args.content.clone(),
+        content: Some(args.content.clone()),
         level: args
             .level
             .clone()
@@ -43995,6 +44015,10 @@ fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
         valid_to: args.valid_to.clone(),
         sentinels: Vec::new(),
         sentinel_stale_threshold_seconds: None,
+        batch: false,
+        stdin: false,
+        reinforce: false,
+        idempotency_key: None,
         dry_run: args.dry_run,
     }
 }
@@ -44006,7 +44030,7 @@ where
 {
     let remember_args = note_to_remember_args(args);
     match handle_remember(cli, &remember_args) {
-        Ok(result) => write_remember_report(cli, &result, stdout),
+        Ok(outcome) => write_remember_outcome(cli, &outcome, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -44324,26 +44348,51 @@ fn validate_remember_sentinels(args: &RememberArgs) -> Result<(), DomainError> {
     Ok(())
 }
 
-fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberMemoryReport, DomainError> {
+fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, DomainError> {
     let workspace_path = cli.resolve_workspace();
     validate_remember_sentinels(args)?;
-    let report = remember_memory(&RememberMemoryOptions {
-        workspace_path: &workspace_path,
-        database_path: None,
-        content: &args.content,
-        workflow_id: args.workflow.as_deref(),
-        level: &args.level,
-        kind: &args.kind,
-        tags: args.tags.as_deref(),
-        confidence: args.confidence,
-        source: args.source.as_deref(),
-        allow_secret_mention: args.allow_secret_mention,
-        valid_from: args.valid_from.as_deref(),
-        valid_to: args.valid_to.as_deref(),
-        dry_run: args.dry_run,
-        auto_link: !args.no_auto_link,
-        propose_candidates: !args.no_propose_candidates,
-    })?;
+    if !args.sentinels.is_empty() && args.reinforce {
+        return Err(DomainError::Usage {
+            message: "--sentinel cannot be combined with --reinforce; a reinforced write \
+                      strengthens an existing memory instead of creating one to attach \
+                      sentinels to"
+                .to_owned(),
+            repair: Some("ee remember --help".to_owned()),
+        });
+    }
+    let Some(content) = args.content.as_deref() else {
+        return Err(DomainError::Usage {
+            message: "remember requires positional CONTENT (or --batch --stdin for a JSONL batch)"
+                .to_owned(),
+            repair: Some("ee remember \"<content>\" --json".to_owned()),
+        });
+    };
+    let outcome = remember_memory_with_controls(
+        &RememberMemoryOptions {
+            workspace_path: &workspace_path,
+            database_path: None,
+            content,
+            workflow_id: args.workflow.as_deref(),
+            level: &args.level,
+            kind: &args.kind,
+            tags: args.tags.as_deref(),
+            confidence: args.confidence,
+            source: args.source.as_deref(),
+            allow_secret_mention: args.allow_secret_mention,
+            valid_from: args.valid_from.as_deref(),
+            valid_to: args.valid_to.as_deref(),
+            dry_run: args.dry_run,
+            auto_link: !args.no_auto_link,
+            propose_candidates: !args.no_propose_candidates,
+        },
+        &RememberWriteControls {
+            reinforce: args.reinforce,
+            idempotency_key: args.idempotency_key.as_deref(),
+        },
+    )?;
+    let RememberOutcome::Created(ref report) = outcome else {
+        return Ok(outcome);
+    };
     if !args.sentinels.is_empty() && !report.dry_run {
         let specs = args
             .sentinels
@@ -44375,7 +44424,167 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberMemoryRepor
                 repair: Some("ee doctor --workspace . --json".to_string()),
             })?;
     }
-    Ok(report)
+    Ok(outcome)
+}
+
+/// Render one bd-1pi9m.4 remember outcome with the active renderer.
+fn write_remember_outcome<W>(
+    cli: &Cli,
+    outcome: &RememberOutcome,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match outcome {
+        RememberOutcome::Created(report) => write_remember_report(cli, report, stdout),
+        RememberOutcome::AlreadyRecorded(report) => {
+            write_remember_data_payload(cli, &report.data_json(), &report.human_summary(), stdout)
+        }
+        RememberOutcome::Reinforced(report) => {
+            write_remember_data_payload(cli, &report.data_json(), &report.human_summary(), stdout)
+        }
+    }
+}
+
+/// Render a serde_json data payload in the `ee.response.v2` envelope
+/// (JSON/TOON) or as the supplied human summary.
+fn write_remember_data_payload<W>(
+    cli: &Cli,
+    data: &serde_json::Value,
+    human_summary: &str,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, human_summary),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(
+                &serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
+                    "success": true,
+                    "data": data,
+                })
+                .to_string(),
+            ) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_journal_data_json(stdout, data),
+    }
+}
+
+/// `ee remember` entry point: routes between the single-memory path and the
+/// `--batch --stdin` JSONL surface (bd-1pi9m.4).
+fn handle_remember_command<W, E>(
+    cli: &Cli,
+    args: &RememberArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if args.batch || args.stdin {
+        return handle_remember_batch(cli, args, stdout, stderr);
+    }
+    match handle_remember(cli, args) {
+        Ok(outcome) => write_remember_outcome(cli, &outcome, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_remember_batch<W, E>(
+    cli: &Cli,
+    args: &RememberArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let usage = |message: &str| DomainError::Usage {
+        message: message.to_owned(),
+        repair: Some("ee remember --help".to_owned()),
+    };
+    if !args.batch || !args.stdin {
+        let error = usage("--batch and --stdin must be used together for a remember JSONL batch");
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    if args.content.is_some() {
+        let error = usage("pass either positional CONTENT or --batch --stdin, not both");
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    if args.idempotency_key.is_some() {
+        let error = usage(
+            "--idempotency-key applies to single-memory mode; put `idempotencyKey` on each \
+             JSONL line instead",
+        );
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    if !args.sentinels.is_empty() {
+        let error = usage("--sentinel is not supported with --batch");
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    // Reading stdin would block forever if no input is piped; refuse on an
+    // interactive TTY (same guard as `ee journal append --stdin`).
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        let error = DomainError::Usage {
+            message: "--stdin was given but stdin is a terminal; pipe the JSONL batch".to_owned(),
+            repair: Some(
+                "printf '%s\\n' '{\"content\":\"...\"}' | ee remember --batch --stdin --json"
+                    .to_owned(),
+            ),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let mut input = String::new();
+    if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input) {
+        let error = DomainError::Usage {
+            message: format!("failed to read JSONL batch from stdin: {error}"),
+            repair: Some("pipe UTF-8 JSONL, one remember input object per line".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let workspace_path = cli.resolve_workspace();
+    let options = RememberBatchOptions {
+        workspace_path: &workspace_path,
+        database_path: None,
+        reinforce: args.reinforce,
+        dry_run: args.dry_run,
+        auto_link: !args.no_auto_link,
+        propose_candidates: !args.no_propose_candidates,
+    };
+    match remember_memory_batch_stdin(&options, &input) {
+        Ok(report) if report.all_failed() => {
+            // Mirror the journal batch contract: exit 5 when every line
+            // failed; per-line results ride in the error envelope details.
+            let details = serde_json::json!({ "results": report.results_json() });
+            let error = DomainError::ImportWithDetails {
+                message: format!(
+                    "remember --batch --stdin stored 0 of {} lines",
+                    report.line_count
+                ),
+                repair: Some(
+                    "fix the per-line errors in details.results and re-pipe the failed lines"
+                        .to_owned(),
+                ),
+                details_json: details.to_string(),
+            };
+            write_domain_error(&error, cli.wants_json(), stdout, stderr)
+        }
+        Ok(report) => {
+            write_remember_data_payload(cli, &report.data_json(), &report.human_summary(), stdout)
+        }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_curate_candidates<W, E>(
