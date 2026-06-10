@@ -5504,10 +5504,10 @@ mod tests {
         // Frontier(branchb) = Frontier(branchc) = {join}; join supersedes
         // nothing (chain head), branches are dominated/superseded interiors.
         for (id, content) in [
-            ("mem_revdiamondroot0000000001", "Initial release rule."),
-            ("mem_revdiamondbrancha0000001", "Branch A restatement."),
-            ("mem_revdiamondbranchb0000001", "Branch B restatement."),
-            ("mem_revdiamondjoin0000000001", "Merged final rule."),
+            ("mem_revdiamondroot000000000001", "Initial release rule."),
+            ("mem_revdiamondbrancha000000001", "Branch A restatement."),
+            ("mem_revdiamondbranchb000000001", "Branch B restatement."),
+            ("mem_revdiamondjoin000000000001", "Merged final rule."),
         ] {
             connection
                 .insert_memory(
@@ -5534,24 +5534,24 @@ mod tests {
 
         for (link_id, src, dst) in [
             (
-                "lnk_revdiamond00000000000001",
-                "mem_revdiamondroot0000000001",
-                "mem_revdiamondbrancha0000001",
+                "link_revdiamond0000000000000001",
+                "mem_revdiamondroot000000000001",
+                "mem_revdiamondbrancha000000001",
             ),
             (
-                "lnk_revdiamond00000000000002",
-                "mem_revdiamondroot0000000001",
-                "mem_revdiamondbranchb0000001",
+                "link_revdiamond0000000000000002",
+                "mem_revdiamondroot000000000001",
+                "mem_revdiamondbranchb000000001",
             ),
             (
-                "lnk_revdiamond00000000000003",
-                "mem_revdiamondbrancha0000001",
-                "mem_revdiamondjoin0000000001",
+                "link_revdiamond0000000000000003",
+                "mem_revdiamondbrancha000000001",
+                "mem_revdiamondjoin000000000001",
             ),
             (
-                "lnk_revdiamond00000000000004",
-                "mem_revdiamondbranchb0000001",
-                "mem_revdiamondjoin0000000001",
+                "link_revdiamond0000000000000004",
+                "mem_revdiamondbranchb000000001",
+                "mem_revdiamondjoin000000000001",
             ),
         ] {
             connection
@@ -5591,8 +5591,8 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "mem_revdiamondbrancha0000001",
-                "mem_revdiamondbranchb0000001"
+                "mem_revdiamondbrancha000000001",
+                "mem_revdiamondbranchb000000001"
             ],
             "diamond branches must surface as frontier sources"
         );
@@ -5600,7 +5600,7 @@ mod tests {
             assert_eq!(input.dominance_frontier_size, 1);
             assert_eq!(
                 input.affected_memory_ids,
-                vec!["mem_revdiamondjoin0000000001".to_owned()]
+                vec!["mem_revdiamondjoin000000000001".to_owned()]
             );
             assert_eq!(input.frontier_role, "interior");
             assert_eq!(input.stale_posture, "superseded");
