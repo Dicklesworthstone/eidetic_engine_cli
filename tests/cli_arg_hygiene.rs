@@ -107,3 +107,48 @@ fn every_subcommand_builds_and_has_unique_arg_ids() {
     root.build();
     walk(&root, "ee");
 }
+
+/// bd-39tzu.3 — `ee primer` and `ee orient --include-primer` must parse
+/// without panicking across their documented argument combinations (the
+/// `ee search`/`fields` arg-id collision class).
+#[test]
+fn ee_primer_parses_and_accesses_without_panicking() {
+    for argv in [
+        vec!["ee", "primer"],
+        vec!["ee", "primer", "--json"],
+        vec!["ee", "primer", "--tokens", "800"],
+        vec!["ee", "primer", "--format", "markdown"],
+        vec!["ee", "primer", "--format", "json", "--json"],
+        vec!["ee", "primer", "--refresh"],
+        vec!["ee", "primer", "--no-persist"],
+        vec![
+            "ee",
+            "primer",
+            "--tokens",
+            "600",
+            "--format",
+            "markdown",
+            "--refresh",
+            "--no-persist",
+            "--workspace",
+            ".",
+        ],
+        vec!["ee", "orient", "task", "--include-primer"],
+        vec![
+            "ee",
+            "orient",
+            "task",
+            "--fast",
+            "--include-primer",
+            "--json",
+        ],
+    ] {
+        let parsed = Cli::try_parse_from(argv.clone());
+        assert!(
+            parsed.is_ok(),
+            "`{}` must parse without panic; got {:?}",
+            argv.join(" "),
+            parsed.err()
+        );
+    }
+}

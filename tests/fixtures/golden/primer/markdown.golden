@@ -1,0 +1,10 @@
+# Workspace Primer
+
+## Rules
+- Always run the verify script before pushing changes to main. [mem_00000000]
+
+## Warnings
+- Release broke when goldens were regenerated on the wrong host. [mem_00000000]
+
+## Decisions
+- Keep the async runtime on asupersync; tokio is forbidden. [mem_00000000]

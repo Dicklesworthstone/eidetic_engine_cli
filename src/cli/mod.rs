@@ -342,6 +342,7 @@ const HELP_PRELUDE: &str = concat!(
     "  remember      Capture an explicit memory\n",
     "  search        Fine-grained memory retrieval\n",
     "  pack          Assemble a task-specific context pack\n",
+    "  primer        Deterministic cached workspace charter (session-start knowledge)\n",
     "  lens          Inspect reusable task lens policies for pack/search\n",
     "  why           Explain why a memory was stored or selected\n",
     "\n",
@@ -836,6 +837,8 @@ pub enum Command {
     /// Append-only agent observation journal (append, list, show).
     #[command(subcommand)]
     Journal(JournalCommand),
+    /// Deterministic cached workspace charter from highest-value memory (ADR 0065).
+    Primer(PrimerArgs),
     /// Counterfactual memory lab: capture, replay, and counterfactual task episodes.
     #[command(subcommand)]
     Lab(LabCommand),
@@ -2676,6 +2679,11 @@ pub struct OrientArgs {
     /// Include remote-compilation posture in the swarm brief portion.
     #[arg(long = "include-rch", action = ArgAction::SetTrue)]
     pub include_rch: bool,
+
+    /// Embed the cached workspace primer (markdown, no cache writes) so a
+    /// cold session gets knowledge + posture in one call (ADR 0065).
+    #[arg(long = "include-primer", action = ArgAction::SetTrue)]
+    pub include_primer: bool,
 
     /// Timeout for external probe commands used by the swarm brief.
     #[arg(long = "command-timeout-ms", default_value_t = DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS)]
@@ -5349,6 +5357,26 @@ pub enum JournalCommand {
     List(JournalListArgs),
     /// Show one journal entry (full record incl. structured sidecar).
     Show(JournalShowArgs),
+}
+
+/// Arguments for `ee primer` (ADR 0065 / bd-39tzu.3).
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct PrimerArgs {
+    /// Token budget for the assembled primer (default: [primer] default_tokens, 600).
+    #[arg(long, value_name = "N")]
+    pub tokens: Option<u32>,
+
+    /// Force re-assembly, bypassing the primer cache (still deterministic).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub refresh: bool,
+
+    /// Assemble without writing primer_cache rows (read-only variant).
+    #[arg(long = "no-persist", action = ArgAction::SetTrue)]
+    pub no_persist: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee journal append`.
@@ -12288,6 +12316,7 @@ where
         Some(Command::Journal(JournalCommand::Show(ref args))) => {
             handle_journal_show(&cli, args, stdout, stderr)
         }
+        Some(Command::Primer(ref args)) => handle_primer(&cli, args, stdout, stderr),
         Some(Command::Lab(LabCommand::Capture(ref args))) => {
             handle_lab_capture(&cli, args, stdout, stderr)
         }
@@ -32965,6 +32994,12 @@ where
         }
     };
 
+    let primer = if args.include_primer {
+        orient_primer_value(&workspace_path, &mut degraded)
+    } else {
+        serde_json::Value::Null
+    };
+
     let data = serde_json::json!({
         "schema": "ee.orient.v1",
         "command": "orient",
@@ -32979,6 +33014,7 @@ where
         "install": install,
         "workspaceHygiene": workspace_hygiene,
         "pack": pack,
+        "primer": primer,
         "nextCommands": orient_next_commands(&workspace_path, &args.task, args.max_tokens),
     });
 
@@ -33018,6 +33054,74 @@ fn orient_component_data_from_envelope(raw: &str) -> serde_json::Value {
         .ok()
         .and_then(|value| value.get("data").cloned())
         .unwrap_or(serde_json::Value::Null)
+}
+
+/// Assemble the embedded primer for `ee orient --include-primer`.
+/// Read-only by contract: served from the primer cache when fresh and
+/// assembled without persisting otherwise (orient is sideEffectFree).
+fn orient_primer_value(
+    workspace_path: &Path,
+    degraded: &mut Vec<serde_json::Value>,
+) -> serde_json::Value {
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    let unavailable = |message: String, degraded: &mut Vec<serde_json::Value>| {
+        degraded.push(orient_degradation_value(
+            "orient_primer_unavailable",
+            "info",
+            message,
+            Some("Run `ee primer --json` to isolate primer assembly.".to_owned()),
+        ));
+        serde_json::Value::Null
+    };
+    if !database_path.exists() {
+        return unavailable(
+            "Primer skipped: workspace database is missing.".to_owned(),
+            degraded,
+        );
+    }
+    let connection = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return unavailable(
+                format!("Primer skipped: database open failed: {error}"),
+                degraded,
+            );
+        }
+    };
+    let workspace_key = workspace_path.to_string_lossy().into_owned();
+    let workspace_id = match connection.get_workspace_by_path(&workspace_key) {
+        Ok(Some(workspace)) => workspace.id,
+        Ok(None) => {
+            return unavailable(
+                "Primer skipped: workspace is not registered.".to_owned(),
+                degraded,
+            );
+        }
+        Err(error) => {
+            return unavailable(
+                format!("Primer skipped: workspace lookup failed: {error}"),
+                degraded,
+            );
+        }
+    };
+    let settings = crate::core::primer::primer_settings_from_workspace(
+        workspace_path,
+        crate::core::primer::PrimerFormat::Markdown,
+        None,
+    );
+    match crate::core::primer::run_primer_with_persistence(
+        &connection,
+        &workspace_id,
+        &settings,
+        false,
+        false,
+    ) {
+        Ok(report) => serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+        Err(error) => unavailable(
+            format!("Primer skipped: assembly failed: {error}"),
+            degraded,
+        ),
+    }
 }
 
 fn orient_degradation_value(
@@ -39024,6 +39128,144 @@ fn journal_append_options<'a>(
         database_path: database,
         agent_name: crate::core::memory_scope::current_agent_name(),
         source,
+    }
+}
+
+fn handle_primer<W, E>(
+    cli: &Cli,
+    args: &PrimerArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    // The global --format renderer selects the primer payload format:
+    // markdown/human render the charter text; everything else gets the
+    // structured ee.primer.v1 payload.
+    let format = match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            crate::core::primer::PrimerFormat::Markdown
+        }
+        _ => crate::core::primer::PrimerFormat::Json,
+    };
+
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        let error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace . --json".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let connection = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            let error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: Some("ee status --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if let Err(error) = connection.migrate() {
+        let error = DomainError::Storage {
+            message: format!("Failed to migrate database: {error}"),
+            repair: Some("ee migrate run --workspace . --json".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let workspace_key = workspace_path.to_string_lossy().into_owned();
+    let workspace_id = match connection.get_workspace_by_path(&workspace_key) {
+        Ok(Some(workspace)) => workspace.id,
+        Ok(None) => {
+            let error = DomainError::Storage {
+                message: format!("Workspace is not registered: {}", workspace_path.display()),
+                repair: Some("ee init --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        Err(error) => {
+            let error = DomainError::Storage {
+                message: format!("Failed to query workspace row: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let settings =
+        crate::core::primer::primer_settings_from_workspace(&workspace_path, format, args.tokens);
+    let report = match crate::core::primer::run_primer_with_persistence(
+        &connection,
+        &workspace_id,
+        &settings,
+        args.refresh,
+        !args.no_persist,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            let error = DomainError::Storage {
+                message: format!("Failed to assemble primer: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let degraded: Vec<serde_json::Value> = report
+        .degraded
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "code": entry.code,
+                "severity": entry.severity,
+                "message": entry.message,
+                "repair": entry.repair,
+            })
+        })
+        .collect();
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown
+            if format == crate::core::primer::PrimerFormat::Markdown =>
+        {
+            let text = report.rendered_markdown.clone().unwrap_or_default();
+            write_stdout(stdout, &text)
+        }
+        output::Renderer::Toon => {
+            let envelope = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+                "degraded": degraded,
+            });
+            write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&envelope.to_string())
+                    + "
+"),
+            )
+        }
+        _ => {
+            let envelope = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+                "degraded": degraded,
+            });
+            write_stdout(
+                stdout,
+                &(envelope.to_string()
+                    + "
+"),
+            )
+        }
     }
 }
 
@@ -54295,6 +54537,7 @@ impl NormalizedInvocation {
                     IndexCommand::Vacuum(_) => "index vacuum".to_string(),
                 },
                 Command::Introspect => "introspect".to_string(),
+                Command::Primer(_) => "primer".to_string(),
                 Command::Journal(journal) => match journal {
                     JournalCommand::Append(_) => "journal append".to_string(),
                     JournalCommand::List(_) => "journal list".to_string(),

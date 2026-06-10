@@ -578,6 +578,20 @@ pub fn run_primer(
     settings: &PrimerSettings,
     refresh: bool,
 ) -> crate::db::Result<PrimerReport> {
+    run_primer_with_persistence(connection, workspace_id, settings, refresh, true)
+}
+
+/// [`run_primer`] with an explicit persistence switch: `persist = false`
+/// assembles without writing `primer_cache` rows (the `--no-persist`
+/// read-only variant; still served from an existing cache row unless
+/// `refresh` is set).
+pub fn run_primer_with_persistence(
+    connection: &DbConnection,
+    workspace_id: &str,
+    settings: &PrimerSettings,
+    refresh: bool,
+    persist: bool,
+) -> crate::db::Result<PrimerReport> {
     let db_generation = i64::try_from(
         connection
             .get_workspace_generation(workspace_id)?
@@ -649,7 +663,7 @@ pub fn run_primer(
         ..report.clone()
     })
     .unwrap_or_default();
-    if !serialized.is_empty() {
+    if persist && !serialized.is_empty() {
         connection.put_primer_cache(
             workspace_id,
             db_generation,

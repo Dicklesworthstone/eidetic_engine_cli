@@ -1644,6 +1644,11 @@ impl EffectManifest {
                 "Rebuild search indexes from database",
             ),
             CommandEffect::derived_write(
+                "primer",
+                vec!["primer_cache (db table)"],
+                "Assemble the cached workspace primer; cache rows are derived and rebuildable (--no-persist is read-only)",
+            ),
+            CommandEffect::derived_write(
                 "index reembed",
                 vec![".ee/index/embeddings/"],
                 "Rebuild semantic embeddings from database records",
