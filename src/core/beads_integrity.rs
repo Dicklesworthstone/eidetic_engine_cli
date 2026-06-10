@@ -45,6 +45,30 @@
 //! import is reported only when the DB has fewer rows than the JSONL
 //! and the JSONL parses cleanly; otherwise it folds into the mismatch
 //! state.
+//!
+//! ## Tracker authority states (bd-3w4pv.6)
+//!
+//! [`BeadsIntegrityHealth`] folds the doctor `sync.metadata` prose
+//! message into `external_changes_pending_import`, which collapsed a
+//! metadata-only "External changes pending import" message into a hard
+//! `brReadsAuthoritative=false` even when every concrete dirty/import
+//! signal was clean. [`BeadsTrackerAuthorityState`] keeps each concrete
+//! signal distinct so the claim gate can report *why* tracker reads are
+//! (not) authoritative:
+//!
+//! - Concrete fail-closed states (each keeps `brReadsAuthoritative`
+//!   false): `parse_error`, `merge_artifacts`, `count_mismatch`,
+//!   `dirty_issues`, `jsonl_newer`, `db_newer`.
+//! - `doctor_metadata_message_only` — the doctor metadata message is
+//!   present but every concrete signal is clean. Tracker reads stay
+//!   authoritative; the contradiction is surfaced as a warning-severity
+//!   degradation, never as `beads_tracker_not_authoritative`.
+//! - `clean` — no signal at all.
+//!
+//! Precedence when several concrete signals hold at once (worst first):
+//! `parse_error` > `merge_artifacts` > `count_mismatch` >
+//! `dirty_issues` > `jsonl_newer` > `db_newer` >
+//! `doctor_metadata_message_only` > `clean`.
 
 use serde::Serialize;
 
@@ -100,6 +124,166 @@ pub enum BeadsIntegrityRepairClassification {
     /// The parse error is not the narrow trailing-line shape, or the
     /// evidence is otherwise insufficient for bounded repair advice.
     UnknownDurableCorruption,
+}
+
+/// Concrete tracker-authority state behind `brReadsAuthoritative`
+/// (bd-3w4pv.6).
+///
+/// Unlike [`BeadsIntegrityHealth`] — which is preserved unchanged for
+/// serialized `trackerIntegrity.health` compatibility — this
+/// classification never collapses the doctor `sync.metadata` prose
+/// message into a hard authority failure. Each variant is derived only
+/// from support-bundle-safe evidence: boolean sync fields, counts, and
+/// bounded path patterns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeadsTrackerAuthorityState {
+    /// No parse, merge, count, dirty, or metadata signal at all.
+    Clean,
+    /// The doctor `sync.metadata` message still says external changes
+    /// are pending import while every concrete dirty/import signal is
+    /// clean (zero dirty issues, equal DB/JSONL counts, no merge
+    /// artifacts, no parse error). Tracker reads stay authoritative;
+    /// the contradiction is warning evidence, not a claim blocker.
+    DoctorMetadataMessageOnly,
+    /// The SQLite store has rows the JSONL export lacks; local state
+    /// may be unexported (`br sync --flush-only`).
+    DbNewer,
+    /// The JSONL export has rows the DB has not imported yet and
+    /// auto-import can reconcile them (`br sync --import-only`).
+    JsonlNewer,
+    /// `br doctor` reports locally dirty Beads issues.
+    DirtyIssues,
+    /// DB/JSONL record counts differ in a shape auto-import cannot
+    /// reconcile (JSONL ahead while auto-import is disabled).
+    CountMismatch,
+    /// Non-benign merge-conflict artifacts sit next to
+    /// `issues.jsonl`; the benign `beads.base.jsonl` merge anchor does
+    /// not count.
+    MergeArtifacts,
+    /// At least one JSONL line failed to parse.
+    ParseError,
+}
+
+impl BeadsTrackerAuthorityState {
+    /// Stable snake_case label used for `sourceAuthority.trackerHealth`
+    /// and bounded reason suffixes.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::DoctorMetadataMessageOnly => "doctor_metadata_message_only",
+            Self::DbNewer => "db_newer",
+            Self::JsonlNewer => "jsonl_newer",
+            Self::DirtyIssues => "dirty_issues",
+            Self::CountMismatch => "count_mismatch",
+            Self::MergeArtifacts => "merge_artifacts",
+            Self::ParseError => "parse_error",
+        }
+    }
+
+    /// Whether normal `br` reads remain authoritative in this state.
+    ///
+    /// Fail-closed contract: every concrete stale state keeps tracker
+    /// authority false. Only the absence of concrete evidence —
+    /// [`Self::Clean`] and the metadata-message-only contradiction —
+    /// keeps `br` reads authoritative.
+    #[must_use]
+    pub const fn is_authoritative(self) -> bool {
+        matches!(self, Self::Clean | Self::DoctorMetadataMessageOnly)
+    }
+}
+
+/// Already-collected concrete signals feeding
+/// [`classify_tracker_authority_state`].
+///
+/// Callers derive these from `br doctor --json` / `br sync --status`
+/// evidence; the struct itself carries only booleans and a bounded
+/// count so it stays support-bundle-safe.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BeadsTrackerAuthoritySignals {
+    /// At least one JSONL line failed to parse.
+    pub jsonl_parse_error: bool,
+    /// Non-benign merge-conflict artifacts are present.
+    pub non_benign_merge_artifacts: bool,
+    /// DB/JSONL counts differ in a shape auto-import cannot reconcile.
+    pub unreconcilable_count_mismatch: bool,
+    /// Locally dirty Beads issues reported by `br doctor`.
+    pub dirty_issue_count: u64,
+    /// JSONL has rows the DB has not imported yet (importable drift).
+    pub jsonl_newer: bool,
+    /// DB has rows the JSONL export lacks (unexported local state).
+    pub db_newer: bool,
+    /// The doctor `sync.metadata` message claims external changes are
+    /// pending import.
+    pub doctor_metadata_message: bool,
+}
+
+/// Pick the single [`BeadsTrackerAuthorityState`] implied by the
+/// concrete signals.
+///
+/// Documented precedence when multiple signals are present (worst
+/// first): `parse_error` > `merge_artifacts` > `count_mismatch` >
+/// `dirty_issues` > `jsonl_newer` > `db_newer` >
+/// `doctor_metadata_message_only` > `clean`. A doctor metadata message
+/// counts as non-authoritative only when paired with one of the
+/// concrete signals above it; alone it classifies as
+/// [`BeadsTrackerAuthorityState::DoctorMetadataMessageOnly`].
+#[must_use]
+pub const fn classify_tracker_authority_state(
+    signals: BeadsTrackerAuthoritySignals,
+) -> BeadsTrackerAuthorityState {
+    if signals.jsonl_parse_error {
+        return BeadsTrackerAuthorityState::ParseError;
+    }
+    if signals.non_benign_merge_artifacts {
+        return BeadsTrackerAuthorityState::MergeArtifacts;
+    }
+    if signals.unreconcilable_count_mismatch {
+        return BeadsTrackerAuthorityState::CountMismatch;
+    }
+    if signals.dirty_issue_count > 0 {
+        return BeadsTrackerAuthorityState::DirtyIssues;
+    }
+    if signals.jsonl_newer {
+        return BeadsTrackerAuthorityState::JsonlNewer;
+    }
+    if signals.db_newer {
+        return BeadsTrackerAuthorityState::DbNewer;
+    }
+    if signals.doctor_metadata_message {
+        return BeadsTrackerAuthorityState::DoctorMetadataMessageOnly;
+    }
+    BeadsTrackerAuthorityState::Clean
+}
+
+/// Derive the concrete authority signals from already-collected
+/// integrity inputs. Exposed for the work-packet layer and tests.
+#[must_use]
+pub fn tracker_authority_signals(
+    has_parse_error: bool,
+    jsonl_record_count: u64,
+    db_record_count: u64,
+    auto_import_enabled: bool,
+    external_changes_pending_import: bool,
+    dirty_issue_count: u64,
+    merge_artifact_paths: &[String],
+) -> BeadsTrackerAuthoritySignals {
+    let jsonl_newer = jsonl_record_count > db_record_count && auto_import_enabled;
+    let db_newer = db_record_count > jsonl_record_count;
+    BeadsTrackerAuthoritySignals {
+        jsonl_parse_error: has_parse_error,
+        non_benign_merge_artifacts: merge_artifact_paths
+            .iter()
+            .any(|path| !is_benign_beads_merge_base_artifact(path)),
+        unreconcilable_count_mismatch: jsonl_record_count != db_record_count
+            && !jsonl_newer
+            && !db_newer,
+        dirty_issue_count,
+        jsonl_newer,
+        db_newer,
+        doctor_metadata_message: external_changes_pending_import,
+    }
 }
 
 impl BeadsIntegrityHealth {
@@ -229,6 +413,12 @@ pub struct BeadsIntegrityReport {
     pub last_import_timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_export_timestamp: Option<String>,
+    /// Concrete authority state behind `br_reads_authoritative`
+    /// (bd-3w4pv.6). Not serialized: the `trackerIntegrity` payload
+    /// keeps its existing field set; the claim gate surfaces this
+    /// state as `sourceAuthority.trackerHealth`.
+    #[serde(skip)]
+    pub tracker_authority_state: BeadsTrackerAuthorityState,
     pub br_reads_authoritative: bool,
     pub requires_candidate_downgrade: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -240,6 +430,20 @@ pub struct BeadsIntegrityReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repair_command_candidate: Option<&'static str>,
     pub recovery_hint: Option<&'static str>,
+}
+
+impl BeadsIntegrityReport {
+    /// True when the only stale signal is the doctor `sync.metadata`
+    /// message: tracker reads stay authoritative, and the work-packet
+    /// layer surfaces the contradiction as a warning-severity
+    /// degradation instead of `beads_tracker_not_authoritative`.
+    #[must_use]
+    pub const fn doctor_metadata_message_only(&self) -> bool {
+        matches!(
+            self.tracker_authority_state,
+            BeadsTrackerAuthorityState::DoctorMetadataMessageOnly
+        )
+    }
 }
 
 /// Owned input bundle returned by the `br doctor --json` adapter.
@@ -374,12 +578,16 @@ fn compose_integrity_report_with_metadata(
         .collect();
     merge_artifact_paths.sort();
 
-    let br_reads_authoritative = br_reads_authoritative_for_report(
-        health,
-        pending_import_count,
+    let tracker_authority_state = classify_tracker_authority_state(tracker_authority_signals(
+        parse_error.is_some(),
+        inputs.jsonl_record_count,
+        inputs.db_record_count,
+        inputs.auto_import_enabled,
+        inputs.external_changes_pending_import,
         inputs.dirty_issue_count,
         &merge_artifact_paths,
-    );
+    ));
+    let br_reads_authoritative = tracker_authority_state.is_authoritative();
     let safe_repair_candidate = safe_repair_candidate_for_report(
         &parse_error,
         inputs.jsonl_record_count,
@@ -423,6 +631,7 @@ fn compose_integrity_report_with_metadata(
         } else {
             None
         },
+        tracker_authority_state,
         br_reads_authoritative,
         requires_candidate_downgrade: !br_reads_authoritative,
         safe_repair_candidate: show_repair_context.then_some(safe_repair_candidate),
@@ -602,30 +811,6 @@ pub fn classify_health(
     }
 
     candidate
-}
-
-fn br_reads_authoritative_for_report(
-    health: BeadsIntegrityHealth,
-    pending_import_count: u64,
-    dirty_issue_count: u64,
-    merge_artifact_paths: &[String],
-) -> bool {
-    if dirty_issue_count > 0 {
-        return false;
-    }
-
-    let merge_artifacts_are_benign = merge_artifact_paths
-        .iter()
-        .all(|path| is_benign_beads_merge_base_artifact(path));
-
-    match health {
-        BeadsIntegrityHealth::Ok => true,
-        BeadsIntegrityHealth::MergeArtifactsWarn => merge_artifacts_are_benign,
-        BeadsIntegrityHealth::ExternalChangesPendingImport => {
-            pending_import_count == 0 && merge_artifacts_are_benign
-        }
-        BeadsIntegrityHealth::DbJsonlCountMismatch | BeadsIntegrityHealth::JsonlParseError => false,
-    }
 }
 
 fn repair_classification_for_report(
@@ -1733,6 +1918,330 @@ mod tests {
             "truncated must end on a UTF-8 boundary",
         )?;
         ensure_equal(&truncated.as_str(), &"🦀", "first crab survives")
+    }
+
+    #[test]
+    fn classify_tracker_authority_state_covers_each_state() -> TestResult {
+        use BeadsTrackerAuthorityState::{
+            Clean, CountMismatch, DbNewer, DirtyIssues, DoctorMetadataMessageOnly, JsonlNewer,
+            MergeArtifacts, ParseError,
+        };
+
+        let cases: [(BeadsTrackerAuthoritySignals, BeadsTrackerAuthorityState); 8] = [
+            (BeadsTrackerAuthoritySignals::default(), Clean),
+            (
+                BeadsTrackerAuthoritySignals {
+                    doctor_metadata_message: true,
+                    ..BeadsTrackerAuthoritySignals::default()
+                },
+                DoctorMetadataMessageOnly,
+            ),
+            (
+                BeadsTrackerAuthoritySignals {
+                    db_newer: true,
+                    ..BeadsTrackerAuthoritySignals::default()
+                },
+                DbNewer,
+            ),
+            (
+                BeadsTrackerAuthoritySignals {
+                    jsonl_newer: true,
+                    ..BeadsTrackerAuthoritySignals::default()
+                },
+                JsonlNewer,
+            ),
+            (
+                BeadsTrackerAuthoritySignals {
+                    dirty_issue_count: 1,
+                    ..BeadsTrackerAuthoritySignals::default()
+                },
+                DirtyIssues,
+            ),
+            (
+                BeadsTrackerAuthoritySignals {
+                    unreconcilable_count_mismatch: true,
+                    ..BeadsTrackerAuthoritySignals::default()
+                },
+                CountMismatch,
+            ),
+            (
+                BeadsTrackerAuthoritySignals {
+                    non_benign_merge_artifacts: true,
+                    ..BeadsTrackerAuthoritySignals::default()
+                },
+                MergeArtifacts,
+            ),
+            (
+                BeadsTrackerAuthoritySignals {
+                    jsonl_parse_error: true,
+                    ..BeadsTrackerAuthoritySignals::default()
+                },
+                ParseError,
+            ),
+        ];
+        for (signals, expected) in cases {
+            ensure_equal(
+                &classify_tracker_authority_state(signals),
+                &expected,
+                &format!("single-signal state for {signals:?}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn classify_tracker_authority_state_precedence_matches_documented_order() -> TestResult {
+        // Documented precedence (worst first): parse_error >
+        // merge_artifacts > count_mismatch > dirty_issues > jsonl_newer
+        // > db_newer > doctor_metadata_message_only > clean. Start with
+        // every signal raised and peel them off in that order.
+        use BeadsTrackerAuthorityState::{
+            Clean, CountMismatch, DbNewer, DirtyIssues, DoctorMetadataMessageOnly, JsonlNewer,
+            MergeArtifacts, ParseError,
+        };
+
+        let mut signals = BeadsTrackerAuthoritySignals {
+            jsonl_parse_error: true,
+            non_benign_merge_artifacts: true,
+            unreconcilable_count_mismatch: true,
+            dirty_issue_count: 3,
+            jsonl_newer: true,
+            db_newer: true,
+            doctor_metadata_message: true,
+        };
+        ensure_equal(
+            &classify_tracker_authority_state(signals),
+            &ParseError,
+            "parse error dominates every other signal",
+        )?;
+        signals.jsonl_parse_error = false;
+        ensure_equal(
+            &classify_tracker_authority_state(signals),
+            &MergeArtifacts,
+            "merge artifacts dominate count/dirty/import signals",
+        )?;
+        signals.non_benign_merge_artifacts = false;
+        ensure_equal(
+            &classify_tracker_authority_state(signals),
+            &CountMismatch,
+            "count mismatch dominates dirty/import signals",
+        )?;
+        signals.unreconcilable_count_mismatch = false;
+        ensure_equal(
+            &classify_tracker_authority_state(signals),
+            &DirtyIssues,
+            "dirty issues dominate directional drift",
+        )?;
+        signals.dirty_issue_count = 0;
+        ensure_equal(
+            &classify_tracker_authority_state(signals),
+            &JsonlNewer,
+            "jsonl_newer dominates db_newer",
+        )?;
+        signals.jsonl_newer = false;
+        ensure_equal(
+            &classify_tracker_authority_state(signals),
+            &DbNewer,
+            "db_newer dominates the metadata message",
+        )?;
+        signals.db_newer = false;
+        ensure_equal(
+            &classify_tracker_authority_state(signals),
+            &DoctorMetadataMessageOnly,
+            "metadata message alone is message-only",
+        )?;
+        signals.doctor_metadata_message = false;
+        ensure_equal(
+            &classify_tracker_authority_state(signals),
+            &Clean,
+            "no signal is clean",
+        )
+    }
+
+    #[test]
+    fn metadata_message_with_clean_concrete_evidence_is_message_only_state() -> TestResult {
+        let report = compose_integrity_report(BeadsIntegrityInputs {
+            external_changes_pending_import: true,
+            dirty_issue_count: 0,
+            ..base_inputs(&[], None)
+        });
+        ensure_equal(
+            &report.tracker_authority_state,
+            &BeadsTrackerAuthorityState::DoctorMetadataMessageOnly,
+            "metadata-only message classifies as doctor_metadata_message_only",
+        )?;
+        ensure(
+            report.doctor_metadata_message_only(),
+            "report must expose the contradiction accessor",
+        )?;
+        ensure_equal(
+            &report.br_reads_authoritative,
+            &true,
+            "metadata-only message keeps br reads authoritative",
+        )?;
+        ensure_equal(
+            &report.health,
+            &BeadsIntegrityHealth::ExternalChangesPendingImport,
+            "serialized health vocabulary is unchanged",
+        )
+    }
+
+    #[test]
+    fn dirty_issues_without_metadata_message_fail_closed() -> TestResult {
+        let report = compose_integrity_report(BeadsIntegrityInputs {
+            dirty_issue_count: 2,
+            ..base_inputs(&[], None)
+        });
+        ensure_equal(
+            &report.tracker_authority_state,
+            &BeadsTrackerAuthorityState::DirtyIssues,
+            "dirty issues classify concretely",
+        )?;
+        ensure_equal(
+            &report.br_reads_authoritative,
+            &false,
+            "dirty issues fail closed",
+        )?;
+        ensure_equal(
+            &report.requires_candidate_downgrade,
+            &true,
+            "dirty issues downgrade candidates",
+        )
+    }
+
+    #[test]
+    fn directional_drift_states_fail_closed() -> TestResult {
+        let jsonl_newer = compose_integrity_report(BeadsIntegrityInputs {
+            jsonl_record_count: 105,
+            db_record_count: 100,
+            auto_import_enabled: true,
+            ..base_inputs(&[], None)
+        });
+        ensure_equal(
+            &jsonl_newer.tracker_authority_state,
+            &BeadsTrackerAuthorityState::JsonlNewer,
+            "importable JSONL drift is jsonl_newer",
+        )?;
+        ensure_equal(
+            &jsonl_newer.br_reads_authoritative,
+            &false,
+            "jsonl_newer fails closed",
+        )?;
+
+        let db_newer = compose_integrity_report(BeadsIntegrityInputs {
+            jsonl_record_count: 100,
+            db_record_count: 110,
+            auto_import_enabled: true,
+            ..base_inputs(&[], None)
+        });
+        ensure_equal(
+            &db_newer.tracker_authority_state,
+            &BeadsTrackerAuthorityState::DbNewer,
+            "unexported DB rows are db_newer",
+        )?;
+        ensure_equal(
+            &db_newer.br_reads_authoritative,
+            &false,
+            "db_newer fails closed",
+        )
+    }
+
+    #[test]
+    fn count_mismatch_without_auto_import_fails_closed() -> TestResult {
+        let report = compose_integrity_report(BeadsIntegrityInputs {
+            jsonl_record_count: 105,
+            db_record_count: 100,
+            auto_import_enabled: false,
+            ..base_inputs(&[], None)
+        });
+        ensure_equal(
+            &report.tracker_authority_state,
+            &BeadsTrackerAuthorityState::CountMismatch,
+            "unreconcilable drift is count_mismatch",
+        )?;
+        ensure_equal(
+            &report.br_reads_authoritative,
+            &false,
+            "count_mismatch fails closed",
+        )
+    }
+
+    #[test]
+    fn benign_merge_base_artifact_stays_clean_non_benign_fails_closed() -> TestResult {
+        let benign = vec!["beads.base.jsonl".to_owned()];
+        let benign_report = compose_integrity_report(base_inputs(&benign, None));
+        ensure_equal(
+            &benign_report.tracker_authority_state,
+            &BeadsTrackerAuthorityState::Clean,
+            "benign merge anchor is not a merge_artifacts signal",
+        )?;
+        ensure_equal(
+            &benign_report.br_reads_authoritative,
+            &true,
+            "benign merge anchor keeps br reads authoritative",
+        )?;
+
+        let artifacts = vec![".beads/issues.jsonl.orig".to_owned()];
+        let report = compose_integrity_report(base_inputs(&artifacts, None));
+        ensure_equal(
+            &report.tracker_authority_state,
+            &BeadsTrackerAuthorityState::MergeArtifacts,
+            "non-benign artifacts classify as merge_artifacts",
+        )?;
+        ensure_equal(
+            &report.br_reads_authoritative,
+            &false,
+            "merge_artifacts fails closed",
+        )
+    }
+
+    #[test]
+    fn tracker_authority_state_agrees_with_br_reads_authoritative() -> TestResult {
+        let artifacts = vec![".beads/issues.jsonl.orig".to_owned()];
+        let parse_error = JsonlParseError {
+            line: 101,
+            column: None,
+            excerpt: "}] }".to_owned(),
+        };
+        let combos: Vec<BeadsIntegrityInputs<'_>> = vec![
+            base_inputs(&[], None),
+            BeadsIntegrityInputs {
+                external_changes_pending_import: true,
+                ..base_inputs(&[], None)
+            },
+            BeadsIntegrityInputs {
+                dirty_issue_count: 4,
+                external_changes_pending_import: true,
+                ..base_inputs(&[], None)
+            },
+            BeadsIntegrityInputs {
+                jsonl_record_count: 105,
+                db_record_count: 100,
+                ..base_inputs(&[], None)
+            },
+            BeadsIntegrityInputs {
+                jsonl_record_count: 100,
+                db_record_count: 105,
+                ..base_inputs(&[], None)
+            },
+            BeadsIntegrityInputs {
+                jsonl_record_count: 105,
+                db_record_count: 100,
+                auto_import_enabled: false,
+                ..base_inputs(&[], None)
+            },
+            base_inputs(&artifacts, None),
+            base_inputs(&[], Some(parse_error)),
+        ];
+        for inputs in combos {
+            let report = compose_integrity_report(inputs.clone());
+            ensure_equal(
+                &report.br_reads_authoritative,
+                &report.tracker_authority_state.is_authoritative(),
+                &format!("authority agreement for {inputs:?}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

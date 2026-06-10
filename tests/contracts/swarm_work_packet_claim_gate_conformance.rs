@@ -1,9 +1,24 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use ee::core::beads_integrity::{
+    BeadsIntegrityInputs, BeadsIntegrityReport, JsonlParseError, compose_integrity_report,
+    compose_integrity_report_from_br_doctor_json,
+};
+use ee::core::swarm_brief::SwarmBriefReport;
+use ee::core::swarm_next_action::{
+    SWARM_NEXT_ACTION_REDACTION_STATUS, SWARM_NEXT_ACTION_SCHEMA_V1, SwarmNextActionCandidate,
+    SwarmNextActionCheckoutSummary, SwarmNextActionCompileHealthSummary,
+    SwarmNextActionCoordinationSummary, SwarmNextActionEnvironmentSummary,
+    SwarmNextActionInputSummary, SwarmNextActionSnapshot, SwarmNextActionVerificationSummary,
+    SwarmWorkPacket, SwarmWorkPacketClaimGate,
+};
+
 type TestResult = Result<(), String>;
+
+const TRACKER_METADATA_DRIFT_CODE: &str = "beads_tracker_metadata_drift";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -500,6 +515,441 @@ fn claim_gate_schema_forbids_mutating_inspection_actions() -> TestResult {
     )? != "object"
     {
         return Err("safeToClaim=true must force claimCommandAction to be an object".into());
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tracker authority states (bd-3w4pv.6)
+//
+// Fixture-driven gate conformance for the split trackerHealth vocabulary:
+// every concrete stale state fails closed, while the doctor
+// metadata-message-only contradiction keeps tracker authority true and
+// surfaces as a warning-severity degradation instead of
+// beads_tracker_not_authoritative.
+// ---------------------------------------------------------------------------
+
+fn tracker_authority_fixture(file_name: &str) -> Result<Value, String> {
+    read_json(&[
+        "tests",
+        "fixtures",
+        "swarm_work_packet",
+        "tracker_authority",
+        file_name,
+    ])
+}
+
+fn u64_at(value: &Value, pointer: &str, context: &str) -> Result<u64, String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("{context} missing unsigned integer {pointer}"))
+}
+
+fn claim_ready_snapshot(candidate_id: &str, title: &str) -> SwarmNextActionSnapshot {
+    SwarmNextActionSnapshot {
+        schema: SWARM_NEXT_ACTION_SCHEMA_V1,
+        workspace: "/tmp/project".to_owned(),
+        redaction_status: SWARM_NEXT_ACTION_REDACTION_STATUS,
+        inputs: SwarmNextActionInputSummary {
+            source_count: 1,
+            ready_bead_count: 1,
+            in_progress_bead_count: 0,
+            blocked_bead_count: 0,
+            bv_top_pick_count: 0,
+        },
+        candidates: vec![SwarmNextActionCandidate {
+            id: candidate_id.to_owned(),
+            title: title.to_owned(),
+            source: "beads_ready",
+            score_milli: None,
+            status: "open".to_owned(),
+            priority: Some(2),
+            issue_type: None,
+            assignee: None,
+            blocked_by: Vec::new(),
+            blocked_by_compile_health: false,
+            action_hint: "reserve_files_and_start_smallest_useful_slice".to_owned(),
+        }],
+        stale_work_proposals: Vec::new(),
+        coordination: SwarmNextActionCoordinationSummary {
+            active_reservation_count: 0,
+            reservation_holders: Vec::new(),
+            unread_inbox_count: 0,
+            ack_required_count: 0,
+        },
+        checkout: SwarmNextActionCheckoutSummary {
+            dirty_path_count: 0,
+            dirty_paths: Vec::new(),
+        },
+        compile_health: SwarmNextActionCompileHealthSummary {
+            safe_to_launch_rch: Some(true),
+            blocker_count: 0,
+            blockers: Vec::new(),
+            recommended_alternative_work: Vec::new(),
+        },
+        verification: SwarmNextActionVerificationSummary {
+            rch_source_enabled: true,
+            remote_only_required: true,
+            remote_only_safe: Some(true),
+            healthy_worker_count: Some(1),
+            active_remote_build_count: Some(0),
+            queued_remote_build_count: Some(0),
+            slots_available: Some(1),
+            queue_head_slots_needed: None,
+            active_build_max_age_seconds: None,
+            queue_status: Some("ready".to_owned()),
+            verifier_evidence: Vec::new(),
+        },
+        environment: SwarmNextActionEnvironmentSummary {
+            cargo_target_externalized: true,
+            tmpdir_externalized: true,
+            external_agent_space_present: true,
+            disk_pressure_hint_count: 0,
+        },
+        degraded: Vec::new(),
+    }
+}
+
+fn packet_and_gate(
+    tracker_integrity: BeadsIntegrityReport,
+    snapshot: &SwarmNextActionSnapshot,
+    candidate_id: &str,
+) -> (SwarmWorkPacket, SwarmWorkPacketClaimGate) {
+    let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+    let packet = SwarmWorkPacket::from_brief_and_next_action_with_tracker_integrity(
+        &brief,
+        snapshot,
+        tracker_integrity,
+    );
+    let gate = packet.claim_gate(Some(candidate_id));
+    (packet, gate)
+}
+
+fn report_from_matrix_case(case: &Value, context: &str) -> Result<BeadsIntegrityReport, String> {
+    let merge_artifact_paths = string_array_at(case, "/mergeArtifactPaths", context)?;
+    let jsonl_parse_error = match case.pointer("/jsonlParseError") {
+        None | Some(Value::Null) => None,
+        Some(error) => Some(JsonlParseError {
+            line: u64_at(error, "/line", context)?,
+            column: error.pointer("/column").and_then(Value::as_u64),
+            excerpt: string_at(error, "/excerpt", context)?.to_owned(),
+        }),
+    };
+    Ok(compose_integrity_report(BeadsIntegrityInputs {
+        jsonl_path: ".beads/issues.jsonl",
+        db_path: ".beads/beads.db",
+        jsonl_record_count: u64_at(case, "/jsonlRecordCount", context)?,
+        db_record_count: u64_at(case, "/dbRecordCount", context)?,
+        auto_import_enabled: bool_at(case, "/autoImportEnabled", context)?,
+        external_changes_pending_import: bool_at(case, "/externalChangesPendingImport", context)?,
+        dirty_issue_count: u64_at(case, "/dirtyIssueCount", context)?,
+        merge_artifact_paths: &merge_artifact_paths,
+        jsonl_parse_error,
+    }))
+}
+
+fn report_from_doctor_fixture(
+    fixture: &Value,
+    context: &str,
+) -> Result<BeadsIntegrityReport, String> {
+    let doctor = fixture
+        .get("doctor")
+        .ok_or_else(|| format!("{context} missing doctor payload"))?;
+    let raw = serde_json::to_string(doctor)
+        .map_err(|error| format!("{context} serialize doctor payload: {error}"))?;
+    compose_integrity_report_from_br_doctor_json(
+        &raw,
+        ".beads/issues.jsonl",
+        ".beads/beads.db",
+        true,
+    )
+    .map_err(|error| format!("{context} compose integrity report: {error}"))
+}
+
+fn gate_contradiction_signal(
+    packet: &SwarmWorkPacket,
+    gate: &SwarmWorkPacketClaimGate,
+) -> (bool, bool) {
+    let packet_signal = packet
+        .degraded
+        .iter()
+        .any(|degradation| degradation.code == TRACKER_METADATA_DRIFT_CODE);
+    let gate_signal = gate
+        .degraded_codes
+        .iter()
+        .any(|code| code == TRACKER_METADATA_DRIFT_CODE);
+    (packet_signal, gate_signal)
+}
+
+#[test]
+fn claim_gate_tracker_health_matrix_states_are_fail_closed_except_message_only() -> TestResult {
+    let fixture = tracker_authority_fixture("claim_gate_tracker_health_matrix.json")?;
+    let cases = fixture
+        .pointer("/cases")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "tracker health matrix fixture missing cases[]".to_owned())?;
+    if cases.len() != 8 {
+        return Err(format!(
+            "tracker health matrix must pin all 8 states, found {}",
+            cases.len()
+        ));
+    }
+
+    for case in cases {
+        let name = string_at(case, "/name", "tracker health matrix case")?;
+        let context = format!("tracker health matrix case {name}");
+        let expected_health = string_at(case, "/expected/trackerHealth", &context)?.to_owned();
+        let expected_authoritative = bool_at(case, "/expected/trackerAuthoritative", &context)?;
+        let expected_contradiction = bool_at(case, "/expected/contradictionSignal", &context)?;
+
+        let report = report_from_matrix_case(case, &context)?;
+        let snapshot = claim_ready_snapshot("bd-matrix", "Document tracker authority states");
+        let (packet, gate) = packet_and_gate(report, &snapshot, "bd-matrix");
+
+        if gate.source_authority.tracker_health != expected_health {
+            return Err(format!(
+                "{context}: trackerHealth expected {expected_health}, got {}",
+                gate.source_authority.tracker_health
+            ));
+        }
+        if gate.source_authority.tracker_authoritative != expected_authoritative {
+            return Err(format!(
+                "{context}: trackerAuthoritative expected {expected_authoritative}, got {}",
+                gate.source_authority.tracker_authoritative
+            ));
+        }
+
+        if expected_authoritative {
+            if !gate.safe_to_claim || gate.verdict != "safe_to_claim" {
+                return Err(format!(
+                    "{context}: authoritative tracker must keep the clean candidate claimable, \
+                     got verdict {} safeToClaim {}",
+                    gate.verdict, gate.safe_to_claim
+                ));
+            }
+            if gate.claim_command_action.is_none() {
+                return Err(format!(
+                    "{context}: claimable gate must expose claimCommandAction"
+                ));
+            }
+            if gate
+                .unsafe_reasons
+                .iter()
+                .any(|reason| reason.starts_with("beads_tracker_not_authoritative"))
+            {
+                return Err(format!(
+                    "{context}: authoritative tracker must not emit beads_tracker_not_authoritative"
+                ));
+            }
+        } else {
+            if gate.safe_to_claim {
+                return Err(format!("{context}: stale tracker state must fail closed"));
+            }
+            if gate.claim_command_action.is_some() {
+                return Err(format!(
+                    "{context}: stale tracker state must keep claimCommandAction null"
+                ));
+            }
+            let expected_reason = format!("beads_tracker_not_authoritative:{expected_health}");
+            if !gate.unsafe_reasons.contains(&expected_reason) {
+                return Err(format!(
+                    "{context}: missing concrete unsafe reason {expected_reason}; got {:?}",
+                    gate.unsafe_reasons
+                ));
+            }
+        }
+
+        let (packet_signal, gate_signal) = gate_contradiction_signal(&packet, &gate);
+        if packet_signal != expected_contradiction || gate_signal != expected_contradiction {
+            return Err(format!(
+                "{context}: contradiction signal expected {expected_contradiction}, \
+                 packet {packet_signal}, gate {gate_signal}"
+            ));
+        }
+
+        let rendered = serde_json::to_value(&gate)
+            .map_err(|error| format!("{context}: serialize gate: {error}"))?;
+        assert_no_forbidden_markers(&rendered, &context)?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn claim_gate_doctor_metadata_message_only_keeps_tracker_authoritative() -> TestResult {
+    let fixture = tracker_authority_fixture("doctor_metadata_message_only.json")?;
+    let context = "doctor metadata-message-only fixture";
+    let report = report_from_doctor_fixture(&fixture, context)?;
+    let snapshot = claim_ready_snapshot("bd-message-only", "Document tracker authority states");
+    let (packet, gate) = packet_and_gate(report, &snapshot, "bd-message-only");
+
+    let expected_health = string_at(&fixture, "/expected/trackerHealth", context)?;
+    if gate.source_authority.tracker_health != expected_health {
+        return Err(format!(
+            "{context}: trackerHealth expected {expected_health}, got {}",
+            gate.source_authority.tracker_health
+        ));
+    }
+    if !gate.source_authority.tracker_authoritative {
+        return Err(format!(
+            "{context}: metadata-only doctor message must keep trackerAuthoritative=true"
+        ));
+    }
+    if !gate.safe_to_claim || gate.claim_command_action.is_none() {
+        return Err(format!(
+            "{context}: clean concrete evidence must keep the candidate claimable"
+        ));
+    }
+    if gate
+        .unsafe_reasons
+        .iter()
+        .any(|reason| reason.starts_with("beads_tracker_not_authoritative"))
+    {
+        return Err(format!(
+            "{context}: the metadata message must not surface as beads_tracker_not_authoritative"
+        ));
+    }
+
+    let expected_code = string_at(&fixture, "/expected/contradictionDegradedCode", context)?;
+    let drift = packet
+        .degraded
+        .iter()
+        .find(|degradation| degradation.code == expected_code)
+        .ok_or_else(|| {
+            format!("{context}: contradiction degradation {expected_code} must be present")
+        })?;
+    if drift.severity != "warning" {
+        return Err(format!(
+            "{context}: contradiction severity expected warning, got {}",
+            drift.severity
+        ));
+    }
+    if !gate.degraded_codes.contains(&expected_code.to_owned()) {
+        return Err(format!(
+            "{context}: gate degradedCodes must carry {expected_code}"
+        ));
+    }
+
+    let rendered = serde_json::to_value(&gate)
+        .map_err(|error| format!("{context}: serialize gate: {error}"))?;
+    assert_no_forbidden_markers(&rendered, context)?;
+    assert_next_actions_are_read_only(&rendered, context)?;
+
+    Ok(())
+}
+
+#[test]
+fn claim_gate_doctor_dirty_issues_fail_closed() -> TestResult {
+    let fixture = tracker_authority_fixture("doctor_dirty_issues.json")?;
+    let context = "doctor dirty-issues fixture";
+    let report = report_from_doctor_fixture(&fixture, context)?;
+    let snapshot = claim_ready_snapshot("bd-dirty", "Document tracker authority states");
+    let (packet, gate) = packet_and_gate(report, &snapshot, "bd-dirty");
+
+    let expected_health = string_at(&fixture, "/expected/trackerHealth", context)?;
+    if gate.source_authority.tracker_health != expected_health {
+        return Err(format!(
+            "{context}: trackerHealth expected {expected_health}, got {}",
+            gate.source_authority.tracker_health
+        ));
+    }
+    if gate.source_authority.tracker_authoritative {
+        return Err(format!(
+            "{context}: dirty issues must force trackerAuthoritative=false"
+        ));
+    }
+    if gate.safe_to_claim || gate.claim_command_action.is_some() {
+        return Err(format!(
+            "{context}: dirty issues must fail closed with claimCommandAction=null"
+        ));
+    }
+    let expected_reason = format!("beads_tracker_not_authoritative:{expected_health}");
+    if !gate.unsafe_reasons.contains(&expected_reason) {
+        return Err(format!(
+            "{context}: missing unsafe reason {expected_reason}; got {:?}",
+            gate.unsafe_reasons
+        ));
+    }
+    let (packet_signal, gate_signal) = gate_contradiction_signal(&packet, &gate);
+    if packet_signal || gate_signal {
+        return Err(format!(
+            "{context}: concrete dirty evidence must not be reported as a metadata contradiction"
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn claim_gate_dirty_checkout_with_clean_tracker_stays_unsafe_due_to_conflict() -> TestResult {
+    let fixture = tracker_authority_fixture("doctor_metadata_message_only.json")?;
+    let context = "dirty checkout with clean tracker";
+    let report = report_from_doctor_fixture(&fixture, context)?;
+
+    // The candidate title maps to the swarm next-action surfaces, and the
+    // checkout has uncommitted work on one of them: dirty-surface conflict
+    // evidence must keep the claim gate closed even though the tracker
+    // itself is authoritative (metadata-message-only).
+    let mut snapshot =
+        claim_ready_snapshot("bd-conflict", "Polish swarm next-action conflict surfaces");
+    snapshot.checkout.dirty_path_count = 1;
+    snapshot.checkout.dirty_paths = vec!["src/core/swarm_next_action.rs".to_owned()];
+
+    let (packet, gate) = packet_and_gate(report, &snapshot, "bd-conflict");
+
+    if !gate.source_authority.tracker_authoritative {
+        return Err(format!(
+            "{context}: tracker must stay authoritative; unsafety must come from dirty surfaces"
+        ));
+    }
+    if gate.source_authority.tracker_health != "doctor_metadata_message_only" {
+        return Err(format!(
+            "{context}: trackerHealth expected doctor_metadata_message_only, got {}",
+            gate.source_authority.tracker_health
+        ));
+    }
+    let candidate = packet
+        .candidates
+        .iter()
+        .find(|candidate| candidate.id == "bd-conflict")
+        .ok_or_else(|| format!("{context}: candidate must remain visible"))?;
+    if candidate.decision != "unsafe_due_to_conflict" {
+        return Err(format!(
+            "{context}: candidate decision expected unsafe_due_to_conflict, got {}",
+            candidate.decision
+        ));
+    }
+    if gate.verdict != "unsafe_due_to_conflict" {
+        return Err(format!(
+            "{context}: gate verdict expected unsafe_due_to_conflict, got {}",
+            gate.verdict
+        ));
+    }
+    if gate.safe_to_claim || gate.claim_command_action.is_some() {
+        return Err(format!(
+            "{context}: dirty checkout must never become claim-safe via tracker authority"
+        ));
+    }
+    if !gate
+        .unsafe_reasons
+        .iter()
+        .any(|reason| reason.starts_with("dirty_path_overlap:"))
+    {
+        return Err(format!(
+            "{context}: unsafe reasons must carry dirty_path_overlap evidence; got {:?}",
+            gate.unsafe_reasons
+        ));
+    }
+    if gate
+        .unsafe_reasons
+        .iter()
+        .any(|reason| reason.starts_with("beads_tracker_not_authoritative"))
+    {
+        return Err(format!(
+            "{context}: tracker authority must not be blamed for a dirty-checkout conflict"
+        ));
     }
 
     Ok(())

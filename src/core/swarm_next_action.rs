@@ -15,7 +15,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::core::beads_integrity::{
-    BeadsIntegrityHealth, BeadsIntegrityInputs, BeadsIntegrityReport, compose_integrity_report,
+    BeadsIntegrityInputs, BeadsIntegrityReport, compose_integrity_report,
     compose_integrity_report_from_br_doctor_json,
 };
 use crate::core::environment_attestation::{
@@ -54,6 +54,7 @@ pub const SWARM_WORK_PACKET_REDACTION_STATUS: &str =
     "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content";
 const EXTERNAL_AGENT_SPACE_ROOT: &str = "/Volumes/USBNVME16TB/temp_agent_space";
 const AGENT_MAIL_UNAVAILABLE_CODE: &str = "agent_mail_unavailable";
+const BEADS_TRACKER_METADATA_DRIFT_CODE: &str = "beads_tracker_metadata_drift";
 const AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE: &str = "agent_mail_semantic_readiness_failed";
 const AGENT_MAIL_SNAPSHOT_TEMPLATE_AGENT: &str = "<AGENT_NAME>";
 const AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH: &str = "/private/tmp/ee-agent-mail-snapshot.json";
@@ -1360,6 +1361,13 @@ impl SwarmWorkPacket {
             .iter()
             .map(SwarmWorkPacketDegradation::from_next_action)
             .collect::<Vec<_>>();
+        if tracker_integrity.doctor_metadata_message_only()
+            && !degraded
+                .iter()
+                .any(|degradation| degradation.code == BEADS_TRACKER_METADATA_DRIFT_CODE)
+        {
+            degraded.push(work_packet_tracker_metadata_contradiction_degradation());
+        }
         degraded.sort();
         degraded.dedup();
 
@@ -1523,7 +1531,7 @@ impl SwarmWorkPacket {
             recommended_safe_to_claim,
             source_authority: SwarmWorkPacketClaimGateSourceAuthority {
                 tracker_authoritative: self.tracker_integrity.br_reads_authoritative,
-                tracker_health: beads_integrity_health_label(self.tracker_integrity.health),
+                tracker_health: self.tracker_integrity.tracker_authority_state.label(),
                 agent_mail_status: self.coordination.agent_mail.status,
                 reservation_authoritative: self.coordination.agent_mail.reservation_authoritative,
                 inbox_authoritative: self.coordination.agent_mail.inbox_authoritative,
@@ -1713,7 +1721,7 @@ fn work_packet_claim_gate_unsafe_reasons(
                 } else {
                     reasons.push(format!(
                         "candidate_unresolved_due_to_tracker_state:{}:{candidate_id}",
-                        beads_integrity_health_label(packet.tracker_integrity.health)
+                        packet.tracker_integrity.tracker_authority_state.label()
                     ));
                 }
             } else {
@@ -1725,7 +1733,7 @@ fn work_packet_claim_gate_unsafe_reasons(
     if !packet.tracker_integrity.br_reads_authoritative {
         reasons.push(format!(
             "beads_tracker_not_authoritative:{}",
-            beads_integrity_health_label(packet.tracker_integrity.health)
+            packet.tracker_integrity.tracker_authority_state.label()
         ));
     }
     if agent_mail_blocks_claim(&packet.coordination.agent_mail) {
@@ -2490,7 +2498,7 @@ fn apply_tracker_integrity_candidate_downgrade(
 
     let unsafe_reason = format!(
         "beads_tracker_not_authoritative:{}",
-        beads_integrity_health_label(tracker_integrity.health)
+        tracker_integrity.tracker_authority_state.label()
     );
     for candidate in candidates {
         if candidate.decision == "safe_to_claim" {
@@ -2499,6 +2507,26 @@ fn apply_tracker_integrity_candidate_downgrade(
         candidate.unsafe_reasons.push(unsafe_reason.clone());
         candidate.unsafe_reasons.sort();
         candidate.unsafe_reasons.dedup();
+    }
+}
+
+/// Warning-severity contradiction signal for the
+/// `doctor_metadata_message_only` tracker authority state (bd-3w4pv.6):
+/// the doctor `sync.metadata` message claims pending external changes
+/// while every concrete dirty/import signal is clean. Bounded message
+/// id and prose only — never raw `br` output — so the packet stays
+/// support-bundle-safe. This degradation never blocks claims; tracker
+/// reads remain authoritative in this state.
+fn work_packet_tracker_metadata_contradiction_degradation() -> SwarmWorkPacketDegradation {
+    SwarmWorkPacketDegradation {
+        code: BEADS_TRACKER_METADATA_DRIFT_CODE.to_owned(),
+        source: "beads".to_owned(),
+        severity: "warning",
+        message: "Beads tracker metadata reports external changes pending import, but concrete \
+                  evidence is clean (dirty issues 0, DB/JSONL counts equal, no merge artifacts, \
+                  no JSONL parse error); br reads remain authoritative."
+            .to_owned(),
+        repair: Some("br sync --import-only --json".to_owned()),
     }
 }
 
@@ -3934,7 +3962,7 @@ fn work_packet_recommended_action(
     if !tracker_integrity.br_reads_authoritative {
         reasons.push(format!(
             "beads_tracker_not_authoritative:{}",
-            beads_integrity_health_label(tracker_integrity.health)
+            tracker_integrity.tracker_authority_state.label()
         ));
     }
     reasons.sort();
@@ -4250,16 +4278,6 @@ fn work_packet_suggested_command_actions(
     ));
     sort_work_packet_command_actions(&mut actions);
     actions
-}
-
-fn beads_integrity_health_label(health: BeadsIntegrityHealth) -> &'static str {
-    match health {
-        BeadsIntegrityHealth::Ok => "ok",
-        BeadsIntegrityHealth::MergeArtifactsWarn => "merge_artifacts_warn",
-        BeadsIntegrityHealth::ExternalChangesPendingImport => "external_changes_pending_import",
-        BeadsIntegrityHealth::DbJsonlCountMismatch => "db_jsonl_count_mismatch",
-        BeadsIntegrityHealth::JsonlParseError => "jsonl_parse_error",
-    }
 }
 
 fn work_packet_observed_state_class(
@@ -5948,6 +5966,7 @@ fn env_path_starts_with(key: &str, expected_root: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::beads_integrity::{BeadsIntegrityHealth, BeadsTrackerAuthorityState};
     use crate::core::swarm_brief::{
         RchCodexHookCapability, RchLocalCapabilityReport, RchQueueHealth, RchWorkerPressureReport,
         RchWorkerProbeSummary, SwarmBriefBead, SwarmBriefBvPick, SwarmBriefBvSummary,
@@ -9067,13 +9086,19 @@ mod tests {
             packet.tracker_integrity.health,
             BeadsIntegrityHealth::ExternalChangesPendingImport
         );
+        assert_eq!(
+            packet.tracker_integrity.tracker_authority_state,
+            BeadsTrackerAuthorityState::DirtyIssues
+        );
         assert!(!packet.tracker_integrity.br_reads_authoritative);
         assert_eq!(packet.recommended_action.action, "coordinate_before_claim");
         assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
         assert_eq!(packet.candidates[0].decision, "external_state_required");
-        assert!(packet.candidates[0].unsafe_reasons.contains(
-            &"beads_tracker_not_authoritative:external_changes_pending_import".to_owned()
-        ));
+        assert!(
+            packet.candidates[0]
+                .unsafe_reasons
+                .contains(&"beads_tracker_not_authoritative:dirty_issues".to_owned())
+        );
         assert!(
             packet
                 .recommended_action
@@ -9125,12 +9150,9 @@ mod tests {
         assert!(gate.selected_candidate.is_none());
         assert!(gate.claim_command_action.is_none());
         assert_eq!(gate.recommended_safe_to_claim, None);
-        assert!(
-            gate.unsafe_reasons.contains(
-                &"candidate_unresolved_due_to_tracker_state:external_changes_pending_import:bd-stale-missing"
-                    .to_owned()
-            )
-        );
+        assert!(gate.unsafe_reasons.contains(
+            &"candidate_unresolved_due_to_tracker_state:dirty_issues:bd-stale-missing".to_owned()
+        ));
         assert!(
             !gate
                 .unsafe_reasons
@@ -9192,21 +9214,95 @@ mod tests {
             packet.tracker_integrity.health,
             BeadsIntegrityHealth::ExternalChangesPendingImport
         );
+        assert_eq!(
+            packet.tracker_integrity.tracker_authority_state,
+            BeadsTrackerAuthorityState::DoctorMetadataMessageOnly
+        );
         assert!(packet.tracker_integrity.br_reads_authoritative);
         assert!(!packet.tracker_integrity.requires_candidate_downgrade);
         assert_eq!(packet.candidates[0].decision, "safe_to_claim");
-        assert!(!packet.candidates[0].unsafe_reasons.contains(
-            &"beads_tracker_not_authoritative:external_changes_pending_import".to_owned()
-        ));
+        assert!(
+            packet.candidates[0]
+                .unsafe_reasons
+                .iter()
+                .all(|reason| !reason.starts_with("beads_tracker_not_authoritative"))
+        );
         assert_eq!(packet.recommended_action.safe_to_claim, Some(true));
         assert_eq!(packet.recommended_action.action, "inspect_and_claim");
         assert_eq!(gate.source_authority.tracker_authoritative, true);
+        assert_eq!(
+            gate.source_authority.tracker_health,
+            "doctor_metadata_message_only"
+        );
         assert_eq!(gate.verdict, "safe_to_claim");
         assert!(gate.safe_to_claim);
         assert!(gate.claim_command_action.is_some());
-        assert!(!gate.unsafe_reasons.contains(
-            &"beads_tracker_not_authoritative:external_changes_pending_import".to_owned()
-        ));
+        assert!(
+            gate.unsafe_reasons
+                .iter()
+                .all(|reason| !reason.starts_with("beads_tracker_not_authoritative"))
+        );
+        let drift = packet
+            .degraded
+            .iter()
+            .find(|degradation| degradation.code == BEADS_TRACKER_METADATA_DRIFT_CODE)
+            .expect("metadata-only contradiction must surface as a degradation");
+        assert_eq!(drift.severity, "warning");
+        assert_eq!(drift.source, "beads");
+        assert!(
+            gate.degraded_codes
+                .contains(&BEADS_TRACKER_METADATA_DRIFT_CODE.to_owned())
+        );
+    }
+
+    #[test]
+    fn claim_gate_reports_concrete_tracker_health_for_dirty_tracker() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-dirty-tracker",
+            "Dirty tracker issues must fail the claim gate closed",
+            "beads_ready",
+            Some(1),
+        )]);
+        let merge_artifact_paths = Vec::new();
+        let tracker_integrity = compose_integrity_report(BeadsIntegrityInputs {
+            jsonl_path: ".beads/issues.jsonl",
+            db_path: ".beads/beads.db",
+            jsonl_record_count: 42,
+            db_record_count: 42,
+            auto_import_enabled: true,
+            external_changes_pending_import: true,
+            dirty_issue_count: 3,
+            merge_artifact_paths: &merge_artifact_paths,
+            jsonl_parse_error: None,
+        });
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action_with_tracker_integrity(
+            &brief,
+            &snapshot,
+            tracker_integrity,
+        );
+        let gate = packet.claim_gate(Some("bd-dirty-tracker"));
+
+        assert_eq!(
+            packet.tracker_integrity.tracker_authority_state,
+            BeadsTrackerAuthorityState::DirtyIssues
+        );
+        assert!(!gate.source_authority.tracker_authoritative);
+        assert_eq!(gate.source_authority.tracker_health, "dirty_issues");
+        assert!(!gate.safe_to_claim);
+        assert!(gate.claim_command_action.is_none());
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"beads_tracker_not_authoritative:dirty_issues".to_owned())
+        );
+        assert!(
+            !packet
+                .degraded
+                .iter()
+                .any(|degradation| degradation.code == BEADS_TRACKER_METADATA_DRIFT_CODE),
+            "concrete dirty evidence is a real stale state, not a metadata contradiction"
+        );
     }
 
     #[test]
@@ -9254,7 +9350,7 @@ mod tests {
         assert!(
             candidate
                 .unsafe_reasons
-                .contains(&"beads_tracker_not_authoritative:db_jsonl_count_mismatch".to_owned())
+                .contains(&"beads_tracker_not_authoritative:dirty_issues".to_owned())
         );
         assert!(!packet.tracker_integrity.br_reads_authoritative);
         assert_eq!(packet.recommended_action.safe_to_claim, Some(false));

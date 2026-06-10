@@ -1,0 +1,141 @@
+{
+  "schema": "ee.test_fixture.claim_gate_tracker_health_matrix.v1",
+  "trackingBead": "bd-3w4pv.6",
+  "description": "Tracker authority state matrix for the claim gate. Each case feeds raw Beads integrity inputs into compose_integrity_report and pins the sourceAuthority.trackerHealth label, the trackerAuthoritative boolean, the fail-closed claim gating, and whether the doctor-metadata contradiction degradation must surface. Precedence (worst first): parse_error > merge_artifacts > count_mismatch > dirty_issues > jsonl_newer > db_newer > doctor_metadata_message_only > clean.",
+  "precedence": [
+    "parse_error",
+    "merge_artifacts",
+    "count_mismatch",
+    "dirty_issues",
+    "jsonl_newer",
+    "db_newer",
+    "doctor_metadata_message_only",
+    "clean"
+  ],
+  "cases": [
+    {
+      "name": "clean",
+      "jsonlRecordCount": 100,
+      "dbRecordCount": 100,
+      "autoImportEnabled": true,
+      "externalChangesPendingImport": false,
+      "dirtyIssueCount": 0,
+      "mergeArtifactPaths": [],
+      "jsonlParseError": null,
+      "expected": {
+        "trackerHealth": "clean",
+        "trackerAuthoritative": true,
+        "contradictionSignal": false
+      }
+    },
+    {
+      "name": "doctor_metadata_message_only",
+      "jsonlRecordCount": 3347,
+      "dbRecordCount": 3347,
+      "autoImportEnabled": true,
+      "externalChangesPendingImport": true,
+      "dirtyIssueCount": 0,
+      "mergeArtifactPaths": [],
+      "jsonlParseError": null,
+      "expected": {
+        "trackerHealth": "doctor_metadata_message_only",
+        "trackerAuthoritative": true,
+        "contradictionSignal": true
+      }
+    },
+    {
+      "name": "dirty_issues",
+      "jsonlRecordCount": 100,
+      "dbRecordCount": 100,
+      "autoImportEnabled": true,
+      "externalChangesPendingImport": true,
+      "dirtyIssueCount": 2,
+      "mergeArtifactPaths": [],
+      "jsonlParseError": null,
+      "expected": {
+        "trackerHealth": "dirty_issues",
+        "trackerAuthoritative": false,
+        "contradictionSignal": false
+      }
+    },
+    {
+      "name": "jsonl_newer",
+      "jsonlRecordCount": 105,
+      "dbRecordCount": 100,
+      "autoImportEnabled": true,
+      "externalChangesPendingImport": false,
+      "dirtyIssueCount": 0,
+      "mergeArtifactPaths": [],
+      "jsonlParseError": null,
+      "expected": {
+        "trackerHealth": "jsonl_newer",
+        "trackerAuthoritative": false,
+        "contradictionSignal": false
+      }
+    },
+    {
+      "name": "db_newer",
+      "jsonlRecordCount": 100,
+      "dbRecordCount": 110,
+      "autoImportEnabled": true,
+      "externalChangesPendingImport": false,
+      "dirtyIssueCount": 0,
+      "mergeArtifactPaths": [],
+      "jsonlParseError": null,
+      "expected": {
+        "trackerHealth": "db_newer",
+        "trackerAuthoritative": false,
+        "contradictionSignal": false
+      }
+    },
+    {
+      "name": "count_mismatch",
+      "jsonlRecordCount": 105,
+      "dbRecordCount": 100,
+      "autoImportEnabled": false,
+      "externalChangesPendingImport": false,
+      "dirtyIssueCount": 0,
+      "mergeArtifactPaths": [],
+      "jsonlParseError": null,
+      "expected": {
+        "trackerHealth": "count_mismatch",
+        "trackerAuthoritative": false,
+        "contradictionSignal": false
+      }
+    },
+    {
+      "name": "merge_artifacts",
+      "jsonlRecordCount": 100,
+      "dbRecordCount": 100,
+      "autoImportEnabled": true,
+      "externalChangesPendingImport": false,
+      "dirtyIssueCount": 0,
+      "mergeArtifactPaths": [".beads/issues.jsonl.orig"],
+      "jsonlParseError": null,
+      "expected": {
+        "trackerHealth": "merge_artifacts",
+        "trackerAuthoritative": false,
+        "contradictionSignal": false
+      }
+    },
+    {
+      "name": "parse_error",
+      "jsonlRecordCount": 100,
+      "dbRecordCount": 100,
+      "autoImportEnabled": true,
+      "externalChangesPendingImport": false,
+      "dirtyIssueCount": 0,
+      "mergeArtifactPaths": [],
+      "jsonlParseError": {
+        "line": 101,
+        "column": 12,
+        "excerpt": "{\"id\":\"bd-malformed-tail\""
+      },
+      "expected": {
+        "trackerHealth": "parse_error",
+        "trackerAuthoritative": false,
+        "contradictionSignal": false
+      }
+    }
+  ]
+}

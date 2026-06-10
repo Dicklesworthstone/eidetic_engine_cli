@@ -320,7 +320,25 @@
       "additionalProperties": false,
       "properties": {
         "trackerAuthoritative": {"type": "boolean"},
-        "trackerHealth": {"type": "string"},
+        "trackerHealth": {
+          "type": "string",
+          "description": "Concrete tracker authority state (bd-3w4pv.6). Live gates emit the split vocabulary clean|doctor_metadata_message_only|dirty_issues|jsonl_newer|db_newer|merge_artifacts|count_mismatch|parse_error; the legacy coarse trackerIntegrity.health vocabulary stays valid for archived payloads. doctor_metadata_message_only means the br doctor sync.metadata message claims pending external changes while every concrete dirty/import signal is clean: trackerAuthoritative stays true and the contradiction surfaces as a warning-severity beads_tracker_metadata_drift degraded code. Every other non-clean state keeps trackerAuthoritative=false (fail closed).",
+          "enum": [
+            "ok",
+            "merge_artifacts_warn",
+            "external_changes_pending_import",
+            "db_jsonl_count_mismatch",
+            "jsonl_parse_error",
+            "clean",
+            "doctor_metadata_message_only",
+            "dirty_issues",
+            "jsonl_newer",
+            "db_newer",
+            "merge_artifacts",
+            "count_mismatch",
+            "parse_error"
+          ]
+        },
         "agentMailStatus": {"type": "string"},
         "reservationAuthoritative": {"type": ["boolean", "null"]},
         "inboxAuthoritative": {"type": ["boolean", "null"]},

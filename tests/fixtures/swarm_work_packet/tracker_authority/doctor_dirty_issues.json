@@ -1,0 +1,43 @@
+{
+  "schema": "ee.test_fixture.br_doctor_payload.v1",
+  "trackingBead": "bd-3w4pv.6",
+  "description": "br doctor --json payload with concrete dirty evidence: sync.metadata carries the pending-import message AND dirty_issues > 0. This is a true-stale tracker state, so the claim gate must fail closed: trackerAuthoritative=false, trackerHealth=dirty_issues, claimCommandAction=null, and no metadata-contradiction degradation.",
+  "doctor": {
+    "ok": true,
+    "checks": [
+      {
+        "name": "jsonl.merge_artifacts",
+        "status": "ok",
+        "message": "No merge artifacts",
+        "details": { "files": [] }
+      },
+      {
+        "name": "jsonl.parse",
+        "status": "ok",
+        "message": "Parsed 3347 records",
+        "details": { "records": 3347 }
+      },
+      {
+        "name": "sqlite.integrity_check",
+        "status": "ok"
+      },
+      {
+        "name": "counts.db_vs_jsonl",
+        "status": "ok",
+        "message": "Both have 3347 records",
+        "details": { "db": 3347, "jsonl": 3347 }
+      },
+      {
+        "name": "sync.metadata",
+        "status": "ok",
+        "message": "External changes pending import",
+        "details": { "dirty_issues": 3 }
+      }
+    ]
+  },
+  "expected": {
+    "trackerHealth": "dirty_issues",
+    "trackerAuthoritative": false,
+    "contradictionDegradedCode": null
+  }
+}

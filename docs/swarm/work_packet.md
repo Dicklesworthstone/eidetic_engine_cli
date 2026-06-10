@@ -139,6 +139,41 @@ inspect the malformed row, run `br doctor --json`, use
 `br --no-auto-import --allow-stale` for read-only fallback when needed, and only
 then claim or update tracker state.
 
+### Tracker authority states (bd-3w4pv.6)
+
+`trackerIntegrity.health` keeps its coarse five-value vocabulary for payload
+compatibility, but `brReadsAuthoritative` is derived from a finer
+tracker-authority classification that the claim gate surfaces as
+`sourceAuthority.trackerHealth`:
+
+| State | Concrete evidence | `trackerAuthoritative` |
+| --- | --- | --- |
+| `clean` | No parse, merge, count, dirty, or metadata signal. | `true` |
+| `doctor_metadata_message_only` | The doctor `sync.metadata` message claims pending external changes while dirty issues are 0, DB/JSONL counts match, and there are no merge artifacts or parse errors. | `true` |
+| `db_newer` | DB has rows the JSONL export lacks (`br sync --flush-only`). | `false` |
+| `jsonl_newer` | JSONL has importable rows the DB has not absorbed (`br sync --import-only`). | `false` |
+| `dirty_issues` | `br doctor` reports locally dirty issues. | `false` |
+| `count_mismatch` | DB/JSONL counts differ in a shape auto-import cannot reconcile. | `false` |
+| `merge_artifacts` | Non-benign merge artifacts next to `issues.jsonl` (the `beads.base.jsonl` merge anchor is benign). | `false` |
+| `parse_error` | At least one malformed JSONL line. | `false` |
+
+Precedence when several concrete signals hold at once (worst first):
+`parse_error` > `merge_artifacts` > `count_mismatch` > `dirty_issues` >
+`jsonl_newer` > `db_newer` > `doctor_metadata_message_only` > `clean`.
+
+A doctor `sync.metadata` prose message counts as non-authoritative only when it
+is paired with concrete dirty/import evidence. When the message appears with
+clean concrete evidence, the packet keeps `brReadsAuthoritative=true`, emits
+`trackerHealth=doctor_metadata_message_only`, and surfaces the contradiction as
+the warning-severity `beads_tracker_metadata_drift` degraded code (bounded
+message, no raw `br` output) instead of `beads_tracker_not_authoritative`.
+Every other non-clean state fails closed: the unsafe reason
+`beads_tracker_not_authoritative:<state>` names the concrete state, candidates
+downgrade to `external_state_required`, and `claimCommandAction` stays `null`.
+Dirty-checkout conflict evidence is computed separately, so a metadata-only
+tracker contradiction never makes a dirty checkout claim-safe — overlapping
+dirty surfaces still produce `unsafe_due_to_conflict`.
+
 ## Candidate decision vocabulary (bd-2z5ly.7.5)
 
 `candidates[].decision` is a stable diagnostic vocabulary. It explains the
@@ -208,6 +243,19 @@ without replacing the gate verdict, candidate decision, unsafe reasons, or the
 full `ee diag environment-attestation` surface. `candidate_not_found` and
 `no_candidate` are explicit gate verdicts so
 harnesses do not infer safety from missing candidate data.
+
+`sourceAuthority.trackerAuthoritative` and `sourceAuthority.trackerHealth`
+carry the tracker authority state described in
+[Tracker authority states (bd-3w4pv.6)](#tracker-authority-states-bd-3w4pv6).
+Live gates emit the split vocabulary (`clean`,
+`doctor_metadata_message_only`, `dirty_issues`, `jsonl_newer`, `db_newer`,
+`merge_artifacts`, `count_mismatch`, `parse_error`); the legacy coarse
+`trackerIntegrity.health` values remain schema-valid for archived payloads.
+`doctor_metadata_message_only` is the only non-`clean` state that keeps
+`trackerAuthoritative=true`: the doctor metadata message contradicts clean
+concrete evidence, so the gate carries the warning-severity
+`beads_tracker_metadata_drift` degraded code instead of refusing the claim for
+the wrong reason.
 
 Installed-binary freshness is carried beside the other authority fields as
 `installFreshnessVerdict`, `installFreshnessAuthoritative`, and
