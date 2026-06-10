@@ -3151,6 +3151,630 @@ mod tests {
             .expect("absent path is already clean");
     }
 
+    // ------------------------------------------------------------------
+    // bd-2yg7d.3: adversarial SocketBroker lifecycle fixtures (ADR 0055).
+    // These pin the broker's fail-closed publish/cleanup invariants
+    // directly at the SocketBroker API so a refactor cannot silently
+    // reopen a prior P0/P1 class without a named test failing.
+    // ------------------------------------------------------------------
+
+    /// Sample the canonical socket path in a tight loop until `stop`
+    /// flips, recording every observation that violates the ADR 0055
+    /// publish invariant: once the canonical path exists it must be a
+    /// socket with mode 0o600. The chmod runs on the temp path BEFORE
+    /// the atomic `rename(2)`, so correct code can never expose an
+    /// insecure intermediate state at the canonical name — any recorded
+    /// violation means the temp-bind + chmod + rename mechanism
+    /// regressed. `allow_missing` covers fresh publishes where the
+    /// canonical path legitimately does not exist until the rename
+    /// lands; stale replacement must never let the path go missing.
+    fn spawn_canonical_path_invariant_watcher(
+        path: PathBuf,
+        allow_missing: bool,
+        stop: Arc<AtomicBool>,
+    ) -> JoinHandle<(u64, Vec<String>)> {
+        use std::os::unix::fs::FileTypeExt;
+
+        thread::spawn(move || {
+            let mut samples = 0_u64;
+            let mut violations = Vec::new();
+            while !stop.load(Ordering::Acquire) {
+                samples += 1;
+                let observed = match fs::symlink_metadata(&path) {
+                    Ok(metadata) => {
+                        if metadata.file_type().is_socket() {
+                            let mode = metadata.permissions().mode() & 0o777;
+                            (mode != 0o600).then(|| {
+                                format!(
+                                    "sample {samples}: canonical socket observed with mode 0o{mode:o}"
+                                )
+                            })
+                        } else {
+                            Some(format!(
+                                "sample {samples}: canonical path exists as a non-socket"
+                            ))
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => (!allow_missing)
+                        .then(|| format!("sample {samples}: canonical path observed missing")),
+                    Err(error) => Some(format!("sample {samples}: stat failed: {error}")),
+                };
+                if let Some(violation) = observed
+                    && violations.len() < 16
+                {
+                    violations.push(violation);
+                }
+                thread::yield_now();
+            }
+            (samples, violations)
+        })
+    }
+
+    /// Accept the single pending connection on `listener` without
+    /// risking an unbounded blocking `accept()` if the publish
+    /// mechanism regressed. UDS `connect(2)` only succeeds once the
+    /// connection is queued on the listener, so the bounded retry is a
+    /// formality — `WouldBlock` persisting for the full deadline means
+    /// the canonical path no longer routes to this listener.
+    fn accept_pending_connection(listener: &UnixListener) -> UnixStream {
+        listener
+            .set_nonblocking(true)
+            .expect("listener nonblocking");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return stream,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the published listener must receive the connection made against the \
+                         canonical socket path (ADR 0055: the atomic rename must publish THIS \
+                         listener, not leave a different socket at the canonical name)",
+                    );
+                    thread::yield_now();
+                }
+                Err(error) => panic!("accept on published listener failed: {error}"),
+            }
+        }
+    }
+
+    /// bd-2yg7d.3 (ADR 0055: never publish in a shared parent). The
+    /// broker must refuse every parent mode that grants group or other
+    /// access — including a /tmp-style 0o1777 sticky directory — and
+    /// the refusal must fire BEFORE the lock file or temp socket is
+    /// created, so the hostile directory never receives an ee artifact
+    /// another uid could tamper with.
+    #[test]
+    fn socket_broker_publish_refuses_shared_parent_without_artifacts() {
+        for mode in [0o777_u32, 0o1777, 0o770, 0o707, 0o750] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let parent = temp.path().join("shared-parent");
+            fs::create_dir(&parent).expect("create shared parent");
+            fs::set_permissions(&parent, fs::Permissions::from_mode(mode))
+                .expect("loosen parent mode");
+
+            let broker = SocketBroker::new(parent.join("ee-daemon.sock"));
+            let error = broker.publish_listener().expect_err(
+                "SocketBroker must refuse to publish into a group/other-accessible parent \
+                 (ADR 0055 invariant: never publish in a shared parent)",
+            );
+            match error {
+                DaemonStartError::InsecureSocketParent { path, reason } => {
+                    assert_eq!(
+                        path, parent,
+                        "insecure-parent refusal must name the offending parent directory",
+                    );
+                    assert!(
+                        reason.contains("group or other access"),
+                        "refusal reason for parent mode 0o{mode:o} must name the group/other \
+                         access grant; got {reason}",
+                    );
+                }
+                other => panic!(
+                    "parent mode 0o{mode:o} must be refused as InsecureSocketParent (ADR 0055: \
+                     never publish in a shared parent); got {other:?}"
+                ),
+            }
+
+            let leftovers: Vec<PathBuf> = fs::read_dir(&parent)
+                .expect("read refused parent")
+                .map(|entry| entry.expect("dir entry").path())
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "refusing an insecure parent (mode 0o{mode:o}) must not leave lock/temp \
+                 artifacts inside it; found {leftovers:?}",
+            );
+        }
+    }
+
+    /// bd-2yg7d.3 (ADR 0055: never overwrite a non-socket path). A
+    /// regular file or directory squatting the canonical socket path
+    /// must be refused as `SocketPathOccupied` and left untouched —
+    /// publish must never repossess a path the operator pointed at
+    /// real data.
+    #[test]
+    fn socket_broker_publish_refuses_non_socket_canonical_path() {
+        // Regular file at the canonical path.
+        {
+            let temp = private_tempdir();
+            let socket_path = temp.path().join("ee-daemon-occupied.sock");
+            fs::write(&socket_path, b"operator data").expect("write squatting file");
+
+            let error = SocketBroker::new(socket_path.clone())
+                .publish_listener()
+                .expect_err(
+                    "a regular file at the canonical path must refuse publish (ADR 0055: never \
+                     overwrite a non-socket path)",
+                );
+            match error {
+                DaemonStartError::SocketPathOccupied { path } => assert_eq!(
+                    path, socket_path,
+                    "regular-file refusal must name the canonical path",
+                ),
+                other => panic!(
+                    "a regular file at the canonical path must be SocketPathOccupied (ADR 0055: \
+                     never overwrite a non-socket path); got {other:?}"
+                ),
+            }
+            assert_eq!(
+                fs::read(&socket_path).expect("squatting file must survive"),
+                b"operator data",
+                "refused publish must leave the squatting regular file byte-identical",
+            );
+        }
+
+        // Directory at the canonical path.
+        {
+            let temp = private_tempdir();
+            let socket_path = temp.path().join("ee-daemon-occupied-dir.sock");
+            fs::create_dir(&socket_path).expect("create squatting directory");
+
+            let error = SocketBroker::new(socket_path.clone())
+                .publish_listener()
+                .expect_err(
+                    "a directory at the canonical path must refuse publish (ADR 0055: never \
+                     overwrite a non-socket path)",
+                );
+            match error {
+                DaemonStartError::SocketPathOccupied { path } => assert_eq!(
+                    path, socket_path,
+                    "directory refusal must name the canonical path",
+                ),
+                other => panic!(
+                    "a directory at the canonical path must be SocketPathOccupied (ADR 0055: \
+                     never overwrite a non-socket path); got {other:?}"
+                ),
+            }
+            assert!(
+                socket_path.is_dir(),
+                "refused publish must leave the squatting directory in place",
+            );
+        }
+    }
+
+    /// bd-2yg7d.3 (ADR 0055: never overwrite a non-socket path). The
+    /// occupancy check must classify the canonical path with
+    /// `symlink_metadata` — the link itself, never its target — so a
+    /// planted symlink cannot launder a "this is my stale socket"
+    /// belief through whatever it points at.
+    #[test]
+    fn socket_broker_publish_refuses_symlink_at_canonical_path() {
+        let temp = private_tempdir();
+        let target = temp.path().join("symlink-target");
+        fs::write(&target, b"victim bytes").expect("write symlink target");
+        let socket_path = temp.path().join("ee-daemon-link.sock");
+        std::os::unix::fs::symlink(&target, &socket_path).expect("plant symlink at canonical path");
+
+        let error = SocketBroker::new(socket_path.clone())
+            .publish_listener()
+            .expect_err(
+                "a symlink at the canonical path must refuse publish without following it \
+                 (ADR 0055: never overwrite a non-socket path)",
+            );
+        assert!(
+            matches!(error, DaemonStartError::SocketPathOccupied { .. }),
+            "symlink refusal must be SocketPathOccupied (classified via symlink_metadata, never \
+             the target); got {error:?}",
+        );
+        assert!(
+            fs::symlink_metadata(&socket_path)
+                .expect("symlink must survive refused publish")
+                .file_type()
+                .is_symlink(),
+            "the planted symlink must remain at the canonical path after refusal",
+        );
+        assert_eq!(
+            fs::read(&target).expect("symlink target must survive"),
+            b"victim bytes",
+            "refused publish must not write through or replace the symlink target",
+        );
+    }
+
+    /// bd-2yg7d.3 (ADR 0055: stale socket replacement is temp-bind +
+    /// atomic rename). Publishing over a dead socket left by a crashed
+    /// daemon must succeed, must route the canonical path to the NEW
+    /// listener, must consume the temp-bind artifact, and — because the
+    /// replacement is a single `rename(2)` — must never expose a window
+    /// where the canonical path is missing, a non-socket, or
+    /// group/other-accessible.
+    #[test]
+    fn socket_broker_replaces_stale_socket_with_no_observable_gap() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let temp = private_tempdir();
+        let socket_path = temp.path().join("ee-daemon-stale-gap.sock");
+        {
+            let stale = UnixListener::bind(&socket_path).expect("stale bind");
+            // Pin the stale socket to 0o600 so every watcher sample has
+            // exactly one expectation: an existing 0o600 socket, before,
+            // during, and after the replacement.
+            fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+                .expect("chmod stale socket");
+            drop(stale);
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let watcher =
+            spawn_canonical_path_invariant_watcher(socket_path.clone(), false, Arc::clone(&stop));
+
+        let broker = SocketBroker::new(socket_path.clone());
+        let (listener, _publish_lock) = broker.publish_listener().expect(
+            "publish over a dead stale socket must succeed via temp-bind + atomic rename \
+             (ADR 0055 stale replacement)",
+        );
+
+        stop.store(true, Ordering::Release);
+        let (samples, violations) = watcher.join().expect("watcher thread must not panic");
+        assert!(
+            samples > 0,
+            "watcher must observe the canonical path at least once"
+        );
+        assert!(
+            violations.is_empty(),
+            "stale replacement must be atomic: no sample may show the canonical path missing, \
+             non-socket, or insecure (ADR 0055 temp-bind + rename); observed {violations:?}",
+        );
+
+        // The canonical path must now route to the fresh listener; the
+        // stale socket was dead, so a successful connect + accept proves
+        // the rename published THIS listener.
+        let _client = UnixStream::connect(&socket_path)
+            .expect("replaced canonical socket must accept connections");
+        let _server_side = accept_pending_connection(&listener);
+
+        let metadata = fs::symlink_metadata(&socket_path).expect("published socket metadata");
+        assert!(
+            metadata.file_type().is_socket(),
+            "canonical path must be a socket after stale replacement",
+        );
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o600,
+            "replaced socket must be mode 0o600 (chmod-on-temp survives the rename; ADR 0055)",
+        );
+
+        let residue: Vec<String> = fs::read_dir(temp.path())
+            .expect("read socket parent")
+            .map(|entry| {
+                entry
+                    .expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.contains(".tmp."))
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "the temp-bind artifact must be consumed by the atomic rename, leaving no residue \
+             next to the canonical socket (ADR 0055); found {residue:?}",
+        );
+    }
+
+    /// bd-2yg7d.3 (ADR 0055: chmod-before-publish). On a fresh path the
+    /// socket must already carry mode 0o600 by the time the canonical
+    /// name exists at all: `UnixListener::bind` honours the umask
+    /// (typically yielding 0o755), so a refactor that renamed first and
+    /// chmodded second would expose a world-connectable socket at the
+    /// canonical path. The watcher pins that no sample ever sees the
+    /// canonical path as anything but absent or a 0o600 socket; the
+    /// fixture lives in a fresh private tempdir, never global /tmp.
+    #[test]
+    fn socket_broker_fresh_publish_chmods_socket_before_canonical_publish() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let temp = private_tempdir();
+        let socket_path = temp.path().join("ee-daemon-fresh-chmod.sock");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let watcher =
+            spawn_canonical_path_invariant_watcher(socket_path.clone(), true, Arc::clone(&stop));
+
+        let broker = SocketBroker::new(socket_path.clone());
+        let (listener, _publish_lock) = broker
+            .publish_listener()
+            .expect("fresh publish in a private parent must succeed");
+
+        // The instant publish_listener returns, the canonical path is
+        // connectable — so it must ALREADY be 0o600.
+        let metadata = fs::symlink_metadata(&socket_path).expect("published socket metadata");
+        assert!(
+            metadata.file_type().is_socket(),
+            "canonical path must be a socket once published",
+        );
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o600,
+            "the socket must receive mode 0o600 BEFORE it becomes connectable at the canonical \
+             path (ADR 0055 chmod-before-publish; bd-3j0td)",
+        );
+        let _client = UnixStream::connect(&socket_path)
+            .expect("published socket must be connectable by the owning uid");
+        let _server_side = accept_pending_connection(&listener);
+
+        stop.store(true, Ordering::Release);
+        let (samples, violations) = watcher.join().expect("watcher thread must not panic");
+        assert!(
+            samples > 0,
+            "watcher must sample the canonical path at least once"
+        );
+        assert!(
+            violations.is_empty(),
+            "during fresh publish the canonical path may only ever be observed absent or as a \
+             0o600 socket — the chmod must precede the atomic rename (ADR 0055 \
+             chmod-before-publish); observed {violations:?}",
+        );
+    }
+
+    /// bd-2yg7d.3 (ADR 0055: temp-bind + atomic rename mechanism). The
+    /// per-attempt temp path must live in the SAME parent directory as
+    /// the canonical socket (same-directory `rename(2)` is what makes
+    /// the publish atomic — a cross-directory temp could land on a
+    /// different filesystem and would inherit a different privacy
+    /// boundary), must extend the canonical file name, must embed the
+    /// pid, and must be unique per attempt so concurrent publishes
+    /// never collide.
+    #[test]
+    fn socket_broker_temp_bind_path_is_parent_local_and_unique() {
+        let temp = private_tempdir();
+        let socket_path = temp.path().join("ee-daemon-temp-name.sock");
+        let broker = SocketBroker::new(socket_path.clone());
+
+        let first = broker.temp_bind_path();
+        let second = broker.temp_bind_path();
+
+        assert_ne!(
+            first, second,
+            "temp bind paths must be unique per attempt (pid + monotonic counter) so two \
+             concurrent publishes never collide and each rename is a clean atomic publish \
+             (ADR 0055)",
+        );
+        for tmp_path in [&first, &second] {
+            assert_eq!(
+                tmp_path.parent(),
+                socket_path.parent(),
+                "temp bind path must stay inside the validated private parent of the canonical \
+                 socket so the rename(2) publish is same-directory atomic (ADR 0055)",
+            );
+            let name = tmp_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("temp bind file name must be valid UTF-8 in this fixture");
+            assert!(
+                name.starts_with("ee-daemon-temp-name.sock.tmp."),
+                "temp bind name must extend the canonical socket name with a .tmp. suffix; \
+                 got {name}",
+            );
+            assert!(
+                name.contains(&format!(".tmp.{}.", std::process::id())),
+                "temp bind name must embed the publishing pid for cross-process collision \
+                 avoidance; got {name}",
+            );
+        }
+    }
+
+    /// bd-2yg7d.3 (ADR 0055: publish-lock path properties). The publish
+    /// lock must be derived as `<socket>.start.lock` inside the same
+    /// validated-private parent — a lock outside the 0o700 boundary
+    /// could be squatted or flocked by another uid to wedge or race
+    /// daemon starts — and the lock file itself must be a regular file
+    /// with no group/other access, owned by the publishing euid.
+    #[test]
+    fn socket_broker_publish_lock_is_owner_only_sibling_file() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = private_tempdir();
+        let socket_path = temp.path().join("ee-daemon-lock-props.sock");
+        let broker = SocketBroker::new(socket_path.clone());
+
+        let lock_path = broker.socket_publish_lock_path();
+        assert_eq!(
+            lock_path.parent(),
+            socket_path.parent(),
+            "publish lock must live inside the same validated private parent as the canonical \
+             socket (ADR 0055 publish-lock properties)",
+        );
+        assert_eq!(
+            lock_path.file_name().and_then(|name| name.to_str()),
+            Some("ee-daemon-lock-props.sock.start.lock"),
+            "publish lock name must be '<socket file name>.start.lock'",
+        );
+
+        let (_listener, publish_lock) = broker
+            .publish_listener()
+            .expect("publish in a private parent must succeed");
+        let metadata = fs::symlink_metadata(&lock_path)
+            .expect("publish lock file must exist after a successful publish");
+        assert!(
+            metadata.file_type().is_file(),
+            "publish lock must be a regular file (O_NOFOLLOW open), not a socket/symlink/dir",
+        );
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "publish lock mode 0o{mode:o} must grant no group/other access (created 0o600; \
+             ADR 0055 publish-lock properties)",
+        );
+        assert_eq!(
+            metadata.uid(),
+            current_euid(),
+            "publish lock must be owned by the publishing euid",
+        );
+        drop(publish_lock);
+    }
+
+    /// bd-2yg7d.3 (ADR 0055: publish-lock path properties). The lock
+    /// file opens with `O_NOFOLLOW`: a symlink planted at the derived
+    /// lock path must abort the publish (no socket appears) and must
+    /// not open, create, or truncate whatever the link points at.
+    #[test]
+    fn socket_broker_publish_refuses_symlinked_lock_path() {
+        let temp = private_tempdir();
+        let socket_path = temp.path().join("ee-daemon-lock-link.sock");
+        let broker = SocketBroker::new(socket_path.clone());
+
+        let target = temp.path().join("lock-symlink-target");
+        fs::write(&target, b"victim bytes").expect("write lock symlink target");
+        std::os::unix::fs::symlink(&target, broker.socket_publish_lock_path())
+            .expect("plant symlink at the publish-lock path");
+
+        let error = broker.publish_listener().expect_err(
+            "a symlinked publish-lock path must abort the publish (O_NOFOLLOW; ADR 0055 \
+             publish-lock properties)",
+        );
+        assert!(
+            matches!(error, DaemonStartError::Bind { .. }),
+            "symlinked-lock refusal surfaces as the Bind error wrapping the O_NOFOLLOW open \
+             failure; got {error:?}",
+        );
+        assert_eq!(
+            fs::read(&target).expect("lock symlink target must survive"),
+            b"victim bytes",
+            "the publish-lock open must not write through the planted symlink",
+        );
+        assert!(
+            !socket_path.exists(),
+            "no socket may be published when the publish lock cannot be acquired safely",
+        );
+    }
+
+    /// bd-2yg7d.3 (ADR 0055: never delete a non-socket during cleanup).
+    /// A directory at the daemon socket path must be refused by
+    /// `remove_owned_socket_file` and left on disk, exactly like the
+    /// regular-file case pinned above.
+    #[test]
+    fn guarded_socket_unlink_refuses_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("daemon-sock-dir");
+        fs::create_dir(&path).expect("create directory at socket path");
+
+        let error = SocketBroker::new(path.clone())
+            .remove_owned_socket_file()
+            .expect_err(
+                "cleanup must refuse a directory at the socket path (ADR 0055: never delete a \
+                 non-socket during cleanup)",
+            );
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::InvalidInput,
+            "non-socket cleanup refusal must be InvalidInput naming the path; got {error}",
+        );
+        assert!(
+            path.is_dir(),
+            "the directory must remain on disk after refused cleanup",
+        );
+    }
+
+    /// bd-2yg7d.3 (ADR 0055: never delete a non-socket during cleanup).
+    /// Cleanup classifies via `symlink_metadata`: a symlink pointing at
+    /// a REAL socket is still a symlink, and removing it — or worse,
+    /// following it — would let a planted link turn shutdown into an
+    /// arbitrary unlink. Both the link and the socket behind it must
+    /// survive.
+    #[test]
+    fn guarded_socket_unlink_refuses_symlink_to_socket() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let temp = private_tempdir();
+        let real_socket = temp.path().join("real-daemon.sock");
+        let _listener = UnixListener::bind(&real_socket).expect("bind real socket");
+        let link = temp.path().join("link-to-daemon.sock");
+        std::os::unix::fs::symlink(&real_socket, &link).expect("plant symlink to socket");
+
+        let error = SocketBroker::new(link.clone())
+            .remove_owned_socket_file()
+            .expect_err(
+                "cleanup must refuse a symlink even when it points at a real socket (ADR 0055: \
+                 never delete a non-socket during cleanup)",
+            );
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::InvalidInput,
+            "symlink cleanup refusal must be InvalidInput; got {error}",
+        );
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("symlink must survive refused cleanup")
+                .file_type()
+                .is_symlink(),
+            "the planted symlink must remain after refused cleanup",
+        );
+        assert!(
+            fs::symlink_metadata(&real_socket)
+                .expect("real socket must survive refused cleanup")
+                .file_type()
+                .is_socket(),
+            "the socket behind the planted symlink must remain after refused cleanup",
+        );
+    }
+
+    /// bd-2yg7d.3 (ADR 0055: never delete an other-owned file during
+    /// cleanup). Creating a socket owned by a foreign uid requires
+    /// euid 0, so this pin only exercises on a root runner (e.g. a
+    /// container CI job) and skips gracefully elsewhere — mirroring how
+    /// platform-gated coverage in this module degrades rather than
+    /// asserting vacuously.
+    #[test]
+    fn guarded_socket_unlink_refuses_other_uid_socket_when_root() {
+        if current_euid() != 0 {
+            eprintln!(
+                "skipping guarded_socket_unlink_refuses_other_uid_socket_when_root: \
+                 chown to a foreign uid requires euid 0"
+            );
+            return;
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("foreign-owned.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind fixture socket");
+        drop(listener);
+        // uid 1 ("daemon" on Linux and macOS) is a stable foreign uid.
+        std::os::unix::fs::chown(&socket_path, Some(1), None)
+            .expect("chown fixture socket to a foreign uid");
+
+        let error = SocketBroker::new(socket_path.clone())
+            .remove_owned_socket_file()
+            .expect_err(
+                "cleanup must refuse a socket owned by another uid (ADR 0055: never delete an \
+                 other-owned file during cleanup)",
+            );
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::PermissionDenied,
+            "other-uid cleanup refusal must be PermissionDenied; got {error}",
+        );
+        assert!(
+            error.to_string().contains("owned by uid"),
+            "other-uid refusal must name the owning uid; got {error}",
+        );
+        assert!(
+            socket_path.exists(),
+            "the foreign-owned socket must remain on disk after refused cleanup",
+        );
+    }
+
     struct FailingConnectionWorkerSpawner;
 
     #[derive(Default)]
