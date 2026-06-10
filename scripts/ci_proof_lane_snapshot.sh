@@ -119,6 +119,7 @@ limit = ARGV.fetch(3).to_i
 gh_bin = ENV.fetch("EE_CI_PROOF_LANE_GH_BIN", "gh")
 
 EXPECTED_ARTIFACT = "ee-aarch64-apple-darwin-debug".freeze
+ACTIVE_RUN_STALE_SECONDS = 30 * 60
 WORKFLOW_PATHS = {
   "CI" => ".github/workflows/ci.yml",
   "macOS EE Artifact" => ".github/workflows/macos-ee-artifact.yml"
@@ -172,8 +173,35 @@ def repository_from_git(workspace, head_sha_arg)
     "owner" => owner,
     "name" => name,
     "defaultBranch" => "main",
-    "headSha" => head_sha
+    "headSha" => head_sha,
+    "headShaReachability" => "not_checked"
   }
+end
+
+def normalize_repository(repository)
+  normalized = repository.dup
+  normalized["headShaReachability"] ||= "not_checked"
+  normalized
+end
+
+def github_head_sha_reachability(workspace, gh_bin, repository)
+  owner = repository.fetch("owner").to_s
+  name = repository.fetch("name").to_s
+  head_sha = repository.fetch("headSha").to_s
+  return "unknown" if owner.empty? || owner == "unknown" || name.empty?
+  return "unknown" unless head_sha.match?(/\A[a-f0-9]{40}\z/)
+
+  path = "repos/#{owner}/#{name}/commits/#{head_sha}"
+  stdout, stderr, status = run_command([gh_bin, "api", path, "--jq", ".sha"], cwd: workspace)
+  return "github_reachable" if status.zero? && stdout.strip == head_sha
+
+  diagnostic = "#{stdout}\n#{stderr}"
+  return "github_unreachable" if diagnostic.include?("No commit found") ||
+                                  diagnostic.include?("HTTP 422") ||
+                                  diagnostic.include?("HTTP 404") ||
+                                  diagnostic.include?("Not Found")
+
+  "unknown"
 end
 
 def now_iso
@@ -217,6 +245,20 @@ end
 
 def normalize_time(value)
   value.nil? || value.to_s.empty? ? now_iso : value.to_s
+end
+
+def parse_time_or_nil(value)
+  Time.parse(value.to_s)
+rescue ArgumentError
+  nil
+end
+
+def active_run_age_seconds(run, generated_at)
+  started_at = parse_time_or_nil(run["createdAt"])
+  generated = parse_time_or_nil(generated_at)
+  return nil if started_at.nil? || generated.nil?
+
+  [(generated - started_at).to_i, 0].max
 end
 
 def artifact_from_input(raw, run_head_sha)
@@ -389,6 +431,8 @@ def recommendation(verdict, run_id)
     ["macOS EE Artifact", run_id, "file_followup_bead", "Artifact surface probe failed the required command surface; repair the artifact or probe before reuse."]
   when "gh_unavailable"
     [nil, nil, "abstain_manual_review", "GitHub Actions state could not be read; preserve the first gh error and abstain."]
+  when "local_only_head_unavailable"
+    [nil, nil, "abstain_manual_review", "Requested head SHA is not reachable from GitHub; reconcile the checkout before dispatching an artifact proof lane."]
   else
     [nil, nil, "dispatch_new_run", "No matching proof-lane run exists for the requested head SHA."]
   end
@@ -410,6 +454,8 @@ def degraded_for(verdict)
     [["ci_proof_lane_surface_probe_failed", "high", "The proof-lane artifact failed the required command-surface probe.", "Reject the artifact until the expected ee surface is proven."]]
   when "gh_unavailable"
     [["ci_proof_lane_gh_unavailable", "warning", "The producer could not read GitHub Actions state.", "Check gh authentication/network state or rerun with --input fixture JSON."]]
+  when "local_only_head_unavailable"
+    [["ci_proof_lane_local_only_head_unavailable", "warning", "The requested head SHA is not reachable from GitHub Actions.", "Reconcile the checkout with the remote or use an approved push path before dispatching a proof-lane workflow."]]
   when "no_matching_run"
     [["ci_proof_lane_no_matching_run", "info", "No proof-lane run exists for the requested head SHA.", "Coordinate through Agent Mail before dispatching a new proof-lane run."]]
   else
@@ -419,13 +465,33 @@ def degraded_for(verdict)
   end
 end
 
+def stale_active_run_degraded(normalized_runs, repository, generated_at)
+  stale_active_run = normalized_runs.find do |run|
+    next false unless run["headSha"] == repository.fetch("headSha")
+    next false unless run["status"] == "queued" || run["status"] == "in_progress"
+
+    age_seconds = active_run_age_seconds(run, generated_at)
+    age_seconds && age_seconds >= ACTIVE_RUN_STALE_SECONDS
+  end
+  return [] unless stale_active_run
+
+  [
+    {
+      "code" => "ci_proof_lane_active_run_stale",
+      "severity" => "warning",
+      "message" => "The active proof-lane run is still queued or running beyond the normal handoff window.",
+      "repair" => "Keep polling or hand off the authoritative run id; do not dispatch a duplicate run or cancel without human approval."
+    }
+  ]
+end
+
 def recovery_for(verdict, run_id)
   case verdict
   when "fresh_artifact_available"
     [["download", "gh run download #{run_id} --name #{EXPECTED_ARTIFACT} --dir <external-temp>", false, "Download into external temp, verify checksum, then run the no-mock harness with EE_BINARY."]]
   when "wait_for_active_run", "duplicate_dispatch_detected"
     [["wait", "gh run view #{run_id} --json status,conclusion,jobs", false, "Poll the active artifact run until it reaches a terminal conclusion."]]
-  when "run_cancelled_before_artifact", "artifact_missing", "artifact_stale", "checksum_mismatch", "surface_probe_failed", "gh_unavailable"
+  when "run_cancelled_before_artifact", "artifact_missing", "artifact_stale", "checksum_mismatch", "surface_probe_failed", "gh_unavailable", "local_only_head_unavailable"
     [["manual_review", "preserve first-failure diagnosis", false, "Do not treat this proof-lane state as source/test evidence."]]
   else
     [["coordinate", "send Agent Mail before workflow_dispatch", false, "Avoid duplicate dispatches before creating a new proof-lane run."]]
@@ -440,7 +506,10 @@ def recovery_for(verdict, run_id)
   end
 end
 
-def choose_verdict(raw_runs, normalized_runs, head_sha)
+def choose_verdict(raw_runs, normalized_runs, repository)
+  head_sha = repository.fetch("headSha")
+  return ["local_only_head_unavailable", nil] if repository["headShaReachability"] == "github_unreachable"
+
   dedicated = raw_runs.select { |run| run["workflowName"].to_s == "macOS EE Artifact" }
   current = dedicated.select { |run| run["headSha"].to_s == head_sha }
   active_current = current.select { |run| active_run?(run) }
@@ -474,13 +543,14 @@ def choose_verdict(raw_runs, normalized_runs, head_sha)
 end
 
 def build_snapshot(repository:, generated_at:, raw_runs:, artifact_index: {}, gh_unavailable: false)
+  repository = normalize_repository(repository)
   if gh_unavailable
     verdict = "gh_unavailable"
     verdict_run_id = nil
     normalized_runs = []
   else
     normalized_runs = raw_runs.map { |run| normalize_run(run, repository, artifact_index) }
-    verdict, verdict_run_id = choose_verdict(raw_runs, normalized_runs, repository.fetch("headSha"))
+    verdict, verdict_run_id = choose_verdict(raw_runs, normalized_runs, repository)
   end
 
   workflows = WORKFLOW_PATHS.keys.map do |name|
@@ -529,7 +599,7 @@ def build_snapshot(repository:, generated_at:, raw_runs:, artifact_index: {}, gh
       "rationale" => rationale
     },
     "recoveryActions" => recovery_for(verdict, run_id),
-    "degraded" => degraded_for(verdict)
+    "degraded" => degraded_for(verdict) + stale_active_run_degraded(normalized_runs, repository, generated_at)
   }
 end
 
@@ -576,8 +646,11 @@ if !input_file.empty?
   unless input["schema"] == "ee.ci_proof_lane_input.v1"
     raise "input fixture schema must be ee.ci_proof_lane_input.v1"
   end
-  repository = input.fetch("repository")
-  repository["headSha"] = head_sha_arg unless head_sha_arg.empty?
+  repository = normalize_repository(input.fetch("repository"))
+  unless head_sha_arg.empty?
+    repository["headSha"] = head_sha_arg
+    repository["headShaReachability"] = "not_checked"
+  end
   generated_at = input["generatedAt"] || now_iso
   snapshot = build_snapshot(
     repository: repository,
@@ -595,6 +668,7 @@ else
     exit 0
   end
 
+  repository["headShaReachability"] = github_head_sha_reachability(workspace, gh_bin, repository)
   runs, artifact_index, error = live_runs(workspace, gh_bin, limit, repository)
   if error
     warn "ci_proof_lane_snapshot: #{error.lines.first.to_s.strip}"

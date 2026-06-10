@@ -39,6 +39,7 @@ artifact-lane posture without network access.
 The snapshot records:
 
 - repository owner/name/default branch/current head SHA
+- whether the requested head SHA is reachable from GitHub Actions metadata
 - workflow name/path/proof-lane kind/concurrency group/dispatch policy
 - run ids, job ids, event, ref, head SHA, run status, conclusion, and timestamps
 - artifact names, source SHA, retention/freshness, checksum status, architecture, and surface probes
@@ -53,6 +54,12 @@ The contract deliberately separates artifact authority from source compile/test 
 
 `wait_for_active_run`: a queued or in-progress run for the current head SHA exists. Agents should poll that run instead of dispatching a duplicate workflow.
 
+If the active run has been queued or in progress beyond the conservative
+handoff window, the verdict remains `wait_for_active_run`, but `degraded[]`
+includes `ci_proof_lane_active_run_stale`. That code means the named run is
+still authoritative; agents should hand off or keep polling rather than
+dispatching a duplicate or cancelling without explicit human approval.
+
 `duplicate_dispatch_detected`: multiple active workflow_dispatch runs target the same proof lane and head SHA. Agents should coordinate through Agent Mail and wait for one authoritative run.
 
 `run_cancelled_before_artifact`: a terminal run was cancelled before the artifact was uploaded. This is proof-lane evidence, not a source failure.
@@ -66,6 +73,11 @@ The contract deliberately separates artifact authority from source compile/test 
 `surface_probe_failed`: the binary exists but a required command or schema surface is unavailable.
 
 `gh_unavailable`: the producer could not read GitHub Actions state.
+
+`local_only_head_unavailable`: the requested head SHA is not reachable from
+GitHub Actions metadata. A workflow dispatch against `main` or another branch
+can build a different remote SHA, so the snapshot abstains until the checkout is
+reconciled or an approved push path makes the exact SHA available.
 
 `abstain_manual_review`: the snapshot found contradictory evidence and cannot recommend a safe next command.
 
@@ -89,11 +101,14 @@ or treating a CI-built binary as source-authority evidence.
 2. Read `summary.verdict`, `activeRecommendation.workflowName`,
    `activeRecommendation.runId`, `activeRecommendation.nextAction`, and
    `activeRecommendation.rationale`.
-3. Act only on the recommendation. Do not dispatch, cancel, download, or run a
+3. Check `repository.headShaReachability`. If it is `github_unreachable`, do not
+   dispatch a branch ref as proof for the local checkout; it can build a
+   different remote SHA.
+4. Act only on the recommendation. Do not dispatch, cancel, download, or run a
    harness because a mail thread or old support bundle said a lane was usable.
-4. When you need first-failure detail, use `degraded[]` and the matching
+5. When you need first-failure detail, use `degraded[]` and the matching
    `workflows[].runs[].firstFailureDiagnosis` row.
-5. Record the snapshot verdict in Agent Mail before mutating Beads or invoking a
+6. Record the snapshot verdict in Agent Mail before mutating Beads or invoking a
    no-mock harness.
 
 | Recommendation | Agent action |

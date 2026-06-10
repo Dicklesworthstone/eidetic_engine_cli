@@ -1,0 +1,67 @@
+{
+  "schema": "ee.ci_proof_lane_input.v1",
+  "repository": {
+    "owner": "Dicklesworthstone",
+    "name": "eidetic_engine_cli",
+    "defaultBranch": "main",
+    "headSha": "4adddaf2a02cbae5cb0339105df4f52d0a553087",
+    "headShaReachability": "github_reachable"
+  },
+  "generatedAt": "2026-06-09T19:40:00Z",
+  "runs": [
+    {
+      "databaseId": "27228688656",
+      "workflowName": "macOS EE Artifact",
+      "status": "queued",
+      "conclusion": null,
+      "headSha": "4adddaf2a02cbae5cb0339105df4f52d0a553087",
+      "event": "workflow_dispatch",
+      "headBranch": "main",
+      "createdAt": "2026-06-09T18:55:19Z",
+      "updatedAt": "2026-06-09T18:55:19Z",
+      "jobs": [
+        {
+          "databaseId": "80773244144",
+          "name": "build aarch64-apple-darwin debug ee"
+        }
+      ],
+      "artifacts": []
+    },
+    {
+      "databaseId": "27164008356",
+      "workflowName": "macOS EE Artifact",
+      "status": "completed",
+      "conclusion": "success",
+      "headSha": "fef745863e0ed43bc16c193f36673e1a8b84d801",
+      "event": "workflow_dispatch",
+      "headBranch": "main",
+      "createdAt": "2026-06-08T20:10:52Z",
+      "updatedAt": "2026-06-08T21:11:28Z",
+      "completedAt": "2026-06-08T21:11:28Z",
+      "jobs": [
+        {
+          "databaseId": "80643111225",
+          "name": "build aarch64-apple-darwin debug ee"
+        }
+      ],
+      "artifacts": [
+        {
+          "name": "ee-aarch64-apple-darwin-debug",
+          "status": "available",
+          "retentionExpiresAt": "2026-06-11T21:11:28Z",
+          "checksumStatus": "verified",
+          "sourceSha": "fef745863e0ed43bc16c193f36673e1a8b84d801",
+          "architecture": "aarch64-apple-darwin",
+          "surfaceProbes": [
+            {
+              "commandTemplate": "ee diag environment-attestation --help",
+              "status": "passed",
+              "expectedSurface": "diag environment-attestation",
+              "firstFailureDiagnosis": null
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

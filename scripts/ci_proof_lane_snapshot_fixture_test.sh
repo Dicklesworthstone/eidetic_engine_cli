@@ -35,6 +35,14 @@ assert_fixture \
       and .activeRecommendation.nextAction == "wait"'
 
 assert_fixture \
+    active_run_stale.json \
+    '.schema == "ee.ci_proof_lane_snapshot.v1"
+      and .summary.verdict == "wait_for_active_run"
+      and .summary.activeRunCount == 1
+      and .activeRecommendation.nextAction == "wait"
+      and (.degraded[] | select(.code == "ci_proof_lane_active_run_stale"))'
+
+assert_fixture \
     missing_artifact.json \
     '.schema == "ee.ci_proof_lane_snapshot.v1"
       and .summary.verdict == "artifact_missing"
@@ -49,6 +57,17 @@ assert_fixture \
       and .summary.staleArtifactCount == 1
       and .summary.localCargoFallbackAllowed == false
       and .activeRecommendation.nextAction == "dispatch_new_run"'
+
+assert_fixture \
+    local_only_head_unavailable.json \
+    '.schema == "ee.ci_proof_lane_snapshot.v1"
+      and .repository.headShaReachability == "github_unreachable"
+      and .summary.verdict == "local_only_head_unavailable"
+      and .summary.localCargoFallbackAllowed == false
+      and .summary.sourceTestVerdict == "not_evaluated"
+      and .activeRecommendation.nextAction == "abstain_manual_review"
+      and .degraded[0].code == "ci_proof_lane_local_only_head_unavailable"
+      and .recoveryActions[0].kind == "manual_review"'
 
 assert_fixture \
     checksum_mismatch.json \

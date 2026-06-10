@@ -103,7 +103,12 @@
         "owner": {"$ref": "#/$defs/safeString"},
         "name": {"$ref": "#/$defs/safeString"},
         "defaultBranch": {"$ref": "#/$defs/safeString"},
-        "headSha": {"$ref": "#/$defs/sha"}
+        "headSha": {"$ref": "#/$defs/sha"},
+        "headShaReachability": {
+          "type": "string",
+          "enum": ["github_reachable", "github_unreachable", "not_checked", "unknown"],
+          "description": "Whether the requested head SHA is directly reachable from GitHub Actions metadata. github_unreachable means dispatching a branch ref can build a different SHA than the requested checkout."
+        }
       }
     },
     "summary": {
@@ -349,6 +354,7 @@
         "surface_probe_failed",
         "gh_unavailable",
         "abstain_manual_review",
+        "local_only_head_unavailable",
         "no_matching_run"
       ]
     },
@@ -386,7 +392,9 @@
             "ci_proof_lane_artifact_missing",
             "ci_proof_lane_artifact_stale",
             "ci_proof_lane_checksum_mismatch",
-            "ci_proof_lane_surface_probe_failed"
+            "ci_proof_lane_surface_probe_failed",
+            "ci_proof_lane_local_only_head_unavailable",
+            "ci_proof_lane_active_run_stale"
           ]
         },
         "severity": {
