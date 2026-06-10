@@ -38,7 +38,6 @@ expression: canonical_json(value)
       "repair": "Use sections with non-empty evidence, or implement the unavailable section builder.",
       "severity": "info",
       "sources": [
-        "comprehensiveRules",
         "kCore",
         "kTruss",
         "revisionFrontiers"
@@ -97,6 +96,7 @@ expression: canonical_json(value)
       "items": [],
       "name": "comprehensiveRules",
       "nextCommands": [
+        "ee rule list --workspace . --json",
         "ee curate candidates --workspace . --json"
       ],
       "summary": "Rule memories with broad provenance coverage and high reuse potential.",

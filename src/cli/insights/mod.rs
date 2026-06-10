@@ -23,7 +23,7 @@ use crate::config::{
 use crate::core::config_surface::{ConfigSurfaceOptions, get_config};
 use crate::core::degraded_aggregation::{AggregatedDegradation, aggregate_degraded};
 use crate::core::status::DegradationReport;
-use crate::db::{DbConnection, StoredMemory, StoredMemoryLink};
+use crate::db::{DbConnection, StoredMemory, StoredMemoryLink, StoredProceduralRule};
 use crate::graph::gomory_hu::{
     GOMORY_HU_WEIGHT_ATTR, PROXIMITY_SCHEMA_V1, build_gomory_hu_tree, query_proximity,
 };
@@ -58,6 +58,7 @@ const BLIND_SPOT_CENTRALITY_STATUS_UNAVAILABLE: &str =
 const BRIDGE_INSIGHT_SCHEMA_V1: &str = "ee.graph.bridge_insight.v1";
 const KNOWLEDGE_GAP_SCHEMA_V1: &str = "ee.graph.knowledge_gap.v1";
 const TOP_MEMORY_INSIGHT_SCHEMA_V1: &str = "ee.graph.top_memory.v1";
+const COMPREHENSIVE_RULE_INSIGHT_SCHEMA_V1: &str = "ee.insights.comprehensive_rule.v1";
 const HOUSE_RULES_INSIGHT_SCHEMA_V1: &str = "ee.insights.house_rules.v1";
 const KNOWLEDGE_GAP_THIN_EVIDENCE_MAX_SPANS: u32 = 2;
 const KNOWLEDGE_GAP_LOW_CONFIDENCE_MAX: f32 = 0.50;
@@ -494,8 +495,7 @@ pub fn build_insights_report_with_options(
 // "placeholder implementation" at the same time. When a real builder
 // lands for one of these names, remove it from this list in the same
 // change as the `build_registry_section` arm.
-const PLACEHOLDER_BACKED_SECTIONS: &[&str] =
-    &["comprehensiveRules", "kCore", "kTruss", "revisionFrontiers"];
+const PLACEHOLDER_BACKED_SECTIONS: &[&str] = &["kCore", "kTruss", "revisionFrontiers"];
 
 fn build_registry_section_with_runtime_gate(
     display_name: &'static str,
@@ -559,6 +559,10 @@ fn build_registry_section(
         "causalBottlenecks" => {
             let reports = load_causal_bottleneck_reports(workspace)?;
             Ok(causal_bottlenecks_section_from_reports(&reports))
+        }
+        "comprehensiveRules" => {
+            let inputs = load_comprehensive_rule_inputs(workspace)?;
+            Ok(comprehensive_rules_section_from_inputs(&inputs))
         }
         "bridges" => {
             let inputs = load_bridge_inputs(workspace)?;
@@ -828,6 +832,63 @@ fn load_top_memory_inputs(
         return Ok(Vec::new());
     };
     top_memory_inputs_from_graph_data(&data)
+}
+
+#[derive(Clone, Debug)]
+struct ComprehensiveRuleInsightInput {
+    rule: StoredProceduralRule,
+    source_memory_ids: Vec<String>,
+    tags: Vec<String>,
+}
+
+fn load_comprehensive_rule_inputs(
+    workspace: Option<&Path>,
+) -> Result<Vec<ComprehensiveRuleInsightInput>, DomainError> {
+    let Some(workspace) = workspace else {
+        return Ok(Vec::new());
+    };
+    let database_path = workspace.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open workspace database: {error}"),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })?;
+    let Some(workspace_id) = insights_workspace_id(&connection, workspace)? else {
+        return Ok(Vec::new());
+    };
+    let rules = connection
+        .list_procedural_rules(&workspace_id, None, None, false)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query procedural rules: {error}"),
+            repair: Some("Run `ee rule list --workspace . --json`.".to_owned()),
+        })?;
+
+    let mut inputs = Vec::with_capacity(rules.len());
+    for rule in rules {
+        let source_memory_ids =
+            connection
+                .get_rule_source_memory_ids(&rule.id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to query rule source memories: {error}"),
+                    repair: Some("Run `ee rule list --workspace . --json`.".to_owned()),
+                })?;
+        let tags = connection
+            .get_rule_tags(&rule.id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query rule tags: {error}"),
+                repair: Some("Run `ee rule list --workspace . --json`.".to_owned()),
+            })?;
+        inputs.push(ComprehensiveRuleInsightInput {
+            rule,
+            source_memory_ids,
+            tags,
+        });
+    }
+    Ok(inputs)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2519,13 +2580,162 @@ fn causal_bottlenecks_section_from_reports(reports: &[CausalBottleneckInput]) ->
 }
 
 fn comprehensive_rules_section() -> InsightsSection {
-    placeholder_section(
-        "comprehensiveRules",
-        "Comprehensive Rules",
-        "Rule memories with broad provenance coverage and high reuse potential.",
-        "Comprehensive rules are candidates for promotion because they generalize across repeated work.",
-        vec!["ee curate candidates --workspace . --json"],
-    )
+    comprehensive_rules_section_from_inputs(&[])
+}
+
+fn comprehensive_rules_section_from_inputs(
+    inputs: &[ComprehensiveRuleInsightInput],
+) -> InsightsSection {
+    let mut inputs = inputs
+        .iter()
+        .filter(|input| comprehensive_rule_has_real_signal(input))
+        .filter(|input| {
+            input.rule.confidence.is_finite()
+                && input.rule.utility.is_finite()
+                && input.rule.importance.is_finite()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    inputs.sort_by(|left, right| {
+        comprehensive_rule_score(right)
+            .total_cmp(&comprehensive_rule_score(left))
+            .then_with(|| {
+                right
+                    .source_memory_ids
+                    .len()
+                    .cmp(&left.source_memory_ids.len())
+            })
+            .then_with(|| {
+                right
+                    .rule
+                    .validation_passes
+                    .cmp(&left.rule.validation_passes)
+            })
+            .then_with(|| {
+                right
+                    .rule
+                    .positive_feedback_count
+                    .cmp(&left.rule.positive_feedback_count)
+            })
+            .then_with(|| right.rule.updated_at.cmp(&left.rule.updated_at))
+            .then_with(|| left.rule.id.cmp(&right.rule.id))
+    });
+
+    let items = inputs
+        .into_iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let provenance_count = input.source_memory_ids.len();
+            let feedback_count = input
+                .rule
+                .positive_feedback_count
+                .saturating_add(input.rule.negative_feedback_count);
+            let validation_evidence_count = input
+                .rule
+                .validation_passes
+                .saturating_add(input.rule.validation_contradictions);
+            let ranking_score = comprehensive_rule_score(&input);
+            let maturity_rank = comprehensive_rule_maturity_rank(&input.rule.maturity);
+            let next_command = format!("ee rule show {} --workspace . --json", input.rule.id);
+            let rule = input.rule;
+            serde_json::json!({
+                "rank": index + 1,
+                "ruleId": rule.id,
+                "content": rule.content,
+                "maturity": rule.maturity,
+                "scope": rule.scope,
+                "scopePattern": rule.scope_pattern,
+                "trustClass": rule.trust_class,
+                "protected": rule.protected,
+                "confidence": rule.confidence,
+                "utility": rule.utility,
+                "importance": rule.importance,
+                "sourceMemoryIds": input.source_memory_ids,
+                "provenanceCount": provenance_count,
+                "positiveFeedbackCount": rule.positive_feedback_count,
+                "negativeFeedbackCount": rule.negative_feedback_count,
+                "validationPasses": rule.validation_passes,
+                "validationContradictions": rule.validation_contradictions,
+                "lastAppliedAt": rule.last_applied_at,
+                "lastValidatedAt": rule.last_validated_at,
+                "updatedAt": rule.updated_at,
+                "tags": input.tags,
+                "rankingScore": ranking_score,
+                "rankingBasis": {
+                    "formula": "confidence, utility, importance, sourceMemoryIds, validation evidence, feedback, maturity, and protected posture",
+                    "maturityRank": maturity_rank,
+                    "provenanceCount": provenance_count,
+                    "feedbackCount": feedback_count,
+                    "validationEvidenceCount": validation_evidence_count,
+                },
+                "interpretation": "comprehensive_rule",
+                "nextCommand": next_command,
+                "evidence": {
+                    "schema": COMPREHENSIVE_RULE_INSIGHT_SCHEMA_V1,
+                    "source": "procedural_rules",
+                    "algorithm": "rule_provenance_reuse_rank",
+                    "sourceMemoryCount": provenance_count,
+                    "feedbackCount": feedback_count,
+                    "validationEvidenceCount": validation_evidence_count,
+                },
+            })
+        })
+        .collect();
+
+    InsightsSection {
+        name: "comprehensiveRules",
+        title: "Comprehensive Rules",
+        summary: "Rule memories with broad provenance coverage and high reuse potential.",
+        why_it_matters: "Comprehensive rules are candidates for promotion because they generalize across repeated work.",
+        items,
+        next_commands: vec![
+            "ee rule list --workspace . --json",
+            "ee curate candidates --workspace . --json",
+        ],
+    }
+}
+
+fn comprehensive_rule_has_real_signal(input: &ComprehensiveRuleInsightInput) -> bool {
+    !input.source_memory_ids.is_empty()
+        || input.rule.positive_feedback_count > 0
+        || input.rule.negative_feedback_count > 0
+        || input.rule.validation_passes > 0
+        || input.rule.validation_contradictions > 0
+        || input.rule.last_applied_at.is_some()
+        || input.rule.last_validated_at.is_some()
+        || input.rule.protected
+}
+
+fn comprehensive_rule_score(input: &ComprehensiveRuleInsightInput) -> f64 {
+    let rule = &input.rule;
+    let provenance = (input.source_memory_ids.len() as f64).min(8.0) * 0.06;
+    let positive_feedback = f64::from(rule.positive_feedback_count.min(12)) * 0.025;
+    let negative_feedback = f64::from(rule.negative_feedback_count.min(12)) * 0.035;
+    let validation = f64::from(rule.validation_passes.min(12)) * 0.04
+        - f64::from(rule.validation_contradictions.min(12)) * 0.05;
+    let maturity = f64::from(comprehensive_rule_maturity_rank(&rule.maturity)) * 0.025;
+    let protected = if rule.protected { 0.05 } else { 0.0 };
+    let raw = f64::from(rule.confidence) * 0.30
+        + f64::from(rule.utility) * 0.25
+        + f64::from(rule.importance) * 0.20
+        + provenance
+        + positive_feedback
+        + validation
+        + maturity
+        + protected
+        - negative_feedback;
+    raw.max(0.0)
+}
+
+fn comprehensive_rule_maturity_rank(maturity: &str) -> u8 {
+    match maturity {
+        "validated" => 5,
+        "candidate" => 4,
+        "draft" => 3,
+        "deprecated" => 2,
+        "superseded" => 1,
+        _ => 0,
+    }
 }
 
 fn contradiction_clusters_section() -> InsightsSection {
@@ -3632,6 +3842,104 @@ mod tests {
         assert_eq!(
             item["evidence"]["algorithm"].as_str(),
             Some("bipartite_hits")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn comprehensive_rules_section_reads_real_rule_provenance() -> TestResult {
+        let workspace = unique_insights_workspace("comprehensive-rules")?;
+        let _ = seed_load_bearing_workspace(&workspace)?;
+
+        let report = build_insights_report_with_options(
+            &InsightsArgs {
+                section: Some("comprehensiveRules".to_owned()),
+                explain: None,
+                limit: DEFAULT_SECTION_LIMIT,
+                offset: 0,
+                json_stream: false,
+            },
+            InsightsBuildOptions {
+                workspace: Some(&workspace),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.mode, InsightsMode::Section);
+        assert_eq!(
+            report.selected_section.as_deref(),
+            Some("comprehensiveRules")
+        );
+        assert!(
+            report
+                .degraded_signals
+                .iter()
+                .all(|signal| signal.code != INSIGHTS_SECTION_UNAVAILABLE_CODE),
+            "implemented comprehensiveRules must not emit placeholder degradation"
+        );
+        let section = report
+            .sections
+            .first()
+            .ok_or_else(|| "comprehensiveRules section should be present".to_owned())?;
+        assert_eq!(section.name, "comprehensiveRules");
+        assert_eq!(section.items.len(), 2);
+
+        let first = &section.items[0];
+        assert_eq!(
+            first["ruleId"].as_str(),
+            Some("rule_loadbearingbeta00000000000")
+        );
+        assert_eq!(first["rank"].as_u64(), Some(1));
+        assert_eq!(first["provenanceCount"].as_u64(), Some(2));
+        assert_eq!(first["maturity"].as_str(), Some("validated"));
+        assert_eq!(first["interpretation"].as_str(), Some("comprehensive_rule"));
+        assert_eq!(
+            first["sourceMemoryIds"].as_array().map(std::vec::Vec::len),
+            Some(2)
+        );
+        assert_eq!(
+            first["evidence"]["schema"].as_str(),
+            Some(COMPREHENSIVE_RULE_INSIGHT_SCHEMA_V1)
+        );
+        assert_eq!(
+            first["evidence"]["algorithm"].as_str(),
+            Some("rule_provenance_reuse_rank")
+        );
+        assert_eq!(
+            first["nextCommand"].as_str(),
+            Some("ee rule show rule_loadbearingbeta00000000000 --workspace . --json")
+        );
+        assert!(
+            first["rankingScore"]
+                .as_f64()
+                .is_some_and(|score| score > 0.0)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn selected_comprehensive_rules_does_not_emit_placeholder_degradation() -> TestResult {
+        let report = build_insights_report(&InsightsArgs {
+            section: Some("comprehensiveRules".to_owned()),
+            explain: None,
+            limit: DEFAULT_SECTION_LIMIT,
+            offset: 0,
+            json_stream: false,
+        })
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            report.selected_section.as_deref(),
+            Some("comprehensiveRules")
+        );
+        assert!(
+            report
+                .degraded_signals
+                .iter()
+                .all(|signal| signal.code != INSIGHTS_SECTION_UNAVAILABLE_CODE),
+            "comprehensiveRules should no longer be placeholder-backed"
         );
 
         Ok(())
