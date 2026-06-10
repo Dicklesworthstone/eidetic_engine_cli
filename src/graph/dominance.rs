@@ -347,7 +347,7 @@ pub fn compute_workspace_revision_frontiers_with_cx(
     // `revision_frontier_items` sorts by id; the stable re-sort by size
     // descending preserves that id order inside each size bucket.
     let mut items = revision_frontier_items(&merged, snapshot_version);
-    items.sort_by(|a, b| b.dominance_frontier_size.cmp(&a.dominance_frontier_size));
+    items.sort_by_key(|item| std::cmp::Reverse(item.dominance_frontier_size));
     Ok(items)
 }
 
