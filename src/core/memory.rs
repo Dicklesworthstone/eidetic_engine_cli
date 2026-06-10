@@ -8881,7 +8881,7 @@ mod tests {
 
         let memory_id = "mem_00000000000000000000002002";
         let audit_id = "audit_auditlane00000000000000001";
-        let index_job_id = "sidx_auditlane000000000000000001";
+        let index_job_id = "sidx_auditlane00000000000000001";
         let memory_input = CreateMemoryInput {
             workspace_id: workspace_id.to_owned(),
             level: "procedural".to_owned(),
@@ -10224,7 +10224,7 @@ mod tests {
             kind: "failure",
             tags: Some("negative-evidence,prefetch"),
             confidence: 0.8,
-            source: Some("file://README.md#negative-evidence-ledger"),
+            source: Some("file://README.md#L100"),
             allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
