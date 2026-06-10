@@ -39,8 +39,7 @@ expression: canonical_json(value)
       "severity": "info",
       "sources": [
         "kCore",
-        "kTruss",
-        "revisionFrontiers"
+        "kTruss"
       ]
     }
   ],

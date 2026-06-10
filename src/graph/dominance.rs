@@ -300,6 +300,57 @@ pub fn compute_memory_impact_analysis_with_cx(
     })
 }
 
+/// Compute revision-frontier items across every revision chain in the DAG
+/// (workspace-wide view for `ee insights --section revisionFrontiers`).
+///
+/// Roots are nodes with no predecessors and at least one successor; each
+/// root's dominance frontiers are computed independently and merged. A node
+/// reachable from multiple roots (possible via `derived_from` cross-chain
+/// edges) keeps its largest frontier, with the root visit order fixed by
+/// `nodes_ordered`, so the merged result is deterministic. Items are ranked
+/// by frontier size descending with the existing ULID-payload id tie-break;
+/// empty frontiers are dropped (a linear chain has nothing to report).
+pub fn compute_workspace_revision_frontiers(
+    graph: &DiGraph,
+    snapshot_version: u64,
+) -> GraphResult<Vec<RevisionFrontierItem>> {
+    let cx = current_or_testing_cx();
+    compute_workspace_revision_frontiers_with_cx(&cx, graph, snapshot_version)
+}
+
+pub fn compute_workspace_revision_frontiers_with_cx(
+    cx: &Cx,
+    graph: &DiGraph,
+    snapshot_version: u64,
+) -> GraphResult<Vec<RevisionFrontierItem>> {
+    let mut merged = DominanceFrontiers::new();
+    for node in graph.nodes_ordered() {
+        let has_predecessors = !graph.predecessors(node).unwrap_or_default().is_empty();
+        let has_successors = !graph.successors(node).unwrap_or_default().is_empty();
+        if has_predecessors || !has_successors {
+            continue;
+        }
+        let frontiers = compute_dominance_frontiers_with_cx(cx, graph, node)?;
+        for (memory_id, frontier) in frontiers {
+            if frontier.is_empty() {
+                continue;
+            }
+            let keep_existing = merged
+                .get(&memory_id)
+                .is_some_and(|existing| existing.len() >= frontier.len());
+            if !keep_existing {
+                merged.insert(memory_id, frontier);
+            }
+        }
+    }
+
+    // `revision_frontier_items` sorts by id; the stable re-sort by size
+    // descending preserves that id order inside each size bucket.
+    let mut items = revision_frontier_items(&merged, snapshot_version);
+    items.sort_by(|a, b| b.dominance_frontier_size.cmp(&a.dominance_frontier_size));
+    Ok(items)
+}
+
 fn revision_analysis_start(graph: &DiGraph, memory_id: &str) -> String {
     let mut seen = BTreeSet::new();
     let mut frontier = BTreeSet::from([memory_id.to_owned()]);
@@ -513,6 +564,56 @@ mod tests {
             sorted.sort();
             assert_eq!(*start_frontier, sorted);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_revision_frontiers_rank_joins_across_all_chains() -> TestResult {
+        // Two independent chains: a diamond (whose branches have a
+        // non-empty frontier at the join) and a linear chain (no
+        // frontiers at all). The workspace view must surface only the
+        // diamond branches, ranked by frontier size with the id
+        // tie-break, regardless of which chain's root sorts first.
+        let mut graph = empty_digraph();
+        add_edge(&mut graph, "a", "b");
+        add_edge(&mut graph, "a", "c");
+        add_edge(&mut graph, "b", "d");
+        add_edge(&mut graph, "c", "d");
+        add_edge(&mut graph, "x", "y");
+
+        let items = graph_result(compute_workspace_revision_frontiers(&graph, 7))?;
+
+        let ids = items
+            .iter()
+            .map(|item| item.memory_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["b", "c"], "got {items:?}");
+        for item in &items {
+            assert_eq!(item.dominance_frontier_size, 1);
+            assert_eq!(item.affected_memory_ids, vec!["d"]);
+            assert_eq!(item.evidence.algorithm, "dominance_frontiers");
+            assert_eq!(item.evidence.snapshot_version, 7);
+        }
+
+        // Determinism: the same graph yields byte-identical items.
+        let again = graph_result(compute_workspace_revision_frontiers(&graph, 7))?;
+        assert_eq!(items, again);
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_revision_frontiers_empty_graph_yields_no_items() -> TestResult {
+        let graph = empty_digraph();
+        let items = graph_result(compute_workspace_revision_frontiers(&graph, 1))?;
+        assert!(items.is_empty(), "got {items:?}");
+
+        // A purely linear chain has revision data but no frontiers;
+        // the honest answer is still an empty item list.
+        let mut linear = empty_digraph();
+        add_edge(&mut linear, "a", "b");
+        add_edge(&mut linear, "b", "c");
+        let items = graph_result(compute_workspace_revision_frontiers(&linear, 1))?;
+        assert!(items.is_empty(), "got {items:?}");
         Ok(())
     }
 

@@ -58,6 +58,8 @@ const BLIND_SPOT_CENTRALITY_STATUS_UNAVAILABLE: &str =
 const BRIDGE_INSIGHT_SCHEMA_V1: &str = "ee.graph.bridge_insight.v1";
 const KNOWLEDGE_GAP_SCHEMA_V1: &str = "ee.graph.knowledge_gap.v1";
 const TOP_MEMORY_INSIGHT_SCHEMA_V1: &str = "ee.graph.top_memory.v1";
+const REVISION_FRONTIER_INSIGHT_SCHEMA_V1: &str = "ee.graph.revision_frontier.v1";
+const REVISION_FRONTIER_AFFECTED_ID_LIMIT: usize = 8;
 const COMPREHENSIVE_RULE_INSIGHT_SCHEMA_V1: &str = "ee.insights.comprehensive_rule.v1";
 const HOUSE_RULES_INSIGHT_SCHEMA_V1: &str = "ee.insights.house_rules.v1";
 const KNOWLEDGE_GAP_THIN_EVIDENCE_MAX_SPANS: u32 = 2;
@@ -495,7 +497,7 @@ pub fn build_insights_report_with_options(
 // "placeholder implementation" at the same time. When a real builder
 // lands for one of these names, remove it from this list in the same
 // change as the `build_registry_section` arm.
-const PLACEHOLDER_BACKED_SECTIONS: &[&str] = &["kCore", "kTruss", "revisionFrontiers"];
+const PLACEHOLDER_BACKED_SECTIONS: &[&str] = &["kCore", "kTruss"];
 
 fn build_registry_section_with_runtime_gate(
     display_name: &'static str,
@@ -591,6 +593,10 @@ fn build_registry_section(
         "proximityHotspots" => {
             let reports = load_proximity_hotspot_reports(workspace)?;
             Ok(proximity_hotspots_section_from_reports(&reports))
+        }
+        "revisionFrontiers" => {
+            let inputs = load_revision_frontier_inputs(workspace)?;
+            Ok(revision_frontiers_section_from_inputs(&inputs))
         }
         "topMemories" => {
             let inputs = load_top_memory_inputs(workspace)?;
@@ -3069,13 +3075,137 @@ fn proximity_hotspots_section_from_reports(reports: &[ProximityHotspotInput]) ->
 }
 
 fn revision_frontiers_section() -> InsightsSection {
-    placeholder_section(
-        "revisionFrontiers",
-        "Revision Frontiers",
-        "Top recent revisions ranked by dominance-frontier size in logical memory revision DAGs.",
-        "Revision frontiers help agents understand which edits may change downstream context behavior.",
-        vec!["ee insights --section revisionFrontiers --workspace . --json"],
-    )
+    revision_frontiers_section_from_inputs(&[])
+}
+
+/// Workspace-level revision-frontier evidence for one memory revision.
+struct RevisionFrontierInsightInput {
+    memory_id: String,
+    frontier_role: &'static str,
+    stale_posture: &'static str,
+    dominance_frontier_size: usize,
+    affected_memory_ids: Vec<String>,
+    affected_memory_ids_truncated: bool,
+    snapshot_version: u64,
+}
+
+fn revision_frontiers_section_from_inputs(
+    inputs: &[RevisionFrontierInsightInput],
+) -> InsightsSection {
+    let items = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            serde_json::json!({
+                "rank": index + 1,
+                "memoryId": &input.memory_id,
+                "frontierRole": input.frontier_role,
+                "stalePosture": input.stale_posture,
+                "dominanceFrontierSize": input.dominance_frontier_size,
+                "affectedMemoryIds": &input.affected_memory_ids,
+                "affectedMemoryIdsTruncated": input.affected_memory_ids_truncated,
+                "interpretation": "revision_frontier",
+                "evidence": {
+                    "schema": REVISION_FRONTIER_INSIGHT_SCHEMA_V1,
+                    "algorithm": "dominance_frontiers",
+                    "snapshotVersion": input.snapshot_version,
+                },
+                "nextCommands": [
+                    format!("ee why {} --workspace . --json", input.memory_id),
+                ],
+            })
+        })
+        .collect();
+
+    InsightsSection {
+        name: "revisionFrontiers",
+        title: "Revision Frontiers",
+        summary: "Top recent revisions ranked by dominance-frontier size in logical memory revision DAGs.",
+        why_it_matters: "Revision frontiers help agents understand which edits may change downstream context behavior.",
+        items,
+        next_commands: vec!["ee insights --section revisionFrontiers --workspace . --json"],
+    }
+}
+
+fn load_revision_frontier_inputs(
+    workspace: Option<&Path>,
+) -> Result<Vec<RevisionFrontierInsightInput>, DomainError> {
+    let Some(workspace) = workspace else {
+        return Ok(Vec::new());
+    };
+    let database_path = workspace.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open workspace database: {error}"),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })?;
+    let Some(workspace_id) = insights_workspace_id(&connection, workspace)? else {
+        return Ok(Vec::new());
+    };
+    let graph = crate::graph::build_revision_dag_from_logical_ids(&connection, &workspace_id)
+        .map_err(|error| DomainError::Graph {
+            message: format!("Failed to build memory revision DAG: {error}"),
+            repair: Some(
+                "Run `ee graph snapshot refresh --graph revision --workspace . --json`.".to_owned(),
+            ),
+        })?;
+    if graph.node_count() == 0 {
+        return Ok(Vec::new());
+    }
+    let snapshot_version = connection
+        .get_latest_graph_snapshot(&workspace_id, crate::db::GraphSnapshotType::RevisionDag)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query revision-DAG graph snapshot: {error}"),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })?
+        .map_or(0, |snapshot| u64::from(snapshot.snapshot_version));
+
+    let items =
+        crate::graph::dominance::compute_workspace_revision_frontiers(&graph, snapshot_version)
+            .map_err(|error| DomainError::Graph {
+                message: format!("Failed to compute revision dominance frontiers: {error}"),
+                repair: Some(
+                    "Run `ee graph snapshot refresh --graph revision --workspace . --json`."
+                        .to_owned(),
+                ),
+            })?;
+
+    Ok(items
+        .into_iter()
+        .take(MAX_SECTION_LIMIT)
+        .map(|item| {
+            let superseded = !graph
+                .successors(&item.memory_id)
+                .unwrap_or_default()
+                .is_empty();
+            let is_root = graph
+                .predecessors(&item.memory_id)
+                .unwrap_or_default()
+                .is_empty();
+            let truncated = item.affected_memory_ids.len() > REVISION_FRONTIER_AFFECTED_ID_LIMIT;
+            let mut affected = item.affected_memory_ids;
+            affected.truncate(REVISION_FRONTIER_AFFECTED_ID_LIMIT);
+            RevisionFrontierInsightInput {
+                memory_id: item.memory_id,
+                frontier_role: if is_root {
+                    "chain_root"
+                } else if superseded {
+                    "interior"
+                } else {
+                    "chain_head"
+                },
+                stale_posture: if superseded { "superseded" } else { "current" },
+                dominance_frontier_size: item.dominance_frontier_size,
+                affected_memory_ids: affected,
+                affected_memory_ids_truncated: truncated,
+                snapshot_version: item.evidence.snapshot_version,
+            }
+        })
+        .collect())
 }
 
 fn top_memories_section() -> InsightsSection {
@@ -5284,5 +5414,222 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    #[test]
+    fn revision_frontiers_is_no_longer_placeholder_backed() -> TestResult {
+        // Regression guard for bd-2pos6.5: the section must not emit
+        // insights_section_unavailable once real dominance evidence backs it.
+        assert!(!PLACEHOLDER_BACKED_SECTIONS.contains(&"revisionFrontiers"));
+        assert!(placeholder_section_degraded_input("revisionFrontiers").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn revision_frontiers_section_from_inputs_emits_dominance_evidence() -> TestResult {
+        let inputs = vec![
+            RevisionFrontierInsightInput {
+                memory_id: "mem_revfrontierbranch00000001".to_owned(),
+                frontier_role: "interior",
+                stale_posture: "superseded",
+                dominance_frontier_size: 2,
+                affected_memory_ids: vec![
+                    "mem_revfrontierjoin0000000001".to_owned(),
+                    "mem_revfrontierjoin0000000002".to_owned(),
+                ],
+                affected_memory_ids_truncated: false,
+                snapshot_version: 12,
+            },
+            RevisionFrontierInsightInput {
+                memory_id: "mem_revfrontierhead0000000001".to_owned(),
+                frontier_role: "chain_head",
+                stale_posture: "current",
+                dominance_frontier_size: 1,
+                affected_memory_ids: vec!["mem_revfrontierjoin0000000001".to_owned()],
+                affected_memory_ids_truncated: false,
+                snapshot_version: 12,
+            },
+        ];
+
+        let section = revision_frontiers_section_from_inputs(&inputs);
+        assert_eq!(section.name, "revisionFrontiers");
+        assert_eq!(section.items.len(), 2);
+
+        let first = &section.items[0];
+        assert_eq!(first["rank"], 1);
+        assert_eq!(first["memoryId"], "mem_revfrontierbranch00000001");
+        assert_eq!(first["frontierRole"], "interior");
+        assert_eq!(first["stalePosture"], "superseded");
+        assert_eq!(first["dominanceFrontierSize"], 2);
+        assert_eq!(first["affectedMemoryIdsTruncated"], false);
+        assert_eq!(
+            first["evidence"]["schema"],
+            REVISION_FRONTIER_INSIGHT_SCHEMA_V1
+        );
+        assert_eq!(first["evidence"]["algorithm"], "dominance_frontiers");
+        assert_eq!(first["evidence"]["snapshotVersion"], 12);
+        assert_eq!(
+            first["nextCommands"][0],
+            "ee why mem_revfrontierbranch00000001 --workspace . --json"
+        );
+
+        // Honest empty: no inputs yields the same section metadata with no
+        // sample/fake items.
+        let empty = revision_frontiers_section_from_inputs(&[]);
+        assert_eq!(empty.name, "revisionFrontiers");
+        assert_eq!(empty.title, "Revision Frontiers");
+        assert!(empty.items.is_empty());
+        Ok(())
+    }
+
+    fn seed_revision_frontier_workspace(workspace: &std::path::Path) -> Result<String, String> {
+        let database_path = workspace.join(".ee").join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::curate::stable_workspace_id(workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("revision frontier insights".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        // Four memories joined into a diamond by derived_from links:
+        //   root -> branchb -> join
+        //   root -> branchc -> join
+        // Frontier(branchb) = Frontier(branchc) = {join}; join supersedes
+        // nothing (chain head), branches are dominated/superseded interiors.
+        for (id, content) in [
+            ("mem_revdiamondroot0000000001", "Initial release rule."),
+            ("mem_revdiamondbrancha0000001", "Branch A restatement."),
+            ("mem_revdiamondbranchb0000001", "Branch B restatement."),
+            ("mem_revdiamondjoin0000000001", "Merged final rule."),
+        ] {
+            connection
+                .insert_memory(
+                    id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.7,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: Some("2026-05-20T00:00:00Z".to_owned()),
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        for (link_id, src, dst) in [
+            (
+                "lnk_revdiamond00000000000001",
+                "mem_revdiamondroot0000000001",
+                "mem_revdiamondbrancha0000001",
+            ),
+            (
+                "lnk_revdiamond00000000000002",
+                "mem_revdiamondroot0000000001",
+                "mem_revdiamondbranchb0000001",
+            ),
+            (
+                "lnk_revdiamond00000000000003",
+                "mem_revdiamondbrancha0000001",
+                "mem_revdiamondjoin0000000001",
+            ),
+            (
+                "lnk_revdiamond00000000000004",
+                "mem_revdiamondbranchb0000001",
+                "mem_revdiamondjoin0000000001",
+            ),
+        ] {
+            connection
+                .insert_memory_link(
+                    link_id,
+                    &CreateMemoryLinkInput {
+                        src_memory_id: src.to_owned(),
+                        dst_memory_id: dst.to_owned(),
+                        relation: MemoryLinkRelation::DerivedFrom,
+                        weight: 1.0,
+                        confidence: 1.0,
+                        directed: true,
+                        evidence_count: 1,
+                        last_reinforced_at: None,
+                        source: MemoryLinkSource::Human,
+                        created_by: Some("revision frontier test".to_owned()),
+                        metadata_json: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        Ok(workspace_id)
+    }
+
+    #[test]
+    fn revision_frontiers_loader_surfaces_diamond_join_evidence() -> TestResult {
+        let workspace = unique_insights_workspace("revision-frontiers")?;
+        seed_revision_frontier_workspace(&workspace)?;
+
+        let inputs = load_revision_frontier_inputs(Some(&workspace))
+            .map_err(|error| format!("{error:?}"))?;
+        let ids = inputs
+            .iter()
+            .map(|input| input.memory_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "mem_revdiamondbrancha0000001",
+                "mem_revdiamondbranchb0000001"
+            ],
+            "diamond branches must surface as frontier sources"
+        );
+        for input in &inputs {
+            assert_eq!(input.dominance_frontier_size, 1);
+            assert_eq!(
+                input.affected_memory_ids,
+                vec!["mem_revdiamondjoin0000000001".to_owned()]
+            );
+            assert_eq!(input.frontier_role, "interior");
+            assert_eq!(input.stale_posture, "superseded");
+            assert!(!input.affected_memory_ids_truncated);
+        }
+
+        // Determinism across loads.
+        let again = load_revision_frontier_inputs(Some(&workspace))
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|input| (&input.memory_id, input.dominance_frontier_size))
+                .collect::<Vec<_>>(),
+            again
+                .iter()
+                .map(|input| (&input.memory_id, input.dominance_frontier_size))
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn revision_frontiers_loader_handles_missing_revision_data() -> TestResult {
+        // No DB at all → honest empty inputs, not an error.
+        let workspace = unique_insights_workspace("revision-frontiers-empty")?;
+        let inputs = load_revision_frontier_inputs(Some(&workspace))
+            .map_err(|error| format!("{error:?}"))?;
+        assert!(inputs.is_empty());
+        Ok(())
     }
 }

@@ -59,7 +59,8 @@ graph as informative.
 
 If `degradedSignals[]` contains `insights_section_unavailable`, prefer sections
 with non-empty evidence. The current metadata-only registered sections are
-`comprehensiveRules`, `kCore`, `kTruss`, and `revisionFrontiers`.
+`kCore` and `kTruss`; `revisionFrontiers` ships real dominance-frontier
+evidence as of bd-2pos6.5.
 
 ## Section Workflow
 

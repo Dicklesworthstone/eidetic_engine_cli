@@ -146,10 +146,12 @@ signal with the repair command, such as
 `ee config set graph.feature.load_bearing.enabled true`.
 
 Some registered sections are metadata-only until their evidence builders land:
-`comprehensiveRules`, `kCore`, `kTruss`, and `revisionFrontiers`. Selecting
-one of these sections still returns schema-valid output, but
-`degradedSignals[]` includes `insights_section_unavailable`; treat its empty
-`items[]` as unavailable evidence, not as a real graph result.
+`kCore` and `kTruss`. Selecting one of these sections still returns
+schema-valid output, but `degradedSignals[]` includes
+`insights_section_unavailable`; treat its empty `items[]` as unavailable
+evidence, not as a real graph result. `revisionFrontiers` returns real
+dominance-frontier evidence (ranked by frontier size from the memory revision
+DAG) and requires `graph.feature.revision_dominance.enabled`.
 
 ## Causal Command Flags
 
