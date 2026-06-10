@@ -111,11 +111,22 @@ The work-packet contract is `ee.swarm.work_packet.v1`. It is emitted by
 `ee swarm work-packet --json` as a deterministic read-only onboarding artifact
 composed from existing swarm brief and next-action evidence.
 
-The planned claim-gate contract is `ee.swarm.work_packet.claim_gate.v1`. It is
-the read-only `ee swarm work-packet --claim-gate --json` projection for
-answering whether a selected candidate may be claimed. It is tracked by
-`bd-1tlcd.1` and remains marked unshipped until the CLI surface is emitted by
-current builds.
+The claim-gate contract is `ee.swarm.work_packet.claim_gate.v1`. It is the
+read-only `ee swarm work-packet --claim-gate --json` projection for answering
+whether a selected candidate may be claimed. `bd-1tlcd.1` closed with the CLI
+surface emitted by current builds, so the schema is marked shipped.
+
+The planned source-authority snapshot contract is
+`ee.source_authority.snapshot.v1`. It is the per-decision aggregate consumed by
+claim gates and unsafe-claim planners: one record per coordination source
+(Beads, BV, Agent Mail, RCH, git, memory drift, host profile, workspace
+hygiene, installed-binary freshness, support-bundle evidence) carrying status,
+freshness, command budget, timeout, exit class, partial-data availability, and
+repair guidance. Its source-state taxonomy keeps `timed_out`, `stale_fallback`,
+`corrupt_recovery`, and `contradicted` distinct from `unavailable`, and its
+candidate-evidence block keeps "lookup timed out" distinct from "absence
+confirmed". `bd-3w4pv.1` defined the contract; it remains marked unshipped
+until the `bd-3w4pv.2` read-only collectors emit it.
 
 Each schema carries `x-ee-status` so agents can distinguish implemented
 surfaces from documented future contracts. A schema with `"shipped": false`

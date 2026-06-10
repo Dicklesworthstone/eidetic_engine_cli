@@ -1,0 +1,88 @@
+{
+  "schema": "ee.source_authority.snapshot.v1",
+  "snapshotId": "sas-fixture-redaction-0001",
+  "generatedAt": "2026-06-10T15:10:00Z",
+  "workspace": {
+    "workspaceLabel": "eidetic_engine_cli",
+    "workspaceIdHash": "blake3:a7f2c19e6b3d48aa"
+  },
+  "redactionStatus": "paths_counts_subjects_only_no_content",
+  "ordering": {
+    "sources": "sourceKind ascending byte order",
+    "evidence": "evidenceId ascending byte order",
+    "contradictions": "contradictionId ascending byte order"
+  },
+  "sources": [
+    {
+      "sourceKind": "agent_mail",
+      "state": "ready",
+      "authoritative": true,
+      "freshness": {
+        "capturedAt": "2026-06-10T15:09:58Z",
+        "ageMs": 2000,
+        "staleAfterMs": 120000,
+        "freshnessState": "fresh"
+      },
+      "budget": {
+        "commandBudgetMs": 3000,
+        "elapsedMs": 350,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 1
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": { "available": true, "droppedSections": [], "reason": null },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": { "guidance": null, "command": null, "safety": "read_only_probe" },
+      "evidenceId": "sre-agent-mail-2001",
+      "statusDetail": "roster 4 agents, 3 active exclusive reservations, 2 unread ack-required messages; bodies omitted by contract"
+    },
+    {
+      "sourceKind": "rch",
+      "state": "ready",
+      "authoritative": true,
+      "freshness": {
+        "capturedAt": "2026-06-10T15:09:55Z",
+        "ageMs": 5000,
+        "staleAfterMs": 300000,
+        "freshnessState": "fresh"
+      },
+      "budget": {
+        "commandBudgetMs": 10000,
+        "elapsedMs": 1100,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 1
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": { "available": true, "droppedSections": [], "reason": null },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": { "guidance": null, "command": null, "safety": "read_only_probe" },
+      "evidenceId": "sre-rch-2002",
+      "statusDetail": "selector admitted worker; verification command referenced by evidenceId, argv withheld by contract"
+    }
+  ],
+  "candidateEvidence": {
+    "candidateId": "bd-example.2",
+    "lookupOutcome": "candidate_present",
+    "presentIn": ["beads"],
+    "absentFrom": [],
+    "unavailableIn": [],
+    "staleFallbackPresence": {
+      "present": null,
+      "sourceKind": null,
+      "fallbackAgeMs": null
+    },
+    "explanation": "Candidate confirmed by an authoritative source. This fixture exists to prove the redaction posture: every string field stays within paths_counts_subjects_only_no_content, with no raw mail bodies, no memory bodies, no host-private absolute paths, and no captured argv."
+  },
+  "contradictions": [],
+  "overall": {
+    "verdict": "all_sources_authoritative",
+    "failClosed": false,
+    "authoritativeSourceCount": 2,
+    "degradedSourceCount": 0,
+    "unavailableSourceCount": 0
+  },
+  "degraded": [],
+  "provenanceHash": "blake3:0e1d2c3b4a5968770818f2e3d4c5b6a7"
+}

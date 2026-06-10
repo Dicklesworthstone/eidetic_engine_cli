@@ -1,0 +1,359 @@
+{
+  "schema": "ee.source_authority.snapshot.v1",
+  "snapshotId": "sas-fixture-all-states-0001",
+  "generatedAt": "2026-06-10T15:00:00Z",
+  "workspace": {
+    "workspaceLabel": "eidetic_engine_cli",
+    "workspaceIdHash": "blake3:a7f2c19e6b3d48aa"
+  },
+  "redactionStatus": "paths_counts_subjects_only_no_content",
+  "ordering": {
+    "sources": "sourceKind ascending byte order",
+    "evidence": "evidenceId ascending byte order",
+    "contradictions": "contradictionId ascending byte order"
+  },
+  "sources": [
+    {
+      "sourceKind": "agent_mail",
+      "state": "corrupt_recovery",
+      "authoritative": false,
+      "freshness": {
+        "capturedAt": "2026-06-10T14:59:50Z",
+        "ageMs": 10000,
+        "staleAfterMs": 120000,
+        "freshnessState": "fresh"
+      },
+      "budget": {
+        "commandBudgetMs": 3000,
+        "elapsedMs": 410,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 1
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": {
+        "available": true,
+        "droppedSections": [],
+        "reason": null
+      },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": {
+        "guidance": "Mail store reports recovery.mode=corrupt; reservations and inbox reads are non-authoritative until repair.",
+        "command": "am doctor repair --yes",
+        "safety": "approval_required_repair"
+      },
+      "evidenceId": "sre-agent-mail-0001",
+      "statusDetail": "transport green but durabilityState=corrupt; treating roster and reservations as non-authoritative"
+    },
+    {
+      "sourceKind": "beads",
+      "state": "timed_out",
+      "authoritative": false,
+      "freshness": {
+        "capturedAt": null,
+        "ageMs": null,
+        "staleAfterMs": 300000,
+        "freshnessState": "unknown"
+      },
+      "budget": {
+        "commandBudgetMs": 4000,
+        "elapsedMs": 4000,
+        "timedOut": true,
+        "retriesUsed": 3,
+        "retryBudget": 3
+      },
+      "exit": { "exitClass": "timeout", "exitCode": null },
+      "partialData": {
+        "available": false,
+        "droppedSections": ["ready_rows", "comments"],
+        "reason": "retry budget exhausted during a concurrent JSONL flush"
+      },
+      "fallback": {
+        "active": true,
+        "fallbackKind": "stale_safe_snapshot",
+        "fallbackAgeMs": 182000
+      },
+      "repair": {
+        "guidance": "Retry through the transient-read wrapper once the flush settles.",
+        "command": "scripts/br_retry.sh actionable --json",
+        "safety": "read_only_probe"
+      },
+      "evidenceId": "sre-beads-0002",
+      "statusDetail": "live read timed out; stale-safe snapshot answered"
+    },
+    {
+      "sourceKind": "bv",
+      "state": "unavailable",
+      "authoritative": false,
+      "freshness": {
+        "capturedAt": null,
+        "ageMs": null,
+        "staleAfterMs": null,
+        "freshnessState": "unknown"
+      },
+      "budget": {
+        "commandBudgetMs": 2000,
+        "elapsedMs": 12,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 0
+      },
+      "exit": { "exitClass": "spawn_failed", "exitCode": null },
+      "partialData": {
+        "available": false,
+        "droppedSections": ["triage", "ranking"],
+        "reason": "bv binary not found on PATH"
+      },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": {
+        "guidance": "Install bv or continue with Beads-only evidence; BV ranking is advisory.",
+        "command": null,
+        "safety": "unavailable_or_manual_only"
+      },
+      "evidenceId": "sre-bv-0003",
+      "statusDetail": "bv not installed; ranking skipped"
+    },
+    {
+      "sourceKind": "git",
+      "state": "ready",
+      "authoritative": true,
+      "freshness": {
+        "capturedAt": "2026-06-10T14:59:59Z",
+        "ageMs": 1000,
+        "staleAfterMs": 60000,
+        "freshnessState": "fresh"
+      },
+      "budget": {
+        "commandBudgetMs": 2000,
+        "elapsedMs": 95,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 0
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": { "available": true, "droppedSections": [], "reason": null },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": { "guidance": null, "command": null, "safety": "read_only_probe" },
+      "evidenceId": "sre-git-0004",
+      "statusDetail": "branch main, 11 dirty paths, HEAD matches origin"
+    },
+    {
+      "sourceKind": "host_profile",
+      "state": "ready",
+      "authoritative": true,
+      "freshness": {
+        "capturedAt": "2026-06-10T14:59:55Z",
+        "ageMs": 5000,
+        "staleAfterMs": 600000,
+        "freshnessState": "fresh"
+      },
+      "budget": {
+        "commandBudgetMs": 1500,
+        "elapsedMs": 220,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 0
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": { "available": true, "droppedSections": [], "reason": null },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": { "guidance": null, "command": null, "safety": "read_only_probe" },
+      "evidenceId": "sre-host-0005",
+      "statusDetail": "workstation class, no resource pressure"
+    },
+    {
+      "sourceKind": "installed_binary",
+      "state": "stale_fallback",
+      "authoritative": false,
+      "freshness": {
+        "capturedAt": "2026-06-10T14:30:00Z",
+        "ageMs": 1800000,
+        "staleAfterMs": 900000,
+        "freshnessState": "stale"
+      },
+      "budget": {
+        "commandBudgetMs": 2000,
+        "elapsedMs": 310,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 0
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": {
+        "available": true,
+        "droppedSections": [],
+        "reason": null
+      },
+      "fallback": {
+        "active": true,
+        "fallbackKind": "cached_read_only",
+        "fallbackAgeMs": 1800000
+      },
+      "repair": {
+        "guidance": "Installed ee is older than the source contract; rebuild through the approved RCH/release path before trusting flag surfaces.",
+        "command": "ee install check --json",
+        "safety": "read_only_probe"
+      },
+      "evidenceId": "sre-installed-0006",
+      "statusDetail": "version probe served from cache older than its stale-after bound"
+    },
+    {
+      "sourceKind": "memory_drift",
+      "state": "degraded_read_only",
+      "authoritative": false,
+      "freshness": {
+        "capturedAt": "2026-06-10T14:58:00Z",
+        "ageMs": 120000,
+        "staleAfterMs": 600000,
+        "freshnessState": "fresh"
+      },
+      "budget": {
+        "commandBudgetMs": 3000,
+        "elapsedMs": 640,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 1
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": {
+        "available": true,
+        "droppedSections": ["drift_details"],
+        "reason": "index generation behind DB generation; drift details suppressed"
+      },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": {
+        "guidance": "Rebuild the derived search index to restore drift-probe authority.",
+        "command": "ee index rebuild --workspace .",
+        "safety": "idempotent_refresh"
+      },
+      "evidenceId": "sre-memory-0007",
+      "statusDetail": "drift probe answered but index is stale; read-only evidence only"
+    },
+    {
+      "sourceKind": "rch",
+      "state": "contradicted",
+      "authoritative": false,
+      "freshness": {
+        "capturedAt": "2026-06-10T14:59:40Z",
+        "ageMs": 20000,
+        "staleAfterMs": 300000,
+        "freshnessState": "fresh"
+      },
+      "budget": {
+        "commandBudgetMs": 10000,
+        "elapsedMs": 1900,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 1
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": { "available": true, "droppedSections": [], "reason": null },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": {
+        "guidance": "Daemon reports remote-ready but the selector refused admission; restart the daemon or inspect queue accounting before trusting either signal.",
+        "command": "rch doctor",
+        "safety": "read_only_probe"
+      },
+      "evidenceId": "sre-rch-0008",
+      "statusDetail": "daemon posture remote-ready contradicts selector capacity_or_timeout refusal"
+    },
+    {
+      "sourceKind": "support_bundle",
+      "state": "unavailable",
+      "authoritative": false,
+      "freshness": {
+        "capturedAt": null,
+        "ageMs": null,
+        "staleAfterMs": null,
+        "freshnessState": "unknown"
+      },
+      "budget": {
+        "commandBudgetMs": 1000,
+        "elapsedMs": 2,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 0
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": {
+        "available": false,
+        "droppedSections": ["bundle_summaries"],
+        "reason": "no support bundle supplied for this decision"
+      },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": {
+        "guidance": null,
+        "command": null,
+        "safety": "unavailable_or_manual_only"
+      },
+      "evidenceId": "sre-support-0009",
+      "statusDetail": "skipped_by_flag: no embedded bundle evidence requested"
+    },
+    {
+      "sourceKind": "workspace_hygiene",
+      "state": "ready",
+      "authoritative": true,
+      "freshness": {
+        "capturedAt": "2026-06-10T14:59:57Z",
+        "ageMs": 3000,
+        "staleAfterMs": 120000,
+        "freshnessState": "fresh"
+      },
+      "budget": {
+        "commandBudgetMs": 5000,
+        "elapsedMs": 880,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 0
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": { "available": true, "droppedSections": [], "reason": null },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": { "guidance": null, "command": null, "safety": "read_only_probe" },
+      "evidenceId": "sre-hygiene-0010",
+      "statusDetail": "11 dirty paths classified; no secret-risk buckets"
+    }
+  ],
+  "candidateEvidence": null,
+  "contradictions": [
+    {
+      "contradictionId": "ctr-0001",
+      "sourceA": "rch",
+      "sourceB": "host_profile",
+      "field": "remoteVerificationAdmitted",
+      "classification": "status_conflict",
+      "resolution": "prefer_fail_closed"
+    }
+  ],
+  "overall": {
+    "verdict": "fail_closed_insufficient_authority",
+    "failClosed": true,
+    "authoritativeSourceCount": 3,
+    "degradedSourceCount": 4,
+    "unavailableSourceCount": 3
+  },
+  "degraded": [
+    {
+      "code": "source_authority_agent_mail_corrupt_recovery",
+      "severity": "high",
+      "message": "Agent Mail durability is in corrupt-recovery; reservations are non-authoritative.",
+      "repair": "am doctor repair --yes",
+      "sourceKind": "agent_mail"
+    },
+    {
+      "code": "source_authority_beads_timed_out",
+      "severity": "medium",
+      "message": "Beads live read exhausted its budget; stale-safe fallback evidence is advisory only.",
+      "repair": "scripts/br_retry.sh actionable --json",
+      "sourceKind": "beads"
+    },
+    {
+      "code": "source_authority_contradiction_unresolved",
+      "severity": "high",
+      "message": "RCH daemon posture contradicts selector admission; failing closed.",
+      "repair": "rch doctor",
+      "sourceKind": "rch"
+    }
+  ],
+  "provenanceHash": "blake3:1f2e3d4c5b6a79880716253449586a7b"
+}

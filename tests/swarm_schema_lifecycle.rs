@@ -125,6 +125,17 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         shipped: true,
     },
     SchemaCase {
+        // Contract-first schema from bd-3w4pv.1: per-decision source-authority
+        // aggregate consumed by claim gates and unsafe-claim planners. The
+        // read-only collectors that emit it land under bd-3w4pv.2, which is
+        // the tracking bead for the shipped flip.
+        id: "ee.source_authority.snapshot.v1",
+        file_name: "ee.source_authority.snapshot.v1.json",
+        doc_path: "docs/swarm/source_authority_snapshot.md",
+        tracking_bead: "bd-3w4pv.2",
+        shipped: false,
+    },
+    SchemaCase {
         id: "ee.resource.profile.v1",
         file_name: "ee.resource.profile.v1.json",
         doc_path: "docs/swarm/resource_profile.md",
@@ -198,8 +209,12 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         id: "ee.swarm.work_packet.claim_gate.v1",
         file_name: "ee.swarm.work_packet.claim_gate.v1.json",
         doc_path: "docs/swarm/work_packet.md",
+        // bd-1tlcd.1 is closed and the CLI emits the read-only --claim-gate
+        // surface, so the schema header carries shipped=true. The catalog row
+        // previously lagged behind the schema flip (red-main drift fixed
+        // alongside bd-3w4pv.1).
         tracking_bead: "bd-1tlcd.1",
-        shipped: false,
+        shipped: true,
     },
     SchemaCase {
         // bd-1zb7k.14.1 is closed in the beads tracker (the synthetic
@@ -285,6 +300,12 @@ const DRIFT_CASES: &[DriftCase] = &[
         command: "planned source-run watchdog evidence",
         json_path: ".examples[\"ee.source_run_evidence.v1\"]",
         fixture_manifest_key: "ee.source_run_evidence.v1",
+    },
+    DriftCase {
+        schema_id: "ee.source_authority.snapshot.v1",
+        command: "planned source-authority snapshot collectors (bd-3w4pv.2)",
+        json_path: ".examples[\"ee.source_authority.snapshot.v1\"]",
+        fixture_manifest_key: "ee.source_authority.snapshot.v1",
     },
     DriftCase {
         schema_id: "ee.resource.profile.v1",
@@ -719,6 +740,216 @@ fn source_run_evidence_contract_covers_watchdog_policy() -> TestResult {
         "source run fixture example",
     )? {
         return Err("source run fixture must not include raw bodies or env dumps".into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn source_authority_snapshot_contract_covers_source_state_taxonomy() -> TestResult {
+    let schema_case = schema_case_by_id("ee.source_authority.snapshot.v1")?;
+    let schema = schema_doc(schema_case)?;
+
+    let required = string_array_at(&schema, "/required", schema_case.id)?;
+    let expected_required = [
+        "schema",
+        "snapshotId",
+        "generatedAt",
+        "workspace",
+        "redactionStatus",
+        "ordering",
+        "sources",
+        "candidateEvidence",
+        "contradictions",
+        "overall",
+        "degraded",
+        "provenanceHash",
+    ];
+    if required != expected_required {
+        return Err(format!(
+            "{} required field order drifted\nactual: {required:?}\nexpected: {expected_required:?}",
+            schema_case.id
+        ));
+    }
+
+    let source_states = string_array_at(&schema, "/definitions/sourceState/enum", schema_case.id)?;
+    let expected_states = [
+        "ready",
+        "degraded_read_only",
+        "unavailable",
+        "timed_out",
+        "stale_fallback",
+        "corrupt_recovery",
+        "contradicted",
+    ];
+    if source_states != expected_states {
+        return Err(format!(
+            "{} source-state taxonomy drifted\nactual: {source_states:?}\nexpected: {expected_states:?}",
+            schema_case.id
+        ));
+    }
+
+    let source_kinds = string_array_at(&schema, "/definitions/sourceKind/enum", schema_case.id)?;
+    let expected_kinds = [
+        "agent_mail",
+        "beads",
+        "bv",
+        "git",
+        "host_profile",
+        "installed_binary",
+        "memory_drift",
+        "rch",
+        "support_bundle",
+        "workspace_hygiene",
+    ];
+    if source_kinds != expected_kinds {
+        return Err(format!(
+            "{} source-kind catalog drifted\nactual: {source_kinds:?}\nexpected: {expected_kinds:?}",
+            schema_case.id
+        ));
+    }
+
+    let lookup_outcomes = string_array_at(
+        &schema,
+        "/definitions/candidateEvidence/properties/lookupOutcome/enum",
+        schema_case.id,
+    )?;
+    let expected_outcomes = [
+        "candidate_present",
+        "candidate_absent_confirmed",
+        "candidate_lookup_unavailable",
+        "candidate_lookup_timed_out",
+        "candidate_stale_fallback_only",
+        "candidate_contradicted",
+    ];
+    if lookup_outcomes != expected_outcomes {
+        return Err(format!(
+            "{} candidate lookup outcomes drifted\nactual: {lookup_outcomes:?}\nexpected: {expected_outcomes:?}",
+            schema_case.id
+        ));
+    }
+
+    if string_field(&schema, "/properties/redactionStatus/const", schema_case.id)?
+        != "paths_counts_subjects_only_no_content"
+    {
+        return Err(format!(
+            "{} redactionStatus must be pinned to paths_counts_subjects_only_no_content",
+            schema_case.id
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn source_authority_fixtures_cover_taxonomy_and_redaction() -> TestResult {
+    let fixture_dir = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("source_authority");
+
+    let all_states = read_json(&fixture_dir.join("all_source_states.json"))?;
+    let candidate_timeout = read_json(&fixture_dir.join("candidate_beads_timeout.json"))?;
+    let redaction_proof = read_json(&fixture_dir.join("redaction_proof.json"))?;
+
+    // 1. The state-coverage fixture must exercise every source state.
+    let expected_states = [
+        "ready",
+        "degraded_read_only",
+        "unavailable",
+        "timed_out",
+        "stale_fallback",
+        "corrupt_recovery",
+        "contradicted",
+    ];
+    let sources = all_states
+        .pointer("/sources")
+        .and_then(Value::as_array)
+        .ok_or("all_source_states fixture missing sources array")?;
+    let mut seen_states = BTreeSet::new();
+    let mut kinds_in_order = Vec::new();
+    for source in sources {
+        seen_states.insert(string_field(source, "/state", "all_source_states source")?.to_owned());
+        kinds_in_order
+            .push(string_field(source, "/sourceKind", "all_source_states source")?.to_owned());
+    }
+    for state in expected_states {
+        if !seen_states.contains(state) {
+            return Err(format!(
+                "all_source_states fixture missing source state {state}"
+            ));
+        }
+    }
+
+    // 2. Sources must be sorted by sourceKind ascending byte order.
+    let mut sorted_kinds = kinds_in_order.clone();
+    sorted_kinds.sort();
+    if kinds_in_order != sorted_kinds {
+        return Err(format!(
+            "all_source_states sources must be sorted by sourceKind\nactual: {kinds_in_order:?}"
+        ));
+    }
+
+    // 3. The candidate fixture pins timeout-vs-absence: present in stale-safe
+    //    Beads, live lookup timed out, gate fails closed.
+    if string_field(
+        &candidate_timeout,
+        "/candidateEvidence/lookupOutcome",
+        "candidate_beads_timeout fixture",
+    )? != "candidate_lookup_timed_out"
+    {
+        return Err(
+            "candidate_beads_timeout fixture must report candidate_lookup_timed_out, never candidate_absent_confirmed"
+                .into(),
+        );
+    }
+    if !bool_field(
+        &candidate_timeout,
+        "/candidateEvidence/staleFallbackPresence/present",
+        "candidate_beads_timeout fixture",
+    )? {
+        return Err(
+            "candidate_beads_timeout fixture must record candidate presence in the stale-safe fallback".into(),
+        );
+    }
+    if !bool_field(
+        &candidate_timeout,
+        "/overall/failClosed",
+        "candidate_beads_timeout fixture",
+    )? {
+        return Err("candidate_beads_timeout fixture must fail closed".into());
+    }
+
+    // 4. Redaction posture: serialized fixtures must not leak host-private
+    //    absolute paths, raw mail/memory bodies, or secret-shaped argv.
+    for (name, fixture) in [
+        ("all_source_states", &all_states),
+        ("candidate_beads_timeout", &candidate_timeout),
+        ("redaction_proof", &redaction_proof),
+    ] {
+        let serialized = fixture.to_string();
+        for forbidden in [
+            "/Users/",
+            "/home/",
+            "/private/",
+            "body_md",
+            "bodyMd",
+            "rawBody",
+            "sk-ant-",
+            "AKIA",
+            "-----BEGIN",
+        ] {
+            if serialized.contains(forbidden) {
+                return Err(format!(
+                    "source_authority fixture {name} leaks forbidden content {forbidden}"
+                ));
+            }
+        }
+        if string_field(fixture, "/redactionStatus", name)?
+            != "paths_counts_subjects_only_no_content"
+        {
+            return Err(format!("{name} fixture redactionStatus drifted"));
+        }
     }
 
     Ok(())

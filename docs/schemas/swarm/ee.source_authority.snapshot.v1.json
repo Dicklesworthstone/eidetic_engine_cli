@@ -1,0 +1,548 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.source_authority.snapshot.v1.json",
+  "title": "ee.source_authority.snapshot.v1",
+  "description": "Deterministic, redaction-safe source-authority snapshot consumed by claim gates and unsafe-claim planners. Every coordination source is represented independently with status, freshness, command budget, timeout, exit class, partial-data availability, and repair guidance, so consumers can fail closed on precise per-source evidence instead of collapsing distinct failure classes into candidate_not_found.",
+  "type": "object",
+  "additionalProperties": false,
+  "x-ee-status": {
+    "shipped": false,
+    "available_in_build": false,
+    "tracking_bead": "bd-3w4pv.2",
+    "notes": "Contract-first schema from bd-3w4pv.1. The read-only collectors that emit this snapshot land under bd-3w4pv.2; claim-gate and unsafe-plan integration lands under bd-3w4pv.4."
+  },
+  "x-ee-doc": "docs/swarm/source_authority_snapshot.md",
+  "required": [
+    "schema",
+    "snapshotId",
+    "generatedAt",
+    "workspace",
+    "redactionStatus",
+    "ordering",
+    "sources",
+    "candidateEvidence",
+    "contradictions",
+    "overall",
+    "degraded",
+    "provenanceHash"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ee.source_authority.snapshot.v1" },
+    "snapshotId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Stable snapshot identifier suitable for support bundles and Agent Mail summaries (for example sas-<blake3-16>). Never derived from raw query text or secrets."
+    },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceLabel", "workspaceIdHash"],
+      "properties": {
+        "workspaceLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Repo-relative or symbolic workspace label. Host-private absolute paths are forbidden by the redaction contract."
+        },
+        "workspaceIdHash": {
+          "type": "string",
+          "pattern": "^(blake3|sha256):[0-9a-f]{8,64}$"
+        }
+      }
+    },
+    "redactionStatus": {
+      "type": "string",
+      "const": "paths_counts_subjects_only_no_content",
+      "description": "The snapshot keeps source states, counts, budgets, exit classes, evidence ids, hashes, and repair guidance. It omits raw mail bodies, raw memory bodies, host-private absolute paths, raw command argv, and environment dumps."
+    },
+    "ordering": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sources", "evidence", "contradictions"],
+      "description": "Deterministic ordering contract. Producers must sort before writing; consumers may verify but must not re-sort differently.",
+      "properties": {
+        "sources": {
+          "type": "string",
+          "const": "sourceKind ascending byte order"
+        },
+        "evidence": {
+          "type": "string",
+          "const": "evidenceId ascending byte order"
+        },
+        "contradictions": {
+          "type": "string",
+          "const": "contradictionId ascending byte order"
+        }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/sourceRecord" },
+      "description": "One record per consulted source, sorted by sourceKind ascending. A source that was not consulted at all must still appear with state=unavailable and statusDetail explaining why (for example skipped_by_flag), so absence of a record is never ambiguous."
+    },
+    "candidateEvidence": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/definitions/candidateEvidence" }
+      ],
+      "description": "Present when the snapshot was taken for a specific claim candidate; null for candidate-independent posture snapshots."
+    },
+    "contradictions": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/contradiction" }
+    },
+    "overall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verdict",
+        "failClosed",
+        "authoritativeSourceCount",
+        "degradedSourceCount",
+        "unavailableSourceCount"
+      ],
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "all_sources_authoritative",
+            "degraded_but_decidable",
+            "fail_closed_insufficient_authority",
+            "fail_closed_contradiction",
+            "fail_closed_timeout"
+          ]
+        },
+        "failClosed": { "type": "boolean" },
+        "authoritativeSourceCount": { "type": "integer", "minimum": 0 },
+        "degradedSourceCount": { "type": "integer", "minimum": 0 },
+        "unavailableSourceCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/degradation" }
+    },
+    "provenanceHash": {
+      "type": "string",
+      "pattern": "^(blake3|sha256):[0-9a-f]{8,64}$",
+      "description": "Hash over the canonical serialized snapshot body, usable as a dedup and replay key."
+    },
+    "producer": {
+      "type": "object",
+      "description": "Optional ee.producer.metadata.v1 projection identifying the producing surface.",
+      "additionalProperties": true
+    }
+  },
+  "definitions": {
+    "sourceState": {
+      "type": "string",
+      "description": "Source-state taxonomy. ready: live read succeeded and is authoritative. degraded_read_only: source answered but must not authorize mutation (for example Agent Mail durabilityState=corrupt with green transport). unavailable: source absent, unreachable, or skipped; no evidence captured. timed_out: command or transport budget exhausted before an answer; MUST NOT be collapsed into unavailable or candidate absence. stale_fallback: live read failed but a bounded stale-safe snapshot or cache answered; evidence is advisory. corrupt_recovery: store is present but integrity-failed or mid-recovery; reads are non-authoritative until repair. contradicted: this source's evidence conflicts with another source and the contradiction is unresolved.",
+      "enum": [
+        "ready",
+        "degraded_read_only",
+        "unavailable",
+        "timed_out",
+        "stale_fallback",
+        "corrupt_recovery",
+        "contradicted"
+      ]
+    },
+    "sourceKind": {
+      "type": "string",
+      "enum": [
+        "agent_mail",
+        "beads",
+        "bv",
+        "git",
+        "host_profile",
+        "installed_binary",
+        "memory_drift",
+        "rch",
+        "support_bundle",
+        "workspace_hygiene"
+      ]
+    },
+    "exitClass": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "usage_error",
+        "config_error",
+        "storage_error",
+        "timeout",
+        "spawn_failed",
+        "parse_failed",
+        "policy_denied",
+        "unknown"
+      ]
+    },
+    "sourceRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceKind",
+        "state",
+        "authoritative",
+        "freshness",
+        "budget",
+        "exit",
+        "partialData",
+        "fallback",
+        "repair",
+        "evidenceId",
+        "statusDetail"
+      ],
+      "properties": {
+        "sourceKind": { "$ref": "#/definitions/sourceKind" },
+        "state": { "$ref": "#/definitions/sourceState" },
+        "authoritative": {
+          "type": "boolean",
+          "description": "True only when state=ready and no unresolved contradiction names this source. Consumers must fail closed when a decision requires a source whose authoritative=false."
+        },
+        "freshness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["capturedAt", "ageMs", "staleAfterMs", "freshnessState"],
+          "properties": {
+            "capturedAt": {
+              "oneOf": [
+                { "type": "string", "format": "date-time" },
+                { "type": "null" }
+              ],
+              "description": "Null when no evidence was captured (state=unavailable or timed_out with no fallback)."
+            },
+            "ageMs": { "type": ["integer", "null"], "minimum": 0 },
+            "staleAfterMs": { "type": ["integer", "null"], "minimum": 0 },
+            "freshnessState": {
+              "type": "string",
+              "enum": ["fresh", "stale", "unknown"]
+            }
+          }
+        },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commandBudgetMs",
+            "elapsedMs",
+            "timedOut",
+            "retriesUsed",
+            "retryBudget"
+          ],
+          "properties": {
+            "commandBudgetMs": { "type": ["integer", "null"], "minimum": 0 },
+            "elapsedMs": { "type": ["integer", "null"], "minimum": 0 },
+            "timedOut": { "type": "boolean" },
+            "retriesUsed": { "type": "integer", "minimum": 0 },
+            "retryBudget": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "exit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["exitClass", "exitCode"],
+          "properties": {
+            "exitClass": { "$ref": "#/definitions/exitClass" },
+            "exitCode": { "type": ["integer", "null"] }
+          }
+        },
+        "partialData": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["available", "droppedSections", "reason"],
+          "description": "Distinguishes a complete answer from a partial one (for example Beads answered ready-work rows but the comments lookup timed out).",
+          "properties": {
+            "available": { "type": "boolean" },
+            "droppedSections": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+            },
+            "reason": { "type": ["string", "null"], "maxLength": 240 }
+          }
+        },
+        "fallback": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["active", "fallbackKind", "fallbackAgeMs"],
+          "properties": {
+            "active": { "type": "boolean" },
+            "fallbackKind": {
+              "type": ["string", "null"],
+              "enum": [
+                "stale_safe_snapshot",
+                "cached_read_only",
+                "alternate_command",
+                null
+              ]
+            },
+            "fallbackAgeMs": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        },
+        "repair": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["guidance", "command", "safety"],
+          "properties": {
+            "guidance": { "type": ["string", "null"], "maxLength": 240 },
+            "command": {
+              "type": ["string", "null"],
+              "maxLength": 240,
+              "description": "A repair command template with placeholder arguments (for example 'ee index rebuild --workspace .'). Raw captured argv from failed invocations is forbidden; reference it by evidenceId instead."
+            },
+            "safety": {
+              "type": "string",
+              "enum": [
+                "read_only_probe",
+                "idempotent_refresh",
+                "mutating_local_repair",
+                "mutating_external_coordination_repair",
+                "approval_required_repair",
+                "destructive_or_irreversible_repair",
+                "unavailable_or_manual_only"
+              ]
+            }
+          }
+        },
+        "evidenceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Stable id linking this record to durable evidence (a verification run, a support-bundle entry, or an Agent Mail summary). Deterministic for identical inputs."
+        },
+        "statusDetail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "description": "Bounded human-readable detail. Must not contain raw mail bodies, memory bodies, host-private absolute paths, or captured argv."
+        }
+      }
+    },
+    "candidateEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidateId",
+        "lookupOutcome",
+        "presentIn",
+        "absentFrom",
+        "unavailableIn",
+        "staleFallbackPresence",
+        "explanation"
+      ],
+      "properties": {
+        "candidateId": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "lookupOutcome": {
+          "type": "string",
+          "description": "candidate_present: at least one authoritative source confirms the candidate. candidate_absent_confirmed: every authoritative source answered and none contains the candidate. candidate_lookup_unavailable: the sources that could answer were unavailable. candidate_lookup_timed_out: the sources that could answer exhausted their budget; absence is NOT confirmed. candidate_stale_fallback_only: only stale-safe fallback evidence contains the candidate. candidate_contradicted: authoritative sources disagree about the candidate.",
+          "enum": [
+            "candidate_present",
+            "candidate_absent_confirmed",
+            "candidate_lookup_unavailable",
+            "candidate_lookup_timed_out",
+            "candidate_stale_fallback_only",
+            "candidate_contradicted"
+          ]
+        },
+        "presentIn": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/sourceKind" }
+        },
+        "absentFrom": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/sourceKind" }
+        },
+        "unavailableIn": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/sourceKind" }
+        },
+        "staleFallbackPresence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["present", "sourceKind", "fallbackAgeMs"],
+          "description": "Records candidate presence in stale-safe fallback evidence separately from live presence, so 'present in stale-safe Beads but missing from the live packet' is representable without contradiction.",
+          "properties": {
+            "present": { "type": ["boolean", "null"] },
+            "sourceKind": {
+              "oneOf": [
+                { "$ref": "#/definitions/sourceKind" },
+                { "type": "null" }
+              ]
+            },
+            "fallbackAgeMs": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        },
+        "explanation": { "type": "string", "minLength": 1, "maxLength": 480 }
+      }
+    },
+    "contradiction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contradictionId",
+        "sourceA",
+        "sourceB",
+        "field",
+        "classification",
+        "resolution"
+      ],
+      "properties": {
+        "contradictionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sourceA": { "$ref": "#/definitions/sourceKind" },
+        "sourceB": { "$ref": "#/definitions/sourceKind" },
+        "field": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "classification": {
+          "type": "string",
+          "enum": [
+            "candidate_presence_conflict",
+            "status_conflict",
+            "freshness_conflict",
+            "authority_conflict",
+            "verdict_conflict"
+          ]
+        },
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "prefer_fail_closed",
+            "prefer_authoritative_source",
+            "prefer_fresher_evidence",
+            "unresolved_block"
+          ]
+        }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "repair": { "type": ["string", "null"], "maxLength": 240 },
+        "sourceKind": {
+          "oneOf": [
+            { "$ref": "#/definitions/sourceKind" },
+            { "type": "null" }
+          ]
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.source_authority.snapshot.v1",
+      "snapshotId": "sas-9c41b2f0a3d8e716",
+      "generatedAt": "2026-06-10T15:00:00Z",
+      "workspace": {
+        "workspaceLabel": "eidetic_engine_cli",
+        "workspaceIdHash": "blake3:a7f2c19e6b3d48aa"
+      },
+      "redactionStatus": "paths_counts_subjects_only_no_content",
+      "ordering": {
+        "sources": "sourceKind ascending byte order",
+        "evidence": "evidenceId ascending byte order",
+        "contradictions": "contradictionId ascending byte order"
+      },
+      "sources": [
+        {
+          "sourceKind": "beads",
+          "state": "timed_out",
+          "authoritative": false,
+          "freshness": {
+            "capturedAt": null,
+            "ageMs": null,
+            "staleAfterMs": 300000,
+            "freshnessState": "unknown"
+          },
+          "budget": {
+            "commandBudgetMs": 4000,
+            "elapsedMs": 4000,
+            "timedOut": true,
+            "retriesUsed": 3,
+            "retryBudget": 3
+          },
+          "exit": { "exitClass": "timeout", "exitCode": null },
+          "partialData": {
+            "available": false,
+            "droppedSections": ["ready_rows", "comments"],
+            "reason": "br ready exhausted the retry budget during a concurrent JSONL flush"
+          },
+          "fallback": {
+            "active": true,
+            "fallbackKind": "stale_safe_snapshot",
+            "fallbackAgeMs": 182000
+          },
+          "repair": {
+            "guidance": "Retry through the transient-read wrapper once the flush settles.",
+            "command": "scripts/br_retry.sh actionable --json",
+            "safety": "read_only_probe"
+          },
+          "evidenceId": "sre-beads-7d20a4f1",
+          "statusDetail": "live br ready timed out; stale-safe snapshot from 182s ago answered"
+        },
+        {
+          "sourceKind": "rch",
+          "state": "ready",
+          "authoritative": true,
+          "freshness": {
+            "capturedAt": "2026-06-10T14:59:58Z",
+            "ageMs": 2000,
+            "staleAfterMs": 600000,
+            "freshnessState": "fresh"
+          },
+          "budget": {
+            "commandBudgetMs": 10000,
+            "elapsedMs": 1240,
+            "timedOut": false,
+            "retriesUsed": 0,
+            "retryBudget": 1
+          },
+          "exit": { "exitClass": "ok", "exitCode": 0 },
+          "partialData": { "available": true, "droppedSections": [], "reason": null },
+          "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+          "repair": { "guidance": null, "command": null, "safety": "read_only_probe" },
+          "evidenceId": "sre-rch-1f9e2c87",
+          "statusDetail": "selector admission probe selected a healthy worker"
+        }
+      ],
+      "candidateEvidence": {
+        "candidateId": "bd-example.1",
+        "lookupOutcome": "candidate_lookup_timed_out",
+        "presentIn": [],
+        "absentFrom": [],
+        "unavailableIn": ["beads"],
+        "staleFallbackPresence": {
+          "present": true,
+          "sourceKind": "beads",
+          "fallbackAgeMs": 182000
+        },
+        "explanation": "Live Beads timed out before the candidate row could be read; the stale-safe snapshot contains the candidate, so absence is not confirmed and the claim gate must fail closed instead of reporting candidate_not_found."
+      },
+      "contradictions": [],
+      "overall": {
+        "verdict": "fail_closed_timeout",
+        "failClosed": true,
+        "authoritativeSourceCount": 1,
+        "degradedSourceCount": 0,
+        "unavailableSourceCount": 1
+      },
+      "degraded": [
+        {
+          "code": "source_authority_beads_timed_out",
+          "severity": "medium",
+          "message": "Beads live read exhausted its 4000ms budget; stale-safe fallback evidence is advisory only.",
+          "repair": "scripts/br_retry.sh actionable --json",
+          "sourceKind": "beads"
+        }
+      ],
+      "provenanceHash": "blake3:c3a9e1f47b6d28509144aa1f0e7d3b62"
+    }
+  ]
+}

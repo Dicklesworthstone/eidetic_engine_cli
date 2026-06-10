@@ -1,0 +1,108 @@
+{
+  "schema": "ee.source_authority.snapshot.v1",
+  "snapshotId": "sas-fixture-candidate-timeout-0001",
+  "generatedAt": "2026-06-10T15:05:00Z",
+  "workspace": {
+    "workspaceLabel": "eidetic_engine_cli",
+    "workspaceIdHash": "blake3:a7f2c19e6b3d48aa"
+  },
+  "redactionStatus": "paths_counts_subjects_only_no_content",
+  "ordering": {
+    "sources": "sourceKind ascending byte order",
+    "evidence": "evidenceId ascending byte order",
+    "contradictions": "contradictionId ascending byte order"
+  },
+  "sources": [
+    {
+      "sourceKind": "beads",
+      "state": "timed_out",
+      "authoritative": false,
+      "freshness": {
+        "capturedAt": null,
+        "ageMs": null,
+        "staleAfterMs": 300000,
+        "freshnessState": "unknown"
+      },
+      "budget": {
+        "commandBudgetMs": 4000,
+        "elapsedMs": 4000,
+        "timedOut": true,
+        "retriesUsed": 3,
+        "retryBudget": 3
+      },
+      "exit": { "exitClass": "timeout", "exitCode": null },
+      "partialData": {
+        "available": false,
+        "droppedSections": ["ready_rows", "candidate_lookup"],
+        "reason": "br ready exhausted the retry budget during a concurrent JSONL flush"
+      },
+      "fallback": {
+        "active": true,
+        "fallbackKind": "stale_safe_snapshot",
+        "fallbackAgeMs": 182000
+      },
+      "repair": {
+        "guidance": "Retry through the transient-read wrapper once the flush settles.",
+        "command": "scripts/br_retry.sh actionable --json",
+        "safety": "read_only_probe"
+      },
+      "evidenceId": "sre-beads-1001",
+      "statusDetail": "live candidate lookup timed out; stale-safe snapshot from 182s ago contains the candidate"
+    },
+    {
+      "sourceKind": "git",
+      "state": "ready",
+      "authoritative": true,
+      "freshness": {
+        "capturedAt": "2026-06-10T15:04:59Z",
+        "ageMs": 1000,
+        "staleAfterMs": 60000,
+        "freshnessState": "fresh"
+      },
+      "budget": {
+        "commandBudgetMs": 2000,
+        "elapsedMs": 88,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 0
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": { "available": true, "droppedSections": [], "reason": null },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": { "guidance": null, "command": null, "safety": "read_only_probe" },
+      "evidenceId": "sre-git-1002",
+      "statusDetail": "branch main, HEAD matches origin"
+    }
+  ],
+  "candidateEvidence": {
+    "candidateId": "bd-example.1",
+    "lookupOutcome": "candidate_lookup_timed_out",
+    "presentIn": [],
+    "absentFrom": [],
+    "unavailableIn": ["beads"],
+    "staleFallbackPresence": {
+      "present": true,
+      "sourceKind": "beads",
+      "fallbackAgeMs": 182000
+    },
+    "explanation": "The candidate row exists in the stale-safe Beads snapshot but the live claim-gate lookup timed out before it could be confirmed. Absence is NOT confirmed: the gate must report candidate_lookup_timed_out and fail closed instead of emitting candidate_not_found or claiming on stale evidence."
+  },
+  "contradictions": [],
+  "overall": {
+    "verdict": "fail_closed_timeout",
+    "failClosed": true,
+    "authoritativeSourceCount": 1,
+    "degradedSourceCount": 0,
+    "unavailableSourceCount": 1
+  },
+  "degraded": [
+    {
+      "code": "source_authority_beads_timed_out",
+      "severity": "medium",
+      "message": "Beads live read exhausted its 4000ms budget; candidate presence is known only from stale-safe fallback evidence.",
+      "repair": "scripts/br_retry.sh actionable --json",
+      "sourceKind": "beads"
+    }
+  ],
+  "provenanceHash": "blake3:9a8b7c6d5e4f30211f0e2d3c4b5a6978"
+}

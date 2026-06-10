@@ -1,6 +1,137 @@
 {
   "schema": "ee.swarm_schema_examples.v1",
   "examples": {
+    "ee.source_authority.snapshot.v1": {
+      "schema": "ee.source_authority.snapshot.v1",
+      "snapshotId": "sas-9c41b2f0a3d8e716",
+      "generatedAt": "2026-06-10T15:00:00Z",
+      "workspace": {
+        "workspaceLabel": "eidetic_engine_cli",
+        "workspaceIdHash": "blake3:a7f2c19e6b3d48aa"
+      },
+      "redactionStatus": "paths_counts_subjects_only_no_content",
+      "ordering": {
+        "sources": "sourceKind ascending byte order",
+        "evidence": "evidenceId ascending byte order",
+        "contradictions": "contradictionId ascending byte order"
+      },
+      "sources": [
+        {
+          "sourceKind": "beads",
+          "state": "timed_out",
+          "authoritative": false,
+          "freshness": {
+            "capturedAt": null,
+            "ageMs": null,
+            "staleAfterMs": 300000,
+            "freshnessState": "unknown"
+          },
+          "budget": {
+            "commandBudgetMs": 4000,
+            "elapsedMs": 4000,
+            "timedOut": true,
+            "retriesUsed": 3,
+            "retryBudget": 3
+          },
+          "exit": {
+            "exitClass": "timeout",
+            "exitCode": null
+          },
+          "partialData": {
+            "available": false,
+            "droppedSections": [
+              "ready_rows",
+              "comments"
+            ],
+            "reason": "br ready exhausted the retry budget during a concurrent JSONL flush"
+          },
+          "fallback": {
+            "active": true,
+            "fallbackKind": "stale_safe_snapshot",
+            "fallbackAgeMs": 182000
+          },
+          "repair": {
+            "guidance": "Retry through the transient-read wrapper once the flush settles.",
+            "command": "scripts/br_retry.sh actionable --json",
+            "safety": "read_only_probe"
+          },
+          "evidenceId": "sre-beads-7d20a4f1",
+          "statusDetail": "live br ready timed out; stale-safe snapshot from 182s ago answered"
+        },
+        {
+          "sourceKind": "rch",
+          "state": "ready",
+          "authoritative": true,
+          "freshness": {
+            "capturedAt": "2026-06-10T14:59:58Z",
+            "ageMs": 2000,
+            "staleAfterMs": 600000,
+            "freshnessState": "fresh"
+          },
+          "budget": {
+            "commandBudgetMs": 10000,
+            "elapsedMs": 1240,
+            "timedOut": false,
+            "retriesUsed": 0,
+            "retryBudget": 1
+          },
+          "exit": {
+            "exitClass": "ok",
+            "exitCode": 0
+          },
+          "partialData": {
+            "available": true,
+            "droppedSections": [],
+            "reason": null
+          },
+          "fallback": {
+            "active": false,
+            "fallbackKind": null,
+            "fallbackAgeMs": null
+          },
+          "repair": {
+            "guidance": null,
+            "command": null,
+            "safety": "read_only_probe"
+          },
+          "evidenceId": "sre-rch-1f9e2c87",
+          "statusDetail": "selector admission probe selected a healthy worker"
+        }
+      ],
+      "candidateEvidence": {
+        "candidateId": "bd-example.1",
+        "lookupOutcome": "candidate_lookup_timed_out",
+        "presentIn": [],
+        "absentFrom": [],
+        "unavailableIn": [
+          "beads"
+        ],
+        "staleFallbackPresence": {
+          "present": true,
+          "sourceKind": "beads",
+          "fallbackAgeMs": 182000
+        },
+        "explanation": "Live Beads timed out before the candidate row could be read; the stale-safe snapshot contains the candidate, so absence is not confirmed and the claim gate must fail closed instead of reporting candidate_not_found."
+      },
+      "contradictions": [],
+      "overall": {
+        "verdict": "fail_closed_timeout",
+        "failClosed": true,
+        "authoritativeSourceCount": 1,
+        "degradedSourceCount": 0,
+        "unavailableSourceCount": 1
+      },
+      "degraded": [
+        {
+          "code": "source_authority_beads_timed_out",
+          "severity": "medium",
+          "message": "Beads live read exhausted its 4000ms budget; stale-safe fallback evidence is advisory only.",
+          "repair": "scripts/br_retry.sh actionable --json",
+          "sourceKind": "beads"
+        }
+      ],
+      "provenanceHash": "blake3:c3a9e1f47b6d28509144aa1f0e7d3b62"
+    },
     "ee.producer.metadata.v1": {
       "schema": "ee.producer.metadata.v1",
       "sourceSystem": "verification",
@@ -224,7 +355,8 @@
       "source_commands": [
         "am agents list --project '<workspace>' --json",
         "am robot reservations --project '<workspace>' --all --format json",
-        "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json"
+        "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json",
+        "agent-mail-health http://127.0.0.1:8765/health"
       ],
       "command_statuses": [
         {
@@ -237,12 +369,16 @@
       ],
       "fallback_active": false,
       "am_agents_list_ok": true,
+      "health_level": "green",
+      "semantic_readiness": {
+        "status": "pass"
+      },
       "summary": {
         "agent_count": 1,
         "file_reservation_count": 1,
         "inbox_mailbox_count": 1,
         "thread_count": 1,
-        "source_command_count": 3,
+        "source_command_count": 4,
         "degraded_count": 0
       },
       "degraded": [],
