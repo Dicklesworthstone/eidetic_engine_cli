@@ -578,12 +578,15 @@ fn lab_swarm_replay_executes_small_generated_fixture_with_artifact_ledger() -> T
                 "required_runtime": "Rust",
                 "workers_reported": ["vmi1227854"],
                 "daemon_workers_reported": ["vmi1227854"],
+                "workers_reported_count": 1,
+                "daemon_workers_reported_count": 1,
                 "selected_worker": "vmi1227854",
                 "selection_failure_reason": null,
                 "workers_vs_selection_contradiction": false,
                 "path_normalization_warning": null,
                 "remote_required": true,
-                "local_fallback_refused": false
+                "local_fallback_refused": false,
+                "admission_blocker": null
             },
             "local_cargo_processes": {
                 "schema": "ee.rch_local_cargo_tripwire.v1",
