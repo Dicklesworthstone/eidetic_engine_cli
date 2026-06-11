@@ -2,9 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use ee::models::{
-    ReleaseArtifact, ReleaseManifest, ReleaseVerificationCode, ReleaseVerificationReport,
-    ReleaseVerificationStatus, is_allowed_package_member_path, release_artifact_file_name,
-    verify_release_manifest_json,
+    ReleaseArtifact, ReleaseChecksum, ReleaseManifest, ReleaseVerificationCode,
+    ReleaseVerificationReport, ReleaseVerificationStatus, is_allowed_package_member_path,
+    release_artifact_file_name, verify_release_manifest_json,
 };
 
 type TestResult = Result<(), String>;
@@ -166,6 +166,157 @@ fn unsafe_artifact_path_is_reported_without_file_io() -> TestResult {
     ensure(
         !codes.contains(&ReleaseVerificationCode::MissingArtifact),
         "unsafe artifact path skips file verification",
+    )
+}
+
+#[test]
+fn unsafe_signature_sidecar_path_is_reported() -> TestResult {
+    let mut manifest = parse_fixture(MULTI_PLATFORM)?;
+    let artifact = manifest
+        .artifacts
+        .first_mut()
+        .ok_or_else(|| "multi-platform fixture has no artifact".to_owned())?;
+    let signature = artifact
+        .signature
+        .as_mut()
+        .ok_or_else(|| "multi-platform artifact has no signature".to_owned())?;
+    signature.file_name = "../escape.sigstore.json".to_owned();
+
+    let report = manifest.verify(None);
+    let codes = finding_codes(&report);
+
+    ensure_equal(
+        report.status,
+        ReleaseVerificationStatus::Failed,
+        "unsafe signature sidecar status",
+    )?;
+    ensure(
+        codes.contains(&ReleaseVerificationCode::UnsafeArtifactPath),
+        "unsafe signature sidecar path detected",
+    )?;
+    ensure_equal(
+        report.artifacts_failed,
+        1,
+        "unsafe signature sidecar fails its artifact",
+    )
+}
+
+#[test]
+fn malformed_signature_checksum_is_reported() -> TestResult {
+    let mut manifest = parse_fixture(MULTI_PLATFORM)?;
+    let artifact = manifest
+        .artifacts
+        .first_mut()
+        .ok_or_else(|| "multi-platform fixture has no artifact".to_owned())?;
+    let signature = artifact
+        .signature
+        .as_mut()
+        .ok_or_else(|| "multi-platform artifact has no signature".to_owned())?;
+    let checksum = signature
+        .checksum
+        .as_mut()
+        .ok_or_else(|| "multi-platform signature has no checksum".to_owned())?;
+    checksum.value = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".to_owned();
+
+    let report = manifest.verify(None);
+    let codes = finding_codes(&report);
+
+    ensure_equal(
+        report.status,
+        ReleaseVerificationStatus::Failed,
+        "malformed signature checksum status",
+    )?;
+    ensure(
+        codes.contains(&ReleaseVerificationCode::InvalidChecksum),
+        "malformed signature checksum detected",
+    )?;
+    ensure_equal(
+        report.artifacts_failed,
+        1,
+        "malformed signature checksum fails its artifact",
+    )
+}
+
+#[test]
+fn missing_signature_sidecar_is_reported_when_root_is_supplied() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let mut manifest = parse_fixture(MULTI_PLATFORM)?;
+    manifest.artifacts.truncate(1);
+    manifest.artifact_count = 1;
+    let artifact = manifest
+        .artifacts
+        .first_mut()
+        .ok_or_else(|| "multi-platform fixture has no artifact".to_owned())?;
+    let archive_bytes = b"archive";
+    artifact.checksum = ReleaseChecksum::sha256_bytes(archive_bytes);
+    let signature = artifact
+        .signature
+        .as_mut()
+        .ok_or_else(|| "multi-platform artifact has no signature".to_owned())?;
+    signature.checksum = None;
+    fs::write(temp.path().join(&artifact.file_name), archive_bytes)
+        .map_err(|error| error.to_string())?;
+
+    let report = manifest.verify(Some(temp.path()));
+    let codes = finding_codes(&report);
+
+    ensure_equal(
+        report.status,
+        ReleaseVerificationStatus::Failed,
+        "missing signature sidecar status",
+    )?;
+    ensure(
+        codes.contains(&ReleaseVerificationCode::MissingArtifact),
+        "missing signature sidecar detected",
+    )?;
+    ensure_equal(
+        report.artifacts_failed,
+        1,
+        "missing signature sidecar fails its artifact",
+    )
+}
+
+#[test]
+fn signature_sidecar_checksum_mismatch_is_reported() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let mut manifest = parse_fixture(MULTI_PLATFORM)?;
+    manifest.artifacts.truncate(1);
+    manifest.artifact_count = 1;
+    let artifact = manifest
+        .artifacts
+        .first_mut()
+        .ok_or_else(|| "multi-platform fixture has no artifact".to_owned())?;
+    let archive_bytes = b"archive";
+    artifact.checksum = ReleaseChecksum::sha256_bytes(archive_bytes);
+    let signature = artifact
+        .signature
+        .as_mut()
+        .ok_or_else(|| "multi-platform artifact has no signature".to_owned())?;
+    signature.checksum = Some(ReleaseChecksum::sha256_bytes(b"trusted signature"));
+    fs::write(temp.path().join(&artifact.file_name), archive_bytes)
+        .map_err(|error| error.to_string())?;
+    fs::write(
+        temp.path().join(&signature.file_name),
+        b"tampered signature",
+    )
+    .map_err(|error| error.to_string())?;
+
+    let report = manifest.verify(Some(temp.path()));
+    let codes = finding_codes(&report);
+
+    ensure_equal(
+        report.status,
+        ReleaseVerificationStatus::Failed,
+        "signature sidecar checksum mismatch status",
+    )?;
+    ensure(
+        codes.contains(&ReleaseVerificationCode::ChecksumMismatch),
+        "signature sidecar checksum mismatch detected",
+    )?;
+    ensure_equal(
+        report.artifacts_failed,
+        1,
+        "signature sidecar checksum mismatch fails its artifact",
     )
 }
 

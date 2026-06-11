@@ -154,10 +154,18 @@ pub struct MetricValue {
 impl MetricValue {
     #[must_use]
     pub fn measured(value: f64, unit: impl Into<String>) -> Self {
+        let unit = unit.into();
+        if !value.is_finite() {
+            return Self {
+                kind: MetricValueKind::NonComparable,
+                value: None,
+                unit: Some(unit),
+            };
+        }
         Self {
             kind: MetricValueKind::Measured,
             value: Some(value),
-            unit: Some(unit.into()),
+            unit: Some(unit),
         }
     }
 
@@ -367,6 +375,8 @@ impl Ord for SummaryDegradation {
             .then_with(|| self.code.cmp(&other.code))
             .then_with(|| self.artifact_id.cmp(&other.artifact_id))
             .then_with(|| self.field_path.cmp(&other.field_path))
+            .then_with(|| self.message.cmp(&other.message))
+            .then_with(|| self.repair.cmp(&other.repair))
     }
 }
 
@@ -390,6 +400,7 @@ impl Ord for ProvenanceEntry {
         self.field
             .cmp(&other.field)
             .then_with(|| self.source_path.cmp(&other.source_path))
+            .then_with(|| self.source_line.cmp(&other.source_line))
     }
 }
 
@@ -496,6 +507,9 @@ impl ArtifactSummary {
     }
 
     pub fn add_degradation(&mut self, degradation: SummaryDegradation) {
+        if self.degraded.contains(&degradation) {
+            return;
+        }
         self.degraded.push(degradation);
         self.degraded.sort();
     }
@@ -676,37 +690,40 @@ fn push_json_string(output: &mut String, value: &str) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn artifact_kind_roundtrip() {
+    fn artifact_kind_roundtrip() -> Result<(), String> {
         for kind in ArtifactKind::ALL {
             let s = kind.as_str();
-            let parsed: ArtifactKind = s.parse().unwrap();
+            let parsed: ArtifactKind = s
+                .parse::<ArtifactKind>()
+                .map_err(|error| error.to_string())?;
             assert_eq!(kind, parsed);
         }
+        Ok(())
     }
 
     #[test]
-    fn artifact_kind_accepts_operator_spelling_variants() {
+    fn artifact_kind_accepts_operator_spelling_variants() -> Result<(), String> {
         assert_eq!(
-            ArtifactKind::from_str(" Benchmark-Report ").unwrap(),
+            ArtifactKind::from_str(" Benchmark-Report ").map_err(|error| error.to_string())?,
             ArtifactKind::BenchmarkReport
         );
         assert_eq!(
-            ArtifactKind::from_str("SUPPORT_BUNDLE_MANIFEST").unwrap(),
+            ArtifactKind::from_str("SUPPORT_BUNDLE_MANIFEST").map_err(|error| error.to_string())?,
             ArtifactKind::SupportBundleManifest
         );
         assert_eq!(
-            ArtifactKind::from_str("ExplainPerformanceReport").unwrap(),
+            ArtifactKind::from_str("ExplainPerformanceReport").map_err(|error| error.to_string())?,
             ArtifactKind::ExplainPerformanceReport
         );
         assert_eq!(
-            ArtifactKind::from_str("WriteQueueReport").unwrap(),
+            ArtifactKind::from_str("WriteQueueReport").map_err(|error| error.to_string())?,
             ArtifactKind::WriteQueueReport
         );
+        Ok(())
     }
 
     #[test]
@@ -728,6 +745,17 @@ mod tests {
         let m = MetricValue::unavailable();
         assert_eq!(m.kind, MetricValueKind::Unavailable);
         assert!(m.value.is_none());
+    }
+
+    #[test]
+    fn metric_value_measured_rejects_non_finite_values() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let metric = MetricValue::measured(value, "ratio");
+
+            assert_eq!(metric.kind, MetricValueKind::NonComparable);
+            assert_eq!(metric.value, None);
+            assert_eq!(metric.unit.as_deref(), Some("ratio"));
+        }
     }
 
     #[test]
@@ -780,6 +808,23 @@ mod tests {
     }
 
     #[test]
+    fn hash_verification_is_idempotent() {
+        let mut summary =
+            ArtifactSummary::new("test-003", ArtifactKind::ProfileEvidence, "ee.profile.v1")
+                .with_content_hash("declared123")
+                .with_observed_hash("observed456");
+
+        assert!(!summary.verify_hash());
+        assert!(!summary.verify_hash());
+
+        assert_eq!(summary.degraded.len(), 1);
+        assert_eq!(
+            summary.degraded[0].code,
+            SummaryDegradationCode::TamperedHash
+        );
+    }
+
+    #[test]
     fn hash_verification_passes_on_match() {
         let mut summary =
             ArtifactSummary::new("test-004", ArtifactKind::ProfileEvidence, "ee.profile.v1")
@@ -821,14 +866,58 @@ mod tests {
     }
 
     #[test]
-    fn json_serialization_stable() {
+    fn provenance_ordering_uses_source_line_tie_breaker() {
+        let mut summary =
+            ArtifactSummary::new("test-006", ArtifactKind::BenchmarkReport, "ee.bench.v1");
+        summary.add_provenance(ProvenanceEntry {
+            field: "elapsed_ms".to_owned(),
+            source_path: "benchmark.json".to_owned(),
+            source_line: Some(20),
+        });
+        summary.add_provenance(ProvenanceEntry {
+            field: "elapsed_ms".to_owned(),
+            source_path: "benchmark.json".to_owned(),
+            source_line: Some(10),
+        });
+
+        assert_eq!(summary.provenance[0].source_line, Some(10));
+        assert_eq!(summary.provenance[1].source_line, Some(20));
+    }
+
+    #[test]
+    fn degradation_ordering_uses_message_tie_breaker() {
+        let mut summary =
+            ArtifactSummary::new("test-007", ArtifactKind::BenchmarkReport, "ee.bench.v1");
+        let later = SummaryDegradation {
+            code: SummaryDegradationCode::MalformedSource,
+            severity: ArtifactDegradationSeverity::High,
+            artifact_id: Some("test-007".to_owned()),
+            field_path: Some("metrics.elapsed_ms".to_owned()),
+            message: "zeta parse failure".to_owned(),
+            repair: Some("Retry with a normalized artifact.".to_owned()),
+        };
+        let earlier = SummaryDegradation {
+            message: "alpha parse failure".to_owned(),
+            ..later.clone()
+        };
+
+        summary.add_degradation(later);
+        summary.add_degradation(earlier);
+
+        assert_eq!(summary.degraded[0].message, "alpha parse failure");
+        assert_eq!(summary.degraded[1].message, "zeta parse failure");
+    }
+
+    #[test]
+    fn json_serialization_stable() -> Result<(), String> {
         let summary = ArtifactSummary::new("stable-001", ArtifactKind::CacheReport, "ee.cache.v1")
             .with_source_path("redacted/path")
             .with_fixture_tier("smoke");
 
-        let json = serde_json::to_string(&summary).unwrap();
+        let json = serde_json::to_string(&summary).map_err(|error| error.to_string())?;
         assert!(json.contains("\"schema\":\"ee.perf.artifact_summary.v1\""));
         assert!(json.contains("\"artifactKind\":\"cache_report\""));
+        Ok(())
     }
 
     #[test]
@@ -839,12 +928,17 @@ mod tests {
     }
 
     #[test]
-    fn perf_schema_catalog_json_is_stable_and_parseable() {
+    fn perf_schema_catalog_json_is_stable_and_parseable() -> Result<(), String> {
         let json = perf_schema_catalog_json();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        let schemas = parsed["schemas"]
+            .as_array()
+            .ok_or_else(|| "schemas must be an array".to_owned())?;
 
         assert_eq!(parsed["schema"], PERF_SCHEMA_CATALOG_V1);
-        assert_eq!(parsed["schemas"].as_array().unwrap().len(), 3);
+        assert_eq!(schemas.len(), 3);
+        Ok(())
     }
 
     #[test]

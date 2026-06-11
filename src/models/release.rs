@@ -436,7 +436,37 @@ impl ReleaseManifest {
             ));
         }
 
-        if artifact.signature.is_none() {
+        if let Some(signature) = &artifact.signature {
+            let safe_signature_path = is_safe_release_signature_path(&signature.file_name);
+            if !safe_signature_path {
+                findings.push(ReleaseVerificationFinding::error(
+                    ReleaseVerificationCode::UnsafeArtifactPath,
+                    Some(artifact.artifact_id.clone()),
+                    format!("unsafe signature sidecar path '{}'", signature.file_name),
+                    "Signature sidecar file names must be relative release sidecar names.",
+                ));
+            }
+            let signature_checksum_well_formed = signature
+                .checksum
+                .as_ref()
+                .is_none_or(|checksum| checksum.is_well_formed());
+            if let Some(checksum) = &signature.checksum
+                && !checksum.is_well_formed()
+            {
+                findings.push(ReleaseVerificationFinding::error(
+                    ReleaseVerificationCode::InvalidChecksum,
+                    Some(artifact.artifact_id.clone()),
+                    "signature sidecar checksum is not a valid lowercase hex digest",
+                    "Regenerate the signature sidecar checksum with the declared checksum algorithm.",
+                ));
+            }
+            if safe_signature_path
+                && signature_checksum_well_formed
+                && let Some(root) = artifact_root
+            {
+                verify_signature_file(root, &artifact.artifact_id, signature, findings);
+            }
+        } else {
             findings.push(ReleaseVerificationFinding::warning(
                 ReleaseVerificationCode::SignatureMissing,
                 Some(artifact.artifact_id.clone()),
@@ -817,6 +847,13 @@ pub fn is_safe_release_artifact_path(path: &str) -> bool {
         || path.ends_with(".intoto.jsonl")
 }
 
+fn is_safe_release_signature_path(path: &str) -> bool {
+    if !is_safe_relative_path(path) {
+        return false;
+    }
+    path.ends_with(".sigstore.json") || path.ends_with(".intoto.jsonl")
+}
+
 #[must_use]
 pub fn is_allowed_package_member_path(path: &str) -> bool {
     if !is_safe_relative_path(path) {
@@ -965,6 +1002,129 @@ fn verify_artifact_file(
             Some(artifact.artifact_id.clone()),
             format!("checksum mismatch for '{}'", artifact.file_name),
             "Regenerate the archive or update the manifest checksum from trusted release inputs.",
+        ));
+    }
+}
+
+fn verify_signature_file(
+    artifact_root: &Path,
+    artifact_id: &str,
+    signature: &ReleaseSignature,
+    findings: &mut Vec<ReleaseVerificationFinding>,
+) {
+    let signature_path = artifact_root.join(&signature.file_name);
+    let relative_path = Path::new(&signature.file_name);
+    match release_artifact_path_has_symlink_component(artifact_root, relative_path) {
+        Ok(true) => {
+            findings.push(ReleaseVerificationFinding::error(
+                ReleaseVerificationCode::UnsafeArtifactPath,
+                Some(artifact_id.to_owned()),
+                format!(
+                    "signature sidecar '{}' traverses a symbolic link",
+                    signature.file_name
+                ),
+                "Use a regular signature sidecar contained directly under the artifact root.",
+            ));
+            return;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            findings.push(ReleaseVerificationFinding::error(
+                ReleaseVerificationCode::MissingArtifact,
+                Some(artifact_id.to_owned()),
+                format!(
+                    "signature sidecar '{}' could not be inspected: {error}",
+                    signature.file_name
+                ),
+                "Check signature sidecar permissions and rerun verification.",
+            ));
+            return;
+        }
+    }
+
+    match fs::symlink_metadata(&signature_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            findings.push(ReleaseVerificationFinding::error(
+                ReleaseVerificationCode::UnsafeArtifactPath,
+                Some(artifact_id.to_owned()),
+                format!(
+                    "signature sidecar '{}' is not a regular file",
+                    signature.file_name
+                ),
+                "Use a regular signature sidecar contained directly under the artifact root.",
+            ));
+            return;
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            findings.push(ReleaseVerificationFinding::error(
+                ReleaseVerificationCode::MissingArtifact,
+                Some(artifact_id.to_owned()),
+                format!("signature sidecar '{}' is missing", signature.file_name),
+                "Place the signature sidecar next to the archive or regenerate packaging output.",
+            ));
+            return;
+        }
+        Err(error) => {
+            findings.push(ReleaseVerificationFinding::error(
+                ReleaseVerificationCode::MissingArtifact,
+                Some(artifact_id.to_owned()),
+                format!(
+                    "signature sidecar '{}' could not be inspected: {error}",
+                    signature.file_name
+                ),
+                "Check signature sidecar permissions and rerun verification.",
+            ));
+            return;
+        }
+    }
+
+    let Some(checksum) = &signature.checksum else {
+        return;
+    };
+
+    let mut file = match File::open(&signature_path) {
+        Ok(file) => file,
+        Err(_) => {
+            findings.push(ReleaseVerificationFinding::error(
+                ReleaseVerificationCode::MissingArtifact,
+                Some(artifact_id.to_owned()),
+                format!("signature sidecar '{}' is missing", signature.file_name),
+                "Place the signature sidecar next to the archive or regenerate packaging output.",
+            ));
+            return;
+        }
+    };
+
+    let mut bytes = Vec::new();
+    if let Err(error) = file.read_to_end(&mut bytes) {
+        findings.push(ReleaseVerificationFinding::error(
+            ReleaseVerificationCode::MissingArtifact,
+            Some(artifact_id.to_owned()),
+            format!(
+                "signature sidecar '{}' could not be read: {error}",
+                signature.file_name
+            ),
+            "Check signature sidecar permissions and rerun verification.",
+        ));
+        return;
+    }
+
+    let actual = match checksum.algorithm {
+        ReleaseChecksumAlgorithm::Sha256 => sha256_hex(&bytes),
+        ReleaseChecksumAlgorithm::Blake3 => blake3::hash(&bytes).to_hex().to_string(),
+    };
+    if actual != checksum.value {
+        findings.push(ReleaseVerificationFinding::error(
+            ReleaseVerificationCode::ChecksumMismatch,
+            Some(artifact_id.to_owned()),
+            format!("checksum mismatch for signature sidecar '{}'", signature.file_name),
+            "Regenerate the signature sidecar or update the manifest checksum from trusted release inputs.",
         ));
     }
 }

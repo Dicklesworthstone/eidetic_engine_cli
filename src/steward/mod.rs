@@ -6222,6 +6222,19 @@ pub fn diagnose_ledger(ledger: &JobLedger) -> JobDiagnosticReport {
         );
     }
 
+    // Check for cancelled jobs
+    for job in ledger.list_by_status(JobStatus::Cancelled) {
+        diagnostics.push(
+            JobDiagnostic::new(
+                "STEWARD_JOB_CANCELLED",
+                DiagnosticSeverity::Warning,
+                format!("Job {} was cancelled before completion", job.id),
+            )
+            .with_suggestion("Review cancellation cause, then retry the job if work remains")
+            .for_job(&job.id),
+        );
+    }
+
     // Check for high pending count
     if stats.pending > 10 {
         diagnostics.push(
@@ -6912,10 +6925,10 @@ mod tests {
                 fields: &mut captured.fields,
             };
             event.record(&mut visitor);
-            self.events
-                .lock()
-                .expect("steward event capture lock")
-                .push(captured);
+            match self.events.lock() {
+                Ok(mut events) => events.push(captured),
+                Err(error) => error.into_inner().push(captured),
+            }
         }
     }
 
@@ -6957,7 +6970,10 @@ mod tests {
             .with(layer)
             .with(tracing_subscriber::filter::LevelFilter::TRACE);
         let result = with_default(subscriber, thunk);
-        let captured = events.lock().expect("steward event capture lock").clone();
+        let captured = match events.lock() {
+            Ok(events) => events.clone(),
+            Err(error) => error.into_inner().clone(),
+        };
         (result, captured)
     }
 
@@ -7031,8 +7047,10 @@ mod tests {
         fs::write(&outside_lock, "outside sentinel").map_err(|error| error.to_string())?;
         symlink(&outside_lock, &lock_path).map_err(|error| error.to_string())?;
 
-        let error = open_maintenance_job_lock_file(&lock_path)
-            .expect_err("final lock open must reject symlinked path");
+        let error = match open_maintenance_job_lock_file(&lock_path) {
+            Ok(_) => return Err("final lock open must reject symlinked path".to_owned()),
+            Err(error) => error,
+        };
 
         ensure(
             error.kind() != std::io::ErrorKind::NotFound,
@@ -10018,6 +10036,26 @@ mod tests {
 
         assert_eq!(report.health, HealthStatus::Degraded);
         assert_eq!(report.summary.warning_count, 1);
+    }
+
+    #[test]
+    fn diagnose_ledger_with_cancelled_job_warns() {
+        let mut ledger = JobLedger::new();
+        let mut job = Job::new("job-001", JobType::HealthCheck, "2026-04-30T12:00:00Z");
+        job.cancel("2026-04-30T12:00:01Z");
+        ledger.add_job(job);
+
+        let report = diagnose_ledger(&ledger);
+
+        assert_eq!(report.health, HealthStatus::Degraded);
+        assert_eq!(report.summary.warning_count, 1);
+        assert_eq!(report.summary.jobs_with_issues, 1);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "STEWARD_JOB_CANCELLED")
+        );
     }
 
     #[test]
