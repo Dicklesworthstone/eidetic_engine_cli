@@ -217,6 +217,13 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         shipped: true,
     },
     SchemaCase {
+        id: "ee.swarm.unsafe_claim_plan.v1",
+        file_name: "ee.swarm.unsafe_claim_plan.v1.json",
+        doc_path: "docs/swarm/unsafe_claim_plan.md",
+        tracking_bead: "bd-1n3x1.16.1",
+        shipped: false,
+    },
+    SchemaCase {
         // bd-1zb7k.14.1 is closed in the beads tracker (the synthetic
         // incident scenario schema and fixture catalog landed), so the
         // schema is now shipped and available in build.
@@ -372,6 +379,12 @@ const DRIFT_CASES: &[DriftCase] = &[
         command: "ee swarm work-packet --claim-gate --json",
         json_path: ".data",
         fixture_manifest_key: "ee.swarm.work_packet.claim_gate.v1",
+    },
+    DriftCase {
+        schema_id: "ee.swarm.unsafe_claim_plan.v1",
+        command: "planned unsafe-claim planner over ee.swarm.work_packet.claim_gate.v1",
+        json_path: ".examples[\"ee.swarm.unsafe_claim_plan.v1\"]",
+        fixture_manifest_key: "ee.swarm.unsafe_claim_plan.v1",
     },
     DriftCase {
         schema_id: "ee.swarm_incident.v1",
@@ -950,6 +963,283 @@ fn source_authority_fixtures_cover_taxonomy_and_redaction() -> TestResult {
             != "paths_counts_subjects_only_no_content"
         {
             return Err(format!("{name} fixture redactionStatus drifted"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn unsafe_claim_plan_contract_pins_reason_taxonomy_and_non_mutation() -> TestResult {
+    let schema_case = schema_case_by_id("ee.swarm.unsafe_claim_plan.v1")?;
+    let schema = schema_doc(schema_case)?;
+
+    let required = string_array_at(&schema, "/required", schema_case.id)?;
+    let expected_required = [
+        "schema",
+        "planId",
+        "generatedAt",
+        "workspace",
+        "redactionStatus",
+        "ordering",
+        "sourceGate",
+        "reasonGroups",
+        "candidatePlans",
+        "plannerActions",
+        "nextCommandActions",
+        "evidenceSources",
+        "nonMutationPolicy",
+        "degraded",
+        "provenanceHash",
+    ];
+    if required != expected_required {
+        return Err(format!(
+            "{} required field order drifted\nactual: {required:?}\nexpected: {expected_required:?}",
+            schema_case.id
+        ));
+    }
+
+    let source_gate_required =
+        string_array_at(&schema, "/definitions/sourceGate/required", schema_case.id)?;
+    for field in [
+        "gateId",
+        "packetId",
+        "requestedCandidateId",
+        "selectedCandidateId",
+        "verdict",
+        "safeToClaim",
+        "recommendedAction",
+        "recommendedSafeToClaim",
+        "claimCommandAction",
+        "unsafeReasons",
+        "staleReasons",
+        "degradedCodes",
+        "sourceRefs",
+        "nextCommandActions",
+    ] {
+        if !source_gate_required.iter().any(|actual| actual == field) {
+            return Err(format!(
+                "unsafe-claim sourceGate must preserve original claim-gate field {field}"
+            ));
+        }
+    }
+    if schema
+        .pointer("/definitions/sourceGate/properties/safeToClaim/const")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        return Err("unsafe-claim sourceGate.safeToClaim must be pinned false".into());
+    }
+    if !schema
+        .pointer("/definitions/sourceGate/properties/claimCommandAction/const")
+        .is_some_and(Value::is_null)
+    {
+        return Err("unsafe-claim sourceGate.claimCommandAction must be pinned null".into());
+    }
+
+    let reason_categories =
+        string_array_at(&schema, "/definitions/reasonCategory/enum", schema_case.id)?;
+    let expected_categories = [
+        "tracker_authority",
+        "agent_mail_readiness",
+        "source_overlap",
+        "dirty_checkout",
+        "rch_proof_admission",
+        "installed_binary_freshness",
+        "reservation_conflict",
+        "bv_staleness",
+        "recommendation_mismatch",
+        "memory_source_drift",
+        "resource_admission",
+        "action_suppression",
+        "unknown",
+    ];
+    if reason_categories != expected_categories {
+        return Err(format!(
+            "{} reason-category taxonomy drifted\nactual: {reason_categories:?}\nexpected: {expected_categories:?}",
+            schema_case.id
+        ));
+    }
+
+    let action_kinds = string_array_at(
+        &schema,
+        "/definitions/plannerActionKind/enum",
+        schema_case.id,
+    )?;
+    let expected_action_kinds = [
+        "inspect",
+        "comment_template",
+        "decompose_candidate",
+        "alternate_candidate",
+        "retry_with_snapshot",
+        "wait_or_coordinate",
+        "stop",
+    ];
+    if action_kinds != expected_action_kinds {
+        return Err(format!(
+            "{} planner-action taxonomy drifted\nactual: {action_kinds:?}\nexpected: {expected_action_kinds:?}",
+            schema_case.id
+        ));
+    }
+
+    let fixtures = fixture_examples()?;
+    let example = fixtures
+        .get(schema_case.id)
+        .ok_or_else(|| format!("fixture manifest missing {}", schema_case.id))?;
+
+    if string_field(example, "/redactionStatus", schema_case.id)?
+        != "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content"
+    {
+        return Err("unsafe-claim plan redactionStatus drifted".into());
+    }
+    if bool_field(example, "/sourceGate/safeToClaim", schema_case.id)? {
+        return Err("unsafe-claim plan fixture sourceGate.safeToClaim must be false".into());
+    }
+    if !example
+        .pointer("/sourceGate/claimCommandAction")
+        .is_some_and(Value::is_null)
+    {
+        return Err("unsafe-claim plan fixture must preserve claimCommandAction=null".into());
+    }
+
+    let source_gate_unsafe =
+        string_array_at(example, "/sourceGate/unsafeReasons", "unsafe plan example")?;
+    let unknown_reason = "future_gate_reason:opaque_value".to_owned();
+    if !source_gate_unsafe.contains(&unknown_reason) {
+        return Err("unsafe-claim plan fixture must preserve unknown raw reason".into());
+    }
+
+    let category_order = reason_categories
+        .iter()
+        .enumerate()
+        .map(|(index, category)| (category.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let reason_groups = example
+        .pointer("/reasonGroups")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "unsafe-claim plan fixture missing reasonGroups".to_owned())?;
+    let mut last_category_position = None;
+    let mut seen_unknown = false;
+    for (index, group) in reason_groups.iter().enumerate() {
+        let context = format!("unsafe-claim reasonGroups[{index}]");
+        let category = string_field(group, "/category", &context)?;
+        let position = category_order
+            .get(category)
+            .copied()
+            .ok_or_else(|| format!("{context} uses unknown category {category}"))?;
+        if last_category_position.is_some_and(|last| position < last) {
+            return Err("unsafe-claim reasonGroups are not sorted by taxonomy order".into());
+        }
+        last_category_position = Some(position);
+
+        if category == "unknown" {
+            seen_unknown = true;
+            if !bool_field(group, "/preservesUnknown", &context)? {
+                return Err("unknown reason group must set preservesUnknown=true".into());
+            }
+            let codes = string_array_at(group, "/reasonCodes", &context)?;
+            if !codes.contains(&unknown_reason) {
+                return Err("unknown reason group must keep the raw unknown reason".into());
+            }
+        }
+    }
+    if !seen_unknown {
+        return Err("unsafe-claim plan fixture must include an unknown reason group".into());
+    }
+
+    let action_order = action_kinds
+        .iter()
+        .enumerate()
+        .map(|(index, kind)| (kind.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let planner_actions = example
+        .pointer("/plannerActions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "unsafe-claim plan fixture missing plannerActions".to_owned())?;
+    let mut last_action_position = None;
+    for (index, action) in planner_actions.iter().enumerate() {
+        let context = format!("unsafe-claim plannerActions[{index}]");
+        let kind = string_field(action, "/kind", &context)?;
+        let position = action_order
+            .get(kind)
+            .copied()
+            .ok_or_else(|| format!("{context} uses unknown action kind {kind}"))?;
+        if last_action_position.is_some_and(|last| position < last) {
+            return Err("unsafe-claim plannerActions are not sorted by taxonomy order".into());
+        }
+        last_action_position = Some(position);
+
+        if bool_field(action, "/mutatesState", &context)?
+            || !bool_field(action, "/advisoryOnly", &context)?
+        {
+            return Err(format!("{context} must be advisory and non-mutating"));
+        }
+        if let Some(command) = action.pointer("/commandAction") {
+            if !command.is_null() && bool_field(command, "/mutatesState", &context)? {
+                return Err(format!("{context}.commandAction must be read-only"));
+            }
+        }
+    }
+
+    let next_actions = example
+        .pointer("/nextCommandActions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "unsafe-claim plan fixture missing nextCommandActions".to_owned())?;
+    for (index, action) in next_actions.iter().enumerate() {
+        let context = format!("unsafe-claim nextCommandActions[{index}]");
+        if bool_field(action, "/mutatesState", &context)? {
+            return Err(format!("{context} must be read-only"));
+        }
+    }
+
+    let candidate_plans = example
+        .pointer("/candidatePlans")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "unsafe-claim plan fixture missing candidatePlans".to_owned())?;
+    for (index, plan) in candidate_plans.iter().enumerate() {
+        let context = format!("unsafe-claim candidatePlans[{index}]");
+        if bool_field(plan, "/mayEmitClaimCommand", &context)? {
+            return Err(format!("{context} must suppress claim commands"));
+        }
+    }
+
+    for (pointer, expected) in [
+        ("/nonMutationPolicy/advisoryOnly", true),
+        ("/nonMutationPolicy/claimsBeads", false),
+        ("/nonMutationPolicy/reservesFiles", false),
+        ("/nonMutationPolicy/sendsAgentMail", false),
+        ("/nonMutationPolicy/runsCargo", false),
+        ("/nonMutationPolicy/stagesGit", false),
+        ("/nonMutationPolicy/deletesFiles", false),
+    ] {
+        if bool_field(example, pointer, schema_case.id)? != expected {
+            return Err(format!(
+                "unsafe-claim plan nonMutationPolicy drifted at {pointer}"
+            ));
+        }
+    }
+
+    let rendered = serde_json::to_string(example)
+        .map_err(|error| format!("serialize unsafe-claim example: {error}"))?;
+    for forbidden in [
+        "/Users/",
+        "/home/",
+        "From:",
+        "Subject:",
+        "Message-ID:",
+        "raw_inbox",
+        "stdout:",
+        "stderr:",
+        "BEGIN PRIVATE KEY",
+        "BEGIN OPENSSH PRIVATE KEY",
+        "ghp_",
+        "Bearer ",
+        "DATABASE_URL=",
+    ] {
+        if rendered.contains(forbidden) {
+            return Err(format!(
+                "unsafe-claim plan fixture leaks forbidden marker {forbidden}"
+            ));
         }
     }
 

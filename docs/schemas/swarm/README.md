@@ -116,6 +116,15 @@ read-only `ee swarm work-packet --claim-gate --json` projection for answering
 whether a selected candidate may be claimed. `bd-1tlcd.1` closed with the CLI
 surface emitted by current builds, so the schema is marked shipped.
 
+The planned unsafe-claim plan contract is
+`ee.swarm.unsafe_claim_plan.v1`. It is the companion projection for an unsafe
+`ee.swarm.work_packet.claim_gate.v1` result: it preserves the original gate
+fields, groups blockers into a stable reason taxonomy, and emits advisory
+non-mutating actions such as inspection, bounded comment templates,
+retry-with-snapshot, wait/coordinate, alternate-candidate, decomposition, or
+stop. It is tracked by `bd-1n3x1.16.1` and remains marked unshipped until the
+planner implementation lands under the `bd-1n3x1.16` follow-up beads.
+
 The planned source-authority snapshot contract is
 `ee.source_authority.snapshot.v1`. It is the per-decision aggregate consumed by
 claim gates and unsafe-claim planners: one record per coordination source
