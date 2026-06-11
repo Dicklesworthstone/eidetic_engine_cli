@@ -6933,3 +6933,185 @@ pub fn record_outcome_batch_stdin(
         results,
     })
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// bd-1pi9m.5 — `ee outcome trace <memory-id>`: the "did my feedback do
+// anything?" report. Read-only join of feedback events with the bayes
+// posterior audit rows and trust-class transitions they triggered.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Schema id for the outcome trace report.
+pub const OUTCOME_TRACE_SCHEMA_V1: &str = "ee.outcome.trace.v1";
+
+/// One traced feedback event with its downstream effects.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeTraceEvent {
+    pub event_id: String,
+    pub signal: String,
+    pub weight: f32,
+    pub source_type: String,
+    pub recorded_at: String,
+    pub reason_present: bool,
+    /// True when a feedback_quarantine row references this event.
+    pub quarantined: bool,
+    /// Posterior means from the matching outcome.bayes_update audit row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prior_mean: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub posterior_mean: Option<f64>,
+    /// trust_class.transition triggered by this event, when one fired.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trust_transition: Option<String>,
+}
+
+/// Read-only trace report for one memory's feedback history.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeTraceReport {
+    pub schema: &'static str,
+    pub version: &'static str,
+    pub memory_id: String,
+    pub event_count: usize,
+    pub quarantined_count: usize,
+    pub bayes_updates_applied: usize,
+    pub trust_transitions: usize,
+    pub events: Vec<OutcomeTraceEvent>,
+}
+
+/// Build the read-only outcome trace for one memory. Joins
+/// feedback_events (chronological) with the audit rows their recording
+/// produced: outcome.bayes_update rows carry priorMean/posteriorMean in
+/// their details keyed by feedbackEventId; trust_class.transition rows
+/// likewise. Quarantine state comes from feedback_quarantine references.
+pub fn build_outcome_trace(
+    database_path: &Path,
+    memory_id: &str,
+) -> Result<OutcomeTraceReport, DomainError> {
+    let connection =
+        DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open database for outcome trace: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    let events = connection
+        .list_feedback_events_for_target("memory", memory_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list feedback events: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    let audits = connection
+        .list_audit_by_target("memory", memory_id, None)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list audit rows: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    // Quarantine rows are workspace-scoped; resolve the workspace from the
+    // events themselves (no events means nothing can be quarantined for
+    // this target either).
+    let quarantines = match events.first().map(|event| event.workspace_id.clone()) {
+        Some(workspace_id) => connection
+            .list_feedback_quarantine(&workspace_id, None)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to list feedback quarantine rows: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?
+            .into_iter()
+            .filter(|row| row.target_type == "memory" && row.target_id == memory_id)
+            .collect(),
+        None => Vec::new(),
+    };
+
+    // Index audit details by feedbackEventId for the join.
+    let mut bayes_by_event: std::collections::BTreeMap<String, (Option<f64>, Option<f64>)> =
+        std::collections::BTreeMap::new();
+    let mut transition_by_event: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for row in &audits {
+        let Some(details) = row
+            .details
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        else {
+            continue;
+        };
+        let Some(event_id) = details
+            .get("feedbackEventId")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        if row.action == crate::db::audit_actions::OUTCOME_BAYES_UPDATE {
+            bayes_by_event.insert(
+                event_id.to_owned(),
+                (
+                    details.get("priorMean").and_then(serde_json::Value::as_f64),
+                    details
+                        .get("posteriorMean")
+                        .and_then(serde_json::Value::as_f64),
+                ),
+            );
+        } else if row.action == crate::db::audit_actions::TRUST_CLASS_TRANSITION {
+            let transition = format!(
+                "{} -> {}",
+                details
+                    .get("fromClass")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?"),
+                details
+                    .get("toClass")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?"),
+            );
+            transition_by_event.insert(event_id.to_owned(), transition);
+        }
+    }
+    let quarantined_event_ids: std::collections::BTreeSet<&str> = quarantines
+        .iter()
+        .filter_map(|row| row.proposed_event_id.as_deref())
+        .collect();
+
+    let mut traced = Vec::with_capacity(events.len());
+    let mut quarantined_count = 0_usize;
+    let mut bayes_updates_applied = 0_usize;
+    let mut trust_transitions = 0_usize;
+    for event in &events {
+        let quarantined = quarantined_event_ids.contains(event.id.as_str());
+        if quarantined {
+            quarantined_count += 1;
+        }
+        let (prior_mean, posterior_mean) = bayes_by_event
+            .get(&event.id)
+            .copied()
+            .unwrap_or((None, None));
+        if posterior_mean.is_some() {
+            bayes_updates_applied += 1;
+        }
+        let trust_transition = transition_by_event.get(&event.id).cloned();
+        if trust_transition.is_some() {
+            trust_transitions += 1;
+        }
+        traced.push(OutcomeTraceEvent {
+            event_id: event.id.clone(),
+            signal: event.signal.clone(),
+            weight: event.weight,
+            source_type: event.source_type.clone(),
+            recorded_at: event.created_at.clone(),
+            reason_present: event.reason.is_some(),
+            quarantined,
+            prior_mean,
+            posterior_mean,
+            trust_transition,
+        });
+    }
+
+    Ok(OutcomeTraceReport {
+        schema: OUTCOME_TRACE_SCHEMA_V1,
+        version: env!("CARGO_PKG_VERSION"),
+        memory_id: memory_id.to_owned(),
+        event_count: traced.len(),
+        quarantined_count,
+        bayes_updates_applied,
+        trust_transitions,
+        events: traced,
+    })
+}

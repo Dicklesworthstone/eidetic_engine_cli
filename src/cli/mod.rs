@@ -9702,6 +9702,10 @@ pub struct RuleUpdateArgs {
 /// Arguments for `ee outcome`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct OutcomeArgs {
+    /// Introspection subcommands (`ee outcome trace <memory-id>`).
+    #[command(subcommand)]
+    pub command: Option<OutcomeCommand>,
+
     /// Target ID to receive feedback. Memory IDs are verified by default.
     /// Required unless --batch --stdin is given.
     #[arg(value_name = "TARGET_ID")]
@@ -9775,6 +9779,26 @@ pub struct OutcomeArgs {
     /// Burst window for harmful feedback rate limiting.
     #[arg(long, default_value_t = DEFAULT_HARMFUL_BURST_WINDOW_SECONDS)]
     pub harmful_burst_window_seconds: u32,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Subcommands of `ee outcome`.
+#[derive(Clone, Debug, Subcommand, PartialEq)]
+pub enum OutcomeCommand {
+    /// Read-only report joining one memory's feedback events with the
+    /// bayes posterior updates and trust transitions they triggered.
+    Trace(OutcomeTraceArgs),
+}
+
+/// Arguments for `ee outcome trace`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct OutcomeTraceArgs {
+    /// Memory ID to trace.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -39723,6 +39747,41 @@ fn format_search_toon_with_mesh(report: &SearchReport, mesh_mode: MeshCommandMod
     output::render_toon_from_json(&format_search_json_with_mesh(report, mesh_mode))
 }
 
+/// bd-1pi9m.5: `ee outcome trace <memory-id>` — read-only feedback
+/// introspection report.
+fn handle_outcome_trace<W, E>(
+    cli: &Cli,
+    args: &OutcomeTraceArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    match crate::core::outcome::build_outcome_trace(&database_path, &args.memory_id) {
+        Ok(report) => {
+            let data = serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}));
+            let human = format!(
+                "Outcome trace for {}: {} event(s), {} quarantined, {} bayes update(s), {} \
+                 trust transition(s)\n",
+                report.memory_id,
+                report.event_count,
+                report.quarantined_count,
+                report.bayes_updates_applied,
+                report.trust_transitions
+            );
+            write_remember_data_payload(cli, &data, &human, stdout)
+        }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 /// bd-1pi9m.5: `ee outcome --batch --stdin` — JSONL batch of outcome
 /// events with per-line independence (mirrors `remember --batch`).
 fn handle_outcome_batch<W, E>(
@@ -39838,6 +39897,9 @@ where
     W: Write,
     E: Write,
 {
+    if let Some(OutcomeCommand::Trace(trace_args)) = &args.command {
+        return handle_outcome_trace(cli, trace_args, stdout, stderr);
+    }
     if args.batch || args.stdin {
         return handle_outcome_batch(cli, args, stdout, stderr);
     }
