@@ -1504,7 +1504,13 @@ fn run_rehearsal_command_with_limits(
         }
     };
 
-    let stderr = output_bytes_to_string(stderr_thread.join().unwrap_or_default());
+    // A panicked reader thread must fail the rehearsal command rather
+    // than fabricate empty captured output.
+    let stderr =
+        output_bytes_to_string(stderr_thread.join().map_err(|_| RehearsalCommandError {
+            kind: io::ErrorKind::Other,
+            message: "rehearsal stderr reader thread panicked".to_string(),
+        })?);
     Ok(RehearsalCommandOutput { status, stderr })
 }
 

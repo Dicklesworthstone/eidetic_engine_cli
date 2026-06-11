@@ -2865,8 +2865,18 @@ fn run_bounded_verify_step_command(
         }
     };
 
-    let stdout = output_bytes_to_string(stdout_thread.join().unwrap_or_default());
-    let stderr = output_bytes_to_string(stderr_thread.join().unwrap_or_default());
+    // A panicked reader thread must fail the step: fabricating empty
+    // captured output would mislead the proof surface this step feeds.
+    let stdout = output_bytes_to_string(stdout_thread.join().map_err(|_| {
+        BoundedVerifyStepError {
+            message: "verify step stdout reader thread panicked".to_string(),
+        }
+    })?);
+    let stderr = output_bytes_to_string(stderr_thread.join().map_err(|_| {
+        BoundedVerifyStepError {
+            message: "verify step stderr reader thread panicked".to_string(),
+        }
+    })?);
 
     Ok(BoundedVerifyStepOutput {
         status,

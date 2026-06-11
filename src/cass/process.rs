@@ -485,7 +485,10 @@ impl CassInvocation {
             }
 
             if let Some(status) = child_status {
-                if stdout_done && stderr_bytes.is_some() && stdout_thread.is_none() {
+                if stdout_done
+                    && stdout_thread.is_none()
+                    && let Some(captured_stderr) = stderr_bytes.take()
+                {
                     if let Some(error) = stream_error {
                         return Err(CassStreamError::Cass(error));
                     }
@@ -493,7 +496,7 @@ impl CassInvocation {
                         return Err(CassStreamError::Handler(error));
                     }
                     return Ok(CassStreamOutcome::new(
-                        stderr_bytes.take().unwrap_or_default(),
+                        captured_stderr,
                         status.code(),
                         false,
                         stdout_line_count,

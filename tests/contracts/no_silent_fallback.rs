@@ -2042,12 +2042,11 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "bd-192lf",
         "CASS subprocess stderr capture failure must not become empty stderr, matching the stdout-side must-fix contract.",
     ),
-    must_fix(
+    allowed(
         "NSF-CASS-STDOUT-DRAIN-TIMEOUT",
         "src/cass/process.rs",
         "Ok(Vec::new())",
-        "bd-192lf",
-        "A stdout drain timeout silently yields empty subprocess output instead of surfacing the timeout like the stderr path does.",
+        "The after-timeout drain only feeds outcomes that already carry timed_out=true or error paths that discard the bytes; the stderr side keeps a sentinel because its text is shown in diagnostics.",
     ),
     allowed(
         "NSF-OBS-EVIDENCE-FIELDS",

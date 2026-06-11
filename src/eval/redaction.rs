@@ -414,6 +414,40 @@ fn default_leak_patterns() -> Vec<LeakPattern> {
         ),
     ];
 
+    for (name, description, pattern) in [
+        (
+            "password_field_spaced",
+            "Password field in pretty JSON",
+            r#""password"\s+:"#,
+        ),
+        (
+            "secret_field_spaced",
+            "Secret field in pretty JSON",
+            r#""secret"\s+:"#,
+        ),
+        (
+            "token_field_spaced",
+            "Token field in pretty JSON",
+            r#""token"\s+:"#,
+        ),
+        (
+            "api_key_field_spaced",
+            "API key field in pretty JSON",
+            r#""api_key"\s+:"#,
+        ),
+        (
+            "apikey_field_spaced",
+            "API key field in pretty JSON (alt)",
+            r#""apiKey"\s+:"#,
+        ),
+    ] {
+        if let Some(pattern) =
+            LeakPattern::regex(RedactionClass::Secret, name, description, pattern)
+        {
+            patterns.push(pattern);
+        }
+    }
+
     if let Some(p) = LeakPattern::regex(
         RedactionClass::Secret,
         "aws_secret_access_key",
@@ -605,6 +639,41 @@ mod tests {
             leaks.iter().any(|l| l.pattern_name == "password_field"),
             true,
             "should match password_field pattern",
+        )
+    }
+
+    #[test]
+    fn detector_detects_pretty_json_secret_fields() -> TestResult {
+        let detector = RedactionLeakDetector::new();
+        let output = r#"{
+            "password" : "secret123",
+            "secret" : "value",
+            "token" : "value",
+            "api_key" : "value",
+            "apiKey" : "value"
+        }"#;
+
+        let leaks = detector.detect_leaks(output);
+        for pattern in [
+            "password_field_spaced",
+            "secret_field_spaced",
+            "token_field_spaced",
+            "api_key_field_spaced",
+            "apikey_field_spaced",
+        ] {
+            ensure(
+                leaks.iter().any(|leak| leak.pattern_name == pattern),
+                true,
+                pattern,
+            )?;
+        }
+        ensure(
+            leaks
+                .iter()
+                .filter(|leak| leak.pattern_name.ends_with("_field_spaced"))
+                .all(|leak| leak.class == RedactionClass::Secret),
+            true,
+            "pretty-json field detections should all be secret class",
         )
     }
 
