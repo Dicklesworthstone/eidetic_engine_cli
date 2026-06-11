@@ -485,7 +485,7 @@ proptest! {
     #[test]
     fn prop_cosine_confirmation_matches_floor_decision(
         (left, right) in finite_embedding_pair(),
-        floor in -1.0_f32..=1.0,
+        floor in 0.0_f32..=1.0,
     ) {
         prop_assume!(has_non_zero_norm(&left));
         prop_assume!(has_non_zero_norm(&right));

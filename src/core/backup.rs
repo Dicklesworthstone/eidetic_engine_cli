@@ -4794,7 +4794,7 @@ mod tests {
             r#"{"schema":"ee.export.header.v1","format_version":1,"created_at":"2026-04-30T00:00:00Z","workspace_id":"wsp_01234567890123456789012345","workspace_path":"/source","export_scope":"memories","redaction_level":"none","record_count":3,"ee_version":"0.1.0","hostname":null,"export_id":"exp-001","import_source":"native","trust_level":"validated","checksum":null,"signature":null,"source_schema_version":null}"#,
             r#"{"schema":"ee.export.memory.v1","memory_id":"mem_01234567890123456789012345","workspace_id":"wsp_01234567890123456789012345","level":"procedural","kind":"rule","content":"Run cargo fmt --check before release.","importance":0.8,"confidence":0.9,"utility":0.7,"pagerank_score":0.12,"betweenness_score":0.34,"hits_authority":0.56,"hits_hub":0.78,"onion_layer":3,"k_truss_max":4,"articulation_point":true,"bayes_alpha":2.5,"bayes_beta":1.5,"created_at":"2026-04-30T00:00:00Z","updated_at":null,"expires_at":null,"source_agent":"MistySalmon","provenance_uri":"ee-export://fixture","superseded_by":null,"supersedes":null,"redacted":false,"redaction_reason":null}"#,
             r#"{"schema":"ee.export.tag.v1","memory_id":"mem_01234567890123456789012345","tag":"Release","created_at":"2026-04-30T00:00:00Z"}"#,
-            r#"{"schema":"ee.export.footer.v1","export_id":"exp-001","completed_at":"2026-04-30T00:01:00Z","total_records":3,"memory_count":1,"link_count":0,"tag_count":1,"audit_count":0,"checksum":null,"success":true,"error_message":null}"#,
+            r#"{"schema":"ee.export.footer.v1","export_id":"exp-001","completed_at":"2026-04-30T00:01:00Z","total_records":4,"memory_count":1,"link_count":0,"tag_count":1,"audit_count":0,"checksum":null,"success":true,"error_message":null}"#,
         ]
         .join("\n")
     }
@@ -5074,6 +5074,10 @@ mod tests {
         })
         .map_err(|error| error.to_string())?;
         ensure_equal(import_report.status.as_str(), "completed", "import status")?;
+        ensure(
+            import_report.issues.is_empty(),
+            format!("import should not emit issues: {:?}", import_report.issues),
+        )?;
 
         let out = workspace.join("imported-graph-field-backups");
         let backup_report = create_backup(&BackupCreateOptions {
