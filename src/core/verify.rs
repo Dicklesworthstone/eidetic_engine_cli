@@ -2972,17 +2972,17 @@ mod tests {
         }));
 
         ensure_equal(
-            response.get("schema").and_then(serde_json::Value::as_str),
+            &response.get("schema").and_then(serde_json::Value::as_str),
             &Some(RESPONSE_SCHEMA_V2),
             "response schema",
         )?;
         ensure_equal(
-            response.get("success").and_then(serde_json::Value::as_bool),
+            &response.get("success").and_then(serde_json::Value::as_bool),
             &Some(true),
             "success",
         )?;
         ensure_equal(
-            response.get("degraded"),
+            &response.get("degraded"),
             &Some(&serde_json::json!([])),
             "clean degraded array",
         )
@@ -3186,7 +3186,7 @@ mod tests {
         std::fs::write(temp.path().join("recent.md"), "recent\n")
             .map_err(|error| error.to_string())?;
         let connection = provenance_fixture_connection(temp.path())?;
-        let workspace_id = "wsp_verify_provenance_fixture";
+        let workspace_id = "wsp_verify_provenance_fixture0";
         insert_provenance_fixture_memory(
             &connection,
             workspace_id,
@@ -3246,7 +3246,7 @@ mod tests {
         std::fs::write(temp.path().join("recent.md"), "recent\n")
             .map_err(|error| error.to_string())?;
         let connection = provenance_fixture_connection(temp.path())?;
-        let workspace_id = "wsp_verify_provenance_fixture";
+        let workspace_id = "wsp_verify_provenance_fixture0";
         let memory_id = "mem_00000000000000000000009103";
         insert_provenance_fixture_memory(
             &connection,
@@ -3294,7 +3294,7 @@ mod tests {
         std::fs::write(temp.path().join("fresh.md"), "fresh\n")
             .map_err(|error| error.to_string())?;
         let connection = provenance_fixture_connection(temp.path())?;
-        let workspace_id = "wsp_verify_provenance_fixture";
+        let workspace_id = "wsp_verify_provenance_fixture0";
         let memory_id = "mem_00000000000000000000009108";
         insert_provenance_fixture_memory(
             &connection,
@@ -3400,7 +3400,7 @@ mod tests {
         std::fs::write(temp.path().join("source.md"), "original cited evidence\n")
             .map_err(|error| error.to_string())?;
         let connection = provenance_fixture_connection(temp.path())?;
-        let workspace_id = "wsp_verify_provenance_fixture";
+        let workspace_id = "wsp_verify_provenance_fixture0";
         let memory_id = "mem_00000000000000000000009104";
         insert_provenance_fixture_memory_with_content(
             &connection,
@@ -3593,7 +3593,7 @@ mod tests {
         std::fs::write(temp.path().join("source.md"), "original cited evidence\n")
             .map_err(|error| error.to_string())?;
         let connection = provenance_fixture_connection(temp.path())?;
-        let workspace_id = "wsp_verify_provenance_fixture";
+        let workspace_id = "wsp_verify_provenance_fixture0";
         let memory_id = "mem_00000000000000000000009105";
         insert_provenance_fixture_memory_with_content(
             &connection,
@@ -3670,7 +3670,7 @@ mod tests {
     fn provenance_reverify_rechecks_tombstone_state_inside_write_transaction() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let connection = provenance_fixture_connection(temp.path())?;
-        let workspace_id = "wsp_verify_provenance_fixture";
+        let workspace_id = "wsp_verify_provenance_fixture0";
         let memory_id = "mem_00000000000000000000009106";
         insert_provenance_fixture_memory_with_content(
             &connection,
@@ -3743,7 +3743,7 @@ mod tests {
     fn provenance_reverify_dry_run_rechecks_tombstone_state_before_planning() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let connection = provenance_fixture_connection(temp.path())?;
-        let workspace_id = "wsp_verify_provenance_fixture";
+        let workspace_id = "wsp_verify_provenance_fixture0";
         let memory_id = "mem_00000000000000000000009107";
         insert_provenance_fixture_memory_with_content(
             &connection,
@@ -3792,7 +3792,7 @@ mod tests {
         connection.migrate().map_err(|error| error.to_string())?;
         connection
             .insert_workspace(
-                "wsp_verify_provenance_fixture",
+                "wsp_verify_provenance_fixture0",
                 &crate::db::CreateWorkspaceInput {
                     path: workspace_path.to_string_lossy().to_string(),
                     name: Some("verify provenance fixture".to_owned()),
