@@ -2,7 +2,8 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "output_budget_unsatisfiable",
   "introduced_by": {
-    "bead": "bd-7lvbg.2"
+    "bead": "bd-7lvbg.2",
+    "epic_letter": "GOV"
   },
   "surfaces": [
     "all ee.response.v2 machine surfaces"

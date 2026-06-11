@@ -2,7 +2,8 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "output_truncated_budget",
   "introduced_by": {
-    "bead": "bd-7lvbg.2"
+    "bead": "bd-7lvbg.2",
+    "epic_letter": "GOV"
   },
   "surfaces": [
     "schema list",

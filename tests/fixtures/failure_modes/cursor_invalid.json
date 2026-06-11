@@ -2,7 +2,8 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "cursor_invalid",
   "introduced_by": {
-    "bead": "bd-7lvbg.2"
+    "bead": "bd-7lvbg.2",
+    "epic_letter": "GOV"
   },
   "surfaces": [
     "governed list surfaces accepting --cursor (per-surface wiring lands with bd-7lvbg.3)"
