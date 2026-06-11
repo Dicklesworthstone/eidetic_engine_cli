@@ -345,6 +345,23 @@
         "required",
         "error envelope"
       ]
+    },
+    {
+      "schemaId": "ee.cursor.v1",
+      "status": "current",
+      "surface": "continuation_cursor_envelope",
+      "owner": "src/output/mod.rs::public_schemas",
+      "schemaFile": "docs/schemas/ee.cursor.v1.json",
+      "canonicalDocs": [
+        "docs/adr/0063-output-token-governor-and-continuation-cursors.md"
+      ],
+      "currentFacingContexts": [
+        "docs/adr/0063-output-token-governor-and-continuation-cursors.md",
+        "docs/degraded_code_taxonomy.md",
+        "docs/degraded_codes.md"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
     }
   ]
 }
