@@ -460,12 +460,13 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `journal_redaction_applied` | info | bd-1pi9m.2 — secret classes redacted before storage |
 | `distill_no_candidates` | info | bd-1pi9m.3 — ADR 0062 §7: distill scope had entries but nothing met proposal thresholds (honest empty, response time) |
 
-#### Code-anchored recall (3)
+#### Code-anchored recall (4)
 | Code | Severity | Bead |
 |------|----------|------|
 | `anchor_index_empty` | info | bd-u875s.2 — ADR 0064 §5: the anchor reverse index has no rows for this workspace (nothing anchored yet); never a hard error |
 | `anchor_index_stale` | low | bd-u875s.2 — ADR 0064 §5: reverse-index generation < DB generation; repair `ee index rebuild --workspace .` |
 | `recall_filtered_empty` | info | bd-u875s.2 — ADR 0064 §5: anchored rows matched the surface but `--kind`/`--level`/`--stale` filters removed them all (distinct from empty-index so hook authors can tell the difference) |
+| `recall_git_unavailable` | warning | bd-u875s.3 — ADR 0064 §2 `git_unavailable`-family: the read-only `git diff` shell-out behind `--diff`/`--diff-staged` failed; the diff selector degrades to an empty path set and recall continues (never blocks an edit) |
 
 #### Workspace primer (3)
 | Code | Severity | Bead |
