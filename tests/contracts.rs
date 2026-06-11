@@ -543,3 +543,6 @@ mod obs_log_envelope_schema_contract;
 
 #[path = "contracts/governor_surfaces.rs"]
 mod governor_surfaces;
+
+#[path = "contracts/governor_truncation_registry.rs"]
+mod governor_truncation_registry;

@@ -1,0 +1,38 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "schema": "ee.curate.candidates.v1",
+    "command": "curate candidates",
+    "version": "<scrubbed>",
+    "workspaceId": "<scrubbed>",
+    "workspacePath": "<scrubbed>",
+    "databasePath": "<scrubbed>",
+    "totalCount": 0,
+    "returnedCount": 0,
+    "limit": 100,
+    "offset": 0,
+    "truncated": false,
+    "durableMutation": false,
+    "filter": {
+      "type": null,
+      "status": "pending",
+      "targetMemoryId": "<scrubbed>",
+      "sort": "review_state",
+      "groupDuplicates": false
+    },
+    "candidates": [],
+    "degraded": [
+      {
+        "code": "cursor_invalid",
+        "severity": "low",
+        "message": "Continuation cursor failed validation (MAC mismatch, parameter mismatch, or legacy format).",
+        "repair": "Re-run the command without --cursor to start a fresh page sequence."
+      }
+    ],
+    "nextAction": "no pending curation candidates"
+  },
+  "meta": {
+    "tokensEstimated": 0
+  }
+}

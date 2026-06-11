@@ -786,3 +786,265 @@ fn curate_candidates_accepts_cursor_flag() -> TestResult {
         "curate candidates must report cursor_invalid for a rejected cursor",
     )
 }
+
+// ============================================================================
+// Tight-ceiling envelope goldens (bd-7lvbg.4)
+//
+// Each golden pins the SHAPE of a governed surface — field set/order,
+// degraded-entry structure, repair guidance, meta stamp — after a deep
+// scrub of everything volatile: ids, timestamps, hashes, cursors,
+// paths, versions, float scores, token estimates, and the kept-array
+// tails (ULID tokenization noise can shift how many elements a fixed
+// ceiling keeps, so the tail length must not be load-bearing). The
+// scrub leaves nothing host-specific, so UPDATE_GOLDEN regen is safe
+// on any platform.
+// ============================================================================
+
+/// Replace volatile leaves in place. Keys are matched by exact name or
+/// by the id/hash/timestamp suffix conventions of the JSON contracts;
+/// all floating-point numbers are score-like and scrubbed wholesale.
+fn scrub_volatile_leaves(value: &mut JsonValue) {
+    const VOLATILE_EXACT: &[&str] = &[
+        "id",
+        "timestamp",
+        "version",
+        "tokensEstimated",
+        "droppedCount",
+        "continuationCursor",
+        "next_cursor",
+        "nextCursor",
+        "workspacePath",
+        "databasePath",
+        "indexPath",
+        "actor",
+        "durationMs",
+        "elapsedMs",
+        "tookMs",
+        "valid_from",
+        "valid_to",
+        "validFrom",
+        "validTo",
+    ];
+    fn is_volatile_key(key: &str) -> bool {
+        VOLATILE_EXACT.contains(&key)
+            || key.ends_with("Id")
+            || key.ends_with("_id")
+            || key.ends_with("Hash")
+            || key.ends_with("_hash")
+            || key.ends_with("At")
+            || key.ends_with("_at")
+            || key.ends_with("_ts")
+            || key.ends_with("Generation")
+    }
+    match value {
+        JsonValue::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if is_volatile_key(key) && !child.is_object() && !child.is_array() {
+                    *child = match child {
+                        JsonValue::Number(_) => JsonValue::from(0),
+                        _ => JsonValue::String("<scrubbed>".to_owned()),
+                    };
+                } else {
+                    scrub_volatile_leaves(child);
+                }
+            }
+        }
+        JsonValue::Array(items) => {
+            for item in items {
+                scrub_volatile_leaves(item);
+            }
+        }
+        JsonValue::Number(number) => {
+            if number.is_f64() {
+                *value = JsonValue::from(0);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Keep only the first element of the array at `pointer` (its scrubbed
+/// shape is the per-element contract) and collapse the tail into one
+/// placeholder, so ceiling-boundary noise in the kept count cannot
+/// churn the golden.
+fn condense_array_tail(value: &mut JsonValue, pointer: &str) {
+    if let Some(array) = value.pointer_mut(pointer).and_then(JsonValue::as_array_mut)
+        && array.len() > 1
+    {
+        array.truncate(1);
+        array.push(JsonValue::String(
+            "<remaining elements scrubbed>".to_owned(),
+        ));
+    }
+}
+
+/// Deep-scrubbed pretty form of a governed data-surface payload.
+fn normalize_surface_golden(
+    value: &JsonValue,
+    condense_pointers: &[&str],
+) -> Result<String, String> {
+    let mut normalized = value.clone();
+    scrub_volatile_leaves(&mut normalized);
+    for pointer in condense_pointers {
+        condense_array_tail(&mut normalized, pointer);
+    }
+    // Degraded message/repair prose embeds counts and ceilings; scrub
+    // bare numbers the same way normalize_governor_envelope does.
+    for degraded_pointer in ["/degraded", "/data/degraded"] {
+        if let Some(entries) = normalized
+            .pointer_mut(degraded_pointer)
+            .and_then(JsonValue::as_array_mut)
+        {
+            for entry in entries {
+                for field in ["message", "repair"] {
+                    if let Some(text) = entry.get(field).and_then(JsonValue::as_str) {
+                        let scrubbed: String = text
+                            .split_whitespace()
+                            .map(|word| {
+                                if word.chars().all(|c| c.is_ascii_digit()) {
+                                    "<n>"
+                                } else {
+                                    word
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        entry[field] = JsonValue::String(scrubbed);
+                    }
+                }
+            }
+        }
+    }
+    serde_json::to_string_pretty(&normalized).map_err(|error| format!("serialize: {error}"))
+}
+
+#[test]
+fn search_tight_ceiling_envelope_matches_golden() -> TestResult {
+    let workspace = isolated_workspace("search-golden-ceiling")?;
+    seed_memories(&workspace, 8)?;
+    let value = run_ee_in(
+        &workspace,
+        &[
+            "search",
+            "release workflow clippy",
+            "--limit",
+            "8",
+            "--max-output-tokens",
+            "700",
+            "--json",
+        ],
+    )?;
+    ensure(
+        degraded_entry_with_code(&value, "output_truncated_budget").is_some()
+            || degraded_entry_with_code(&value, "output_budget_unsatisfiable").is_some(),
+        "a 700-token ceiling must engage the governor on an 8-result search",
+    )?;
+    assert_golden(
+        "search_tight_ceiling_envelope",
+        &normalize_surface_golden(&value, &["/data/results"])?,
+    )
+}
+
+#[test]
+fn memory_list_tight_ceiling_envelope_matches_golden() -> TestResult {
+    let workspace = isolated_workspace("memlist-golden-ceiling")?;
+    seed_memories(&workspace, 8)?;
+    let value = run_ee_in(
+        &workspace,
+        &[
+            "memory",
+            "list",
+            "--limit",
+            "8",
+            "--max-output-tokens",
+            "800",
+            "--json",
+        ],
+    )?;
+    ensure(
+        degraded_entry_with_code(&value, "output_truncated_budget").is_some()
+            || degraded_entry_with_code(&value, "output_budget_unsatisfiable").is_some(),
+        "an 800-token ceiling must engage the governor on an 8-row memory list",
+    )?;
+    assert_golden(
+        "memory_list_tight_ceiling_envelope",
+        &normalize_surface_golden(&value, &["/data/memories"])?,
+    )
+}
+
+#[test]
+fn insights_rejected_cursor_envelope_matches_golden() -> TestResult {
+    // Insights section composition varies with corpus and graph posture,
+    // so the deterministic governed shape to pin is the rejected-cursor
+    // empty page: every section emptied, cursor_invalid reported, no
+    // continuation offered (drain coverage lives in
+    // insights_cursor_drain_never_duplicates_section_items).
+    let workspace = isolated_workspace("insights-golden-invalid")?;
+    seed_memories(&workspace, 4)?;
+    let value = run_ee_in(
+        &workspace,
+        &[
+            "insights",
+            "--cursor",
+            "not-a-valid-cursor",
+            "--max-output-tokens",
+            "2500",
+            "--json",
+        ],
+    )?;
+    ensure(
+        degraded_entry_with_code(&value, "cursor_invalid").is_some(),
+        "insights must report cursor_invalid for a rejected cursor",
+    )?;
+    assert_golden(
+        "insights_cursor_invalid_empty_page",
+        &normalize_surface_golden(&value, &["/data/sections"])?,
+    )
+}
+
+#[test]
+fn curate_candidates_rejected_cursor_envelope_matches_golden() -> TestResult {
+    // Candidate seeding is heavyweight (session review / agentsmd
+    // import), so the stable governed shape to pin is the same
+    // rejected-cursor empty page the flag contract above asserts.
+    let workspace = isolated_workspace("curate-golden-invalid")?;
+    seed_memories(&workspace, 1)?;
+    let value = run_ee_in(
+        &workspace,
+        &[
+            "curate",
+            "candidates",
+            "--cursor",
+            "not-a-valid-cursor",
+            "--max-output-tokens",
+            "400",
+            "--json",
+        ],
+    )?;
+    ensure(
+        degraded_entry_with_code(&value, "cursor_invalid").is_some(),
+        "curate candidates must report cursor_invalid for a rejected cursor",
+    )?;
+    assert_golden(
+        "curate_candidates_cursor_invalid_empty_page",
+        &normalize_surface_golden(&value, &["/data/candidates"])?,
+    )
+}
+
+#[test]
+fn audit_timeline_paged_report_matches_golden() -> TestResult {
+    let workspace = isolated_workspace("audit-golden-page")?;
+    seed_memories(&workspace, 6)?;
+    let value = run_ee_in(&workspace, &["audit", "timeline", "--limit", "2", "--json"])?;
+    ensure(
+        value
+            .pointer("/pagination/next_cursor")
+            .and_then(JsonValue::as_str)
+            .is_some(),
+        "a 2-row page over >= 6 audit rows must offer a next_cursor",
+    )?;
+    assert_golden(
+        "audit_timeline_paged_report",
+        &normalize_surface_golden(&value, &["/entries"])?,
+    )
+}

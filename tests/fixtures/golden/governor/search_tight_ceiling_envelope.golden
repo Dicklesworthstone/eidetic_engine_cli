@@ -1,0 +1,18 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "command": "search"
+  },
+  "degraded": [
+    {
+      "code": "output_budget_unsatisfiable",
+      "severity": "medium",
+      "message": "Output budget unsatisfiable: the envelope minimum exceeds the ceiling (estimated <n> tokens against a ceiling of 700); payload withheld.",
+      "repair": "Re-run with --max-output-tokens <n> or higher, or use --fields minimal."
+    }
+  ],
+  "meta": {
+    "tokensEstimated": 0
+  }
+}

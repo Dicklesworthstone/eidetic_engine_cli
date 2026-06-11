@@ -1,0 +1,45 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "command": "memory list",
+    "version": "<scrubbed>",
+    "total_count": 8,
+    "truncated": false,
+    "filter": {
+      "include_tombstoned": true
+    },
+    "memories": [
+      {
+        "id": "<scrubbed>",
+        "level": "semantic",
+        "kind": "fact",
+        "content": "Governor contract seed memory 00: deterministic retrieval corpus row about the r...",
+        "content_truncated": true,
+        "confidence": 0,
+        "is_tombstoned": false,
+        "valid_from": "<scrubbed>",
+        "valid_to": "<scrubbed>",
+        "validity_status": "current",
+        "validity_window_kind": "starts_at",
+        "created_at": "<scrubbed>"
+      },
+      "<remaining elements scrubbed>"
+    ]
+  },
+  "degraded": [
+    {
+      "code": "output_truncated_budget",
+      "severity": "info",
+      "message": "Dropped <n> trailing element(s) at the declared truncation point to satisfy the output ceiling of <n> tokens.",
+      "repair": "Resume with --cursor <details.continuationCursor>, or re-run with a larger --max-output-tokens ceiling or a narrower --fields preset.",
+      "details": {
+        "droppedCount": 0,
+        "continuationCursor": "<scrubbed>"
+      }
+    }
+  ],
+  "meta": {
+    "tokensEstimated": 0
+  }
+}

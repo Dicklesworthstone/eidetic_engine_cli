@@ -1,0 +1,70 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "schema": "ee.insights.v1",
+    "command": "insights",
+    "mode": "full_bundle",
+    "snapshotVersion": 0,
+    "generatedAt": "<scrubbed>",
+    "runDurationMs": 0,
+    "selectedSection": null,
+    "explainMemoryId": "<scrubbed>",
+    "explainCommand": null,
+    "pagination": null,
+    "availableSections": [
+      "authorities",
+      "blindSpots",
+      "bridges",
+      "causalBottlenecks",
+      "comprehensiveRules",
+      "contradictionClusters",
+      "houseRules",
+      "hubs",
+      "kCore",
+      "kTruss",
+      "knowledgeGaps",
+      "knowledgeSkyline",
+      "loadBearingMemories",
+      "proximityHotspots",
+      "revisionFrontiers",
+      "topMemories"
+    ],
+    "sections": [
+      {
+        "name": "authorities",
+        "title": "Authority Memories",
+        "summary": "HITS authority scores for memories that ground claims from many hubs.",
+        "whyItMatters": "Authority memories help agents distinguish grounded evidence from navigational references.",
+        "items": [],
+        "nextCommands": [
+          "ee insights --section authorities --workspace . --json"
+        ]
+      },
+      "<remaining elements scrubbed>"
+    ],
+    "degradedSignals": [
+      {
+        "code": "insights_section_unavailable",
+        "severity": "info",
+        "message": "One or more registered insights sections do not have DB-backed evidence yet.",
+        "repair": "Use sections with non-empty evidence, or implement the unavailable section builder.",
+        "sources": [
+          "kCore",
+          "kTruss"
+        ]
+      }
+    ]
+  },
+  "degraded": [
+    {
+      "code": "cursor_invalid",
+      "severity": "low",
+      "message": "Continuation cursor failed validation (MAC mismatch, parameter mismatch, or legacy format).",
+      "repair": "Re-run the command without --cursor to start a fresh page sequence."
+    }
+  ],
+  "meta": {
+    "tokensEstimated": 0
+  }
+}

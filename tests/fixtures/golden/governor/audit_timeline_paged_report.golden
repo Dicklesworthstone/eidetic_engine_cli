@@ -1,0 +1,56 @@
+{
+  "schema": "ee.audit.timeline.v1",
+  "entries": [
+    {
+      "id": "<scrubbed>",
+      "timestamp": "<scrubbed>",
+      "actor": "<scrubbed>",
+      "surface": "memory",
+      "mutation_kind": "memory.create",
+      "before_hash": "<scrubbed>",
+      "after_hash": "<scrubbed>",
+      "prev_row_hash": "<scrubbed>",
+      "this_row_hash": "<scrubbed>",
+      "workspace_id": "<scrubbed>",
+      "target_type": "memory",
+      "target_id": "<scrubbed>",
+      "producer": {
+        "schema": "ee.producer.metadata.v1",
+        "sourceSystem": "audit",
+        "identity": {
+          "status": "known",
+          "agentName": "ee remember",
+          "harness": null,
+          "model": null
+        },
+        "run": {
+          "runId": "<scrubbed>",
+          "sessionId": "<scrubbed>",
+          "workspaceFingerprint": null
+        },
+        "observedAt": "<scrubbed>"
+      },
+      "details": {
+        "schema": "ee.audit.memory_create.v1",
+        "command": "ee remember",
+        "memoryId": "<scrubbed>",
+        "level": "semantic",
+        "kind": "fact",
+        "confidence": 0,
+        "trustClass": "human_explicit",
+        "trustSubclass": "ee remember",
+        "provenanceUri": null,
+        "workflowId": "<scrubbed>",
+        "tagCount": 2,
+        "policyBypass": null
+      }
+    },
+    "<remaining elements scrubbed>"
+  ],
+  "pagination": {
+    "total_count": 45,
+    "returned_count": 2,
+    "has_more": true,
+    "next_cursor": "<scrubbed>"
+  }
+}
