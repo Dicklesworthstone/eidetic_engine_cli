@@ -6,12 +6,13 @@
     "epic_letter": "GOV"
   },
   "surfaces": [
+    "recall (--budget-tokens continuation lane, bd-u875s.3)",
     "governed list surfaces accepting --cursor (per-surface wiring lands with bd-7lvbg.3)"
   ],
   "severity": "low",
   "repair_present": true,
   "trigger": {
-    "description": "An ee.cursor.v1 continuation cursor is resumed after the workspace DB generation advanced past the cursor's dbGeneration (ADR 0063 §3). Pagination across writes is dishonest — pages must partition exactly one generation's result set with no duplicates and no gaps — so the codec rejects the cursor as stale instead of silently mixing generations. The codec and degraded contract ship with bd-7lvbg.2; the per-surface --cursor resume flag lands with bd-7lvbg.3.",
+    "description": "An ee.cursor.v1 continuation cursor is resumed after the workspace DB generation advanced past the cursor's dbGeneration (ADR 0063 \u00a73). Pagination across writes is dishonest \u2014 pages must partition exactly one generation's result set with no duplicates and no gaps \u2014 so the codec rejects the cursor as stale instead of silently mixing generations. The codec and degraded contract ship with bd-7lvbg.2; the per-surface --cursor resume flag lands with bd-7lvbg.3.",
     "setup_commands": [
       "ee init --workspace .",
       "ee schema list --max-output-tokens 150 --json   # capture details.continuationCursor",

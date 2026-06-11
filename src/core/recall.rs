@@ -852,11 +852,12 @@ pub fn run_recall(
 // CLI-facing surface helpers (bd-u875s.3)
 // ---------------------------------------------------------------------------
 
-/// Established degraded code for a failed read-only git shell-out
-/// (`--diff`/`--diff-staged`). Same vocabulary the swarm-brief and
-/// workspace-hygiene surfaces use; a git failure degrades the diff selector
-/// to an empty path set and never blocks recall (ADR 0064 §2).
-pub const RECALL_GIT_UNAVAILABLE_CODE: &str = "git_unavailable";
+/// `git_unavailable`-family degraded code (ADR 0064 §2) for a failed
+/// read-only git shell-out behind `--diff`/`--diff-staged`. Recall-specific
+/// rather than the shared `git_unavailable` because that code's fixture
+/// pins swarm-brief/workspace-hygiene repair strings; a git failure here
+/// degrades the diff selector to an empty path set and never blocks recall.
+pub const RECALL_GIT_UNAVAILABLE_CODE: &str = "recall_git_unavailable";
 
 /// Collect the changed-path set for `--diff <ref>` / `--diff-staged` by
 /// shelling out to git read-only (`git -C <workspace> diff --name-only`).

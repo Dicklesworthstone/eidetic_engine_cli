@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "recall_git_unavailable",
+  "introduced_by": {
+    "bead": "bd-u875s.3",
+    "epic_letter": "RECALL"
+  },
+  "surfaces": [
+    "recall"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee recall --diff <ref> or --diff-staged could not collect the changed-path set because the read-only git shell-out failed (git missing from PATH, not a git worktree, bad ref, or an option-shaped ref refused by the safety check). The diff selector degrades to an empty path set and recall continues with the remaining selectors — a recall failure must never block an edit (ADR 0064 §2).",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# run from a workspace directory that is not a git worktree"
+    ],
+    "invocation": "ee recall --diff HEAD~1 --path 'src/**' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "recall_git_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "--diff selector degraded to an empty path set",
+      "git was unavailable"
+    ]
+  }
+}
