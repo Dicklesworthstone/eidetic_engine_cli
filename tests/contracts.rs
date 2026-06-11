@@ -540,3 +540,6 @@ mod curate_outcome_audit_schema_contract;
 
 #[path = "contracts/obs_log_envelope_schema_contract.rs"]
 mod obs_log_envelope_schema_contract;
+
+#[path = "contracts/governor_surfaces.rs"]
+mod governor_surfaces;
