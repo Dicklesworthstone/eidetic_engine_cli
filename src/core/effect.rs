@@ -2293,6 +2293,11 @@ impl EffectManifest {
                 ],
                 "Update procedural rule metadata",
             ),
+            CommandEffect::durable_write(
+                "situation adopt",
+                vec!["situation_records"],
+                "Adopt task text as a persisted situation record via the idempotent fingerprint",
+            ),
             CommandEffect::durable_state_write(
                 "tripwire check",
                 vec!["tripwires", "tripwire_check_events"],
