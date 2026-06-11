@@ -2684,16 +2684,16 @@ impl MemoryProbe {
     #[must_use]
     pub fn gather() -> Self {
         let meminfo = fs::read_to_string("/proc/meminfo").ok();
-        let platform_total = if meminfo.is_none() {
-            gather_platform_memory_total_bytes()
+        let platform_memory = if meminfo.is_none() {
+            gather_platform_memory_bytes()
         } else {
             None
         };
         let (total_bytes, available_bytes, source) = if let Some(meminfo) = meminfo.as_deref() {
             let (total, available) = parse_proc_meminfo_bytes(meminfo);
             (total, available, "proc_meminfo")
-        } else if let Some((source, total)) = platform_total {
-            (Some(total), None, source)
+        } else if let Some((source, total, available)) = platform_memory {
+            (Some(total), available, source)
         } else {
             (None, None, "unavailable")
         };
@@ -3101,10 +3101,17 @@ fn parse_meminfo_kib(line: &str, key: &str) -> Option<u64> {
     }
 }
 
-fn gather_platform_memory_total_bytes() -> Option<(&'static str, u64)> {
+fn gather_platform_memory_bytes() -> Option<(&'static str, u64, Option<u64>)> {
     #[cfg(target_os = "macos")]
     {
-        read_macos_hw_memsize_bytes().map(|bytes| ("sysctl_hw_memsize", bytes))
+        let total = read_macos_hw_memsize_bytes()?;
+        let available = read_macos_vm_stat_available_bytes().map(|bytes| bytes.min(total));
+        let source = if available.is_some() {
+            "macos_sysctl_vm_stat"
+        } else {
+            "sysctl_hw_memsize"
+        };
+        Some((source, total, available))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -3130,6 +3137,59 @@ fn read_macos_hw_memsize_bytes() -> Option<u64> {
 fn parse_sysctl_memsize_bytes(input: &str) -> Option<u64> {
     let value = input.trim().parse::<u64>().ok()?;
     if value == 0 { None } else { Some(value) }
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_vm_stat_available_bytes() -> Option<u64> {
+    let output = std::process::Command::new("/usr/bin/vm_stat")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    parse_macos_vm_stat_available_bytes(stdout)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn parse_macos_vm_stat_available_bytes(input: &str) -> Option<u64> {
+    let page_size = parse_macos_vm_stat_page_size(input)?;
+    let mut free_pages = None;
+    let mut inactive_pages = None;
+    let mut speculative_pages = None;
+
+    for line in input.lines() {
+        if let Some(value) = parse_macos_vm_stat_counter(line, "Pages free:") {
+            free_pages = Some(value);
+        } else if let Some(value) = parse_macos_vm_stat_counter(line, "Pages inactive:") {
+            inactive_pages = Some(value);
+        } else if let Some(value) = parse_macos_vm_stat_counter(line, "Pages speculative:") {
+            speculative_pages = Some(value);
+        }
+    }
+
+    // Free, inactive, and speculative pages are the conservative reclaimable
+    // set used for profile admission; avoid purgeable to reduce double-counting.
+    let pages = free_pages?
+        .saturating_add(inactive_pages.unwrap_or(0))
+        .saturating_add(speculative_pages.unwrap_or(0));
+    pages.checked_mul(page_size)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn parse_macos_vm_stat_page_size(input: &str) -> Option<u64> {
+    let header = input.lines().next()?.trim();
+    let (_, rest) = header.split_once("page size of ")?;
+    let (bytes, _) = rest.split_once(" bytes")?;
+    let value = bytes.trim().parse::<u64>().ok()?;
+    if value == 0 { None } else { Some(value) }
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn parse_macos_vm_stat_counter(line: &str, key: &str) -> Option<u64> {
+    let rest = line.trim().strip_prefix(key)?;
+    let raw = rest.split_whitespace().next()?.trim_end_matches('.');
+    raw.parse::<u64>().ok()
 }
 
 fn read_cgroup_memory_limit_bytes() -> Option<u64> {
@@ -3230,6 +3290,40 @@ mod tests {
             parse_sysctl_memsize_bytes("hw.memsize: 274877906944\n"),
             None,
             "non numeric output rejected",
+        )
+    }
+
+    #[test]
+    fn macos_vm_stat_parser_estimates_available_bytes() -> TestResult {
+        let input = "\
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   333085.
+Pages active:                                 577815.
+Pages inactive:                               566675.
+Pages speculative:                             28138.
+Pages wired down:                             253184.
+";
+
+        ensure(
+            parse_macos_vm_stat_available_bytes(input),
+            Some((333_085_u64 + 566_675 + 28_138) * 16_384),
+            "free + inactive + speculative pages",
+        )
+    }
+
+    #[test]
+    fn macos_vm_stat_parser_rejects_missing_page_size_or_free_pages() -> TestResult {
+        ensure(
+            parse_macos_vm_stat_available_bytes("Pages free: 1.\n"),
+            None,
+            "missing page size rejected",
+        )?;
+        ensure(
+            parse_macos_vm_stat_available_bytes(
+                "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages inactive: 1.\n",
+            ),
+            None,
+            "missing free pages rejected",
         )
     }
 
