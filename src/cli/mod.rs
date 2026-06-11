@@ -70,9 +70,9 @@ use crate::core::context::{
     run_context_pack_with_performance,
 };
 use crate::core::context_delta::{
-    CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE, CONTEXT_DELTA_PRIOR_UNKNOWN_CODE,
-    CONTEXT_DELTA_PRIOR_UNKNOWN_REPAIR, ContextDeltaDegradation, ContextDeltaItemSnapshot,
-    ContextDeltaOptions, ContextDeltaPackSnapshot, compute_context_delta,
+    CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE, CONTEXT_DELTA_NO_BASELINE_CODE,
+    CONTEXT_DELTA_PRIOR_UNKNOWN_CODE, CONTEXT_DELTA_PRIOR_UNKNOWN_REPAIR, ContextDeltaDegradation,
+    ContextDeltaItemSnapshot, ContextDeltaOptions, ContextDeltaPackSnapshot, compute_context_delta,
 };
 use crate::core::curate::{
     CurateApplyOptions, CurateApplyReport, CurateAutoPromoteOptions, CurateCandidatesOptions,
@@ -2946,6 +2946,20 @@ pub struct PackArgs {
     /// Assemble context without writing pack_records, audit rows, or L2 cache entries.
     #[arg(long = "read-only", alias = "no-persist", action = ArgAction::SetTrue)]
     pub read_only: bool,
+
+    /// Prior pack hash to delta against, or `last` to resolve this agent's
+    /// most recent recorded baseline (requires EE_AGENT_NAME). JSON responses
+    /// only; other formats emit the full pack with a degraded notice.
+    #[arg(long, value_name = "PACK_HASH")]
+    pub since: Option<String>,
+
+    /// Task scope for baseline recording and `--since last` resolution.
+    #[arg(long = "task-key", value_name = "KEY")]
+    pub task_key: Option<String>,
+
+    /// Skip recording this pack as the agent's `--since last` baseline.
+    #[arg(long = "no-baseline-write", action = ArgAction::SetTrue)]
+    pub no_baseline_write: bool,
 
     /// Exclude sentinel-backed memories unless their latest sentinel checks are fresh and passing.
     #[arg(long = "require-fresh-sentinels", action = ArgAction::SetTrue)]
@@ -33835,7 +33849,16 @@ where
         filters,
         output_options,
         persist_pack: !args.read_only,
-        baseline_write: None,
+        baseline_write: if args.read_only || args.no_baseline_write {
+            None
+        } else {
+            crate::core::memory_scope::current_agent_name().map(|agent_name| {
+                crate::core::context::PackBaselineWrite {
+                    agent_name,
+                    task_key: args.task_key.clone(),
+                }
+            })
+        },
         no_lod: args.no_lod,
     };
 
@@ -33943,6 +33966,66 @@ where
         );
         return None;
     }
+
+    // bd-7lvbg.6: `--since last` resolves the baseline from the per-agent
+    // ledger instead of making the agent bookkeep pack hashes across
+    // sessions. Every miss is an honest full-pack fallback.
+    let resolved_last_hash;
+    let prior_pack_hash = if prior_pack_hash.eq_ignore_ascii_case("last") {
+        let database_path = args
+            .database
+            .clone()
+            .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+        match resolve_last_baseline_hash(&database_path, workspace_path, args.task_key.as_deref()) {
+            Ok(LastBaselineResolution::Resolved(hash)) => {
+                resolved_last_hash = hash;
+                resolved_last_hash.as_str()
+            }
+            Ok(LastBaselineResolution::NoAgentIdentity) => {
+                push_context_delta_degradation(
+                    response,
+                    CONTEXT_DELTA_NO_BASELINE_CODE,
+                    ContextResponseSeverity::Info,
+                    "`--since last` needs an agent identity, but EE_AGENT_NAME is unset; \
+                     emitting the full pack instead.",
+                    Some(
+                        "Set EE_AGENT_NAME, or pass an explicit pack hash to --since.".to_string(),
+                    ),
+                );
+                return None;
+            }
+            Ok(LastBaselineResolution::NoBaseline) => {
+                push_context_delta_degradation(
+                    response,
+                    CONTEXT_DELTA_NO_BASELINE_CODE,
+                    ContextResponseSeverity::Info,
+                    "No recorded pack baseline exists for this agent in this workspace; \
+                     emitting the full pack instead.",
+                    Some(
+                        "Run one persisted pack first (a non --read-only pack records the \
+                         baseline automatically), or pass an explicit pack hash to --since."
+                            .to_string(),
+                    ),
+                );
+                return None;
+            }
+            Err(error) => {
+                push_context_delta_degradation(
+                    response,
+                    CONTEXT_DELTA_NO_BASELINE_CODE,
+                    ContextResponseSeverity::Info,
+                    format!(
+                        "The pack baseline ledger could not be read: {error}; emitting the \
+                         full pack instead."
+                    ),
+                    Some("Pass an explicit pack hash to --since, or run ee doctor.".to_string()),
+                );
+                return None;
+            }
+        }
+    } else {
+        prior_pack_hash
+    };
 
     if !context_delta_json_supported(renderer, requested_format, args) {
         let format = if args.stream {
@@ -34104,6 +34187,38 @@ fn context_delta_json_supported(
     args: &ContextArgs,
 ) -> bool {
     !args.stream && renderer == output::Renderer::Json && requested_format != OutputFormat::Binary
+}
+
+/// Outcome of resolving `--since last` against the per-agent baseline
+/// ledger (bd-7lvbg.6).
+enum LastBaselineResolution {
+    Resolved(String),
+    NoAgentIdentity,
+    NoBaseline,
+}
+
+fn resolve_last_baseline_hash(
+    database_path: &Path,
+    workspace_path: &Path,
+    task_key: Option<&str>,
+) -> Result<LastBaselineResolution, String> {
+    let Some(agent_name) = crate::core::memory_scope::current_agent_name() else {
+        return Ok(LastBaselineResolution::NoAgentIdentity);
+    };
+    if !database_path.exists() {
+        return Ok(LastBaselineResolution::NoBaseline);
+    }
+    let conn = DbConnection::open_schema_only(database_path)
+        .map_err(|error| format!("failed to open pack database: {error}"))?;
+    let workspace_id = workspace_core::stable_workspace_id(workspace_path);
+    let baseline = conn
+        .resolve_pack_baseline(&workspace_id, &agent_name, task_key)
+        .map_err(|error| format!("failed to resolve pack baseline: {error}"))?;
+    Ok(
+        baseline.map_or(LastBaselineResolution::NoBaseline, |baseline| {
+            LastBaselineResolution::Resolved(baseline.pack_hash)
+        }),
+    )
 }
 
 fn load_context_delta_prior_snapshot(
@@ -36855,10 +36970,13 @@ where
                 .as_ref()
                 .map(|resolved| resolved.task_lens.clone()),
             max_results: lens_overlay.and_then(|overlay| overlay.max_results),
-            // bd-1es1m: --since / --max-delta-bytes are only meaningful for
-            // `ee context`; the `ee pack` shim passes None through and the
-            // delta path stays inert.
-            since: None,
+            // bd-7lvbg.6 supersedes the bd-1es1m scoping: the pack shim
+            // forwards --since/--task-key/--no-baseline-write so the headline
+            // surface gets baseline ergonomics; --max-delta-bytes stays a
+            // context-only tuning knob.
+            since: args.since.clone(),
+            task_key: args.task_key.clone(),
+            no_baseline_write: args.no_baseline_write,
             max_delta_bytes: None,
         };
         return handle_context_pack_query(cli, &context_args, "pack", false, stdout, stderr);

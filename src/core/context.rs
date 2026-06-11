@@ -76,9 +76,8 @@ use crate::db::read_pool::{
 };
 use crate::db::{
     CreatePackBaselineInput, CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput,
-    CreatePackTaskLensInput,
-    DatabaseConfig, DbConnection, PackRecordInsertTimings, StoredAgentContextProfileForPack,
-    StoredMemory,
+    CreatePackTaskLensInput, DatabaseConfig, DbConnection, PackRecordInsertTimings,
+    StoredAgentContextProfileForPack, StoredMemory,
 };
 use crate::models::degradation::{
     GRAPH_PACK_DNA_TIMEOUT_CODE, GRAPH_PPR_EMPTY_SEED_SET_CODE, GRAPH_PPR_SNAPSHOT_STALE_CODE,
@@ -650,9 +649,10 @@ pub struct PackBaselineWrite {
     pub agent_name: String,
     /// Optional task scope from `--task-key`.
     pub task_key: Option<String>,
-    /// Per-agent ledger cap (`[pack] baseline_ledger_max_rows`, default 32).
-    pub max_rows: u32,
 }
+
+/// In-code default for `[pack] baseline_ledger_max_rows` (bd-7lvbg.6).
+pub const DEFAULT_PACK_BASELINE_LEDGER_MAX_ROWS: u32 = 32;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ContextPackOutputProfile {
@@ -4394,6 +4394,12 @@ fn persist_pack_record_with_pack_id(
     // record above is the durable outcome; a ledger failure must not
     // unwind it, so this is warn-and-continue rather than an error path.
     if let Some(baseline) = baseline {
+        let max_rows = context_workspace_config(workspace_path, "Pack baseline ledger")
+            .ok()
+            .flatten()
+            .and_then(|config| config.pack.baseline_ledger_max_rows)
+            .and_then(|rows| u32::try_from(rows).ok())
+            .unwrap_or(DEFAULT_PACK_BASELINE_LEDGER_MAX_ROWS);
         if let Err(error) = connection.insert_pack_baseline(
             &CreatePackBaselineInput {
                 workspace_id: workspace.id.clone(),
@@ -4402,7 +4408,7 @@ fn persist_pack_record_with_pack_id(
                 pack_id: pack_id.to_string(),
                 pack_hash: input.pack_hash.clone(),
             },
-            baseline.max_rows,
+            max_rows,
             Some(baseline.agent_name.as_str()),
         ) {
             tracing::warn!(

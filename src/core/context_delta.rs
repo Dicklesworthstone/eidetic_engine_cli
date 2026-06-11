@@ -8,6 +8,10 @@ pub const CONTEXT_DELTA_SCHEMA_V1: &str = "ee.context.delta.v1";
 pub const CONTEXT_DELTA_PRIOR_UNKNOWN_CODE: &str = "context_delta_prior_unknown";
 pub const CONTEXT_DELTA_OVERSIZED_CODE: &str = "context_delta_larger_than_full";
 pub const CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE: &str = "context_delta_format_unsupported";
+/// `--since last` could not resolve a baseline for this agent
+/// (bd-7lvbg.6): no `EE_AGENT_NAME` identity, an empty ledger, or a
+/// ledger read failure. Honest full-pack fallback, severity info.
+pub const CONTEXT_DELTA_NO_BASELINE_CODE: &str = "context_delta_no_baseline";
 
 /// bd-n0vkg: pinned repair string for `context_delta_prior_unknown`.
 /// MUST stay byte-identical to

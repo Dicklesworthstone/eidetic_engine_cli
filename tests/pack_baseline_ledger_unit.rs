@@ -25,7 +25,11 @@ use ee::db::{CreatePackBaselineInput, CreatePackRecordInput, DbConnection, audit
 type TestResult = Result<(), String>;
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
-    if condition { Ok(()) } else { Err(message.into()) }
+    if condition {
+        Ok(())
+    } else {
+        Err(message.into())
+    }
 }
 
 /// `ee init` a temp workspace (runs migrations incl. V078) and return the
@@ -182,7 +186,10 @@ fn resolution_is_per_agent_and_prefers_exact_task_key() -> TestResult {
         .ok_or("agent baseline must resolve")?;
     ensure(
         no_key.pack_id == "pack_a3",
-        format!("no task key resolves the newest row, got {}", no_key.pack_id),
+        format!(
+            "no task key resolves the newest row, got {}",
+            no_key.pack_id
+        ),
     )?;
 
     let other = connection
@@ -215,8 +222,7 @@ fn eviction_caps_rows_oldest_first_with_audit() -> TestResult {
 
     let mut total_evicted = 0u32;
     for pack_id in pack_ids {
-        total_evicted +=
-            record_baseline(&connection, &workspace_id, "AgentE", None, pack_id, CAP)?;
+        total_evicted += record_baseline(&connection, &workspace_id, "AgentE", None, pack_id, CAP)?;
     }
     ensure(
         total_evicted == 2,
@@ -276,6 +282,9 @@ fn rerecording_the_same_pack_is_idempotent() -> TestResult {
         .map_err(|error| error.to_string())?;
     ensure(
         rows.len() == 1,
-        format!("re-recording the same pack must replace, got {} rows", rows.len()),
+        format!(
+            "re-recording the same pack must replace, got {} rows",
+            rows.len()
+        ),
     )
 }
