@@ -317,6 +317,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `memory_drift_source_changed` | medium | bd-1z1fd.3 |
 | `memory_drift_source_missing` | high | bd-1z1fd.3 |
 | `memory_drift_source_unverifiable` | medium | bd-1z1fd.3 |
+| `memory_drift_lock_contention` | warning | bd-1xpq9 (DRIFT) |
 | `mesh_peer_human_explicit_filtered` | medium | bd-29ulx (SRR6.5) |
 | `mi_dedup_candidate_proposed` | info | bd-17c65.14.14 (N14) |
 | `mi_dedup_threshold_underpowered` | info | bd-17c65.14.14 (N14) |
@@ -585,7 +586,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `write_hot_path_cancelled_before_commit` | medium | bd-2lsxf.2.4 (SRR3) |
 | `write_hot_path_fsync_failure` | high | bd-2lsxf.2.4 (SRR3) |
 
-#### Other (8)
+#### Other (6)
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_feature_disabled` | medium | bd-17c65.5.3 (E3) — different from build-time `graph_unavailable`; this is a per-call disable |
@@ -593,7 +594,6 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `singleflight_follower_timeout` | medium | bd-gni47.3 (SF3) |
 | `singleflight_leader_failed` | medium | bd-gni47.3 (SF3) |
 | `singleflight_state_poisoned` | high | bd-gni47.3 (SF3) |
-| `situation_decisioning_unavailable` | medium | bd-14tio |
 | `test_degraded` | info | testing harness (synthetic; not emitted in production paths) |
 
 #### Tailscale local probe (7)

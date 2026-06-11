@@ -210,6 +210,9 @@ pub fn categorize_unsafe_claim_reason(reason: &str) -> UnsafeClaimReasonCategory
         "install_freshness" | "claim_gate_install_freshness_not_authoritative" => {
             UnsafeClaimReasonCategory::InstalledBinaryFreshness
         }
+        // bd-1xpq9: lock contention blocked collection BEFORE evidence
+        // inspection — a contended local resource, not drift evidence.
+        "memory_drift_lock_contention" => UnsafeClaimReasonCategory::ResourceAdmission,
         _ => {
             if head.starts_with("agent_mail") {
                 UnsafeClaimReasonCategory::AgentMailReadiness
@@ -896,6 +899,10 @@ mod tests {
             (
                 "memory_probe_unavailable",
                 UnsafeClaimReasonCategory::MemorySourceDrift,
+            ),
+            (
+                "memory_drift_lock_contention",
+                UnsafeClaimReasonCategory::ResourceAdmission,
             ),
             ("never_seen_before", UnsafeClaimReasonCategory::Unknown),
         ] {

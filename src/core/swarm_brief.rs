@@ -2417,12 +2417,32 @@ impl SwarmBriefSourceAdapter for MemoryDriftSourceAdapter {
                 }
             }
             Err(error) => {
-                let degradation = SwarmBriefDegradation::warning(
-                    source,
-                    MEMORY_DRIFT_UNAVAILABLE_CODE,
-                    format!("Memory drift posture could not be collected read-only: {error}"),
-                    Some("ee doctor --json".to_string()),
-                );
+                // bd-1xpq9: lock contention means collection never reached
+                // evidence inspection — report it as its own code instead of
+                // the (too broad) unverifiable-evidence code.
+                let degradation =
+                    if super::memory_drift::memory_drift_error_is_lock_contention(&error) {
+                        SwarmBriefDegradation::warning(
+                            source,
+                            super::memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_CODE,
+                            super::memory_drift::memory_drift_lock_contention_message(
+                                "swarm_brief",
+                            ),
+                            Some(
+                                super::memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_REPAIR
+                                    .to_string(),
+                            ),
+                        )
+                    } else {
+                        SwarmBriefDegradation::warning(
+                            source,
+                            MEMORY_DRIFT_UNAVAILABLE_CODE,
+                            format!(
+                                "Memory drift posture could not be collected read-only: {error}"
+                            ),
+                            Some("ee doctor --json".to_string()),
+                        )
+                    };
                 SwarmBriefSourceOutput {
                     snapshot: SwarmBriefSourceSnapshot::unavailable(
                         source,

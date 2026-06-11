@@ -988,6 +988,57 @@ pub fn build_memory_drift_report(
     build_memory_drift_report_with_connection(&connection, options)
 }
 
+/// bd-1xpq9: degraded code for memory-drift COLLECTION being blocked by
+/// workspace write-lock contention. Distinct from
+/// `memory_drift_source_unverifiable`: that code means evidence was
+/// inspected and could not be verified; this one means the collector
+/// never reached evidence inspection at all.
+pub const MEMORY_DRIFT_LOCK_CONTENTION_CODE: &str = "memory_drift_lock_contention";
+
+/// Detail schema for lock-contention emissions (bd-1xpq9).
+pub const MEMORY_DRIFT_LOCK_CONTENTION_SCHEMA: &str = "ee.memory_drift.lock_contention.v1";
+
+/// True when a memory-drift collection error is workspace write-lock
+/// contention. Matches the stable lock-acquisition error texts from the
+/// DB layer ("could not open/acquire database write lock"); those
+/// strings are part of the storage error contract.
+#[must_use]
+pub fn memory_drift_error_is_lock_contention(error: &DomainError) -> bool {
+    let text = error.message();
+    text.contains("could not acquire database write lock")
+        || text.contains("could not open database write lock")
+}
+
+/// Redaction-safe structured details for a lock-contention emission:
+/// names the collector surface and lock class, and states explicitly
+/// that NO memory evidence was inspected — so consumers can never
+/// confuse this with stale provenance. No lock-holder internals, no
+/// host-private absolute paths.
+#[must_use]
+pub fn memory_drift_lock_contention_details(collector_surface: &str) -> serde_json::Value {
+    serde_json::json!({
+        "schema": MEMORY_DRIFT_LOCK_CONTENTION_SCHEMA,
+        "collectorSurface": collector_surface,
+        "lockAcquisitionClass": "workspace_write_lock",
+        "lockPath": ".ee/ee.write.lock",
+        "sourceFreshness": "not_inspected",
+        "memoryEvidenceInspected": false,
+    })
+}
+
+/// Canonical agent-facing message for the lock-contention code.
+#[must_use]
+pub fn memory_drift_lock_contention_message(collector_surface: &str) -> String {
+    format!(
+        "Memory drift collection on {collector_surface} was blocked by workspace write-lock \
+         contention before any evidence inspection; memory evidence was NOT inspected and this \
+         does not indicate stale provenance."
+    )
+}
+
+/// Canonical non-mutating repair guidance for the lock-contention code.
+pub const MEMORY_DRIFT_LOCK_CONTENTION_REPAIR: &str = "Retry after the current lock holder finishes, or inspect holders read-only with `ee diag advisory-lock --workspace . --resource-type workspace --json`.";
+
 pub fn build_memory_drift_report_read_only(
     options: &MemoryDriftReportOptions<'_>,
 ) -> Result<MemoryDriftReport, DomainError> {
@@ -2551,5 +2602,61 @@ mod tests {
         assert_eq!(transition.file_line.as_deref(), Some("src/db/mod.rs:42"));
         assert!(transition.is_degradation());
         assert_eq!(transition.anchor_value_hash, anchor.anchor_value_hash);
+    }
+    /// bd-1xpq9: lock-contention classification matches the stable DB lock
+    /// error texts and nothing else.
+    #[test]
+    fn lock_contention_classification_matches_stable_lock_errors() {
+        let contended = DomainError::Storage {
+            message: "Failed to open database read-only for memory drift report: could not \
+                      acquire database write lock: contention timeout"
+                .to_owned(),
+            repair: None,
+        };
+        assert!(memory_drift_error_is_lock_contention(&contended));
+        let open_failed = DomainError::Storage {
+            message: "could not open database write lock: permission denied".to_owned(),
+            repair: None,
+        };
+        assert!(memory_drift_error_is_lock_contention(&open_failed));
+        let unrelated = DomainError::Storage {
+            message: "Failed to open database read-only for memory drift report: disk I/O error"
+                .to_owned(),
+            repair: None,
+        };
+        assert!(!memory_drift_error_is_lock_contention(&unrelated));
+    }
+
+    /// bd-1xpq9: the structured details state explicitly that no memory
+    /// evidence was inspected, with redaction-safe fields only.
+    #[test]
+    fn lock_contention_details_are_explicit_and_redaction_safe() {
+        let details = memory_drift_lock_contention_details("swarm_brief");
+        assert_eq!(
+            details["schema"],
+            serde_json::json!(MEMORY_DRIFT_LOCK_CONTENTION_SCHEMA)
+        );
+        assert_eq!(
+            details["collectorSurface"],
+            serde_json::json!("swarm_brief")
+        );
+        assert_eq!(
+            details["lockAcquisitionClass"],
+            serde_json::json!("workspace_write_lock")
+        );
+        assert_eq!(details["memoryEvidenceInspected"], serde_json::json!(false));
+        assert_eq!(
+            details["sourceFreshness"],
+            serde_json::json!("not_inspected")
+        );
+        let rendered = details.to_string();
+        assert!(
+            !rendered.contains("/Users") && !rendered.contains("/private"),
+            "details must not leak host-private absolute paths"
+        );
+        assert!(
+            memory_drift_lock_contention_message("swarm_brief").contains("NOT inspected"),
+            "the message must state evidence was not inspected"
+        );
     }
 }
