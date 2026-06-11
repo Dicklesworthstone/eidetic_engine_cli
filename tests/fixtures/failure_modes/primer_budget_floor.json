@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "primer_budget_floor",
+  "introduced_by": {
+    "bead": "bd-39tzu.2",
+    "epic_letter": "PRM"
+  },
+  "surfaces": [
+    "primer",
+    "orient"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "Proportional budget shrink hit a section floor: under a tight --tokens budget the quota mix could not honor every section share, so lower-priority items were evicted to keep the floor order rules > warnings > decisions > loadBearing (rules never drop to zero while any exist; ADR 0065 §2/§6). meta.floors_engaged names the sections.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Always run the verify script before pushing changes to the main branch of this repository, without exception, every single time.' --workspace . --level procedural --kind rule --json"
+    ],
+    "invocation": "ee primer --tokens 40 --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "primer_budget_floor",
+    "severity": "info",
+    "message_contains": [
+      "floor"
+    ]
+  },
+  "notes": "The floor is the contract working: a 200-token primer is a selection subset of the 600-token primer, not a rewrite (golden-tested at 200/600/4000 in tests/primer_cli_golden.rs). Agents seeing this code with an unexpectedly thin primer should raise --tokens rather than treat the output as incomplete."
+}

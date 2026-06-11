@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "primer_cache_cold",
+  "introduced_by": {
+    "bead": "bd-39tzu.2",
+    "epic_letter": "PRM"
+  },
+  "surfaces": [
+    "primer",
+    "orient"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "No primer_cache row exists for the (workspace generation, config hash, budget, format) key, so the primer assembled fresh instead of serving cached bytes (ADR 0065 §3/§6). Any DB generation advance, config change, budget override, or format switch lands on this path once; the assembly persists the result so the next identical call is a byte-identical cache hit.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Always run the verify script before pushing.' --workspace . --level procedural --kind rule --json"
+    ],
+    "invocation": "ee primer --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "primer_cache_cold",
+    "severity": "info",
+    "message_contains": [
+      "no primer cache row",
+      "assembled fresh"
+    ]
+  },
+  "notes": "Informational by design: cold is the normal first-call state and after every memory write. Agents should never retry on this code; the warm-hit latency contract (<100ms) only applies to the cached path, which the very same call just warmed."
+}

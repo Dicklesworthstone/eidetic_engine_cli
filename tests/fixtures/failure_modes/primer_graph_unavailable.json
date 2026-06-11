@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "primer_graph_unavailable",
+  "introduced_by": {
+    "bead": "bd-39tzu.2",
+    "epic_letter": "PRM"
+  },
+  "surfaces": [
+    "primer",
+    "orient"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Persisted centrality rows (the latest valid memory-links graph snapshot) are missing or unusable, so the loadBearing section is honestly omitted and the rules ranking uses a neutral authority factor instead of recomputing graph metrics inline (ADR 0065 §1/§6 — the latency contract forbids inline graph computation).",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Always run the verify script before pushing.' --workspace . --level procedural --kind rule --json"
+    ],
+    "invocation": "ee primer --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "primer_graph_unavailable",
+    "severity": "info",
+    "message_contains": [
+      "centrality rows",
+      "loadBearing"
+    ],
+    "repair_contains": "ee graph centrality-refresh --workspace ."
+  },
+  "notes": "Honest omission, never fabrication: a primer without a loadBearing section is correct for a workspace that has not refreshed graph snapshots. The repair refreshes persisted centrality; the next assembly then includes the section."
+}

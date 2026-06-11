@@ -76,6 +76,7 @@ set -euo pipefail
 #   6.05 Output Budget E2E     - scripts/e2e_output_budget.sh
 #   6.06 Replay Lab Smoke E2E  - scripts/e2e_overhaul/swarm_replay_lab_smoke.sh
 #   6.07 Why-Not E2E          - scripts/e2e_why_not.sh
+#   6.075 Primer/AGENTS.md E2E - scripts/e2e_primer_agentsmd.sh
 #   6.08 Cross-Cutting E2E     - scripts/e2e_cross_cutting.sh
 #   6.09 Evidence Harvester E2E - scripts/e2e_evidence_harvester.sh
 #   6.10 LOD Packing E2E       - scripts/e2e_lod_packing.sh
@@ -1064,6 +1065,12 @@ run_stage "Replay Lab Smoke E2E (bd-ppbue.8)" "./scripts/e2e_overhaul/swarm_repl
 
 # Gate 6.07: Dueling Wizards why-not real-binary E2E.
 run_stage "Dueling Wizards Why-Not E2E" "./scripts/e2e_why_not.sh"
+
+# Gate 6.075: Primer + AGENTS.md bridge real-binary E2E (bd-39tzu.5).
+# Real-binary, no-Cargo: cold/warm primer cache contract, generation
+# invalidation, managed-block export/backup/hand-edit refusal, candidates-only
+# import, and the drift diagnostic, all logging ee.test_event.v1 lines.
+run_stage "Primer/AGENTS.md Bridge E2E (bd-39tzu.5)" "./scripts/e2e_primer_agentsmd.sh"
 
 # Gate 6.08: Dueling Wizards cross-cutting static E2E. This is intentionally
 # no-Cargo and checks the shared manifests/static gates before the feature

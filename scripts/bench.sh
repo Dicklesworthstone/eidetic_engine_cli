@@ -420,6 +420,32 @@ run_status_smoke() {
     fi
 }
 
+run_primer_smoke() {
+    echo "" >&2
+    echo "[*] Primer latency smoke (bd-39tzu.5: cold assemble + warm cache hit)..." >&2
+    for op in ee_primer_cold_assemble ee_primer_warm_cache_hit; do
+        if output=$(cargo bench --bench primer -- "$op" --warm-up-time 0.5 --measurement-time 1 --sample-size 10 2>&1); then
+            time_line=$(parse_time_value "$output")
+            if [ -n "$time_line" ]; then
+                value=${time_line% *}
+                unit=${time_line#* }
+                elapsed=$(to_ms "$value" "$unit")
+                append_measured_ms "$op" "$elapsed"
+                echo "[+] $op: ${elapsed}ms" >&2
+            else
+                append_smoke_failure "$op"
+                echo "[-] $op: no time line in criterion output" >&2
+                FAILED=true
+            fi
+        else
+            printf '%s\n' "$output" >&2
+            append_smoke_failure "$op"
+            echo "[-] $op: FAILED" >&2
+            FAILED=true
+        fi
+    done
+}
+
 run_criterion_bench() {
     bench="$1"
     compare_only=false
@@ -820,6 +846,7 @@ fi
 
 if [ "$PROFILE" = "ci-smoke" ]; then
     run_pack_replay_freshness_smoke
+    run_primer_smoke
 fi
 
 WORKLOAD_JSON=$(workload_json)

@@ -289,3 +289,324 @@ fn validate_against_schema(schema: &Value, payload: &Value) -> TestResult {
     let _unused: &Path = Path::new(".");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// bd-39tzu.5 — budget-sweep + centrality-seeded goldens.
+// ---------------------------------------------------------------------------
+
+const SWEEP_WORKSPACE_ID: &str = "wsp_00000000000000000000000073";
+
+/// Richer fixture per the bd-39tzu.5 spec: rules/failures/decisions with a
+/// supersedes link and PERSISTED centrality rows, so all four sections
+/// (loadBearing included) participate in the budget sweep.
+fn seed_sweep_workspace() -> Result<tempfile::TempDir, String> {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let db_dir = temp.path().join(".ee");
+    std::fs::create_dir_all(&db_dir).map_err(|error| format!("mkdir .ee: {error}"))?;
+    let connection = ee::db::DbConnection::open_file(&db_dir.join("ee.db"))
+        .map_err(|error| format!("open db: {error}"))?;
+    connection
+        .migrate()
+        .map_err(|error| format!("migrate: {error}"))?;
+    connection
+        .insert_workspace(
+            SWEEP_WORKSPACE_ID,
+            &ee::db::CreateWorkspaceInput {
+                path: temp.path().to_string_lossy().into_owned(),
+                name: Some("primer-sweep".to_owned()),
+            },
+        )
+        .map_err(|error| format!("insert workspace: {error}"))?;
+
+    let seeds: [(&str, &str, &str, &str, f32); 12] = [
+        (
+            "mem_00000000000000000000000021",
+            "procedural",
+            "rule",
+            "Always run the verify script before pushing changes to main.",
+            0.95,
+        ),
+        (
+            "mem_00000000000000000000000022",
+            "procedural",
+            "rule",
+            "Never regenerate goldens on a Mac-local checkout; use the remote lane.",
+            0.9,
+        ),
+        (
+            "mem_00000000000000000000000023",
+            "procedural",
+            "rule",
+            "Use sqlmodel for storage access; rusqlite is a forbidden dependency.",
+            0.85,
+        ),
+        (
+            "mem_00000000000000000000000024",
+            "procedural",
+            "rule",
+            "Prefer append-only writes with deterministic idempotency keys for imports.",
+            0.8,
+        ),
+        (
+            "mem_00000000000000000000000025",
+            "episodic",
+            "failure",
+            "Release broke when goldens were regenerated on the wrong host.",
+            0.85,
+        ),
+        (
+            "mem_00000000000000000000000026",
+            "episodic",
+            "failure",
+            "Index rebuild stalled when CARGO_TARGET_DIR pointed at the ExFAT volume.",
+            0.8,
+        ),
+        (
+            "mem_00000000000000000000000027",
+            "episodic",
+            "risk",
+            "Schema list golden drifts silently when a registry entry lands without regen.",
+            0.75,
+        ),
+        (
+            "mem_00000000000000000000000028",
+            "semantic",
+            "decision",
+            "Keep the async runtime on asupersync; tokio is forbidden.",
+            0.9,
+        ),
+        (
+            "mem_00000000000000000000000029",
+            "semantic",
+            "decision",
+            "Pack budgeting uses the cl100k_base estimator everywhere.",
+            0.85,
+        ),
+        (
+            "mem_00000000000000000000000030",
+            "semantic",
+            "decision",
+            "Superseded: packs were once budgeted by character count.",
+            0.6,
+        ),
+        (
+            "mem_00000000000000000000000031",
+            "semantic",
+            "fact",
+            "The workspace database lives at .ee/ee.db and migrates on open.",
+            0.8,
+        ),
+        (
+            "mem_00000000000000000000000032",
+            "semantic",
+            "fact",
+            "Golden artifacts under tests/fixtures/golden freeze surface contracts.",
+            0.75,
+        ),
+    ];
+    for (id, level, kind, content, confidence) in seeds {
+        connection
+            .insert_memory(
+                id,
+                &ee::db::CreateMemoryInput {
+                    workspace_id: SWEEP_WORKSPACE_ID.to_owned(),
+                    level: level.to_owned(),
+                    kind: kind.to_owned(),
+                    content: content.to_owned(),
+                    workflow_id: None,
+                    confidence,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some("test://primer-sweep".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["primer-sweep".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| format!("insert memory {id}: {error}"))?;
+    }
+
+    // Decision 29 supersedes decision 30: 30 must drop from the section.
+    connection
+        .insert_memory_link(
+            "link_00000000000000000000000001",
+            &ee::db::CreateMemoryLinkInput {
+                src_memory_id: "mem_00000000000000000000000029".to_owned(),
+                dst_memory_id: "mem_00000000000000000000000030".to_owned(),
+                relation: ee::db::MemoryLinkRelation::Supersedes,
+                weight: 1.0,
+                confidence: 0.9,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: None,
+                source: ee::db::MemoryLinkSource::Human,
+                created_by: Some("primer-sweep-fixture".to_owned()),
+                metadata_json: None,
+            },
+        )
+        .map_err(|error| format!("insert supersedes link: {error}"))?;
+
+    // Persisted centrality rows (valid memory-links snapshot) so the
+    // loadBearing section renders instead of honestly omitting.
+    let metrics = serde_json::json!({
+        "graph": {
+            "nodes": [
+                {"memoryId": "mem_00000000000000000000000031", "authority": 0.9, "betweenness": 0.7},
+                {"memoryId": "mem_00000000000000000000000032", "authority": 0.8, "betweenness": 0.6},
+                {"memoryId": "mem_00000000000000000000000021", "authority": 0.5, "betweenness": 0.4}
+            ]
+        }
+    });
+    connection
+        .insert_graph_snapshot(
+            "gsnap_0000000000000000000000001",
+            &ee::db::CreateGraphSnapshotInput {
+                workspace_id: SWEEP_WORKSPACE_ID.to_owned(),
+                snapshot_version: 1,
+                schema_version: "ee.graph.snapshot.v1".to_owned(),
+                graph_type: ee::db::GraphSnapshotType::MemoryLinks,
+                node_count: 3,
+                edge_count: 1,
+                metrics_json: metrics.to_string(),
+                content_hash: "blake3:primer-sweep-fixture".to_owned(),
+                source_generation: 0,
+                expires_at: None,
+            },
+        )
+        .map_err(|error| format!("insert graph snapshot: {error}"))?;
+
+    connection
+        .close()
+        .map_err(|error| format!("close db: {error}"))?;
+    Ok(temp)
+}
+
+fn sweep_run(workspace: &Path, tokens: &str) -> Result<Value, String> {
+    let output = run_ee(&[
+        "primer",
+        "--no-persist",
+        "--tokens",
+        tokens,
+        "--workspace",
+        workspace.to_str().unwrap(),
+        "--json",
+    ])?;
+    if !output.status.success() {
+        return Err(format!(
+            "ee primer --tokens {tokens} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|error| format!("parse: {error}"))
+}
+
+fn section_ids(payload: &Value, section: &str) -> Vec<String> {
+    payload
+        .pointer("/data/sections")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.pointer("/name").and_then(Value::as_str) == Some(section))
+        .flat_map(|entry| {
+            entry
+                .pointer("/items")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|item| {
+            item.pointer("/memory_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+#[test]
+fn primer_budget_sweep_goldens_and_monotone_subset() -> TestResult {
+    let workspace = seed_sweep_workspace()?;
+    let sweep_200 = sweep_run(workspace.path(), "200")?;
+    let sweep_600 = sweep_run(workspace.path(), "600")?;
+    let sweep_4000 = sweep_run(workspace.path(), "4000")?;
+
+    assert_primer_golden("sweep_200.json.golden", &(sweep_200.to_string() + "\n"))?;
+    assert_primer_golden("sweep_600.json.golden", &(sweep_600.to_string() + "\n"))?;
+    assert_primer_golden("sweep_4000.json.golden", &(sweep_4000.to_string() + "\n"))?;
+
+    // Monotone scaling: a smaller budget output is a SELECTION SUBSET of the
+    // larger budget output per section, never a rewrite (ADR 0065 §2).
+    for section in ["rules", "warnings", "decisions", "loadBearing"] {
+        let small = section_ids(&sweep_200, section);
+        let medium = section_ids(&sweep_600, section);
+        let large = section_ids(&sweep_4000, section);
+        for id in &small {
+            if !medium.contains(id) {
+                return Err(format!("{section}: 200-token id {id} missing at 600"));
+            }
+        }
+        for id in &medium {
+            if !large.contains(id) {
+                return Err(format!("{section}: 600-token id {id} missing at 4000"));
+            }
+        }
+    }
+
+    // The centrality-seeded fixture must actually render loadBearing at the
+    // full budget, and the superseded decision must be excluded.
+    let load_bearing = section_ids(&sweep_4000, "loadBearing");
+    if load_bearing.is_empty() {
+        return Err("loadBearing must render with persisted centrality rows".to_owned());
+    }
+    let decisions = section_ids(&sweep_4000, "decisions");
+    if decisions.contains(&"mem_00000000000000000000000030".to_owned()) {
+        return Err("superseded decision must be excluded from the decisions section".to_owned());
+    }
+    let degraded_codes: Vec<&str> = sweep_4000
+        .pointer("/data/degraded")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.pointer("/code").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    if degraded_codes.contains(&"primer_graph_unavailable") {
+        return Err("persisted centrality rows must suppress primer_graph_unavailable".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn primer_consecutive_runs_are_byte_identical_modulo_cache_flag() -> TestResult {
+    let workspace = seed_sweep_workspace()?;
+    let workspace_arg = workspace.path().to_str().unwrap().to_owned();
+    let first = run_ee(&["primer", "--workspace", &workspace_arg, "--json"])?;
+    let second = run_ee(&["primer", "--workspace", &workspace_arg, "--json"])?;
+    let mut first_json: Value =
+        serde_json::from_slice(&first.stdout).map_err(|error| format!("parse first: {error}"))?;
+    let mut second_json: Value =
+        serde_json::from_slice(&second.stdout).map_err(|error| format!("parse second: {error}"))?;
+    if second_json.pointer("/data/cache_hit") != Some(&Value::Bool(true)) {
+        return Err("second consecutive run must be a cache hit".to_owned());
+    }
+    // Whole-payload determinism: only the cache_hit flag may differ.
+    if let Some(data) = first_json
+        .pointer_mut("/data")
+        .and_then(Value::as_object_mut)
+    {
+        data.remove("cache_hit");
+    }
+    if let Some(data) = second_json
+        .pointer_mut("/data")
+        .and_then(Value::as_object_mut)
+    {
+        data.remove("cache_hit");
+    }
+    if first_json != second_json {
+        return Err("consecutive primer runs must be byte-identical modulo cache_hit".to_owned());
+    }
+    Ok(())
+}
