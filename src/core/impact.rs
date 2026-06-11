@@ -437,6 +437,9 @@ fn exact_impact_results(
 
     let mut results = Vec::new();
     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    if limit == 0 {
+        return Ok(results);
+    }
     for (memory_id, mut memory_anchors) in grouped {
         let Some(memory) = connection.get_memory(&memory_id)? else {
             scope_stats.record_candidate_id(false, Some(&memory_id));
@@ -656,6 +659,44 @@ mod tests {
         assert_eq!(data["results"][0]["matchType"], "exact_anchor");
         let anchor_block = data["results"][0]["anchor"].to_string();
         assert!(!anchor_block.contains("src/core/impact.rs"));
+        Ok(())
+    }
+
+    #[test]
+    fn impact_zero_limit_returns_no_exact_anchor_results() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let db_path = workspace.join("impact.ee.db");
+        let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        seed_anchor_database(&connection, &workspace).map_err(|error| error.to_string())?;
+
+        let report = run_impact(&ImpactOptions {
+            workspace_path: workspace,
+            database_path: Some(db_path),
+            index_dir: None,
+            surface: ImpactSurfaceQuery {
+                kind: MemoryAnchorKind::Path,
+                value: "src/core/impact.rs".to_owned(),
+            },
+            limit: 0,
+            speed: SpeedMode::Instant,
+            source_mode: SearchSourceMode::LexicalOnly,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        })
+        .map_err(|error| error.to_string())?;
+
+        assert!(report.results.is_empty());
+        assert_eq!(report.exact_anchor_count, 0);
+        assert_eq!(
+            report.fallback_status,
+            ImpactFallbackStatus::SkippedLimitFilled
+        );
+        assert_eq!(report.data_json()["resultCount"], 0);
         Ok(())
     }
 
