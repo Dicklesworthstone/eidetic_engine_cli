@@ -18,6 +18,8 @@ use chrono::{SecondsFormat, Utc};
 use rustix::process::{Pid, Signal, kill_process_group};
 use serde::{Deserialize, Serialize};
 
+use crate::core::preflight_guard::classify_repair_action_for_preflight;
+use crate::models::RecoveryKind;
 use crate::models::producer::{ProducerMetadata, ProducerSourceSystem};
 use crate::policy::redact_secret_like_content;
 
@@ -509,11 +511,13 @@ pub enum SourceRunSeverity {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SourceRunRecoveryAction {
     pub priority: u32,
     pub kind: SourceRunRecoveryKind,
     pub command: Option<String>,
     pub message: String,
+    pub repair_safety: SourceRunRepairSafety,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -526,6 +530,23 @@ pub enum SourceRunRecoveryKind {
     ManualCoordination,
     FailClosed,
     SkipSource,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRunRepairSafety {
+    pub risk_class: String,
+    pub preflight_command: Option<String>,
+    pub requires_human_approval: bool,
+    pub mutates_external_state: bool,
+    pub mutates_tracker_state: bool,
+    pub privacy_class: String,
+    pub next_action: String,
+    pub rule_id: String,
+    pub source: String,
+    pub reason_code: String,
+    pub evidence: Vec<String>,
+    pub preconditions: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -885,6 +906,11 @@ fn recovery_for_status(
             message:
                 "Retry the same source with a longer explicit timeout if the evidence is required."
                     .to_owned(),
+            repair_safety: source_run_manual_repair_safety(
+                "source_run_retry_timeout_manual_only",
+                &["source_run_recovery_without_command", "source_run_timeout"],
+                &["caller_must_set_explicit_timeout"],
+            ),
         }],
         SourceRunStatus::Failed | SourceRunStatus::SpawnFailed => {
             let kind = if policy.on_failure == SourceRunFailurePolicy::FailClosed {
@@ -892,17 +918,67 @@ fn recovery_for_status(
             } else {
                 SourceRunRecoveryKind::UseStaticFallback
             };
+            let (reason_code, evidence, preconditions) =
+                if policy.on_failure == SourceRunFailurePolicy::FailClosed {
+                    (
+                        "source_run_fail_closed_manual_only",
+                        [
+                            "source_run_recovery_without_command",
+                            "source_run_fail_closed_policy",
+                        ],
+                        ["operator_decision_required"],
+                    )
+                } else {
+                    (
+                        "source_run_static_fallback_manual_only",
+                        [
+                            "source_run_recovery_without_command",
+                            "source_run_best_effort_policy",
+                        ],
+                        ["fallback_must_be_documented"],
+                    )
+                };
             vec![SourceRunRecoveryAction {
                 priority: 1,
                 kind,
                 command: None,
                 message: "Use a documented fallback only when the source is best-effort; otherwise fail closed.".to_owned(),
+                repair_safety: source_run_manual_repair_safety(
+                    reason_code,
+                    &evidence,
+                    &preconditions,
+                ),
             }]
         }
         SourceRunStatus::ParseFailed
         | SourceRunStatus::StaleSource
         | SourceRunStatus::MalformedStore
         | SourceRunStatus::Blocked => Vec::new(),
+    }
+}
+
+fn source_run_manual_repair_safety(
+    reason_code: &str,
+    evidence: &[&str],
+    preconditions: &[&str],
+) -> SourceRunRepairSafety {
+    let assessment = classify_repair_action_for_preflight(RecoveryKind::None, None);
+    SourceRunRepairSafety {
+        risk_class: assessment.risk_class.to_owned(),
+        preflight_command: assessment.preflight_command,
+        requires_human_approval: assessment.requires_human_approval,
+        mutates_external_state: assessment.mutates_external_state,
+        mutates_tracker_state: assessment.mutates_tracker_state,
+        privacy_class: assessment.privacy_class.to_owned(),
+        next_action: assessment.next_action.as_str().to_owned(),
+        rule_id: assessment.rule_id.to_owned(),
+        source: assessment.source.to_owned(),
+        reason_code: reason_code.to_owned(),
+        evidence: evidence.iter().map(|item| (*item).to_owned()).collect(),
+        preconditions: preconditions
+            .iter()
+            .map(|item| (*item).to_owned())
+            .collect(),
     }
 }
 
@@ -1303,6 +1379,18 @@ mod tests {
         assert!(evidence.exit.killed_own_child);
         assert!(!evidence.exit.killed_peer_processes);
         assert_eq!(evidence.degraded[0].code, "source_run_timeout");
+        assert_eq!(
+            evidence.recovery[0].repair_safety.risk_class,
+            "unavailable_or_manual_only"
+        );
+        assert_eq!(
+            evidence.recovery[0].repair_safety.next_action,
+            "manual_only"
+        );
+        assert_eq!(
+            evidence.recovery[0].repair_safety.reason_code,
+            "source_run_retry_timeout_manual_only"
+        );
     }
 
     #[test]
@@ -1332,7 +1420,50 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_argv_and_env_material_are_not_serialized() {
+    fn serialized_recovery_actions_include_repair_safety_contract() -> Result<(), String> {
+        let evidence = evidence_for(SourceRunExecution::Completed {
+            exit_code: Some(2),
+            signal: None,
+            stdout: SourceRunPipeCapture::empty(),
+            stderr: SourceRunPipeCapture::from_bytes(b"coordination source failed", 128),
+            elapsed: Duration::from_millis(7),
+        });
+        let serialized = serde_json::to_value(&evidence)
+            .map_err(|error| format!("serialize evidence: {error}"))?;
+        let repair_safety = serialized
+            .pointer("/recovery/0/repairSafety")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "source-run recovery action must serialize repairSafety".to_owned())?;
+
+        assert_eq!(
+            repair_safety
+                .get("riskClass")
+                .and_then(serde_json::Value::as_str),
+            Some("unavailable_or_manual_only")
+        );
+        assert_eq!(
+            repair_safety
+                .get("nextAction")
+                .and_then(serde_json::Value::as_str),
+            Some("manual_only")
+        );
+        assert_eq!(
+            repair_safety
+                .get("source")
+                .and_then(serde_json::Value::as_str),
+            Some("repair_action_safety")
+        );
+        assert_eq!(
+            repair_safety
+                .get("reasonCode")
+                .and_then(serde_json::Value::as_str),
+            Some("source_run_static_fallback_manual_only")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unsafe_argv_and_env_material_are_not_serialized() -> Result<(), String> {
         let mut request = request();
         request.command = SourceRunCommand::new("agent-mail")
             .with_args(["--token", "SECRET_TOKEN=super-secret-value"])
@@ -1352,7 +1483,8 @@ mod tests {
             },
             &FixedClock::new("2026-05-24T05:04:00Z"),
         );
-        let serialized = serde_json::to_string(&evidence).expect("serialize evidence");
+        let serialized = serde_json::to_string(&evidence)
+            .map_err(|error| format!("serialize evidence: {error}"))?;
 
         assert_eq!(
             evidence.command.argv_redaction,
@@ -1361,6 +1493,7 @@ mod tests {
         assert!(evidence.command.display.is_none());
         assert!(!serialized.contains("SECRET_TOKEN"));
         assert!(!serialized.contains("super-secret-value"));
+        Ok(())
     }
 
     #[test]
