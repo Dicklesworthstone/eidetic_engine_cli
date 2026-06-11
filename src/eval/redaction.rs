@@ -232,7 +232,10 @@ impl LeakPattern {
 fn prefixed_token<'a>(word: &'a str, prefix: &str) -> Option<&'a str> {
     for (index, _) in word.match_indices(prefix) {
         let (before_prefix, prefixed_fragment) = word.split_at(index);
-        let prefix_is_token_start = before_prefix.chars().last().is_none_or(is_token_delimiter);
+        let prefix_is_token_start = before_prefix
+            .chars()
+            .last()
+            .is_none_or(is_prefix_start_delimiter);
         if prefix_is_token_start {
             let candidate = trim_token_delimiters(prefixed_fragment);
             if candidate.starts_with(prefix) && candidate.len() > prefix.len() {
@@ -252,6 +255,10 @@ fn is_token_delimiter(ch: char) -> bool {
         ch,
         '"' | '\'' | '`' | '{' | '}' | '[' | ']' | '(' | ')' | '<' | '>' | ',' | ':' | ';' | '='
     )
+}
+
+fn is_prefix_start_delimiter(ch: char) -> bool {
+    is_token_delimiter(ch) || matches!(ch, '/' | '\\' | '?' | '&' | '#')
 }
 
 /// A detected potential leak.
@@ -625,6 +632,36 @@ mod tests {
                 .any(|l| l.class == RedactionClass::InternalPath),
             true,
             "should be internal_path class",
+        )
+    }
+
+    #[test]
+    fn detector_detects_uri_wrapped_internal_path() -> TestResult {
+        let detector = RedactionLeakDetector::new();
+        let output = r#"{"uri": "file:///Users/alice/private/project.log"}"#;
+
+        let leaks = detector.detect_leaks(output);
+        ensure(
+            leaks.iter().any(|leak| {
+                leak.class == RedactionClass::InternalPath && leak.pattern_name == "users_path"
+            }),
+            true,
+            "file URI should still expose a macOS user path leak",
+        )
+    }
+
+    #[test]
+    fn detector_detects_url_path_secret_prefix() -> TestResult {
+        let detector = RedactionLeakDetector::new();
+        let output = "GET https://example.invalid/v1/sk-proj-redaction-fixture";
+
+        let leaks = detector.detect_leaks(output);
+        ensure(
+            leaks.iter().any(|leak| {
+                leak.class == RedactionClass::Secret && leak.pattern_name == "openai_key"
+            }),
+            true,
+            "URL path segment should still expose an API key prefix leak",
         )
     }
 
