@@ -43,18 +43,7 @@
       },
       "<remaining elements scrubbed>"
     ],
-    "degradedSignals": [
-      {
-        "code": "insights_section_unavailable",
-        "severity": "info",
-        "message": "One or more registered insights sections do not have DB-backed evidence yet.",
-        "repair": "Use sections with non-empty evidence, or implement the unavailable section builder.",
-        "sources": [
-          "kCore",
-          "kTruss"
-        ]
-      }
-    ]
+    "degradedSignals": []
   },
   "degraded": [
     {
