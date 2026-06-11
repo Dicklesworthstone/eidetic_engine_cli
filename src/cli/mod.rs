@@ -9723,6 +9723,15 @@ pub struct OutcomeArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub stdin: bool,
 
+    /// Resolve the target memory from a persisted pack's replay ledger
+    /// (use with --item; replaces TARGET_ID).
+    #[arg(long, value_name = "PACK_ID", conflicts_with = "target_id")]
+    pub pack: Option<String>,
+
+    /// 1-based pack item rank to grade (requires --pack).
+    #[arg(long, value_name = "N", requires = "pack")]
+    pub item: Option<u32>,
+
     /// Target type: memory, rule, session, source, pack, or candidate.
     #[arg(long, default_value = "memory")]
     pub target_type: String,
@@ -39747,6 +39756,99 @@ fn format_search_toon_with_mesh(report: &SearchReport, mesh_mode: MeshCommandMod
     output::render_toon_from_json(&format_search_json_with_mesh(report, mesh_mode))
 }
 
+/// bd-1pi9m.5: resolve `--pack <id> --item <n>` to the packed memory id
+/// through the persisted pack replay ledger, so an agent can grade item
+/// 3 of a pack it consumed without ever copying a memory id. Degrades
+/// honestly when the pack was assembled with --read-only/--no-persist.
+fn resolve_outcome_pack_item_target(
+    cli: &Cli,
+    args: &OutcomeArgs,
+    pack_id: &str,
+    item: u32,
+) -> Result<String, DomainError> {
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    let connection = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to open database for pack-item resolution: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        }
+    })?;
+    let record = connection
+        .get_pack_record(pack_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to look up pack record {pack_id}: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    // Agents usually hold data.pack.hash (the response never exposes the
+    // persisted row id), so accept a blake3 pack hash as the address too.
+    let resolved_pack_id = match record {
+        Some(record) => record.id,
+        None if pack_id.starts_with("blake3:") => {
+            let workspace_id = workspace_core::stable_workspace_id(&workspace_path);
+            connection
+                .list_recent_pack_items_for_workspace(&workspace_id, 10_000)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to scan pack records by hash: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?
+                .into_iter()
+                .find(|(candidate, _)| candidate.pack_hash == pack_id)
+                .map(|(candidate, _)| candidate.id)
+                .ok_or_else(|| DomainError::Usage {
+                    message: format!(
+                        "pack_ledger_missing: no persisted pack with hash {pack_id} in this \
+                         workspace — packs assembled with --read-only/--no-persist cannot be \
+                         item-addressed"
+                    ),
+                    repair: Some(
+                        "Re-run the pack without --read-only, or pass the memory id directly."
+                            .to_owned(),
+                    ),
+                })?
+        }
+        None => {
+            return Err(DomainError::Usage {
+                message: format!(
+                    "pack_ledger_missing: pack {pack_id} has no persisted replay ledger in this \
+                     workspace — packs assembled with --read-only/--no-persist cannot be \
+                     item-addressed"
+                ),
+                repair: Some(
+                    "Re-run the pack without --read-only, or pass the memory id directly."
+                        .to_owned(),
+                ),
+            });
+        }
+    };
+    let items = connection
+        .get_pack_items(&resolved_pack_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load pack items for {resolved_pack_id}: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    if item == 0 {
+        return Err(DomainError::Usage {
+            message: "--item is 1-based; item 0 does not exist".to_owned(),
+            repair: Some("Pass the 1-based item rank shown in the pack output.".to_owned()),
+        });
+    }
+    items
+        .iter()
+        .find(|candidate| candidate.rank == item)
+        .map(|candidate| candidate.memory_id.clone())
+        .ok_or_else(|| DomainError::Usage {
+            message: format!(
+                "pack {pack_id} has no item with rank {item} (ledger holds {} items)",
+                items.len()
+            ),
+            repair: Some("Inspect the ledger with `ee pack replay <pack-id> --json`.".to_owned()),
+        })
+}
+
 /// bd-1pi9m.5: `ee outcome trace <memory-id>` — read-only feedback
 /// introspection report.
 fn handle_outcome_trace<W, E>(
@@ -39907,8 +40009,25 @@ where
         message: message.to_owned(),
         repair: Some("ee outcome --help".to_owned()),
     };
-    let Some(target_id) = args.target_id.clone() else {
-        let error = usage("TARGET_ID is required unless --batch --stdin is given");
+    let resolved_pack_target = match (&args.pack, args.item) {
+        (Some(pack_id), Some(item)) => {
+            match resolve_outcome_pack_item_target(cli, args, pack_id, item) {
+                Ok(memory_id) => Some(memory_id),
+                Err(error) => {
+                    return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                }
+            }
+        }
+        (Some(_), None) => {
+            let error = usage("--pack requires --item <N> to address one pack item");
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        (None, _) => None,
+    };
+    let Some(target_id) = resolved_pack_target.or_else(|| args.target_id.clone()) else {
+        let error = usage(
+            "TARGET_ID (or --pack <id> --item <n>) is required unless --batch --stdin is given",
+        );
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     };
     let Some(signal) = args.signal.clone() else {
