@@ -285,7 +285,9 @@ where
         })?;
 
     let outcome = loop {
-        check_cancelled(cx, name)?;
+        if let Err(error) = check_cancelled(cx, name) {
+            break Err(error);
+        }
         let Some(remaining) = budget.checked_sub(started.elapsed()) else {
             break Err(GraphError::AlgorithmTimeout {
                 algorithm: name.to_owned(),
@@ -1786,6 +1788,62 @@ mod tests {
         assert_eq!(
             cancelled[0].fields.get("algorithm").map(String::as_str),
             Some("telemetry_cancelled_fixture")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn run_with_budget_emits_cancelled_telemetry_when_cancelled_after_start() -> TestResult {
+        let cx = Cx::for_testing();
+        let worker_cx = cx.clone();
+        let started = Arc::new(AtomicBool::new(false));
+        let started_for_worker = Arc::clone(&started);
+        let started_for_canceller = Arc::clone(&started);
+        let canceller_cx = cx.clone();
+        let canceller = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !started_for_canceller.load(Ordering::Acquire) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(1));
+            }
+            canceller_cx
+                .set_cancel_reason(CancelReason::timeout().with_message("mid-run cancellation"));
+        });
+
+        let mut outcome = None;
+        let events = capture_graph_events(|| {
+            outcome = Some(run_with_budget(
+                &cx,
+                "telemetry_midrun_cancelled_fixture",
+                DEFAULT_FOREGROUND_BUDGET,
+                move || {
+                    started_for_worker.store(true, Ordering::Release);
+                    while !worker_cx.is_cancel_requested() {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                    7_u64
+                },
+            ));
+        });
+
+        canceller
+            .join()
+            .map_err(|_| "mid-run cancellation helper panicked".to_owned())?;
+
+        match outcome.expect("run_with_budget should have returned") {
+            Err(GraphError::AlgorithmCancelled { algorithm, reason }) => {
+                assert_eq!(algorithm, "telemetry_midrun_cancelled_fixture");
+                assert!(reason.contains("mid-run cancellation"));
+            }
+            Err(other) => return Err(format!("expected AlgorithmCancelled, got {other:?}")),
+            Ok(value) => return Err(format!("expected AlgorithmCancelled, got Ok({value})")),
+        }
+
+        let cancelled = events_with_target(&events, ALGORITHM_CANCELLED_EVENT);
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(
+            cancelled[0].fields.get("algorithm").map(String::as_str),
+            Some("telemetry_midrun_cancelled_fixture")
         );
         Ok(())
     }
