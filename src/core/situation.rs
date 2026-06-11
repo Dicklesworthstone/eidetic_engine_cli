@@ -2449,7 +2449,10 @@ impl SituationAdoptReport {
             "inputHash": self.input_hash,
             "category": self.category.as_str(),
             "confidence": self.confidence,
-            "confidenceScore": self.confidence_score,
+            // Same 3-decimal stabilization as classify's stable_score_json:
+            // the stored f64 carries f32-cast noise that must not leak
+            // into the wire contract.
+            "confidenceScore": (self.confidence_score * 1_000.0).round() / 1_000.0,
             "contextHints": self.context_hints,
             "evidenceIds": self.evidence_ids,
             "createdAt": self.created_at,
@@ -2463,11 +2466,7 @@ impl SituationAdoptReport {
 
     #[must_use]
     pub fn human_summary(&self) -> String {
-        let mut output = format!(
-            "Situation {} ({})\n",
-            self.situation_id,
-            self.posture()
-        );
+        let mut output = format!("Situation {} ({})\n", self.situation_id, self.posture());
         output.push_str(&format!(
             "Category: {} ({} confidence, score {:.2})\n",
             self.category.as_str(),
@@ -2476,7 +2475,10 @@ impl SituationAdoptReport {
         ));
         output.push_str(&format!("Adopted: {}\n", self.adopted_at));
         if !self.context_hints.is_empty() {
-            output.push_str(&format!("Context hints: {}\n", self.context_hints.join(", ")));
+            output.push_str(&format!(
+                "Context hints: {}\n",
+                self.context_hints.join(", ")
+            ));
         }
         if !self.evidence_ids.is_empty() {
             output.push_str(&format!("Evidence: {}\n", self.evidence_ids.join(", ")));

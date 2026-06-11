@@ -1,0 +1,29 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "command": "situation adopt",
+    "version": "ee.situation.adopt.v1",
+    "situationId": "sit_DYNAMIC",
+    "posture": "adopted",
+    "workspaceScope": "<scrubbed:workspaceScope>",
+    "inputHash": "situation_input_a9667bd52404dadb",
+    "category": "bug_fix",
+    "confidence": "low",
+    "confidenceScore": 0.49,
+    "contextHints": [
+      "fail",
+      "fix"
+    ],
+    "evidenceIds": [
+      "cass-session://incident-release#L1-L3"
+    ],
+    "createdAt": "2026-06-11T00:00:00Z",
+    "adoptedAt": "2026-06-11T00:00:00Z",
+    "recordSchemaVersion": "ee.situation.record.v1",
+    "classifierAlgorithm": "ee.situation.heuristics.v1",
+    "classifierVersion": "1",
+    "buildVersion": "<scrubbed:eeVersion>"
+  },
+  "degraded": []
+}
