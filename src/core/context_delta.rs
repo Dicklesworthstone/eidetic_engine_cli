@@ -437,6 +437,13 @@ pub fn compute_context_delta(
             repair: None,
             details: None,
         });
+        // bd-gj2bg: the fallback marker just grew the serialized envelope, so
+        // re-converge the measurement — tokenSavings.deltaBytes must describe
+        // the envelope as it now is, even though most callers fall back to
+        // the full pack before serializing it.
+        let post_marker_bytes = stable_serialized_len(&mut envelope)?;
+        envelope.data.token_savings =
+            token_savings(new.full_bytes, post_marker_bytes, new.net_pack_tokens);
     }
 
     Ok(envelope)
@@ -931,6 +938,36 @@ mod tests {
         if rendered != expected {
             return Err(format!(
                 "markdown delta rendering drifted from the golden:\n--- expected\n{expected}\n+++ actual\n{rendered}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// bd-gj2bg: when the kernel-level max-delta fallback fires, the
+    /// oversized marker grows the envelope — tokenSavings.deltaBytes must
+    /// be re-converged so the envelope is internally consistent even if a
+    /// caller serializes it directly instead of falling back.
+    #[test]
+    fn oversized_fallback_envelope_reports_post_marker_delta_bytes() -> TestResult {
+        let prior = snapshot("h1", 1, 5_000, vec![item("mem_a", "a", 10)]);
+        let new = snapshot(
+            "h2",
+            2,
+            5_000,
+            vec![item("mem_a", "a", 10), item("mem_b", "b", 20)],
+        );
+        let mut envelope = compute_context_delta(&prior, &new, ContextDeltaOptions::new(Some(1)))
+            .map_err(|error| error.to_string())?;
+        if envelope.emits_delta() {
+            return Err("a 1-byte budget must trigger the oversized fallback".to_string());
+        }
+        let reported = envelope.data.token_savings.delta_bytes;
+        let remeasured =
+            super::stable_serialized_len(&mut envelope).map_err(|error| error.to_string())?;
+        if reported != remeasured {
+            return Err(format!(
+                "post-marker deltaBytes is stale: reported {reported}, envelope actually \
+                 serializes to {remeasured} bytes"
             ));
         }
         Ok(())
