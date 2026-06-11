@@ -4269,6 +4269,7 @@ struct SupportDiagnosticRedaction {
 /// not surfaced as a hard error, since the summary already truncates to
 /// 16 samples per directory).
 fn read_support_bundle_sample_file_bounded(path: &Path) -> Option<String> {
+    reject_existing_symlink_component(path, "support bundle sample file").ok()?;
     let metadata = fs::symlink_metadata(path).ok()?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_SUPPORT_BUNDLE_SAMPLE_FILE_BYTES {
         return None;
@@ -5672,12 +5673,16 @@ fn resolve_bundle_file_no_symlinks(
 }
 
 fn regular_file_no_symlink(path: &Path) -> bool {
+    if reject_existing_symlink_component(path, "support bundle file").is_err() {
+        return false;
+    }
     fs::symlink_metadata(path)
         .map(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
         .unwrap_or(false)
 }
 
 fn read_regular_file_no_symlinks(path: &Path) -> Result<String, DomainError> {
+    reject_existing_symlink_component(path, "support bundle file")?;
     let metadata = fs::symlink_metadata(path).map_err(|error| DomainError::Storage {
         message: format!(
             "Failed to inspect support bundle file {}: {error}",
@@ -10857,6 +10862,53 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn performance_sample_discovery_ignores_symlinked_parent_directory() -> TestResult {
+        let root = unique_test_path("performance-sample-parent-symlink");
+        let workspace = root.join("workspace");
+        let ee_dir = workspace.join(".ee");
+        fs::create_dir_all(&ee_dir)
+            .map_err(|error| format!("failed to create workspace .ee dir: {error}"))?;
+
+        let outside_dir = root.join("outside-performance-explain");
+        fs::create_dir_all(&outside_dir)
+            .map_err(|error| format!("failed to create outside sample dir: {error}"))?;
+        let outside_sample = outside_dir.join("external-sample.json");
+        fs::write(
+            &outside_sample,
+            json!({
+                "schema": crate::core::search::PERFORMANCE_EXPLAIN_SCHEMA_V1,
+                "success": true,
+                "data": {
+                    "command": "search",
+                    "fallbacks": []
+                }
+            })
+            .to_string(),
+        )
+        .map_err(|error| format!("failed to write outside sample: {error}"))?;
+
+        let linked_dir = ee_dir.join(PERFORMANCE_EXPLAIN_SAMPLE_DIR);
+        std::os::unix::fs::symlink(&outside_dir, &linked_dir)
+            .map_err(|error| format!("failed to create sample-dir symlink: {error}"))?;
+
+        let samples = discover_performance_explain_samples(&workspace);
+        assert!(
+            samples.is_empty(),
+            "performance sample discovery must not follow symlinked parent directories"
+        );
+        assert!(
+            summarize_performance_explain_sample(
+                &workspace,
+                &linked_dir.join("external-sample.json")
+            )
+            .is_none(),
+            "direct performance sample summarization must reject symlinked parent directories"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn swarm_report_discovery_ignores_symlinked_json() -> TestResult {
         let root = unique_test_path("swarm-report-symlink");
         let workspace = root.join("workspace");
@@ -10891,6 +10943,50 @@ mod tests {
         assert!(
             summarize_swarm_report(&workspace, &link).is_none(),
             "direct swarm report summarization must reject symlinked json files"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swarm_report_discovery_ignores_symlinked_parent_directory() -> TestResult {
+        let root = unique_test_path("swarm-report-parent-symlink");
+        let workspace = root.join("workspace");
+        let ee_dir = workspace.join(".ee");
+        fs::create_dir_all(&ee_dir)
+            .map_err(|error| format!("failed to create workspace .ee dir: {error}"))?;
+
+        let outside_dir = root.join("outside-swarm-contention");
+        fs::create_dir_all(&outside_dir)
+            .map_err(|error| format!("failed to create outside report dir: {error}"))?;
+        let outside_report = outside_dir.join("external-report.json");
+        fs::write(
+            &outside_report,
+            json!({
+                "schema": "ee.swarm_contention.report.v1",
+                "scenario": "symlinked_parent_report",
+                "processCount": 1,
+                "successCount": 1,
+                "failureCount": 0,
+                "dbIntegrityOk": true,
+                "determinismOk": true
+            })
+            .to_string(),
+        )
+        .map_err(|error| format!("failed to write outside report: {error}"))?;
+
+        let linked_dir = ee_dir.join("swarm-contention");
+        std::os::unix::fs::symlink(&outside_dir, &linked_dir)
+            .map_err(|error| format!("failed to create report-dir symlink: {error}"))?;
+
+        let reports = discover_swarm_report_summaries(&workspace);
+        assert!(
+            reports.is_empty(),
+            "swarm report discovery must not follow symlinked parent directories"
+        );
+        assert!(
+            summarize_swarm_report(&workspace, &linked_dir.join("external-report.json")).is_none(),
+            "direct swarm report summarization must reject symlinked parent directories"
         );
         Ok(())
     }
