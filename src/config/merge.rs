@@ -65,6 +65,7 @@ pub const PACK_LOD_FULL_BASIS_POINTS_KEY: &str = "pack.lod_full_basis_points";
 pub const PACK_LOD_TRUNCATED_PREVIEW_BASIS_POINTS_KEY: &str =
     "pack.lod_truncated_preview_basis_points";
 pub const PACK_LOD_LINK_ONLY_BASIS_POINTS_KEY: &str = "pack.lod_link_only_basis_points";
+pub const PACK_BASELINE_LEDGER_MAX_ROWS_KEY: &str = "pack.baseline_ledger_max_rows";
 pub const CACHE_PACK_L2_ENABLED_KEY: &str = "cache.pack_l2.enabled";
 pub const CACHE_PACK_L2_DIRECTORY_KEY: &str = "cache.pack_l2.directory";
 pub const CACHE_PACK_L2_MAX_BYTES_KEY: &str = "cache.pack_l2.max_bytes";
@@ -1034,6 +1035,8 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             lod_full_basis_points: None,
             lod_truncated_preview_basis_points: None,
             lod_link_only_basis_points: None,
+            // Unset: the in-code 32-row default applies (bd-7lvbg.6).
+            baseline_ledger_max_rows: None,
         },
         task_lens: TaskLensConfig::default(),
         handoff: HandoffConfig::default(),
@@ -1288,6 +1291,8 @@ pub fn config_from_env(
             lod_full_basis_points: None,
             lod_truncated_preview_basis_points: None,
             lod_link_only_basis_points: None,
+            // No environment variable drives the baseline-ledger cap.
+            baseline_ledger_max_rows: None,
         },
         task_lens: TaskLensConfig::default(),
         curation: CurationConfig::default(),
@@ -1673,6 +1678,15 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.pack.lod_link_only_basis_points,
                 &layers.user.pack.lod_link_only_basis_points,
                 &layers.defaults.pack.lod_link_only_basis_points,
+            ),
+            baseline_ledger_max_rows: pick_field(
+                &mut sources,
+                PACK_BASELINE_LEDGER_MAX_ROWS_KEY,
+                &layers.cli.pack.baseline_ledger_max_rows,
+                &layers.environment.pack.baseline_ledger_max_rows,
+                &layers.project.pack.baseline_ledger_max_rows,
+                &layers.user.pack.baseline_ledger_max_rows,
+                &layers.defaults.pack.baseline_ledger_max_rows,
             ),
         },
         task_lens: merge_task_lens_config(layers),
