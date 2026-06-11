@@ -344,11 +344,7 @@ fn path_pattern_matches(pattern: &str, path: &str) -> bool {
 
 fn find_relevant_blockers(inputs: &DuplicateWorkInputs<'_>) -> Vec<KnownBlockerAdvisory> {
     let Some(candidate) = inputs.candidate.as_ref() else {
-        return inputs
-            .known_blockers
-            .iter()
-            .map(KnownBlockerAdvisory::from_input)
-            .collect();
+        return Vec::new();
     };
     let mut findings: Vec<KnownBlockerAdvisory> = inputs
         .known_blockers
@@ -560,6 +556,76 @@ mod tests {
             SuggestedAction::WaitForReservation
         );
         assert_eq!(verdict.confidence, Confidence::Low);
+    }
+
+    #[test]
+    fn no_candidate_ignores_known_blockers_as_unproven_relevance() {
+        let blocker = KnownBlockerInput {
+            blocker_kind: "rch_verify_topology_blocked".to_string(),
+            command_fingerprint: "cargo_test:rch_verify_contract".to_string(),
+            evidence_hash: "blake3:def456".to_string(),
+            owner_agent: Some("NobleMill".to_string()),
+            remediation_bead: Some("bd-17c65.10.17.1".to_string()),
+        };
+        let blockers = [blocker];
+        let inputs = DuplicateWorkInputs {
+            candidate: None,
+            edit_paths: &[],
+            bead_claim: None,
+            active_verifications: &[],
+            active_reservations: &[],
+            active_bead_claims: &[],
+            known_blockers: &blockers,
+            self_agent: agent(),
+        };
+
+        let verdict = detect_duplicate_work(&inputs);
+
+        assert!(verdict.known_blockers.is_empty());
+        assert_eq!(
+            verdict.suggested_action,
+            SuggestedAction::WaitForReservation
+        );
+        assert_eq!(verdict.confidence, Confidence::Low);
+    }
+
+    #[test]
+    fn no_candidate_known_blocker_does_not_mask_edit_overlap() {
+        let blocker = KnownBlockerInput {
+            blocker_kind: "rch_verify_topology_blocked".to_string(),
+            command_fingerprint: "cargo_test:rch_verify_contract".to_string(),
+            evidence_hash: "blake3:def456".to_string(),
+            owner_agent: Some("NobleMill".to_string()),
+            remediation_bead: Some("bd-17c65.10.17.1".to_string()),
+        };
+        let reservation = ActiveFileReservation {
+            path_pattern: "src/core/**".to_string(),
+            holder_agent: "OtherAgent".to_string(),
+            bead_id: Some("bd-other".to_string()),
+            thread_id: Some("thread-1".to_string()),
+        };
+        let blockers = [blocker];
+        let reservations = [reservation];
+        let edits = ["src/core/foo.rs"];
+        let inputs = DuplicateWorkInputs {
+            candidate: None,
+            edit_paths: &edits,
+            bead_claim: Some("bd-mine"),
+            active_verifications: &[],
+            active_reservations: &reservations,
+            active_bead_claims: &[],
+            known_blockers: &blockers,
+            self_agent: agent(),
+        };
+
+        let verdict = detect_duplicate_work(&inputs);
+
+        assert!(verdict.known_blockers.is_empty());
+        assert_eq!(
+            verdict.suggested_action,
+            SuggestedAction::CoordinateWithOwner
+        );
+        assert_eq!(verdict.duplicate_edit_candidates.len(), 1);
     }
 
     #[test]
