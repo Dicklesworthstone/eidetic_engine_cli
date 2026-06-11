@@ -14,7 +14,7 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Barrier, RwLock};
 use std::thread;
 
 use ee::graph::ppr_prefetch_cache::{PprPrefetchCache, PprPrefetchCacheKey};
@@ -47,13 +47,23 @@ fn eight_overlapping_callers_hit_the_cache_after_the_first() {
         guard.insert(hot_seed_key.clone(), hot_scores.clone());
     }
 
+    // Readers take the SHARED read lock — the same lock mode production's
+    // load_ppr_prefetch_result uses (get() is an &self hot path with an
+    // atomic LRU touch). A barrier holds every reader until all eight are
+    // spawned, so the lookups genuinely overlap inside the read guard: a
+    // regression from shared-read back to exclusive locking (or a
+    // deadlock in the touch path) fails or wedges this smoke instead of
+    // being serialized away.
+    let overlap = Arc::new(Barrier::new(8));
     let mut handles = Vec::with_capacity(8);
     for reader_index in 0..8 {
         let cache = Arc::clone(&cache);
+        let overlap = Arc::clone(&overlap);
         let lookup_key = hot_seed_key.clone();
         let expected_scores = hot_scores.clone();
         handles.push(thread::spawn(move || -> bool {
-            let guard = cache.write().expect("cache write lock for reader");
+            let guard = cache.read().expect("cache read lock for reader");
+            overlap.wait();
             match guard.get(&lookup_key) {
                 Some(hit) => {
                     assert_eq!(
