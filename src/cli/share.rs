@@ -95,13 +95,10 @@ where
     W: Write,
     E: Write,
 {
-    if args.peer_id.trim().is_empty() {
-        let error = DomainError::Usage {
-            message: "share preview requires --peer to name the target peer".to_owned(),
-            repair: Some("Use `ee share preview --peer peer_alpha --json`.".to_owned()),
-        };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-    }
+    let validated_args = match validate_share_preview_args(args) {
+        Ok(validated_args) => validated_args,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
 
     let workspace_path = cli.resolve_workspace();
     let database_path = args
@@ -129,14 +126,14 @@ where
     let candidates =
         share_preview_candidates(&memories, args.include_body, args.include_embeddings);
     let report = build_share_preview(&SharePreviewInput {
-        target_peer_id: args.peer_id.trim(),
+        target_peer_id: validated_args.peer_id,
         candidates: &candidates,
         consent_required: true,
         max_examples: args.max_examples,
     });
     let preview_hash = share_preview_hash(&report);
     let consent_record = if args.record_consent {
-        match record_share_consent(&connection, &workspace_id, args, &report) {
+        match record_share_consent(&connection, &workspace_id, &validated_args, &report) {
             Ok(record) => Some(record),
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         }
@@ -155,6 +152,54 @@ where
     };
 
     write_share_preview_report(cli, &render_input, stdout)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SharePreviewValidatedArgs<'a> {
+    peer_id: &'a str,
+    actor: &'a str,
+    consent_reason: &'a str,
+}
+
+fn validate_share_preview_args(
+    args: &SharePreviewArgs,
+) -> Result<SharePreviewValidatedArgs<'_>, DomainError> {
+    let peer_id = args.peer_id.trim();
+    if peer_id.is_empty() {
+        return Err(DomainError::Usage {
+            message: "share preview requires --peer to name the target peer".to_owned(),
+            repair: Some("Use `ee share preview --peer peer_alpha --json`.".to_owned()),
+        });
+    }
+
+    let actor = args.actor.trim();
+    if args.record_consent && actor.is_empty() {
+        return Err(DomainError::Usage {
+            message: "share preview --record-consent requires --actor to name the consenting operator".to_owned(),
+            repair: Some(
+                "Use `ee share preview --peer peer_alpha --record-consent --actor operator --json`."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    let consent_reason = args.consent_reason.trim();
+    if args.record_consent && consent_reason.is_empty() {
+        return Err(DomainError::Usage {
+            message: "share preview --record-consent requires a non-empty --consent-reason"
+                .to_owned(),
+            repair: Some(
+                "Use `ee share preview --peer peer_alpha --record-consent --consent-reason operator_preview_ack --json`."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    Ok(SharePreviewValidatedArgs {
+        peer_id,
+        actor,
+        consent_reason,
+    })
 }
 
 fn share_preview_candidates<'a>(
@@ -272,10 +317,10 @@ struct SharePreviewRenderInput<'a> {
 fn record_share_consent(
     connection: &DbConnection,
     workspace_id: &str,
-    args: &SharePreviewArgs,
+    args: &SharePreviewValidatedArgs<'_>,
     report: &SharePreviewReport,
 ) -> Result<ShareConsentRecord, DomainError> {
-    let audit = share_preview_consent_audit(report, true, false, args.consent_reason.clone());
+    let audit = share_preview_consent_audit(report, true, false, args.consent_reason);
     let details = json!({
         "schema": audit.schema,
         "targetPeerId": &audit.target_peer_id,
@@ -295,10 +340,10 @@ fn record_share_consent(
             &audit_id,
             &CreateAuditInput {
                 workspace_id: Some(workspace_id.to_owned()),
-                actor: Some(args.actor.trim().to_owned()),
+                actor: Some(args.actor.to_owned()),
                 action: SHARE_CONSENT_ACTION.to_owned(),
                 target_type: Some("mesh_peer".to_owned()),
-                target_id: Some(args.peer_id.trim().to_owned()),
+                target_id: Some(args.peer_id.to_owned()),
                 details: Some(details.to_string()),
             },
         )
@@ -503,6 +548,90 @@ mod tests {
             valid_from: Some("2026-05-19T00:00:00Z".to_owned()),
             valid_to: None,
         }
+    }
+
+    fn share_preview_args() -> SharePreviewArgs {
+        SharePreviewArgs {
+            peer_id: "peer_alpha".to_owned(),
+            database: None,
+            level: None,
+            include_body: false,
+            include_embeddings: false,
+            max_examples: 6,
+            record_consent: false,
+            actor: "operator".to_owned(),
+            consent_reason: "operator_preview_ack".to_owned(),
+        }
+    }
+
+    #[test]
+    fn share_preview_validation_rejects_blank_peer() {
+        let mut args = share_preview_args();
+        args.peer_id = " \t ".to_owned();
+
+        let error = validate_share_preview_args(&args).expect_err("blank peer must fail");
+        let DomainError::Usage { message, repair } = error else {
+            panic!("expected usage error for blank peer");
+        };
+
+        assert!(message.contains("--peer"));
+        assert_eq!(
+            repair.as_deref(),
+            Some("Use `ee share preview --peer peer_alpha --json`.")
+        );
+    }
+
+    #[test]
+    fn share_preview_validation_rejects_blank_consent_actor() {
+        let mut args = share_preview_args();
+        args.record_consent = true;
+        args.actor = " \n ".to_owned();
+
+        let error = validate_share_preview_args(&args).expect_err("blank actor must fail");
+        let DomainError::Usage { message, repair } = error else {
+            panic!("expected usage error for blank consent actor");
+        };
+
+        assert!(message.contains("--actor"));
+        assert!(
+            repair
+                .as_deref()
+                .is_some_and(|repair| repair.contains("--record-consent --actor operator"))
+        );
+    }
+
+    #[test]
+    fn share_preview_validation_rejects_blank_consent_reason() {
+        let mut args = share_preview_args();
+        args.record_consent = true;
+        args.consent_reason = " \r\n ".to_owned();
+
+        let error = validate_share_preview_args(&args).expect_err("blank reason must fail");
+        let DomainError::Usage { message, repair } = error else {
+            panic!("expected usage error for blank consent reason");
+        };
+
+        assert!(message.contains("--consent-reason"));
+        assert!(
+            repair
+                .as_deref()
+                .is_some_and(|repair| repair.contains("--consent-reason operator_preview_ack"))
+        );
+    }
+
+    #[test]
+    fn share_preview_validation_trims_consent_audit_fields() {
+        let mut args = share_preview_args();
+        args.peer_id = " peer_alpha ".to_owned();
+        args.record_consent = true;
+        args.actor = " operator ".to_owned();
+        args.consent_reason = " reviewed ".to_owned();
+
+        let validated = validate_share_preview_args(&args).expect("valid consent fields");
+
+        assert_eq!(validated.peer_id, "peer_alpha");
+        assert_eq!(validated.actor, "operator");
+        assert_eq!(validated.consent_reason, "reviewed");
     }
 
     #[test]
