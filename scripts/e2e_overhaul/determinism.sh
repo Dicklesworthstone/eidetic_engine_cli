@@ -49,9 +49,13 @@ hash_stdin() {
     fi
 }
 
+# Mirror of ee::obs::VOLATILE_FIELD_NAMES — tests/volatile_field_registry_consistency_test.rs
+# pins this list to the Rust registry entry-for-entry, in order.
 VOLATILE_FIELD_NAMES=(
     generatedAt
     generated_at
+    created_at
+    captured_at
     computed_at
     last_accessed
     last_accessed_at
@@ -68,15 +72,39 @@ VOLATILE_FIELD_NAMES=(
     timestamp
     runIndex
     run_index
+    runDurationMs
+    run_duration_ms
     ee_binary_hash
+    capsule_id
+    integrity
+    swarm_brief_summary
+    swarm_incident_summary
+    swarm_replay_summary
+    environment_attestation_summary
+    pack_replay_summary
+    proof_broker_summary
+    regression_causality_summary
+    shadow_policy_summary
     databasePath
     workspacePath
     indexDir
     snapshotRefreshedAt
-    runDurationMs
     witnessElapsedMs
     witnessRecordedAt
     algorithmStartedAt
+    selfNodeKey
+    selfTailscaleIp
+    selfMagicDnsName
+    tailnetId
+    tailnetDisplayName
+    selfAdvertisedTags
+    peerNodeKey
+    peerTailscaleIps
+    peerMagicDnsName
+    peerHostname
+    peerAdvertisedTags
+    binaryVersionRaw
+    binaryAbsolutePath
 )
 
 volatile_field_delete_filter() {

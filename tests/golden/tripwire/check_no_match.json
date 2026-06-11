@@ -21,7 +21,10 @@
       "code": "tripwire_inputs_incomplete",
       "severity": "warning",
       "message": "Missing persisted tripwire inputs for the requested ID, so the check could not evaluate a concrete event payload.",
-      "repair": "ee tripwire list --json"
+      "repair": "ee tripwire list --json",
+      "sources": [
+        "tripwire_check"
+      ]
     }
   ]
 }

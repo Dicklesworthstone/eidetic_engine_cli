@@ -49,9 +49,23 @@ pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "swarm_incident_summary",
     "swarm_replay_summary",
     "environment_attestation_summary",
+    // Newer capsule diagnostic subtrees (same class as the four above): they
+    // embed run-scoped attestation ids, artifact hashes over volatile inputs,
+    // and raw command output carrying timestamps, so two creates of the same
+    // workspace state would otherwise produce different canonical hashes.
+    "pack_replay_summary",
+    "proof_broker_summary",
+    "regression_causality_summary",
+    "shadow_policy_summary",
     "databasePath",
     "workspacePath",
     "indexDir",
+    // Graph determinism surfaces (previously only in the determinism.sh bash
+    // mirror; registered here so the two lists stay identical).
+    "snapshotRefreshedAt",
+    "witnessElapsedMs",
+    "witnessRecordedAt",
+    "algorithmStartedAt",
     // Tailscale local-probe identity fields are machine/network specific and
     // sensitive in shared support bundles.
     "selfNodeKey",

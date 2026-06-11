@@ -29,6 +29,15 @@ the Rust constant, and the shell list together.
 | `witnessElapsedMs` | Wall-clock algorithm witness duration | v0.2 | CGSE witness timing varies by host and load. |
 | `witnessRecordedAt` | Wall-clock witness persistence time | v0.2 | Audit timing for the witness record. |
 | `algorithmStartedAt` | Wall-clock graph algorithm start time | v0.2 | Used to explain operations, not rank or selection. |
+| `created_at` / `captured_at` | Per-write wall-clock timestamp | v0.3 | Creation/capture times on capsules, snapshots, and evidence rows. |
+| `run_duration_ms` | Wall-clock run duration (snake_case spelling) | v0.3 | Same measurement class as `runDurationMs`. |
+| `capsule_id` | Per-create random identifier | v0.3 | Handoff capsules mint a fresh id even for identical workspace state. |
+| `integrity` | Per-create HMAC signature block | v0.3 | Signed over volatile content; never part of canonical capsule identity. |
+| `swarm_brief_summary` / `swarm_incident_summary` / `swarm_replay_summary` | Runtime diagnostic subtree | v0.3 | Coordination posture snapshots embedded in capsules and support bundles. |
+| `environment_attestation_summary` / `pack_replay_summary` / `proof_broker_summary` / `regression_causality_summary` / `shadow_policy_summary` | Runtime diagnostic subtree | v0.3 | Embed run-scoped attestation ids, artifact hashes over volatile inputs, and raw command output with timestamps. |
+| `selfNodeKey` / `selfTailscaleIp` / `selfMagicDnsName` / `tailnetId` / `tailnetDisplayName` / `selfAdvertisedTags` | Machine/network identity | v0.3 | Tailscale local-probe identity; machine-specific and sensitive in shared bundles. |
+| `peerNodeKey` / `peerTailscaleIps` / `peerMagicDnsName` / `peerHostname` / `peerAdvertisedTags` | Machine/network identity | v0.3 | Tailscale peer identity fields; same posture as the self fields. |
+| `binaryVersionRaw` / `binaryAbsolutePath` | Per-host binary metadata | v0.3 | Host-installed binary probe details. |
 
 The registry is intentionally field-name based, not JSON-pointer based. These
 fields may appear at multiple nesting depths across command responses, golden

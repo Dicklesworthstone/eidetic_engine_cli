@@ -1747,14 +1747,21 @@ impl SearchReport {
                         // level so agents don't have to reach into `metadata.content`
                         // (or make a follow-up `ee memory show`). Derived from the
                         // already-redacted public metadata. (agent-UX item 1)
+                        // Canonical field policy (D1, bd-17c65.4.1): the key is
+                        // `content` — `contentPreview` is a forbidden synonym —
+                        // with `content_truncated` marking elided values.
                         if let Some(text) = search_hit_content_text(&metadata) {
-                            obj_map.insert(
-                                "contentPreview".to_string(),
-                                serde_json::json!(search_content_preview(
-                                    &text,
-                                    SEARCH_CONTENT_PREVIEW_MAX_CHARS
-                                )),
-                            );
+                            let preview =
+                                search_content_preview(&text, SEARCH_CONTENT_PREVIEW_MAX_CHARS);
+                            let truncated =
+                                preview.chars().count() > SEARCH_CONTENT_PREVIEW_MAX_CHARS;
+                            obj_map.insert("content".to_string(), serde_json::json!(preview));
+                            if truncated {
+                                obj_map.insert(
+                                    "content_truncated".to_string(),
+                                    serde_json::json!(true),
+                                );
+                            }
                         }
                         obj_map.insert("metadata".to_string(), metadata);
                         if let Some(drift_hint) = meta.get("driftHint") {

@@ -47,8 +47,8 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "posture", "healthy"],
-    "summary": ["command", "version", "posture", "healthy"],
-    "standard": ["command", "version", "posture", "healthy", "checks"],
+    "summary": ["command", "version", "posture", "healthy", "qos"],
+    "standard": ["command", "version", "posture", "healthy", "checks", "qos"],
     "full": ["*"]
   },
   "$defs": {

@@ -1,54 +1,54 @@
 {
+  "schema": "ee.swarm_replay_blocked_result_envelope_golden.v1",
+  "sourceSchema": "ee.swarm_replay_result.v1",
+  "fixtureId": "destructive-shell-command-shape",
+  "fixturePath": "generated://swarm-replay/destructive-shell-command-shape",
+  "expectedOutcome": "blocked-ledger",
+  "expectedCode": "swarm_replay_command_not_allowlisted",
+  "status": "blocked",
+  "sideEffectFree": true,
   "aggregate": {
     "commandCount": 1,
-    "degradedCount": 1,
+    "successCount": 0,
     "failureCount": 1,
-    "successCount": 0
+    "degradedCount": 1
+  },
+  "firstFailure": {
+    "stepId": "[STEP_ID]",
+    "agentSlotMatchesCommandResult": true,
+    "code": "swarm_replay_command_not_allowlisted",
+    "severity": "medium",
+    "diagnosis": "command shape is outside the redaction-safe swarm replay allowlist",
+    "repairHint": "Regenerate the workload with supported ee command shapes."
   },
   "commandResults": [
     {
-      "artifactPathCount": 0,
+      "stepId": "[STEP_ID]",
       "commandHash": "[HASH]",
+      "exitCode": 1,
       "degradedCodes": [
         "swarm_replay_command_not_allowlisted"
       ],
-      "exitCode": 1,
-      "redactionStatus": "clean",
-      "stepId": "[STEP_ID]"
+      "artifactPathCount": 0,
+      "redactionStatus": "clean"
     }
   ],
-  "expectedCode": "swarm_replay_command_not_allowlisted",
-  "expectedOutcome": "blocked-ledger",
-  "firstFailure": {
-    "agentSlotMatchesCommandResult": true,
-    "code": "swarm_replay_command_not_allowlisted",
-    "diagnosis": "command shape is outside the redaction-safe swarm replay allowlist",
-    "repairHint": "Regenerate the workload with supported ee command shapes.",
-    "severity": "medium",
-    "stepId": "[STEP_ID]"
-  },
-  "fixtureId": "destructive-shell-command-shape",
-  "fixturePath": "generated://swarm-replay/destructive-shell-command-shape",
-  "schema": "ee.swarm_replay_blocked_result_envelope_golden.v1",
-  "sideEffectFree": true,
-  "sourceSchema": "ee.swarm_replay_result.v1",
-  "status": "blocked",
-  "supportBundleSafety": {
-    "fullResultRedacted": true,
-    "privateAbsolutePathsIncluded": false,
-    "rawCommandStringsIncluded": false,
-    "rawTraceBodiesIncluded": false
-  },
   "verification": {
-    "deterministic": true,
-    "proofLevel": "static_replay_only",
     "rchRequired": false,
     "rchStatus": "not_required",
+    "proofLevel": "static_replay_only",
+    "deterministic": true,
     "volatileFieldsStripped": [
       "workspace",
       "trace_path",
       "wall_clock",
       "elapsed_ms"
     ]
+  },
+  "supportBundleSafety": {
+    "rawCommandStringsIncluded": false,
+    "privateAbsolutePathsIncluded": false,
+    "rawTraceBodiesIncluded": false,
+    "fullResultRedacted": true
   }
 }

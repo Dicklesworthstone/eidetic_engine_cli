@@ -12,8 +12,8 @@ expression: normalized
   "memories_revised_since": 0,
   "content_drift_score": 0.5,
   "repair_hints": [
-    "Add new evidence: ee context --extend-capsule <capsule>",
-    "Refresh: ee handoff create --refresh <capsule>",
+    "Add new evidence: ee context \"refresh handoff evidence\" --workspace . --json",
+    "Refresh: ee handoff create --workspace . --out handoff-refresh.json --json",
     "Significant drift; consider rebuilding: ee handoff create --workspace ."
   ]
 }
