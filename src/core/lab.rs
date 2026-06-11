@@ -4748,13 +4748,14 @@ fn promoted_swarm_command_sequence(
                             "Export command shapes with recorded positional arity.".to_owned(),
                         ),
                     })?;
-            let positional_arity = u16::try_from(recorded_arity).map_err(|_| DomainError::Usage {
-                message: format!(
-                    "agent workload trace command {} positionalArity exceeds u16",
-                    row.command.verbs.join(" ")
-                ),
-                repair: Some("Export command shapes with bounded positional arity.".to_owned()),
-            })?;
+            let positional_arity =
+                u16::try_from(recorded_arity).map_err(|_| DomainError::Usage {
+                    message: format!(
+                        "agent workload trace command {} positionalArity exceeds u16",
+                        row.command.verbs.join(" ")
+                    ),
+                    repair: Some("Export command shapes with bounded positional arity.".to_owned()),
+                })?;
             Ok(SwarmWorkloadCommandStep {
                 step_id: step_id.clone(),
                 agent_slot: (index as u16) % agent_count,
