@@ -661,8 +661,8 @@ pub fn list_bypass_tokens(
         .list_preflight_bypass_tokens(workspace_id)
         .map_err(storage_error)?
         .into_iter()
-        .map(BypassTokenListEntry::from)
-        .collect();
+        .map(bypass_token_list_entry)
+        .collect::<Result<Vec<_>>>()?;
     Ok(BypassTokenListReport {
         schema: PREFLIGHT_BYPASS_TOKEN_SCHEMA_V1.to_owned(),
         workspace_id: workspace_id.to_owned(),
@@ -838,22 +838,22 @@ fn insert_token_audit(
     Ok(audit_id)
 }
 
-impl From<StoredPreflightBypassToken> for BypassTokenListEntry {
-    fn from(token: StoredPreflightBypassToken) -> Self {
-        Self {
-            token_hash_prefix: token.token_hash_prefix,
-            issued_at: token.issued_at,
-            expires_at: token.expires_at,
-            max_uses: token.max_uses,
-            used_count: token.used_count,
-            revoked: token.revoked_at.is_some(),
-            issuer_workspace: token.issuer_workspace,
-            reason: token.reason,
-            command: token.command,
-            command_hash: token.command_hash,
-            rule_ids: serde_json::from_str::<Vec<String>>(&token.rule_ids_json)
-                .map(|rule_ids| canonical_bypass_rule_ids(&rule_ids))
-                .unwrap_or_default(),
-        }
-    }
+fn bypass_token_list_entry(token: StoredPreflightBypassToken) -> Result<BypassTokenListEntry> {
+    // Reuse the verification-path parser so a token with corrupt stored
+    // rule scope fails the listing with BYPASS_TOKEN_STORAGE_ERROR
+    // instead of displaying an empty (and therefore wrong) rule set.
+    let rule_ids = stored_token_rule_ids(&token)?;
+    Ok(BypassTokenListEntry {
+        token_hash_prefix: token.token_hash_prefix,
+        issued_at: token.issued_at,
+        expires_at: token.expires_at,
+        max_uses: token.max_uses,
+        used_count: token.used_count,
+        revoked: token.revoked_at.is_some(),
+        issuer_workspace: token.issuer_workspace,
+        reason: token.reason,
+        command: token.command,
+        command_hash: token.command_hash,
+        rule_ids,
+    })
 }

@@ -824,10 +824,10 @@ where
         "degraded": [],
     });
 
-    let _ = write_stdout(
-        stdout,
-        &(serde_json::to_string(&response).unwrap_or_default() + "\n"),
-    );
+    // `response` is an in-memory `serde_json::Value`; its Display impl is
+    // the same infallible encoder, so the envelope can never silently
+    // collapse to an empty stdout line.
+    let _ = write_stdout(stdout, &(response.to_string() + "\n"));
     ProcessExitCode::Success
 }
 

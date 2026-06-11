@@ -2020,9 +2020,17 @@ impl SwarmWorkPacketDegradation {
 fn work_packet_id(packet: &SwarmWorkPacket) -> String {
     let mut stable = packet.clone();
     stable.packet_id.clear();
-    let bytes = serde_json::to_vec(&stable).unwrap_or_default();
-    let digest = blake3::hash(&bytes).to_hex().to_string();
-    format!("swarm_work_packet_{}", &digest[..24])
+    match serde_json::to_vec(&stable) {
+        Ok(bytes) => {
+            let digest = blake3::hash(&bytes).to_hex().to_string();
+            format!("swarm_work_packet_{}", &digest[..24])
+        }
+        // The packet tree is strings/bools/integers today, so
+        // serialization cannot fail; if a future field breaks that
+        // invariant the id must say so instead of impersonating a
+        // normal content hash derived from empty bytes.
+        Err(_) => "swarm_work_packet_unhashable".to_owned(),
+    }
 }
 
 fn work_packet_claim_gate_id(

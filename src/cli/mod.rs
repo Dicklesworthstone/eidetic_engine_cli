@@ -34202,9 +34202,16 @@ fn context_delta_item_snapshot_from_pack_item(
 fn context_delta_item_snapshot_from_stored_pack_item(
     item: &crate::db::StoredPackItem,
 ) -> ContextDeltaItemSnapshot {
-    let provenance =
-        serde_json::from_str::<serde_json::Value>(&item.provenance_json).unwrap_or_default();
-    ContextDeltaItemSnapshot::new(&item.memory_id)
+    // A stored pack item whose provenance JSON fails to parse must be
+    // distinguishable from one that legitimately has no provenance, so
+    // corrupt rows carry an explicit parse-error marker instead of a
+    // silent null.
+    let (provenance, provenance_parse_error) =
+        match serde_json::from_str::<serde_json::Value>(&item.provenance_json) {
+            Ok(value) => (value, false),
+            Err(_) => (serde_json::Value::Null, true),
+        };
+    let snapshot = ContextDeltaItemSnapshot::new(&item.memory_id)
         .with_field("rank", serde_json::json!(item.rank))
         .with_field("section", serde_json::json!(&item.section))
         .with_field("estimatedTokens", serde_json::json!(item.estimated_tokens))
@@ -34220,7 +34227,11 @@ fn context_delta_item_snapshot_from_stored_pack_item(
         .with_field(
             "trustSubclass",
             serde_json::json!(item.trust_subclass.as_deref()),
-        )
+        );
+    if provenance_parse_error {
+        return snapshot.with_field("provenanceParseError", serde_json::json!(true));
+    }
+    snapshot
 }
 
 fn push_context_delta_kernel_degradation(
@@ -36505,10 +36516,10 @@ where
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            let _ = write_stdout(
-                stdout,
-                &(serde_json::to_string(&response).unwrap_or_default() + "\n"),
-            );
+            // `response` is an in-memory `serde_json::Value`; its Display
+            // impl is the same infallible encoder, so the envelope can
+            // never silently collapse to an empty stdout line.
+            let _ = write_stdout(stdout, &(response.to_string() + "\n"));
         }
         _ => {
             let mut out = String::new();

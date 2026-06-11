@@ -12,6 +12,14 @@ use crate::models::degradation::{
     ALL_DEGRADATION_CODES, ActiveDegradation, DegradationCode, DegradationSeverity,
 };
 
+const KNOWN_REPAIR_COMMAND_PREFIXES: &[&str] = &["ee ", "cargo ", "cass ", "chmod ", "sqlite3 "];
+
+fn starts_with_known_repair_prefix(repair: &str) -> bool {
+    KNOWN_REPAIR_COMMAND_PREFIXES
+        .iter()
+        .any(|prefix| repair.starts_with(prefix))
+}
+
 /// Result of a single honesty check.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HonestyCheckResult {
@@ -116,10 +124,7 @@ pub fn validate_repair_command(repair: &str) -> HonestyCheckResult {
         return HonestyCheckResult::fail("repair_not_empty", "Repair command is empty");
     }
 
-    let known_prefixes = ["ee ", "cargo ", "cass ", "chmod ", "rm ", "sqlite3 "];
-    let starts_with_known = known_prefixes.iter().any(|p| repair.starts_with(p));
-
-    if !starts_with_known {
+    if !starts_with_known_repair_prefix(repair) {
         return HonestyCheckResult::fail(
             "repair_known_command",
             format!(
@@ -183,8 +188,7 @@ pub fn classify_repair_command(repair: &str) -> RepairCommandKind {
         return RepairCommandKind::Empty;
     }
 
-    let known_prefixes = ["ee ", "cargo ", "cass ", "chmod ", "rm ", "sqlite3 "];
-    if !known_prefixes.iter().any(|p| repair.starts_with(p)) {
+    if !starts_with_known_repair_prefix(repair) {
         return RepairCommandKind::Unknown;
     }
 
@@ -621,6 +625,12 @@ mod tests {
     }
 
     #[test]
+    fn validate_repair_rejects_raw_rm_command() -> TestResult {
+        let result = validate_repair_command("rm -rf target");
+        ensure(result.passed, false, "raw rm repair fails")
+    }
+
+    #[test]
     fn classify_repair_returns_empty_for_empty_string() -> TestResult {
         ensure(
             classify_repair_command(""),
@@ -635,6 +645,15 @@ mod tests {
             classify_repair_command("ssh deploy --rollback"),
             RepairCommandKind::Unknown,
             "unknown prefix",
+        )
+    }
+
+    #[test]
+    fn classify_repair_returns_unknown_for_raw_rm_command() -> TestResult {
+        ensure(
+            classify_repair_command("rm -rf target"),
+            RepairCommandKind::Unknown,
+            "raw rm command is not directly actionable",
         )
     }
 

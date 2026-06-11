@@ -725,8 +725,10 @@ fn text_hash(value: &str) -> String {
 }
 
 fn value_hash(value: &Value) -> String {
-    let serialized = serde_json::to_string(value).unwrap_or_default();
-    text_hash(&serialized)
+    // `Value`'s Display impl is the same serde encoder and is infallible
+    // for in-memory JSON (finite numbers, string keys), so the attested
+    // hash always covers the real serialized content.
+    text_hash(&value.to_string())
 }
 
 fn memory_omissions() -> Vec<AttestationOmission> {

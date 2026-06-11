@@ -1659,12 +1659,11 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         ".filter_map(|entry| entry.get(\"code\").and_then(JsonValue::as_str))",
         "Serve payloads without a degraded array truly carry no degradations; the extracted code list mirrors the envelope.",
     ),
-    must_fix(
+    allowed(
         "NSF-SERVE-EXCHANGE-STATUS-LINE",
         "src/serve.rs",
         "response.lines().next().unwrap_or_default()",
-        "bd-192lf",
-        "An empty or malformed HTTP response records an empty status line in the exchange record instead of surfacing the malformed response.",
+        "The recorded status line comes from the server's own freshly rendered response, and every render path emits an HTTP/1.1 status line first; there is no inbound response that could be malformed here.",
     ),
     allowed(
         "NSF-SERVE-JOB-TABLE-ABSENT",
@@ -1860,12 +1859,11 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "bd-192lf",
         "An attestation value that fails to serialize silently hashes empty text, misrepresenting the attested content instead of surfacing the failure.",
     ),
-    must_fix(
+    allowed(
         "NSF-AUDIT-LANE-WORKSPACE-ID",
         "src/core/audit_lane.rs",
         "workspace_id: input.workspace_id.clone().unwrap_or_default()",
-        "bd-192lf",
-        "An absent audit workspace id is fabricated as an empty string in the persisted lane record instead of preserving the optional field.",
+        "from_audit_input and to_audit_input are a lossless pair: the empty-string sentinel round-trips back to None before every audit write, so no fabricated workspace id is persisted.",
     ),
     allowed(
         "NSF-JOURNAL-FIRST-LINE",
