@@ -3,6 +3,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::memory::Tag;
+
 fn normalized_query_token(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace('-', "_")
 }
@@ -1281,34 +1283,19 @@ pub fn parse_tags(value: &serde_json::Value) -> TagFilters {
     let require = object
         .get("require")
         .and_then(serde_json::Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(String::from)
-                .collect()
-        })
+        .map(|arr| canonical_query_tag_array(arr))
         .unwrap_or_default();
 
     let require_any = object
         .get("requireAny")
         .and_then(serde_json::Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(String::from)
-                .collect()
-        })
+        .map(|arr| canonical_query_tag_array(arr))
         .unwrap_or_default();
 
     let exclude = object
         .get("exclude")
         .and_then(serde_json::Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(String::from)
-                .collect()
-        })
+        .map(|arr| canonical_query_tag_array(arr))
         .unwrap_or_default();
 
     TagFilters {
@@ -1316,6 +1303,19 @@ pub fn parse_tags(value: &serde_json::Value) -> TagFilters {
         require_any,
         exclude,
     }
+}
+
+fn canonical_query_tag_array(values: &[serde_json::Value]) -> Vec<String> {
+    values
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(canonical_query_tag_filter)
+        .collect()
+}
+
+fn canonical_query_tag_filter(raw: &str) -> String {
+    let trimmed = raw.trim();
+    Tag::parse(trimmed).map_or_else(|_| trimmed.to_owned(), |tag| tag.to_string())
 }
 
 /// Trust filters from ee.query.v1 trust object.
@@ -1650,6 +1650,61 @@ mod tests {
         assert!(memory_tags_include_global_scope(&["global".to_owned()]));
         assert!(memory_tags_include_global_scope(&["HOUSE-RULE".to_owned()]));
         assert!(!memory_tags_include_global_scope(&["workspace".to_owned()]));
+    }
+
+    #[test]
+    fn parse_tags_canonicalizes_valid_query_tag_filters() -> TestResult {
+        let filters = parse_tags(&serde_json::json!({
+            "require": [" RELEASE ", "Important"],
+            "requireAny": ["CI:Build"],
+            "exclude": [" Draft "]
+        }));
+
+        ensure(
+            filters.require == vec!["release".to_owned(), "important".to_owned()],
+            "required tags should use the same canonical form as stored memory tags",
+        )?;
+        ensure(
+            filters.require_any == vec!["ci:build".to_owned()],
+            "requireAny tags should use the same canonical form as stored memory tags",
+        )?;
+        ensure(
+            filters.exclude == vec!["draft".to_owned()],
+            "excluded tags should use the same canonical form as stored memory tags",
+        )?;
+        ensure(
+            filters.matches(&[
+                "release".to_owned(),
+                "important".to_owned(),
+                "ci:build".to_owned(),
+            ]),
+            "canonicalized filters should match stored canonical tags",
+        )
+    }
+
+    #[test]
+    fn parse_tags_keeps_invalid_query_tag_filters_restrictive() -> TestResult {
+        let filters = parse_tags(&serde_json::json!({
+            "require": ["bad tag", "   "],
+            "exclude": ["DRAFT"]
+        }));
+
+        ensure(
+            filters.require == vec!["bad tag".to_owned(), String::new()],
+            "invalid or empty required tags must remain restrictive instead of becoming no-op filters",
+        )?;
+        ensure(
+            !filters.matches(&["bad".to_owned(), "tag".to_owned()]),
+            "invalid required tags should not accidentally match split stored tags",
+        )?;
+
+        let exclude_only = parse_tags(&serde_json::json!({
+            "exclude": ["DRAFT"]
+        }));
+        ensure(
+            !exclude_only.matches(&["draft".to_owned()]),
+            "valid excluded tags should still canonicalize before matching",
+        )
     }
 
     #[test]
