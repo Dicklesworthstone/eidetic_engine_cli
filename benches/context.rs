@@ -67,6 +67,9 @@ const REGRESSION_THRESHOLD: f64 = 0.30;
 const S4_RELEASE_CANDIDATE_SCALE: usize = 1_000;
 const S4_NIGHTLY_SCALE: usize = 10_000;
 const S4_STRESS_SCALE: usize = 100_000;
+const BENCH_GROUP_NAME: &str = "ee_context";
+const MEMORY_SCALES_BENCH_GROUP: &str = "ee_context_memory_scales";
+const S4_RESOURCE_SCALES_BENCH_GROUP: &str = "ee_context_s4_resource_scales";
 const L2_WARM_BENCH_GROUP: &str = "ee_context_pack_l2_warm";
 const L2_WARM_BENCH_OPERATION: &str = "ee_context_pack_l2_warm";
 const ARENA_MODE_BENCH_GROUP: &str = "ee_context_arena_mode";
@@ -841,7 +844,7 @@ fn s4_resource_scales_for_profile(profile: &str) -> Vec<ResourceScale> {
 
 /// Benchmark `run_context_pack` at different token budget scales.
 fn bench_context(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ee_context");
+    let mut group = c.benchmark_group(BENCH_GROUP_NAME);
 
     let temp_dir = TempDir::new().expect("temp dir");
     let workspace_path = seed_database(temp_dir.path(), 100);
@@ -905,7 +908,7 @@ fn bench_context(c: &mut Criterion) {
 
 /// Benchmark context pack at different memory scales.
 fn bench_context_memory_scales(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ee_context_memory_scales");
+    let mut group = c.benchmark_group(MEMORY_SCALES_BENCH_GROUP);
 
     for &count in &[10usize, 100, 500] {
         let label = match count {
@@ -965,7 +968,7 @@ fn bench_context_memory_scales(c: &mut Criterion) {
 
 /// Benchmark context SLO telemetry over S4's required large-memory fixtures.
 fn bench_context_s4_resource_scales(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ee_context_s4_resource_scales");
+    let mut group = c.benchmark_group(S4_RESOURCE_SCALES_BENCH_GROUP);
 
     for scale in s4_resource_scales_for_profile(&active_bench_profile()) {
         group.bench_with_input(
@@ -1398,15 +1401,16 @@ mod tests {
 
     use super::{
         ARENA_MODE_BENCH_GROUP, ARENA_MODE_BENCH_OPERATION, ARENA_MODE_BUDGET_P50_MS,
-        ARENA_MODE_BUDGET_P99_MS, ARENA_MODE_EXPECTED_WORKSPACE_FRESH_ALLOCATIONS, BUDGET_P50_MS,
-        BUDGET_P99_MS, L2_CONCURRENT_IDENTICAL_REQUESTS, L2_EXPECTED_FRESH_ASSEMBLIES,
-        L2_EXPECTED_WARM_HITS, L2_WARM_BENCH_GROUP, L2_WARM_BENCH_OPERATION, L2_WARM_BUDGET_P50_MS,
-        L2_WARM_BUDGET_P99_MS, PACK_DNA_ORCHESTRATION_BENCH_GROUP,
+        ARENA_MODE_BUDGET_P99_MS, ARENA_MODE_EXPECTED_WORKSPACE_FRESH_ALLOCATIONS,
+        BENCH_GROUP_NAME, BUDGET_P50_MS, BUDGET_P99_MS, L2_CONCURRENT_IDENTICAL_REQUESTS,
+        L2_EXPECTED_FRESH_ASSEMBLIES, L2_EXPECTED_WARM_HITS, L2_WARM_BENCH_GROUP,
+        L2_WARM_BENCH_OPERATION, L2_WARM_BUDGET_P50_MS, L2_WARM_BUDGET_P99_MS,
+        MEMORY_SCALES_BENCH_GROUP, PACK_DNA_ORCHESTRATION_BENCH_GROUP,
         PACK_DNA_ORCHESTRATION_BUDGET_P50_MS, PACK_DNA_ORCHESTRATION_BUDGET_P99_MS,
         PACK_DNA_ORCHESTRATION_OPERATION, PACK_DNA_ORCHESTRATION_SERIAL_TASK_COUNT,
         REGRESSION_THRESHOLD, S4_NIGHTLY_SCALE, S4_RELEASE_CANDIDATE_SCALE, S4_RESOURCE_SCALES,
-        S4_STRESS_SCALE, TIERED_RECALL_BENCH_GROUP, TIERED_RECALL_BUDGET_P50_MS,
-        TIERED_RECALL_BUDGET_P99_MS, TIERED_RECALL_CANDIDATE_POOL,
+        S4_RESOURCE_SCALES_BENCH_GROUP, S4_STRESS_SCALE, TIERED_RECALL_BENCH_GROUP,
+        TIERED_RECALL_BUDGET_P50_MS, TIERED_RECALL_BUDGET_P99_MS, TIERED_RECALL_CANDIDATE_POOL,
         TIERED_RECALL_EXPECTED_REQUIRED_COLD_MIN, TIERED_RECALL_MEMORY_COUNT,
         TIERED_RECALL_OPERATION, TIERED_RECALL_QUERY, ZSTD_PACK_DICTIONARY_BENCH_GROUP,
         ZSTD_PACK_DICTIONARY_BUDGET_P50_MS, ZSTD_PACK_DICTIONARY_BUDGET_P99_MS,
@@ -1419,7 +1423,15 @@ mod tests {
 
     #[test]
     fn benchmark_group_name_is_canonical() {
-        assert_eq!("ee_context", "ee_context", "canonical group name");
+        assert_eq!(BENCH_GROUP_NAME, "ee_context", "canonical group name");
+        assert_eq!(
+            MEMORY_SCALES_BENCH_GROUP, "ee_context_memory_scales",
+            "memory-scale group name"
+        );
+        assert_eq!(
+            S4_RESOURCE_SCALES_BENCH_GROUP, "ee_context_s4_resource_scales",
+            "S4 resource-scale group name"
+        );
     }
 
     #[test]

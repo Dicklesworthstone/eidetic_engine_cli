@@ -30,6 +30,8 @@ const BUDGET_P99_MS: f64 = 22.0;
 
 /// Regression threshold: fail if p50 degrades by more than 30%.
 const REGRESSION_THRESHOLD: f64 = 0.30;
+const BENCH_GROUP_NAME: &str = "ee_remember";
+const DRY_RUN_BENCH_GROUP_NAME: &str = "ee_remember_dry_run";
 
 /// Seed a database with `n` memories and return the workspace root path.
 fn seed_database(temp_dir: &Path, n: usize) -> std::path::PathBuf {
@@ -70,7 +72,7 @@ fn seed_database(temp_dir: &Path, n: usize) -> std::path::PathBuf {
 
 /// Benchmark `remember_memory` at different database scales.
 fn bench_remember(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ee_remember");
+    let mut group = c.benchmark_group(BENCH_GROUP_NAME);
 
     for &count in &[0usize, 100, 5000] {
         let label = match count {
@@ -118,7 +120,7 @@ fn bench_remember(c: &mut Criterion) {
 
 /// Benchmark dry-run mode (validation without persistence).
 fn bench_remember_dry_run(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ee_remember_dry_run");
+    let mut group = c.benchmark_group(DRY_RUN_BENCH_GROUP_NAME);
 
     let temp_dir = TempDir::new().expect("temp dir");
     let workspace_path = temp_dir.path().to_path_buf();
@@ -160,11 +162,18 @@ criterion_main!(benches);
 mod tests {
     use tempfile::TempDir;
 
-    use super::{BUDGET_P50_MS, BUDGET_P99_MS, REGRESSION_THRESHOLD, seed_database};
+    use super::{
+        BENCH_GROUP_NAME, BUDGET_P50_MS, BUDGET_P99_MS, DRY_RUN_BENCH_GROUP_NAME,
+        REGRESSION_THRESHOLD, seed_database,
+    };
 
     #[test]
     fn benchmark_group_name_is_canonical() {
-        assert_eq!("ee_remember", "ee_remember", "canonical group name");
+        assert_eq!(BENCH_GROUP_NAME, "ee_remember", "canonical group name");
+        assert_eq!(
+            DRY_RUN_BENCH_GROUP_NAME, "ee_remember_dry_run",
+            "dry-run group name"
+        );
     }
 
     #[test]
