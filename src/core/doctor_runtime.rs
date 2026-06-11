@@ -525,9 +525,7 @@ impl RunContext {
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                let holder = fs::read_to_string(&lock_path)
-                    .ok()
-                    .and_then(|s| s.lines().next().map(std::string::ToString::to_string));
+                let holder = read_doctor_lock_holder(&lock_path);
                 return Err(DoctorRuntimeError::ConcurrencyLost {
                     lock_path,
                     holder_run_id: holder,
@@ -1008,10 +1006,7 @@ pub fn replay_undo(run_dir: &Path) -> Result<UndoSummary, DoctorRuntimeError> {
     let _lock_guard = acquire_undo_lock(&state.workspace)?;
 
     let actions_path = run_dir.join("actions.jsonl");
-    let raw = fs::read_to_string(&actions_path).map_err(|source| DoctorRuntimeError::Io {
-        context: format!("read {}", actions_path.display()),
-        source,
-    })?;
+    let raw = read_required_doctor_jsonl_file(&actions_path, "actions.jsonl")?;
     let mut lines: Vec<ActionLine> = Vec::new();
     for (i, line) in raw.lines().enumerate() {
         if line.trim().is_empty() {
@@ -1027,16 +1022,15 @@ pub fn replay_undo(run_dir: &Path) -> Result<UndoSummary, DoctorRuntimeError> {
 
     // Read existing undo_log to skip already-undone actions.
     let undo_log_path = run_dir.join("undo_log.jsonl");
-    let already_undone_sequences: std::collections::HashSet<u64> = if undo_log_path.exists() {
-        fs::read_to_string(&undo_log_path)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter_map(|v| v.get("sequence")?.as_u64())
-            .collect()
-    } else {
-        std::collections::HashSet::new()
-    };
+    let already_undone_sequences: std::collections::HashSet<u64> =
+        read_optional_doctor_jsonl_file(&undo_log_path, "undo_log.jsonl")?
+            .map(|raw| {
+                raw.lines()
+                    .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                    .filter_map(|v| v.get("sequence")?.as_u64())
+                    .collect()
+            })
+            .unwrap_or_default();
 
     let mut undone = 0u64;
     let mut skipped = 0u64;
@@ -1763,6 +1757,127 @@ fn stage_backup(
 /// (7f56d89b).
 const DOCTOR_RUN_STATE_INSPECT_LIMIT: u64 = 4 * 1024 * 1024;
 
+/// Maximum bytes inspected when reading doctor JSONL logs during undo.
+/// Action lines store paths, hashes, modes, and diagnostic notes rather than
+/// file payload bytes, so 16 MiB leaves room for thousands of actions while
+/// bounding corrupted or hostile `.doctor/runs/<run-id>/*.jsonl` allocations.
+const DOCTOR_ACTION_LOG_INSPECT_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// Maximum bytes inspected when reading `<workspace>/.ee/.doctor.lock`.
+/// The lock file contains only a run id plus a process id.
+const DOCTOR_LOCK_FILE_INSPECT_LIMIT: u64 = 4 * 1024;
+
+fn read_required_doctor_jsonl_file(
+    path: &Path,
+    label: &'static str,
+) -> Result<String, DoctorRuntimeError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| DoctorRuntimeError::Io {
+        context: format!("read {label} {}", path.display()),
+        source,
+    })?;
+    read_doctor_text_file_with_metadata(path, label, metadata, DOCTOR_ACTION_LOG_INSPECT_LIMIT)
+}
+
+fn read_optional_doctor_jsonl_file(
+    path: &Path,
+    label: &'static str,
+) -> Result<Option<String>, DoctorRuntimeError> {
+    read_optional_doctor_text_file(path, label, DOCTOR_ACTION_LOG_INSPECT_LIMIT)
+}
+
+fn read_doctor_lock_holder(lock_path: &Path) -> Option<String> {
+    read_optional_doctor_text_file(lock_path, "doctor lock", DOCTOR_LOCK_FILE_INSPECT_LIMIT)
+        .ok()
+        .flatten()
+        .and_then(|s| s.lines().next().map(std::string::ToString::to_string))
+}
+
+fn read_optional_doctor_text_file(
+    path: &Path,
+    label: &'static str,
+    byte_limit: u64,
+) -> Result<Option<String>, DoctorRuntimeError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(DoctorRuntimeError::Io {
+                context: format!("read {label} {}", path.display()),
+                source,
+            });
+        }
+    };
+    read_doctor_text_file_with_metadata(path, label, metadata, byte_limit).map(Some)
+}
+
+fn read_doctor_text_file_with_metadata(
+    path: &Path,
+    label: &'static str,
+    metadata: fs::Metadata,
+    byte_limit: u64,
+) -> Result<String, DoctorRuntimeError> {
+    if !metadata.file_type().is_file() {
+        return Err(DoctorRuntimeError::Io {
+            context: format!("read {label} {}", path.display()),
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{label} is not a regular file"),
+            ),
+        });
+    }
+    if metadata.len() > byte_limit {
+        return Err(DoctorRuntimeError::Io {
+            context: format!("read {label} {}", path.display()),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{label} size {} exceeds {byte_limit} byte cap",
+                    metadata.len()
+                ),
+            ),
+        });
+    }
+    let file =
+        open_doctor_inspect_file_for_read(path).map_err(|source| DoctorRuntimeError::Io {
+            context: format!("read {label} {}", path.display()),
+            source,
+        })?;
+    let mut raw = String::new();
+    file.take(byte_limit.saturating_add(1))
+        .read_to_string(&mut raw)
+        .map_err(|source| DoctorRuntimeError::Io {
+            context: format!("read {label} {}", path.display()),
+            source,
+        })?;
+    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > byte_limit {
+        return Err(DoctorRuntimeError::Io {
+            context: format!("read {label} {}", path.display()),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{label} grew past cap during read"),
+            ),
+        });
+    }
+    Ok(raw)
+}
+
+fn open_doctor_inspect_file_for_read(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_doctor_inspect_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_doctor_inspect_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_doctor_inspect_open_no_follow(_options: &mut fs::OpenOptions) {}
+
 /// Read the persisted [`RunState`] from `<run_dir>/state.json`.
 fn read_state(run_dir: &Path) -> Result<RunState, DoctorRuntimeError> {
     let path = run_dir.join("state.json");
@@ -1791,10 +1906,11 @@ fn read_state(run_dir: &Path) -> Result<RunState, DoctorRuntimeError> {
             ),
         });
     }
-    let file = fs::File::open(&path).map_err(|source| DoctorRuntimeError::Io {
-        context: format!("read state.json {}", path.display()),
-        source,
-    })?;
+    let file =
+        open_doctor_inspect_file_for_read(&path).map_err(|source| DoctorRuntimeError::Io {
+            context: format!("read state.json {}", path.display()),
+            source,
+        })?;
     let mut bytes = Vec::new();
     file.take(DOCTOR_RUN_STATE_INSPECT_LIMIT.saturating_add(1))
         .read_to_end(&mut bytes)
@@ -1871,9 +1987,7 @@ fn acquire_undo_lock(workspace: &Path) -> Result<UndoLockGuard, DoctorRuntimeErr
             Ok(UndoLockGuard { lock_path })
         }
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            let holder = fs::read_to_string(&lock_path)
-                .ok()
-                .and_then(|s| s.lines().next().map(std::string::ToString::to_string));
+            let holder = read_doctor_lock_holder(&lock_path);
             Err(DoctorRuntimeError::ConcurrencyLost {
                 lock_path,
                 holder_run_id: holder,
@@ -2074,6 +2188,38 @@ mod tests {
     }
 
     #[test]
+    fn start_bounds_existing_lock_holder_read() {
+        let ws = fresh_workspace();
+        let ee_dir = ws.path().join(".ee");
+        fs::create_dir_all(&ee_dir).unwrap();
+        let lock_path = ee_dir.join(".doctor.lock");
+        let lock = fs::File::create(&lock_path).unwrap();
+        lock.set_len(DOCTOR_LOCK_FILE_INSPECT_LIMIT.saturating_add(1))
+            .unwrap();
+
+        let result = RunContext::start(
+            ws.path(),
+            "deadbeefcafe",
+            default_blast_radius_roots(ws.path()),
+            false,
+        );
+
+        match result {
+            Ok(_) => panic!("oversized doctor lock unexpectedly allowed RunContext::start"),
+            Err(DoctorRuntimeError::ConcurrencyLost {
+                lock_path: observed_lock_path,
+                holder_run_id,
+            }) => {
+                assert_eq!(observed_lock_path, lock_path);
+                assert_eq!(holder_run_id, None);
+            }
+            Err(other) => {
+                panic!("expected oversized doctor lock to report concurrency, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
     fn undo_restores_byte_identical_state_for_write_file() {
         let ws = fresh_workspace();
         let target = ws.path().join("data.txt");
@@ -2230,6 +2376,88 @@ mod tests {
         assert!(
             !run_dir.join("undo_log.jsonl").exists(),
             "undo must stop before replay artifacts are written"
+        );
+    }
+
+    #[test]
+    fn undo_fails_closed_when_actions_jsonl_is_oversized() {
+        let ws = fresh_workspace();
+        let run_dir;
+        {
+            let ctx = start_run(ws.path());
+            run_dir = ctx.run_dir().to_path_buf();
+            ctx.finish(RunStatus::CompletedOk).unwrap();
+        }
+
+        let actions_path = run_dir.join("actions.jsonl");
+        let actions = fs::File::create(&actions_path).unwrap();
+        actions
+            .set_len(DOCTOR_ACTION_LOG_INSPECT_LIMIT.saturating_add(1))
+            .unwrap();
+
+        let result = replay_undo(&run_dir);
+
+        match result {
+            Err(DoctorRuntimeError::Io { context, source }) => {
+                assert!(context.contains("read actions.jsonl"), "{context}");
+                assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+            }
+            other => panic!("expected oversized actions.jsonl to fail closed, got {other:?}"),
+        }
+        assert!(
+            !run_dir.join("undo_log.jsonl").exists(),
+            "undo must stop before replay artifacts are written"
+        );
+        assert!(
+            !ws.path().join(".ee").join(".doctor.lock").exists(),
+            "undo lock must be released after a log-read failure"
+        );
+    }
+
+    #[test]
+    fn undo_fails_closed_when_undo_log_jsonl_is_oversized() {
+        let ws = fresh_workspace();
+        let target = ws.path().join("data.txt");
+        fs::write(&target, b"original").unwrap();
+
+        let run_dir;
+        {
+            let mut ctx = start_run(ws.path());
+            run_dir = ctx.run_dir().to_path_buf();
+            mutate(
+                &mut ctx,
+                &target,
+                Op::WriteFile {
+                    bytes: b"updated".to_vec(),
+                },
+            )
+            .unwrap();
+            ctx.finish(RunStatus::CompletedOk).unwrap();
+        }
+
+        let undo_log_path = run_dir.join("undo_log.jsonl");
+        let undo_log = fs::File::create(&undo_log_path).unwrap();
+        undo_log
+            .set_len(DOCTOR_ACTION_LOG_INSPECT_LIMIT.saturating_add(1))
+            .unwrap();
+
+        let result = replay_undo(&run_dir);
+
+        match result {
+            Err(DoctorRuntimeError::Io { context, source }) => {
+                assert!(context.contains("read undo_log.jsonl"), "{context}");
+                assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+            }
+            other => panic!("expected oversized undo_log.jsonl to fail closed, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            b"updated",
+            "undo must not start mutating before it can inspect the undo log"
+        );
+        assert!(
+            !ws.path().join(".ee").join(".doctor.lock").exists(),
+            "undo lock must be released after a log-read failure"
         );
     }
 
