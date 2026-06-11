@@ -623,6 +623,11 @@ pub struct ContextPackOptions {
     pub require_fresh_sentinels: bool,
     pub output_options: ContextPackOutputOptions,
     pub persist_pack: bool,
+    /// bd-7lvbg.6: when set, a per-agent baseline row is recorded after
+    /// the pack persists, making `--since last` resolvable next session.
+    /// `None` (no agent identity, `--no-baseline-write`, or any read-only
+    /// path) writes nothing.
+    pub baseline_write: Option<PackBaselineWrite>,
     /// bd-1n0np.5.8 (E5): when `true` (via `pack --no-lod`), the
     /// level-of-detail tiering is disabled and the pack is assembled with
     /// `lod_budget_shares: None` — the legacy flat selector that places
@@ -633,6 +638,19 @@ pub struct ContextPackOptions {
     /// undesirable. Defaults to `false` (LOD on, the post-bd-1n0np.5.2
     /// behavior).
     pub no_lod: bool,
+}
+
+/// Per-agent baseline ledger write request (bd-7lvbg.6): rides the pack
+/// persistence chokepoint, so read-only / no-persist paths skip it for
+/// free.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackBaselineWrite {
+    /// Agent identity from `EE_AGENT_NAME`.
+    pub agent_name: String,
+    /// Optional task scope from `--task-key`.
+    pub task_key: Option<String>,
+    /// Per-agent ledger cap (`[pack] baseline_ledger_max_rows`, default 32).
+    pub max_rows: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -4161,6 +4179,7 @@ fn persist_pack_record_measured(
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
     task_lens: Option<&ContextTaskLens>,
+    baseline: Option<&PackBaselineWrite>,
     subspans: &mut PackPersistenceSubspans,
 ) -> Result<(), String> {
     persist_pack_record_with_pack_id(
@@ -4170,6 +4189,7 @@ fn persist_pack_record_measured(
         draft,
         degraded,
         task_lens,
+        baseline,
         PackId::now(),
         subspans,
     )
@@ -4194,6 +4214,7 @@ fn persist_pack_record_seeded(
         degraded,
         determinism,
         None,
+        None,
         &mut subspans,
     )
 }
@@ -4206,6 +4227,7 @@ fn persist_pack_record_seeded_measured(
     degraded: &[ContextResponseDegradation],
     determinism: &Deterministic<Seed>,
     task_lens: Option<&ContextTaskLens>,
+    baseline: Option<&PackBaselineWrite>,
     subspans: &mut PackPersistenceSubspans,
 ) -> Result<String, String> {
     let mut pack_id_token = determinism.shared_child("ulid.pack");
@@ -4216,6 +4238,7 @@ fn persist_pack_record_seeded_measured(
         draft,
         degraded,
         task_lens,
+        baseline,
         PackId::now_seeded(&mut pack_id_token),
         subspans,
     )
@@ -4228,6 +4251,7 @@ fn persist_pack_record_with_pack_id(
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
     task_lens: Option<&ContextTaskLens>,
+    baseline: Option<&PackBaselineWrite>,
     pack_id: PackId,
     subspans: &mut PackPersistenceSubspans,
 ) -> Result<String, String> {
@@ -4360,6 +4384,31 @@ fn persist_pack_record_with_pack_id(
         )
         .map(|timings| subspans.apply_insert_timings(&timings))
         .map_err(|e| format!("insert failed: {e}"))?;
+
+    // bd-7lvbg.6: record the per-agent `--since last` baseline. The pack
+    // record above is the durable outcome; a ledger failure must not
+    // unwind it, so this is warn-and-continue rather than an error path.
+    if let Some(baseline) = baseline {
+        if let Err(error) = connection.insert_pack_baseline(
+            &CreatePackBaselineInput {
+                workspace_id: workspace.id.clone(),
+                agent_name: baseline.agent_name.clone(),
+                task_key: baseline.task_key.clone(),
+                pack_id: pack_id.to_string(),
+                pack_hash: pack_hash.clone(),
+            },
+            baseline.max_rows,
+            Some(baseline.agent_name.as_str()),
+        ) {
+            tracing::warn!(
+                target: "ee::pack::baseline",
+                pack_id = %pack_id,
+                agent = %baseline.agent_name,
+                %error,
+                "pack baseline ledger write failed; --since last will not see this pack"
+            );
+        }
+    }
     Ok(pack_id.to_string())
 }
 
