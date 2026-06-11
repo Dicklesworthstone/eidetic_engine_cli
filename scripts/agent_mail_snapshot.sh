@@ -421,7 +421,7 @@ def bounded_recovery_mode(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     normalized = value.strip().lower()
-    if normalized in {"", "ok", "none", "normal", "clean", "idle"}:
+    if normalized in {"", "ok", "none", "normal", "clean", "idle", "healthy", "ready"}:
         return "ok"
     if normalized == "corrupt":
         return "corrupt"
@@ -454,7 +454,7 @@ def recovery_reason_class(mode: str, health: dict[str, Any], recovery: dict[str,
         if isinstance(value, str):
             text_parts.append(value)
     normalized = " ".join(text_parts).lower()
-    if "doctor repair" in normalized or "restore" in normalized or "reconstruct" in normalized:
+    if ("doctor" in normalized and "repair" in normalized) or "restore" in normalized or "reconstruct" in normalized:
         return "storage_recovery_required"
     if "permission denied" in normalized:
         return "permission_denied"
@@ -930,7 +930,7 @@ def run_self_test() -> int:
                     "semantic_readiness": {"status": "ok"},
                     "recovery": {
                         "mode": "corrupt",
-                        "next_action": "Run am doctor repair --yes or restore from /Users/example/.local/share/mcp_agent_mail/storage.sqlite3 after B-tree page 283 failed",
+                        "next_action": "Run Agent Mail repair or restore from /Users/example/.local/share/mcp_agent_mail/storage.sqlite3 after B-tree page 283 failed",
                         "bundle_path": "/Users/example/.local/share/mcp_agent_mail/doctor/forensics/storage.sqlite3/reconstruct-20260602_030410_115",
                     },
                 },
@@ -964,6 +964,32 @@ def run_self_test() -> int:
     assert repair_output["producer_status"] == "degraded"
     assert repair_output["fallback_active"] is True
     assert repair_output["recovery"]["mode"] == "repair_required"
+
+    current_health_output = build_snapshot_output(
+        project,
+        agent,
+        [
+            commands[0],
+            commands[1],
+            commands[2],
+            synthetic_command(
+                ["agent-mail-health", "http://127.0.0.1:8765/health"],
+                {
+                    "status": "ready",
+                    "version": "0.2.51",
+                    "database_path": "storage.sqlite3",
+                    "project_count": 13,
+                    "message_count": 9436,
+                    "durability_state": "healthy",
+                },
+            ),
+        ],
+        thread_limit=10,
+    )
+    assert current_health_output["producer_status"] == "ok"
+    assert current_health_output["fallback_active"] is False
+    assert current_health_output["durability_state"] == "ok"
+    assert "recovery" not in current_health_output
 
     http_error_output = build_snapshot_output(
         project,

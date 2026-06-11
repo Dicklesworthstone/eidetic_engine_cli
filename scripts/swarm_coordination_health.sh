@@ -176,7 +176,7 @@ def bounded_recovery_mode(value):
     if not isinstance(value, str):
         return None
     normalized = value.lower()
-    if normalized in {"", "ok", "none", "normal", "clean", "idle"}:
+    if normalized in {"", "ok", "none", "normal", "clean", "idle", "healthy", "ready"}:
         return "ok"
     if normalized == "corrupt":
         return "corrupt"
