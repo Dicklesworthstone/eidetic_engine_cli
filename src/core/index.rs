@@ -1153,6 +1153,130 @@ pub fn process_index_jobs(
     })
 }
 
+/// Drain every pending search-index job for one workspace with a SINGLE
+/// index rebuild (bd-2efx1). Every job type publishes as a full rebuild
+/// of the workspace's indexable documents, so N enqueued jobs are all
+/// satisfied by one rebuild executed after the last enqueuing write —
+/// the batch-remember lane uses this instead of paying one full rebuild
+/// per line. Claimed jobs complete (or fail) together; jobs another
+/// worker claimed mid-drain are reported as skipped.
+pub(crate) fn process_pending_index_jobs_coalesced(
+    db: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+    job_limit: Option<u32>,
+) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError> {
+    const COALESCED_MODE: &str = "coalesced_full_rebuild";
+    let pending = db.list_pending_search_index_jobs(workspace_id, job_limit)?;
+    let mut claimed = Vec::new();
+    let mut reports = Vec::new();
+    for job in pending {
+        if db.start_search_index_job(&job.id)? {
+            claimed.push(job);
+        } else {
+            reports.push(IndexProcessingJobReport {
+                job_id: job.id.clone(),
+                job_type: job.job_type.clone(),
+                document_source: job.document_source.clone(),
+                document_id: job.document_id.clone(),
+                outcome: "skipped".to_owned(),
+                processing_mode: COALESCED_MODE.to_owned(),
+                documents_total: job.documents_total,
+                documents_indexed: job.documents_indexed,
+                error: Some("search index job was not pending".to_owned()),
+            });
+        }
+    }
+    if claimed.is_empty() {
+        return Ok(reports);
+    }
+
+    let (_memories_indexed, _sessions_indexed, documents_total, indexable_docs) =
+        collect_workspace_indexable_documents(db, workspace_id)?;
+    for job in &claimed {
+        db.update_search_index_job_total(&job.id, documents_total)?;
+    }
+
+    if documents_total == 0 {
+        for job in &claimed {
+            db.complete_search_index_job(&job.id, 0)?;
+            reports.push(IndexProcessingJobReport {
+                job_id: job.id.clone(),
+                job_type: job.job_type.clone(),
+                document_source: job.document_source.clone(),
+                document_id: job.document_id.clone(),
+                outcome: "completed_no_documents".to_owned(),
+                processing_mode: COALESCED_MODE.to_owned(),
+                documents_total: 0,
+                documents_indexed: 0,
+                error: None,
+            });
+        }
+        return Ok(reports);
+    }
+
+    let published_generation = db
+        .get_workspace_generation(workspace_id)?
+        .or(get_db_stats(db)?.2)
+        .unwrap_or_else(|| u64::from(documents_total));
+
+    let holder_id = generate_index_holder_id();
+    acquire_index_publish_lock(db, workspace_id, &holder_id)?;
+    let build_result = (|| -> Result<(), String> {
+        let _recovery_action = recover_interrupted_publish(index_dir).map_err(|error| error.to_string())?;
+        let staging_dir = create_publish_staging_dir(index_dir).map_err(|error| error.to_string())?;
+        build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs).and_then(
+            |_stats| {
+                write_index_metadata(&staging_dir, published_generation, documents_total)
+                    .and_then(|()| publish_staged_index(index_dir, &staging_dir))
+                    .map_err(|error| error.to_string())
+            },
+        )
+    })();
+    release_index_publish_lock(db, workspace_id, &holder_id);
+
+    match build_result {
+        Ok(()) => {
+            for job in &claimed {
+                db.update_search_index_job_progress(&job.id, documents_total)?;
+                db.complete_search_index_job(&job.id, documents_total)?;
+                reports.push(IndexProcessingJobReport {
+                    job_id: job.id.clone(),
+                    job_type: job.job_type.clone(),
+                    document_source: job.document_source.clone(),
+                    document_id: job.document_id.clone(),
+                    outcome: "completed".to_owned(),
+                    processing_mode: COALESCED_MODE.to_owned(),
+                    documents_total,
+                    documents_indexed: documents_total,
+                    error: None,
+                });
+            }
+        }
+        Err(error) => {
+            for job in &claimed {
+                let mut error_message = error.clone();
+                if let Err(fail_error) = db.fail_search_index_job(&job.id, &error_message) {
+                    error_message.push_str("; failed to mark search index job failed: ");
+                    error_message.push_str(&fail_error.to_string());
+                }
+                reports.push(IndexProcessingJobReport {
+                    job_id: job.id.clone(),
+                    job_type: job.job_type.clone(),
+                    document_source: job.document_source.clone(),
+                    document_id: job.document_id.clone(),
+                    outcome: "failed".to_owned(),
+                    processing_mode: COALESCED_MODE.to_owned(),
+                    documents_total,
+                    documents_indexed: 0,
+                    error: Some(error_message),
+                });
+            }
+        }
+    }
+    Ok(reports)
+}
+
 pub(crate) fn process_index_job_for_connection(
     db: &DbConnection,
     job_id: &str,

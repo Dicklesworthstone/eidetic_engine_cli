@@ -21,6 +21,7 @@ use super::bayes::BetaPosterior;
 use super::config_surface::{ConfigSurfaceOptions, get_config};
 use super::index::{
     DEFAULT_INDEX_SUBDIR, IndexProcessingJobReport, process_index_job_for_connection,
+    process_pending_index_jobs_coalesced,
 };
 use super::memory_lifecycle::{
     LEVEL_TRANSITION_CONCURRENT_CONFLICT_CODE, LEVEL_TRANSITION_REQUIRES_EVIDENCE_CODE,
@@ -513,7 +514,18 @@ pub fn remember_memory(
     options: &RememberMemoryOptions<'_>,
 ) -> Result<RememberMemoryReport, DomainError> {
     let mut id_source = RememberIdSource::Ambient;
-    remember_memory_inner(options, &mut id_source, None)
+    remember_memory_inner(options, &mut id_source, None, false)
+}
+
+/// [`remember_memory`] with the search-index publish optionally deferred
+/// (bd-2efx1): the index job is enqueued transactionally but left
+/// pending for a later coalesced drain. Batch-lane internal.
+fn remember_memory_with_index_mode(
+    options: &RememberMemoryOptions<'_>,
+    defer_index_processing: bool,
+) -> Result<RememberMemoryReport, DomainError> {
+    let mut id_source = RememberIdSource::Ambient;
+    remember_memory_inner(options, &mut id_source, None, defer_index_processing)
 }
 
 pub fn remember_memory_seeded(
@@ -521,7 +533,7 @@ pub fn remember_memory_seeded(
     determinism: &mut Deterministic<Seed>,
 ) -> Result<RememberMemoryReport, DomainError> {
     let mut id_source = RememberIdSource::Seeded(determinism);
-    remember_memory_inner(options, &mut id_source, None)
+    remember_memory_inner(options, &mut id_source, None, false)
 }
 
 enum RememberIdSource<'a> {
@@ -556,6 +568,7 @@ fn remember_memory_inner(
     options: &RememberMemoryOptions<'_>,
     id_source: &mut RememberIdSource<'_>,
     audit_lane: Option<&AuditLaneHandle>,
+    defer_index_processing: bool,
 ) -> Result<RememberMemoryReport, DomainError> {
     let prepared = prepare_remember_memory(options, id_source.next_memory_id())?;
     if options.dry_run {
@@ -812,8 +825,23 @@ fn remember_memory_inner(
         .workspace_path
         .join(".ee")
         .join(DEFAULT_INDEX_SUBDIR);
-    let index_report =
-        process_remember_index_job_with_retry(&connection, &index_job_id, &index_dir)?;
+    let index_report = if defer_index_processing {
+        // bd-2efx1: leave the job pending; the batch lane drains every
+        // pending job with one coalesced rebuild after its last line.
+        IndexProcessingJobReport {
+            job_id: index_job_id.clone(),
+            job_type: SearchIndexJobType::SingleDocument.as_str().to_owned(),
+            document_source: Some("memory".to_owned()),
+            document_id: None,
+            outcome: "skipped".to_owned(),
+            processing_mode: "deferred_to_coalesced_batch_rebuild".to_owned(),
+            documents_total: 1,
+            documents_indexed: 0,
+            error: None,
+        }
+    } else {
+        process_remember_index_job_with_retry(&connection, &index_job_id, &index_dir)?
+    };
     let index_status = remember_index_status(&index_report);
 
     let (curation_candidate, curation_candidate_status, curation_candidate_degradations) =
@@ -4379,6 +4407,11 @@ pub struct RememberWriteControls<'a> {
     pub reinforce: bool,
     /// Optional idempotency key for replay-safe writes.
     pub idempotency_key: Option<&'a str>,
+    /// bd-2efx1: leave this write's search-index job pending instead of
+    /// publishing it synchronously. The batch lane sets this and drains
+    /// every pending job with ONE coalesced rebuild after the last line —
+    /// without it each line pays a full index rebuild (O(n²) ingest).
+    pub defer_index_processing: bool,
 }
 
 /// Outcome of one controlled remember write (bd-1pi9m.4).
@@ -5003,7 +5036,7 @@ pub fn remember_memory_with_controls(
         }
     }
 
-    let report = remember_memory(options)?;
+    let report = remember_memory_with_index_mode(options, controls.defer_index_processing)?;
     if let Some(key) = idempotency_key.as_deref()
         && !options.dry_run
     {
@@ -5418,6 +5451,9 @@ pub fn remember_memory_batch_stdin(
         let line_controls = RememberWriteControls {
             reinforce: draft.reinforce.unwrap_or(options.reinforce),
             idempotency_key: draft.idempotency_key.as_deref(),
+            // bd-2efx1: every line leaves its index job pending; one
+            // coalesced rebuild below covers the whole batch.
+            defer_index_processing: true,
         };
 
         // Per-line independent persistence: each line runs its own full
@@ -5485,6 +5521,22 @@ pub fn remember_memory_batch_stdin(
                 });
             }
         }
+    }
+
+    // bd-2efx1: one coalesced index rebuild for the whole batch. Every
+    // stored line enqueued its job transactionally; draining here replaces
+    // the per-line full rebuild that made batch ingest O(n²).
+    if !options.dry_run && (stored_count > 0 || reinforced_count > 0) {
+        let workspace_path = resolve_workspace_path(options.workspace_path, false)?;
+        let database_path = options
+            .database_path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+        let workspace_id = stable_workspace_id(&workspace_path);
+        let index_dir = workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+        let connection = open_remember_database_with_retry(&database_path)?;
+        process_pending_index_jobs_coalesced(&connection, &workspace_id, &index_dir, None)
+            .map_err(remember_search_index_error)?;
     }
 
     Ok(RememberBatchReport {
@@ -12789,6 +12841,7 @@ mod tests {
                 &RememberWriteControls {
                     reinforce: true,
                     idempotency_key: None,
+                    defer_index_processing: false,
                 },
             )
             .map_err(|error| error.message())?,
@@ -12852,6 +12905,7 @@ mod tests {
                 &RememberWriteControls {
                     reinforce: true,
                     idempotency_key: None,
+                    defer_index_processing: false,
                 },
             )
             .map_err(|error| error.message())?,
@@ -12916,6 +12970,7 @@ mod tests {
                 &RememberWriteControls {
                     reinforce: true,
                     idempotency_key: None,
+                    defer_index_processing: false,
                 },
             )
             .map_err(|error| error.message())?,
@@ -13002,6 +13057,7 @@ mod tests {
                     &RememberWriteControls {
                         reinforce: true,
                         idempotency_key: None,
+                        defer_index_processing: false,
                     },
                 )
                 .map_err(|error| error.message())?,
@@ -13089,6 +13145,7 @@ mod tests {
                 &RememberWriteControls {
                     reinforce: true,
                     idempotency_key: None,
+                    defer_index_processing: false,
                 },
             )
             .map_err(|error| error.message())?,

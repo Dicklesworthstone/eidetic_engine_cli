@@ -45704,6 +45704,7 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, Do
         &RememberWriteControls {
             reinforce: args.reinforce,
             idempotency_key: args.idempotency_key.as_deref(),
+            defer_index_processing: false,
         },
     )?;
     let RememberOutcome::Created(ref report) = outcome else {
