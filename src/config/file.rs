@@ -307,6 +307,10 @@ pub struct PackConfig {
     pub lod_full_basis_points: Option<u64>,
     pub lod_truncated_preview_basis_points: Option<u64>,
     pub lod_link_only_basis_points: Option<u64>,
+    /// Per-agent pack-baseline ledger row cap for `--since last`
+    /// resolution (bd-7lvbg.6). Absent means the in-code default of 32;
+    /// oldest rows beyond the cap are evicted with an audit entry.
+    pub baseline_ledger_max_rows: Option<u64>,
 }
 
 impl PackConfig {
@@ -330,6 +334,7 @@ impl PackConfig {
                 "pack",
                 "lod_link_only_basis_points",
             )?,
+            baseline_ledger_max_rows: optional_u64(document, "pack", "baseline_ledger_max_rows")?,
         })
     }
 }

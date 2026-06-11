@@ -116,6 +116,11 @@ pub mod audit_actions {
     /// from migration-derived posterior rewrites.
     pub const OUTCOME_BAYES_UPDATE: &str = "outcome.bayes_update";
 
+    /// Pack-baseline ledger rows evicted past the per-agent cap
+    /// (bd-7lvbg.6). Details carry the agent, cap, evicted count, and
+    /// the evicted pack ids — the ledger never shrinks silently.
+    pub const PACK_BASELINE_EVICTED: &str = "pack.baseline_evicted";
+
     /// Trust-class transitioned for a memory because its 90% credible
     /// interval crossed a transition threshold (N7.1 / ADR 0032
     /// amendment to ADR 0009). Details carry from_class, to_class,
@@ -396,7 +401,29 @@ fn file_write_owner_gate(key: &WriteOwnerKey) -> &'static Mutex<()> {
 fn write_owner_key(location: &DatabaseLocation) -> WriteOwnerKey {
     match location {
         DatabaseLocation::Memory => WriteOwnerKey::Memory,
-        DatabaseLocation::File(path) => WriteOwnerKey::File(path.to_path_buf()),
+        DatabaseLocation::File(path) => WriteOwnerKey::File(normalized_write_owner_file_key(path)),
+    }
+}
+
+fn normalized_write_owner_file_key(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() && !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            std::path::Component::Normal(value) => normalized.push(value),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
     }
 }
 
@@ -6365,6 +6392,31 @@ CREATE TABLE IF NOT EXISTS primer_cache (
     "blake3:v077_primer_cache_2026_06_10",
 );
 
+/// V078: per-agent pack-baseline ledger (bd-7lvbg.6) — records which
+/// persisted pack an agent should delta against (`ee pack --since last`).
+/// Rows ride pack persistence; `--read-only` / `--no-persist` /
+/// `--no-baseline-write` paths never write here. Capped per
+/// (workspace, agent) with audited eviction; pack-record GC cascades so
+/// a baseline can never name a pack whose ledger is gone.
+pub const V078_PACK_BASELINES: Migration = Migration::new(
+    78,
+    "pack_baselines",
+    r#"
+CREATE TABLE IF NOT EXISTS pack_baselines (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    agent_name TEXT NOT NULL CHECK (length(trim(agent_name)) > 0),
+    task_key TEXT NOT NULL DEFAULT '',
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    pack_hash TEXT NOT NULL CHECK (length(trim(pack_hash)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    PRIMARY KEY (workspace_id, agent_name, task_key, pack_id)
+);
+CREATE INDEX IF NOT EXISTS pack_baselines_resolution
+    ON pack_baselines(workspace_id, agent_name, created_at);
+"#,
+    "blake3:v078_pack_baselines_2026_06_11",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -6444,6 +6496,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V075_REMEMBER_IDEMPOTENCY_KEYS,
     V076_MEMORY_ANCHOR_INDEX,
     V077_PRIMER_CACHE,
+    V078_PACK_BASELINES,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -17205,6 +17258,43 @@ pub struct CreatePackTaskLensInput {
     pub lens_hash: String,
 }
 
+/// Input for one per-agent pack-baseline ledger row (bd-7lvbg.6).
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CreatePackBaselineInput {
+    pub workspace_id: String,
+    pub agent_name: String,
+    /// Optional task scope; `None` records an any-task baseline.
+    pub task_key: Option<String>,
+    pub pack_id: String,
+    pub pack_hash: String,
+}
+
+/// A stored pack_baselines row.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct StoredPackBaseline {
+    pub agent_name: String,
+    /// `None` when the row was recorded without a task key.
+    pub task_key: Option<String>,
+    pub pack_id: String,
+    pub pack_hash: String,
+    pub created_at: String,
+}
+
+fn stored_pack_baseline_from_row(row: &Row) -> Result<StoredPackBaseline> {
+    let task_key = required_text(row, 1, DbOperation::Query, "task_key")?.to_string();
+    Ok(StoredPackBaseline {
+        agent_name: required_text(row, 0, DbOperation::Query, "agent_name")?.to_string(),
+        task_key: if task_key.is_empty() {
+            None
+        } else {
+            Some(task_key)
+        },
+        pack_id: required_text(row, 2, DbOperation::Query, "pack_id")?.to_string(),
+        pack_hash: required_text(row, 3, DbOperation::Query, "pack_hash")?.to_string(),
+        created_at: required_text(row, 4, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
 /// A stored pack_records row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredPackRecord {
@@ -17711,6 +17801,141 @@ impl DbConnection {
         })?;
         timings.transaction = transaction_start.elapsed();
         Ok(timings)
+    }
+
+    /// Record a per-agent pack baseline (bd-7lvbg.6) and evict rows past
+    /// the per-agent cap, oldest first, with one audit row per eviction
+    /// batch. Returns the number of evicted rows. Idempotent for the same
+    /// (workspace, agent, task key, pack id).
+    pub fn insert_pack_baseline(
+        &self,
+        input: &CreatePackBaselineInput,
+        max_rows_per_agent: u32,
+        actor: Option<&str>,
+    ) -> Result<u32> {
+        let now = Utc::now().to_rfc3339();
+        let cap = max_rows_per_agent.max(1) as usize;
+        let task_key = input.task_key.as_deref().unwrap_or("").trim().to_string();
+        self.with_transaction(|| {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT OR REPLACE INTO pack_baselines (workspace_id, agent_name, task_key, pack_id, pack_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                &[
+                    Value::Text(input.workspace_id.clone()),
+                    Value::Text(input.agent_name.clone()),
+                    Value::Text(task_key.clone()),
+                    Value::Text(input.pack_id.clone()),
+                    Value::Text(input.pack_hash.clone()),
+                    Value::Text(now.clone()),
+                ],
+            )?;
+
+            let rows = self.query_for(
+                DbOperation::Query,
+                "SELECT pack_id, task_key FROM pack_baselines WHERE workspace_id = ?1 AND agent_name = ?2 ORDER BY created_at DESC, pack_id DESC",
+                &[
+                    Value::Text(input.workspace_id.clone()),
+                    Value::Text(input.agent_name.clone()),
+                ],
+            )?;
+            if rows.len() <= cap {
+                return Ok(0u32);
+            }
+
+            let mut evicted_pack_ids = Vec::new();
+            for row in &rows[cap..] {
+                let pack_id = required_text(row, 0, DbOperation::Query, "pack_id")?.to_string();
+                let row_task_key =
+                    required_text(row, 1, DbOperation::Query, "task_key")?.to_string();
+                self.execute_for(
+                    DbOperation::Execute,
+                    "DELETE FROM pack_baselines WHERE workspace_id = ?1 AND agent_name = ?2 AND task_key = ?3 AND pack_id = ?4",
+                    &[
+                        Value::Text(input.workspace_id.clone()),
+                        Value::Text(input.agent_name.clone()),
+                        Value::Text(row_task_key),
+                        Value::Text(pack_id.clone()),
+                    ],
+                )?;
+                evicted_pack_ids.push(pack_id);
+            }
+
+            let details = serde_json::json!({
+                "schema": "ee.audit.pack_baseline_evicted.v1",
+                "agentName": &input.agent_name,
+                "capRows": cap,
+                "evictedCount": evicted_pack_ids.len(),
+                "evictedPackIds": evicted_pack_ids,
+            })
+            .to_string();
+            self.insert_audit(
+                &generate_audit_id(),
+                &CreateAuditInput {
+                    workspace_id: Some(input.workspace_id.clone()),
+                    actor: actor.map(str::to_owned),
+                    action: audit_actions::PACK_BASELINE_EVICTED.to_string(),
+                    target_type: Some("pack_baseline".to_string()),
+                    target_id: Some(input.agent_name.clone()),
+                    details: Some(details),
+                },
+            )?;
+            Ok(evicted_pack_ids.len() as u32)
+        })
+    }
+
+    /// Resolve the `--since last` baseline for an agent (bd-7lvbg.6):
+    /// the most recent baseline for the exact task key when one is given
+    /// and matches, falling back to the agent's most recent baseline of
+    /// any task key. Ties break deterministically by created_at then
+    /// pack_id, both descending.
+    pub fn resolve_pack_baseline(
+        &self,
+        workspace_id: &str,
+        agent_name: &str,
+        task_key: Option<&str>,
+    ) -> Result<Option<StoredPackBaseline>> {
+        let normalized_key = task_key.map(str::trim).filter(|key| !key.is_empty());
+        if let Some(key) = normalized_key {
+            let exact = self.query_for(
+                DbOperation::Query,
+                "SELECT agent_name, task_key, pack_id, pack_hash, created_at FROM pack_baselines WHERE workspace_id = ?1 AND agent_name = ?2 AND task_key = ?3 ORDER BY created_at DESC, pack_id DESC LIMIT 1",
+                &[
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(agent_name.to_string()),
+                    Value::Text(key.to_string()),
+                ],
+            )?;
+            if let Some(row) = exact.first() {
+                return Ok(Some(stored_pack_baseline_from_row(row)?));
+            }
+        }
+        let any = self.query_for(
+            DbOperation::Query,
+            "SELECT agent_name, task_key, pack_id, pack_hash, created_at FROM pack_baselines WHERE workspace_id = ?1 AND agent_name = ?2 ORDER BY created_at DESC, pack_id DESC LIMIT 1",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(agent_name.to_string()),
+            ],
+        )?;
+        any.first().map(stored_pack_baseline_from_row).transpose()
+    }
+
+    /// All baseline rows for an agent, newest first (test + diagnostics
+    /// surface).
+    pub fn list_pack_baselines(
+        &self,
+        workspace_id: &str,
+        agent_name: &str,
+    ) -> Result<Vec<StoredPackBaseline>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT agent_name, task_key, pack_id, pack_hash, created_at FROM pack_baselines WHERE workspace_id = ?1 AND agent_name = ?2 ORDER BY created_at DESC, pack_id DESC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(agent_name.to_string()),
+            ],
+        )?;
+        rows.iter().map(stored_pack_baseline_from_row).collect()
     }
 
     fn insert_pack_record_row(
@@ -35547,6 +35772,22 @@ mod tests {
     }
 
     #[test]
+    fn file_write_owner_process_gate_normalizes_equivalent_database_paths() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let direct = DatabaseLocation::File(tempdir.path().join("same.db"));
+        let dotted = DatabaseLocation::File(tempdir.path().join(".").join("same.db"));
+
+        let direct_gate = file_write_owner_gate_address_for_test(&direct);
+        let dotted_gate = file_write_owner_gate_address_for_test(&dotted);
+
+        ensure_equal(
+            &direct_gate,
+            &dotted_gate,
+            "equivalent non-symlink path spellings reuse the same process gate",
+        )
+    }
+
+    #[test]
     fn file_write_owner_depth_allows_same_file_nesting_only() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
         let shard_a = DatabaseLocation::File(tempdir.path().join("shard-a.db"));
@@ -35606,6 +35847,50 @@ mod tests {
             &file_write_owner_depth_for_test(&shard_b),
             &0usize,
             "dropping shard-b owner clears shard-b depth",
+        )
+    }
+
+    #[test]
+    fn file_write_owner_depth_treats_equivalent_paths_as_same_file() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let direct = DatabaseLocation::File(tempdir.path().join("same-nested.db"));
+        let dotted = DatabaseLocation::File(tempdir.path().join(".").join("same-nested.db"));
+
+        let direct_outer = lock_file_write_owner_gate(&direct)?;
+        ensure_equal(
+            &file_write_owner_depth_for_test(&direct),
+            &1usize,
+            "direct owner depth after outer acquisition",
+        )?;
+        ensure_equal(
+            &file_write_owner_depth_for_test(&dotted),
+            &1usize,
+            "dotted equivalent path observes the same outer owner depth",
+        )?;
+
+        let dotted_nested = lock_file_write_owner_gate(&dotted)?;
+        ensure_equal(
+            &file_write_owner_depth_for_test(&direct),
+            &2usize,
+            "direct path observes nested dotted acquisition",
+        )?;
+        ensure_equal(
+            &file_write_owner_depth_for_test(&dotted),
+            &2usize,
+            "dotted path shares nested owner depth",
+        )?;
+
+        drop(dotted_nested);
+        ensure_equal(
+            &file_write_owner_depth_for_test(&direct),
+            &1usize,
+            "dropping dotted nested owner restores direct outer depth",
+        )?;
+        drop(direct_outer);
+        ensure_equal(
+            &file_write_owner_depth_for_test(&dotted),
+            &0usize,
+            "dropping final direct owner clears dotted depth",
         )
     }
 
