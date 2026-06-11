@@ -5192,39 +5192,125 @@ pub fn resolve_bound_workspace_identity(workspace: &Path) -> WorkspaceIdentity {
 
 fn find_latest_capsule(workspace: &Path) -> Result<PathBuf, DomainError> {
     let ee_dir = workspace.join(".ee");
-    if !ee_dir.exists() {
-        return Err(DomainError::Storage {
-            message: "No .ee directory found in workspace.".to_owned(),
-            repair: Some("Run ee init to initialize the workspace.".to_owned()),
-        });
+    reject_existing_symlink_component(&ee_dir, "handoff workspace directory")?;
+    match fs::symlink_metadata(&ee_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Refusing to scan handoff workspace directory from non-directory path: {}",
+                    ee_dir.display()
+                ),
+                repair: Some(
+                    "Run ee init to recreate the workspace metadata directory.".to_owned(),
+                ),
+            });
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(DomainError::Storage {
+                message: "No .ee directory found in workspace.".to_owned(),
+                repair: Some("Run ee init to initialize the workspace.".to_owned()),
+            });
+        }
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Failed to inspect handoff workspace directory {}: {error}",
+                    ee_dir.display()
+                ),
+                repair: Some(format!("Check permissions for {}", ee_dir.display())),
+            });
+        }
     }
 
     let handoffs_dir = ee_dir.join("handoffs");
-    if !handoffs_dir.exists() {
-        return Err(DomainError::Storage {
-            message: "No handoffs directory found.".to_owned(),
-            repair: Some("Create a handoff capsule first with ee handoff create.".to_owned()),
-        });
+    reject_existing_symlink_component(&handoffs_dir, "handoff discovery directory")?;
+    match fs::symlink_metadata(&handoffs_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Refusing to scan handoff discovery directory from non-directory path: {}",
+                    handoffs_dir.display()
+                ),
+                repair: Some(
+                    "Use a real .ee/handoffs directory, or pass an explicit capsule path."
+                        .to_owned(),
+                ),
+            });
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(DomainError::Storage {
+                message: "No handoffs directory found.".to_owned(),
+                repair: Some("Create a handoff capsule first with ee handoff create.".to_owned()),
+            });
+        }
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Failed to inspect handoff discovery directory {}: {error}",
+                    handoffs_dir.display()
+                ),
+                repair: Some(format!("Check permissions for {}", handoffs_dir.display())),
+            });
+        }
     }
 
     let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
 
-    if let Ok(entries) = std::fs::read_dir(&handoffs_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "json") {
-                if let Ok(metadata) = path.metadata() {
-                    if let Ok(modified) = metadata.modified() {
-                        match &latest {
-                            None => latest = Some((modified, path)),
-                            Some((prev_time, _)) if modified > *prev_time => {
-                                latest = Some((modified, path));
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+    let entries = fs::read_dir(&handoffs_dir).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to scan handoff discovery directory {}: {error}",
+            handoffs_dir.display()
+        ),
+        repair: Some(format!("Check permissions for {}", handoffs_dir.display())),
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to read handoff discovery entry in {}: {error}",
+                handoffs_dir.display()
+            ),
+            repair: Some(format!("Check permissions for {}", handoffs_dir.display())),
+        })?;
+        let path = entry.path();
+        if !path.extension().is_some_and(|e| e == "json") {
+            continue;
+        }
+        reject_existing_symlink_component(&path, "handoff capsule")?;
+        let metadata = fs::symlink_metadata(&path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to inspect handoff capsule candidate {}: {error}",
+                path.display()
+            ),
+            repair: Some(format!("Check permissions for {}", path.display())),
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Refusing to consider non-regular handoff capsule candidate: {}",
+                    path.display()
+                ),
+                repair: Some(
+                    "Keep only regular .json capsule files in .ee/handoffs, or pass an explicit capsule path."
+                        .to_owned(),
+                ),
+            });
+        }
+        let modified = metadata.modified().map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to inspect handoff capsule timestamp {}: {error}",
+                path.display()
+            ),
+            repair: Some(format!("Check permissions for {}", path.display())),
+        })?;
+        match &latest {
+            None => latest = Some((modified, path)),
+            Some((prev_time, _)) if modified > *prev_time => latest = Some((modified, path)),
+            Some((prev_time, prev_path)) if modified == *prev_time && path > *prev_path => {
+                latest = Some((modified, path));
             }
+            _ => {}
         }
     }
 
@@ -5289,6 +5375,22 @@ mod tests {
                 format!("{context}: expected symlink error, got {}", error.message()),
             ),
         }
+    }
+
+    fn expect_domain_error<T: Debug>(
+        result: Result<T, DomainError>,
+        context: &str,
+    ) -> Result<DomainError, String> {
+        match result {
+            Ok(value) => Err(format!("{context}: expected error, got {value:?}")),
+            Err(error) => Ok(error),
+        }
+    }
+
+    fn init_handoff_discovery_dir(workspace: &Path) -> Result<PathBuf, String> {
+        let handoffs_dir = workspace.join(".ee").join("handoffs");
+        fs::create_dir_all(&handoffs_dir).map_err(|error| error.to_string())?;
+        Ok(handoffs_dir)
     }
 
     #[test]
@@ -6521,8 +6623,10 @@ memories_revised = 3
         let key_path = dir.path().join("handoff_hmac_key");
         fs::create_dir(&key_path).map_err(|error| error.to_string())?;
 
-        let error = write_private_secret(&key_path, &[7_u8; 32])
-            .expect_err("non-regular key path should be rejected before write");
+        let error = expect_domain_error(
+            write_private_secret(&key_path, &[7_u8; 32]),
+            "non-regular key path should be rejected before write",
+        )?;
         ensure(
             error.message().contains("non-regular path"),
             format!("unexpected error: {}", error.message()),
@@ -6542,8 +6646,10 @@ memories_revised = 3
         let capsule_path = dir.path().join("capsule.json");
         fs::create_dir(&capsule_path).map_err(|error| error.to_string())?;
 
-        let error = write_regular_file_no_symlinks(&capsule_path, "{}", "handoff capsule")
-            .expect_err("non-regular capsule path should be rejected before write");
+        let error = expect_domain_error(
+            write_regular_file_no_symlinks(&capsule_path, "{}", "handoff capsule"),
+            "non-regular capsule path should be rejected before write",
+        )?;
         ensure(
             error.message().contains("non-regular path"),
             format!("unexpected error: {}", error.message()),
@@ -6564,8 +6670,10 @@ memories_revised = 3
         let temp_path = handoff_temp_publish_path(&capsule_path);
         fs::write(&temp_path, "stale temp sentinel").map_err(|error| error.to_string())?;
 
-        let error = write_regular_file_no_symlinks(&capsule_path, "{}", "handoff capsule")
-            .expect_err("existing temp file should reject before write");
+        let error = expect_domain_error(
+            write_regular_file_no_symlinks(&capsule_path, "{}", "handoff capsule"),
+            "existing temp file should reject before write",
+        )?;
         ensure(
             error.message().contains("temp file"),
             format!("unexpected error: {}", error.message()),
@@ -6593,8 +6701,10 @@ memories_revised = 3
         std::os::unix::fs::symlink(&outside_path, &capsule_path)
             .map_err(|error| error.to_string())?;
 
-        let error = publish_handoff_temp_file(&temp_path, &capsule_path, "handoff capsule")
-            .expect_err("symlinked final capsule path should reject before publish");
+        let error = expect_domain_error(
+            publish_handoff_temp_file(&temp_path, &capsule_path, "handoff capsule"),
+            "symlinked final capsule path should reject before publish",
+        )?;
 
         ensure(
             error.message().contains("symlink"),
@@ -6628,8 +6738,10 @@ memories_revised = 3
         fs::write(&outside_path, "outside capsule").map_err(|error| error.to_string())?;
         std::os::unix::fs::symlink(&outside_path, &temp_path).map_err(|error| error.to_string())?;
 
-        let error = publish_handoff_temp_file(&temp_path, &capsule_path, "handoff capsule")
-            .expect_err("symlinked temp capsule path should reject before publish");
+        let error = expect_domain_error(
+            publish_handoff_temp_file(&temp_path, &capsule_path, "handoff capsule"),
+            "symlinked temp capsule path should reject before publish",
+        )?;
 
         ensure(
             error.message().contains("symlink"),
@@ -6650,6 +6762,61 @@ memories_revised = 3
                 .file_type()
                 .is_symlink(),
             "temp capsule symlink should remain untouched",
+        )
+    }
+
+    #[test]
+    fn latest_handoff_capsule_rejects_non_directory_handoffs_path() -> TestResult {
+        let dir = repo_tempdir()?;
+        let ee_dir = dir.path().join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        fs::write(ee_dir.join("handoffs"), "not a directory").map_err(|error| error.to_string())?;
+
+        let error = expect_domain_error(
+            find_latest_capsule(dir.path()),
+            "latest lookup should reject non-directory handoffs path",
+        )?;
+        ensure(
+            error.message().contains("non-directory path"),
+            format!("unexpected handoffs path error: {}", error.message()),
+        )
+    }
+
+    #[test]
+    fn latest_handoff_capsule_rejects_non_regular_json_candidate() -> TestResult {
+        let dir = repo_tempdir()?;
+        let handoffs_dir = init_handoff_discovery_dir(dir.path())?;
+        fs::create_dir(handoffs_dir.join("capsule.json")).map_err(|error| error.to_string())?;
+
+        let error = expect_domain_error(
+            find_latest_capsule(dir.path()),
+            "latest lookup should reject non-regular .json candidates",
+        )?;
+        ensure(
+            error
+                .message()
+                .contains("non-regular handoff capsule candidate"),
+            format!("unexpected candidate error: {}", error.message()),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn latest_handoff_capsule_rejects_symlinked_json_candidate() -> TestResult {
+        let dir = repo_tempdir()?;
+        let handoffs_dir = init_handoff_discovery_dir(dir.path())?;
+        let outside_path = dir.path().join("outside-capsule.json");
+        fs::write(&outside_path, "{}").map_err(|error| error.to_string())?;
+        let link_path = handoffs_dir.join("latest.json");
+        std::os::unix::fs::symlink(&outside_path, &link_path).map_err(|error| error.to_string())?;
+
+        let error = expect_domain_error(
+            find_latest_capsule(dir.path()),
+            "latest lookup should reject symlinked .json candidates",
+        )?;
+        ensure(
+            error.message().contains("symlink") && error.message().contains("latest.json"),
+            format!("unexpected symlink candidate error: {}", error.message()),
         )
     }
 
