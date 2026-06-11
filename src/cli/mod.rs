@@ -34027,7 +34027,14 @@ where
         prior_pack_hash
     };
 
-    if !context_delta_json_supported(renderer, requested_format, args) {
+    // bd-7lvbg.6: markdown gets a real delta rendering (added in full,
+    // changed as field lines, removed as id stubs) instead of the
+    // format_unsupported fallback. Other non-JSON formats still fall
+    // back to the full pack with the honest notice.
+    let markdown_delta = !args.stream
+        && renderer == output::Renderer::Markdown
+        && requested_format != OutputFormat::Binary;
+    if !context_delta_json_supported(renderer, requested_format, args) && !markdown_delta {
         let format = if args.stream {
             "stream"
         } else {
@@ -34042,7 +34049,8 @@ where
                  the full pack instead."
             ),
             Some(
-                "Use `ee pack \"<task>\" --since <pack-hash> --json` for JSON context deltas, or omit --since."
+                "Use `ee pack \"<task>\" --since <pack-hash> --json` for JSON context deltas, \
+                 `--format markdown` for a markdown delta, or omit --since."
                     .to_string(),
             ),
         );
@@ -34171,9 +34179,13 @@ where
         return None;
     }
 
-    let rendered = serde_json::to_string(&delta).unwrap_or_else(|_| {
-        output::render_context_response_json_with_options(response, render_options)
-    });
+    let rendered = if markdown_delta {
+        crate::core::context_delta::render_context_delta_markdown(&delta)
+    } else {
+        serde_json::to_string(&delta).unwrap_or_else(|_| {
+            output::render_context_response_json_with_options(response, render_options)
+        })
+    };
     Some(write_context_text(
         stdout,
         args.output.as_deref(),

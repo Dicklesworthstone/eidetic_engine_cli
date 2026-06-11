@@ -1,0 +1,29 @@
+# context delta
+
+**Prior:** `blake3:prior0000` → **New:** `blake3:new0000`
+
+Unchanged items are not re-emitted. Apply per docs/agent-ux/context-delta-apply.md.
+
+## added (1)
+
+### 1. `mem_added_01`
+
+- **content:** Run cargo fmt --check before release.
+- **section:** procedural_rules
+- **why:** matched release workflow query
+
+## changed (1)
+
+### `mem_changed_01`
+
+- **confidence:** 0.5 → 0.8
+- **why:** (prior value omitted: RedactionDrift) → trust class promoted
+
+## removed (2)
+
+- `mem_removed_01`
+- `mem_removed_02`
+
+## degraded (1)
+
+- **search_lexical_only** (info): semantic backend unavailable; lexical retrieval only.

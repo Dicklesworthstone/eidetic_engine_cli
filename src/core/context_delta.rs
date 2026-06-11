@@ -556,10 +556,15 @@ fn saved_percent(full_bytes: u64, saved_bytes: i64) -> f64 {
 mod tests {
     use serde_json::json;
 
+    use std::collections::BTreeMap;
+
     use super::{
-        CONTEXT_DELTA_OVERSIZED_CODE, CONTEXT_DELTA_SCHEMA_V1, ContextDeltaFallbackReason,
-        ContextDeltaFieldChange, ContextDeltaItemSnapshot, ContextDeltaOptions,
-        ContextDeltaPackSnapshot, compute_context_delta,
+        CONTEXT_DELTA_FORMAT_JSON, CONTEXT_DELTA_OVERSIZED_CODE, CONTEXT_DELTA_SCHEMA_V1,
+        ContextDeltaDegradation, ContextDeltaEnvelope, ContextDeltaFallbackReason,
+        ContextDeltaFieldChange, ContextDeltaFieldChangeRedaction, ContextDeltaItemSnapshot,
+        ContextDeltaItems, ContextDeltaModifiedItem, ContextDeltaOptions, ContextDeltaPackSnapshot,
+        ContextDeltaPayload, ContextDeltaRedactionReason, ContextDeltaServerDecision,
+        compute_context_delta, render_context_delta_markdown, token_savings,
     };
 
     type TestResult = Result<(), String>;
@@ -859,4 +864,156 @@ mod tests {
         }
         Ok(())
     }
+    /// bd-7lvbg.6: the markdown delta rendering is a stable contract —
+    /// added items in full, changed items as field lines (redactions
+    /// honored), removed items as one-line id stubs.
+    #[test]
+    fn markdown_delta_rendering_matches_golden() -> TestResult {
+        let envelope = ContextDeltaEnvelope {
+            schema: CONTEXT_DELTA_SCHEMA_V1,
+            success: true,
+            data: ContextDeltaPayload {
+                prior_pack_hash: "blake3:prior0000".to_string(),
+                new_pack_hash: "blake3:new0000".to_string(),
+                workspace_id: None,
+                base_db_generation: Some(1),
+                new_db_generation: Some(2),
+                prior_feature_flag_set_hash: None,
+                new_feature_flag_set_hash: None,
+                items: ContextDeltaItems {
+                    added: vec![
+                        ContextDeltaItemSnapshot::new("mem_added_01")
+                            .with_field("content", json!("Run cargo fmt --check before release."))
+                            .with_field("section", json!("procedural_rules"))
+                            .with_field("why", json!("matched release workflow query")),
+                    ],
+                    removed: vec!["mem_removed_01".to_string(), "mem_removed_02".to_string()],
+                    modified: vec![ContextDeltaModifiedItem {
+                        id: "mem_changed_01".to_string(),
+                        field_changes: BTreeMap::from([
+                            (
+                                "confidence".to_string(),
+                                ContextDeltaFieldChange::Pair([json!(0.5), json!(0.8)]),
+                            ),
+                            (
+                                "why".to_string(),
+                                ContextDeltaFieldChange::Redacted(
+                                    ContextDeltaFieldChangeRedaction {
+                                        new_value: json!("trust class promoted"),
+                                        old_value_omitted: true,
+                                        reason: ContextDeltaRedactionReason::RedactionDrift,
+                                    },
+                                ),
+                            ),
+                        ]),
+                    }],
+                },
+                token_savings: token_savings(100, 50, 10),
+                server_decision: ContextDeltaServerDecision {
+                    computed_from_server_verified_pack_record: true,
+                    delta_chained: false,
+                    format: CONTEXT_DELTA_FORMAT_JSON,
+                    fallback_reason: None,
+                },
+                trace: None,
+            },
+            degraded: vec![ContextDeltaDegradation {
+                code: "search_lexical_only".to_string(),
+                severity: "info".to_string(),
+                message: "semantic backend unavailable; lexical retrieval only.".to_string(),
+                repair: None,
+                details: None,
+            }],
+        };
+        let rendered = render_context_delta_markdown(&envelope);
+        let expected =
+            include_str!("../../tests/fixtures/golden/context_delta/markdown_delta.golden");
+        if rendered != expected {
+            return Err(format!(
+                "markdown delta rendering drifted from the golden:\n--- expected\n{expected}\n+++ actual\n{rendered}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Render a context-delta envelope as a compact markdown document
+/// (bd-7lvbg.6): added items in full (they ARE the new content),
+/// changed items as field-level lines, removed items as one-line id
+/// stubs — never full bodies. Unchanged items are intentionally not
+/// re-emitted; consumers apply the delta per
+/// docs/agent-ux/context-delta-apply.md.
+#[must_use]
+pub fn render_context_delta_markdown(envelope: &ContextDeltaEnvelope) -> String {
+    fn field_value_line(value: &JsonValue) -> String {
+        match value {
+            JsonValue::String(text) => text.clone(),
+            other => other.to_string(),
+        }
+    }
+
+    let payload = &envelope.data;
+    let mut out = String::with_capacity(1024);
+    out.push_str("# context delta\n\n");
+    out.push_str(&format!(
+        "**Prior:** `{}` → **New:** `{}`\n\n",
+        payload.prior_pack_hash, payload.new_pack_hash
+    ));
+    out.push_str(
+        "Unchanged items are not re-emitted. Apply per \
+         docs/agent-ux/context-delta-apply.md.\n",
+    );
+
+    out.push_str(&format!("\n## added ({})\n", payload.items.added.len()));
+    for (index, item) in payload.items.added.iter().enumerate() {
+        out.push_str(&format!("\n### {}. `{}`\n\n", index + 1, item.id));
+        for (name, value) in &item.fields {
+            out.push_str(&format!("- **{name}:** {}\n", field_value_line(value)));
+        }
+    }
+
+    out.push_str(&format!(
+        "\n## changed ({})\n",
+        payload.items.modified.len()
+    ));
+    for item in &payload.items.modified {
+        out.push_str(&format!("\n### `{}`\n\n", item.id));
+        for (field, change) in &item.field_changes {
+            match change {
+                ContextDeltaFieldChange::Pair(pair) => {
+                    out.push_str(&format!(
+                        "- **{field}:** {} → {}\n",
+                        field_value_line(&pair[0]),
+                        field_value_line(&pair[1]),
+                    ));
+                }
+                ContextDeltaFieldChange::Redacted(redaction) => {
+                    out.push_str(&format!(
+                        "- **{field}:** (prior value omitted: {:?}) → {}\n",
+                        redaction.reason,
+                        field_value_line(&redaction.new_value),
+                    ));
+                }
+            }
+        }
+    }
+
+    out.push_str(&format!(
+        "\n## removed ({})\n\n",
+        payload.items.removed.len()
+    ));
+    for id in &payload.items.removed {
+        out.push_str(&format!("- `{id}`\n"));
+    }
+
+    if !envelope.degraded.is_empty() {
+        out.push_str(&format!("\n## degraded ({})\n\n", envelope.degraded.len()));
+        for entry in &envelope.degraded {
+            out.push_str(&format!(
+                "- **{}** ({}): {}\n",
+                entry.code, entry.severity, entry.message
+            ));
+        }
+    }
+    out
 }
