@@ -1,0 +1,18 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "command": "situation show",
+    "version": "ee.situation.show.v1",
+    "situationId": "sit_DYNAMIC",
+    "category": "bug_fix",
+    "originalText": "fix the failing release workflow gate",
+    "createdAt": "2026-06-11T00:00:00Z",
+    "contextHints": [
+      "fail",
+      "fix"
+    ],
+    "relatedMemories": []
+  },
+  "degraded": []
+}

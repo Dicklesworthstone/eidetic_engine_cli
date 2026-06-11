@@ -4168,6 +4168,99 @@ mod tests {
         )
     }
 
+    fn adopt_golden_workspace(prefix: &str) -> Result<(PathBuf, String, String), String> {
+        let artifact_dir = unique_artifact_dir(prefix)?;
+        let workspace = artifact_dir.join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| {
+            format!(
+                "failed to create workspace {}: {error}",
+                workspace.display()
+            )
+        })?;
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+        run_json_stdout(&["--json", "--workspace", &workspace_arg, "init"], true)?;
+        let adopted = run_json_stdout(
+            &[
+                "--json",
+                "--workspace",
+                &workspace_arg,
+                "situation",
+                "adopt",
+                "fix the failing release workflow gate",
+                "--adopted-by",
+                "golden-agent",
+                "--reason",
+                "golden conformance",
+                "--evidence-id",
+                "cass-session://incident-release#L1-L3",
+                "--as-of",
+                "2026-06-11T00:00:00Z",
+            ],
+            true,
+        )?;
+        let situation_id = adopted["data"]["situationId"]
+            .as_str()
+            .ok_or("adopt must report a situation id")?
+            .to_owned();
+        Ok((workspace, workspace_arg, situation_id))
+    }
+
+    #[test]
+    fn agent_situation_show_json_matches_golden() -> TestResult {
+        let (_workspace, workspace_arg, situation_id) =
+            adopt_golden_workspace("situation-show-json")?;
+        let output = run_ee(&[
+            "--json",
+            "--workspace",
+            &workspace_arg,
+            "situation",
+            "show",
+            &situation_id,
+        ])?;
+        ensure(output.status.success(), "situation show should succeed")?;
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|error| format!("show stdout was not UTF-8: {error}"))?;
+        let normalized = normalize_situation_read_json(&stdout);
+        assert_golden("situation", "show_recorded.json", &normalized)
+    }
+
+    #[test]
+    fn agent_situation_explain_json_matches_golden() -> TestResult {
+        let (_workspace, workspace_arg, situation_id) =
+            adopt_golden_workspace("situation-explain-json")?;
+        let output = run_ee(&[
+            "--json",
+            "--workspace",
+            &workspace_arg,
+            "situation",
+            "explain",
+            &situation_id,
+        ])?;
+        ensure(output.status.success(), "situation explain should succeed")?;
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|error| format!("explain stdout was not UTF-8: {error}"))?;
+        let normalized = normalize_situation_read_json(&stdout);
+        assert_golden("situation", "explain_recorded.json", &normalized)
+    }
+
+    fn normalize_situation_read_json(json: &str) -> String {
+        let mut value: serde_json::Value = match serde_json::from_str(json) {
+            Ok(parsed) => parsed,
+            Err(_) => return json.to_string(),
+        };
+
+        if let Some(data) = value.get_mut("data") {
+            // The situation id derives from the temp workspace path via
+            // the adoption fingerprint; everything else is deterministic
+            // through the fixed task text and --as-of timestamp.
+            if let Some(id) = data.get_mut("situationId") {
+                *id = serde_json::json!("sit_DYNAMIC");
+            }
+        }
+
+        serde_json::to_string_pretty(&value).unwrap_or_else(|_| json.to_string()) + "\n"
+    }
+
     fn normalize_situation_adopt_json(json: &str) -> String {
         let mut value: serde_json::Value = match serde_json::from_str(json) {
             Ok(parsed) => parsed,

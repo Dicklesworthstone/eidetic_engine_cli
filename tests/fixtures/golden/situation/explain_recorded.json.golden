@@ -1,0 +1,18 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "command": "situation explain",
+    "version": "ee.situation.explain.v1",
+    "situationId": "sit_DYNAMIC",
+    "category": "bug_fix",
+    "explanation": "Adopted situation classified as `bug_fix` with low confidence (score 0.49) by `ee.situation.heuristics.v1`.",
+    "recommendations": [],
+    "relevantRules": [
+      "fail",
+      "fix"
+    ],
+    "potentialRisks": []
+  },
+  "degraded": []
+}
