@@ -147,6 +147,15 @@ classify_command() {
         return
     fi
 
+    # Tracker comments often need to quote the exact Cargo command that
+    # RCH attempted. Treat that as evidence text, not an execution
+    # request, after the command-substitution guard above has ruled out
+    # `$(cargo ...)` and backtick forms.
+    if is_tracker_evidence_command "$cmd"; then
+        printf 'allowed\ttracker evidence command quotes Rust verifier text without executing it\t-\t-\n'
+        return
+    fi
+
     # Whitelist only remote-required `rch exec` cargo forms. Bare
     # `rch exec -- cargo ...` can fall back to local Cargo when topology
     # admission fails, so the tripwire denies it and points callers at
@@ -264,6 +273,12 @@ probe_processes() {
         # `cargo check ...` as the payload being classified, but no local
         # Cargo process is spawned by these payload-inspection commands.
         if is_rch_payload_inspection_command "$cmd"; then
+            continue
+        fi
+        # Skip tracker evidence commands. They can include `cargo test`
+        # in a Beads comment body while the live process is `br`/wrapper
+        # plumbing rather than Cargo.
+        if is_tracker_evidence_command "$cmd"; then
             continue
         fi
         # Skip explicit SSH remote-proof launchers. Their argv can contain a
@@ -569,6 +584,17 @@ is_rch_exec_command() {
 is_ssh_remote_rust_payload_command() {
     printf '%s' "$1" | grep -Eq '(^|[[:space:]/])ssh([[:space:]]|$)' &&
         command_mentions_rust_tool "$1"
+}
+
+is_tracker_evidence_command() {
+    local cmd="$1"
+    # Do not bless shell command lists that run Cargo after the tracker
+    # write. Plain prose such as "Command: cargo test ..." is handled by
+    # the evidence-command shape below.
+    if printf '%s' "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*(cargo|rustc|rustdoc)([[:space:]]|$)'; then
+        return 1
+    fi
+    printf '%s' "$cmd" | grep -Eq '(^|[[:space:]/.])scripts/br_retry\.sh[[:space:]]+comments[[:space:]]+add([[:space:]]|$)|(^|[[:space:]/])br[[:space:]]+comments[[:space:]]+add([[:space:]]|$)'
 }
 
 command_kind_from_command() {
@@ -1108,6 +1134,23 @@ run_self_test() {
         denied*) ;;
         *) printf 'self-test FAILED: rch wrapper inside command substitution must be denied; got %s\n' "$result" >&2; exit 1 ;;
     esac
+    # Tracker evidence may quote the exact Cargo command that RCH
+    # attempted without executing it locally.
+    result=$(classify_command 'br comments add bd-1 --message "RCH proof command: cargo test --lib foo"')
+    case "$result" in
+        allowed*) ;;
+        *) printf 'self-test FAILED: plain tracker evidence mentioning cargo must be allowed; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    result=$(classify_command 'bash scripts/br_retry.sh comments add bd-1 --message "RCH proof command: cargo test --lib foo"')
+    case "$result" in
+        allowed*) ;;
+        *) printf 'self-test FAILED: br_retry tracker evidence mentioning cargo must be allowed; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    result=$(classify_command 'br comments add bd-1 --message ok; cargo test --lib foo')
+    case "$result" in
+        denied*) ;;
+        *) printf 'self-test FAILED: tracker command followed by cargo execution must be denied; got %s\n' "$result" >&2; exit 1 ;;
+    esac
     # Direct rustc → DENIED.
     result=$(classify_command "rustc src/main.rs")
     case "$result" in
@@ -1299,7 +1342,7 @@ EOF
             exit 1
         fi
     fi
-    printf 'self-test PASSED: 21 classifier cases, JSON repair action, stable-wrapper/ssh exclusion, process/tmux fixture, and worktree fixtures produced expected outcomes\n'
+    printf 'self-test PASSED: 24 classifier cases, JSON repair action, stable-wrapper/ssh exclusion, process/tmux fixture, and worktree fixtures produced expected outcomes\n'
     exit 0
 }
 
