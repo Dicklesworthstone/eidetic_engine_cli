@@ -38,6 +38,14 @@ const IMPORT_SOURCE_KIND: &str = "cass";
 const CASS_REDACTION_AUDIT_SCHEMA_V1: &str = "ee.cass.redaction_audit.v1";
 const CASS_REDACTION_AUDIT_ACTION: &str = "cass.evidence.redacted";
 const CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1: &str = "ee.cass.subprocess_diagnostics.v1";
+/// Upper bound on the total `cass view --json` stdout we will buffer before
+/// parsing. Real `cass` emits a single pretty-printed `{...,"lines":[...]}`
+/// envelope (see [`parse_view_json_envelope`]), so the per-line read limit
+/// (`CASS_STDOUT_LINE_MAX_BYTES`, enforced in `process.rs`) is not by itself a
+/// total bound — the whole object can span many lines. Mirror the buffered
+/// `run` path's 100 MiB pipe cap so a pathological session can't make us hold
+/// unbounded memory.
+const CASS_VIEW_STDOUT_TOTAL_MAX_BYTES: usize = 100 * 1024 * 1024;
 #[cfg(test)]
 const CASS_VIEW_STREAM_MEMORY_BUDGET_BYTES: usize = 10 * 1024 * 1024;
 
@@ -972,8 +980,16 @@ fn view_session_spans(
     source_path: &str,
 ) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
     let invocation = client.import_view_invocation(source_path, 1, DEFAULT_VIEW_CONTEXT)?;
-    let mut collector = CassViewLineCollector::new(source_path);
-    let outcome = match invocation.run_stdout_lines(|line| collector.accept_line(&line)) {
+    // `cass view --json` emits ONE pretty-printed `{...,"lines":[...]}` envelope
+    // (the first stdout line is just `{`), not a per-line `{"line",..}` JSONL
+    // stream. So we cannot `serde_json::from_str` each line in isolation (the
+    // bare `{` yields "EOF while parsing an object" and imports zero spans —
+    // issue #11). Instead, stream the stdout to keep the per-line 1 MiB read
+    // limit and bound total memory, accumulate the raw bytes, then hand the
+    // whole buffer to `parse_view_json`, which understands the real envelope
+    // shape via `parse_view_json_envelope` (and still tolerates true JSONL).
+    let mut buffer = CassViewStdoutBuffer::default();
+    let outcome = match invocation.run_stdout_lines(|line| buffer.accept_line(&line)) {
         Ok(outcome) => outcome,
         Err(CassStreamError::Cass(error)) => return Err(CassImportError::Cass(error)),
         Err(CassStreamError::Handler(error)) => return Err(error),
@@ -987,7 +1003,48 @@ fn view_session_spans(
         "streamed CASS view stdout"
     );
     ensure_successful_stream_outcome(&outcome, "cass view")?;
-    Ok(collector.into_spans())
+    parse_view_json(buffer.as_bytes(), source_path)
+}
+
+/// Accumulates `cass view --json` stdout while streaming so the full envelope
+/// can be parsed in one pass (see [`view_session_spans`]). Preserves the
+/// streaming safety posture: each line is already bounded by the read-side
+/// `CASS_STDOUT_LINE_MAX_BYTES` limit, and the running total is capped here at
+/// [`CASS_VIEW_STDOUT_TOTAL_MAX_BYTES`] so pathological output cannot pin
+/// unbounded memory.
+#[derive(Default)]
+struct CassViewStdoutBuffer {
+    bytes: Vec<u8>,
+}
+
+impl CassViewStdoutBuffer {
+    fn accept_line(&mut self, line: &str) -> Result<(), CassImportError> {
+        // `+ 1` accounts for the newline we re-insert between lines so the
+        // reconstructed buffer matches the original multi-line stdout.
+        let projected = self
+            .bytes
+            .len()
+            .saturating_add(line.len())
+            .saturating_add(1);
+        if projected > CASS_VIEW_STDOUT_TOTAL_MAX_BYTES {
+            return Err(CassImportError::InvalidJson {
+                source: "view",
+                message: format!(
+                    "view JSON output exceeds {CASS_VIEW_STDOUT_TOTAL_MAX_BYTES} byte limit"
+                ),
+            });
+        }
+        if !self.bytes.is_empty() {
+            self.bytes.push(b'\n');
+        }
+        self.bytes.extend_from_slice(line.as_bytes());
+        record_cass_view_stream_peak_sample(self.bytes.len());
+        Ok(())
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 fn ensure_successful_outcome(
@@ -2239,7 +2296,12 @@ mod tests {
                 "token_count": 8
             }]
         });
-        let mut view = String::new();
+        // Emit the SAME pretty-printed `{...,"lines":[...],"total_lines":N}`
+        // envelope that real `cass view --json` produces (the first stdout line
+        // is just `{`). Emitting per-line JSONL here — which `cass` never does —
+        // previously masked issue #11, where the streaming import parsed each
+        // stdout line in isolation and choked on the bare `{`.
+        let mut lines = Vec::with_capacity(view_line_count as usize);
         for line_number in 1..=view_line_count {
             let content = json!({
                 "type": "user",
@@ -2248,17 +2310,22 @@ mod tests {
                     "content": format!("index me {line_number}"),
                 }
             });
-            view.push_str(
-                &json!({
-                    "line": line_number,
-                    "content": content.to_string(),
-                })
-                .to_string(),
-            );
-            view.push('\n');
+            lines.push(json!({
+                "line": line_number,
+                "content": content.to_string(),
+                "highlighted": line_number == 1,
+            }));
         }
+        let view = serde_json::to_string_pretty(&json!({
+            "path": session_path.to_string_lossy(),
+            "target_line": 1,
+            "context": DEFAULT_VIEW_CONTEXT,
+            "lines": lines,
+            "total_lines": view_line_count,
+        }))
+        .map_err(|error| error.to_string())?;
         let script = format!(
-            "#!/bin/sh\ncase \"$1\" in\n  sessions) cat <<'EE_CASS_SESSIONS'\n{}\nEE_CASS_SESSIONS\n;;\n  view) cat <<'EE_CASS_VIEW'\n{}EE_CASS_VIEW\n;;\n  *) printf 'unexpected cass command: %s\\n' \"$1\" >&2; exit 2;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n  sessions) cat <<'EE_CASS_SESSIONS'\n{}\nEE_CASS_SESSIONS\n;;\n  view) cat <<'EE_CASS_VIEW'\n{}\nEE_CASS_VIEW\n;;\n  *) printf 'unexpected cass command: %s\\n' \"$1\" >&2; exit 2;;\nesac\n",
             sessions, view
         );
         fs::write(path, script).map_err(|error| error.to_string())?;
@@ -3081,6 +3148,122 @@ mod tests {
         ensure_equal(&spans.len(), &1000, "stored evidence spans")?;
         ensure_equal(&spans[0].start_line, &1, "first stored line")?;
         ensure_equal(&spans[999].end_line, &1000, "last stored line")
+    }
+
+    /// Writes a fake `cass` whose `view` emits the supplied stdout verbatim,
+    /// so a test can feed the EXACT multi-line `{...,"lines":[...]}` envelope
+    /// that real `cass view --json` produces (whose first stdout line is `{`).
+    #[cfg(unix)]
+    fn write_fake_cass_binary_with_verbatim_view(
+        path: &Path,
+        workspace_path: &Path,
+        session_path: &Path,
+        view_stdout: &str,
+    ) -> TestResult {
+        let sessions = json!({
+            "sessions": [{
+                "path": session_path.to_string_lossy(),
+                "workspace": workspace_path.to_string_lossy(),
+                "agent": "codex",
+                "modified": "2026-05-05T00:00:00Z",
+                "message_count": 1,
+                "token_count": 8
+            }]
+        });
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n  sessions) cat <<'EE_CASS_SESSIONS'\n{}\nEE_CASS_SESSIONS\n;;\n  view) cat <<'EE_CASS_VIEW'\n{}\nEE_CASS_VIEW\n;;\n  *) printf 'unexpected cass command: %s\\n' \"$1\" >&2; exit 2;;\nesac\n",
+            sessions, view_stdout
+        );
+        fs::write(path, script).map_err(|error| error.to_string())?;
+        let mut permissions = fs::metadata(path)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).map_err(|error| error.to_string())
+    }
+
+    /// Regression guard for issue #11: real `cass view --json` emits ONE
+    /// pretty-printed `{...,"lines":[...]}` envelope (the first stdout line is
+    /// just `{`), so the streaming import must buffer the whole envelope and
+    /// parse it via `parse_view_json` — not `serde_json::from_str` each stdout
+    /// line. We drive the full streaming import against the SAME envelope
+    /// fixture real cass produces and assert non-zero sessions and spans, so a
+    /// regression to per-line parsing (which imports zero) is caught.
+    #[cfg(unix)]
+    #[test]
+    fn import_streams_real_view_envelope_fixture_imports_nonzero_spans() -> TestResult {
+        let root = unique_test_dir("stream-real-view-envelope")?;
+        let bin_dir = root.join("bin");
+        let workspace_path = root.join("workspace");
+        let session_path = root.join("session.jsonl");
+        fs::create_dir_all(&bin_dir).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&workspace_path).map_err(|error| error.to_string())?;
+        fs::write(&session_path, "{}\n").map_err(|error| error.to_string())?;
+        let mut bin_permissions = fs::metadata(&bin_dir)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        bin_permissions.set_mode(0o755);
+        fs::set_permissions(&bin_dir, bin_permissions).map_err(|error| error.to_string())?;
+
+        // The committed fixture is the verbatim pretty-printed envelope shape
+        // that real `cass view --json` emits (matches cass 0.6.13 stdout).
+        let fixture_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cass/v1/view.json");
+        let view_stdout = fs::read_to_string(&fixture_path)
+            .map_err(|error| format!("read view fixture {}: {error}", fixture_path.display()))?;
+        // Sanity: confirm the fixture really is the multi-line pretty envelope
+        // (first non-empty stdout line is a bare `{`), i.e. NOT per-line JSONL.
+        let first_line = view_stdout
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or_default()
+            .trim();
+        ensure_equal(
+            &first_line,
+            &"{",
+            "view fixture must be a pretty envelope whose first line is `{`",
+        )?;
+
+        let cass_binary = bin_dir.join("cass");
+        write_fake_cass_binary_with_verbatim_view(
+            &cass_binary,
+            &workspace_path,
+            &session_path,
+            &view_stdout,
+        )?;
+        let database_path = root.join("ee.db");
+        let client = CassClient::with_binary(cass_binary).with_timeout(Duration::from_secs(5));
+        let options = CassImportOptions {
+            workspace_path: workspace_path.clone(),
+            database_path: Some(database_path.clone()),
+            limit: 1,
+            since: None,
+            dry_run: false,
+            include_spans: true,
+        };
+
+        let report = import_cass_sessions(&client, &options).map_err(|error| error.to_string())?;
+
+        ensure_equal(&report.sessions_imported, &1, "sessions imported")?;
+        // The fixture has three `lines[]` entries; the import must produce a
+        // non-zero span count (zero spans is exactly the issue #11 symptom).
+        ensure_equal(&report.spans_imported, &3, "spans imported")?;
+        let imported_session = report
+            .sessions
+            .first()
+            .ok_or_else(|| "import report should include imported session".to_string())?;
+        let session_id = imported_session
+            .session_id
+            .as_deref()
+            .ok_or_else(|| "imported session should include id".to_string())?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let spans = connection
+            .list_evidence_spans_for_session(session_id)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&spans.len(), &3, "stored evidence spans")?;
+        ensure_equal(&spans[0].start_line, &1, "first stored line")?;
+        ensure_equal(&spans[2].end_line, &3, "last stored line")
     }
 
     #[cfg(unix)]

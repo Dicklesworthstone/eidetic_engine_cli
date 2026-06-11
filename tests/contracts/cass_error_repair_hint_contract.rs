@@ -38,16 +38,38 @@ fn ensure_equal<T: std::fmt::Debug + PartialEq>(
     }
 }
 
+fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
+    if condition {
+        Ok(())
+    } else {
+        Err(message.into())
+    }
+}
+
 #[test]
 fn repair_hint_for_invalid_binary_points_to_allowlisted_executable() -> TestResult {
     let error = CassError::InvalidBinary {
         binary: PathBuf::from("/tmp/sketchy-cass"),
         reason: "outside allowlist".to_string(),
     };
-    ensure_equal(
-        &error.repair_hint(),
-        &Some("set EE_CASS_BINARY or [cass.binary] to an absolute trusted cass executable"),
-        "InvalidBinary repair_hint",
+    let hint = error
+        .repair_hint()
+        .ok_or_else(|| "InvalidBinary must surface a repair hint".to_string())?;
+    // The repair must steer the agent to the EE_CASS_BINARY opt-in (the
+    // concrete `$(command -v cass)` form is the documented workaround for the
+    // EE-100 allowlist refusal — see issue #11), and never tell an agent to
+    // install an already-present cass.
+    ensure(
+        hint.contains("EE_CASS_BINARY"),
+        format!("InvalidBinary repair_hint must mention EE_CASS_BINARY: {hint}"),
+    )?;
+    ensure(
+        hint.contains("command -v cass"),
+        format!("InvalidBinary repair_hint must show the `command -v cass` form: {hint}"),
+    )?;
+    ensure(
+        hint.contains("[cass.binary]"),
+        format!("InvalidBinary repair_hint must mention the [cass.binary] config: {hint}"),
     )
 }
 

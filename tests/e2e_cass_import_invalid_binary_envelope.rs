@@ -12,8 +12,9 @@
 //!
 //! The InvalidBinary variant has a stable kind_str (`invalid_binary`),
 //! Display prefix (`cass binary '{path}' is not allowed: {reason}`),
-//! and repair hint (`set EE_CASS_BINARY or [cass.binary] to an
-//! absolute trusted cass executable`), but `grep -rln "InvalidBinary"
+//! and a repair hint that surfaces the concrete
+//! `EE_CASS_BINARY=$(command -v cass)` workaround (issue #11), but
+//! `grep -rln "InvalidBinary"
 //! tests/` returns zero hits — no real-binary E2E proves the CLI
 //! surface. This test pins three deterministic branches that fire
 //! regardless of whether a real `cass` binary is installed on the host:
@@ -37,8 +38,11 @@ use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
-const CANONICAL_REPAIR_HINT: &str =
-    "set EE_CASS_BINARY or [cass.binary] to an absolute trusted cass executable";
+// Stable substring the InvalidBinary repair hint must always contain. The
+// full wording was enriched (issue #11) to show the concrete
+// `EE_CASS_BINARY=$(command -v cass)` workaround, so this pins the actionable
+// invariant rather than the exact prose.
+const CANONICAL_REPAIR_HINT: &str = "EE_CASS_BINARY=$(command -v cass)";
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {

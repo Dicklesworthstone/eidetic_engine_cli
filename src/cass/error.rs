@@ -126,9 +126,9 @@ impl CassError {
     #[must_use]
     pub fn repair_hint(&self) -> Option<&str> {
         match self {
-            Self::InvalidBinary { .. } => {
-                Some("set EE_CASS_BINARY or [cass.binary] to an absolute trusted cass executable")
-            }
+            Self::InvalidBinary { .. } => Some(
+                "set EE_CASS_BINARY to an absolute, trusted cass executable (e.g. `EE_CASS_BINARY=$(command -v cass)`) or set [cass.binary] in config; ee only auto-runs a bare `cass` on PATH or a trusted absolute path to a file named `cass`",
+            ),
             Self::BinaryNotFound { .. } => Some("install cass or set [cass.binary] in config"),
             Self::FoundButUntrusted { .. } => Some(
                 "cass is already installed but outside ee's trusted allowlist; set EE_CASS_BINARY to its absolute path (or move the cass binary into a system bin such as /usr/local/bin) to let ee use it",
