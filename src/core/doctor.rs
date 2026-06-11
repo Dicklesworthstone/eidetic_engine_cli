@@ -1204,6 +1204,7 @@ fn doctor_mesh_auto_enrollment_action(
     workspace_path: &str,
     required: &BTreeSet<String>,
 ) -> Option<RepairAction> {
+    let workspace_arg = doctor_shell_quote_arg(workspace_path);
     let present_deps = |deps: &[&str]| -> Vec<String> {
         deps.iter()
             .filter(|dep| required.contains(**dep))
@@ -1272,7 +1273,7 @@ fn doctor_mesh_auto_enrollment_action(
         "ee_daemon_start" => RepairAction {
             id: id.to_owned(),
             kind: ActionKind::EeSubcommand,
-            command: format!("ee daemon --foreground --workspace \"{workspace_path}\""),
+            command: format!("ee daemon --foreground --workspace {workspace_arg}"),
             human_readable: "Start the foreground ee daemon and hello responder.".to_owned(),
             prerequisites: present_deps(&["tailscale_up", "tailscale_disable_shields_up"]),
             expected_outcome: ExpectedOutcome {
@@ -1290,7 +1291,7 @@ fn doctor_mesh_auto_enrollment_action(
             id: id.to_owned(),
             kind: ActionKind::EeSubcommand,
             command: format!(
-                "ee audit timeline --workspace \"{workspace_path}\" --event-type mesh.hello_responder_crashed_restarted --json"
+                "ee audit timeline --workspace {workspace_arg} --event-type mesh.hello_responder_crashed_restarted --json"
             ),
             human_readable: "Inspect hello-responder restart audit rows.".to_owned(),
             prerequisites: Vec::new(),
@@ -1308,7 +1309,7 @@ fn doctor_mesh_auto_enrollment_action(
         "ee_mesh_discovery_refresh" => RepairAction {
             id: id.to_owned(),
             kind: ActionKind::EeSubcommand,
-            command: format!("ee mesh status --workspace \"{workspace_path}\" --json"),
+            command: format!("ee mesh status --workspace {workspace_arg} --json"),
             human_readable: "Refresh the read-only mesh discovery posture.".to_owned(),
             prerequisites: present_deps(&["tailscale_up", "ee_daemon_start"]),
             expected_outcome: ExpectedOutcome {
@@ -1328,7 +1329,7 @@ fn doctor_mesh_auto_enrollment_action(
         "inspect_auto_enrollment_audit" => RepairAction {
             id: id.to_owned(),
             kind: ActionKind::EeSubcommand,
-            command: format!("ee audit verify --workspace \"{workspace_path}\" --json"),
+            command: format!("ee audit verify --workspace {workspace_arg} --json"),
             human_readable: "Verify the auto-enrollment audit chain.".to_owned(),
             prerequisites: Vec::new(),
             expected_outcome: ExpectedOutcome {
@@ -1346,7 +1347,7 @@ fn doctor_mesh_auto_enrollment_action(
             id: id.to_owned(),
             kind: ActionKind::EeSubcommand,
             command: format!(
-                "ee audit timeline --workspace \"{workspace_path}\" --event-type mesh.steward_reconciliation_failed --json"
+                "ee audit timeline --workspace {workspace_arg} --event-type mesh.steward_reconciliation_failed --json"
             ),
             human_readable: "Inspect recent steward reconciliation failures.".to_owned(),
             prerequisites: Vec::new(),
@@ -1381,7 +1382,7 @@ fn doctor_mesh_auto_enrollment_action(
         "ee_mesh_auto_enroll" => RepairAction {
             id: id.to_owned(),
             kind: ActionKind::EeSubcommand,
-            command: format!("ee mesh auto-enroll --workspace \"{workspace_path}\""),
+            command: format!("ee mesh auto-enroll --workspace {workspace_arg}"),
             human_readable: "Materialize discovered ee-capable peers into the mesh peer set."
                 .to_owned(),
             prerequisites: present_deps(&[
@@ -1397,7 +1398,7 @@ fn doctor_mesh_auto_enrollment_action(
             estimated_duration_seconds: 5,
             reversible: true,
             reversal_command: Some(format!(
-                "ee mesh disable --workspace \"{workspace_path}\" --reason \"revert auto-enrollment\""
+                "ee mesh disable --workspace {workspace_arg} --reason \"revert auto-enrollment\""
             )),
             requires_user_confirmation: false,
             execution_context: ExecutionContext::EeSubcommand,
@@ -1406,7 +1407,7 @@ fn doctor_mesh_auto_enrollment_action(
             id: id.to_owned(),
             kind: ActionKind::EeSubcommand,
             command: format!(
-                "ee mesh disable --workspace \"{workspace_path}\" --reason \"reset inconsistent auto-enrollment\""
+                "ee mesh disable --workspace {workspace_arg} --reason \"reset inconsistent auto-enrollment\""
             ),
             human_readable: "Disable stale materialized mesh configuration before re-enrolling."
                 .to_owned(),
@@ -1444,6 +1445,19 @@ fn doctor_mesh_auto_enrollment_action(
     };
 
     Some(action)
+}
+
+fn doctor_shell_quote_arg(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        if matches!(ch, '"' | '$' | '`' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn gather_qos_posture(workspace_path: Option<&Path>) -> QosLaneSummary {
@@ -3617,6 +3631,34 @@ mod tests {
             "external tool action",
         )?;
         ensure(kinds.contains("manual_step"), true, "manual step action")
+    }
+
+    #[test]
+    fn doctor_mesh_action_graph_escapes_shell_sensitive_workspace_path() -> TestResult {
+        let mut probe = mesh_auto_enrollment_problem_probe();
+        probe.workspace_path = "/tmp/ee \"quoted\" $HOME".to_owned();
+        let report = DoctorMeshAutoEnrollmentReport::from_probe(&probe);
+        let expected = "--workspace \"/tmp/ee \\\"quoted\\\" \\$HOME\"";
+
+        for action in &report.action_graph.actions {
+            if action.command.contains("--workspace") {
+                ensure(
+                    action.command.contains(expected),
+                    true,
+                    &format!("{} command quotes workspace", action.id),
+                )?;
+            }
+            if let Some(reversal) = &action.reversal_command {
+                if reversal.contains("--workspace") {
+                    ensure(
+                        reversal.contains(expected),
+                        true,
+                        &format!("{} reversal quotes workspace", action.id),
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]

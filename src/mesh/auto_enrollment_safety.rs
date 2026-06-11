@@ -468,11 +468,23 @@ fn compute_intended_peer_set_hash(
 }
 
 fn build_reversal_command(workspace_path: &str) -> String {
-    // The literal command an operator can copy-paste. The workspace path is
-    // double-quoted to survive spaces; an operator on a path containing
-    // double quotes is already in trouble for many other reasons. The
-    // single-line shape is intentional for clipboard friendliness.
-    format!("ee mesh disable --workspace \"{workspace_path}\"")
+    // The literal command an operator can copy-paste. The single-line shape is
+    // intentional for clipboard friendliness.
+    let workspace_arg = shell_quote_command_arg(workspace_path);
+    format!("ee mesh disable --workspace {workspace_arg}")
+}
+
+fn shell_quote_command_arg(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        if matches!(ch, '"' | '$' | '`' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn compute_summary_hash(summary: &AutoEnrollmentSummary) -> String {
@@ -587,6 +599,17 @@ mod tests {
             summary
                 .reversal_command
                 .contains("/data/projects/eidetic_engine_cli")
+        );
+    }
+
+    #[test]
+    fn safety_snapshot_reversal_command_escapes_shell_sensitive_workspace_path() {
+        let mut input = fixture_input();
+        input.workspace_path = "/data/projects/weird \"workspace\"";
+        let summary = compute_summary(&input);
+        assert_eq!(
+            summary.reversal_command,
+            "ee mesh disable --workspace \"/data/projects/weird \\\"workspace\\\"\""
         );
     }
 

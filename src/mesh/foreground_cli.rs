@@ -68,13 +68,14 @@ pub struct MeshCliDegradation {
 impl MeshCliDegradation {
     #[must_use]
     pub fn workspace_uninitialized(workspace_path: &str) -> Self {
+        let workspace_arg = mesh_shell_quote_arg(workspace_path);
         Self {
             code: MESH_WORKSPACE_UNINITIALIZED_CODE,
             severity: "warning",
             message: format!(
                 "Mesh foreground storage was not inspected because {workspace_path}/.ee/ee.db does not exist."
             ),
-            repair: format!("Run `ee init --workspace \"{workspace_path}\" --json`."),
+            repair: format!("Run `ee init --workspace {workspace_arg} --json`."),
         }
     }
 
@@ -1029,14 +1030,17 @@ impl MeshForegroundSnapshot {
                 MeshAutoStatusSignals::default(),
             ),
             repair_commands: vec![
-                format!("ee init --workspace \"{}\" --json", self.workspace_path),
                 format!(
-                    "ee mesh export --workspace \"{}\" --out mesh-export.json --json",
-                    self.workspace_path
+                    "ee init --workspace {} --json",
+                    mesh_shell_quote_arg(&self.workspace_path)
                 ),
                 format!(
-                    "ee mesh import --workspace \"{}\" --file mesh-export.json --json",
-                    self.workspace_path
+                    "ee mesh export --workspace {} --out mesh-export.json --json",
+                    mesh_shell_quote_arg(&self.workspace_path)
+                ),
+                format!(
+                    "ee mesh import --workspace {} --file mesh-export.json --json",
+                    mesh_shell_quote_arg(&self.workspace_path)
                 ),
             ],
             degraded: self.degraded.clone(),
@@ -1351,10 +1355,10 @@ fn auto_status_next_action_hint(
     signals: &MeshAutoStatusSignals,
     new_peer_count: u32,
 ) -> String {
+    let workspace_arg = mesh_shell_quote_arg(&snapshot.workspace_path);
     if !snapshot.initialized {
         return format!(
-            "Run `ee init --workspace \"{}\" --json` before mesh auto-enrollment can inspect local state.",
-            snapshot.workspace_path
+            "Run `ee init --workspace {workspace_arg} --json` before mesh auto-enrollment can inspect local state."
         );
     }
     if !snapshot.mesh_enabled {
@@ -1366,14 +1370,12 @@ fn auto_status_next_action_hint(
     }
     if signals.node_key_changed {
         return format!(
-            "Auto-enrollment is blocked because nodeKeyChanged=true. Run `ee mesh disable --workspace \"{}\" --reason \"restored from different machine\"`, then re-run auto-enroll.",
-            snapshot.workspace_path
+            "Auto-enrollment is blocked because nodeKeyChanged=true. Run `ee mesh disable --workspace {workspace_arg} --reason \"restored from different machine\"`, then re-run auto-enroll."
         );
     }
     if signals.tailnet_changed {
         return format!(
-            "Auto-enrollment is blocked because tailnetChanged=true. Run `ee mesh disable --workspace \"{}\"`, then re-run auto-enroll.",
-            snapshot.workspace_path
+            "Auto-enrollment is blocked because tailnetChanged=true. Run `ee mesh disable --workspace {workspace_arg}`, then re-run auto-enroll."
         );
     }
     if signals.manual_conflict_present {
@@ -1398,14 +1400,13 @@ fn auto_status_next_action_hint(
     }
     if snapshot.storage.peer_count == 0 && signals.discovered_peer_count > 0 {
         return format!(
-            "{} peers discovered. Run `ee mesh auto-enroll --workspace \"{}\"` to enroll them.",
-            signals.discovered_peer_count, snapshot.workspace_path
+            "{} peers discovered. Run `ee mesh auto-enroll --workspace {workspace_arg}` to enroll them.",
+            signals.discovered_peer_count
         );
     }
     if new_peer_count > 0 {
         return format!(
-            "{new_peer_count} new peers are available. Run `ee mesh auto-enroll --workspace \"{}\"` to reconcile the peer set.",
-            snapshot.workspace_path
+            "{new_peer_count} new peers are available. Run `ee mesh auto-enroll --workspace {workspace_arg}` to reconcile the peer set."
         );
     }
     "Auto-enrollment materialized state matches the local mesh cache; no drift was detected by this read-only status view."
@@ -1417,6 +1418,7 @@ fn auto_status_degradations(
     signals: &MeshAutoStatusSignals,
 ) -> Vec<MeshCliDegradation> {
     let mut degraded = Vec::new();
+    let workspace_arg = mesh_shell_quote_arg(&snapshot.workspace_path);
     if signals.tailnet_changed {
         degraded.push(MeshCliDegradation {
             code: AUTO_ENROLLMENT_TAILNET_CHANGED_CODE,
@@ -1424,8 +1426,7 @@ fn auto_status_degradations(
             message: "Auto-enrollment materialized state belongs to a different tailnet."
                 .to_owned(),
             repair: format!(
-                "Run `ee mesh disable --workspace \"{}\"` and then `ee mesh auto-enroll --workspace \"{}\"`.",
-                snapshot.workspace_path, snapshot.workspace_path
+                "Run `ee mesh disable --workspace {workspace_arg}` and then `ee mesh auto-enroll --workspace {workspace_arg}`."
             ),
         });
     }
@@ -1434,11 +1435,10 @@ fn auto_status_degradations(
             code: AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE,
             severity: "medium",
             message:
-                "Auto-enrollment materialized state was created on a different Tailscale node key."
+                    "Auto-enrollment materialized state was created on a different Tailscale node key."
                     .to_owned(),
             repair: format!(
-                "Run `ee mesh disable --workspace \"{}\" --reason \"restored from different machine\"` and then `ee mesh auto-enroll --workspace \"{}\"`.",
-                snapshot.workspace_path, snapshot.workspace_path
+                "Run `ee mesh disable --workspace {workspace_arg} --reason \"restored from different machine\"` and then `ee mesh auto-enroll --workspace {workspace_arg}`."
             ),
         });
     }
@@ -1453,6 +1453,19 @@ fn auto_status_degradations(
         });
     }
     degraded
+}
+
+fn mesh_shell_quote_arg(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        if matches!(ch, '"' | '$' | '`' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn build_auto_repair_action_graph(actions: Vec<RepairAction>) -> RepairActionGraph {
@@ -1492,10 +1505,11 @@ fn tailscale_up_action() -> RepairAction {
 }
 
 fn ee_daemon_start_action(workspace_path: &str, prerequisites: Vec<String>) -> RepairAction {
+    let workspace_arg = mesh_shell_quote_arg(workspace_path);
     RepairAction {
         id: "ee_daemon_start".to_owned(),
         kind: ActionKind::EeSubcommand,
-        command: format!("ee daemon --foreground --workspace \"{workspace_path}\""),
+        command: format!("ee daemon --foreground --workspace {workspace_arg}"),
         human_readable: "Start the foreground ee daemon so peers can discover this workspace."
             .to_owned(),
         prerequisites,
@@ -1513,10 +1527,11 @@ fn ee_daemon_start_action(workspace_path: &str, prerequisites: Vec<String>) -> R
 }
 
 fn mesh_auto_enroll_action(workspace_path: &str, prerequisites: Vec<String>) -> RepairAction {
+    let workspace_arg = mesh_shell_quote_arg(workspace_path);
     RepairAction {
         id: "ee_mesh_auto_enroll".to_owned(),
         kind: ActionKind::EeSubcommand,
-        command: format!("ee mesh auto-enroll --workspace \"{workspace_path}\""),
+        command: format!("ee mesh auto-enroll --workspace {workspace_arg}"),
         human_readable: "Materialize the discovered ee-capable peers into the mesh peer set."
             .to_owned(),
         prerequisites,
@@ -1528,7 +1543,7 @@ fn mesh_auto_enroll_action(workspace_path: &str, prerequisites: Vec<String>) -> 
         estimated_duration_seconds: 5,
         reversible: true,
         reversal_command: Some(format!(
-            "ee mesh disable --workspace \"{workspace_path}\" --reason \"revert auto-enrollment\""
+            "ee mesh disable --workspace {workspace_arg} --reason \"revert auto-enrollment\""
         )),
         requires_user_confirmation: false,
         execution_context: ExecutionContext::EeSubcommand,
@@ -1541,10 +1556,12 @@ fn mesh_disable_action(workspace_path: &str, node_key_changed: bool) -> RepairAc
     } else {
         "tailnet changed"
     };
+    let workspace_arg = mesh_shell_quote_arg(workspace_path);
+    let reason_arg = mesh_shell_quote_arg(reason);
     RepairAction {
         id: "ee_mesh_disable".to_owned(),
         kind: ActionKind::EeSubcommand,
-        command: format!("ee mesh disable --workspace \"{workspace_path}\" --reason \"{reason}\""),
+        command: format!("ee mesh disable --workspace {workspace_arg} --reason {reason_arg}"),
         human_readable: "Disable the stale materialized peer group before auto-enrolling again."
             .to_owned(),
         prerequisites: Vec::new(),
@@ -1928,6 +1945,23 @@ mod tests {
     }
 
     #[test]
+    fn status_report_repair_commands_escape_shell_sensitive_workspace_path() {
+        let mut snapshot = sample_snapshot(Vec::new());
+        snapshot.workspace_path = "/tmp/ee \"quoted\" $HOME".to_owned();
+        let report = snapshot.status_report();
+        let expected = "--workspace \"/tmp/ee \\\"quoted\\\" \\$HOME\"";
+
+        assert!(
+            report
+                .repair_commands
+                .iter()
+                .all(|command| command.contains(expected)),
+            "all status repair commands should quote the workspace safely: {:?}",
+            report.repair_commands
+        );
+    }
+
+    #[test]
     fn auto_status_view_action_graph_field_validates_against_ee_repair_action_graph_v1_schema() {
         let snapshot = sample_snapshot(Vec::new());
         let auto_status = snapshot.status_report().auto_enrollment;
@@ -2045,6 +2079,36 @@ mod tests {
                 "repair hint must not expose an unresolved metavariable: {repair}"
             );
         }
+    }
+
+    #[test]
+    fn auto_status_degraded_repairs_escape_shell_sensitive_workspace_path() {
+        let mut snapshot = sample_snapshot(vec![sample_peer("peer-a", true)]);
+        snapshot.workspace_path = "/tmp/ee \"quoted\" $HOME".to_owned();
+        let auto_status = auto_enrollment_status_for_snapshot(
+            &snapshot,
+            MeshAutoStatusSignals {
+                tailnet_changed: true,
+                node_key_changed: true,
+                ..MeshAutoStatusSignals::default()
+            },
+        );
+        let expected = "--workspace \"/tmp/ee \\\"quoted\\\" \\$HOME\"";
+
+        let repairs = auto_status
+            .degraded
+            .iter()
+            .filter(|item| {
+                item.code == AUTO_ENROLLMENT_TAILNET_CHANGED_CODE
+                    || item.code == AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE
+            })
+            .map(|item| item.repair.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(repairs.len(), 2);
+        assert!(
+            repairs.iter().all(|repair| repair.contains(expected)),
+            "all auto-enrollment repairs should quote the workspace safely: {repairs:?}"
+        );
     }
 
     #[test]

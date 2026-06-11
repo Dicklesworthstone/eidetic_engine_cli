@@ -153,12 +153,14 @@ impl IdentityGuardVerdict {
     /// Returns `None` for non-refusal verdicts.
     #[must_use]
     pub fn repair_command(&self, workspace_path: &str) -> Option<String> {
+        let workspace_arg = shell_quote_command_arg(workspace_path);
+        let reason_arg = shell_quote_command_arg("restored from different machine");
         match self {
             Self::TailnetChanged { .. } => Some(format!(
-                "ee mesh disable --workspace \"{workspace_path}\" && ee mesh auto-enroll --workspace \"{workspace_path}\""
+                "ee mesh disable --workspace {workspace_arg} && ee mesh auto-enroll --workspace {workspace_arg}"
             )),
             Self::NodeKeyChanged { .. } => Some(format!(
-                "ee mesh disable --workspace \"{workspace_path}\" --reason \"restored from different machine\" && ee mesh auto-enroll --workspace \"{workspace_path}\""
+                "ee mesh disable --workspace {workspace_arg} --reason {reason_arg} && ee mesh auto-enroll --workspace {workspace_arg}"
             )),
             _ => None,
         }
@@ -176,6 +178,19 @@ impl IdentityGuardVerdict {
             Self::NoBoundIdentity => "no_bound_identity",
         }
     }
+}
+
+fn shell_quote_command_arg(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        if matches!(ch, '"' | '$' | '`' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// Evaluate the identity guard.
@@ -469,6 +484,18 @@ mod tests {
         assert!(cmd.contains("--reason \"restored from different machine\""));
         assert!(cmd.contains("ee mesh disable"));
         assert!(cmd.contains("ee mesh auto-enroll"));
+    }
+
+    #[test]
+    fn repair_command_shell_quotes_workspace_path() {
+        let b = bound("tn_old", None, "nk_self");
+        let c = current("tn_new", None, "nk_self");
+        let verdict = evaluate_identity_guard(Some(&b), &c);
+        let cmd = verdict
+            .repair_command("/Users/me/projects/weird path/it's \"fine\"")
+            .expect("repair available");
+        assert!(cmd.contains("--workspace \"/Users/me/projects/weird path/it's \\\"fine\\\"\""));
+        assert!(!cmd.contains("--workspace \"/Users/me/projects/weird path/it's \"fine\""));
     }
 
     #[test]
