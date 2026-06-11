@@ -637,7 +637,9 @@ fn redact_header(mut header: ExportHeader, level: RedactionLevel) -> ExportHeade
         if let Some(id) = header.workspace_id.as_ref() {
             header.workspace_id = Some(redact_identifier(id, level));
         }
-        header.export_id = redact_identifier(&header.export_id, level);
+        // export_id stays raw at every level: it is the artifact's own random
+        // identity (no user data), the footer carries it unredacted, and the
+        // importer rejects the file when header and footer disagree.
         if let Some(host) = header.hostname.as_ref() {
             header.hostname = Some(redact_identifier(host, level));
         }
