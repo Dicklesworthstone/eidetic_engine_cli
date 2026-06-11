@@ -1824,6 +1824,17 @@ pub fn compare_pack_quality(
         failure_reasons.push(format!("Missing expected memories: {:?}", missing_expected));
     }
 
+    if !unexpected.is_empty() {
+        failure_reasons.push(format!("Unexpected memories selected: {:?}", unexpected));
+    }
+
+    if !unexpected_degradation.is_empty() {
+        failure_reasons.push(format!(
+            "Unexpected degradation codes: {:?}",
+            unexpected_degradation
+        ));
+    }
+
     if !provenance_density_passed {
         failure_reasons.push(format!(
             "Provenance density {:.2} below minimum {:.2}",
@@ -2612,6 +2623,14 @@ mod tests {
             result.unexpected_ids[0].as_str(),
             "mem_extra",
             "unexpected id",
+        )?;
+        ensure(
+            result
+                .failure_reasons
+                .iter()
+                .any(|reason| reason.contains("Unexpected memories selected")),
+            true,
+            "unexpected id should explain drift",
         )
     }
 
@@ -2688,6 +2707,14 @@ mod tests {
             result.unexpected_degradation_codes.len(),
             1,
             "one unexpected",
+        )?;
+        ensure(
+            result
+                .failure_reasons
+                .iter()
+                .any(|reason| reason.contains("Unexpected degradation codes")),
+            true,
+            "unexpected degradation should explain drift",
         )
     }
 
