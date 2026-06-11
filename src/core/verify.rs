@@ -1649,6 +1649,19 @@ pub fn verify_parsed_provenance_referent(
             None,
             Some("Retry from a command path with Agent Mail lookup capability.".to_owned()),
         ),
+        ProvenanceUri::External { scheme, .. } if scheme == "ee-reflect" => {
+            provenance_referent_report(
+                &uri.to_string(),
+                uri.scheme(),
+                VerifyProvenanceReferentStatus::Unverifiable,
+                "reflection_recheck_requires_request_ledger".to_owned(),
+                None,
+                Some(
+                    "Retry from a command path with reflection request ledger lookup capability."
+                        .to_owned(),
+                ),
+            )
+        }
         ProvenanceUri::External { scheme, .. } if scheme == "manual" => provenance_referent_report(
             &uri.to_string(),
             uri.scheme(),
@@ -3093,6 +3106,44 @@ mod tests {
                 .ok_or("json status")?,
             &"unverifiable",
             "json status",
+        )
+    }
+
+    #[test]
+    fn provenance_referent_classifies_reflection_scheme_as_first_party_unverifiable() -> TestResult
+    {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+
+        let report = verify_provenance_referent(
+            "ee-reflect://reflect_req_0123456789abcdef",
+            &VerifyProvenanceReferentOptions {
+                workspace_path: temp.path(),
+                database: None,
+                allow_network: false,
+            },
+        );
+
+        ensure_equal(
+            &report.scheme.as_str(),
+            &"ee-reflect",
+            "reflection provenance scheme",
+        )?;
+        ensure_equal(
+            &report.status,
+            &VerifyProvenanceReferentStatus::Unverifiable,
+            "reflection status",
+        )?;
+        ensure_equal(
+            &report.reason.as_str(),
+            &"reflection_recheck_requires_request_ledger",
+            "reflection reason",
+        )?;
+        ensure(
+            report
+                .repair
+                .as_deref()
+                .is_some_and(|repair| repair.contains("reflection request ledger")),
+            "reflection repair names ledger lookup",
         )
     }
 
