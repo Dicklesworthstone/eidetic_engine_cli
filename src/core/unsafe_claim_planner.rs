@@ -453,6 +453,262 @@ pub fn rank_unsafe_claim_actions(
     actions
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// bd-1n3x1.16.3 — non-mutating decomposition suggester.
+//
+// When a candidate is REAL work but unsafe to claim, suggest smaller
+// self-contained leaves and a plan-space comment an agent may review and
+// apply with br manually. Never calls br, never mutates dependencies,
+// never marks anything in progress.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Non-secret candidate facts the suggester may consume (gate evidence
+/// already gathered upstream; nothing here re-runs a source).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UnsafeClaimCandidateFacts {
+    pub candidate_id: String,
+    pub title: String,
+    /// Bounded description text (caller truncates; only used for breadth
+    /// heuristics and keyword extraction, never echoed raw into output).
+    pub description: String,
+    pub issue_type: String,
+    pub priority: Option<i64>,
+    pub labels: Vec<String>,
+    /// Bounded path families from the gate's source-overlap evidence
+    /// (for example "src/db/", "src/cli/", "tests/").
+    pub path_families: Vec<String>,
+}
+
+/// One suggested leaf bead, emitted as a draft for manual `br create`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestedBeadDraft {
+    pub title: String,
+    pub issue_type: &'static str,
+    pub priority: i64,
+    pub labels: Vec<String>,
+    pub parent_id: String,
+    /// Human dependency hint ("create blocked by <prior leaf>"), never a
+    /// machine mutation.
+    pub dependency_hint: String,
+    pub rationale: String,
+}
+
+/// Decomposition plan: advisory output only.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsafeClaimDecompositionPlan {
+    /// True only when the evidence actually supports splitting.
+    pub decompose: bool,
+    /// Why decomposition is (or is not) recommended.
+    pub reason: String,
+    pub suggested_beads: Vec<SuggestedBeadDraft>,
+    /// Plan-space comment citing gate blocker categories without raw logs.
+    pub comment_template: String,
+    /// Search terms for de-duplicating against existing beads before
+    /// creating anything.
+    pub overlap_search_terms: Vec<String>,
+}
+
+const BROAD_DESCRIPTION_CHARS: usize = 600;
+
+fn candidate_is_broad(facts: &UnsafeClaimCandidateFacts) -> bool {
+    matches!(facts.issue_type.as_str(), "feature" | "epic")
+        || facts.title.starts_with("[idea-wizard]")
+        || facts.title.starts_with("[CLUSTER]")
+        || facts.title.starts_with("[THEME]")
+        || facts.description.len() >= BROAD_DESCRIPTION_CHARS
+        || facts.path_families.len() > 1
+}
+
+/// Deterministic surface lane for a path family.
+fn lane_for_path_family(family: &str) -> (&'static str, &'static str) {
+    let normalized = family.trim_start_matches("./");
+    if normalized.starts_with("src/db") {
+        ("storage", "schema/storage surface")
+    } else if normalized.starts_with("src/cli") {
+        ("cli", "CLI wiring surface")
+    } else if normalized.starts_with("src/core") {
+        ("domain", "core domain surface")
+    } else if normalized.starts_with("tests") {
+        ("tests", "test/golden surface")
+    } else if normalized.starts_with("docs") {
+        ("docs", "docs/schema surface")
+    } else if normalized.starts_with("scripts") {
+        ("scripts", "script/gate surface")
+    } else {
+        ("slice", "separable surface")
+    }
+}
+
+const OVERLAP_STOPWORDS: &[&str] = &[
+    "the", "and", "for", "with", "into", "from", "that", "this", "are", "not", "its", "their",
+    "when", "where", "every", "all",
+];
+
+fn overlap_terms(facts: &UnsafeClaimCandidateFacts) -> Vec<String> {
+    let mut terms = vec![facts.candidate_id.clone()];
+    let mut seen = std::collections::BTreeSet::new();
+    for word in facts.title.split(|c: char| !c.is_ascii_alphanumeric()) {
+        let lowered = word.to_ascii_lowercase();
+        if lowered.len() >= 4
+            && !OVERLAP_STOPWORDS.contains(&lowered.as_str())
+            && seen.insert(lowered.clone())
+        {
+            terms.push(lowered);
+        }
+        if terms.len() >= 8 {
+            break;
+        }
+    }
+    terms
+}
+
+/// Suggest a non-mutating decomposition plan for an unsafe-but-real
+/// candidate. Decomposition is recommended only when the evidence
+/// supports it: a broad candidate AND blocker categories that splitting
+/// can actually route around (source overlap / dirty checkout). Narrow
+/// leaves, or blockers that splitting cannot fix (tracker authority,
+/// missing Agent Mail evidence alone), produce `decompose: false` with
+/// an explanatory reason — never a make-work split.
+#[must_use]
+pub fn suggest_unsafe_claim_decomposition(
+    facts: &UnsafeClaimCandidateFacts,
+    classification: &UnsafeClaimClassification,
+) -> UnsafeClaimDecompositionPlan {
+    let split_routable = classification.reason_groups.iter().any(|group| {
+        matches!(
+            group.category,
+            UnsafeClaimReasonCategory::SourceOverlap
+                | UnsafeClaimReasonCategory::DirtyCheckout
+                | UnsafeClaimReasonCategory::ReservationConflict
+        )
+    });
+    let broad = candidate_is_broad(facts);
+
+    if !split_routable {
+        return UnsafeClaimDecompositionPlan {
+            decompose: false,
+            reason: "No source-overlap, dirty-checkout, or reservation blockers are present; \
+                     splitting this candidate would not route around the gate's actual \
+                     blockers."
+                .to_owned(),
+            suggested_beads: Vec::new(),
+            comment_template: String::new(),
+            overlap_search_terms: overlap_terms(facts),
+        };
+    }
+    if !broad {
+        return UnsafeClaimDecompositionPlan {
+            decompose: false,
+            reason: "The candidate is already a narrow leaf; the contested surface IS the \
+                     work. Wait for or coordinate with the surface owner instead of splitting."
+                .to_owned(),
+            suggested_beads: Vec::new(),
+            comment_template: String::new(),
+            overlap_search_terms: overlap_terms(facts),
+        };
+    }
+
+    let priority = facts.priority.unwrap_or(2);
+    let decomposed_label = format!("decomposed-from:{}", facts.candidate_id);
+    let mut suggested_beads = Vec::new();
+    let mut lanes_seen = std::collections::BTreeSet::new();
+
+    for family in &facts.path_families {
+        let (lane, lane_description) = lane_for_path_family(family);
+        if !lanes_seen.insert(lane) {
+            continue;
+        }
+        let dependency_hint = if suggested_beads.is_empty() {
+            "first leaf; later leaves should be created blocked by it".to_owned()
+        } else {
+            format!(
+                "create blocked by the previous leaf so surfaces land in order ({} leaves so far)",
+                suggested_beads.len()
+            )
+        };
+        suggested_beads.push(SuggestedBeadDraft {
+            title: format!("{}: {lane} slice — {}", facts.candidate_id, family),
+            issue_type: "task",
+            priority,
+            labels: vec![decomposed_label.clone(), format!("lane:{lane}")],
+            parent_id: facts.candidate_id.clone(),
+            dependency_hint,
+            rationale: format!(
+                "Separable {lane_description} under {family}; claimable independently once \
+                 the contested surfaces are split apart."
+            ),
+        });
+    }
+    // A broad bead with no concrete path families still gets the standard
+    // design → implementation → proof ladder.
+    if suggested_beads.is_empty() {
+        for (lane, title_suffix, rationale) in [
+            (
+                "contract",
+                "define contract/design leaf",
+                "Pin the response contract or design decisions first; this leaf needs no \
+                 contested source surface.",
+            ),
+            (
+                "implementation",
+                "implementation leaf on uncontested surfaces",
+                "Implement against the pinned contract, scoped to surfaces no peer holds.",
+            ),
+            (
+                "proof",
+                "tests + RCH proof leaf",
+                "Land verification separately so the implementation leaf stays small.",
+            ),
+        ] {
+            let dependency_hint = if suggested_beads.is_empty() {
+                "first leaf; later leaves should be created blocked by it".to_owned()
+            } else {
+                "create blocked by the previous leaf".to_owned()
+            };
+            suggested_beads.push(SuggestedBeadDraft {
+                title: format!("{}: {title_suffix}", facts.candidate_id),
+                issue_type: "task",
+                priority,
+                labels: vec![decomposed_label.clone(), format!("lane:{lane}")],
+                parent_id: facts.candidate_id.clone(),
+                dependency_hint,
+                rationale: rationale.to_owned(),
+            });
+        }
+    }
+
+    let categories: Vec<&str> = classification
+        .reason_groups
+        .iter()
+        .map(|group| group.category.as_str())
+        .collect();
+    let comment_template = format!(
+        "Decomposition proposal for {candidate} (advisory, not yet applied): the claim gate \
+         reports blockers in [{categories}], and the candidate spans {lanes} separable \
+         surface(s). Splitting lets disjoint leaves proceed while contested surfaces wait for \
+         their owners. Suggested leaves are listed in plan space; before creating any, search \
+         existing beads for the overlap terms to avoid duplicates. Raw gate evidence stays in \
+         the gate output — not repeated here.",
+        candidate = facts.candidate_id,
+        categories = categories.join(", "),
+        lanes = suggested_beads.len(),
+    );
+
+    UnsafeClaimDecompositionPlan {
+        decompose: true,
+        reason: format!(
+            "Broad candidate ({} type, {} path families) with split-routable blockers.",
+            facts.issue_type,
+            facts.path_families.len()
+        ),
+        suggested_beads,
+        comment_template,
+        overlap_search_terms: overlap_terms(facts),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,5 +906,149 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+    /// bd-1n3x1.16.3: a broad feature with dirty source overlaps suggests
+    /// per-surface leaves (repository/domain/CLI/proof style) without
+    /// mutating anything.
+    #[test]
+    fn broad_feature_with_source_overlaps_suggests_surface_leaves() -> TestResult {
+        let classification = classify_unsafe_claim_evidence(
+            &strings(&[
+                "source_overlap:src/db/mod.rs",
+                "dirty_checkout:src/cli/mod.rs",
+                "reservation_collision:src/core/*.rs",
+            ]),
+            &[],
+        );
+        let facts = UnsafeClaimCandidateFacts {
+            candidate_id: "bd-test1".to_owned(),
+            title: "situation storage: persist classifications".to_owned(),
+            description: "broad feature description".repeat(40),
+            issue_type: "feature".to_owned(),
+            priority: Some(2),
+            labels: vec![],
+            path_families: vec![
+                "src/db/".to_owned(),
+                "src/core/".to_owned(),
+                "src/cli/".to_owned(),
+                "tests/".to_owned(),
+            ],
+        };
+        let plan = suggest_unsafe_claim_decomposition(&facts, &classification);
+        ensure(
+            plan.decompose,
+            "broad + overlap evidence must recommend a split",
+        )?;
+        ensure(
+            plan.suggested_beads.len() == 4,
+            format!(
+                "one leaf per path family, got {}",
+                plan.suggested_beads.len()
+            ),
+        )?;
+        let lanes: Vec<&str> = plan
+            .suggested_beads
+            .iter()
+            .flat_map(|bead| bead.labels.iter())
+            .filter_map(|label| label.strip_prefix("lane:"))
+            .collect();
+        ensure(
+            lanes == vec!["storage", "domain", "cli", "tests"],
+            format!("deterministic lane order drifted: {lanes:?}"),
+        )?;
+        ensure(
+            plan.suggested_beads
+                .iter()
+                .all(|bead| bead.parent_id == "bd-test1" && bead.issue_type == "task"),
+            "leaves must parent to the candidate as tasks",
+        )?;
+        ensure(
+            plan.comment_template.contains("source_overlap")
+                && !plan.comment_template.contains("src/db/mod.rs"),
+            "the comment cites categories, never raw path evidence",
+        )?;
+        ensure(
+            plan.overlap_search_terms.contains(&"bd-test1".to_owned()),
+            "overlap terms must include the candidate id",
+        )
+    }
+
+    /// bd-1n3x1.16.3 negative fixture: a narrow leaf unsafe only because
+    /// of coordination evidence must NOT be split.
+    #[test]
+    fn narrow_leaf_or_unroutable_blockers_do_not_decompose() -> TestResult {
+        // Narrow leaf with an overlap blocker: the surface IS the work.
+        let overlap =
+            classify_unsafe_claim_evidence(&strings(&["reservation_collision:src/core/x.rs"]), &[]);
+        let narrow = UnsafeClaimCandidateFacts {
+            candidate_id: "bd-leaf".to_owned(),
+            title: "fix one assertion".to_owned(),
+            description: "small".to_owned(),
+            issue_type: "bug".to_owned(),
+            priority: Some(2),
+            labels: vec![],
+            path_families: vec!["src/core/".to_owned()],
+        };
+        let plan = suggest_unsafe_claim_decomposition(&narrow, &overlap);
+        ensure(!plan.decompose, "narrow leaves must not be split")?;
+        ensure(
+            plan.suggested_beads.is_empty(),
+            "no drafts when not decomposing",
+        )?;
+
+        // Broad bead whose only blocker is missing Agent Mail evidence:
+        // splitting cannot route around it.
+        let mail_only = classify_unsafe_claim_evidence(&strings(&["agent_mail_unavailable"]), &[]);
+        let broad = UnsafeClaimCandidateFacts {
+            candidate_id: "bd-broad".to_owned(),
+            title: "[idea-wizard] broad feature".to_owned(),
+            description: "x".repeat(700),
+            issue_type: "feature".to_owned(),
+            priority: None,
+            labels: vec![],
+            path_families: vec!["src/db/".to_owned(), "src/cli/".to_owned()],
+        };
+        let plan = suggest_unsafe_claim_decomposition(&broad, &mail_only);
+        ensure(
+            !plan.decompose,
+            "blockers splitting cannot fix must not trigger a split",
+        )?;
+        ensure(
+            plan.reason.contains("would not route around"),
+            "the refusal explains itself",
+        )
+    }
+
+    /// bd-1n3x1.16.3: a broad bead with NO path families still gets the
+    /// contract → implementation → proof ladder.
+    #[test]
+    fn broad_bead_without_path_families_gets_standard_ladder() -> TestResult {
+        let classification =
+            classify_unsafe_claim_evidence(&strings(&["dirty_checkout_pending_peer_commits"]), &[]);
+        let facts = UnsafeClaimCandidateFacts {
+            candidate_id: "bd-nofam".to_owned(),
+            title: "[CLUSTER] sweeping refactor".to_owned(),
+            description: String::new(),
+            issue_type: "epic".to_owned(),
+            priority: Some(1),
+            labels: vec![],
+            path_families: vec![],
+        };
+        let plan = suggest_unsafe_claim_decomposition(&facts, &classification);
+        ensure(plan.decompose, "broad cluster must decompose")?;
+        let lanes: Vec<&str> = plan
+            .suggested_beads
+            .iter()
+            .flat_map(|bead| bead.labels.iter())
+            .filter_map(|label| label.strip_prefix("lane:"))
+            .collect();
+        ensure(
+            lanes == vec!["contract", "implementation", "proof"],
+            format!("standard ladder drifted: {lanes:?}"),
+        )?;
+        ensure(
+            plan.suggested_beads.iter().all(|bead| bead.priority == 1),
+            "leaves inherit the parent priority",
+        )
     }
 }
