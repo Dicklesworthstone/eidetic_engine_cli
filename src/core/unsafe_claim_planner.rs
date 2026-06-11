@@ -25,6 +25,7 @@ use serde::Serialize;
 const MAX_RAW_REASONS_PER_GROUP: usize = 16;
 /// Maximum preserved length of one raw reason string.
 const MAX_RAW_REASON_LEN: usize = 160;
+const TRUNCATED_REASON_MARKER: &str = "…";
 
 /// Reason-group categories (ee.swarm.unsafe_claim_plan.v1 enum, in
 /// deterministic schema order).
@@ -201,25 +202,38 @@ pub fn categorize_unsafe_claim_reason(reason: &str) -> UnsafeClaimReasonCategory
         // Tracker authority: Beads reads are not trustworthy right now.
         "beads_tracker_not_authoritative"
         | "beads_tracker_stale"
+        | "tracker_not_authoritative"
+        | "beads_requires_candidate_downgrade"
+        | "beads_db_jsonl_count_mismatch"
+        | "beads_unavailable"
+        | "ready_unclaimed_visible_but_not_authoritative"
+        | "beads_ready_source_stale"
         | "candidate_unresolved_due_to_tracker_state"
         | "actionable_queue_unavailable"
         | "actionable_queue_timed_out"
         | "actionable_queue_stale_fallback" => UnsafeClaimReasonCategory::TrackerAuthority,
         // Agent Mail readiness: coordination evidence missing or corrupt.
-        "inbox_evidence_not_authoritative" => UnsafeClaimReasonCategory::AgentMailReadiness,
-        // Reservations: someone may actively own the surface.
-        "reservation_evidence_not_authoritative" | "reservation_collision" => {
-            UnsafeClaimReasonCategory::ReservationConflict
+        "inbox_evidence_not_authoritative" | "archive_index_parity_drift" => {
+            UnsafeClaimReasonCategory::AgentMailReadiness
         }
+        // Reservations: someone may actively own the surface.
+        "reservation_evidence_not_authoritative"
+        | "reservation_collision"
+        | "active_claim"
+        | "fallback_row_already_owned"
+        | "reserved_file_overlap" => UnsafeClaimReasonCategory::ReservationConflict,
         // BV ranking staleness or contradiction.
         "bv_advisory_contradiction"
         | "bv_command_timeout"
         | "bv_no_output"
-        | "bv_recommends_blocked_id" => UnsafeClaimReasonCategory::BvStaleness,
+        | "bv_recommends_blocked_id"
+        | "graph_triage_unavailable" => UnsafeClaimReasonCategory::BvStaleness,
         // The gate could not line the candidate up with its own
         // recommendation — pick differently rather than force it.
         "candidate_not_found"
         | "candidate_decision"
+        | "candidate_is_rollup_not_leaf"
+        | "rollup_has_no_claimable_child"
         | "no_candidate_available"
         | "actionable_queue_candidate_absent"
         | "packet_recommendation_not_claim_safe"
@@ -262,11 +276,11 @@ fn bounded_reason(reason: &str) -> String {
     if reason.len() <= MAX_RAW_REASON_LEN {
         reason.to_owned()
     } else {
-        let mut cut = MAX_RAW_REASON_LEN;
+        let mut cut = MAX_RAW_REASON_LEN.saturating_sub(TRUNCATED_REASON_MARKER.len());
         while !reason.is_char_boundary(cut) {
             cut -= 1;
         }
-        format!("{}…", &reason[..cut])
+        format!("{}{}", &reason[..cut], TRUNCATED_REASON_MARKER)
     }
 }
 
@@ -989,6 +1003,37 @@ mod tests {
     }
 
     #[test]
+    fn bounded_reason_respects_byte_cap_and_utf8_boundaries() -> TestResult {
+        let long_ascii = format!("rch_{}", "x".repeat(MAX_RAW_REASON_LEN + 10));
+        let bounded_ascii = bounded_reason(&long_ascii);
+        ensure(
+            bounded_ascii.len() == MAX_RAW_REASON_LEN,
+            format!(
+                "bounded ASCII reason must be exactly {MAX_RAW_REASON_LEN} bytes, got {}",
+                bounded_ascii.len()
+            ),
+        )?;
+        ensure(
+            bounded_ascii.ends_with(TRUNCATED_REASON_MARKER),
+            "bounded ASCII reason must disclose truncation",
+        )?;
+
+        let long_utf8 = format!("memory_probe_{}", "é".repeat(MAX_RAW_REASON_LEN));
+        let bounded_utf8 = bounded_reason(&long_utf8);
+        ensure(
+            bounded_utf8.len() <= MAX_RAW_REASON_LEN,
+            format!(
+                "bounded UTF-8 reason must stay within {MAX_RAW_REASON_LEN} bytes, got {}",
+                bounded_utf8.len()
+            ),
+        )?;
+        ensure(
+            bounded_utf8.ends_with(TRUNCATED_REASON_MARKER),
+            "bounded UTF-8 reason must disclose truncation",
+        )
+    }
+
+    #[test]
     fn category_mapping_covers_known_gate_vocabulary() -> TestResult {
         for (reason, expected) in [
             (
@@ -996,8 +1041,36 @@ mod tests {
                 UnsafeClaimReasonCategory::TrackerAuthority,
             ),
             (
+                "tracker_not_authoritative",
+                UnsafeClaimReasonCategory::TrackerAuthority,
+            ),
+            (
+                "beads_requires_candidate_downgrade",
+                UnsafeClaimReasonCategory::TrackerAuthority,
+            ),
+            (
+                "beads_db_jsonl_count_mismatch",
+                UnsafeClaimReasonCategory::TrackerAuthority,
+            ),
+            (
+                "beads_unavailable",
+                UnsafeClaimReasonCategory::TrackerAuthority,
+            ),
+            (
                 "agent_mail_recovery_corrupt",
                 UnsafeClaimReasonCategory::AgentMailReadiness,
+            ),
+            (
+                "archive_index_parity_drift",
+                UnsafeClaimReasonCategory::AgentMailReadiness,
+            ),
+            (
+                "active_claim",
+                UnsafeClaimReasonCategory::ReservationConflict,
+            ),
+            (
+                "fallback_row_already_owned",
+                UnsafeClaimReasonCategory::ReservationConflict,
             ),
             (
                 "reservation_collision:src/core/*.rs",
@@ -1024,7 +1097,19 @@ mod tests {
                 UnsafeClaimReasonCategory::BvStaleness,
             ),
             (
+                "graph_triage_unavailable",
+                UnsafeClaimReasonCategory::BvStaleness,
+            ),
+            (
                 "packet_recommendation_candidate_mismatch:bd-1:bd-2",
+                UnsafeClaimReasonCategory::RecommendationMismatch,
+            ),
+            (
+                "candidate_is_rollup_not_leaf",
+                UnsafeClaimReasonCategory::RecommendationMismatch,
+            ),
+            (
+                "rollup_has_no_claimable_child",
                 UnsafeClaimReasonCategory::RecommendationMismatch,
             ),
             (
