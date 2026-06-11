@@ -351,7 +351,7 @@ const HELP_PRELUDE: &str = concat!(
     "\n",
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
-    "  Inspect:        status, doctor, capabilities, insights, impact, lens, why-not, memory show, memory history\n",
+    "  Inspect:        status, doctor, capabilities, insights, impact, lens, why-not, recall, memory show, memory history\n",
     "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome, journal\n",
     "  Curate:         curate (candidates|validate|apply), reflect, playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
@@ -920,6 +920,8 @@ pub enum Command {
     /// Manage distilled procedures and skill capsules.
     #[command(subcommand)]
     Procedure(ProcedureCommand),
+    /// Code-anchored memory recall: reverse lookup from paths, symbols, or a git diff to anchored memories (ADR 0064).
+    Recall(RecallArgs),
     /// Record agent activity for outcomes and replay.
     #[command(subcommand)]
     Recorder(RecorderCommand),
@@ -5451,6 +5453,57 @@ pub struct PrimerArgs {
     /// Assemble without writing primer_cache rows (read-only variant).
     #[arg(long = "no-persist", action = ArgAction::SetTrue)]
     pub no_persist: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee recall` (bd-u875s.3, ADR 0064). At least one selector
+/// (`--path`, `--symbol`, `--diff`, or `--diff-staged`) is required;
+/// selector families compose as OR with dedup by memory id, while
+/// `--kind`/`--level` filter conjunctively before ranking.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+#[command(
+    after_help = "With --json, recalled items live at data.recall.items; budget truncation \
+                  reports output_truncated_budget with a resume cursor in degraded[].details."
+)]
+pub struct RecallArgs {
+    /// Workspace-relative path or fnmatch-style glob selector; repeatable.
+    #[arg(long = "path", value_name = "GLOB")]
+    pub paths: Vec<String>,
+
+    /// Exact symbol-name selector; repeatable.
+    #[arg(long = "symbol", value_name = "NAME")]
+    pub symbols: Vec<String>,
+
+    /// Recall against the changed paths of `git diff <REF>` (read-only shell-out).
+    #[arg(long, value_name = "REF", conflicts_with = "diff_staged")]
+    pub diff: Option<String>,
+
+    /// Recall against the staged changed paths (`git diff --cached`, read-only).
+    #[arg(long = "diff-staged", action = ArgAction::SetTrue)]
+    pub diff_staged: bool,
+
+    /// Filter to these memory kinds before ranking; repeatable.
+    #[arg(long = "kind", value_name = "KIND")]
+    pub kinds: Vec<String>,
+
+    /// Filter to these memory levels before ranking; repeatable.
+    #[arg(long = "level", value_name = "LEVEL")]
+    pub levels: Vec<String>,
+
+    /// Keep only suspect/stale-anchored items and include per-item repair hints.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub stale: bool,
+
+    /// Token budget for the recalled item list; keeps the longest ranked prefix under budget.
+    #[arg(long = "budget-tokens", value_name = "N")]
+    pub budget_tokens: Option<u32>,
+
+    /// Resume a budget-truncated page sequence from a continuation cursor.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -12574,6 +12627,7 @@ where
         Some(Command::Pack(ref args)) => handle_pack_command(&cli, args, stdout, stderr),
         Some(Command::Perf(ref perf_cmd)) => handle_perf_command(&cli, perf_cmd, stdout, stderr),
         Some(Command::Proximity(ref args)) => handle_proximity(&cli, args, stdout, stderr),
+        Some(Command::Recall(ref args)) => handle_recall(&cli, args, stdout, stderr),
         Some(Command::Preflight(PreflightCommand::Run(ref args))) => {
             handle_preflight_run(&cli, args, stdout, stderr)
         }
@@ -39683,6 +39737,228 @@ where
     }
 }
 
+/// `ee recall` (bd-u875s.3, ADR 0064): reverse lookup from a code surface to
+/// anchored memories. Read-only. `--budget-tokens` is the recall content
+/// budget (engine lane with its deterministic per-item estimate and
+/// `ee.recall.cursor.v1` continuation); the global `--max-output-tokens`
+/// governor ceiling composes on top through the shared truncation registry
+/// (`data.recall.items[]`).
+fn handle_recall<W, E>(
+    cli: &Cli,
+    args: &RecallArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::recall::{
+        RecallCursorResolution, RecallDegradedEntry, RecallQuery, RecallQueryEcho,
+        collect_diff_paths_via_git, empty_recall_report_for_rejected_cursor, recall_data_json,
+        render_recall_markdown, resolve_recall_cursor, run_recall,
+    };
+
+    // At least one selector is required (ADR 0064 §2): with no selectors the
+    // engine deterministically matches nothing, so an unselected invocation
+    // is a usage error rather than a silently empty result.
+    if args.paths.is_empty() && args.symbols.is_empty() && args.diff.is_none() && !args.diff_staged
+    {
+        let error = DomainError::Usage {
+            message: "ee recall requires at least one selector: --path, --symbol, --diff, or \
+                      --diff-staged"
+                .to_owned(),
+            repair: Some("ee recall --path 'src/**' --workspace . --json".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        let error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace . --json".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let connection = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            let error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: Some("ee status --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if let Err(error) = connection.migrate() {
+        let error = DomainError::Storage {
+            message: format!("Failed to migrate database: {error}"),
+            repair: Some("ee migrate run --workspace . --json".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let workspace_key = workspace_path.to_string_lossy().into_owned();
+    let workspace_id = match connection.get_workspace_by_path(&workspace_key) {
+        Ok(Some(workspace)) => workspace.id,
+        Ok(None) => {
+            let error = DomainError::Storage {
+                message: format!("Workspace is not registered: {}", workspace_path.display()),
+                repair: Some("ee init --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        Err(error) => {
+            let error = DomainError::Storage {
+                message: format!("Failed to query workspace row: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let mut extra_degraded: Vec<RecallDegradedEntry> = Vec::new();
+
+    // --diff/--diff-staged: read-only git path extraction; failure degrades
+    // to git_unavailable and never blocks recall (ADR 0064 §2).
+    let mut diff_paths: Vec<String> = Vec::new();
+    if args.diff.is_some() || args.diff_staged {
+        match collect_diff_paths_via_git(&workspace_path, args.diff.as_deref(), args.diff_staged) {
+            Ok(paths) => diff_paths = paths,
+            Err(reason) => extra_degraded.push(RecallDegradedEntry::git_unavailable(&reason)),
+        }
+    }
+
+    let mut query = RecallQuery {
+        paths: args.paths.clone(),
+        symbols: args.symbols.clone(),
+        diff_paths,
+        kinds: args.kinds.clone(),
+        levels: args.levels.clone(),
+        stale_only: args.stale,
+        max_tokens: args.budget_tokens,
+        offset: 0,
+    };
+    let query_echo = RecallQueryEcho {
+        paths: args.paths.clone(),
+        symbols: args.symbols.clone(),
+        diff_ref: args.diff.clone(),
+        diff_staged: args.diff_staged,
+        kinds: args.kinds.clone(),
+        levels: args.levels.clone(),
+        stale_only: args.stale,
+        budget_tokens: args.budget_tokens,
+    };
+
+    // Cursor binding needs the live DB generation before the engine runs.
+    let db_generation = match connection.get_workspace_generation(&workspace_id) {
+        Ok(value) => i64::try_from(value.unwrap_or(0)).unwrap_or(i64::MAX),
+        Err(error) => {
+            let error = DomainError::Storage {
+                message: format!("Failed to read workspace generation: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let rejected_page = match resolve_recall_cursor(args.cursor.as_deref(), &query, db_generation) {
+        RecallCursorResolution::Fresh => None,
+        RecallCursorResolution::Resume(offset) => {
+            query.offset = offset;
+            None
+        }
+        RecallCursorResolution::RejectedInvalid => {
+            extra_degraded.push(RecallDegradedEntry::cursor_invalid());
+            Some(())
+        }
+        RecallCursorResolution::RejectedStale {
+            cursor_generation,
+            current_generation,
+        } => {
+            extra_degraded.push(RecallDegradedEntry::cursor_stale(
+                cursor_generation,
+                current_generation,
+            ));
+            Some(())
+        }
+    };
+    let report = if rejected_page.is_some() {
+        // A rejected cursor yields an empty page (never a restarted one), so
+        // a page sequence can never duplicate or skip items across writes.
+        let index_generation = match connection.memory_anchor_index_generation(&workspace_id) {
+            Ok(value) => value,
+            Err(error) => {
+                let error = DomainError::Storage {
+                    message: format!("Failed to read anchor index generation: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                };
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        empty_recall_report_for_rejected_cursor(index_generation, db_generation)
+    } else {
+        match run_recall(&connection, &workspace_id, &query) {
+            Ok(report) => report,
+            Err(error) => {
+                let error = DomainError::Storage {
+                    message: format!("Failed to run recall: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                };
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+        }
+    };
+
+    // Engine degradations first, then CLI-level entries, then the budget
+    // truncation entry — one truncation vocabulary (ADR 0064 §5).
+    let mut degraded: Vec<RecallDegradedEntry> = report
+        .degraded
+        .iter()
+        .map(RecallDegradedEntry::from_engine)
+        .collect();
+    degraded.append(&mut extra_degraded);
+    if report.truncated
+        && let (Some(budget), Some(cursor)) = (args.budget_tokens, report.continuation_cursor.as_deref())
+    {
+        degraded.push(RecallDegradedEntry::budget_truncated(
+            report.dropped_count,
+            cursor,
+            budget,
+        ));
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_recall_markdown(&report, &degraded))
+        }
+        output::Renderer::Toon => {
+            let envelope = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": recall_data_json(&report, &query_echo),
+                "degraded": degraded.iter().map(RecallDegradedEntry::to_json).collect::<Vec<_>>(),
+            });
+            write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&envelope.to_string()) + "\n"),
+            )
+        }
+        _ => {
+            let envelope = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": recall_data_json(&report, &query_echo),
+                "degraded": degraded.iter().map(RecallDegradedEntry::to_json).collect::<Vec<_>>(),
+            });
+            write_stdout(stdout, &(envelope.to_string() + "\n"))
+        }
+    }
+}
+
 fn write_journal_data_json<W>(stdout: &mut W, data: &serde_json::Value) -> ProcessExitCode
 where
     W: Write,
@@ -55093,6 +55369,7 @@ impl NormalizedInvocation {
                     PerfCommand::Live(_) => "perf live".to_string(),
                 },
                 Command::Proximity(_) => "proximity".to_string(),
+                Command::Recall(_) => "recall".to_string(),
                 Command::Preflight(preflight) => match preflight {
                     PreflightCommand::Run(_) => "preflight run".to_string(),
                     PreflightCommand::Show(_) => "preflight show".to_string(),

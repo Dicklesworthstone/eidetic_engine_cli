@@ -1395,6 +1395,10 @@ impl EffectManifest {
                 "Show one journal entry with structured sidecar and redaction report",
             ),
             CommandEffect::read_only_db(
+                "recall",
+                "Code-anchored reverse lookup from paths, symbols, or a git diff to anchored memories",
+            ),
+            CommandEffect::read_only_db(
                 "learn agenda",
                 "Show learning agenda with prioritized gaps",
             ),
