@@ -183,7 +183,7 @@ fn assert_eval_list_payload(payload: &JsonValue, context: &str) -> TestResult {
         payload
             .pointer("/data/fixtureCount")
             .ok_or("missing fixture count")?,
-        &json!(7),
+        &json!(8),
         context,
     )
 }

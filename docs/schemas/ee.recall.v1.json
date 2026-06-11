@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.recall.v1.json",
+  "title": "ee.recall.v1",
+  "description": "Code-anchored recall result (ADR 0064): the reverse lookup from a code surface (path globs, exact symbols, or a git-diff changed-path set) to the memories anchored on it, ranked by freshness x confidence x level tilt with a warnings-first kind bonus. Carried under ee.response.v2 data.recall. The declared output-governor truncation point is items[]; budget truncation reports the governor's output_truncated_budget degraded code with an ee.recall.cursor.v1 continuation cursor in details.",
+  "x-ee-status": {
+    "shipped": true,
+    "available_in_build": true,
+    "tracking_bead": "bd-u875s.3"
+  },
+  "type": "object",
+  "required": [
+    "schema",
+    "query",
+    "items",
+    "indexGeneration",
+    "dbGeneration",
+    "totalMatched",
+    "truncated",
+    "droppedCount",
+    "continuationCursor"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.recall.v1"
+    },
+    "query": {
+      "type": "object",
+      "required": ["paths", "symbols", "diffRef", "diffStaged", "kinds", "levels", "staleOnly", "budgetTokens"],
+      "properties": {
+        "paths": {"type": "array", "items": {"type": "string"}},
+        "symbols": {"type": "array", "items": {"type": "string"}},
+        "diffRef": {"type": ["string", "null"]},
+        "diffStaged": {"type": "boolean"},
+        "kinds": {"type": "array", "items": {"type": "string"}},
+        "levels": {"type": "array", "items": {"type": "string"}},
+        "staleOnly": {"type": "boolean"},
+        "budgetTokens": {"type": ["integer", "null"], "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "memoryId",
+          "anchor",
+          "freshnessState",
+          "scoreComponents",
+          "score",
+          "level",
+          "kind",
+          "contentPreview",
+          "provenance",
+          "tags",
+          "repair"
+        ],
+        "properties": {
+          "memoryId": {"type": "string"},
+          "anchor": {
+            "type": "object",
+            "required": ["kind", "path", "symbol"],
+            "properties": {
+              "kind": {"type": "string"},
+              "path": {"type": ["string", "null"]},
+              "symbol": {"type": ["string", "null"]}
+            },
+            "additionalProperties": false
+          },
+          "freshnessState": {"type": "string", "enum": ["current", "suspect", "stale"]},
+          "scoreComponents": {
+            "type": "object",
+            "required": ["freshness", "confidence", "levelTilt", "kindBonus"],
+            "properties": {
+              "freshness": {"type": "number", "minimum": 0, "maximum": 1},
+              "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+              "levelTilt": {"type": "number", "minimum": 0, "maximum": 1},
+              "kindBonus": {"type": "number", "minimum": 1}
+            },
+            "additionalProperties": false
+          },
+          "score": {"type": "number", "minimum": 0},
+          "level": {"type": "string"},
+          "kind": {"type": "string"},
+          "contentPreview": {"type": "string", "maxLength": 240},
+          "provenance": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["uri", "sourceType"],
+              "properties": {
+                "uri": {"type": "string"},
+                "sourceType": {"type": "string"}
+              },
+              "additionalProperties": false
+            }
+          },
+          "tags": {"type": "array", "items": {"type": "string"}},
+          "repair": {"type": ["string", "null"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "indexGeneration": {"type": ["integer", "null"], "minimum": 0},
+    "dbGeneration": {"type": "integer", "minimum": 0},
+    "totalMatched": {"type": "integer", "minimum": 0},
+    "truncated": {"type": "boolean"},
+    "droppedCount": {"type": "integer", "minimum": 0},
+    "continuationCursor": {"type": ["string", "null"]}
+  },
+  "additionalProperties": false
+}
