@@ -1795,4 +1795,45 @@ mod tests {
         assert_eq!(report.last_hash, None);
         Ok(())
     }
+    /// bd-1pi9m.5: the --target filter selects exactly the rows whose
+    /// target_id matches, and the filter binds into the cursor params
+    /// hash so page sequences never mix filter scopes.
+    #[test]
+    fn target_filter_selects_exact_target_and_binds_cursor_params() -> TestResult {
+        let mut a =
+            audit_entry_for_sort("audit_00000000000000000000000001", "2026-05-19T08:00:00Z");
+        a.target_id = Some("mem_00000000000000000000000001".to_owned());
+        let mut b =
+            audit_entry_for_sort("audit_00000000000000000000000002", "2026-05-19T08:00:01Z");
+        b.target_id = Some("mem_00000000000000000000000002".to_owned());
+        let mut c =
+            audit_entry_for_sort("audit_00000000000000000000000003", "2026-05-19T08:00:02Z");
+        c.target_id = None;
+
+        let filtered = filter_entries(
+            vec![a, b, c],
+            None,
+            None,
+            None,
+            None,
+            Some("mem_00000000000000000000000001"),
+        )
+        .map_err(|error| error.message())?;
+        if filtered.len() != 1 || filtered[0].id != "audit_00000000000000000000000001" {
+            return Err(format!(
+                "target filter must select exactly the matching row, got {:?}",
+                filtered
+                    .iter()
+                    .map(|entry| entry.id.clone())
+                    .collect::<Vec<_>>()
+            ));
+        }
+
+        let unscoped = timeline_params_hash(None, None, None, None);
+        let scoped = timeline_params_hash(None, None, None, Some("mem_00000000000000000000000001"));
+        if unscoped == scoped {
+            return Err("the target filter must change the cursor params hash".to_owned());
+        }
+        Ok(())
+    }
 }

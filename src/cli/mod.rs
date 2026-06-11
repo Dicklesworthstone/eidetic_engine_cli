@@ -20262,7 +20262,7 @@ where
     let options = AuditTimelineOptions {
         workspace: cli.resolve_workspace(),
         database_path: args.database.clone(),
-since: args.since.clone(),
+        since: args.since.clone(),
         surface: args.surface.clone(),
         action: args.action.clone(),
         target: args.target.clone(),
