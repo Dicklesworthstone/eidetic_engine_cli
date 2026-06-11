@@ -11412,9 +11412,7 @@ where
     ACTIVE_OUTPUT_GOVERNOR.with(|governor| {
         *governor.borrow_mut() = output_token_ceiling.map(|ceiling_tokens| ActiveOutputGovernor {
             ceiling_tokens,
-            params_hash: output::governor::hash_invocation_params(
-                governor_params_for_hash(&args),
-            ),
+            params_hash: output::governor::hash_invocation_params(governor_params_for_hash(&args)),
             workspace_root: resolve_workspace_for_cli(cli.workspace.as_deref()).0,
         });
     });
@@ -17179,11 +17177,7 @@ fn response_schema_stdout(
             ),
             db_generation: &db_generation,
         };
-        output::governor::govern_response_json(
-            &selected,
-            &ctx,
-            output::OUTPUT_TRUNCATION_REGISTRY,
-        )?
+        output::governor::govern_response_json(&selected, &ctx, output::OUTPUT_TRUNCATION_REGISTRY)?
     } else {
         selected
     };

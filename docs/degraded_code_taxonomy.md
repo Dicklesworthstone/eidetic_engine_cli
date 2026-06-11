@@ -474,6 +474,14 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `primer_graph_unavailable` | info | bd-39tzu.2 — ADR 0065 §6: persisted centrality rows missing/unusable; loadBearing omitted, rules authority factor neutral; repair `ee graph centrality-refresh --workspace .` |
 | `primer_budget_floor` | info | bd-39tzu.2 — ADR 0065 §6: proportional shrink hit the rules floor; lower-priority items evicted |
 
+#### Output-token governor (4)
+| Code | Severity | Bead |
+|------|----------|------|
+| `output_truncated_budget` | info | bd-7lvbg.2 — ADR 0063 §5: trailing whole elements dropped at the schema's declared truncation point to satisfy `--max-output-tokens`; carries `details.droppedCount` + `details.continuationCursor` (`ee.cursor.v1`) |
+| `output_budget_unsatisfiable` | medium | bd-7lvbg.2 — ADR 0063 §5: the envelope minimum (or a schema with no declared truncation point) exceeds the ceiling; the response fails closed with a minimal identifying payload |
+| `cursor_stale` | low | bd-7lvbg.2 — ADR 0063 §5: cursor `dbGeneration` < current workspace generation; honest pagination requires partitioning one generation's result set; repair: re-run without `--cursor` (surface wiring bd-7lvbg.3) |
+| `cursor_invalid` | low | bd-7lvbg.2 — ADR 0063 §5: cursor MAC failure, `paramsHash` mismatch, future generation, or legacy format; repair: re-run without `--cursor` (surface wiring bd-7lvbg.3) |
+
 #### Feedback (5)
 | Code | Severity | Bead |
 |------|----------|------|
