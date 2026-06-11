@@ -1280,23 +1280,9 @@ pub fn parse_tags(value: &serde_json::Value) -> TagFilters {
         return TagFilters::default();
     };
 
-    let require = object
-        .get("require")
-        .and_then(serde_json::Value::as_array)
-        .map(|arr| canonical_query_tag_array(arr))
-        .unwrap_or_default();
-
-    let require_any = object
-        .get("requireAny")
-        .and_then(serde_json::Value::as_array)
-        .map(|arr| canonical_query_tag_array(arr))
-        .unwrap_or_default();
-
-    let exclude = object
-        .get("exclude")
-        .and_then(serde_json::Value::as_array)
-        .map(|arr| canonical_query_tag_array(arr))
-        .unwrap_or_default();
+    let require = canonical_query_tag_array(object.get("require"));
+    let require_any = canonical_query_tag_array(object.get("requireAny"));
+    let exclude = canonical_query_tag_array(object.get("exclude"));
 
     TagFilters {
         require,
@@ -1305,9 +1291,11 @@ pub fn parse_tags(value: &serde_json::Value) -> TagFilters {
     }
 }
 
-fn canonical_query_tag_array(values: &[serde_json::Value]) -> Vec<String> {
-    values
-        .iter()
+fn canonical_query_tag_array(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
         .filter_map(serde_json::Value::as_str)
         .map(canonical_query_tag_filter)
         .collect()
