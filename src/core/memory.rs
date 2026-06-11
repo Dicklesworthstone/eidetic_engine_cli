@@ -12769,6 +12769,7 @@ mod tests {
         let controls = RememberWriteControls {
             reinforce: false,
             idempotency_key: Some("lesson-001"),
+            defer_index_processing: false,
         };
 
         let created = upgrade_created_report(
