@@ -476,6 +476,10 @@ impl FeedbackSummary {
     }
 
     pub fn compute_metrics(&mut self) {
+        self.precision = None;
+        self.recall = None;
+        self.f1_score = None;
+
         let tp = self.true_positive_count as f64;
         let fp = self.false_alarm_count as f64;
         let fn_ = self.miss_count as f64;
@@ -1164,6 +1168,28 @@ mod tests {
         assert!(summary.precision.is_some());
         assert!(summary.recall.is_some());
         assert!(summary.f1_score.is_some());
+    }
+
+    #[test]
+    fn compute_metrics_clears_stale_values_when_denominators_disappear() {
+        let mut summary = FeedbackSummary::new();
+        summary.true_positive_count = 1;
+        summary.false_alarm_count = 1;
+        summary.miss_count = 1;
+        summary.compute_metrics();
+
+        assert!(summary.precision.is_some());
+        assert!(summary.recall.is_some());
+        assert!(summary.f1_score.is_some());
+
+        summary.true_positive_count = 0;
+        summary.false_alarm_count = 0;
+        summary.miss_count = 0;
+        summary.compute_metrics();
+
+        assert_eq!(summary.precision, None);
+        assert_eq!(summary.recall, None);
+        assert_eq!(summary.f1_score, None);
     }
 
     #[test]

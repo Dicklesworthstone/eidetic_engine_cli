@@ -980,6 +980,17 @@ fn validate_header_and_footer(parsed: &mut ParsedJsonlImport, first_schema: Opti
         let parsed_tag_count = parsed.tags_by_memory.values().fold(0_u64, |total, tags| {
             total.saturating_add(u64::try_from(tags.len()).unwrap_or(u64::MAX))
         });
+        let parsed_record_count = u64::from(parsed.records_total);
+        if footer.total_records != parsed_record_count {
+            parsed.issues.push(JsonlImportIssue::warning(
+                None,
+                "footer_total_records_mismatch",
+                format!(
+                    "footer total_records {} does not match parsed JSONL records {}",
+                    footer.total_records, parsed_record_count
+                ),
+            ));
+        }
         if footer.tag_count != parsed_tag_count {
             parsed.issues.push(JsonlImportIssue::warning(
                 None,
@@ -1603,7 +1614,7 @@ mod tests {
             r#"{"schema":"ee.export.header.v1","format_version":1,"created_at":"2026-04-30T00:00:00Z","workspace_id":"wsp_01234567890123456789012345","workspace_path":"/source","export_scope":"memories","redaction_level":"none","record_count":3,"ee_version":"0.1.0","hostname":null,"export_id":"exp-001","import_source":"native","trust_level":"validated","checksum":null,"signature":null,"source_schema_version":null}"#,
             r#"{"schema":"ee.export.memory.v1","memory_id":"mem_01234567890123456789012345","workspace_id":"wsp_01234567890123456789012345","level":"procedural","kind":"rule","content":"Run cargo fmt --check before release.","importance":0.8,"confidence":0.9,"utility":0.7,"created_at":"2026-04-30T00:00:00Z","updated_at":null,"expires_at":null,"source_agent":"MistySalmon","provenance_uri":"ee-export://fixture","superseded_by":null,"supersedes":null,"redacted":false,"redaction_reason":null}"#,
             r#"{"schema":"ee.export.tag.v1","memory_id":"mem_01234567890123456789012345","tag":"Release","created_at":"2026-04-30T00:00:00Z"}"#,
-            r#"{"schema":"ee.export.footer.v1","export_id":"exp-001","completed_at":"2026-04-30T00:01:00Z","total_records":3,"memory_count":1,"link_count":0,"tag_count":1,"audit_count":0,"checksum":null,"success":true,"error_message":null}"#,
+            r#"{"schema":"ee.export.footer.v1","export_id":"exp-001","completed_at":"2026-04-30T00:01:00Z","total_records":4,"memory_count":1,"link_count":0,"tag_count":1,"audit_count":0,"checksum":null,"success":true,"error_message":null}"#,
         ]
         .join("\n")
     }
@@ -1968,6 +1979,25 @@ mod tests {
             }),
             true,
             "tag count warning",
+        )
+    }
+
+    #[test]
+    fn parse_jsonl_source_warns_on_footer_total_records_mismatch() -> TestResult {
+        let input = sample_jsonl().replace("\"total_records\":4", "\"total_records\":99");
+        let parsed = parse_jsonl_source(&input);
+
+        ensure(parsed.has_errors(), false, "warning only")?;
+        ensure(
+            parsed.issues.iter().any(|issue| {
+                issue.line.is_none()
+                    && issue.code == "footer_total_records_mismatch"
+                    && issue.severity == JsonlImportIssueSeverity::Warning
+                    && issue.message.contains("99")
+                    && issue.message.contains("4")
+            }),
+            true,
+            "total record count warning",
         )
     }
 
