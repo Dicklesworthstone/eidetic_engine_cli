@@ -4,7 +4,7 @@
   "data": {
     "schema": "ee.agent.sources.v1",
     "command": "agent sources",
-    "version": "0.1.0",
+    "version": "<ee-version>",
     "totalCount": 1,
     "includePaths": true,
     "sources": [

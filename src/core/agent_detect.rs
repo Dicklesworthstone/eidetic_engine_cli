@@ -14,8 +14,39 @@ use std::path::{Path, PathBuf};
 pub use franken_agent_detection::{
     AgentDetectError, AgentDetectOptions, AgentDetectRootOverride, InstalledAgentDetectionEntry,
     InstalledAgentDetectionReport, InstalledAgentDetectionSummary, default_probe_paths_tilde,
-    detect_installed_agents,
 };
+
+/// Detect installed agents with ee's operator-spelling tolerance.
+///
+/// `franken_agent_detection`'s canonical alias map accepts lowercase
+/// hyphenated aliases only (`codex-cli`); ee additionally accepts CamelCase
+/// and snake_case operator spellings (`CodexCli`, `codex_cli`). Connector
+/// slugs in `only_connectors` and `root_overrides` are folded to the
+/// hyphenated form before delegation so the crate's own alias table
+/// canonicalizes them.
+pub fn detect_installed_agents(
+    options: &AgentDetectOptions,
+) -> Result<InstalledAgentDetectionReport, AgentDetectError> {
+    let mut normalized = options.clone();
+    normalized.only_connectors = normalized.only_connectors.map(|slugs| {
+        slugs
+            .iter()
+            .map(|slug| crate_alias_slug(slug))
+            .collect::<Vec<_>>()
+    });
+    for override_root in &mut normalized.root_overrides {
+        override_root.slug = crate_alias_slug(&override_root.slug);
+    }
+    franken_agent_detection::detect_installed_agents(&normalized)
+}
+
+/// Fold an operator-supplied connector spelling into the hyphenated alias
+/// form that `franken_agent_detection`'s canonical map accepts. Canonical
+/// underscore slugs (`copilot_cli`, `pi_agent`) survive because the crate
+/// maps their hyphenated aliases back to the canonical form.
+fn crate_alias_slug(slug: &str) -> String {
+    normalize_connector_slug(slug).replace('_', "-")
+}
 
 /// Stable schema identifier for `ee agent status --json`.
 pub const AGENT_STATUS_SCHEMA_V1: &str = "ee.agent.status.v1";

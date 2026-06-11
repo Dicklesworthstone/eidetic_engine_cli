@@ -3,7 +3,7 @@
   "success": true,
   "data": {
     "command": "agent status",
-    "version": "0.3.3",
+    "version": "<ee-version>",
     "inventory": {
       "schema": "ee.agent.status.v1",
       "status": "ready",

@@ -47,8 +47,11 @@ fn golden_path(name: &str) -> PathBuf {
 }
 
 fn canonical_json(raw: &str) -> Result<String, String> {
-    let value: JsonValue =
+    let mut value: JsonValue =
         serde_json::from_str(raw).map_err(|error| format!("output must be JSON: {error}"))?;
+    if let Some(version) = value.pointer_mut("/data/version") {
+        *version = JsonValue::String("<ee-version>".to_string());
+    }
     serde_json::to_string_pretty(&value)
         .map(|json| format!("{json}\n"))
         .map_err(|error| format!("failed to canonicalize JSON: {error}"))

@@ -5,6 +5,7 @@
     "message": "unknown connector(s): [\"not-a-real-agent\"]",
     "severity": "low",
     "repair": "ee agent detect --help",
+    "repairKind": "actionable",
     "details": {}
   }
 }

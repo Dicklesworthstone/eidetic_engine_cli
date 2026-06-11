@@ -104,6 +104,9 @@ fn normalize_fixture_paths(value: &mut JsonValue) {
 
 fn normalized_agent_detect_json(raw: &str) -> Result<String, String> {
     let mut value = parse_json(raw, "agent detection output")?;
+    if let Some(version) = value.pointer_mut("/data/version") {
+        *version = JsonValue::String("<ee-version>".to_string());
+    }
     normalize_fixture_paths(&mut value);
     serde_json::to_string_pretty(&value)
         .map(|json| format!("{json}\n"))
