@@ -745,10 +745,12 @@ fn resolve_path_lookup_cass_binary(inherited_path: Option<&OsStr>) -> Result<Pat
     for directory in std::env::split_paths(path_var) {
         let candidate = directory.join(ALLOWLISTED_CASS_EXECUTABLE);
         if validate_absolute_cass_binary(&candidate).is_ok() {
-            return candidate.canonicalize().map_err(|error| CassError::InvalidBinary {
-                binary: candidate,
-                reason: format!("CASS binary canonicalization failed: {error}"),
-            });
+            return candidate
+                .canonicalize()
+                .map_err(|error| CassError::InvalidBinary {
+                    binary: candidate,
+                    reason: format!("CASS binary canonicalization failed: {error}"),
+                });
         }
     }
 
@@ -2023,7 +2025,14 @@ mod tests {
         let spawn_target = inv
             .validated_spawn_target_from_path_var(Some(trusted_dir.as_os_str()))
             .map_err(|error| error.to_string())?;
-        assert_eq!(spawn_target, super::CassSpawnTarget::Absolute(trusted_binary));
+        assert_eq!(
+            spawn_target,
+            super::CassSpawnTarget::Absolute(
+                trusted_binary
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?
+            )
+        );
 
         let mut command = spawn_target.command();
         command.args(inv.args());
