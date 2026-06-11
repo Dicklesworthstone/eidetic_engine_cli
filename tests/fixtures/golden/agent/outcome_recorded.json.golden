@@ -3,7 +3,7 @@
   "success": true,
   "data": {
     "command": "outcome",
-    "version": "0.1.0",
+    "version": "<scrubbed:eeVersion>",
     "status": "recorded",
     "dryRun": false,
     "target": {
@@ -24,6 +24,11 @@
       "sessionId": null
     },
     "quarantine": null,
+    "confidence": {
+      "before": 0.5,
+      "after": 0.75,
+      "delta": 0.25
+    },
     "feedback": {
       "positiveWeight": 2.0,
       "positiveCount": 1,
@@ -36,6 +41,7 @@
       "totalCount": 1,
       "netScore": 2.0,
       "trustScore": 1.0
-    }
+    },
+    "degraded": []
   }
 }
