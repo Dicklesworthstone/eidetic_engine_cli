@@ -890,7 +890,8 @@ mod tests {
             .map(|index| {
                 json!({
                     "id": format!("item_{index:04}"),
-                    "content": format!("deterministic body text for element {index:04}"),
+                    "content": format!("deterministic body text for element {index:04}; ")
+                        .repeat(4),
                 })
             })
             .collect();
@@ -1026,7 +1027,7 @@ mod tests {
     fn truncation_emits_dropped_count_and_decodable_cursor() -> TestResult {
         let json = list_envelope(40);
         let generation = || 7u64;
-        let ctx = test_context(220, &generation);
+        let ctx = test_context(600, &generation);
         let governed = govern_response_json(&json, &ctx, TEST_REGISTRY)
             .map_err(|error| format!("govern: {error:?}"))?;
         let value = parse(&governed)?;
@@ -1087,8 +1088,8 @@ mod tests {
     fn smaller_budget_output_is_a_prefix_of_larger_budget_output() -> TestResult {
         let json = list_envelope(50);
         let generation = || 1u64;
-        let small_ctx = test_context(200, &generation);
-        let large_ctx = test_context(500, &generation);
+        let small_ctx = test_context(600, &generation);
+        let large_ctx = test_context(1_200, &generation);
         let small = parse(
             &govern_response_json(&json, &small_ctx, TEST_REGISTRY)
                 .map_err(|error| format!("govern small: {error:?}"))?,
@@ -1112,7 +1113,7 @@ mod tests {
     fn same_input_same_ceiling_is_byte_identical_including_cursor() -> TestResult {
         let json = list_envelope(40);
         let generation = || 4u64;
-        let ctx = test_context(220, &generation);
+        let ctx = test_context(600, &generation);
         let first = govern_response_json(&json, &ctx, TEST_REGISTRY)
             .map_err(|error| format!("govern: {error:?}"))?;
         let second = govern_response_json(&json, &ctx, TEST_REGISTRY)
@@ -1163,7 +1164,10 @@ mod tests {
                 .map(|item_index| {
                     json!({
                         "id": format!("s{section_index}_i{item_index}"),
-                        "content": format!("section {section_index} item {item_index} body"),
+                        "content": format!(
+                            "section {section_index} item {item_index} deterministic body; "
+                        )
+                        .repeat(4),
                     })
                 })
                 .collect();
@@ -1181,7 +1185,7 @@ mod tests {
         })
         .to_string();
         let generation = || 2u64;
-        let ctx = test_context(150, &generation);
+        let ctx = test_context(500, &generation);
         let governed = govern_response_json(&json, &ctx, TEST_REGISTRY)
             .map_err(|error| format!("govern: {error:?}"))?;
         let value = parse(&governed)?;
