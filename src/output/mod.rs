@@ -9622,6 +9622,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: cursor_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::recall::RECALL_SCHEMA_V1,
+            version: "1",
+            description: "Code-anchored recall result emitted by ee recall (ADR 0064): reverse lookup from paths, symbols, or a git diff to anchored memories with deterministic freshness x confidence x level-tilt ranking.",
+            category: "search",
+            definition: recall_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::agentsmd::AGENTSMD_EXPORT_SCHEMA_V1,
             version: "1",
             description: "AGENTS.md bridge export report emitted by ee export agentsmd (managed block render, backup, hand-edit refusal).",
@@ -9667,6 +9674,10 @@ fn journal_distill_schema_definition() -> String {
 
 fn cursor_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.cursor.v1.json").to_string()
+}
+
+fn recall_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.recall.v1.json").to_string()
 }
 
 /// Per-schema output-token truncation-point registry (ADR 0063 §2,
