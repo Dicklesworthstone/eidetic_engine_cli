@@ -1961,6 +1961,318 @@ fn stored_situation_unavailable_error(
 }
 
 // ============================================================================
+// Persisted situation records (bd-1tp6p.2.1)
+// ============================================================================
+
+/// Schema version stamped into persisted situation records and used as
+/// part of the idempotence fingerprint (bd-1tp6p.1 contract).
+pub const SITUATION_RECORD_SCHEMA_VERSION: &str = "ee.situation.record.v1";
+
+/// Display placeholder when a record stores no redacted original text.
+const SITUATION_TEXT_REDACTED_PLACEHOLDER: &str = "[redacted]";
+
+/// Domain input for the idempotent create-or-adopt write path. The
+/// caller (the bd-1tp6p.2.2 adoption use case) supplies redaction,
+/// hashing, classification serialization, and timestamps; the
+/// repository owns id derivation and fingerprint idempotence.
+#[derive(Clone, Debug)]
+pub struct AdoptSituationRecordInput {
+    pub workspace_scope: String,
+    pub input_hash: String,
+    pub original_text_redacted: Option<String>,
+    pub category: SituationCategory,
+    pub confidence: ConfidenceLevel,
+    pub confidence_score: f64,
+    pub signals_json: String,
+    pub alternative_categories_json: String,
+    pub routing_decisions_json: String,
+    pub context_hints: Vec<String>,
+    pub provenance_json: String,
+    pub adopted_by: Option<String>,
+    pub adoption_reason: Option<String>,
+    pub created_at: String,
+    pub adopted_at: String,
+    pub classifier_algorithm: String,
+    pub classifier_version: String,
+    pub build_version: String,
+}
+
+/// Outcome of the idempotent adoption write: the persisted record's
+/// domain view plus whether an existing record satisfied the request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SituationAdoption {
+    pub situation_id: String,
+    pub details: SituationDetails,
+    pub already_existed: bool,
+}
+
+/// Deterministic record id derived from the idempotence fingerprint
+/// (SIT-STOR-MUST-003): the same workspace scope, input hash,
+/// classifier algorithm, and schema version always yield the same id.
+#[must_use]
+pub fn deterministic_situation_record_id(
+    workspace_scope: &str,
+    input_hash: &str,
+    classifier_algorithm: &str,
+    schema_version: &str,
+) -> String {
+    let digest = blake3::hash(
+        format!("{workspace_scope}|{input_hash}|{classifier_algorithm}|{schema_version}")
+            .as_bytes(),
+    )
+    .to_hex()
+    .to_string();
+    format!("sit_{}", &digest[..26])
+}
+
+fn situation_storage_error(
+    action: &str,
+    error: impl std::fmt::Display,
+) -> crate::models::DomainError {
+    crate::models::DomainError::Storage {
+        message: format!("Failed to {action} situation record: {error}"),
+        repair: Some("ee doctor --json".to_owned()),
+    }
+}
+
+fn situation_record_corrupt_error(situation_id: &str, column: &str) -> crate::models::DomainError {
+    crate::models::DomainError::Storage {
+        message: format!(
+            "Persisted situation record `{situation_id}` has a corrupt `{column}` column; the stored JSON does not parse."
+        ),
+        repair: Some("ee doctor --json".to_owned()),
+    }
+}
+
+fn stored_record_details(
+    record: &crate::db::StoredSituationRecord,
+) -> Result<SituationDetails, crate::models::DomainError> {
+    let context_hints: Vec<String> = serde_json::from_str(&record.context_hints_json)
+        .map_err(|_| situation_record_corrupt_error(&record.situation_id, "context_hints_json"))?;
+    let category = record
+        .category
+        .parse::<SituationCategory>()
+        .map_err(|_| situation_record_corrupt_error(&record.situation_id, "category"))?;
+    Ok(SituationDetails {
+        version: SITUATION_SHOW_SCHEMA_V1,
+        situation_id: record.situation_id.clone(),
+        category,
+        original_text: record
+            .original_text_redacted
+            .clone()
+            .unwrap_or_else(|| SITUATION_TEXT_REDACTED_PLACEHOLDER.to_owned()),
+        created_at: record.created_at.clone(),
+        context_hints,
+        // Related-memory links are not part of the v1 stored record;
+        // the empty list is the true stored state.
+        related_memories: Vec::new(),
+    })
+}
+
+/// Create a persisted situation record, or return the existing record
+/// when the idempotence fingerprint already has one (bd-1tp6p.1
+/// decision: repeated adoption returns the existing record with an
+/// already-exists posture).
+pub fn create_or_adopt_situation_record(
+    connection: &crate::db::DbConnection,
+    input: &AdoptSituationRecordInput,
+) -> Result<SituationAdoption, crate::models::DomainError> {
+    let lookup = |action: &str| -> Result<
+        Option<crate::db::StoredSituationRecord>,
+        crate::models::DomainError,
+    > {
+        connection
+            .find_situation_record_by_fingerprint(
+                &input.workspace_scope,
+                &input.input_hash,
+                &input.classifier_algorithm,
+                SITUATION_RECORD_SCHEMA_VERSION,
+            )
+            .map_err(|error| situation_storage_error(action, error))
+    };
+
+    if let Some(existing) = lookup("look up")? {
+        let details = stored_record_details(&existing)?;
+        return Ok(SituationAdoption {
+            situation_id: existing.situation_id,
+            details,
+            already_existed: true,
+        });
+    }
+
+    let situation_id = deterministic_situation_record_id(
+        &input.workspace_scope,
+        &input.input_hash,
+        &input.classifier_algorithm,
+        SITUATION_RECORD_SCHEMA_VERSION,
+    );
+    let context_hints_json = serde_json::to_string(&input.context_hints)
+        .map_err(|error| situation_storage_error("serialize context hints for", error))?;
+    let record_input = crate::db::CreateSituationRecordInput {
+        situation_id: situation_id.clone(),
+        workspace_scope: input.workspace_scope.clone(),
+        schema_version: SITUATION_RECORD_SCHEMA_VERSION.to_owned(),
+        input_hash: input.input_hash.clone(),
+        original_text_redacted: input.original_text_redacted.clone(),
+        category: input.category.as_str().to_owned(),
+        confidence: input.confidence.to_string(),
+        confidence_score: input.confidence_score,
+        signals_json: input.signals_json.clone(),
+        alternative_categories_json: input.alternative_categories_json.clone(),
+        routing_decisions_json: input.routing_decisions_json.clone(),
+        context_hints_json,
+        provenance_json: input.provenance_json.clone(),
+        adopted_by: input.adopted_by.clone(),
+        adoption_reason: input.adoption_reason.clone(),
+        created_at: input.created_at.clone(),
+        adopted_at: input.adopted_at.clone(),
+        classifier_algorithm: input.classifier_algorithm.clone(),
+        classifier_version: input.classifier_version.clone(),
+        build_version: input.build_version.clone(),
+    };
+
+    match connection.insert_situation_record(&record_input) {
+        Ok(()) => {}
+        Err(insert_error) => {
+            // A concurrent adopter may have won the unique fingerprint
+            // index between lookup and insert; the existing record then
+            // satisfies this request. Any other failure is a real
+            // storage error and must surface.
+            if let Some(existing) = lookup("re-check")? {
+                let details = stored_record_details(&existing)?;
+                return Ok(SituationAdoption {
+                    situation_id: existing.situation_id,
+                    details,
+                    already_existed: true,
+                });
+            }
+            return Err(situation_storage_error("insert", insert_error));
+        }
+    }
+
+    let stored = connection
+        .get_situation_record(&situation_id)
+        .map_err(|error| situation_storage_error("read back", error))?
+        .ok_or_else(|| crate::models::DomainError::Storage {
+            message: format!(
+                "Situation record `{situation_id}` was not readable immediately after insert."
+            ),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    let details = stored_record_details(&stored)?;
+    Ok(SituationAdoption {
+        situation_id,
+        details,
+        already_existed: false,
+    })
+}
+
+/// Read one persisted situation record as its domain view.
+pub fn get_situation_record_details(
+    connection: &crate::db::DbConnection,
+    situation_id: &str,
+) -> Result<Option<SituationDetails>, crate::models::DomainError> {
+    let Some(record) = connection
+        .get_situation_record(situation_id)
+        .map_err(|error| situation_storage_error("read", error))?
+    else {
+        return Ok(None);
+    };
+    stored_record_details(&record).map(Some)
+}
+
+/// Read one persisted situation record by its idempotence fingerprint.
+pub fn find_situation_record_details_by_fingerprint(
+    connection: &crate::db::DbConnection,
+    workspace_scope: &str,
+    input_hash: &str,
+    classifier_algorithm: &str,
+) -> Result<Option<SituationDetails>, crate::models::DomainError> {
+    let Some(record) = connection
+        .find_situation_record_by_fingerprint(
+            workspace_scope,
+            input_hash,
+            classifier_algorithm,
+            SITUATION_RECORD_SCHEMA_VERSION,
+        )
+        .map_err(|error| situation_storage_error("find", error))?
+    else {
+        return Ok(None);
+    };
+    stored_record_details(&record).map(Some)
+}
+
+/// Derive the v1 explanation from a persisted record (bd-1tp6p.1:
+/// explanation v1 is derived, not stored; recommendations are sorted by
+/// stable routing id then text and empty arrays stay empty arrays).
+pub fn explain_situation_record(
+    connection: &crate::db::DbConnection,
+    situation_id: &str,
+) -> Result<Option<SituationExplanation>, crate::models::DomainError> {
+    let Some(record) = connection
+        .get_situation_record(situation_id)
+        .map_err(|error| situation_storage_error("read", error))?
+    else {
+        return Ok(None);
+    };
+    let category = record
+        .category
+        .parse::<SituationCategory>()
+        .map_err(|_| situation_record_corrupt_error(&record.situation_id, "category"))?;
+    let routing: Vec<serde_json::Value> = serde_json::from_str(&record.routing_decisions_json)
+        .map_err(|_| {
+            situation_record_corrupt_error(&record.situation_id, "routing_decisions_json")
+        })?;
+    let context_hints: Vec<String> = serde_json::from_str(&record.context_hints_json)
+        .map_err(|_| situation_record_corrupt_error(&record.situation_id, "context_hints_json"))?;
+
+    let mut keyed_recommendations: Vec<(String, String)> = routing
+        .iter()
+        .filter_map(|decision| {
+            let routing_id = decision
+                .get("routingId")
+                .and_then(serde_json::Value::as_str)?;
+            let surface = decision
+                .get("surface")
+                .and_then(serde_json::Value::as_str)?;
+            let profile = decision
+                .get("selectedProfile")
+                .and_then(serde_json::Value::as_str)?;
+            Some((
+                routing_id.to_owned(),
+                format!("Route {surface} through the `{profile}` profile."),
+            ))
+        })
+        .collect();
+    keyed_recommendations.sort();
+    let recommendations: Vec<String> = keyed_recommendations
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect();
+
+    let mut relevant_rules = context_hints;
+    relevant_rules.sort();
+
+    Ok(Some(SituationExplanation {
+        version: SITUATION_EXPLAIN_SCHEMA_V1,
+        situation_id: record.situation_id.clone(),
+        category,
+        explanation: format!(
+            "Adopted situation classified as `{}` with {} confidence (score {:.2}) by `{}`.",
+            category.as_str(),
+            record.confidence,
+            record.confidence_score,
+            record.classifier_algorithm
+        ),
+        recommendations,
+        relevant_rules,
+        // Risk derivation needs rule lookups that v1 records do not
+        // store; the empty list is the true derived state.
+        potential_risks: Vec::new(),
+    }))
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1969,6 +2281,174 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), String>;
+
+    fn adopt_input(input_hash: &str) -> AdoptSituationRecordInput {
+        AdoptSituationRecordInput {
+            workspace_scope: "wsp_01234567890123456789012345".to_owned(),
+            input_hash: input_hash.to_owned(),
+            original_text_redacted: Some("fix the failing release workflow".to_owned()),
+            category: SituationCategory::BugFix,
+            confidence: ConfidenceLevel::High,
+            confidence_score: 0.92,
+            signals_json: "[]".to_owned(),
+            alternative_categories_json: "[]".to_owned(),
+            routing_decisions_json: "[]".to_owned(),
+            context_hints: vec!["release".to_owned(), "ci".to_owned()],
+            provenance_json: "[]".to_owned(),
+            adopted_by: Some("test-agent".to_owned()),
+            adoption_reason: Some("unit test".to_owned()),
+            created_at: "2026-06-11T00:00:00Z".to_owned(),
+            adopted_at: "2026-06-11T00:00:00Z".to_owned(),
+            classifier_algorithm: "keyword_v1".to_owned(),
+            classifier_version: "1".to_owned(),
+            build_version: "0.0.0-test".to_owned(),
+        }
+    }
+
+    fn open_situation_test_db() -> Result<crate::db::DbConnection, String> {
+        let connection = crate::db::DbConnection::open_memory().map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+        Ok(connection)
+    }
+
+    fn check(condition: bool, message: &str) -> TestResult {
+        if condition {
+            Ok(())
+        } else {
+            Err(message.to_owned())
+        }
+    }
+
+    #[test]
+    fn adopt_situation_record_is_idempotent() -> TestResult {
+        let connection = open_situation_test_db()?;
+        let input = adopt_input("blake3:adopt-a");
+
+        let first =
+            create_or_adopt_situation_record(&connection, &input).map_err(|e| e.to_string())?;
+        check(!first.already_existed, "first adoption must create")?;
+        check(
+            first.situation_id.starts_with("sit_"),
+            "situation id must use the sit_ prefix",
+        )?;
+
+        let second =
+            create_or_adopt_situation_record(&connection, &input).map_err(|e| e.to_string())?;
+        check(second.already_existed, "second adoption must be idempotent")?;
+        check(
+            second.situation_id == first.situation_id,
+            "idempotent adoption must return the same deterministic id",
+        )?;
+        check(
+            second.details == first.details,
+            "idempotent adoption must return the same stored details",
+        )?;
+
+        let found = find_situation_record_details_by_fingerprint(
+            &connection,
+            &input.workspace_scope,
+            &input.input_hash,
+            &input.classifier_algorithm,
+        )
+        .map_err(|e| e.to_string())?;
+        check(
+            found.as_ref().map(|details| details.situation_id.as_str())
+                == Some(first.situation_id.as_str()),
+            "fingerprint lookup must find the adopted record",
+        )
+    }
+
+    #[test]
+    fn adopt_situation_record_returns_existing_on_fingerprint_conflict() -> TestResult {
+        let connection = open_situation_test_db()?;
+        let input = adopt_input("blake3:adopt-b");
+
+        // Simulate a previously adopted record that used a different id
+        // for the same fingerprint (for example an older id scheme):
+        // adoption must return it instead of fabricating a second row.
+        let existing_id = "sit_legacy0000000000000000001";
+        connection
+            .insert_situation_record(&crate::db::CreateSituationRecordInput {
+                situation_id: existing_id.to_owned(),
+                workspace_scope: input.workspace_scope.clone(),
+                schema_version: SITUATION_RECORD_SCHEMA_VERSION.to_owned(),
+                input_hash: input.input_hash.clone(),
+                original_text_redacted: None,
+                category: "bug_fix".to_owned(),
+                confidence: "high".to_owned(),
+                confidence_score: 0.9,
+                signals_json: "[]".to_owned(),
+                alternative_categories_json: "[]".to_owned(),
+                routing_decisions_json: "[]".to_owned(),
+                context_hints_json: "[]".to_owned(),
+                provenance_json: "[]".to_owned(),
+                adopted_by: None,
+                adoption_reason: None,
+                created_at: "2026-06-10T00:00:00Z".to_owned(),
+                adopted_at: "2026-06-10T00:00:00Z".to_owned(),
+                classifier_algorithm: input.classifier_algorithm.clone(),
+                classifier_version: "1".to_owned(),
+                build_version: "0.0.0-test".to_owned(),
+            })
+            .map_err(|e| e.to_string())?;
+
+        let adoption =
+            create_or_adopt_situation_record(&connection, &input).map_err(|e| e.to_string())?;
+        check(
+            adoption.already_existed,
+            "fingerprint conflict must resolve to the existing record",
+        )?;
+        check(
+            adoption.situation_id == existing_id,
+            "conflict resolution must return the existing record id",
+        )?;
+        check(
+            adoption.details.original_text == "[redacted]",
+            "absent redacted text must render the explicit redaction placeholder",
+        )
+    }
+
+    #[test]
+    fn explain_situation_record_orders_recommendations_deterministically() -> TestResult {
+        let connection = open_situation_test_db()?;
+        let mut input = adopt_input("blake3:adopt-c");
+        input.routing_decisions_json = serde_json::json!([
+            {"routingId": "route_b", "surface": "pack", "selectedProfile": "thorough"},
+            {"routingId": "route_a", "surface": "search", "selectedProfile": "balanced"},
+        ])
+        .to_string();
+        input.context_hints = vec!["zeta".to_owned(), "alpha".to_owned()];
+
+        let adoption =
+            create_or_adopt_situation_record(&connection, &input).map_err(|e| e.to_string())?;
+        let explanation = explain_situation_record(&connection, &adoption.situation_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("adopted record must be explainable")?;
+
+        check(
+            explanation.recommendations
+                == vec![
+                    "Route search through the `balanced` profile.".to_owned(),
+                    "Route pack through the `thorough` profile.".to_owned(),
+                ],
+            "recommendations must be sorted by stable routing id",
+        )?;
+        check(
+            explanation.relevant_rules == vec!["alpha".to_owned(), "zeta".to_owned()],
+            "relevant rules must be sorted deterministically",
+        )?;
+        check(
+            explanation.potential_risks.is_empty(),
+            "empty risk arrays must stay empty arrays",
+        )?;
+
+        let missing = explain_situation_record(&connection, "sit_missing000000000000000001")
+            .map_err(|e| e.to_string())?;
+        check(
+            missing.is_none(),
+            "a missing situation id must explain as None, not an error",
+        )
+    }
     const SITUATION_FIXTURE_METRICS_GOLDEN: &str =
         include_str!("../../tests/fixtures/golden/situation/fixture_metrics.json.golden");
     const LOW_CONFIDENCE_BROADENING_GOLDEN: &str =

@@ -349,8 +349,10 @@ fn bypass_audit_records_token_hash_matches_and_blocking_memories() {
         details["matched_memory_ids"][0],
         "mem_risk000000000000000000001"
     );
+    // 547a5b23 restored the guard schema contract: memory matches
+    // serialize camelCase keys through the redacting serializer.
     assert_eq!(
-        details["matched_memories"][0]["provenance_uri"],
+        details["matched_memories"][0]["provenanceUri"],
         "cass-session://incident-rm-rf#L1-L3"
     );
     assert!(

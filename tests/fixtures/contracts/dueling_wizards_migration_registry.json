@@ -4,8 +4,8 @@
   "gateBead": "bd-1n0np.23.1",
   "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
   "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
-  "currentLastCompiledMigration": 77,
-  "nextPlannedMigration": 78,
+  "currentLastCompiledMigration": 79,
+  "nextPlannedMigration": 80,
   "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
   "backupCoverageBead": "bd-1n0np.23.2",
   "policy": {
@@ -20,7 +20,9 @@
         "V074": "V074_JOURNAL_ENTRIES",
         "V075": "V075_REMEMBER_IDEMPOTENCY_KEYS",
         "V076": "V076_MEMORY_ANCHOR_INDEX",
-        "V077": "V077_PRIMER_CACHE"
+        "V077": "V077_PRIMER_CACHE",
+        "V078": "V078_PACK_BASELINES",
+        "V079": "V079_SITUATION_RECORDS (bd-1tp6p.2.1 persisted situation storage)"
       }
     }
   },
@@ -107,7 +109,7 @@
     },
     {
       "id": "attestation_bundles",
-      "version": 78,
+      "version": 80,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -117,7 +119,7 @@
     },
     {
       "id": "query_miss_ledger",
-      "version": 79,
+      "version": 81,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -127,7 +129,7 @@
     },
     {
       "id": "source_write_stats",
-      "version": 80,
+      "version": 82,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -278,8 +280,8 @@
     },
     {
       "id": "attestation_bundles",
-      "version": 78,
-      "migrationName": "V078_ATTESTATION_BUNDLES",
+      "version": 80,
+      "migrationName": "V080_ATTESTATION_BUNDLES",
       "ownerBead": "bd-1n0np.22.1",
       "ownerSurface": "attestation_bundles",
       "status": "planned",
@@ -293,8 +295,8 @@
     },
     {
       "id": "query_miss_ledger",
-      "version": 79,
-      "migrationName": "V079_QUERY_MISS_LEDGER",
+      "version": 81,
+      "migrationName": "V081_QUERY_MISS_LEDGER",
       "ownerBead": "bd-1n0np.6.3",
       "ownerSurface": "gap_honesty",
       "status": "planned",
@@ -307,8 +309,8 @@
     },
     {
       "id": "source_write_stats",
-      "version": 80,
-      "migrationName": "V080_SOURCE_WRITE_STATS",
+      "version": 82,
+      "migrationName": "V082_SOURCE_WRITE_STATS",
       "ownerBead": "bd-1n0np.8.5",
       "ownerSurface": "read_fence",
       "status": "planned",

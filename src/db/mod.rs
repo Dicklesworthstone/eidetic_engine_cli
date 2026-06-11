@@ -6417,6 +6417,46 @@ CREATE INDEX IF NOT EXISTS pack_baselines_resolution
     "blake3:v078_pack_baselines_2026_06_11",
 );
 
+/// V079: persisted situation records (bd-1tp6p.2.1, contract pinned in
+/// bd-1tp6p.1). Rows are written only by the explicit audited adoption
+/// path — `ee situation classify` stays non-mutating. The unique
+/// fingerprint index (workspace scope, input hash, classifier
+/// algorithm, schema version) is the default idempotence key: repeated
+/// adoption of the same input returns the existing record. The original
+/// task text is stored only in redacted form so support-bundle-safe
+/// show/explain output cannot leak secret-like input.
+pub const V079_SITUATION_RECORDS: Migration = Migration::new(
+    79,
+    "situation_records",
+    r#"
+CREATE TABLE IF NOT EXISTS situation_records (
+    situation_id TEXT PRIMARY KEY,
+    workspace_scope TEXT NOT NULL CHECK (length(trim(workspace_scope)) > 0),
+    schema_version TEXT NOT NULL CHECK (length(trim(schema_version)) > 0),
+    input_hash TEXT NOT NULL CHECK (length(trim(input_hash)) > 0),
+    original_text_redacted TEXT,
+    category TEXT NOT NULL CHECK (length(trim(category)) > 0),
+    confidence TEXT NOT NULL CHECK (length(trim(confidence)) > 0),
+    confidence_score REAL NOT NULL CHECK (confidence_score >= 0.0 AND confidence_score <= 1.0),
+    signals_json TEXT NOT NULL DEFAULT '[]',
+    alternative_categories_json TEXT NOT NULL DEFAULT '[]',
+    routing_decisions_json TEXT NOT NULL DEFAULT '[]',
+    context_hints_json TEXT NOT NULL DEFAULT '[]',
+    provenance_json TEXT NOT NULL DEFAULT '[]',
+    adopted_by TEXT,
+    adoption_reason TEXT,
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    adopted_at TEXT NOT NULL CHECK (length(trim(adopted_at)) > 0),
+    classifier_algorithm TEXT NOT NULL CHECK (length(trim(classifier_algorithm)) > 0),
+    classifier_version TEXT NOT NULL CHECK (length(trim(classifier_version)) > 0),
+    build_version TEXT NOT NULL CHECK (length(trim(build_version)) > 0)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS situation_records_fingerprint
+    ON situation_records(workspace_scope, input_hash, classifier_algorithm, schema_version);
+"#,
+    "blake3:v079_situation_records_2026_06_11",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -6497,6 +6537,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V076_MEMORY_ANCHOR_INDEX,
     V077_PRIMER_CACHE,
     V078_PACK_BASELINES,
+    V079_SITUATION_RECORDS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -16336,6 +16377,197 @@ fn stored_preflight_bypass_token_from_row(row: &Row) -> Result<StoredPreflightBy
         revoked_at: optional_text(row, 12)?.map(str::to_string),
         last_used_at: optional_text(row, 13)?.map(str::to_string),
     })
+}
+
+/// Input for inserting a persisted situation record (bd-1tp6p.2.1).
+///
+/// Field semantics are pinned by the bd-1tp6p.1 storage contract: the
+/// original task text arrives already redacted (or omitted), the JSON
+/// columns carry canonical serialized arrays, and the fingerprint
+/// columns (workspace scope, input hash, classifier algorithm, schema
+/// version) form the unique idempotence key.
+#[derive(Debug, Clone)]
+pub struct CreateSituationRecordInput {
+    pub situation_id: String,
+    pub workspace_scope: String,
+    pub schema_version: String,
+    pub input_hash: String,
+    pub original_text_redacted: Option<String>,
+    pub category: String,
+    pub confidence: String,
+    pub confidence_score: f64,
+    pub signals_json: String,
+    pub alternative_categories_json: String,
+    pub routing_decisions_json: String,
+    pub context_hints_json: String,
+    pub provenance_json: String,
+    pub adopted_by: Option<String>,
+    pub adoption_reason: Option<String>,
+    pub created_at: String,
+    pub adopted_at: String,
+    pub classifier_algorithm: String,
+    pub classifier_version: String,
+    pub build_version: String,
+}
+
+/// A persisted situation record as stored in `situation_records`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredSituationRecord {
+    pub situation_id: String,
+    pub workspace_scope: String,
+    pub schema_version: String,
+    pub input_hash: String,
+    pub original_text_redacted: Option<String>,
+    pub category: String,
+    pub confidence: String,
+    pub confidence_score: f64,
+    pub signals_json: String,
+    pub alternative_categories_json: String,
+    pub routing_decisions_json: String,
+    pub context_hints_json: String,
+    pub provenance_json: String,
+    pub adopted_by: Option<String>,
+    pub adoption_reason: Option<String>,
+    pub created_at: String,
+    pub adopted_at: String,
+    pub classifier_algorithm: String,
+    pub classifier_version: String,
+    pub build_version: String,
+}
+
+const SITUATION_RECORD_COLUMNS: &str = "situation_id, workspace_scope, schema_version, \
+     input_hash, original_text_redacted, category, confidence, confidence_score, \
+     signals_json, alternative_categories_json, routing_decisions_json, \
+     context_hints_json, provenance_json, adopted_by, adoption_reason, created_at, \
+     adopted_at, classifier_algorithm, classifier_version, build_version";
+
+fn stored_situation_record_from_row(row: &Row) -> Result<StoredSituationRecord> {
+    Ok(StoredSituationRecord {
+        situation_id: required_text(row, 0, DbOperation::Query, "situation_id")?.to_string(),
+        workspace_scope: required_text(row, 1, DbOperation::Query, "workspace_scope")?.to_string(),
+        schema_version: required_text(row, 2, DbOperation::Query, "schema_version")?.to_string(),
+        input_hash: required_text(row, 3, DbOperation::Query, "input_hash")?.to_string(),
+        original_text_redacted: optional_text(row, 4)?.map(str::to_string),
+        category: required_text(row, 5, DbOperation::Query, "category")?.to_string(),
+        confidence: required_text(row, 6, DbOperation::Query, "confidence")?.to_string(),
+        confidence_score: required_f64(row, 7, DbOperation::Query, "confidence_score")?,
+        signals_json: required_text(row, 8, DbOperation::Query, "signals_json")?.to_string(),
+        alternative_categories_json: required_text(
+            row,
+            9,
+            DbOperation::Query,
+            "alternative_categories_json",
+        )?
+        .to_string(),
+        routing_decisions_json: required_text(
+            row,
+            10,
+            DbOperation::Query,
+            "routing_decisions_json",
+        )?
+        .to_string(),
+        context_hints_json: required_text(row, 11, DbOperation::Query, "context_hints_json")?
+            .to_string(),
+        provenance_json: required_text(row, 12, DbOperation::Query, "provenance_json")?.to_string(),
+        adopted_by: optional_text(row, 13)?.map(str::to_string),
+        adoption_reason: optional_text(row, 14)?.map(str::to_string),
+        created_at: required_text(row, 15, DbOperation::Query, "created_at")?.to_string(),
+        adopted_at: required_text(row, 16, DbOperation::Query, "adopted_at")?.to_string(),
+        classifier_algorithm: required_text(row, 17, DbOperation::Query, "classifier_algorithm")?
+            .to_string(),
+        classifier_version: required_text(row, 18, DbOperation::Query, "classifier_version")?
+            .to_string(),
+        build_version: required_text(row, 19, DbOperation::Query, "build_version")?.to_string(),
+    })
+}
+
+impl DbConnection {
+    /// Insert a persisted situation record. The unique fingerprint index
+    /// rejects a second record with the same (workspace scope, input
+    /// hash, classifier algorithm, schema version); callers implementing
+    /// idempotent adoption should look the fingerprint up first and
+    /// treat a constraint failure here as a concurrent-adoption conflict.
+    pub fn insert_situation_record(&self, input: &CreateSituationRecordInput) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO situation_records (situation_id, workspace_scope, schema_version, \
+             input_hash, original_text_redacted, category, confidence, confidence_score, \
+             signals_json, alternative_categories_json, routing_decisions_json, \
+             context_hints_json, provenance_json, adopted_by, adoption_reason, created_at, \
+             adopted_at, classifier_algorithm, classifier_version, build_version) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+             ?17, ?18, ?19, ?20)",
+            &[
+                Value::Text(input.situation_id.clone()),
+                Value::Text(input.workspace_scope.clone()),
+                Value::Text(input.schema_version.clone()),
+                Value::Text(input.input_hash.clone()),
+                optional_text_value(input.original_text_redacted.as_deref()),
+                Value::Text(input.category.clone()),
+                Value::Text(input.confidence.clone()),
+                Value::Double(input.confidence_score),
+                Value::Text(input.signals_json.clone()),
+                Value::Text(input.alternative_categories_json.clone()),
+                Value::Text(input.routing_decisions_json.clone()),
+                Value::Text(input.context_hints_json.clone()),
+                Value::Text(input.provenance_json.clone()),
+                optional_text_value(input.adopted_by.as_deref()),
+                optional_text_value(input.adoption_reason.as_deref()),
+                Value::Text(input.created_at.clone()),
+                Value::Text(input.adopted_at.clone()),
+                Value::Text(input.classifier_algorithm.clone()),
+                Value::Text(input.classifier_version.clone()),
+                Value::Text(input.build_version.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch one persisted situation record by id.
+    pub fn get_situation_record(
+        &self,
+        situation_id: &str,
+    ) -> Result<Option<StoredSituationRecord>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            &format!(
+                "SELECT {SITUATION_RECORD_COLUMNS} FROM situation_records WHERE situation_id = ?1 LIMIT 1"
+            ),
+            &[Value::Text(situation_id.to_string())],
+        )?;
+        rows.first()
+            .map(stored_situation_record_from_row)
+            .transpose()
+    }
+
+    /// Fetch one persisted situation record by its idempotence
+    /// fingerprint (workspace scope, input hash, classifier algorithm,
+    /// schema version).
+    pub fn find_situation_record_by_fingerprint(
+        &self,
+        workspace_scope: &str,
+        input_hash: &str,
+        classifier_algorithm: &str,
+        schema_version: &str,
+    ) -> Result<Option<StoredSituationRecord>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            &format!(
+                "SELECT {SITUATION_RECORD_COLUMNS} FROM situation_records WHERE \
+                 workspace_scope = ?1 AND input_hash = ?2 AND classifier_algorithm = ?3 \
+                 AND schema_version = ?4 LIMIT 1"
+            ),
+            &[
+                Value::Text(workspace_scope.to_string()),
+                Value::Text(input_hash.to_string()),
+                Value::Text(classifier_algorithm.to_string()),
+                Value::Text(schema_version.to_string()),
+            ],
+        )?;
+        rows.first()
+            .map(stored_situation_record_from_row)
+            .transpose()
+    }
 }
 
 /// Input for audited memory creation (EE-070).
@@ -30773,6 +31005,141 @@ mod tests {
             "second inserted audit row points to first row hash",
         )?;
 
+        connection.close()?;
+        Ok(())
+    }
+
+    fn situation_record_input(situation_id: &str, input_hash: &str) -> CreateSituationRecordInput {
+        CreateSituationRecordInput {
+            situation_id: situation_id.to_string(),
+            workspace_scope: "wsp_01234567890123456789012345".to_string(),
+            schema_version: "ee.situation.record.v1".to_string(),
+            input_hash: input_hash.to_string(),
+            original_text_redacted: Some("fix the failing release [REDACTED]".to_string()),
+            category: "bug_fix".to_string(),
+            confidence: "high".to_string(),
+            confidence_score: 0.92,
+            signals_json: "[{\"pattern\":\"fix\",\"signalType\":\"keyword\"}]".to_string(),
+            alternative_categories_json: "[]".to_string(),
+            routing_decisions_json: "[]".to_string(),
+            context_hints_json: "[\"release\"]".to_string(),
+            provenance_json: "[]".to_string(),
+            adopted_by: Some("test-agent".to_string()),
+            adoption_reason: Some("unit test".to_string()),
+            created_at: "2026-06-11T00:00:00Z".to_string(),
+            adopted_at: "2026-06-11T00:00:00Z".to_string(),
+            classifier_algorithm: "keyword_v1".to_string(),
+            classifier_version: "1".to_string(),
+            build_version: "0.0.0-test".to_string(),
+        }
+    }
+
+    #[test]
+    fn situation_record_roundtrip_preserves_all_fields() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = situation_record_input("sit_00000000000000000000000001", "blake3:abc");
+        connection.insert_situation_record(&input)?;
+
+        let stored = connection
+            .get_situation_record("sit_00000000000000000000000001")?
+            .ok_or("inserted situation record must be readable")?;
+        assert_eq!(stored.situation_id, input.situation_id);
+        assert_eq!(stored.workspace_scope, input.workspace_scope);
+        assert_eq!(stored.schema_version, input.schema_version);
+        assert_eq!(stored.input_hash, input.input_hash);
+        assert_eq!(stored.original_text_redacted, input.original_text_redacted);
+        assert_eq!(stored.category, input.category);
+        assert_eq!(stored.confidence, input.confidence);
+        assert!((stored.confidence_score - input.confidence_score).abs() < 1e-9);
+        assert_eq!(stored.signals_json, input.signals_json);
+        assert_eq!(
+            stored.alternative_categories_json,
+            input.alternative_categories_json
+        );
+        assert_eq!(stored.routing_decisions_json, input.routing_decisions_json);
+        assert_eq!(stored.context_hints_json, input.context_hints_json);
+        assert_eq!(stored.provenance_json, input.provenance_json);
+        assert_eq!(stored.adopted_by, input.adopted_by);
+        assert_eq!(stored.adoption_reason, input.adoption_reason);
+        assert_eq!(stored.created_at, input.created_at);
+        assert_eq!(stored.adopted_at, input.adopted_at);
+        assert_eq!(stored.classifier_algorithm, input.classifier_algorithm);
+        assert_eq!(stored.classifier_version, input.classifier_version);
+        assert_eq!(stored.build_version, input.build_version);
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn situation_record_handles_empty_provenance_and_absent_optionals() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let mut input = situation_record_input("sit_00000000000000000000000002", "blake3:def");
+        input.original_text_redacted = None;
+        input.adopted_by = None;
+        input.adoption_reason = None;
+        input.provenance_json = "[]".to_string();
+        connection.insert_situation_record(&input)?;
+
+        let stored = connection
+            .get_situation_record("sit_00000000000000000000000002")?
+            .ok_or("inserted situation record must be readable")?;
+        assert_eq!(stored.original_text_redacted, None);
+        assert_eq!(stored.adopted_by, None);
+        assert_eq!(stored.adoption_reason, None);
+        assert_eq!(stored.provenance_json, "[]");
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn situation_record_fingerprint_is_unique_and_findable() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = situation_record_input("sit_00000000000000000000000003", "blake3:ghi");
+        connection.insert_situation_record(&input)?;
+
+        let found = connection
+            .find_situation_record_by_fingerprint(
+                &input.workspace_scope,
+                &input.input_hash,
+                &input.classifier_algorithm,
+                &input.schema_version,
+            )?
+            .ok_or("fingerprint lookup must find the inserted record")?;
+        assert_eq!(found.situation_id, "sit_00000000000000000000000003");
+
+        // Same fingerprint under a different id must violate the unique
+        // index — concurrent duplicate adoption surfaces as a storage
+        // error, never as a silent second record.
+        let mut duplicate = situation_record_input("sit_00000000000000000000000004", "blake3:ghi");
+        duplicate.adopted_by = Some("other-agent".to_string());
+        assert!(
+            connection.insert_situation_record(&duplicate).is_err(),
+            "duplicate fingerprint insert must be rejected by the unique index"
+        );
+
+        // A different fingerprint coexists.
+        let other = situation_record_input("sit_00000000000000000000000005", "blake3:jkl");
+        connection.insert_situation_record(&other)?;
+        assert!(
+            connection
+                .find_situation_record_by_fingerprint(
+                    &other.workspace_scope,
+                    "blake3:missing",
+                    &other.classifier_algorithm,
+                    &other.schema_version,
+                )?
+                .is_none(),
+            "unknown fingerprint must return None, not a fabricated record"
+        );
         connection.close()?;
         Ok(())
     }
