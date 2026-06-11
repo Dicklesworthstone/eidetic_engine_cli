@@ -580,11 +580,7 @@ fn install_check_already_current_is_idempotent() -> TestResult {
     let install_dir_arg = install_dir
         .to_str()
         .ok_or_else(|| "install dir was not UTF-8".to_owned())?;
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("release_manifest")
-        .join("already_current.json");
+    let manifest = root.join("already_current.json");
     let manifest_arg = manifest
         .to_str()
         .ok_or_else(|| "manifest path was not UTF-8".to_owned())?;

@@ -1366,8 +1366,9 @@ pub struct InstallExecutionResult {
 ///
 /// Pre-conditions:
 /// - `plan.status` must be `Ready` or `Idempotent`
-/// - `artifact_root` must contain the artifact named in the plan
-/// - The artifact must pass checksum verification
+/// - `Idempotent` plans validate the target path and return a no-op result
+/// - `Ready` plans require `artifact_root` to contain the artifact named in the plan
+/// - The artifact must pass checksum verification for `Ready` plans
 ///
 /// Steps:
 /// 1. Verify artifact checksum
@@ -1402,6 +1403,16 @@ pub fn execute_install_plan(
                 "install target '{}' contains unsafe path components",
                 plan.target.install_path
             )),
+        };
+    }
+
+    if plan.status == InstallPlanStatus::Idempotent {
+        return InstallExecutionResult {
+            success: true,
+            artifact_verified: false,
+            binary_installed: false,
+            backup_path: None,
+            error_message: None,
         };
     }
 
@@ -3163,6 +3174,52 @@ mod tests {
                 .as_ref()
                 .is_some_and(|msg| msg.contains("no artifact")),
             "error message should mention missing artifact",
+        )
+    }
+
+    #[test]
+    fn execute_install_plan_idempotent_status_is_noop() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let install_path = tempdir.path().join("bin").join("ee");
+        fs::create_dir_all(install_path.parent().expect("install parent"))
+            .map_err(|error| error.to_string())?;
+        fs::write(&install_path, b"existing binary").map_err(|error| error.to_string())?;
+        let artifact = InstallArtifactSelection {
+            artifact_id: "ee-0.1.0-x86_64-unknown-linux-gnu".to_owned(),
+            release_version: "0.1.0".to_owned(),
+            file_name: "missing-artifact.tar.xz".to_owned(),
+            target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+            archive_format: "tar_xz".to_owned(),
+            checksum_algorithm: "blake3".to_owned(),
+            checksum: "unused".to_owned(),
+            signature: "missing".to_owned(),
+        };
+        let mut report = executable_plan_for_artifact(artifact, &install_path);
+        report.status = InstallPlanStatus::Idempotent;
+        report.current_version = "0.1.0".to_owned();
+        report.target_version = Some("0.1.0".to_owned());
+
+        let result = execute_install_plan(&report, &tempdir.path().join("missing-artifacts"));
+
+        ensure(result.success, "idempotent plan should succeed as no-op")?;
+        ensure(
+            !result.artifact_verified,
+            "idempotent no-op should not read or verify artifacts",
+        )?;
+        ensure(
+            !result.binary_installed,
+            "idempotent no-op should not install a binary",
+        )?;
+        ensure_equal(result.backup_path, None, "backup path")?;
+        ensure_equal(result.error_message, None, "error message")?;
+        ensure_equal(
+            fs::read(&install_path).map_err(|error| error.to_string())?,
+            b"existing binary".to_vec(),
+            "existing binary bytes",
+        )?;
+        ensure(
+            !install_path.with_extension("backup").exists(),
+            "idempotent no-op must not create a backup",
         )
     }
 

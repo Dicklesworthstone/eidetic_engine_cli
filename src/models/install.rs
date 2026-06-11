@@ -1,8 +1,8 @@
 //! Agent-safe install and update planning contracts (EE-DIST-003).
 //!
 //! These contracts describe what an installer or updater would inspect or
-//! mutate. They are intentionally data-only so command paths can stay dry-run
-//! and auditable until a verified apply path exists.
+//! mutate. Planning remains data-only; update apply consumes the verified plan
+//! through the guarded side-path artifact flow.
 
 use std::cmp::Ordering;
 use std::fmt;
