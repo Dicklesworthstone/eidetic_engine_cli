@@ -4092,6 +4092,15 @@ mod tests {
             *audit_id = serde_json::json!("audit_DYNAMIC");
         }
 
+        // Scrub the binary version so Cargo.toml bumps cannot re-break
+        // this golden (same convention as scrub_status_volatile_fields).
+        if let Some(version) = value
+            .get_mut("data")
+            .and_then(|data| data.get_mut("version"))
+        {
+            *version = serde_json::json!("<scrubbed:eeVersion>");
+        }
+
         serde_json::to_string_pretty(&value).unwrap_or_else(|_| json.to_string()) + "\n"
     }
 
