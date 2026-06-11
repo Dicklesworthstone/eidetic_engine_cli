@@ -4733,14 +4733,28 @@ fn promoted_swarm_command_sequence(
         .enumerate()
         .map(|(index, row)| {
             let step_id = format!("step_{:03}", index + 1);
-            let positional_arity = u16::try_from(row.command.positional_arity.unwrap_or_default())
-                .map_err(|_| DomainError::Usage {
-                    message: format!(
-                        "agent workload trace command {} positionalArity exceeds u16",
-                        row.command.verbs.join(" ")
-                    ),
-                    repair: Some("Export command shapes with bounded positional arity.".to_owned()),
-                })?;
+            // The flight recorder always records positionalArity; an absent
+            // value means an unknown command shape, not a zero-argument
+            // command, and must not be promoted into the workload.
+            let recorded_arity =
+                row.command
+                    .positional_arity
+                    .ok_or_else(|| DomainError::Usage {
+                        message: format!(
+                            "agent workload trace command {} is missing positionalArity",
+                            row.command.verbs.join(" ")
+                        ),
+                        repair: Some(
+                            "Export command shapes with recorded positional arity.".to_owned(),
+                        ),
+                    })?;
+            let positional_arity = u16::try_from(recorded_arity).map_err(|_| DomainError::Usage {
+                message: format!(
+                    "agent workload trace command {} positionalArity exceeds u16",
+                    row.command.verbs.join(" ")
+                ),
+                repair: Some("Export command shapes with bounded positional arity.".to_owned()),
+            })?;
             Ok(SwarmWorkloadCommandStep {
                 step_id: step_id.clone(),
                 agent_slot: (index as u16) % agent_count,
