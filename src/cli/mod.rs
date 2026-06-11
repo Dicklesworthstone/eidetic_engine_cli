@@ -5136,7 +5136,7 @@ pub struct InstallPlanArgs {
 /// Arguments for `ee update`.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 pub struct UpdateArgs {
-    /// Only report what would happen. Apply mode is intentionally unsupported in this slice.
+    /// Only report what would happen without applying the verified update plan.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 
@@ -16627,10 +16627,17 @@ where
         write_stdout(stdout, &(json.to_string() + "\n"))
     } else {
         let mut lines = Vec::new();
-        lines.push(format!(
-            "Update applied successfully to {}",
-            plan.target.install_path
-        ));
+        if result.binary_installed {
+            lines.push(format!(
+                "Update applied successfully to {}",
+                plan.target.install_path
+            ));
+        } else {
+            lines.push(format!(
+                "Update already satisfied at {}; no binary write was needed",
+                plan.target.install_path
+            ));
+        }
         if let Some(version) = &plan.target_version {
             lines.push(format!("Installed version: {version}"));
         }
@@ -20630,6 +20637,13 @@ fn open_preflight_token_database(
     database: Option<&Path>,
 ) -> Result<(crate::db::DbConnection, String, PathBuf), DomainError> {
     let workspace = cli.resolve_workspace();
+    open_preflight_token_database_for_workspace(workspace, database)
+}
+
+fn open_preflight_token_database_for_workspace(
+    workspace: PathBuf,
+    database: Option<&Path>,
+) -> Result<(crate::db::DbConnection, String, PathBuf), DomainError> {
     let database_path = database
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
@@ -20820,13 +20834,15 @@ where
     if let Some(override_token) = args.override_token.as_deref() {
         let matches = registry.match_command(&command);
         if !matches.is_empty() {
-            let (connection, workspace_id, _) =
-                match open_preflight_token_database(cli, args.database.as_deref()) {
-                    Ok(opened) => opened,
-                    Err(error) => {
-                        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-                    }
-                };
+            let (connection, workspace_id, _) = match open_preflight_token_database_for_workspace(
+                workspace.clone(),
+                args.database.as_deref(),
+            ) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                }
+            };
             let options = VerifyBypassTokenOptions {
                 workspace_id: workspace_id.clone(),
                 token: override_token.to_owned(),
@@ -20858,7 +20874,7 @@ where
                 exit_code: 0,
                 checked_at: chrono::Utc::now().to_rfc3339(),
             };
-            attach_preflight_memory_matches(cli, args.database.as_deref(), &mut report);
+            attach_preflight_memory_matches(&workspace, args.database.as_deref(), &mut report);
             let audit_options = RecordPreflightBypassAuditOptions {
                 workspace_id,
                 token: override_token.to_owned(),
@@ -20889,37 +20905,38 @@ where
 
     let options = PreflightGuardOptions {
         command,
-        workspace,
+        workspace: workspace.clone(),
         bypass_tokens,
         bypass_secret: read(EnvVar::PreflightBypassSecret).map(|s| s.into_bytes()),
     };
 
     let mut report = run_preflight_guard(&registry, &options);
-    attach_preflight_memory_matches(cli, args.database.as_deref(), &mut report);
-    record_preflight_halt_audit_if_available(cli, args.database.as_deref(), &report);
+    attach_preflight_memory_matches(&workspace, args.database.as_deref(), &mut report);
+    record_preflight_halt_audit_if_available(&workspace, args.database.as_deref(), &report);
     write_preflight_guard_report(cli, &report, stdout)
 }
 
 fn attach_preflight_memory_matches(
-    cli: &Cli,
+    workspace: &Path,
     database: Option<&Path>,
     report: &mut PreflightGuardReport,
 ) {
     if report.matches.is_empty() {
         return;
     }
-    let (connection, workspace_id, _) = match open_preflight_token_database(cli, database) {
-        Ok(opened) => opened,
-        Err(error) => {
-            let mut degraded = no_risk_memories_degradation();
-            degraded.message = format!(
-                "Preflight risk-memory lookup unavailable: {}",
-                error.message()
-            );
-            report.degraded.push(degraded);
-            return;
-        }
-    };
+    let (connection, workspace_id, _) =
+        match open_preflight_token_database_for_workspace(workspace.to_path_buf(), database) {
+            Ok(opened) => opened,
+            Err(error) => {
+                let mut degraded = no_risk_memories_degradation();
+                degraded.message = format!(
+                    "Preflight risk-memory lookup unavailable: {}",
+                    error.message()
+                );
+                report.degraded.push(degraded);
+                return;
+            }
+        };
     let memories = match connection.list_memories(&workspace_id, None, false) {
         Ok(memories) => memories,
         Err(error) => {
@@ -20936,23 +20953,24 @@ fn attach_preflight_memory_matches(
 }
 
 fn record_preflight_halt_audit_if_available(
-    cli: &Cli,
+    workspace: &Path,
     database: Option<&Path>,
     report: &PreflightGuardReport,
 ) {
     if report.exit_code != 7 {
         return;
     }
-    let (connection, workspace_id, _) = match open_preflight_token_database(cli, database) {
-        Ok(opened) => opened,
-        Err(error) => {
-            tracing::error!(
-                error = %error.message(),
-                "failed to open database for preflight halt audit"
-            );
-            return;
-        }
-    };
+    let (connection, workspace_id, _) =
+        match open_preflight_token_database_for_workspace(workspace.to_path_buf(), database) {
+            Ok(opened) => opened,
+            Err(error) => {
+                tracing::error!(
+                    error = %error.message(),
+                    "failed to open database for preflight halt audit"
+                );
+                return;
+            }
+        };
     let options = RecordPreflightHaltAuditOptions {
         workspace_id,
         actor: None,
@@ -61692,6 +61710,93 @@ mod tests {
                     })
                 }),
             "persisted guard tripwire source id",
+        )
+    }
+
+    fn seed_preflight_guard_cli_workspace(workspace: &Path, name: &str) -> TestResult {
+        let ee_dir = workspace.join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| format!("create .ee dir: {error}"))?;
+        let database_path = ee_dir.join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| format!("open preflight guard test db: {error}"))?;
+        connection
+            .migrate()
+            .map_err(|error| format!("migrate preflight guard test db: {error}"))?;
+        let workspace_id = crate::core::workspace::stable_workspace_id(workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some(name.to_owned()),
+                },
+            )
+            .map_err(|error| format!("insert preflight guard workspace row: {error}"))?;
+        Ok(())
+    }
+
+    fn preflight_halt_audit_count(workspace: &Path) -> Result<usize, String> {
+        let database_path = workspace.join(".ee").join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| format!("open audit test db: {error}"))?;
+        let workspace_id = crate::core::workspace::stable_workspace_id(workspace);
+        let entries = connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| format!("list preflight audit entries: {error}"))?;
+        Ok(entries
+            .iter()
+            .filter(|entry| entry.action == crate::db::audit_actions::PREFLIGHT_HALT)
+            .count())
+    }
+
+    #[test]
+    fn preflight_check_subcommand_workspace_controls_database_and_audit() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let default_workspace = tempdir.path().join("default-workspace");
+        let explicit_workspace = tempdir.path().join("explicit-workspace");
+        seed_preflight_guard_cli_workspace(&default_workspace, "default-workspace")?;
+        seed_preflight_guard_cli_workspace(&explicit_workspace, "explicit-workspace")?;
+
+        let default_workspace = default_workspace.to_string_lossy().into_owned();
+        let explicit_workspace = explicit_workspace.to_string_lossy().into_owned();
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            &default_workspace,
+            "preflight",
+            "check",
+            "--cmd",
+            "rm -rf /tmp/guarded",
+            "--workspace",
+            &explicit_workspace,
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::PolicyDenied,
+            "preflight check policy-denied exit",
+        )?;
+        ensure(stderr.is_empty(), "preflight check JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["exitCode"],
+            &serde_json::json!(7),
+            "preflight guard exit code",
+        )?;
+
+        let explicit_count = preflight_halt_audit_count(Path::new(&explicit_workspace))?;
+        let default_count = preflight_halt_audit_count(Path::new(&default_workspace))?;
+        ensure_equal(
+            &explicit_count,
+            &1usize,
+            "explicit workspace receives preflight halt audit",
+        )?;
+        ensure_equal(
+            &default_count,
+            &0usize,
+            "top-level workspace must not receive subcommand preflight halt audit",
         )
     }
 

@@ -43,10 +43,26 @@ fn has_explicit_machine_output_flag(args: &[OsString]) -> bool {
     false
 }
 
-fn should_inject_json_flag(args: &[OsString]) -> bool {
-    let hook_mode = env_flag_truthy(read(EnvVar::HookMode));
+fn injected_output_flag_for_modes(
+    args: &[OsString],
+    agent_mode: bool,
+    hook_mode: bool,
+) -> Option<OsString> {
+    if has_explicit_machine_output_flag(args) {
+        None
+    } else if agent_mode {
+        Some(OsString::from("--json"))
+    } else if hook_mode {
+        Some(OsString::from("--format=hook"))
+    } else {
+        None
+    }
+}
+
+fn injected_output_flag(args: &[OsString]) -> Option<OsString> {
     let agent_mode = env_flag_truthy(read(EnvVar::AgentMode));
-    (hook_mode || agent_mode) && !has_explicit_machine_output_flag(args)
+    let hook_mode = env_flag_truthy(read(EnvVar::HookMode));
+    injected_output_flag_for_modes(args, agent_mode, hook_mode)
 }
 
 fn env_value_is_json(value: Option<String>) -> bool {
@@ -167,8 +183,8 @@ fn init_tracing_subscriber() {
 fn cli_main() -> ExitCode {
     init_tracing_subscriber();
     let mut args: Vec<OsString> = std::env::args_os().collect();
-    if should_inject_json_flag(&args) {
-        args.insert(1, OsString::from("--json"));
+    if let Some(flag) = injected_output_flag(&args) {
+        args.insert(1, flag);
     }
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
@@ -266,6 +282,53 @@ mod tests {
             OsString::from("--format=json"),
         ];
         assert!(has_explicit_machine_output_flag(&equals_format));
+    }
+
+    #[test]
+    fn agent_mode_injects_json_when_no_output_flag_is_explicit() {
+        let args = [OsString::from("ee"), OsString::from("status")];
+
+        assert_eq!(
+            injected_output_flag_for_modes(&args, true, false),
+            Some(OsString::from("--json"))
+        );
+    }
+
+    #[test]
+    fn hook_mode_injects_hook_renderer_when_no_output_flag_is_explicit() {
+        let args = [
+            OsString::from("ee"),
+            OsString::from("pack"),
+            OsString::from("task"),
+        ];
+
+        assert_eq!(
+            injected_output_flag_for_modes(&args, false, true),
+            Some(OsString::from("--format=hook"))
+        );
+    }
+
+    #[test]
+    fn output_mode_injection_preserves_explicit_renderer_and_agent_precedence() {
+        let explicit = [
+            OsString::from("ee"),
+            OsString::from("--format"),
+            OsString::from("markdown"),
+            OsString::from("pack"),
+            OsString::from("task"),
+        ];
+        assert_eq!(
+            injected_output_flag_for_modes(&explicit, true, true),
+            None,
+            "explicit renderer must not be overridden"
+        );
+
+        let implicit = [OsString::from("ee"), OsString::from("status")];
+        assert_eq!(
+            injected_output_flag_for_modes(&implicit, true, true),
+            Some(OsString::from("--json")),
+            "agent mode keeps the same precedence as OutputContext"
+        );
     }
 
     #[test]

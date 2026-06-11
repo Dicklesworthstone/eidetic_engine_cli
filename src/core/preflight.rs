@@ -19,6 +19,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::core::feedback::{PreflightFeedbackKind, RecordFeedbackReport, TaskOutcome};
+use crate::core::preflight_guard::matches_drop_table_sql;
 use crate::models::DomainError;
 use crate::models::claims::{ClaimEntry, ClaimStatus};
 use crate::models::episode::{RegretCategory, RegretEntry as LedgerRegretEntry};
@@ -2250,7 +2251,7 @@ fn assess_task_risk(task_input: &str) -> RiskLevel {
     // Critical risk patterns
     if lower.contains("delete")
         || lower.contains("rm -rf")
-        || lower.contains("drop table")
+        || matches_drop_table_sql(task_input)
         || lower.contains("truncate")
     {
         return RiskLevel::Critical;
@@ -3848,6 +3849,11 @@ RULE NUMBER 2: NO WORKTREES. EVER.
     #[test]
     fn assess_task_risk_patterns() -> TestResult {
         ensure(assess_task_risk("rm -rf /"), RiskLevel::Critical, "rm -rf")?;
+        ensure(
+            assess_task_risk("DROP/**/TABLE memories"),
+            RiskLevel::Critical,
+            "drop table comment bypass",
+        )?;
         ensure(
             assess_task_risk("deploy to production"),
             RiskLevel::High,

@@ -441,6 +441,35 @@ fn drop_table_sql_blocks_whitespace_variant_bypasses() {
 }
 
 #[test]
+fn drop_table_sql_blocks_comment_variant_bypasses() {
+    // SQL comments are whitespace to SQL parsers. A guard that only
+    // collapses literal whitespace lets comment-separated destructive
+    // keywords through even though the executed SQL still says DROP TABLE.
+    let registry = PreflightGuardRegistry::with_builtins();
+    for command in [
+        "psql -c 'DROP/**/TABLE memories;'",
+        "psql -c 'DROP /* maintenance */ TABLE memories;'",
+        "psql --command 'DROP/**/TABLE memories;'",
+        "psql -c 'DROP--comment\nTABLE memories;'",
+        "psql -c 'drop/*\nmultiline\n*/table memories;'",
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(
+            report.exit_code, 7,
+            "drop-table comment bypass `{command}` should exit 7"
+        );
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|matched| matched.rule_id == "builtin:drop_table_sql"),
+            "command `{command}` did not cite builtin:drop_table_sql: {:?}",
+            report.matches
+        );
+    }
+}
+
+#[test]
 fn no_match_yields_exit_zero() {
     let registry = PreflightGuardRegistry::with_builtins();
     let report = run_preflight_guard(&registry, &opts("ls -la"));

@@ -155,6 +155,16 @@
       ]
     },
     {
+      "id": "drop_table_sql_block_comment",
+      "category": "drop_table_sql",
+      "command": "psql -c 'DROP/**/TABLE memories;'",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:drop_table_sql"
+      ]
+    },
+    {
       "id": "terraform_destroy",
       "category": "terraform_destroy",
       "command": "terraform destroy -auto-approve",

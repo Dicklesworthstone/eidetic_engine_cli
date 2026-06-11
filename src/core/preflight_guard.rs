@@ -2079,27 +2079,82 @@ fn kubectl_flag_is_truthy(arg: &str, flag: &str) -> bool {
     false
 }
 
-fn matches_drop_table_sql(command: &str) -> bool {
-    // Normalize whitespace before matching so trivial bypasses such as
-    // `DROP  TABLE`, `DROP\tTABLE`, or `DROP\nTABLE` (passed verbatim
-    // through `psql -c '...'`) cannot evade the guard. Case is folded
-    // to lowercase. Comment-stripping is left for a future revision —
-    // the common bypass vector is whitespace, not SQL comments.
+pub(crate) fn matches_drop_table_sql(command: &str) -> bool {
     let lowered = command.to_ascii_lowercase();
-    let mut collapsed = String::with_capacity(lowered.len());
-    let mut last_was_space = false;
-    for ch in lowered.chars() {
-        if ch.is_whitespace() {
-            if !last_was_space {
-                collapsed.push(' ');
-                last_was_space = true;
+    let bytes = lowered.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if sql_guard_keyword_at(bytes, index, b"drop")
+            && skip_sql_guard_keyword_gap(bytes, index + b"drop".len())
+                .is_some_and(|table_index| sql_guard_keyword_at(bytes, table_index, b"table"))
+        {
+            return true;
+        }
+        index += 1;
+    }
+
+    false
+}
+
+fn sql_guard_keyword_at(bytes: &[u8], index: usize, keyword: &[u8]) -> bool {
+    bytes
+        .get(index..index.saturating_add(keyword.len()))
+        .is_some_and(|candidate| candidate == keyword)
+        && index
+            .checked_sub(1)
+            .and_then(|previous| bytes.get(previous))
+            .is_none_or(|byte| !sql_guard_word_byte(*byte))
+        && bytes
+            .get(index + keyword.len())
+            .is_none_or(|byte| !sql_guard_word_byte(*byte))
+}
+
+fn sql_guard_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn skip_sql_guard_keyword_gap(bytes: &[u8], mut index: usize) -> Option<usize> {
+    let mut consumed = false;
+    loop {
+        let before = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+            consumed = true;
+        }
+        if bytes.get(index) == Some(&b'/') && bytes.get(index + 1) == Some(&b'*') {
+            index += 2;
+            consumed = true;
+            let mut closed = false;
+            while index + 1 < bytes.len() {
+                if bytes[index] == b'*' && bytes[index + 1] == b'/' {
+                    index += 2;
+                    closed = true;
+                    break;
+                }
+                index += 1;
             }
-        } else {
-            collapsed.push(ch);
-            last_was_space = false;
+            if !closed {
+                return None;
+            }
+            continue;
+        }
+        if bytes.get(index) == Some(&b'-') && bytes.get(index + 1) == Some(&b'-') {
+            index += 2;
+            consumed = true;
+            while bytes
+                .get(index)
+                .is_some_and(|byte| !matches!(*byte, b'\n' | b'\r'))
+            {
+                index += 1;
+            }
+            continue;
+        }
+        if index == before {
+            break;
         }
     }
-    collapsed.contains("drop table")
+
+    consumed.then_some(index)
 }
 
 fn matches_terraform_destroy(command: &str) -> bool {
