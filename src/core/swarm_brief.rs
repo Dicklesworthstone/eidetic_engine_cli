@@ -3573,11 +3573,7 @@ fn summarize_swarm_replay_result_artifact(path: &Path) -> Option<Value> {
     }
     let raw = String::from_utf8(bytes).ok()?;
     let result: Value = serde_json::from_str(&raw).ok()?;
-    if result.get("schema").and_then(Value::as_str)
-        != Some(crate::core::lab::SWARM_REPLAY_RESULT_SCHEMA_V1)
-    {
-        return None;
-    }
+    let (workload_id, run_id, status) = swarm_replay_result_required_shape(&result)?;
 
     let aggregate = result.get("aggregate").cloned().unwrap_or(Value::Null);
     let host = result
@@ -3594,10 +3590,10 @@ fn summarize_swarm_replay_result_artifact(path: &Path) -> Option<Value> {
     let first_failure = swarm_replay_first_failure_summary(&result);
 
     Some(json!({
-        "workloadId": result.get("workloadId").and_then(Value::as_str).unwrap_or("unknown"),
-        "runId": result.get("runId").and_then(Value::as_str).unwrap_or("unknown"),
-        "status": result.get("status").and_then(Value::as_str).unwrap_or("unknown"),
-        "sideEffectFree": result.get("sideEffectFree").and_then(Value::as_bool).unwrap_or(false),
+        "workloadId": workload_id,
+        "runId": run_id,
+        "status": status,
+        "sideEffectFree": true,
         "artifactModifiedEpochMs": modified_epoch_ms,
         "workloadHash": verification.get("workloadHash").and_then(Value::as_str),
         "replayHash": verification.get("replayHash").and_then(Value::as_str),
@@ -3654,6 +3650,54 @@ fn summarize_swarm_replay_result_artifact(path: &Path) -> Option<Value> {
             "artifactPathsIncluded": false,
         },
     }))
+}
+
+fn swarm_replay_result_required_shape(result: &Value) -> Option<(&str, &str, &str)> {
+    if result.get("schema").and_then(Value::as_str)
+        != Some(crate::core::lab::SWARM_REPLAY_RESULT_SCHEMA_V1)
+    {
+        return None;
+    }
+    let workload_id = result.get("workloadId").and_then(Value::as_str)?;
+    let run_id = result.get("runId").and_then(Value::as_str)?;
+    let status = result.get("status").and_then(Value::as_str)?;
+    if !is_prefixed_hex_id(workload_id, "swarmwl_")
+        || !is_prefixed_hex_id(run_id, "swarmrun_")
+        || !matches!(status, "pass" | "fail" | "blocked" | "degraded")
+        || result.get("sideEffectFree").and_then(Value::as_bool) != Some(true)
+        || result
+            .get("hostProfileAdmission")
+            .and_then(Value::as_object)
+            .is_none()
+        || result
+            .get("commandResults")
+            .and_then(Value::as_array)
+            .is_none()
+        || result.get("aggregate").and_then(Value::as_object).is_none()
+        || result
+            .get("redactionStatus")
+            .and_then(Value::as_object)
+            .is_none()
+        || result
+            .get("resourceUsage")
+            .and_then(Value::as_object)
+            .is_none()
+        || result.get("firstFailure").is_none()
+        || result
+            .get("verification")
+            .and_then(Value::as_object)
+            .is_none()
+        || result.get("warnings").and_then(Value::as_array).is_none()
+    {
+        return None;
+    }
+    Some((workload_id, run_id, status))
+}
+
+fn is_prefixed_hex_id(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|suffix| {
+        (16..=64).contains(&suffix.len()) && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 fn swarm_replay_summary_value(
@@ -4045,10 +4089,7 @@ fn summarize_swarm_incident_fixture(path: &Path) -> Option<Value> {
         return None;
     }
 
-    let scenario_id = fixture
-        .get("scenarioId")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
+    let scenario_id = swarm_incident_fixture_required_shape(&fixture)?;
     let substrate_posture = swarm_incident_substrate_posture(&fixture);
     let status_counts = swarm_incident_status_counts(&substrate_posture);
     let dominant_status = swarm_incident_dominant_status(&substrate_posture);
@@ -4104,6 +4145,44 @@ fn summarize_swarm_incident_fixture(path: &Path) -> Option<Value> {
             "artifactRefs": artifact_refs,
         },
     }))
+}
+
+fn swarm_incident_fixture_required_shape(fixture: &Value) -> Option<&str> {
+    let scenario_id = fixture.get("scenarioId").and_then(Value::as_str)?;
+    if !is_swarm_incident_scenario_id(scenario_id)
+        || fixture.get("fixedClock").and_then(Value::as_str).is_none()
+        || fixture.get("purpose").and_then(Value::as_str).is_none()
+        || fixture
+            .get("substrates")
+            .and_then(Value::as_object)
+            .is_none()
+        || fixture
+            .get("expectedDegraded")
+            .and_then(Value::as_array)
+            .is_none()
+        || fixture
+            .get("expectedRecoveryActions")
+            .and_then(Value::as_array)
+            .is_none()
+        || fixture
+            .get("redactionExpectations")
+            .and_then(Value::as_object)
+            .is_none()
+        || fixture
+            .get("assertions")
+            .and_then(Value::as_object)
+            .is_none()
+        || fixture.get("artifacts").and_then(Value::as_array).is_none()
+    {
+        return None;
+    }
+    Some(scenario_id)
+}
+
+fn is_swarm_incident_scenario_id(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars.next().is_some_and(|first| first.is_ascii_lowercase())
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 fn swarm_incident_summary_value(
@@ -9357,6 +9436,127 @@ mod tests {
                 && !rendered.contains("workspaceHash"),
             "handoff text should stay compact and omit raw key-shape field names"
         );
+    }
+
+    #[test]
+    fn swarm_incident_summary_counts_schema_shaped_invalid_fixtures_as_malformed() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let fixture_dir = tempdir
+            .path()
+            .join("tests")
+            .join("fixtures")
+            .join("swarm_incidents");
+        fs::create_dir_all(&fixture_dir).map_err(|error| error.to_string())?;
+
+        fs::write(
+            fixture_dir.join("schema_only.json"),
+            r#"{"schema":"ee.swarm_incident.v1"}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            fixture_dir.join("bad_scenario.json"),
+            stable_summary_json(&json!({
+                "schema": "ee.swarm_incident.v1",
+                "scenarioId": "Bad-Scenario",
+                "fixedClock": "2026-06-11T00:00:00Z",
+                "purpose": "invalid identifier should not become support evidence",
+                "substrates": {},
+                "expectedDegraded": [],
+                "expectedRecoveryActions": [],
+                "redactionExpectations": {},
+                "assertions": {},
+                "artifacts": []
+            })),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let summary = collect_swarm_incident_summary(tempdir.path());
+        assert_eq!(
+            summary.pointer("/status"),
+            Some(&json!("no_valid_incident_fixtures"))
+        );
+        assert_eq!(summary.pointer("/counts/fixtureCount"), Some(&json!(2)));
+        assert_eq!(
+            summary.pointer("/counts/summarizedIncidentCount"),
+            Some(&json!(0))
+        );
+        assert_eq!(
+            summary.pointer("/counts/malformedIncidentCount"),
+            Some(&json!(2))
+        );
+        assert!(
+            !stable_summary_json(&summary).contains(r#""scenarioId":"unknown""#),
+            "invalid fixtures must not be summarized under a synthetic scenario id"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_replay_summary_counts_schema_shaped_invalid_results_as_malformed() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let replay_root = tempdir
+            .path()
+            .join(crate::core::lab::SWARM_REPLAY_ARTIFACT_DIR_TAIL);
+        let schema_only_dir = replay_root.join("schema_only");
+        let bad_id_dir = replay_root.join("bad_id");
+        fs::create_dir_all(&schema_only_dir).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&bad_id_dir).map_err(|error| error.to_string())?;
+
+        fs::write(
+            schema_only_dir.join(crate::core::lab::SWARM_REPLAY_RESULT_ARTIFACT_FILE),
+            stable_summary_json(&json!({
+                "schema": crate::core::lab::SWARM_REPLAY_RESULT_SCHEMA_V1
+            })),
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            bad_id_dir.join(crate::core::lab::SWARM_REPLAY_RESULT_ARTIFACT_FILE),
+            stable_summary_json(&json!({
+                "schema": crate::core::lab::SWARM_REPLAY_RESULT_SCHEMA_V1,
+                "workloadId": "not_a_swarm_workload_id",
+                "runId": "not_a_swarm_run_id",
+                "sideEffectFree": true,
+                "status": "pass",
+                "hostProfileAdmission": {},
+                "commandResults": [],
+                "aggregate": {},
+                "redactionStatus": {},
+                "resourceUsage": {},
+                "firstFailure": null,
+                "verification": {},
+                "warnings": []
+            })),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let summary = collect_swarm_replay_summary(tempdir.path());
+        assert_eq!(
+            summary.pointer("/status"),
+            Some(&json!("no_valid_replay_artifacts"))
+        );
+        assert_eq!(
+            summary.pointer("/counts/runDirectoryCount"),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            summary.pointer("/counts/resultArtifactCount"),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            summary.pointer("/counts/summarizedReplayCount"),
+            Some(&json!(0))
+        );
+        assert_eq!(
+            summary.pointer("/counts/malformedReplayCount"),
+            Some(&json!(2))
+        );
+        let encoded = stable_summary_json(&summary);
+        assert!(
+            !encoded.contains(r#""workloadId":"unknown""#)
+                && !encoded.contains(r#""runId":"unknown""#),
+            "invalid replay results must not be summarized under synthetic identifiers"
+        );
+        Ok(())
     }
 
     #[test]

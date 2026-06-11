@@ -480,11 +480,34 @@ fn parse_rust_error_header(header: &str) -> (Option<String>, Option<String>) {
 }
 
 fn parse_rust_location(location: &str) -> Option<(String, Option<u32>, Option<u32>)> {
-    let location = location.split_whitespace().next()?.trim();
+    let location = location.trim();
     if location.is_empty() {
         return None;
     }
 
+    if let Some(parsed) = parse_rust_location_candidate(location) {
+        return Some(parsed);
+    }
+
+    let mut end = location.len();
+    while let Some((index, _)) = location[..end]
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+    {
+        let candidate = location[..index].trim_end();
+        if !candidate.is_empty()
+            && let Some(parsed) = parse_rust_location_candidate(candidate)
+        {
+            return Some(parsed);
+        }
+        end = index;
+    }
+
+    Some((location.to_owned(), None, None))
+}
+
+fn parse_rust_location_candidate(location: &str) -> Option<(String, Option<u32>, Option<u32>)> {
     let mut parts = location.rsplitn(3, ':');
     let last = parts.next()?;
     let middle = parts.next();
@@ -496,7 +519,7 @@ fn parse_rust_location(location: &str) -> Option<(String, Option<u32>, Option<u3
         {
             return Some((path_raw.to_owned(), Some(line), Some(column)));
         }
-        return Some((location.to_owned(), None, None));
+        return None;
     }
 
     if let Some(path_raw) = middle
@@ -504,6 +527,10 @@ fn parse_rust_location(location: &str) -> Option<(String, Option<u32>, Option<u3
         && !path_raw.is_empty()
     {
         return Some((path_raw.to_owned(), Some(line), None));
+    }
+
+    if middle.is_some() {
+        return None;
     }
 
     Some((location.to_owned(), None, None))
@@ -806,6 +833,51 @@ error[E0425]: cannot find value `snapshot` in this scope
             parse_first_rust_compile_diagnostic(excerpt).expect("diagnostic should parse");
 
         assert_eq!(diagnostic.path, "src/core/ownership_snapshot.rs");
+        assert_eq!(diagnostic.line, Some(112));
+        assert_eq!(diagnostic.column, None);
+    }
+
+    #[test]
+    fn rust_location_preserves_valid_path_with_spaces() {
+        let excerpt = r#"
+error[E0425]: cannot find value `snapshot` in this scope
+ --> src/core/ownership snapshot.rs:112:9
+"#;
+
+        let diagnostic =
+            parse_first_rust_compile_diagnostic(excerpt).expect("diagnostic should parse");
+
+        assert_eq!(diagnostic.path, "src/core/ownership snapshot.rs");
+        assert_eq!(diagnostic.line, Some(112));
+        assert_eq!(diagnostic.column, Some(9));
+    }
+
+    #[test]
+    fn rust_location_preserves_spaced_path_before_trailing_annotation() {
+        let excerpt = r#"
+error[E0425]: cannot find value `snapshot` in this scope
+ --> src/core/ownership snapshot.rs:112:9 (in this macro invocation)
+"#;
+
+        let diagnostic =
+            parse_first_rust_compile_diagnostic(excerpt).expect("diagnostic should parse");
+
+        assert_eq!(diagnostic.path, "src/core/ownership snapshot.rs");
+        assert_eq!(diagnostic.line, Some(112));
+        assert_eq!(diagnostic.column, Some(9));
+    }
+
+    #[test]
+    fn rust_location_preserves_line_only_path_before_trailing_annotation() {
+        let excerpt = r#"
+error[E0425]: cannot find value `snapshot` in this scope
+ --> src/core/ownership snapshot.rs:112 (in this macro invocation)
+"#;
+
+        let diagnostic =
+            parse_first_rust_compile_diagnostic(excerpt).expect("diagnostic should parse");
+
+        assert_eq!(diagnostic.path, "src/core/ownership snapshot.rs");
         assert_eq!(diagnostic.line, Some(112));
         assert_eq!(diagnostic.column, None);
     }

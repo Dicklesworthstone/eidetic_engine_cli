@@ -359,8 +359,15 @@ pub fn capture_pack(options: &CaptureOptions) -> Result<CaptureReport, DomainErr
         let lock_file = captured_file_for_content("repro.lock", lock_json.as_bytes());
         let provenance_file = captured_file_for_content("provenance.json", prov_json.as_bytes());
         let payload_files = vec![env_file.clone(), lock_file.clone(), provenance_file.clone()];
-        let manifest_json =
-            create_manifest_json(&pack_name, &options.version, &now, &payload_files);
+        let manifest_json = create_manifest_json(
+            &pack_name,
+            &options.version,
+            &now,
+            &payload_files,
+            options.description.as_deref(),
+            options.claim_id.as_deref(),
+            options.demo_id.as_deref(),
+        );
 
         if let Err(e) = write_pack_file_no_symlinks(&pack_path, "env.json", env_json.as_bytes()) {
             return Err(DomainError::Storage {
@@ -1046,6 +1053,9 @@ fn create_manifest_json(
     version: &str,
     timestamp: &str,
     artifacts: &[CapturedFile],
+    description: Option<&str>,
+    claim_id: Option<&str>,
+    demo_id: Option<&str>,
 ) -> String {
     let artifacts = artifacts
         .iter()
@@ -1058,13 +1068,33 @@ fn create_manifest_json(
             })
         })
         .collect::<Vec<_>>();
-    let manifest = json!({
+    let mut manifest = json!({
         "schema": REPRO_MANIFEST_SCHEMA_V1,
         "name": name,
         "version": version,
         "artifacts": artifacts,
         "created_at": timestamp
     });
+    if let Some(object) = manifest.as_object_mut() {
+        if let Some(description) = description {
+            object.insert(
+                "description".to_string(),
+                serde_json::Value::String(description.to_string()),
+            );
+        }
+        if let Some(claim_id) = claim_id {
+            object.insert(
+                "claim_id".to_string(),
+                serde_json::Value::String(claim_id.to_string()),
+            );
+        }
+        if let Some(demo_id) = demo_id {
+            object.insert(
+                "demo_id".to_string(),
+                serde_json::Value::String(demo_id.to_string()),
+            );
+        }
+    }
 
     crate::core::serialize_pretty_or_error(&manifest)
 }
@@ -1144,6 +1174,49 @@ mod tests {
         )?;
 
         Ok(())
+    }
+
+    #[test]
+    fn capture_manifest_preserves_supplied_metadata() -> TestResult {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("ee_repro_capture_metadata_")
+            .tempdir()
+            .map(tempfile::TempDir::keep)
+            .map_err(|e| e.to_string())?;
+
+        let report = capture_pack(&CaptureOptions {
+            source: temp_dir.clone(),
+            output_dir: temp_dir.clone(),
+            name: Some("metadata-pack".to_string()),
+            version: "1.2.3".to_string(),
+            description: Some("release claim reproduction".to_string()),
+            claim_id: Some("claim_release_context_demo".to_string()),
+            demo_id: Some("demo_release_context_demo".to_string()),
+            dry_run: false,
+            ..Default::default()
+        })
+        .map_err(|e| e.message())?;
+
+        let manifest_json = fs::read_to_string(report.pack_path.join("manifest.json"))
+            .map_err(|error| error.to_string())?;
+        let manifest: serde_json::Value =
+            serde_json::from_str(&manifest_json).map_err(|error| error.to_string())?;
+
+        ensure(
+            manifest["description"].as_str(),
+            Some("release claim reproduction"),
+            "description",
+        )?;
+        ensure(
+            manifest["claim_id"].as_str(),
+            Some("claim_release_context_demo"),
+            "claim_id",
+        )?;
+        ensure(
+            manifest["demo_id"].as_str(),
+            Some("demo_release_context_demo"),
+            "demo_id",
+        )
     }
 
     #[test]
