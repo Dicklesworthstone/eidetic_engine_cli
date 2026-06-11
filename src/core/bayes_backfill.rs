@@ -113,15 +113,11 @@ pub fn backfill_workspace(
                     })?;
                 let replay = events.into_iter().map(|ev| {
                     let signal = FeedbackSignal::from_signal_str(&ev.signal);
-                    // Per-event weight comes from the stored row; if
-                    // it isn't positive, fall back to the run-wide
-                    // default so harmful events still register.
-                    let event_weight = f64::from(ev.weight);
-                    let weight = if event_weight.is_finite() && event_weight > 0.0 {
-                        event_weight
-                    } else {
-                        harmful_weight
-                    };
+                    let weight = backfill_event_weight_or_default(
+                        signal,
+                        f64::from(ev.weight),
+                        harmful_weight,
+                    );
                     (signal, weight)
                 });
                 Some(BetaPosterior::from_feedback_events(replay))
@@ -215,6 +211,21 @@ fn approx_eq(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-12
 }
 
+fn backfill_event_weight_or_default(
+    signal: FeedbackSignal,
+    event_weight: f64,
+    harmful_weight: f64,
+) -> f64 {
+    if event_weight.is_finite() && event_weight > 0.0 {
+        return event_weight;
+    }
+    match signal {
+        FeedbackSignal::Helpful => 1.0,
+        FeedbackSignal::Harmful => harmful_weight,
+        FeedbackSignal::Neutral => 0.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +258,44 @@ mod tests {
         assert!(approx_eq(1.0, 1.0));
         assert!(approx_eq(0.5, 0.5 + 1e-13));
         assert!(!approx_eq(0.5, 0.5 + 1e-6));
+    }
+
+    #[test]
+    fn invalid_feedback_event_weight_defaults_by_signal() {
+        assert!(approx_eq(
+            backfill_event_weight_or_default(FeedbackSignal::Helpful, 0.0, DEFAULT_HARMFUL_WEIGHT),
+            1.0
+        ));
+        assert!(approx_eq(
+            backfill_event_weight_or_default(
+                FeedbackSignal::Harmful,
+                f64::NAN,
+                DEFAULT_HARMFUL_WEIGHT,
+            ),
+            DEFAULT_HARMFUL_WEIGHT
+        ));
+        assert!(approx_eq(
+            backfill_event_weight_or_default(FeedbackSignal::Neutral, 0.0, DEFAULT_HARMFUL_WEIGHT),
+            0.0
+        ));
+    }
+
+    #[test]
+    fn invalid_helpful_backfill_weight_replays_as_one_helpful_event() {
+        let weight =
+            backfill_event_weight_or_default(FeedbackSignal::Helpful, 0.0, DEFAULT_HARMFUL_WEIGHT);
+        let posterior = BetaPosterior::from_feedback_events([(FeedbackSignal::Helpful, weight)]);
+
+        assert!(approx_eq(posterior.alpha(), 1.5));
+        assert!(approx_eq(posterior.beta(), 0.5));
+    }
+
+    #[test]
+    fn invalid_configured_harmful_weight_still_replays_as_default_harmful_event() {
+        let weight = backfill_event_weight_or_default(FeedbackSignal::Harmful, 0.0, f64::NAN);
+        let posterior = BetaPosterior::from_feedback_events([(FeedbackSignal::Harmful, weight)]);
+
+        assert!(approx_eq(posterior.alpha(), 0.5));
+        assert!(approx_eq(posterior.beta(), 0.5 + DEFAULT_HARMFUL_WEIGHT));
     }
 }
