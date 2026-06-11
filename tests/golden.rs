@@ -3798,7 +3798,23 @@ mod tests {
         let audit = connection
             .list_audit_by_target("memory", "mem_00000000000000000000000001", None)
             .map_err(|error| error.to_string())?;
-        ensure_equal(&audit.len(), &1_usize, "outcome audit row count")?;
+        // One helpful outcome writes exactly two memory-target audit rows:
+        // the feedback record plus the ADR 0032 Bayes posterior update —
+        // every memory carries a Jeffreys prior (V041), so a helpful signal
+        // always moves the posterior and must be audited (no silent
+        // memory mutation). A trust-class transition row would be a third
+        // entry; human_explicit memories must not transition here.
+        ensure_equal(&audit.len(), &2_usize, "outcome audit row count")?;
+        let mut actions: Vec<&str> = audit.iter().map(|row| row.action.as_str()).collect();
+        actions.sort_unstable();
+        ensure_equal(
+            &actions,
+            &vec![
+                ee::db::audit_actions::FEEDBACK_RECORD,
+                ee::db::audit_actions::OUTCOME_BAYES_UPDATE,
+            ],
+            "outcome audit actions",
+        )?;
 
         let normalized = normalize_outcome_json(&stdout);
         assert_golden("agent", "outcome_recorded.json", &normalized)

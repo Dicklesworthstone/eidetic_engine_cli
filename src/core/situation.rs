@@ -1767,7 +1767,12 @@ fn link_confidence_score(
     if source.confidence == ConfidenceLevel::Low || target.confidence == ConfidenceLevel::Low {
         score -= 0.15;
     }
-    score.clamp(0.0, LINK_RECOMMENDATION_MIN_SCORE - 0.001)
+    let capped_score = score.clamp(0.0, 1.0);
+    if source.confidence == ConfidenceLevel::Low || target.confidence == ConfidenceLevel::Low {
+        capped_score.min(LINK_RECOMMENDATION_MIN_SCORE - 0.001)
+    } else {
+        capped_score
+    }
 }
 
 fn confidence_for_score(score: f32) -> ConfidenceLevel {
@@ -2273,7 +2278,7 @@ mod tests {
     }
 
     #[test]
-    fn compare_situations_recommends_shared_bug_fix_link() -> TestResult {
+    fn compare_situations_declines_low_confidence_heuristic_link() -> TestResult {
         let report = compare_situations(
             &SituationCompareOptions::new("fix failing release workflow", "fix broken login crash")
                 .source_situation_id("sit.release_bug")
@@ -2308,6 +2313,38 @@ mod tests {
                 .any(|reason| reason.contains("heuristic tags are not sufficient evidence")),
             true,
             "heuristic warning",
+        )
+    }
+
+    #[test]
+    fn situation_link_dry_run_plans_high_confidence_shared_link() -> TestResult {
+        let report = plan_situation_link_dry_run(
+            &SituationCompareOptions::new("fix broken login crash", "fix broken checkout crash")
+                .source_situation_id("sit.login_bug")
+                .target_situation_id("sit.checkout_bug")
+                .with_evidence("feat.shared.bug_fix")
+                .created_at("2026-05-01T00:00:00Z"),
+        );
+
+        ensure(report.compare.recommended, true, "recommended")?;
+        ensure(
+            report.compare.confidence,
+            ConfidenceLevel::Medium,
+            "link confidence",
+        )?;
+        ensure(
+            report.compare.confidence_score >= LINK_RECOMMENDATION_MIN_SCORE,
+            true,
+            "score reaches recommendation threshold",
+        )?;
+        ensure(report.planned_link.is_some(), true, "planned link")?;
+        ensure(
+            report
+                .curation_candidate
+                .reason
+                .contains("propose similar situation link"),
+            true,
+            "curation reason proposes reviewed link",
         )
     }
 
