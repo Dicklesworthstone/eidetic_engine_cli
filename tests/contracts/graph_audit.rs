@@ -14,7 +14,7 @@ use ee::db::{CreateWorkspaceInput, DbConnection};
 
 type TestResult<T = ()> = Result<T, String>;
 
-const WORKSPACE_ID: &str = "wsp_graph_audit_contract_0000000001";
+const WORKSPACE_ID: &str = "wsp_graph_audit_contract_00001";
 
 #[test]
 fn graph_audit_actions_round_trip_through_audit_log() -> TestResult {
