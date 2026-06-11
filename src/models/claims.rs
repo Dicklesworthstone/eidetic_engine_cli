@@ -15,6 +15,7 @@
 //! describes the evidence files, their checksums, and verification status.
 
 use std::fmt;
+use std::path::{Component, Path};
 
 use super::{ClaimId, DemoId, EvidenceId, PolicyId, TraceId};
 
@@ -578,16 +579,19 @@ pub fn is_valid_blake3_hex(s: &str) -> bool {
 
 #[must_use]
 pub fn is_valid_artifact_path(path: &str) -> bool {
-    if path.is_empty() {
+    if path.is_empty() || path.trim() != path || path.contains('\\') {
         return false;
     }
-    if path.starts_with('/') || path.starts_with("..") {
-        return false;
+
+    let mut saw_component = false;
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(_) => saw_component = true,
+            _ => return false,
+        }
     }
-    if path.contains("..") {
-        return false;
-    }
-    true
+
+    saw_component
 }
 
 pub fn validate_manifest_structure(
@@ -623,7 +627,7 @@ pub fn validate_artifact_entry(
     if !is_valid_artifact_path(path) {
         return Err(ManifestValidationError::invalid_artifact_path(
             path,
-            "path must be relative and cannot contain '..'",
+            "path must be a portable relative path with only normal '/'-separated components",
         ));
     }
 
@@ -786,7 +790,11 @@ mod tests {
     fn is_valid_artifact_path_accepts_valid() -> TestResult {
         ensure(is_valid_artifact_path("file.txt"), "simple filename")?;
         ensure(is_valid_artifact_path("dir/file.txt"), "with directory")?;
-        ensure(is_valid_artifact_path("a/b/c/d.json"), "nested directories")
+        ensure(is_valid_artifact_path("a/b/c/d.json"), "nested directories")?;
+        ensure(
+            is_valid_artifact_path("dir/file..txt"),
+            "ordinary filenames may contain dots",
+        )
     }
 
     #[test]
@@ -794,7 +802,26 @@ mod tests {
         ensure(!is_valid_artifact_path(""), "empty path")?;
         ensure(!is_valid_artifact_path("/absolute"), "absolute path")?;
         ensure(!is_valid_artifact_path("../escape"), "parent escape")?;
-        ensure(!is_valid_artifact_path("dir/../escape"), "embedded escape")
+        ensure(!is_valid_artifact_path("dir/../escape"), "embedded escape")?;
+        ensure(!is_valid_artifact_path("./file.txt"), "current dir prefix")?;
+        ensure(
+            !is_valid_artifact_path("dir/./file.txt"),
+            "embedded current dir",
+        )?;
+        ensure(!is_valid_artifact_path(" file.txt"), "leading whitespace")?;
+        ensure(!is_valid_artifact_path("file.txt "), "trailing whitespace")?;
+        ensure(
+            !is_valid_artifact_path("C:\\temp\\artifact.json"),
+            "windows drive path",
+        )?;
+        ensure(
+            !is_valid_artifact_path("\\\\server\\share\\artifact.json"),
+            "windows unc path",
+        )?;
+        ensure(
+            !is_valid_artifact_path("dir\\file.txt"),
+            "backslash separator",
+        )
     }
 
     #[test]
