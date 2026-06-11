@@ -313,6 +313,17 @@ fn test_log_path_has_symlink_component(path: &Path) -> io::Result<bool> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
+        #[cfg(not(windows))]
+        if matches!(component, std::path::Component::RootDir) {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
             Ok(_) => {}
@@ -553,6 +564,20 @@ mod tests {
         assert_eq!(lines[0]["kind"], "note");
         assert_eq!(lines[0]["fields"]["message"], "hello");
         assert_eq!(lines[1]["kind"], "assert_ok");
+    }
+
+    #[test]
+    fn test_log_symlink_scan_accepts_absolute_roots() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let canonical =
+            std::fs::canonicalize(tmp.path()).unwrap_or_else(|_| tmp.path().to_path_buf());
+        let log_path = canonical.join("events.jsonl");
+
+        assert!(
+            !test_log_path_has_symlink_component(&log_path)
+                .expect("absolute test-log path should be inspectable"),
+            "absolute test-log paths should not fail during prefix/root preflight"
+        );
     }
 
     #[cfg(unix)]

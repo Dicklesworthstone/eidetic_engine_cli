@@ -591,13 +591,14 @@ fn first_existing_symlink_component(
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
             Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(None);
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotADirectory => {
+                return Err(SymlinkComponentInspectionError {
+                    path: current,
+                    source,
+                });
             }
             Err(source) => {
                 return Err(SymlinkComponentInspectionError {
@@ -785,6 +786,36 @@ mod tests {
                 .issue
                 .as_deref()
                 .is_some_and(|issue| issue.contains("symbolic link"))
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_permission_report_fails_when_ee_path_is_regular_file() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        std::fs::write(workspace.join(".ee"), b"not a directory")
+            .map_err(|error| error.to_string())?;
+
+        let report = check_workspace_permissions(&workspace, SecurityProfile::Default);
+
+        assert!(!report.passed);
+        let db_check = report
+            .checks
+            .iter()
+            .find(|check| check.path.ends_with(".ee/ee.db"))
+            .ok_or_else(|| "database check missing".to_owned())?;
+        assert!(!db_check.passed);
+        assert_eq!(db_check.current_mode, None);
+        assert!(
+            db_check
+                .issue
+                .as_deref()
+                .is_some_and(|issue| issue.contains("failed to inspect database path component")),
+            "regular .ee file must fail closed instead of passing as not found: {:?}",
+            db_check.issue
         );
         Ok(())
     }

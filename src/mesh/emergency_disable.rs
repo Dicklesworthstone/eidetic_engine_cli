@@ -368,6 +368,12 @@ fn write_mesh_config(
     source_schema: &str,
 ) -> Result<(), MeshEmergencyError> {
     let config_path = workspace_path.join(".ee").join("config.toml");
+    ensure_mesh_config_path_has_no_symlink_components(&config_path, "read or write").map_err(
+        |source| MeshEmergencyError::ReadConfig {
+            path: config_path.clone(),
+            source,
+        },
+    )?;
     let input = match read_mesh_emergency_config_bounded(&config_path) {
         Ok(contents) => contents,
         Err(error)
@@ -408,6 +414,18 @@ fn write_mesh_config(
     })?;
     let mut temp_path = config_path.clone();
     temp_path.set_extension("mesh-containment.tmp");
+    ensure_mesh_config_path_has_no_symlink_components(&temp_path, "write").map_err(|source| {
+        MeshEmergencyError::WriteConfig {
+            path: temp_path.clone(),
+            source,
+        }
+    })?;
+    ensure_mesh_config_path_has_no_symlink_components(&config_path, "publish").map_err(
+        |source| MeshEmergencyError::WriteConfig {
+            path: config_path.clone(),
+            source,
+        },
+    )?;
     {
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -429,10 +447,33 @@ fn write_mesh_config(
                 source,
             })?;
     }
+    ensure_mesh_config_path_has_no_symlink_components(&config_path, "publish").map_err(
+        |source| MeshEmergencyError::WriteConfig {
+            path: config_path.clone(),
+            source,
+        },
+    )?;
     fs::rename(&temp_path, &config_path).map_err(|source| MeshEmergencyError::WriteConfig {
         path: config_path,
         source,
     })
+}
+
+fn ensure_mesh_config_path_has_no_symlink_components(
+    path: &Path,
+    operation: &'static str,
+) -> io::Result<()> {
+    if let Some(symlink_path) = crate::core::path_safety::first_existing_symlink_component(path)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to {operation} mesh emergency config '{}' through symlinked path component '{}'",
+                path.display(),
+                symlink_path.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Read `path` into a string while refusing payloads above
@@ -560,6 +601,50 @@ mod tests {
         let config = ConfigFile::parse(&config_text).map_err(|error| error.to_string())?;
         assert_eq!(config.mesh.enabled, Some(false));
         assert_eq!(config.mesh.command_mode, Some(MeshCommandMode::Off));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn emergency_disable_refuses_symlinked_ee_directory() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = temp_workspace()?;
+        let redirected_ee = workspace.path().join("redirected-ee");
+        fs::create_dir_all(&redirected_ee)
+            .map_err(|error| format!("create redirected .ee: {error}"))?;
+        symlink(&redirected_ee, workspace.path().join(".ee"))
+            .map_err(|error| format!("create .ee symlink: {error}"))?;
+
+        let input = MeshEmergencyDisableInput {
+            workspace_path: workspace.path().to_path_buf(),
+            all_workspaces: false,
+            dry_run: false,
+            reason: Some("symlinked workspace config probe".to_owned()),
+            peer_id: None,
+            temporary_for: None,
+            mesh_enabled_before: true,
+            command_mode_before: MeshCommandMode::Blocking,
+        };
+
+        let error =
+            apply_emergency_disable(&input).expect_err("symlinked .ee write must be refused");
+        match error {
+            MeshEmergencyError::ReadConfig { source, .. }
+            | MeshEmergencyError::WriteConfig { source, .. } => {
+                assert_eq!(source.kind(), io::ErrorKind::InvalidInput);
+                let message = source.to_string();
+                assert!(
+                    message.contains("symlinked path component"),
+                    "expected symlink diagnostic; got {message}"
+                );
+            }
+            other => panic!("expected config path safety error; got {other:?}"),
+        }
+        assert!(
+            !redirected_ee.join("config.toml").exists(),
+            "containment config must not be written through symlinked .ee"
+        );
         Ok(())
     }
 

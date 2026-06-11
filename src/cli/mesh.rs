@@ -2402,6 +2402,26 @@ fn write_node_key_list(
 }
 
 fn ensure_writable_regular_file(path: &Path) -> Result<(), DomainError> {
+    if let Some(symlink_path) = crate::core::path_safety::first_existing_symlink_component(path)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to inspect mesh discovery policy path {}: {error}",
+                path.display()
+            ),
+            repair: Some("Check workspace .ee directory permissions.".to_owned()),
+        })?
+    {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "Refusing to write mesh discovery policy through symlink component {}",
+                symlink_path.display()
+            ),
+            repair: Some(
+                "Replace the symlink with a regular directory or file owned by this workspace."
+                    .to_owned(),
+            ),
+        });
+    }
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => Ok(()),
         Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::PolicyDenied {
@@ -3754,6 +3774,34 @@ mod tests {
             read_mesh_text_bounded(&missing, MESH_CONFIG_MAX_BYTES, "discovery policy config")
                 .expect_err("missing path must error");
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_writable_regular_file_rejects_symlinked_parent_component() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real_ee = tmp.path().join("real-ee");
+        std::fs::create_dir_all(&real_ee).expect("create real .ee");
+        let linked_ee = tmp.path().join(".ee");
+        symlink(&real_ee, &linked_ee).expect("create .ee symlink");
+
+        let error = ensure_writable_regular_file(&linked_ee.join("discovery_policy.toml"))
+            .expect_err("symlinked .ee parent must be refused");
+        match error {
+            DomainError::PolicyDenied { message, .. } => {
+                assert!(
+                    message.contains("symlink component"),
+                    "expected symlink component diagnostic; got {message}"
+                );
+            }
+            other => panic!("expected PolicyDenied for symlinked parent; got {other:?}"),
+        }
+        assert!(
+            !real_ee.join("discovery_policy.toml").exists(),
+            "policy writes must not be redirected through symlinked .ee"
+        );
     }
 
     #[test]
