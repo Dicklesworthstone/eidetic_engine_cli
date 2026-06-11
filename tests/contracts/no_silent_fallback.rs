@@ -42,7 +42,6 @@ const FOLLOW_UP_BEADS: &[&str] = &[
     "eidetic_engine_cli-sos5.4",
     "eidetic_engine_cli-sos5.7",
     "eidetic_engine_cli-ogy9",
-    "bd-192lf",
 ];
 
 const INVENTORY_RULES: &[InventoryRule] = &[
@@ -1810,13 +1809,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "std::str::from_utf8(&bytes[..error.valid_up_to()])",
         "Truncated-write recovery keeps the valid UTF-8 prefix; full parse failures still report a parse error.",
     ),
-    must_fix(
-        "NSF-ATTEST-VALUE-HASH",
-        "src/core/attest.rs",
-        "fn value_hash(value: &Value)",
-        "bd-192lf",
-        "An attestation value that fails to serialize silently hashes empty text, misrepresenting the attested content instead of surfacing the failure.",
-    ),
     allowed(
         "NSF-AUDIT-LANE-WORKSPACE-ID",
         "src/core/audit_lane.rs",
@@ -1949,13 +1941,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "Utc::now().timestamp_millis().try_into().unwrap_or_default()",
         "The QoS timestamp saturates to zero only if the system clock fails; lane summaries stay explicit.",
     ),
-    must_fix(
-        "NSF-VERIFY-READER-JOIN",
-        "src/core/verify.rs",
-        "output_bytes_to_string(stdout_thread.join().unwrap_or_default())",
-        "bd-192lf",
-        "A panicked verify-step reader thread fabricates empty captured output for a proof surface instead of failing the step.",
-    ),
     allowed(
         "NSF-VERIFY-LEDGER-CODES-ABSENT",
         "src/core/verify_ledger.rs",
@@ -1985,20 +1970,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/outcome.rs",
         "harmful_burst_quarantine_degradation(q, &[])",
         "A dry run without a quarantine decision previews no quarantine degradations; the preview status stays explicit.",
-    ),
-    must_fix(
-        "NSF-REHEARSE-READER-JOIN",
-        "src/core/rehearse.rs",
-        "output_bytes_to_string(stderr_thread.join().unwrap_or_default())",
-        "bd-192lf",
-        "A panicked rehearsal reader thread fabricates empty captured output instead of failing the rehearsal command.",
-    ),
-    must_fix(
-        "NSF-CASS-PIPE-STDERR-TAKE",
-        "src/cass/process.rs",
-        "stderr_bytes.take().unwrap_or_default()",
-        "bd-192lf",
-        "CASS subprocess stderr capture failure must not become empty stderr, matching the stdout-side must-fix contract.",
     ),
     allowed(
         "NSF-CASS-STDOUT-DRAIN-TIMEOUT",
