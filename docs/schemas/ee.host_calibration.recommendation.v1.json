@@ -30,8 +30,8 @@
       "const": true
     },
     "configMutation": {
-      "type": "string",
-      "const": "never"
+      "type": "boolean",
+      "const": false
     },
     "hostProfileSchema": {
       "type": "string",

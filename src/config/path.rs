@@ -145,7 +145,7 @@ impl PathExpander {
                     }
                 };
                 let mut joined = home.to_string_lossy().into_owned();
-                joined.push_str(rest);
+                push_tilde_rest(&mut joined, rest);
                 return Ok(joined);
             }
         }
@@ -261,6 +261,22 @@ fn is_valid_identifier(name: &str) -> bool {
     bytes.all(is_identifier_continue)
 }
 
+fn push_tilde_rest(home: &mut String, rest: &str) {
+    if !rest.is_empty() && ends_with_path_separator(home) && starts_with_path_separator(rest) {
+        home.push_str(&rest[1..]);
+    } else {
+        home.push_str(rest);
+    }
+}
+
+fn starts_with_path_separator(value: &str) -> bool {
+    value.starts_with('/') || (cfg!(windows) && value.starts_with('\\'))
+}
+
+fn ends_with_path_separator(value: &str) -> bool {
+    value.ends_with('/') || (cfg!(windows) && value.ends_with('\\'))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -297,6 +313,21 @@ mod tests {
             expander.expand("~/.local/share/ee/ee.db"),
             Ok(PathBuf::from("/home/agent/.local/share/ee/ee.db"))
         );
+    }
+
+    #[test]
+    fn tilde_slash_does_not_duplicate_trailing_home_separator() {
+        let expander = fixed(Some("/home/agent/"), &[]);
+        assert_eq!(
+            expander.expand("~/ee.db"),
+            Ok(PathBuf::from("/home/agent/ee.db"))
+        );
+    }
+
+    #[test]
+    fn tilde_slash_does_not_turn_root_home_into_double_slash() {
+        let expander = fixed(Some("/"), &[]);
+        assert_eq!(expander.expand("~/ee.db"), Ok(PathBuf::from("/ee.db")));
     }
 
     #[test]

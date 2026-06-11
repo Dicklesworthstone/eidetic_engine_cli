@@ -69,8 +69,8 @@ pub use merge::{
 };
 pub use path::{PathExpander, PathExpansionError};
 pub use path_resolver::{
-    PlatformDataDirError, WINDOWS_APPDATA_UNAVAILABLE_CODE, resolve_dir_unix_xdg,
-    resolve_dir_windows_appdata, resolve_dir_windows_localappdata,
+    PlatformDataDirError, UNIX_XDG_DATA_UNAVAILABLE_CODE, WINDOWS_APPDATA_UNAVAILABLE_CODE,
+    resolve_dir_unix_xdg, resolve_dir_windows_appdata, resolve_dir_windows_localappdata,
 };
 pub use workspace::{
     WORKSPACE_ENV_VAR, WORKSPACE_MARKER, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity,

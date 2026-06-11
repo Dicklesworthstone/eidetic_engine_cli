@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 /// Degraded code emitted when a Windows data directory cannot be resolved.
 pub const WINDOWS_APPDATA_UNAVAILABLE_CODE: &str = "windows_appdata_unavailable";
+/// Typed diagnostic code emitted when a Unix data directory cannot be resolved.
+pub const UNIX_XDG_DATA_UNAVAILABLE_CODE: &str = "unix_xdg_data_unavailable";
 
 /// Platform data-directory resolution failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,7 +39,12 @@ impl std::error::Error for PlatformDataDirError {}
 pub fn resolve_dir_windows_appdata(
     env: &BTreeMap<String, OsString>,
 ) -> Result<PathBuf, PlatformDataDirError> {
-    required_env_path_with_repair(env, "APPDATA", "set APPDATA or pass --workspace explicitly")
+    required_env_path_with_repair(
+        env,
+        "APPDATA",
+        WINDOWS_APPDATA_UNAVAILABLE_CODE,
+        "set APPDATA or pass --workspace explicitly",
+    )
 }
 
 /// Resolve the local Windows app data directory used for machine-local caches.
@@ -52,6 +59,7 @@ pub fn resolve_dir_windows_localappdata(
     required_env_path_with_repair(
         env,
         "LOCALAPPDATA",
+        WINDOWS_APPDATA_UNAVAILABLE_CODE,
         "set LOCALAPPDATA or pass --workspace explicitly",
     )
 }
@@ -74,6 +82,7 @@ pub fn resolve_dir_unix_xdg(
     let home = required_env_path_with_repair(
         env,
         "HOME",
+        UNIX_XDG_DATA_UNAVAILABLE_CODE,
         "set HOME, set XDG_DATA_HOME, or pass --workspace explicitly",
     )?;
     Ok(home.join(".local").join("share").join(app_name))
@@ -82,10 +91,11 @@ pub fn resolve_dir_unix_xdg(
 fn required_env_path_with_repair(
     env: &BTreeMap<String, OsString>,
     variable: &'static str,
+    code: &'static str,
     repair: &'static str,
 ) -> Result<PathBuf, PlatformDataDirError> {
     non_empty_env_path(env, variable).ok_or(PlatformDataDirError {
-        code: WINDOWS_APPDATA_UNAVAILABLE_CODE,
+        code,
         variable,
         repair,
     })
@@ -100,8 +110,8 @@ fn non_empty_env_path(env: &BTreeMap<String, OsString>, variable: &str) -> Optio
 #[cfg(test)]
 mod tests {
     use super::{
-        WINDOWS_APPDATA_UNAVAILABLE_CODE, resolve_dir_unix_xdg, resolve_dir_windows_appdata,
-        resolve_dir_windows_localappdata,
+        UNIX_XDG_DATA_UNAVAILABLE_CODE, WINDOWS_APPDATA_UNAVAILABLE_CODE, resolve_dir_unix_xdg,
+        resolve_dir_windows_appdata, resolve_dir_windows_localappdata,
     };
     use std::collections::BTreeMap;
     use std::ffi::OsString;
@@ -193,6 +203,21 @@ mod tests {
         let home = resolve_dir_unix_xdg(&env(&[("HOME", "/home/agent")]), "ee")
             .map_err(|error| error.to_string())?;
         assert_eq!(home, PathBuf::from("/home/agent/.local/share/ee"));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_dir_unix_xdg_reports_unix_specific_missing_home_code() -> TestResult {
+        let err = resolve_dir_unix_xdg(&BTreeMap::new(), "ee")
+            .expect_err("missing XDG_DATA_HOME and HOME should be reported");
+        assert_eq!(err.code, UNIX_XDG_DATA_UNAVAILABLE_CODE);
+        assert_eq!(err.variable, "HOME");
+        assert!(err.repair.contains("XDG_DATA_HOME"));
+        assert!(
+            !err.code.contains("windows"),
+            "Unix data-dir errors must not use Windows appdata code: {:?}",
+            err.code,
+        );
         Ok(())
     }
 }

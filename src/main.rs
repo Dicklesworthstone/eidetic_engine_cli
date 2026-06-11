@@ -24,15 +24,23 @@ fn env_flag_truthy(value: Option<String>) -> bool {
 }
 
 fn has_explicit_machine_output_flag(args: &[OsString]) -> bool {
-    args.iter().skip(1).any(|arg| {
-        arg.to_str().is_some_and(|value| {
-            value == "--json"
-                || value == "-j"
-                || value == "--robot"
-                || value == "--format"
-                || value.starts_with("--format=")
-        })
-    })
+    for arg in args.iter().skip(1) {
+        if arg.as_os_str() == std::ffi::OsStr::new("--") {
+            return false;
+        }
+        let Some(value) = arg.to_str() else {
+            continue;
+        };
+        if value == "--json"
+            || value == "-j"
+            || value == "--robot"
+            || value == "--format"
+            || value.starts_with("--format=")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn should_inject_json_flag(args: &[OsString]) -> bool {
@@ -219,6 +227,45 @@ mod tests {
         fn make_writer(&'a self) -> Self::Writer {
             SharedWriter(Arc::clone(&self.0))
         }
+    }
+
+    #[test]
+    fn explicit_machine_output_flag_detection_stops_at_separator() {
+        let args = [
+            OsString::from("ee"),
+            OsString::from("search"),
+            OsString::from("--"),
+            OsString::from("--format=json"),
+            OsString::from("--json"),
+        ];
+
+        assert!(!has_explicit_machine_output_flag(&args));
+    }
+
+    #[test]
+    fn explicit_machine_output_flag_detection_handles_real_flags() {
+        let split_format = [
+            OsString::from("ee"),
+            OsString::from("pack"),
+            OsString::from("task"),
+            OsString::from("--format"),
+            OsString::from("markdown"),
+        ];
+        assert!(has_explicit_machine_output_flag(&split_format));
+
+        let json_flag = [
+            OsString::from("ee"),
+            OsString::from("--json"),
+            OsString::from("status"),
+        ];
+        assert!(has_explicit_machine_output_flag(&json_flag));
+
+        let equals_format = [
+            OsString::from("ee"),
+            OsString::from("status"),
+            OsString::from("--format=json"),
+        ];
+        assert!(has_explicit_machine_output_flag(&equals_format));
     }
 
     #[test]
