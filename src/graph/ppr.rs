@@ -52,6 +52,34 @@ impl Default for PersonalizedPageRankPolicy {
     }
 }
 
+impl PersonalizedPageRankPolicy {
+    #[must_use]
+    pub fn sanitized(self) -> Self {
+        let fallback = Self::default();
+        Self {
+            alpha: sanitize_unit_interval_or(self.alpha, fallback.alpha),
+            max_iterations: self.max_iterations,
+            tolerance: sanitize_non_negative_or(self.tolerance, fallback.tolerance),
+        }
+    }
+}
+
+fn sanitize_unit_interval_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        fallback
+    }
+}
+
+fn sanitize_non_negative_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        fallback
+    }
+}
+
 pub struct PersonalizedPageRankWitnessSpec<'a> {
     pub conn: &'a DbConnection,
     pub workspace_id: &'a str,
@@ -66,6 +94,7 @@ pub fn personalized_pagerank_cache_params(
     policy: PersonalizedPageRankPolicy,
     seed_map: &BTreeMap<String, f64>,
 ) -> serde_json::Value {
+    let policy = policy.sanitized();
     serde_json::json!({
         "alpha": policy.alpha,
         "maxIterations": policy.max_iterations,
@@ -292,6 +321,7 @@ fn compute_personalized_pagerank_result_unbudgeted(
     seed_map: &BTreeMap<String, f64>,
     policy: PersonalizedPageRankPolicy,
 ) -> PageRankResult {
+    let policy = policy.sanitized();
     let mut nodes = graph.nodes_ordered();
     sort_by_ulid_payload_or_lexical(&mut nodes, |node| *node);
     let node_count = nodes.len();
@@ -317,7 +347,7 @@ fn compute_personalized_pagerank_result_unbudgeted(
         .map(|(index, node)| (*node, index))
         .collect::<BTreeMap<&str, usize>>();
     let outgoing = weighted_outgoing_edges(graph, &nodes, &node_index);
-    let alpha = policy.alpha.clamp(0.0, 1.0);
+    let alpha = policy.alpha;
     let teleport_scale = 1.0 - alpha;
     let max_pushes = policy.max_iterations.saturating_mul(node_count).max(1);
     let mut estimates = vec![0.0; node_count];
@@ -1347,10 +1377,93 @@ mod tests {
     }
 
     #[test]
+    fn personalized_pagerank_cache_params_use_sanitized_execution_policy() -> TestResult {
+        let seed = memory_id(45);
+        let seeds = BTreeMap::from([(seed.to_string(), 1.0)]);
+        let unclamped = PersonalizedPageRankPolicy {
+            alpha: 2.0,
+            max_iterations: 7,
+            tolerance: -1.0,
+        };
+        let equivalent = PersonalizedPageRankPolicy {
+            alpha: 1.0,
+            max_iterations: 7,
+            tolerance: 0.0,
+        };
+
+        assert_eq!(unclamped.sanitized(), equivalent);
+        let unclamped_params = personalized_pagerank_cache_params(unclamped, &seeds);
+        let equivalent_params = personalized_pagerank_cache_params(equivalent, &seeds);
+        let unclamped_hash = crate::graph::graph_algorithm_params_hash(
+            "personalized_pagerank",
+            "blake3:ppr-cache-policy-sanitization",
+            &unclamped_params,
+        )
+        .map_err(|error| error.to_string())?;
+        let equivalent_hash = crate::graph::graph_algorithm_params_hash(
+            "personalized_pagerank",
+            "blake3:ppr-cache-policy-sanitization",
+            &equivalent_params,
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(unclamped_params, equivalent_params);
+        assert_eq!(unclamped_hash, equivalent_hash);
+        assert_eq!(unclamped_params["alpha"], serde_json::json!(1.0));
+        assert_eq!(unclamped_params["tolerance"], serde_json::json!(0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn personalized_pagerank_non_finite_policy_values_fall_back_before_scoring() -> TestResult {
+        let mut graph = DiGraph::strict();
+        let seed = memory_id(47);
+        let target = memory_id(48);
+        graph
+            .add_edge_with_attrs(
+                seed.to_string(),
+                target.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        let seeds = BTreeMap::from([(seed.to_string(), 1.0)]);
+        let noisy_policy = PersonalizedPageRankPolicy {
+            alpha: f64::NAN,
+            max_iterations: 3,
+            tolerance: f64::INFINITY,
+        };
+        let expected_policy = PersonalizedPageRankPolicy {
+            max_iterations: 3,
+            ..PersonalizedPageRankPolicy::default()
+        };
+
+        assert_eq!(noisy_policy.sanitized(), expected_policy);
+        assert_eq!(
+            personalized_pagerank_cache_params(noisy_policy, &seeds),
+            personalized_pagerank_cache_params(expected_policy, &seeds)
+        );
+
+        let result = graph_result(compute_personalized_pagerank_result_with_policy(
+            &graph,
+            &seeds,
+            noisy_policy,
+        ))?;
+        assert!(
+            result.scores.iter().all(|score| score.score.is_finite()),
+            "non-finite policy values must not leak NaN scores: {result:?}"
+        );
+        assert!(
+            personalized_pagerank_final_residual_l1(&result).is_some(),
+            "non-finite policy values must not leak NaN residuals: {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn personalized_pagerank_cache_params_include_seed_identity_and_weight() -> TestResult {
         let policy = PersonalizedPageRankPolicy::default();
-        let a = memory_id(45);
-        let b = memory_id(46);
+        let a = memory_id(49);
+        let b = memory_id(50);
         let seed_a = BTreeMap::from([(a.to_string(), 1.0)]);
         let seed_b = BTreeMap::from([(b.to_string(), 1.0)]);
         let seed_a_half = BTreeMap::from([(a.to_string(), 0.5)]);
