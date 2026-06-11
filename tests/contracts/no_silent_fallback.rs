@@ -1059,20 +1059,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "fn incident_string_array_or_empty",
         "Incident rendering treats absent optional string arrays as empty lists; the incident payload itself still renders its status and codes.",
     ),
-    must_fix(
-        "NSF-CLI-DELTA-ITEM-PROVENANCE-PARSE",
-        "src/cli/mod.rs",
-        "serde_json::from_str::<serde_json::Value>(&item.provenance_json).unwrap_or_default()",
-        "bd-192lf",
-        "A stored pack item whose provenance JSON fails to parse silently becomes a null provenance snapshot in machine-facing context-delta output.",
-    ),
-    must_fix(
-        "NSF-CLI-MIGRATE-RESPONSE-SERIALIZE",
-        "src/cli/mod.rs",
-        "&(serde_json::to_string(&response).unwrap_or_default() + \"\\n\")",
-        "bd-192lf",
-        "A migration response that fails to serialize writes a bare newline to machine-facing stdout instead of surfacing the serialization failure.",
-    ),
     allowed(
         "NSF-CLI-PACK-PROFILE-LENS-DEFAULT",
         "src/cli/mod.rs",
@@ -1355,13 +1341,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "observation.logical_cpu_count.unwrap_or_default()",
         "Unknown CPU or memory observations already emit swarm_replay_cpu_unknown/swarm_replay_memory_unknown degraded codes; the zero default only steers the conservative Smoke classification.",
     ),
-    must_fix(
-        "NSF-LAB-TRACE-POSITIONAL-ARITY",
-        "src/core/lab.rs",
-        "row.command.positional_arity.unwrap_or_default()",
-        "bd-192lf",
-        "An agent workload trace row without a recorded positional arity silently becomes arity zero, conflating unknown command shape with a zero-argument command.",
-    ),
     allowed(
         "NSF-LAB-LATENCY-EMPTY-SAMPLES",
         "src/core/lab.rs",
@@ -1411,13 +1390,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         ".map(|candidate| candidate.stale_reasons.clone())",
         "A missing candidate carries no stale or missing-field reasons; the empty lists truly describe an absent candidate.",
     ),
-    must_fix(
-        "NSF-SNA-PACKET-HASH-SERIALIZE",
-        "src/core/swarm_next_action.rs",
-        "serde_json::to_vec(&stable)",
-        "bd-192lf",
-        "A work-packet stable-hash input that fails to serialize silently hashes empty bytes, corrupting the packet identity instead of surfacing the failure.",
-    ),
     allowed(
         "NSF-SNA-CANDIDATE-UNSAFE-REASONS",
         "src/core/swarm_next_action.rs",
@@ -1447,13 +1419,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/swarm_next_action.rs",
         ".map(affected_command_kinds)",
         "Blocker evidence without affected commands truly affects no command kinds; the empty list is the true result.",
-    ),
-    must_fix(
-        "NSF-CLI-MESH-RESPONSE-SERIALIZE",
-        "src/cli/mesh.rs",
-        "serde_json::to_string(&response).unwrap_or_default()",
-        "bd-192lf",
-        "A mesh CLI response that fails to serialize writes a bare newline to machine-facing stdout instead of surfacing the serialization failure.",
     ),
     allowed(
         "NSF-CLI-MESH-WORKSPACE-LISTS",
@@ -1826,13 +1791,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/preflight_guard.rs",
         "segment.get(index + 1..).unwrap_or_default()",
         "Environment-assignment splitting treats a missing trailing segment as empty text; the guard still scans the full command line.",
-    ),
-    must_fix(
-        "NSF-PREFLIGHT-TOKEN-RULE-IDS",
-        "src/core/preflight_token.rs",
-        "serde_json::from_str::<Vec<String>>(&token.rule_ids_json)",
-        "bd-192lf",
-        "A bypass token whose stored rule-ids JSON fails to parse silently presents an empty rule list instead of invalidating the token.",
     ),
     allowed(
         "NSF-TAILSCALE-EE-CAPS",
