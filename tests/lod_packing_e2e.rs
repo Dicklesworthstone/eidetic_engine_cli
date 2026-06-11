@@ -85,6 +85,7 @@ fn lod_options(workspace_path: &Path, db_path: &Path) -> ContextPackOptions {
         coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
         output_options: ContextPackOutputOptions::default(),
         persist_pack: false,
+        baseline_write: None,
         require_fresh_sentinels: false,
         no_lod: false,
     }

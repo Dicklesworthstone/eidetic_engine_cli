@@ -82,6 +82,7 @@ fn why_not_options(workspace_path: &Path, db_path: &Path, task: &str) -> Context
         output_options: ContextPackOutputOptions::default(),
         // why-not is read-only and must never persist a pack record.
         persist_pack: false,
+        baseline_write: None,
         no_lod: false,
         require_fresh_sentinels: false,
     }

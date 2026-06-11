@@ -4173,6 +4173,7 @@ fn persist_pack_record(
         draft,
         degraded,
         None,
+        None,
         &mut subspans,
     )
 }
@@ -9937,6 +9938,7 @@ mod tests {
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            baseline_write: None,
             no_lod: false,
         }
     }
@@ -12534,6 +12536,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            baseline_write: None,
             no_lod: false,
         };
         let trace = ContextPerformanceTrace {
@@ -12701,6 +12704,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            baseline_write: None,
             no_lod: false,
         };
         let trace = ContextPerformanceTrace::default();
@@ -12865,6 +12869,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            baseline_write: None,
             no_lod: false,
         };
         let payload = serde_json::json!({
@@ -12996,6 +13001,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            baseline_write: None,
             no_lod: false,
         })
         .map_err(|error| error.to_string())?;
@@ -13113,6 +13119,7 @@ pub fn unrelated_context() -> u64 {{
             output_options: super::ContextPackOutputOptions::default()
                 .with_cache_json_response(true),
             persist_pack: true,
+            baseline_write: None,
             no_lod: false,
         };
 
@@ -13223,6 +13230,7 @@ pub fn unrelated_context() -> u64 {{
             output_options: super::ContextPackOutputOptions::default()
                 .with_cache_json_response(true),
             persist_pack: true,
+            baseline_write: None,
             no_lod: false,
         };
         let mut search_report =
@@ -13332,6 +13340,7 @@ pub fn unrelated_context() -> u64 {{
                     require_fresh_sentinels: false,
                     output_options: Default::default(),
                     persist_pack: true,
+                    baseline_write: None,
                     no_lod: false,
                 },
                 &determinism,
@@ -13445,6 +13454,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            baseline_write: None,
             no_lod: false,
         };
 
@@ -14077,6 +14087,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            baseline_write: None,
             no_lod: false,
         };
 
@@ -14247,6 +14258,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: Default::default(),
             persist_pack: true,
+            baseline_write: None,
             no_lod: false,
         };
 
