@@ -6657,3 +6657,279 @@ mod tests {
         }
     }
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// bd-1pi9m.5 — `ee outcome --batch --stdin` (JSONL batch of outcome events)
+//
+// Per-line independent semantics identical to `remember --batch`: each
+// line runs the full record_outcome flow (quarantine, SPRT, rate limits,
+// bayes/trust updates all preserved per event); a failed line reports
+// itself without touching earlier or later lines.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Max JSONL lines accepted by `ee outcome --batch --stdin` per invocation.
+pub const OUTCOME_BATCH_MAX_LINES: usize = 1_000;
+
+/// Shared options for one outcome batch invocation; per-line fields come
+/// from the JSONL lines themselves.
+#[derive(Clone, Debug)]
+pub struct OutcomeBatchOptions<'a> {
+    pub database_path: &'a Path,
+    pub actor: Option<String>,
+    pub agent_name: Option<String>,
+    pub dry_run: bool,
+    pub harmful_per_source_per_hour: u32,
+    pub harmful_burst_window_seconds: u32,
+    pub prompt_injection_guard: bool,
+}
+
+/// Per-line outcome for the batch report.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeBatchLineResult {
+    pub line: usize,
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+/// Result of one `ee outcome --batch --stdin` invocation.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeBatchReport {
+    pub version: &'static str,
+    pub status: &'static str,
+    pub dry_run: bool,
+    pub line_count: usize,
+    pub recorded_count: usize,
+    pub quarantined_count: usize,
+    pub failed_count: usize,
+    pub results: Vec<OutcomeBatchLineResult>,
+}
+
+impl OutcomeBatchReport {
+    /// `true` when every supplied line failed (handler exits 5, mirroring
+    /// the remember/journal batch contract).
+    #[must_use]
+    pub const fn all_failed(&self) -> bool {
+        self.line_count > 0 && self.failed_count == self.line_count
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "command": "outcome",
+            "version": self.version,
+            "mode": "batch",
+            "status": self.status,
+            "dryRun": self.dry_run,
+            "lineCount": self.line_count,
+            "recordedCount": self.recorded_count,
+            "quarantinedCount": self.quarantined_count,
+            "failedCount": self.failed_count,
+            "results": self.results,
+        })
+    }
+}
+
+struct OutcomeBatchLineDraft {
+    target: String,
+    target_type: String,
+    workspace_id: Option<String>,
+    signal: String,
+    weight: Option<f32>,
+    source_type: String,
+    source_id: Option<String>,
+    reason: Option<String>,
+    evidence_json: Option<String>,
+    session_id: Option<String>,
+    event_id: Option<String>,
+}
+
+fn outcome_batch_optional_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    match object.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+            Ok(Some(value.clone()))
+        }
+        Some(serde_json::Value::String(_)) => {
+            Err(format!("field '{field}' must not be blank when present"))
+        }
+        Some(_) => Err(format!("field '{field}' must be a JSON string")),
+    }
+}
+
+fn parse_outcome_batch_line(line: &str) -> Result<OutcomeBatchLineDraft, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(line).map_err(|error| format!("line is not valid JSON: {error}"))?;
+    let serde_json::Value::Object(object) = value else {
+        return Err("line must be a JSON object".to_owned());
+    };
+    let target =
+        outcome_batch_optional_string(&object, "target")?.ok_or("field 'target' is required")?;
+    let signal =
+        outcome_batch_optional_string(&object, "signal")?.ok_or("field 'signal' is required")?;
+    let weight = match object.get("weight") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_f64()
+                .map(|weight| weight as f32)
+                .ok_or("field 'weight' must be a number")?,
+        ),
+    };
+    let evidence_json = match object.get("evidenceJson") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(raw)) => Some(raw.clone()),
+        Some(other) => Some(other.to_string()),
+    };
+    Ok(OutcomeBatchLineDraft {
+        target,
+        target_type: outcome_batch_optional_string(&object, "targetType")?
+            .unwrap_or_else(|| "memory".to_owned()),
+        workspace_id: outcome_batch_optional_string(&object, "workspaceId")?,
+        signal,
+        weight,
+        source_type: outcome_batch_optional_string(&object, "sourceType")?
+            .unwrap_or_else(|| "outcome_observed".to_owned()),
+        source_id: outcome_batch_optional_string(&object, "sourceId")?,
+        reason: outcome_batch_optional_string(&object, "reason")?,
+        evidence_json,
+        session_id: outcome_batch_optional_string(&object, "sessionId")?,
+        event_id: outcome_batch_optional_string(&object, "eventId")?,
+    })
+}
+
+/// Record a JSONL batch of outcome events with per-line independence.
+pub fn record_outcome_batch_stdin(
+    options: &OutcomeBatchOptions<'_>,
+    input: &str,
+) -> Result<OutcomeBatchReport, DomainError> {
+    let lines: Vec<&str> = input
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return Err(DomainError::Usage {
+            message: "outcome --batch --stdin requires at least one JSONL line".to_owned(),
+            repair: Some(
+                "printf '%s\\n' '{\"target\":\"mem_...\",\"signal\":\"helpful\"}' | ee outcome --batch --stdin --json"
+                    .to_owned(),
+            ),
+        });
+    }
+    if lines.len() > OUTCOME_BATCH_MAX_LINES {
+        return Err(DomainError::Usage {
+            message: format!(
+                "outcome --batch --stdin accepts at most {OUTCOME_BATCH_MAX_LINES} lines per \
+                 invocation; got {}",
+                lines.len()
+            ),
+            repair: Some("split the JSONL input into smaller batches".to_owned()),
+        });
+    }
+
+    let mut results = Vec::with_capacity(lines.len());
+    let mut recorded_count = 0_usize;
+    let mut quarantined_count = 0_usize;
+    let mut failed_count = 0_usize;
+
+    for (index, line) in lines.iter().enumerate() {
+        let line_number = index + 1;
+        let draft = match parse_outcome_batch_line(line) {
+            Ok(draft) => draft,
+            Err(message) => {
+                failed_count += 1;
+                results.push(OutcomeBatchLineResult {
+                    line: line_number,
+                    status: "failed",
+                    event_id: None,
+                    target_id: None,
+                    error_code: Some("outcome_batch_invalid_line"),
+                    error_message: Some(message),
+                });
+                continue;
+            }
+        };
+
+        let line_options = OutcomeRecordOptions {
+            database_path: options.database_path,
+            target_type: draft.target_type,
+            target_id: draft.target.clone(),
+            workspace_id: draft.workspace_id,
+            signal: draft.signal,
+            weight: draft.weight,
+            source_type: draft.source_type,
+            source_id: draft.source_id,
+            reason: draft.reason,
+            evidence_json: draft.evidence_json,
+            session_id: draft.session_id,
+            event_id: draft.event_id,
+            actor: options.actor.clone(),
+            agent_name: options.agent_name.clone(),
+            dry_run: options.dry_run,
+            harmful_per_source_per_hour: options.harmful_per_source_per_hour,
+            harmful_burst_window_seconds: options.harmful_burst_window_seconds,
+            prompt_injection_guard: options.prompt_injection_guard,
+        };
+        match record_outcome(&line_options) {
+            Ok(report) => {
+                let quarantined = report.status == OutcomeRecordStatus::Quarantined;
+                if quarantined {
+                    quarantined_count += 1;
+                } else {
+                    recorded_count += 1;
+                }
+                results.push(OutcomeBatchLineResult {
+                    line: line_number,
+                    status: if options.dry_run {
+                        "would_record"
+                    } else if quarantined {
+                        "quarantined"
+                    } else {
+                        "recorded"
+                    },
+                    event_id: report.event_id.clone(),
+                    target_id: Some(draft.target),
+                    error_code: None,
+                    error_message: None,
+                });
+            }
+            Err(error) => {
+                failed_count += 1;
+                results.push(OutcomeBatchLineResult {
+                    line: line_number,
+                    status: "failed",
+                    event_id: None,
+                    target_id: Some(draft.target),
+                    error_code: Some("outcome_batch_line_failed"),
+                    error_message: Some(error.message()),
+                });
+            }
+        }
+    }
+
+    Ok(OutcomeBatchReport {
+        version: env!("CARGO_PKG_VERSION"),
+        status: if options.dry_run {
+            "dry_run"
+        } else {
+            "recorded"
+        },
+        dry_run: options.dry_run,
+        line_count: lines.len(),
+        recorded_count,
+        quarantined_count,
+        failed_count,
+        results,
+    })
+}

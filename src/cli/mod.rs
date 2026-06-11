@@ -9703,8 +9703,21 @@ pub struct RuleUpdateArgs {
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct OutcomeArgs {
     /// Target ID to receive feedback. Memory IDs are verified by default.
+    /// Required unless --batch --stdin is given.
     #[arg(value_name = "TARGET_ID")]
-    pub target_id: String,
+    pub target_id: Option<String>,
+
+    /// Read a JSONL batch of outcome events (one object per line: target +
+    /// signal required; targetType/weight/sourceType/sourceId/reason/
+    /// evidenceJson/sessionId/eventId optional) from stdin. Requires
+    /// --stdin; each line records independently with the full quarantine,
+    /// SPRT, and rate-limit guards.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub batch: bool,
+
+    /// Read the JSONL batch from stdin (required with --batch).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub stdin: bool,
 
     /// Target type: memory, rule, session, source, pack, or candidate.
     #[arg(long, default_value = "memory")]
@@ -9715,8 +9728,9 @@ pub struct OutcomeArgs {
     pub workspace_id: Option<String>,
 
     /// Outcome signal: helpful, harmful, confirmation, contradiction, stale, inaccurate, outdated, positive, negative, or neutral.
+    /// Required unless --batch --stdin is given (then per line).
     #[arg(long)]
-    pub signal: String,
+    pub signal: Option<String>,
 
     /// Explicit feedback weight from 0.0 to 10.0. Defaults from source type and signal.
     #[arg(long)]
@@ -39709,6 +39723,111 @@ fn format_search_toon_with_mesh(report: &SearchReport, mesh_mode: MeshCommandMod
     output::render_toon_from_json(&format_search_json_with_mesh(report, mesh_mode))
 }
 
+/// bd-1pi9m.5: `ee outcome --batch --stdin` — JSONL batch of outcome
+/// events with per-line independence (mirrors `remember --batch`).
+fn handle_outcome_batch<W, E>(
+    cli: &Cli,
+    args: &OutcomeArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let usage = |message: &str| DomainError::Usage {
+        message: message.to_owned(),
+        repair: Some("ee outcome --help".to_owned()),
+    };
+    if !args.batch || !args.stdin {
+        let error = usage("--batch and --stdin must be used together for an outcome JSONL batch");
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    if args.target_id.is_some() || args.signal.is_some() {
+        let error = usage(
+            "pass either positional TARGET_ID/--signal or --batch --stdin, not both; put \
+             target/signal on each JSONL line instead",
+        );
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    if args.event_id.is_some() {
+        let error = usage(
+            "--event-id applies to single-event mode; put `eventId` on each JSONL line instead",
+        );
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        let error = DomainError::Usage {
+            message: "--stdin was given but stdin is a terminal; pipe the JSONL batch".to_owned(),
+            repair: Some(
+                "printf '%s\\n' '{\"target\":\"mem_...\",\"signal\":\"helpful\"}' | ee outcome --batch --stdin --json"
+                    .to_owned(),
+            ),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let mut input = String::new();
+    if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input) {
+        let error = DomainError::Usage {
+            message: format!("failed to read JSONL batch from stdin: {error}"),
+            repair: Some("pipe UTF-8 JSONL, one outcome event object per line".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    let options = crate::core::outcome::OutcomeBatchOptions {
+        database_path: &database_path,
+        actor: args.actor.clone(),
+        agent_name: crate::core::memory_scope::current_agent_name(),
+        dry_run: args.dry_run,
+        harmful_per_source_per_hour: args.harmful_per_source_per_hour,
+        harmful_burst_window_seconds: args.harmful_burst_window_seconds,
+        prompt_injection_guard: crate::core::config_surface::get_config(
+            &crate::core::config_surface::ConfigSurfaceOptions {
+                workspace_root: workspace_path.clone(),
+                config_path: None,
+            },
+            crate::config::TRUST_PROMPT_INJECTION_GUARD_KEY,
+        )
+        .map(|c| c.value == "true")
+        .unwrap_or(true),
+    };
+    match crate::core::outcome::record_outcome_batch_stdin(&options, &input) {
+        Ok(report) if report.all_failed() => {
+            let details = serde_json::json!({ "results": report.results });
+            let error = DomainError::ImportWithDetails {
+                message: format!(
+                    "outcome --batch --stdin recorded 0 of {} lines",
+                    report.line_count
+                ),
+                repair: Some(
+                    "fix the per-line errors in details.results and re-pipe the failed lines"
+                        .to_owned(),
+                ),
+                details_json: details.to_string(),
+            };
+            write_domain_error(&error, cli.wants_json(), stdout, stderr)
+        }
+        Ok(report) => {
+            let human = format!(
+                "Outcome batch: {} recorded, {} quarantined, {} failed ({} lines{})\n",
+                report.recorded_count,
+                report.quarantined_count,
+                report.failed_count,
+                report.line_count,
+                if report.dry_run { ", dry run" } else { "" }
+            );
+            write_remember_data_payload(cli, &report.data_json(), &human, stdout)
+        }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn handle_outcome<W, E>(
     cli: &Cli,
     args: &OutcomeArgs,
@@ -39719,6 +39838,21 @@ where
     W: Write,
     E: Write,
 {
+    if args.batch || args.stdin {
+        return handle_outcome_batch(cli, args, stdout, stderr);
+    }
+    let usage = |message: &str| DomainError::Usage {
+        message: message.to_owned(),
+        repair: Some("ee outcome --help".to_owned()),
+    };
+    let Some(target_id) = args.target_id.clone() else {
+        let error = usage("TARGET_ID is required unless --batch --stdin is given");
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    };
+    let Some(signal) = args.signal.clone() else {
+        let error = usage("--signal is required unless --batch --stdin is given");
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    };
     let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
@@ -39727,9 +39861,9 @@ where
     let options = OutcomeRecordOptions {
         database_path: &database_path,
         target_type: args.target_type.clone(),
-        target_id: args.target_id.clone(),
+        target_id,
         workspace_id: args.workspace_id.clone(),
-        signal: args.signal.clone(),
+        signal,
         weight: args.weight,
         source_type: args.source_type.clone(),
         source_id: args.source_id.clone(),
