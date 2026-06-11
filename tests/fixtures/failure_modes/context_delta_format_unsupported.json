@@ -11,13 +11,13 @@
   "severity": "info",
   "repair_present": true,
   "trigger": {
-    "description": "ee context --since was requested with a renderer that does not support delta envelopes in v1, so ee returns the full rendered pack and reports that the delta optimization was skipped.",
+    "description": "ee context --since was requested with a renderer that supports neither JSON envelopes nor markdown delta documents in v1, so ee returns the full rendered pack and reports that the delta optimization was skipped.",
     "setup_commands": [
       "ee init --workspace .",
       "ee remember 'Delta format unsupported fixture memory.' --workspace . --level procedural --kind fact --json",
       "ee context 'delta format unsupported fixture' --workspace . --json"
     ],
-    "invocation": "ee context 'delta format unsupported fixture' --workspace . --since <prior-pack-hash> --format markdown --json"
+    "invocation": "ee context 'delta format unsupported fixture' --workspace . --since <prior-pack-hash> --format toon"
   },
   "expected_emission": {
     "code": "context_delta_format_unsupported",
@@ -26,7 +26,7 @@
       "format",
       "does not support context deltas"
     ],
-    "repair_contains": "json",
-    "repair_string": "Use --format json or omit --since for markdown, TOON, Mermaid, handoff, and backup full-pack renderers."
+    "repair_contains": "markdown",
+    "repair_string": "Use `ee pack \"<task>\" --since <pack-hash> --json` for JSON context deltas, `--format markdown` for a markdown delta, or omit --since."
   }
 }

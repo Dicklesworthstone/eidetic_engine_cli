@@ -447,7 +447,7 @@ fn context_delta_apply_guide_covers_agent_safety_rules() -> TestResult {
         "The server never chains deltas",
         "data.tokenSavings.netPackTokens",
         "No-op deltas use empty arrays",
-        "Delta v1 is JSON-only",
+        "Delta v1 supports JSON envelopes and markdown delta documents",
         "context_delta_format_unsupported",
         "should not add `ee context apply-delta",
         "context_delta_prior_unknown",
