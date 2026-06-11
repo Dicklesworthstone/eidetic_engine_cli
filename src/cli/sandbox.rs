@@ -220,13 +220,22 @@ pub fn propose_curate(
     }
     let name = session_name(&args.session)?;
     let mut session = load_session(workspace, &name);
+    let mut added_retire_proposals = 0_usize;
     for memory_id in &args.retire {
         let trimmed = memory_id.trim();
         if !trimmed.is_empty() {
             session.proposals.push(SandboxProposal::Retire {
                 memory_id: trimmed.to_owned(),
             });
+            added_retire_proposals += 1;
         }
+    }
+    if added_retire_proposals == 0 {
+        return Err(DomainError::Usage {
+            message: "ee sandbox curate requires at least one non-empty --retire <MEMORY_ID>."
+                .to_owned(),
+            repair: Some("Pass --retire <id> (repeatable) to propose retirements.".to_owned()),
+        });
     }
     save_session(workspace, &name, &session)?;
     Ok(ProposeOutcome {
@@ -470,7 +479,7 @@ pub fn render_diff_human(session_name: &str, surface: &SandboxDiffSurface) -> St
 
 #[cfg(test)]
 mod tests {
-    use super::session_name;
+    use super::{SandboxCurateArgs, SandboxProposal, load_session, propose_curate, session_name};
 
     #[test]
     fn session_name_defaults_and_trims() {
@@ -518,5 +527,58 @@ mod tests {
         ] {
             assert_eq!(session_name(&Some(raw.to_owned())).expect(raw), raw);
         }
+    }
+
+    #[test]
+    fn sandbox_curate_rejects_blank_retire_values() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let args = SandboxCurateArgs {
+            retire: vec![" ".to_owned(), "\t".to_owned()],
+            session: Some("blank-retire".to_owned()),
+        };
+
+        let error = match propose_curate(workspace.path(), &args) {
+            Ok(_) => panic!("blank retires must fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("at least one non-empty --retire"),
+            "unexpected error: {error}"
+        );
+
+        let session_path =
+            crate::core::sandbox::SandboxSession::session_path(workspace.path(), "blank-retire");
+        assert!(
+            !session_path.exists(),
+            "invalid curate invocation must not create a scratch session"
+        );
+    }
+
+    #[test]
+    fn sandbox_curate_trims_and_records_non_empty_retire_values() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let args = SandboxCurateArgs {
+            retire: vec!["  mem_a  ".to_owned(), "".to_owned(), "mem_b".to_owned()],
+            session: Some("trim-retire".to_owned()),
+        };
+
+        let outcome = propose_curate(workspace.path(), &args).expect("valid retires");
+        assert_eq!(outcome.session.proposals.len(), 2);
+        assert_eq!(
+            outcome.session.proposals,
+            vec![
+                SandboxProposal::Retire {
+                    memory_id: "mem_a".to_owned()
+                },
+                SandboxProposal::Retire {
+                    memory_id: "mem_b".to_owned()
+                },
+            ]
+        );
+
+        let stored = load_session(workspace.path(), "trim-retire");
+        assert_eq!(stored.proposals, outcome.session.proposals);
     }
 }
