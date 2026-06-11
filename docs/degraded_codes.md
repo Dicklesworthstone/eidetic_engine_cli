@@ -6714,7 +6714,9 @@ ee index status --workspace . --index-dir stale-index --json
 
 **Introduced by:** bd-113r0 (epic agent-ux)
 
-**Trigger.** A registered ee insights section is selected while its evidence builder is still metadata-only.
+**Status:** retired by bd-2pos6.4. No current production path emits this code.
+
+**Trigger.** Historical: a registered ee insights section was selected while its evidence builder was still metadata-only.
 
 **Setup.**
 
@@ -6722,13 +6724,13 @@ ee index status --workspace . --index-dir stale-index --json
 ee init --workspace .
 ```
 
-**Invocation.**
+**Historical invocation.**
 
 ```bash
-ee insights --section comprehensiveRules --workspace . --json
+ee insights --section kTruss --workspace . --json
 ```
 
-**Expected emission.** Message contains: `registered insights sections ... DB-backed evidence`
+**Historical expected emission.** Message contains: `registered insights sections ... DB-backed evidence`
 
 **Repair hint.** `implement the unavailable section builder`
 

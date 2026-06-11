@@ -22,11 +22,10 @@ The response data uses `ee.insights.v1`. Read these fields first:
 - `degradedSignals[]`: section-level graph problems. Do not ignore this array;
   it explains empty or missing sections.
 
-`availableSections` means the binary recognizes the section name, not that the
-section has DB-backed evidence today. If `degradedSignals[]` contains
-`insights_section_unavailable`, treat the listed sections as metadata-only
-registered surfaces. They may return schema-valid empty `items[]`, but agents
-should not use them as evidence until the degraded signal disappears.
+`availableSections` means the binary recognizes the section name. Empty
+`items[]` now means the section found no matching graph evidence under the
+current workspace/filter posture unless a current `degradedSignals[]` entry says
+otherwise.
 
 Worked example:
 
@@ -57,10 +56,9 @@ If `sections[]` is empty and `degradedSignals[]` contains
 `graph.workspace_empty`, seed memories or use `ee remember` before treating the
 graph as informative.
 
-If `degradedSignals[]` contains `insights_section_unavailable`, prefer sections
-with non-empty evidence. The current metadata-only registered sections are
-`kCore` and `kTruss`; `revisionFrontiers` ships real dominance-frontier
-evidence as of bd-2pos6.5.
+There are no current metadata-only registered insights sections.
+`insights_section_unavailable` is a retired historical degraded code from the
+period before every registered section had DB-backed evidence.
 
 ## Section Workflow
 

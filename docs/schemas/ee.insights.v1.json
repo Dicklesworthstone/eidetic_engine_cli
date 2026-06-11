@@ -70,8 +70,8 @@
         {"name": "contradictionClusters", "title": "Contradiction Clusters", "summary": "Louvain communities filtered to contradiction-heavy memory neighborhoods.", "whyItMatters": "Contradiction clusters identify parts of the memory graph that need curation before agents rely on them.", "items": [], "nextCommands": ["ee insights --section contradictionClusters --workspace . --json"]},
         {"name": "houseRules", "title": "House Rules", "summary": "Global-tier memories (house rules) visible across this workspace, with originating-workspace provenance.", "whyItMatters": "House rules are cross-workspace conventions; surfacing them with provenance shows which global rules will shape packs in this workspace.", "items": [], "nextCommands": ["ee insights --section houseRules --workspace . --json"]},
         {"name": "hubs", "title": "Hub Memories", "summary": "HITS hub scores for memories that point to many authoritative facts.", "whyItMatters": "Hub memories are useful navigation anchors for agents assembling a task-specific context pack.", "items": [], "nextCommands": ["ee insights --section hubs --workspace . --json"]},
-        {"name": "kCore", "title": "K-Core", "summary": "Core-number membership for densely connected memory regions.", "whyItMatters": "K-core posture shows which memories sit in stable, mutually reinforcing graph neighborhoods.", "items": [], "nextCommands": ["ee insights --section kCore --workspace . --json"]},
-        {"name": "kTruss", "title": "K-Truss", "summary": "Triangle-supported structural health findings for support subgraphs.", "whyItMatters": "K-truss posture helps separate isolated support edges from stronger corroborating clusters.", "items": [], "nextCommands": ["ee insights --section kTruss --workspace . --json"]},
+        {"name": "kCore", "title": "K-Core", "summary": "Core-number membership for densely connected memory regions.", "whyItMatters": "K-core posture shows which memories sit in stable, mutually reinforcing graph neighborhoods.", "items": [], "nextCommands": ["ee insights --section kCore --workspace . --json", "ee graph k-core --workspace . --json"]},
+        {"name": "kTruss", "title": "K-Truss", "summary": "Triangle-supported structural health findings for support subgraphs.", "whyItMatters": "K-truss posture helps separate isolated support edges from stronger corroborating clusters.", "items": [], "nextCommands": ["ee insights --section kTruss --workspace . --json", "ee health --robot-insights --workspace . --json"]},
         {"name": "knowledgeGaps", "title": "Knowledge Gaps", "summary": "Graph-derived gaps that need reflection or curation before agents rely on nearby memories.", "whyItMatters": "Knowledge gaps turn weak graph evidence into deterministic reflection requests instead of silently trusting incomplete memories.", "items": [], "nextCommands": ["ee insights --section knowledgeGaps --workspace . --json"], "section": "knowledgeGaps", "recommendations": []},
         {"name": "knowledgeSkyline", "title": "Knowledge Skyline", "summary": "Composite posture across onion layer, community, age, trust, and graph health signals.", "whyItMatters": "The skyline gives agents a portfolio-level view of memory quality before relying on a workspace.", "items": [], "nextCommands": ["ee insights --section knowledgeSkyline --workspace . --json"]},
         {"name": "loadBearingMemories", "title": "Load-Bearing Memories", "summary": "Memories with high influence in rule-to-source provenance projections.", "whyItMatters": "Load-bearing memories should be preserved or reviewed carefully because many rules depend on them.", "items": [], "nextCommands": ["ee insights --section loadBearingMemories --workspace . --json"]},
@@ -86,13 +86,6 @@
           "message": "No graph memories are available for insights yet.",
           "repair": "run: ee remember --workspace . \"<memory>\" --json",
           "sources": ["insights"]
-        },
-        {
-          "code": "insights_section_unavailable",
-          "severity": "info",
-          "message": "One or more registered insights sections do not have DB-backed evidence yet.",
-          "repair": "Use sections with non-empty evidence, or implement the unavailable section builder.",
-          "sources": ["comprehensiveRules", "kCore", "kTruss", "revisionFrontiers"]
         }
       ]
     }

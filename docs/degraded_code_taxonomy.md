@@ -118,7 +118,7 @@ Current conventions:
 | `causal_compare` | `ee causal compare` degradation. |
 | `causal_promote_plan` | `ee causal promote-plan` degradation. |
 | `kCore` | `ee insights --section kCore` degradation. |
-| `kTruss` | `ee insights --section kTruss` degradation. |
+| `kTruss` | `ee insights --section kTruss` structural evidence source. |
 | `knowledgeSkyline` | `ee insights --section knowledgeSkyline` degradation. |
 | `loadBearingMemories` | `ee insights --section loadBearingMemories` degradation. |
 | `revisionFrontiers` | `ee insights --section revisionFrontiers` degradation. |
@@ -590,7 +590,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_feature_disabled` | medium | bd-17c65.5.3 (E3) — different from build-time `graph_unavailable`; this is a per-call disable |
-| `insights_section_unavailable` | info | bd-113r0 — registered `ee insights` section still has a metadata-only evidence builder |
+| `insights_section_unavailable` | info | bd-113r0, retired by bd-2pos6.4 — historical registered `ee insights` metadata-only builder code |
 | `singleflight_follower_timeout` | medium | bd-gni47.3 (SF3) |
 | `singleflight_leader_failed` | medium | bd-gni47.3 (SF3) |
 | `singleflight_state_poisoned` | high | bd-gni47.3 (SF3) |

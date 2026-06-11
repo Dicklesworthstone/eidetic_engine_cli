@@ -145,13 +145,12 @@ signal with the repair command, such as
 `ee config set graph.feature.hits_profiles.enabled true` or
 `ee config set graph.feature.load_bearing.enabled true`.
 
-Some registered sections are metadata-only until their evidence builders land:
-`kCore` and `kTruss`. Selecting one of these sections still returns
-schema-valid output, but `degradedSignals[]` includes
-`insights_section_unavailable`; treat its empty `items[]` as unavailable
-evidence, not as a real graph result. `revisionFrontiers` returns real
-dominance-frontier evidence (ranked by frontier size from the memory revision
-DAG) and requires `graph.feature.revision_dominance.enabled`.
+`kCore` returns live core-number evidence from the memory-link graph. `kTruss`
+returns live triangle-supported evidence from the same structural projection and
+points at `ee health --robot-insights --workspace . --json` for the broader
+structural health report. `revisionFrontiers` returns real dominance-frontier
+evidence (ranked by frontier size from the memory revision DAG) and requires
+`graph.feature.revision_dominance.enabled`.
 
 ## Causal Command Flags
 

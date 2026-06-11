@@ -7,7 +7,8 @@ use std::process::Command;
 use chrono::{DateTime, Utc};
 use clap::Args;
 use fnx_algorithms::{
-    CentralityScore, articulation_points, bridges as fnx_bridges, number_connected_components,
+    CentralityScore, articulation_points, bridges as fnx_bridges, core_number,
+    number_connected_components,
 };
 use fnx_classes::{AttrMap, Graph};
 use fnx_runtime::{CgseValue, CompatibilityMode};
@@ -44,11 +45,6 @@ const CAUSAL_BOTTLENECK_REPORT_SCHEMA_V1: &str = "ee.graph.causal_evidence_proje
 const DEFAULT_SECTION_LIMIT: usize = 10;
 const MAX_SECTION_LIMIT: usize = 100;
 const EMPTY_WORKSPACE_GENERATED_AT: &str = "1970-01-01T00:00:00Z";
-const INSIGHTS_SECTION_UNAVAILABLE_CODE: &str = "insights_section_unavailable";
-const INSIGHTS_SECTION_UNAVAILABLE_MESSAGE: &str =
-    "One or more registered insights sections do not have DB-backed evidence yet.";
-const INSIGHTS_SECTION_UNAVAILABLE_REPAIR: &str =
-    "Use sections with non-empty evidence, or implement the unavailable section builder.";
 const BLIND_SPOT_SCHEMA_V1: &str = "ee.insights.blind_spots.v1";
 const BLIND_SPOT_GIT_CHURN_MAX_COMMITS: usize = 200;
 const BLIND_SPOT_CHURN_STATUS_AVAILABLE: &str = "available";
@@ -311,6 +307,38 @@ struct HitsInsightInput {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct KCoreInsightInput {
+    memory_id: String,
+    core_number: usize,
+    degree: usize,
+    max_core_number: usize,
+    node_count: usize,
+    edge_count: usize,
+    snapshot_version: Option<u64>,
+    graph_type: &'static str,
+    filter_posture: &'static str,
+    evidence_schema: &'static str,
+    witness: JsonValue,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct KTrussInsightInput {
+    memory_id: String,
+    truss_level: usize,
+    degree: usize,
+    max_truss_level: usize,
+    member_count_at_truss_level: usize,
+    member_counts: JsonValue,
+    node_count: usize,
+    edge_count: usize,
+    snapshot_version: Option<u64>,
+    graph_type: &'static str,
+    filter_posture: &'static str,
+    structural_graph_schema: &'static str,
+    evidence_schema: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct TopMemoryInsightInput {
     memory_id: String,
     level: String,
@@ -508,14 +536,6 @@ pub fn build_insights_report_with_options(
     })
 }
 
-// bd-113r0: these registered sections are still metadata-only builders.
-// Emit an explicit section-unavailable degradation so empty `items[]`
-// never has to mean "no graph data", "feature disabled", and
-// "placeholder implementation" at the same time. When a real builder
-// lands for one of these names, remove it from this list in the same
-// change as the `build_registry_section` arm.
-const PLACEHOLDER_BACKED_SECTIONS: &[&str] = &["kCore", "kTruss"];
-
 fn build_registry_section_with_runtime_gate(
     display_name: &'static str,
     builder: SectionBuilder,
@@ -540,25 +560,10 @@ fn build_registry_section_with_runtime_gate(
     }
 
     let section = build_registry_section(display_name, builder, workspace, database_path)?;
-    // Keep selected-section output honest even when broad full-bundle
-    // degraded aggregation is not running.
-    let degraded_signal = if PLACEHOLDER_BACKED_SECTIONS.contains(&display_name) {
-        Some((
-            display_name,
-            DegradationReport {
-                code: INSIGHTS_SECTION_UNAVAILABLE_CODE,
-                severity: "info",
-                message: INSIGHTS_SECTION_UNAVAILABLE_MESSAGE,
-                repair: INSIGHTS_SECTION_UNAVAILABLE_REPAIR,
-            },
-        ))
-    } else {
-        None
-    };
 
     Ok(BuiltSection {
         section,
-        degraded_signal,
+        degraded_signal: None,
     })
 }
 
@@ -596,6 +601,14 @@ fn build_registry_section(
         "hubs" => {
             let scores = load_hits_scores(workspace, database_path)?;
             Ok(hubs_section_from_scores(&scores))
+        }
+        "kCore" => {
+            let input = load_structural_graph_input(workspace, database_path)?;
+            Ok(k_core_section_from_structural_input(input.as_ref()))
+        }
+        "kTruss" => {
+            let input = load_structural_graph_input(workspace, database_path)?;
+            Ok(k_truss_section_from_structural_input(input.as_ref()))
         }
         "knowledgeSkyline" => {
             let skyline = load_knowledge_skyline(workspace, database_path)?;
@@ -683,11 +696,7 @@ fn degraded_signals_for_sections(
     sections: &[InsightsSection],
     graph_data: Option<&WorkspaceInsightsGraphData>,
 ) -> Vec<InsightsDegradedInput> {
-    let mut degraded = sections
-        .iter()
-        .filter(|section| section.items.is_empty())
-        .filter_map(|section| placeholder_section_degraded_input(section.name))
-        .collect::<Vec<_>>();
+    let mut degraded = Vec::new();
 
     if sections.iter().all(|section| section.items.is_empty()) {
         // Distinguish "no memories at all" from "memories exist but the link graph is
@@ -717,23 +726,6 @@ fn degraded_signals_for_sections(
 
     degraded
 }
-
-fn placeholder_section_degraded_input(section_name: &'static str) -> Option<InsightsDegradedInput> {
-    if PLACEHOLDER_BACKED_SECTIONS.contains(&section_name) {
-        Some((
-            section_name,
-            DegradationReport {
-                code: INSIGHTS_SECTION_UNAVAILABLE_CODE,
-                severity: "info",
-                message: INSIGHTS_SECTION_UNAVAILABLE_MESSAGE,
-                repair: INSIGHTS_SECTION_UNAVAILABLE_REPAIR,
-            },
-        ))
-    } else {
-        None
-    }
-}
-
 fn aggregate_insights_degraded(entries: Vec<InsightsDegradedInput>) -> Vec<InsightsDegradedSignal> {
     aggregate_degraded(entries)
         .into_iter()
@@ -831,10 +823,6 @@ fn load_workspace_insights_graph_data(
 /// the latest memory_links snapshot version when one exists, and projects
 /// through [`crate::graph::structural::build_structural_graph_input`] so
 /// both sections share one reviewed loading/evidence path.
-#[allow(
-    dead_code,
-    reason = "consumed by the kCore/kTruss section builder beads (bd-2pos6.x)"
-)]
 fn load_structural_graph_input(
     workspace: Option<&Path>,
     database_path: Option<&Path>,
@@ -2889,23 +2877,226 @@ fn hits_section_from_inputs(
 }
 
 fn k_core_section() -> InsightsSection {
-    placeholder_section(
-        "kCore",
-        "K-Core",
-        "Core-number membership for densely connected memory regions.",
-        "K-core posture shows which memories sit in stable, mutually reinforcing graph neighborhoods.",
-        vec!["ee insights --section kCore --workspace . --json"],
-    )
+    k_core_section_from_inputs(&[])
+}
+
+fn k_core_section_from_structural_input(
+    input: Option<&crate::graph::structural::StructuralGraphInput>,
+) -> InsightsSection {
+    let Some(input) = input else {
+        return k_core_section_from_inputs(&[]);
+    };
+    if input.is_empty() {
+        return k_core_section_from_inputs(&[]);
+    }
+
+    let result = core_number(&input.graph);
+    let max_core_number = result
+        .core_numbers
+        .iter()
+        .map(|core| core.core)
+        .max()
+        .unwrap_or(0);
+    let witness = complexity_witness_json(&result.witness);
+    let inputs = result
+        .core_numbers
+        .into_iter()
+        .map(|core| KCoreInsightInput {
+            degree: input.graph.degree(core.node.as_str()),
+            memory_id: core.node,
+            core_number: core.core,
+            max_core_number,
+            node_count: input.node_count,
+            edge_count: input.edge_count,
+            snapshot_version: input.snapshot_version,
+            graph_type: input.graph_type,
+            filter_posture: input.filter_posture,
+            evidence_schema: input.evidence_schema,
+            witness: witness.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    k_core_section_from_inputs(&inputs)
+}
+
+fn k_core_section_from_inputs(inputs: &[KCoreInsightInput]) -> InsightsSection {
+    let mut inputs = inputs.to_vec();
+    inputs.sort_by(|left, right| {
+        right
+            .core_number
+            .cmp(&left.core_number)
+            .then_with(|| right.degree.cmp(&left.degree))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    let items = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            serde_json::json!({
+                "rank": index + 1,
+                "memoryId": &input.memory_id,
+                "coreNumber": input.core_number,
+                "maxCoreNumber": input.max_core_number,
+                "degree": input.degree,
+                "mainCoreMember": input.max_core_number > 0 && input.core_number == input.max_core_number,
+                "interpretation": k_core_interpretation(input.core_number, input.max_core_number),
+                "nextCommands": [
+                    format!("ee why {} --workspace . --json", input.memory_id),
+                    "ee graph k-core --workspace . --json".to_owned(),
+                ],
+                "evidence": {
+                    "schema": input.evidence_schema,
+                    "algorithm": "core_number",
+                    "graphType": input.graph_type,
+                    "snapshotVersion": input.snapshot_version,
+                    "nodeCount": input.node_count,
+                    "edgeCount": input.edge_count,
+                    "filterPosture": input.filter_posture,
+                    "witness": &input.witness,
+                },
+            })
+        })
+        .collect();
+
+    InsightsSection {
+        name: "kCore",
+        title: "K-Core",
+        summary: "Core-number membership for densely connected memory regions.",
+        why_it_matters: "K-core posture shows which memories sit in stable, mutually reinforcing graph neighborhoods.",
+        items,
+        next_commands: vec![
+            "ee insights --section kCore --workspace . --json",
+            "ee graph k-core --workspace . --json",
+        ],
+    }
+}
+
+fn k_core_interpretation(core_number: usize, max_core_number: usize) -> &'static str {
+    if max_core_number > 0 && core_number == max_core_number {
+        "main_core_member"
+    } else if core_number > 0 {
+        "peripheral_core_member"
+    } else {
+        "isolated_memory"
+    }
+}
+
+fn complexity_witness_json(witness: &fnx_algorithms::ComplexityWitness) -> JsonValue {
+    serde_json::json!({
+        "algorithm": &witness.algorithm,
+        "complexityClaim": &witness.complexity_claim,
+        "nodesTouched": witness.nodes_touched,
+        "edgesScanned": witness.edges_scanned,
+        "queuePeak": witness.queue_peak,
+    })
 }
 
 fn k_truss_section() -> InsightsSection {
-    placeholder_section(
-        "kTruss",
-        "K-Truss",
-        "Triangle-supported structural health findings for support subgraphs.",
-        "K-truss posture helps separate isolated support edges from stronger corroborating clusters.",
-        vec!["ee insights --section kTruss --workspace . --json"],
-    )
+    k_truss_section_from_inputs(&[])
+}
+
+fn k_truss_section_from_structural_input(
+    input: Option<&crate::graph::structural::StructuralGraphInput>,
+) -> InsightsSection {
+    let Some(input) = input else {
+        return k_truss_section_from_inputs(&[]);
+    };
+    if input.is_empty() {
+        return k_truss_section_from_inputs(&[]);
+    }
+
+    let report = crate::graph::health::compute_k_truss(&input.graph);
+    let member_counts =
+        serde_json::to_value(&report.member_counts).unwrap_or_else(|_| serde_json::json!({}));
+    let inputs = report
+        .top_memories_at_k
+        .into_iter()
+        .map(|memory| {
+            let member_count_at_truss_level = report
+                .member_counts
+                .get(&memory.max_k)
+                .copied()
+                .unwrap_or(0);
+            KTrussInsightInput {
+                degree: input.graph.degree(memory.memory_id.as_str()),
+                memory_id: memory.memory_id,
+                truss_level: memory.max_k,
+                max_truss_level: report.max_k,
+                member_count_at_truss_level,
+                member_counts: member_counts.clone(),
+                node_count: input.node_count,
+                edge_count: input.edge_count,
+                snapshot_version: input.snapshot_version,
+                graph_type: input.graph_type,
+                filter_posture: input.filter_posture,
+                structural_graph_schema: input.evidence_schema,
+                evidence_schema: report.schema,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    k_truss_section_from_inputs(&inputs)
+}
+
+fn k_truss_section_from_inputs(inputs: &[KTrussInsightInput]) -> InsightsSection {
+    let mut inputs = inputs.to_vec();
+    inputs.sort_by(|left, right| {
+        right
+            .truss_level
+            .cmp(&left.truss_level)
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    let items = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            serde_json::json!({
+                "rank": index + 1,
+                "memoryId": &input.memory_id,
+                "trussLevel": input.truss_level,
+                "maxTrussLevel": input.max_truss_level,
+                "degree": input.degree,
+                "memberCountAtTrussLevel": input.member_count_at_truss_level,
+                "mainTrussMember": input.max_truss_level >= 3 && input.truss_level == input.max_truss_level,
+                "interpretation": k_truss_interpretation(input.truss_level, input.max_truss_level),
+                "nextCommands": [
+                    format!("ee why {} --workspace . --json", input.memory_id),
+                    "ee health --robot-insights --workspace . --json".to_owned(),
+                ],
+                "evidence": {
+                    "schema": input.evidence_schema,
+                    "algorithm": "fnx_algorithms::k_truss",
+                    "graphType": input.graph_type,
+                    "snapshotVersion": input.snapshot_version,
+                    "nodeCount": input.node_count,
+                    "edgeCount": input.edge_count,
+                    "filterPosture": input.filter_posture,
+                    "structuralGraphSchema": input.structural_graph_schema,
+                    "memberCounts": &input.member_counts,
+                },
+            })
+        })
+        .collect();
+
+    InsightsSection {
+        name: "kTruss",
+        title: "K-Truss",
+        summary: "Triangle-supported structural health findings for support subgraphs.",
+        why_it_matters: "K-truss posture helps separate isolated support edges from stronger corroborating clusters.",
+        items,
+        next_commands: vec![
+            "ee insights --section kTruss --workspace . --json",
+            "ee health --robot-insights --workspace . --json",
+        ],
+    }
+}
+
+fn k_truss_interpretation(truss_level: usize, max_truss_level: usize) -> &'static str {
+    if max_truss_level >= 3 && truss_level == max_truss_level {
+        "main_truss_member"
+    } else {
+        "triangle_supported_member"
+    }
 }
 
 fn knowledge_gaps_section() -> InsightsSection {
@@ -3337,23 +3528,6 @@ fn house_rules_section_from_inputs(inputs: &[HouseRuleInsightInput]) -> Insights
     }
 }
 
-fn placeholder_section(
-    name: &'static str,
-    title: &'static str,
-    summary: &'static str,
-    why_it_matters: &'static str,
-    next_commands: Vec<&'static str>,
-) -> InsightsSection {
-    InsightsSection {
-        name,
-        title,
-        summary,
-        why_it_matters,
-        items: Vec::new(),
-        next_commands,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3369,6 +3543,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     type TestResult = Result<(), String>;
+
+    fn retired_section_unavailable_code() -> &'static str {
+        concat!("insights_section_", "unavailable")
+    }
 
     fn section_names(report: &InsightsReport) -> Vec<&'static str> {
         report.sections.iter().map(|section| section.name).collect()
@@ -3758,25 +3936,13 @@ mod tests {
         assert_eq!(report.selected_section, None);
         assert_eq!(report.explain_memory_id, None);
         assert_eq!(report.explain_command, None);
-        assert_eq!(report.degraded_signals.len(), 2);
+        assert_eq!(report.degraded_signals.len(), 1);
         assert_eq!(report.degraded_signals[0].code, "graph.workspace_empty");
         assert_eq!(report.degraded_signals[0].severity, "info");
         assert_eq!(
             report.degraded_signals[0].sources,
             vec!["insights".to_owned()]
         );
-        assert_eq!(
-            report.degraded_signals[1].code,
-            INSIGHTS_SECTION_UNAVAILABLE_CODE
-        );
-        let mut expected_sources = PLACEHOLDER_BACKED_SECTIONS
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect::<Vec<_>>();
-        expected_sources.sort();
-        let mut actual_sources = report.degraded_signals[1].sources.clone();
-        actual_sources.sort();
-        assert_eq!(actual_sources, expected_sources);
         for section in &report.sections {
             assert!(section.items.is_empty());
         }
@@ -4133,7 +4299,7 @@ mod tests {
             report
                 .degraded_signals
                 .iter()
-                .all(|signal| signal.code != INSIGHTS_SECTION_UNAVAILABLE_CODE),
+                .all(|signal| signal.code != retired_section_unavailable_code()),
             "implemented comprehensiveRules must not emit placeholder degradation"
         );
         let section = report
@@ -4243,7 +4409,7 @@ mod tests {
             report
                 .degraded_signals
                 .iter()
-                .all(|signal| signal.code != INSIGHTS_SECTION_UNAVAILABLE_CODE),
+                .all(|signal| signal.code != retired_section_unavailable_code()),
             "comprehensiveRules should no longer be placeholder-backed"
         );
 
@@ -4259,6 +4425,8 @@ mod tests {
         for section_name in [
             "bridges",
             "contradictionClusters",
+            "kCore",
+            "kTruss",
             "knowledgeSkyline",
             "topMemories",
         ] {
@@ -4307,6 +4475,19 @@ mod tests {
                         "contradiction cluster should carry source memory ids"
                     );
                 }
+                "kCore" => {
+                    assert_eq!(item["interpretation"].as_str(), Some("main_core_member"));
+                    assert!(item["coreNumber"].as_u64().unwrap_or_default() > 0);
+                    assert_eq!(
+                        item["evidence"]["schema"].as_str(),
+                        Some(crate::graph::structural::STRUCTURAL_GRAPH_EVIDENCE_SCHEMA)
+                    );
+                    assert_eq!(item["evidence"]["algorithm"].as_str(), Some("core_number"));
+                    assert_eq!(
+                        item["evidence"]["graphType"].as_str(),
+                        Some(crate::graph::structural::STRUCTURAL_GRAPH_TYPE)
+                    );
+                }
                 "knowledgeSkyline" => {
                     assert_eq!(item["skyline"]["nodeCount"].as_u64(), Some(7));
                     assert!(
@@ -4343,6 +4524,8 @@ mod tests {
         for section in [
             "bridges",
             "contradictionClusters",
+            "kCore",
+            "kTruss",
             "knowledgeSkyline",
             "topMemories",
         ] {
@@ -4361,11 +4544,225 @@ mod tests {
                 report
                     .degraded_signals
                     .iter()
-                    .all(|signal| signal.code != INSIGHTS_SECTION_UNAVAILABLE_CODE),
+                    .all(|signal| signal.code != retired_section_unavailable_code()),
                 "{section} should no longer be placeholder-backed"
             );
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn k_core_section_emits_structural_core_number_evidence() -> TestResult {
+        let memories = vec![
+            stored_memory("mem_core_a", "semantic", "fact", "Core memory A.", 0.9),
+            stored_memory("mem_core_b", "semantic", "fact", "Core memory B.", 0.9),
+            stored_memory("mem_core_c", "semantic", "fact", "Core memory C.", 0.9),
+            stored_memory("mem_core_tail", "semantic", "fact", "Tail memory.", 0.8),
+            stored_memory(
+                "mem_core_isolated",
+                "semantic",
+                "fact",
+                "Isolated memory.",
+                0.7,
+            ),
+        ];
+        let links = vec![
+            stored_memory_link_with_relation(
+                "link_core_1",
+                "mem_core_a",
+                "mem_core_b",
+                "supports",
+                None,
+            ),
+            stored_memory_link_with_relation(
+                "link_core_2",
+                "mem_core_b",
+                "mem_core_c",
+                "supports",
+                None,
+            ),
+            stored_memory_link_with_relation(
+                "link_core_3",
+                "mem_core_a",
+                "mem_core_c",
+                "supports",
+                None,
+            ),
+            stored_memory_link_with_relation(
+                "link_core_4",
+                "mem_core_c",
+                "mem_core_tail",
+                "supports",
+                None,
+            ),
+        ];
+        let input =
+            crate::graph::structural::build_structural_graph_input(&memories, &links, Some(17));
+        let section = k_core_section_from_structural_input(Some(&input));
+
+        assert_eq!(section.name, "kCore");
+        assert_eq!(section.items.len(), 5);
+        assert_eq!(section.next_commands.len(), 2);
+        assert_eq!(section.items[0]["memoryId"], "mem_core_c");
+        assert_eq!(section.items[0]["rank"], 1);
+        assert_eq!(section.items[0]["coreNumber"], 2);
+        assert_eq!(section.items[0]["degree"], 3);
+        assert_eq!(section.items[0]["maxCoreNumber"], 2);
+        assert_eq!(section.items[0]["mainCoreMember"].as_bool(), Some(true));
+        assert_eq!(section.items[0]["interpretation"], "main_core_member");
+        assert_eq!(
+            section.items[0]["evidence"]["schema"],
+            crate::graph::structural::STRUCTURAL_GRAPH_EVIDENCE_SCHEMA
+        );
+        assert_eq!(section.items[0]["evidence"]["algorithm"], "core_number");
+        assert_eq!(section.items[0]["evidence"]["snapshotVersion"], 17);
+        assert_eq!(section.items[0]["evidence"]["nodeCount"], 5);
+        assert_eq!(section.items[0]["evidence"]["edgeCount"], 4);
+        assert_eq!(
+            section.items[0]["evidence"]["filterPosture"],
+            crate::graph::structural::STRUCTURAL_GRAPH_FILTER_POSTURE
+        );
+        assert_eq!(
+            section.items[0]["evidence"]["witness"]["algorithm"],
+            "core_number"
+        );
+        assert_eq!(
+            section
+                .items
+                .last()
+                .and_then(|item| item["memoryId"].as_str()),
+            Some("mem_core_isolated")
+        );
+        assert_eq!(
+            section
+                .items
+                .last()
+                .and_then(|item| item["interpretation"].as_str()),
+            Some("isolated_memory")
+        );
+
+        let edge_free_input =
+            crate::graph::structural::build_structural_graph_input(&memories, &[], Some(18));
+        let edge_free = k_core_section_from_structural_input(Some(&edge_free_input));
+        assert!(edge_free.items.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn k_truss_section_emits_structural_triangle_support_evidence() -> TestResult {
+        let memories = vec![
+            stored_memory("mem_truss_a", "semantic", "fact", "Truss memory A.", 0.9),
+            stored_memory("mem_truss_b", "semantic", "fact", "Truss memory B.", 0.9),
+            stored_memory("mem_truss_c", "semantic", "fact", "Truss memory C.", 0.9),
+            stored_memory("mem_truss_tail", "semantic", "fact", "Tail memory.", 0.8),
+        ];
+        let links = vec![
+            stored_memory_link_with_relation(
+                "link_truss_1",
+                "mem_truss_a",
+                "mem_truss_b",
+                "supports",
+                None,
+            ),
+            stored_memory_link_with_relation(
+                "link_truss_2",
+                "mem_truss_b",
+                "mem_truss_c",
+                "supports",
+                None,
+            ),
+            stored_memory_link_with_relation(
+                "link_truss_3",
+                "mem_truss_a",
+                "mem_truss_c",
+                "supports",
+                None,
+            ),
+            stored_memory_link_with_relation(
+                "link_truss_4",
+                "mem_truss_c",
+                "mem_truss_tail",
+                "supports",
+                None,
+            ),
+        ];
+        let input =
+            crate::graph::structural::build_structural_graph_input(&memories, &links, Some(23));
+        let section = k_truss_section_from_structural_input(Some(&input));
+
+        assert_eq!(section.name, "kTruss");
+        assert_eq!(section.items.len(), 3);
+        assert_eq!(section.next_commands.len(), 2);
+        assert_eq!(section.items[0]["memoryId"], "mem_truss_a");
+        assert_eq!(section.items[0]["rank"], 1);
+        assert_eq!(section.items[0]["trussLevel"], 3);
+        assert_eq!(section.items[0]["maxTrussLevel"], 3);
+        assert_eq!(section.items[0]["memberCountAtTrussLevel"], 3);
+        assert_eq!(section.items[0]["mainTrussMember"].as_bool(), Some(true));
+        assert_eq!(section.items[0]["interpretation"], "main_truss_member");
+        assert_eq!(
+            section.items[0]["nextCommands"][1],
+            "ee health --robot-insights --workspace . --json"
+        );
+        assert_eq!(
+            section.items[0]["evidence"]["schema"],
+            crate::graph::health::HEALTH_STRUCTURAL_SCHEMA_V1
+        );
+        assert_eq!(
+            section.items[0]["evidence"]["algorithm"],
+            "fnx_algorithms::k_truss"
+        );
+        assert_eq!(
+            section.items[0]["evidence"]["structuralGraphSchema"],
+            crate::graph::structural::STRUCTURAL_GRAPH_EVIDENCE_SCHEMA
+        );
+        assert_eq!(section.items[0]["evidence"]["snapshotVersion"], 23);
+        assert_eq!(section.items[0]["evidence"]["nodeCount"], 4);
+        assert_eq!(section.items[0]["evidence"]["edgeCount"], 4);
+        assert_eq!(
+            section.items[0]["evidence"]["filterPosture"],
+            crate::graph::structural::STRUCTURAL_GRAPH_FILTER_POSTURE
+        );
+        assert_eq!(section.items[0]["evidence"]["memberCounts"]["3"], 3);
+        assert_eq!(section.items[1]["memoryId"], "mem_truss_b");
+        assert_eq!(section.items[2]["memoryId"], "mem_truss_c");
+
+        let edge_free_input =
+            crate::graph::structural::build_structural_graph_input(&memories, &[], Some(24));
+        let edge_free = k_truss_section_from_structural_input(Some(&edge_free_input));
+        assert!(edge_free.items.is_empty());
+
+        let path_links = vec![
+            stored_memory_link_with_relation(
+                "link_path_1",
+                "mem_truss_a",
+                "mem_truss_b",
+                "supports",
+                None,
+            ),
+            stored_memory_link_with_relation(
+                "link_path_2",
+                "mem_truss_b",
+                "mem_truss_c",
+                "supports",
+                None,
+            ),
+            stored_memory_link_with_relation(
+                "link_path_3",
+                "mem_truss_c",
+                "mem_truss_tail",
+                "supports",
+                None,
+            ),
+        ];
+        let path_input = crate::graph::structural::build_structural_graph_input(
+            &memories,
+            &path_links,
+            Some(25),
+        );
+        let path_section = k_truss_section_from_structural_input(Some(&path_input));
+        assert!(path_section.items.is_empty());
         Ok(())
     }
 
@@ -5599,8 +5996,22 @@ mod tests {
     fn revision_frontiers_is_no_longer_placeholder_backed() -> TestResult {
         // Regression guard for bd-2pos6.5: the section must not emit
         // insights_section_unavailable once real dominance evidence backs it.
-        assert!(!PLACEHOLDER_BACKED_SECTIONS.contains(&"revisionFrontiers"));
-        assert!(placeholder_section_degraded_input("revisionFrontiers").is_none());
+        let report = build_insights_report(&InsightsArgs {
+            section: Some("revisionFrontiers".to_owned()),
+            explain: None,
+            limit: DEFAULT_SECTION_LIMIT,
+            offset: 0,
+            json_stream: false,
+            cursor: None,
+        })
+        .map_err(|error| error.to_string())?;
+
+        assert!(
+            report
+                .degraded_signals
+                .iter()
+                .all(|signal| signal.code != retired_section_unavailable_code())
+        );
         Ok(())
     }
 
