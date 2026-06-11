@@ -502,6 +502,7 @@ struct ParsedJsonlImport {
     memories: Vec<ExportMemoryRecord>,
     tags_by_memory: BTreeMap<String, BTreeSet<String>>,
     tag_lines_by_memory: BTreeMap<String, u32>,
+    tag_records: u32,
     issues: Vec<JsonlImportIssue>,
     records_total: u32,
     ignored_records: u32,
@@ -661,9 +662,7 @@ fn report_from_parsed(
             .map(JsonlImportFooterSummary::from_footer),
         records_total: parsed.records_total,
         memory_records: saturating_len(parsed.memories.len()),
-        tag_records: parsed.tags_by_memory.values().fold(0_u32, |total, tags| {
-            total.saturating_add(saturating_len(tags.len()))
-        }),
+        tag_records: parsed.tag_records,
         ignored_records: parsed.ignored_records,
         memories_imported: 0,
         memories_skipped_duplicate: 0,
@@ -681,6 +680,7 @@ fn parse_jsonl_source(input: &str) -> ParsedJsonlImport {
         memories: Vec::new(),
         tags_by_memory: BTreeMap::new(),
         tag_lines_by_memory: BTreeMap::new(),
+        tag_records: 0,
         issues: Vec::new(),
         records_total: 0,
         ignored_records: 0,
@@ -839,24 +839,27 @@ fn parse_memory_record(
 
 fn parse_tag_record(parsed: &mut ParsedJsonlImport, line_number: u32, value: JsonValue) {
     match serde_json::from_value::<ExportTagRecord>(value) {
-        Ok(tag) => match Tag::parse(&tag.tag) {
-            Ok(canonical) => {
-                parsed
-                    .tag_lines_by_memory
-                    .entry(tag.memory_id.clone())
-                    .or_insert(line_number);
-                parsed
-                    .tags_by_memory
-                    .entry(tag.memory_id)
-                    .or_default()
-                    .insert(canonical.to_string());
+        Ok(tag) => {
+            parsed.tag_records = parsed.tag_records.saturating_add(1);
+            match Tag::parse(&tag.tag) {
+                Ok(canonical) => {
+                    parsed
+                        .tag_lines_by_memory
+                        .entry(tag.memory_id.clone())
+                        .or_insert(line_number);
+                    parsed
+                        .tags_by_memory
+                        .entry(tag.memory_id)
+                        .or_default()
+                        .insert(canonical.to_string());
+                }
+                Err(error) => parsed.issues.push(JsonlImportIssue::error(
+                    Some(line_number),
+                    "invalid_tag",
+                    error.to_string(),
+                )),
             }
-            Err(error) => parsed.issues.push(JsonlImportIssue::error(
-                Some(line_number),
-                "invalid_tag",
-                error.to_string(),
-            )),
-        },
+        }
         Err(error) => parsed.issues.push(JsonlImportIssue::error(
             Some(line_number),
             "invalid_tag_record",
@@ -977,9 +980,7 @@ fn validate_header_and_footer(parsed: &mut ParsedJsonlImport, first_schema: Opti
                 ),
             ));
         }
-        let parsed_tag_count = parsed.tags_by_memory.values().fold(0_u64, |total, tags| {
-            total.saturating_add(u64::try_from(tags.len()).unwrap_or(u64::MAX))
-        });
+        let parsed_tag_count = u64::from(parsed.tag_records);
         let parsed_record_count = u64::from(parsed.records_total);
         if footer.total_records != parsed_record_count {
             parsed.issues.push(JsonlImportIssue::warning(
@@ -1980,6 +1981,52 @@ mod tests {
             true,
             "tag count warning",
         )
+    }
+
+    #[test]
+    fn parse_jsonl_source_counts_duplicate_tag_records_separately() -> TestResult {
+        let tag_line = r#"{"schema":"ee.export.tag.v1","memory_id":"mem_01234567890123456789012345","tag":"Release","created_at":"2026-04-30T00:00:00Z"}"#;
+        let input = sample_jsonl()
+            .replace(tag_line, &format!("{tag_line}\n{tag_line}"))
+            .replace("\"total_records\":4", "\"total_records\":5")
+            .replace("\"tag_count\":1", "\"tag_count\":2");
+        let parsed = parse_jsonl_source(&input);
+
+        ensure(parsed.has_errors(), false, "duplicate tag record is valid")?;
+        ensure(parsed.tag_records, 2, "raw tag records")?;
+        ensure(
+            parsed
+                .tags_by_memory
+                .get("mem_01234567890123456789012345")
+                .map(BTreeSet::len),
+            Some(1),
+            "deduplicated stored tags",
+        )?;
+        ensure(
+            parsed
+                .issues
+                .iter()
+                .any(|issue| issue.code == "footer_tag_count_mismatch"),
+            false,
+            "footer tag count should compare raw tag records",
+        )?;
+
+        let report = report_from_parsed(
+            Path::new("/workspace"),
+            Path::new("export.jsonl"),
+            "jsonl://export.jsonl",
+            true,
+            &parsed,
+        );
+        ensure(report.tag_records, 2, "reported tag records")?;
+
+        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+        ensure(prepared.has_errors(), false, "prepared has no errors")?;
+        let memory = prepared
+            .memories
+            .first()
+            .ok_or_else(|| "prepared memory missing".to_owned())?;
+        ensure(memory.tag_count, 1, "storage tag count stays deduplicated")
     }
 
     #[test]
