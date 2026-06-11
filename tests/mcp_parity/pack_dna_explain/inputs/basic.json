@@ -4,14 +4,14 @@
   "seedMemoryContent": "Graph-aware pack DNA should explain release context selection.",
   "cliArgs": [
     "ee",
-    "--json",
+    "pack",
+    "release graph context",
     "--workspace",
     "__WORKSPACE__",
-    "context",
-    "release graph context",
     "--max-tokens",
     "1200",
-    "--explain"
+    "--explain",
+    "--json"
   ],
   "mcpArguments": {
     "workspace": "__WORKSPACE__",

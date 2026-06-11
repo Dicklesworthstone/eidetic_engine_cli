@@ -3524,7 +3524,7 @@ mod tests {
             vec![
                 "ee",
                 "--json",
-                "context",
+                "pack",
                 "prepare release",
                 "--max-tokens",
                 "1200",

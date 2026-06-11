@@ -604,7 +604,7 @@ fn mcp_parity_proximity_command() -> TestResult {
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "proximity")
 }
 
-/// Parity test: `ee context --explain --json` packDna vs `ee_pack_dna_explain` MCP tool
+/// Parity test: `ee pack --explain --json` packDna vs `ee_pack_dna_explain` MCP tool
 #[test]
 fn mcp_parity_pack_dna_explain_command() -> TestResult {
     let fixture = load_parity_fixture("pack_dna_explain", "basic")?;
@@ -619,13 +619,10 @@ fn mcp_parity_pack_dna_explain_command() -> TestResult {
         run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
     ensure(
         cli_exit == ee::models::ProcessExitCode::Success,
-        "CLI context --explain failed",
+        "CLI pack --explain failed",
     )?;
-    let cli_pack_dna = extract_json_pointer_text(
-        &cli_stdout,
-        "/data/pack/packDna",
-        "context --explain packDna",
-    )?;
+    let cli_pack_dna =
+        extract_json_pointer_text(&cli_stdout, "/data/pack/packDna", "pack --explain packDna")?;
 
     let mcp_response = run_mcp_tool_call(
         fixture_mcp_tool(&fixture)?,
