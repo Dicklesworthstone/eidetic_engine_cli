@@ -1919,6 +1919,7 @@ mod tests {
                     has_more: false,
                     next_cursor: None,
                 },
+                degraded: vec![],
             }
             .to_json(),
         )?;
@@ -1935,6 +1936,7 @@ mod tests {
                     has_more: true,
                     next_cursor: Some("2".to_owned()),
                 },
+                degraded: vec![],
             }
             .to_json(),
         )?;

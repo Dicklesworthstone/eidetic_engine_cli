@@ -158,6 +158,11 @@ pub struct AuditTimelineReport {
     pub schema: String,
     pub entries: Vec<AuditTimelineEntry>,
     pub pagination: TimelinePagination,
+    /// Cursor-rejection entries (`cursor_invalid` / `cursor_stale`). A
+    /// rejected cursor yields an empty page plus one of these, never a
+    /// restarted page (bd-7lvbg.3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degraded: Vec<JsonValue>,
 }
 
 impl AuditTimelineReport {
@@ -259,7 +264,6 @@ impl AuditVerifyReport {
 pub fn list_timeline(options: &AuditTimelineOptions) -> Result<AuditTimelineReport, DomainError> {
     let entries = load_entries(&options.workspace, options.database_path.as_deref())?;
     let since = parse_optional_instant(options.since.as_deref(), "since")?;
-    let offset = parse_cursor(options.cursor.as_deref())?;
     let filtered = filter_entries(
         entries,
         since,
@@ -267,22 +271,24 @@ pub fn list_timeline(options: &AuditTimelineOptions) -> Result<AuditTimelineRepo
         options.surface.as_deref(),
         options.action.as_deref(),
     )?;
-    let total_count = u32::try_from(filtered.len()).unwrap_or(u32::MAX);
-    let limit = usize::try_from(options.limit.max(1)).unwrap_or(usize::MAX);
-    let page: Vec<_> = filtered.into_iter().skip(offset).take(limit).collect();
-    let next_offset = offset.saturating_add(page.len());
-    let has_more = next_offset < usize::try_from(total_count).unwrap_or(usize::MAX);
-
-    Ok(AuditTimelineReport {
-        schema: AUDIT_TIMELINE_SCHEMA_V1.to_owned(),
-        pagination: TimelinePagination {
-            total_count,
-            returned_count: u32::try_from(page.len()).unwrap_or(u32::MAX),
-            has_more,
-            next_cursor: has_more.then(|| next_offset.to_string()),
-        },
-        entries: page.into_iter().map(AuditTimelineEntry::from).collect(),
-    })
+    let cursor_binding = TimelineCursorBinding {
+        params_hash: timeline_params_hash(
+            options.since.as_deref(),
+            options.surface.as_deref(),
+            options.action.as_deref(),
+        ),
+        mac_key: crate::output::governor::derive_workspace_mac_key(
+            &options.workspace.to_string_lossy(),
+        ),
+        db_generation: timeline_db_generation(&options.workspace, options.database_path.as_deref()),
+    };
+    paginate_timeline(
+        filtered,
+        options.limit,
+        options.cursor.as_deref(),
+        &cursor_binding,
+        AuditTimelineEntry::from,
+    )
 }
 
 /// Merge persisted operations from shard-local audit chains.
@@ -290,7 +296,6 @@ pub fn list_sharded_timeline(
     options: &ShardedAuditTimelineOptions,
 ) -> Result<AuditTimelineReport, DomainError> {
     let since = parse_optional_instant(options.since.as_deref(), "since")?;
-    let offset = parse_cursor(options.cursor.as_deref())?;
     let mut entries = sharded_entries(options.shards.as_slice());
     sort_sharded_entries_chronological(&mut entries);
     let filtered = filter_sharded_entries(
@@ -300,11 +305,87 @@ pub fn list_sharded_timeline(
         options.surface.as_deref(),
         options.action.as_deref(),
     )?;
-    let total_count = u32::try_from(filtered.len()).unwrap_or(u32::MAX);
-    let limit = usize::try_from(options.limit.max(1)).unwrap_or(usize::MAX);
+    // Sharded timelines merge shard-local chains with no single workspace
+    // DB generation; the MAC key binds the stable shard-id set and the
+    // generation is pinned at zero. Staleness detection is therefore not
+    // available here (the bespoke offset cursor never had it either);
+    // tamper and params binding still hold.
+    let mut shard_scope: Vec<&str> = options
+        .shards
+        .iter()
+        .map(|shard| shard.shard_id.as_str())
+        .collect();
+    shard_scope.sort_unstable();
+    let cursor_binding = TimelineCursorBinding {
+        params_hash: timeline_params_hash(
+            options.since.as_deref(),
+            options.surface.as_deref(),
+            options.action.as_deref(),
+        ),
+        mac_key: crate::output::governor::derive_workspace_mac_key(&format!(
+            "ee.audit.sharded:{}",
+            shard_scope.join(",")
+        )),
+        db_generation: 0,
+    };
+    paginate_timeline(
+        filtered,
+        options.limit,
+        options.cursor.as_deref(),
+        &cursor_binding,
+        |entry| AuditTimelineEntry::from_sharded(entry.entry, Some(entry.shard_id)),
+    )
+}
+
+/// Cursor-codec binding shared by the flat and sharded timeline paths.
+struct TimelineCursorBinding {
+    params_hash: String,
+    mac_key: [u8; 32],
+    db_generation: u64,
+}
+
+/// Shared skip/take pagination over filtered timeline entries with the
+/// `ee.cursor.v1` codec (ADR 0063 §3, bd-7lvbg.3): `positionKey` holds the
+/// resume offset (the index of the first unemitted entry, matching the
+/// bespoke cursor this replaces) and `droppedCount` holds the unemitted
+/// remainder for the honesty cross-check. A rejected cursor yields an empty
+/// page plus a `cursor_invalid`/`cursor_stale` degraded entry, never a
+/// restarted page.
+fn paginate_timeline<T>(
+    filtered: Vec<T>,
+    limit: u32,
+    cursor: Option<&str>,
+    binding: &TimelineCursorBinding,
+    into_entry: impl Fn(T) -> AuditTimelineEntry,
+) -> Result<AuditTimelineReport, DomainError> {
+    let total = filtered.len();
+    let total_count = u32::try_from(total).unwrap_or(u32::MAX);
+    let offset = match resolve_timeline_cursor(cursor, binding, total) {
+        TimelineCursorResolution::Fresh => 0,
+        TimelineCursorResolution::Resume(offset) => offset,
+        TimelineCursorResolution::Rejected(entry) => {
+            return Ok(AuditTimelineReport {
+                schema: AUDIT_TIMELINE_SCHEMA_V1.to_owned(),
+                pagination: TimelinePagination {
+                    total_count,
+                    returned_count: 0,
+                    has_more: false,
+                    next_cursor: None,
+                },
+                entries: Vec::new(),
+                degraded: vec![entry],
+            });
+        }
+    };
+    let limit = usize::try_from(limit.max(1)).unwrap_or(usize::MAX);
     let page: Vec<_> = filtered.into_iter().skip(offset).take(limit).collect();
     let next_offset = offset.saturating_add(page.len());
-    let has_more = next_offset < usize::try_from(total_count).unwrap_or(usize::MAX);
+    let has_more = next_offset < total;
+    let next_cursor = if has_more {
+        Some(encode_timeline_cursor(next_offset, total, binding)?)
+    } else {
+        None
+    };
 
     Ok(AuditTimelineReport {
         schema: AUDIT_TIMELINE_SCHEMA_V1.to_owned(),
@@ -312,12 +393,10 @@ pub fn list_sharded_timeline(
             total_count,
             returned_count: u32::try_from(page.len()).unwrap_or(u32::MAX),
             has_more,
-            next_cursor: has_more.then(|| next_offset.to_string()),
+            next_cursor,
         },
-        entries: page
-            .into_iter()
-            .map(|entry| AuditTimelineEntry::from_sharded(entry.entry, Some(entry.shard_id)))
-            .collect(),
+        entries: page.into_iter().map(into_entry).collect(),
+        degraded: Vec::new(),
     })
 }
 
@@ -824,16 +903,118 @@ fn resolved_database_path(workspace: &Path, database_path: Option<&Path>) -> Pat
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"))
 }
 
-fn parse_cursor(cursor: Option<&str>) -> Result<usize, DomainError> {
-    let Some(raw) = cursor else {
-        return Ok(0);
+/// Outcome of resolving an optional `--cursor` token against the live
+/// timeline query.
+enum TimelineCursorResolution {
+    Fresh,
+    Resume(usize),
+    Rejected(JsonValue),
+}
+
+fn resolve_timeline_cursor(
+    cursor: Option<&str>,
+    binding: &TimelineCursorBinding,
+    total: usize,
+) -> TimelineCursorResolution {
+    use crate::output::governor::{CursorRejection, decode_cursor};
+
+    let Some(token) = cursor else {
+        return TimelineCursorResolution::Fresh;
     };
-    raw.parse::<usize>().map_err(|_| DomainError::Usage {
-        message: format!("Invalid audit timeline cursor `{raw}`: expected a non-negative offset"),
-        repair: Some(
-            "Use the `next_cursor` value returned by the previous timeline response.".to_owned(),
+    let payload = match decode_cursor(
+        token,
+        &binding.mac_key,
+        &binding.params_hash,
+        binding.db_generation,
+    ) {
+        Ok(payload) => payload,
+        Err(CursorRejection::Invalid) => {
+            return TimelineCursorResolution::Rejected(
+                crate::output::governor::cursor_invalid_degraded_entry(),
+            );
+        }
+        Err(CursorRejection::Stale {
+            cursor_generation,
+            current_generation,
+        }) => {
+            return TimelineCursorResolution::Rejected(
+                crate::output::governor::cursor_stale_degraded_entry(
+                    cursor_generation,
+                    current_generation,
+                ),
+            );
+        }
+    };
+    let offset = payload.position_key.parse::<usize>().ok();
+    let honest = payload.target_schema == AUDIT_TIMELINE_SCHEMA_V1
+        && offset.is_some_and(|offset| {
+            offset < total
+                && u64::try_from(total - offset).is_ok_and(|rest| rest == payload.dropped_count)
+        });
+    match (honest, offset) {
+        (true, Some(offset)) => TimelineCursorResolution::Resume(offset),
+        _ => TimelineCursorResolution::Rejected(
+            crate::output::governor::cursor_invalid_degraded_entry(),
         ),
-    })
+    }
+}
+
+fn encode_timeline_cursor(
+    next_offset: usize,
+    total: usize,
+    binding: &TimelineCursorBinding,
+) -> Result<String, DomainError> {
+    use crate::output::governor::{CURSOR_SCHEMA_V1, CursorPayload, encode_cursor};
+
+    let payload = CursorPayload {
+        schema: CURSOR_SCHEMA_V1.to_owned(),
+        target_schema: AUDIT_TIMELINE_SCHEMA_V1.to_owned(),
+        db_generation: binding.db_generation,
+        position_key: next_offset.to_string(),
+        dropped_count: u64::try_from(total.saturating_sub(next_offset)).unwrap_or(u64::MAX),
+        params_hash: binding.params_hash.clone(),
+    };
+    encode_cursor(&payload, &binding.mac_key)
+}
+
+/// BLAKE3 binding of the timeline's filter parameters (`since`, `surface`,
+/// `action`). `limit` is deliberately excluded: offsets are absolute, so the
+/// same query at a different page size stays resumable (the same posture as
+/// the governor's ceiling exclusion, ADR 0063 §3).
+fn timeline_params_hash(
+    since: Option<&str>,
+    surface: Option<&str>,
+    action: Option<&str>,
+) -> String {
+    crate::output::governor::hash_invocation_params([
+        "audit timeline".to_owned(),
+        format!("since={}", since.unwrap_or("")),
+        format!("surface={}", surface.unwrap_or("")),
+        format!("action={}", action.unwrap_or("")),
+    ])
+}
+
+/// Workspace DB generation for timeline cursors, read with the same
+/// conservative posture as the governor render path: any failure degrades
+/// to generation 0, which a later resume against a written workspace
+/// reports as `cursor_stale`.
+fn timeline_db_generation(workspace: &Path, database_path: Option<&Path>) -> u64 {
+    let database_path = resolved_database_path(workspace, database_path);
+    if !database_path.exists() {
+        return 0;
+    }
+    let Ok(connection) = DbConnection::open_file(&database_path) else {
+        return 0;
+    };
+    let workspace_path = workspace.to_string_lossy().into_owned();
+    let Ok(Some(workspace_row)) = connection.get_workspace_by_path(&workspace_path) else {
+        return 0;
+    };
+    connection
+        .get_workspace_generation(&workspace_row.id)
+        .ok()
+        .flatten()
+        .unwrap_or(0)
 }
 
 fn parse_optional_instant(
@@ -1052,6 +1233,128 @@ mod tests {
             ]
         );
         assert_eq!(report.pagination.total_count, 4);
+        Ok(())
+    }
+
+    fn four_entry_sharded_options(
+        limit: u32,
+        cursor: Option<String>,
+    ) -> ShardedAuditTimelineOptions {
+        ShardedAuditTimelineOptions {
+            shards: vec![AuditShardEntries {
+                shard_id: "shard_a".to_owned(),
+                entries: vec![
+                    shard_timeline_entry(
+                        "audit_00000000000000000000000001",
+                        "2026-05-19T08:00:00Z",
+                        "wsp_a",
+                    ),
+                    shard_timeline_entry(
+                        "audit_00000000000000000000000002",
+                        "2026-05-19T08:00:01Z",
+                        "wsp_a",
+                    ),
+                    shard_timeline_entry(
+                        "audit_00000000000000000000000003",
+                        "2026-05-19T08:00:02Z",
+                        "wsp_a",
+                    ),
+                    shard_timeline_entry(
+                        "audit_00000000000000000000000004",
+                        "2026-05-19T08:00:03Z",
+                        "wsp_a",
+                    ),
+                ],
+            }],
+            limit,
+            cursor,
+            ..Default::default()
+        }
+    }
+
+    // bd-7lvbg.3: ee.cursor.v1 codec on the audit timeline.
+    #[test]
+    fn timeline_cursor_round_trip_partitions_pages_exactly() -> TestResult {
+        let first = list_sharded_timeline(&four_entry_sharded_options(2, None))
+            .map_err(|error| error.message())?;
+        assert_eq!(first.pagination.returned_count, 2);
+        assert!(first.pagination.has_more);
+        assert!(first.degraded.is_empty());
+        let token = first
+            .pagination
+            .next_cursor
+            .clone()
+            .ok_or("page 1 must carry a next_cursor")?;
+        assert!(
+            token.contains('.'),
+            "next_cursor must be an ee.cursor.v1 wire token, got {token:?}"
+        );
+
+        let second = list_sharded_timeline(&four_entry_sharded_options(2, Some(token)))
+            .map_err(|error| error.message())?;
+        assert_eq!(second.pagination.returned_count, 2);
+        assert!(!second.pagination.has_more);
+        assert!(second.pagination.next_cursor.is_none());
+
+        let drained: Vec<&str> = first
+            .entries
+            .iter()
+            .chain(second.entries.iter())
+            .map(|entry| entry.id.as_str())
+            .collect();
+        assert_eq!(
+            drained,
+            vec![
+                "audit_00000000000000000000000001",
+                "audit_00000000000000000000000002",
+                "audit_00000000000000000000000003",
+                "audit_00000000000000000000000004",
+            ],
+            "page sequence must reconstruct the timeline exactly once in order"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_offset_cursor_is_an_empty_cursor_invalid_page() -> TestResult {
+        // The pre-bd-7lvbg.3 bespoke cursor was a bare offset string.
+        let report = list_sharded_timeline(&four_entry_sharded_options(2, Some("2".to_owned())))
+            .map_err(|error| error.message())?;
+        assert!(
+            report.entries.is_empty(),
+            "a rejected cursor must yield an empty page, never a restarted one"
+        );
+        assert_eq!(report.pagination.returned_count, 0);
+        assert!(!report.pagination.has_more);
+        assert!(report.pagination.next_cursor.is_none());
+        let code = report
+            .degraded
+            .first()
+            .and_then(|entry| entry.get("code"))
+            .and_then(JsonValue::as_str);
+        assert_eq!(code, Some("cursor_invalid"));
+        Ok(())
+    }
+
+    #[test]
+    fn timeline_cursor_binds_filter_params() -> TestResult {
+        let first = list_sharded_timeline(&four_entry_sharded_options(2, None))
+            .map_err(|error| error.message())?;
+        let token = first
+            .pagination
+            .next_cursor
+            .ok_or("page 1 must carry a next_cursor")?;
+        // Same cursor, different filter: params binding must reject it.
+        let mut options = four_entry_sharded_options(2, Some(token));
+        options.surface = Some("rule".to_owned());
+        let report = list_sharded_timeline(&options).map_err(|error| error.message())?;
+        assert!(report.entries.is_empty());
+        let code = report
+            .degraded
+            .first()
+            .and_then(|entry| entry.get("code"))
+            .and_then(JsonValue::as_str);
+        assert_eq!(code, Some("cursor_invalid"));
         Ok(())
     }
 
