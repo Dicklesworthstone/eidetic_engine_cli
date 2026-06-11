@@ -1658,7 +1658,13 @@ fn ensure_distill_session(
     {
         return Ok(session.id);
     }
-    let session_id = format!("sess_{}", uuid::Uuid::now_v7());
+    // sessions.id CHECK requires `sess_` + a 26-char ULID payload (= 31);
+    // reuse the memory-id payload exactly like remember-reinforce does.
+    let session_id = {
+        let memory_id = crate::models::MemoryId::now().to_string();
+        let payload = memory_id.trim_start_matches("mem_").to_owned();
+        format!("sess_{payload}")
+    };
     let input = CreateSessionInput {
         workspace_id: workspace_id.to_owned(),
         cass_session_id: JOURNAL_DISTILL_SESSION_KEY.to_owned(),
