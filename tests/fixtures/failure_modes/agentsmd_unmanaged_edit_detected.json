@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "agentsmd_unmanaged_edit_detected",
+  "introduced_by": {
+    "bead": "bd-39tzu.4",
+    "epic_letter": "PRM"
+  },
+  "surfaces": [
+    "export agentsmd",
+    "diag agentsmd-drift"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "The managed block's recorded content hash (the hash= attribute on the begin marker) no longer matches the block body: someone hand-edited inside the markers since the last export. Export refuses to overwrite the edit without --force-managed-block; when forced, the pre-mutation content including the hand edit is preserved in the .ee-backup sibling (ADR 0065 §5/§6). diag agentsmd-drift reports the same condition read-only as hashMatches=false.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Always run the verify script before pushing changes to main.' --workspace . --level procedural --kind rule --json",
+      "ee export agentsmd --workspace . --create --json",
+      "printf 'sneaky hand edit inside the managed block\\n' >> AGENTS.md  # then move the line inside the markers"
+    ],
+    "invocation": "ee export agentsmd --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "agentsmd_unmanaged_edit_detected",
+    "severity": "warning",
+    "message_contains": [
+      "hand-edited",
+      "--force-managed-block"
+    ],
+    "repair_contains": "ee export agentsmd --workspace . --dry-run"
+  },
+  "notes": "The refusal is the contract working, not a failure: hand edits inside the markers are presumed intentional until a human (or a reviewing agent) confirms otherwise via --dry-run and then --force-managed-block. Content outside the markers is never at risk."
+}

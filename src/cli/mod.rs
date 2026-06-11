@@ -356,7 +356,7 @@ const HELP_PRELUDE: &str = concat!(
     "  Curate:         curate (candidates|validate|apply), reflect, playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
     "  Maintenance:    maintenance, job, index, steward, daemon\n",
-    "  Import/Export:  import (cass|jsonl|eidetic-legacy), export, backup, handoff\n",
+    "  Import/Export:  import (cass|jsonl|eidetic-legacy|agentsmd), export [agentsmd], backup, handoff\n",
     "  Diagnostics:    diag, eval, demo, db, analyze, audit, migrate\n",
     "  Configuration:  install, completion, mcp, serve, agent\n",
     "\n",
@@ -1706,9 +1706,53 @@ fn json_with_data_result_path(raw_json: String, result_path: Option<&str>) -> St
     value.to_string()
 }
 
+/// Bridge subcommands under `ee export`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum ExportSubcommand {
+    /// Render the primer rules+warnings sections into the AGENTS.md
+    /// managed block (ADR 0065 §5).
+    #[command(name = "agentsmd")]
+    Agentsmd(AgentsmdExportArgs),
+}
+
+/// Arguments for `ee export agentsmd` (ADR 0065 §5 / bd-39tzu.4).
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct AgentsmdExportArgs {
+    /// Bridge target file; relative paths resolve against the workspace
+    /// root. Defaults to AGENTS.md.
+    #[arg(long = "file", value_name = "PATH")]
+    pub file: Option<PathBuf>,
+
+    /// Primer token budget override for the managed block.
+    #[arg(long = "tokens", value_name = "N")]
+    pub tokens: Option<u32>,
+
+    /// Print the would-be managed-block diff and write nothing.
+    #[arg(long = "dry-run", action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Create the target file when absent.
+    #[arg(long = "create", action = ArgAction::SetTrue)]
+    pub create: bool,
+
+    /// Overwrite a hand-edited managed block (the prior content, hand
+    /// edit included, is preserved in the .ee-backup sibling).
+    #[arg(long = "force-managed-block", action = ArgAction::SetTrue)]
+    pub force_managed_block: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
 /// Arguments for `ee export`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct ExportArgs {
+    /// Optional bridge subcommand (`ee export agentsmd`); without one,
+    /// `ee export` runs the portable JSONL export.
+    #[command(subcommand)]
+    pub subcommand: Option<ExportSubcommand>,
+
     /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
@@ -3140,6 +3184,8 @@ pub struct PackDiffArgs {
 pub enum DiagCommand {
     /// Acquire a deterministic advisory lock for diagnostic fixture replay.
     AdvisoryLock(DiagAdvisoryLockArgs),
+    /// Report AGENTS.md bridge drift: stale export, contradictions, missing rules.
+    AgentsmdDrift(DiagAgentsmdDriftArgs),
     /// Report verification artifact retention budgets and preserve-only actions.
     Artifacts(DiagArtifactsArgs),
     /// Preflight build and artifact sync paths before expensive work starts.
@@ -3195,6 +3241,19 @@ pub enum DiagCommand {
     WriteOwner(DiagWriteOwnerArgs),
     /// Exercise write-spool budget accounting and backpressure diagnostics.
     WriteSpool(DiagWriteSpoolArgs),
+}
+
+/// Arguments for `ee diag agentsmd-drift` (ADR 0065 §5 / bd-39tzu.4).
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct DiagAgentsmdDriftArgs {
+    /// Bridge target file; relative paths resolve against the workspace
+    /// root. Defaults to AGENTS.md.
+    #[arg(long = "file", value_name = "PATH")]
+    pub file: Option<PathBuf>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -9662,6 +9721,31 @@ pub enum ImportCommand {
     /// Inspect legacy Eidetic Engine artifacts without writing storage.
     #[command(name = "eidetic-legacy")]
     EideticLegacy(EideticLegacyImportArgs),
+    /// Parse rule-like AGENTS.md statements into curation candidates.
+    #[command(name = "agentsmd")]
+    Agentsmd(AgentsmdImportArgs),
+}
+
+/// Arguments for `ee import agentsmd` (ADR 0065 §5 / bd-39tzu.4).
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct AgentsmdImportArgs {
+    /// Source file; relative paths resolve against the workspace root.
+    /// Defaults to AGENTS.md.
+    #[arg(long = "file", value_name = "PATH")]
+    pub file: Option<PathBuf>,
+
+    /// Preview the full proposal set without writing anything (default).
+    #[arg(long = "dry-run", action = ArgAction::SetTrue, conflicts_with = "apply")]
+    pub dry_run: bool,
+
+    /// Write pending curation candidates (trust class capped at
+    /// agent_assertion) and append one agentsmd.import audit row each.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub apply: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee import cass`.
@@ -11641,6 +11725,9 @@ where
             DiagCommand::AdvisoryLock(args) => {
                 handle_diag_advisory_lock(&cli, args, stdout, stderr)
             }
+            DiagCommand::AgentsmdDrift(args) => {
+                handle_diag_agentsmd_drift(&cli, args, stdout, stderr)
+            }
             DiagCommand::Artifacts(args) => handle_diag_artifacts(&cli, args, stdout),
             DiagCommand::BuildAdmission(args) => handle_diag_build_admission(&cli, args, stdout),
             DiagCommand::Claims(args) => handle_diag_claims(&cli, args, stdout),
@@ -12280,7 +12367,12 @@ where
                 stderr,
             ),
         },
-        Some(Command::Export(ref args)) => handle_export(&cli, args, stdout, stderr),
+        Some(Command::Export(ref args)) => match &args.subcommand {
+            Some(ExportSubcommand::Agentsmd(agentsmd_args)) => {
+                handle_export_agentsmd(&cli, agentsmd_args, stdout, stderr)
+            }
+            None => handle_export(&cli, args, stdout, stderr),
+        },
         Some(Command::Focus(ref focus_cmd)) => handle_focus(&cli, focus_cmd, stdout, stderr),
         Some(Command::TaskFrame(ref task_frame_cmd)) => {
             handle_task_frame(&cli, task_frame_cmd, stdout, stderr)
@@ -12293,6 +12385,9 @@ where
         }
         Some(Command::Import(ImportCommand::EideticLegacy(ref args))) => {
             handle_import_eidetic_legacy(&cli, args, stdout, stderr)
+        }
+        Some(Command::Import(ImportCommand::Agentsmd(ref args))) => {
+            handle_import_agentsmd(&cli, args, stdout, stderr)
         }
         Some(Command::Install(InstallCommand::Check(ref args))) => {
             handle_install_check(&cli, args, stdout)
@@ -39267,6 +39362,189 @@ fn journal_append_options<'a>(
     }
 }
 
+/// Shared workspace/database bootstrap for the AGENTS.md bridge handlers
+/// (same resolution order as `handle_primer`).
+fn open_agentsmd_workspace(
+    cli: &Cli,
+    database: Option<&Path>,
+) -> Result<(crate::db::DbConnection, String, PathBuf), DomainError> {
+    let workspace_path = cli.resolve_workspace();
+    let database_path = database.map_or_else(
+        || workspace_path.join(".ee").join("ee.db"),
+        Path::to_path_buf,
+    );
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace . --json".to_owned()),
+        });
+    }
+    let connection = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee status --json".to_owned()),
+        }
+    })?;
+    connection.migrate().map_err(|error| DomainError::Storage {
+        message: format!("Failed to migrate database: {error}"),
+        repair: Some("ee migrate run --workspace . --json".to_owned()),
+    })?;
+    let workspace_key = workspace_path.to_string_lossy().into_owned();
+    let workspace_id = match connection.get_workspace_by_path(&workspace_key) {
+        Ok(Some(workspace)) => workspace.id,
+        Ok(None) => {
+            return Err(DomainError::Storage {
+                message: format!("Workspace is not registered: {}", workspace_path.display()),
+                repair: Some("ee init --workspace . --json".to_owned()),
+            });
+        }
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!("Failed to query workspace row: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            });
+        }
+    };
+    Ok((connection, workspace_id, workspace_path))
+}
+
+fn write_agentsmd_report<W>(
+    cli: &Cli,
+    human: &str,
+    data: &serde_json::Value,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, human),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(
+                &serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
+                    "success": true,
+                    "data": data,
+                })
+                .to_string(),
+            ) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": data,
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn handle_export_agentsmd<W, E>(
+    cli: &Cli,
+    args: &AgentsmdExportArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id, workspace_path) =
+        match open_agentsmd_workspace(cli, args.database.as_deref()) {
+            Ok(opened) => opened,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    let options = crate::core::agentsmd::AgentsmdExportOptions {
+        file: args.file.clone(),
+        tokens: args.tokens,
+        dry_run: args.dry_run,
+        create: args.create,
+        force_managed_block: args.force_managed_block,
+    };
+    match crate::core::agentsmd::run_agentsmd_export(
+        &connection,
+        &workspace_id,
+        &workspace_path,
+        &options,
+    ) {
+        Ok(report) => {
+            write_agentsmd_report(cli, &report.human_summary(), &report.data_json(), stdout)
+        }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_import_agentsmd<W, E>(
+    cli: &Cli,
+    args: &AgentsmdImportArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id, workspace_path) =
+        match open_agentsmd_workspace(cli, args.database.as_deref()) {
+            Ok(opened) => opened,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    // Dry-run is the default (ADR 0065 §5): --apply is the only way to
+    // write; --dry-run is accepted explicitly and conflicts with --apply
+    // at the clap layer.
+    let options = crate::core::agentsmd::AgentsmdImportOptions {
+        file: args.file.clone(),
+        apply: args.apply,
+    };
+    match crate::core::agentsmd::run_agentsmd_import(
+        &connection,
+        &workspace_id,
+        &workspace_path,
+        &options,
+    ) {
+        Ok(report) => {
+            write_agentsmd_report(cli, &report.human_summary(), &report.data_json(), stdout)
+        }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_diag_agentsmd_drift<W, E>(
+    cli: &Cli,
+    args: &DiagAgentsmdDriftArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id, workspace_path) =
+        match open_agentsmd_workspace(cli, args.database.as_deref()) {
+            Ok(opened) => opened,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    let options = crate::core::agentsmd::AgentsmdDriftOptions {
+        file: args.file.clone(),
+    };
+    match crate::core::agentsmd::run_agentsmd_drift(
+        &connection,
+        &workspace_id,
+        &workspace_path,
+        &options,
+    ) {
+        Ok(report) => {
+            write_agentsmd_report(cli, &report.human_summary(), &report.data_json(), stdout)
+        }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn handle_primer<W, E>(
     cli: &Cli,
     args: &PrimerArgs,
@@ -54607,6 +54885,7 @@ impl NormalizedInvocation {
                 },
                 Command::Diag(diag) => match diag {
                     DiagCommand::AdvisoryLock(_) => "diag advisory-lock".to_string(),
+                    DiagCommand::AgentsmdDrift(_) => "diag agentsmd-drift".to_string(),
                     DiagCommand::Artifacts(_) => "diag artifacts".to_string(),
                     DiagCommand::BuildAdmission(_) => "diag build-admission".to_string(),
                     DiagCommand::CausalEdge(_) => "diag causal-edge".to_string(),
@@ -54652,7 +54931,10 @@ impl NormalizedInvocation {
                     EvalCommand::Report { .. } => "eval report".to_string(),
                     EvalCommand::List => "eval list".to_string(),
                 },
-                Command::Export(_) => "export".to_string(),
+                Command::Export(export) => match &export.subcommand {
+                    Some(ExportSubcommand::Agentsmd(_)) => "export agentsmd".to_string(),
+                    None => "export".to_string(),
+                },
                 Command::Focus(focus) => match focus {
                     FocusCommand::Show(_) => "focus show".to_string(),
                     FocusCommand::Set(_) => "focus set".to_string(),
@@ -54690,6 +54972,7 @@ impl NormalizedInvocation {
                     ImportCommand::Cass(_) => "import cass".to_string(),
                     ImportCommand::Jsonl(_) => "import jsonl".to_string(),
                     ImportCommand::EideticLegacy(_) => "import eidetic-legacy".to_string(),
+                    ImportCommand::Agentsmd(_) => "import agentsmd".to_string(),
                 },
                 Command::Install(install) => match install {
                     InstallCommand::Check(_) => "install check".to_string(),

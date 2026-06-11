@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/ee.agentsmd.export.v1.json",
+  "title": "ee.agentsmd.export.v1",
+  "description": "AGENTS.md bridge export report (ADR 0065 §5). Emitted under data by `ee export agentsmd`. The export renders the primer rules+warnings sections into a marker-delimited managed block; it never edits outside its markers, backs up the prior content before mutating, and refuses a hand-edited block without --force-managed-block. Deterministic: no wall-clock timestamps, no absolute paths, no binary version.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "workspaceId",
+    "file",
+    "dbGeneration",
+    "dryRun",
+    "created",
+    "changed",
+    "backupPath",
+    "blockHash",
+    "rulesCount",
+    "warningsCount",
+    "redactionSkipped",
+    "diff",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.agentsmd.export.v1"
+    },
+    "command": {
+      "const": "export agentsmd"
+    },
+    "status": {
+      "enum": ["ok", "file_missing", "refused_unmanaged_edit"],
+      "description": "ok for a completed run (including no-op re-exports); file_missing when the target is absent and --create was not passed; refused_unmanaged_edit when the managed block was hand-edited and --force-managed-block was not passed."
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "file": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Workspace-relative bridge target path (AGENTS.md by default)."
+    },
+    "dbGeneration": {
+      "type": "integer",
+      "description": "Workspace DB generation stamped on the managed-block begin marker."
+    },
+    "dryRun": {
+      "type": "boolean",
+      "description": "true previews the managed-block diff and writes nothing."
+    },
+    "created": {
+      "type": "boolean",
+      "description": "true when the run materialized a new file (--create)."
+    },
+    "changed": {
+      "type": "boolean",
+      "description": "true when the managed block differs from what is (or would be) on disk; an idempotent re-export reports false."
+    },
+    "backupPath": {
+      "type": ["string", "null"],
+      "description": "Workspace-relative .ee-backup sibling written before mutation; null for dry runs, no-ops, refusals, and fresh creates."
+    },
+    "blockHash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{16}$",
+      "description": "Content hash of the rendered managed-block body, recorded on the begin marker for hand-edit detection."
+    },
+    "rulesCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "warningsCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "redactionSkipped": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Primer redaction skip count carried through for honesty (skipped, never leaked)."
+    },
+    "diff": {
+      "type": ["string", "null"],
+      "description": "Dry-run block replacement preview (removed lines prefixed '- ', added lines prefixed '+ '); null otherwise."
+    },
+    "degraded": {
+      "type": "array",
+      "description": "Standard ee.response.v2 degraded entries (agentsmd_file_missing, agentsmd_markers_missing, agentsmd_unmanaged_edit_detected).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "severity", "message"],
+        "properties": {
+          "code": {
+            "enum": [
+              "agentsmd_file_missing",
+              "agentsmd_markers_missing",
+              "agentsmd_unmanaged_edit_detected"
+            ]
+          },
+          "severity": { "type": "string" },
+          "message": { "type": "string" },
+          "repair": { "type": ["string", "null"] }
+        }
+      }
+    }
+  },
+  "x-ee-status": {
+    "shipped": true,
+    "available_in_build": true,
+    "tracking_bead": "bd-39tzu.4"
+  }
+}

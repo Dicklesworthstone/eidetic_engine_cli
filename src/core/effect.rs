@@ -1220,6 +1220,10 @@ impl EffectManifest {
             CommandEffect::read_only_db("demo show", "Show persisted demo audit rows"),
             CommandEffect::read_only_db("demo verify", "Verify demo artifacts"),
             CommandEffect::read_only_db("diag advisory-lock", "Inspect advisory-lock diagnostics"),
+            CommandEffect::read_only_db(
+                "diag agentsmd-drift",
+                "Report AGENTS.md bridge drift: stale export, file-vs-memory contradictions, missing rules",
+            ),
             CommandEffect::read_only_db("diag artifacts", "Inspect artifact diagnostics"),
             CommandEffect::read_only_db(
                 "diag build-admission",
@@ -1812,6 +1816,17 @@ impl EffectManifest {
                 "Import from legacy Eidetic export",
             ),
             CommandEffect::append_only_write(
+                "import agentsmd",
+                vec![
+                    "curation_candidates",
+                    "evidence_spans",
+                    "sessions",
+                    "audit_log",
+                ],
+                "deterministic candidate id over (file, statement text)",
+                "Import rule-like AGENTS.md statements as pending curation candidates",
+            ),
+            CommandEffect::append_only_write(
                 "pack build",
                 vec!["context_packs", "pack_items", "audit_log"],
                 "pack hash",
@@ -2356,6 +2371,11 @@ impl EffectManifest {
                 "export",
                 vec![".ee/backups/<backup-id>/ or <--output-dir>/<backup-id>/"],
                 "Export redacted JSONL records as side-path artifacts",
+            ),
+            CommandEffect::workspace_file_write(
+                "export agentsmd",
+                vec!["AGENTS.md (or --file target) managed block plus .ee-backup sibling"],
+                "Render the primer rules+warnings sections into the AGENTS.md managed block",
             ),
             CommandEffect::workspace_file_write(
                 "artifact relocate",

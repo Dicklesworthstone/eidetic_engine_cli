@@ -1,0 +1,1572 @@
+# AGENTS.md — ee (Eidetic Engine CLI)
+
+> Guidelines for AI coding agents working in this Rust codebase.
+
+---
+
+## RULE 0 - THE FUNDAMENTAL OVERRIDE PREROGATIVE
+
+If I tell you to do something, even if it goes against what follows below, YOU MUST LISTEN TO ME. I AM IN CHARGE, NOT YOU.
+
+---
+
+## RULE NUMBER 1: NO FILE DELETION
+
+**YOU ARE NEVER ALLOWED TO DELETE A FILE WITHOUT EXPRESS PERMISSION.** Even a new file that you yourself created, such as a test code file. You have a horrible track record of deleting critically important files or otherwise throwing away tons of expensive work. As a result, you have permanently lost any and all rights to determine that a file or folder should be deleted.
+
+**YOU MUST ALWAYS ASK AND RECEIVE CLEAR, WRITTEN PERMISSION BEFORE EVER DELETING A FILE OR FOLDER OF ANY KIND.**
+
+---
+
+## Irreversible Git & Filesystem Actions — DO NOT EVER BREAK GLASS
+
+1. **Absolutely forbidden commands:** `git reset --hard`, `git clean -fd`, `rm -rf`, or any command that can delete or overwrite code/data must never be run unless the user explicitly provides the exact command and states, in the same message, that they understand and want the irreversible consequences.
+2. **No guessing:** If there is any uncertainty about what a command might delete or overwrite, stop immediately and ask the user for specific approval. "I think it's safe" is never acceptable.
+3. **Safer alternatives first:** When cleanup or rollbacks are needed, request permission to use non-destructive options (`git status`, `git diff`, `git stash`, copying to backups) before ever considering a destructive command.
+4. **Mandatory explicit plan:** Even after explicit user authorization, restate the command verbatim, list exactly what will be affected, and wait for a confirmation that your understanding is correct. Only then may you execute it—if anything remains ambiguous, refuse and escalate.
+5. **Document the confirmation:** When running any approved destructive command, record (in the session notes / final response) the exact user text that authorized it, the command actually run, and the execution time. If that record is absent, the operation did not happen.
+
+### Wiring Trauma-Guard Into Agent Hooks
+
+`ee preflight check --cmd "<shell-command>" --json` is the command-facing
+trauma-guard surface. Agent harnesses should call it before running shell
+commands that may delete files, rewrite Git history, mutate clusters, destroy
+infrastructure, or write raw block devices. Exit code `7` means policy denied:
+stop and ask for explicit human authorization instead of retrying with a
+different spelling.
+
+Hook integration rules:
+
+- Pass the exact command string the agent is about to run; do not sanitize away
+  flags or shell wrappers before calling `ee preflight check`.
+- Treat `matches[].source` and `matches[].ruleId` as the audit trail for why
+  the guard fired.
+- Only use `--override-token` when a human has already approved that exact
+  destructive action. Bypass-token issuance, verification, revocation, and
+  rate-limit behavior are audited separately.
+- Keep `tests/fixtures/destructive_patterns/commands.json` in sync when adding
+  new built-in destructive-command patterns.
+- The guard combines rule/registry matching with risk-memory lookup. When a
+  destructive command matches a guard rule, current CLI paths query stored
+  `risk`, `anti-pattern`, and `failure` memories, surface `matchedMemories`
+  with provenance when present, and emit `no_risk_memories` when none match.
+  Keep public CLI e2e coverage (`tests/e2e_trauma_guard.rs`,
+  `tests/trauma_guard_wired.rs`, and bypass-token audit tests) aligned when
+  changing this contract.
+
+---
+
+## Git Branch: ONLY Use `main`, NEVER `master`
+
+**The default branch is `main`.** All work happens on `main` — commits, PRs, feature branches all merge to `main`. Never reference `master` in code or docs. If you see `master` anywhere, it's a bug that needs fixing.
+
+---
+
+## RULE NUMBER 2: NO WORKTREES. EVER. NO EXCEPTIONS.
+
+**`git worktree add` is ABSOLUTELY FORBIDDEN. Period.**
+
+You may **NEVER** create a git worktree for any reason. Not to "verify a build in isolation," not to "stage a push," not to "test a rebase," not to "compare two commits," not to "run a parallel cargo build." **NEVER.**
+
+The user has been burned by agents leaving stray worktrees littering the filesystem with detached HEADs, abandoned rebases, and orphaned commits. This wastes hours of recovery work and risks losing real code.
+
+**HARD CONSTRAINTS:**
+
+- All work happens in the single canonical checkout at `/data/projects/eidetic_engine_cli` on the `main` branch.
+- **Never run `git worktree add ...`.**
+- **Never create or work on a feature branch.** All commits land directly on `main`.
+- **Never run `git rebase` interactively or otherwise.** If you think you need to rebase, you do not.
+- **Never run `git checkout <other-ref>`** to detach the HEAD or move off `main`. The only acceptable reset of HEAD is `git pull --rebase origin main` to sync with the remote, and even that goes onto `main`.
+- **Never run `git stash`** to "park" changes — commit them or discard them properly. Stashing is how work gets lost.
+- If your tooling (codex's `/review`, an agent script, anything) wants to spawn a worktree, **disable it immediately or work around it.** A worktree-using helper is broken; do not use it.
+
+**ENFORCEMENT:**
+
+If you see a stray worktree on this host (anything other than `/data/projects/eidetic_engine_cli` itself in `git worktree list`), the orchestrator will:
+
+1. Cherry-pick any unique commits from the stray worktree onto `main`.
+2. `git worktree remove --force <path>` every stray worktree.
+3. Find which agent created it and dispatch a corrective prompt.
+
+Repeat offenders are killed and replaced.
+
+**NO WORKTREES. NO EXCEPTIONS. THIS IS NOT NEGOTIABLE.**
+
+---
+
+## Toolchain: Rust & Cargo
+
+We only use **Cargo** in this project, NEVER any other package manager.
+
+- **Edition:** Rust 2024 (nightly required — see `rust-toolchain.toml`)
+- **Dependency versions:** Explicit versions for stability
+- **Configuration:** Cargo.toml only (single binary crate with library surface in the same package; not a workspace in phase 0)
+- **Unsafe code:** Forbidden (`#![forbid(unsafe_code)]`)
+
+### Forbidden Dependencies (Hard Rule, Audited By CI)
+
+These are **not allowed** anywhere in the dependency tree. If a transitive dependency pulls one in, the feature must be disabled or the dep quarantined behind an explicit adapter with a removal plan.
+
+| Crate | Reason |
+|-------|--------|
+| `tokio`, `tokio-util` | Asupersync is the runtime; no Tokio. |
+| `async-std`, `smol` | Same — only Asupersync. |
+| `rusqlite` | FrankenSQLite via SQLModel is the storage layer. |
+| `sqlx`, `diesel`, `sea-orm` | SQLModel is the ORM. |
+| `petgraph` | FrankenNetworkX is the graph layer. |
+| `hyper`, `axum`, `tower`, `reqwest` | No HTTP stacks in core. Adapters live behind feature flags. |
+
+Run `cargo tree -e features` and grep for these crates. CI must fail if any appear.
+
+### Key Dependencies (Phase 0)
+
+| Crate | Purpose |
+|-------|---------|
+| `asupersync` | Runtime: `Cx`, `Scope`, `Outcome`, budgets, capabilities, supervision |
+| `fsqlite` + `fsqlite-core` + `fsqlite-types` + `fsqlite-error` | FrankenSQLite — durable source of truth |
+| `fsqlite-ext-fts5`, `fsqlite-ext-json` | Lexical FTS fallback and JSON ops |
+| `sqlmodel` (+ `-core`, `-query`, `-schema`, `-session`, `-pool`, `-frankensqlite`) | ORM and migrations on top of FrankenSQLite |
+| `frankensearch` | Hybrid lexical + semantic retrieval (`TwoTierSearcher`) |
+| `fnx-runtime`, `fnx-classes`, `fnx-algorithms`, `fnx-cgse`, `fnx-convert` | FrankenNetworkX graph analytics |
+| `clap` + `clap_complete` | CLI argument parsing with shell completions |
+| `serde` + `serde_json` + `serde_yaml` | Stable JSON/YAML output contracts |
+| `toml` + `toml_edit` | Config parsing with formatting preservation |
+| `chrono` | RFC 3339 timestamps |
+| `uuid` (v7) | Time-ordered IDs within one process; use explicit timestamps or sequence columns for cross-process ordering |
+| `blake3`, `sha2` | Content hashing, pack hashes, source hashes |
+| `tiktoken-rs` | Token budgeting for context packs |
+| `tracing` + `tracing-subscriber` | Structured logging and diagnostics |
+| `mcp` feature (in-tree stdio adapter) | Optional hand-rolled MCP JSON-RPC adapter; no `rust-mcp-sdk` dependency because that crate currently requires Tokio |
+
+### Feature Flags
+
+```toml
+[features]
+default = ["fts5", "json", "embed-fast", "lexical-bm25"]
+fts5 = ["fsqlite-ext-fts5"]
+json = ["fsqlite-ext-json"]
+embed-fast = ["frankensearch/model2vec"]
+# embed-quality is intentionally not exposed until frankensearch/fastembed is forbidden-dep clean.
+lexical-bm25 = ["frankensearch/lexical"]
+mcp = []  # gates the in-tree stdio MCP adapter; intentionally no rust-mcp-sdk/Tokio dependency
+serve = []
+```
+
+---
+
+## Local Dev Environment: External Build Drive (Mac)
+
+The Mac dev host (`/Users/jemanuel/projects/eidetic_engine_cli`) redirects
+**all** cargo build output and tmp scratch to an external USB-NVMe drive to
+keep the 460 GB internal SSD from filling up. This is configured globally
+in `~/.zshrc` so it applies to every cargo invocation on this machine, not
+just to this project:
+
+```bash
+# ~/.zshrc — mount-guarded so it degrades to local builds if the drive is
+# unplugged rather than failing every cargo command. CARGO_TARGET_DIR
+# is set unconditionally for interactive shells; TMPDIR is more delicate
+# (see note below) and ONLY redirected per-cargo-invocation via a
+# function wrapper, not exported into interactive shells.
+if [ -d /Volumes/USBNVME16TB ]; then
+  export CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target
+fi
+
+# Unset the TMPDIR inherited from ~/.zshenv if it points at the ExFAT USB
+# scratch dir. Non-interactive shells (used by Codex and other agents) still
+# see TMPDIR=ExFAT from .zshenv — they don't load gitstatus, so they're
+# unaffected — but interactive shells need a socket-capable TMPDIR so that
+# gitstatusd (powerlevel10k's git-info daemon) can open its IPC socket.
+if [[ "${TMPDIR:-}" == /Volumes/USBNVME16TB/* ]]; then
+  unset TMPDIR
+fi
+```
+
+Why TMPDIR is handled differently from CARGO_TARGET_DIR:
+
+- `CARGO_TARGET_DIR` is safe to export globally. Cargo writes plain
+  files; the destination's filesystem semantics don't matter beyond
+  needing write + space.
+- `TMPDIR` on the USB drive *would* recapture the linker / debuginfo /
+  fingerprint scratch cargo writes during a build (often several GB
+  per session) — that's why an earlier revision of this note set it
+  unconditionally. But the USB drive is **formatted ExFAT**, which
+  does not support Unix domain sockets. Interactive shells run
+  gitstatusd (the powerlevel10k git-info daemon) which opens an IPC
+  socket under `$TMPDIR`; pointing it at ExFAT broke the prompt with
+  no error in the foreground. So the live shape: interactive shells
+  unset the ExFAT TMPDIR (gitstatus works); non-interactive shells
+  and cargo invocations route through `.zshenv` / per-cargo wrappers
+  that re-set TMPDIR to the USB scratch dir. The cargo-side redirect
+  is in a `cargo()` shell function further down in `~/.zshrc` rather
+  than a global export.
+
+Hard rules for agents working on this Mac:
+
+1. **Don't undo the redirect.** If you see `CARGO_TARGET_DIR` set to
+   `/Volumes/USBNVME16TB/...`, leave it. Don't `unset CARGO_TARGET_DIR`
+   "to make builds faster" — the internal SSD has only single-digit GB
+   free and a single full debug build will trip the OOM-for-disk threshold.
+2. **Don't commit the redirect to project config.** No `.cargo/config.toml`
+   in this repo with the external-drive path baked in — the canonical
+   server checkout at `/data/projects/eidetic_engine_cli` doesn't have
+   that drive, and a committed absolute path would break server builds.
+   The redirect lives in `~/.zshrc` (per-machine), not in the repo.
+3. **Reading build artifacts:** `target/` in the repo will be empty or
+   stale; the real artifacts are at
+   `/Volumes/USBNVME16TB/temp_agent_space/cargo-target/{debug,release}/...`.
+   Scripts that hard-code `./target/release/ee` should be updated to use
+   `$(cargo metadata --no-deps --format-version 1 | jq -r .target_directory)/release/ee`
+   or `cargo run --release --` instead of poking at the path directly.
+4. **rch (remote compilation helper)** still works: it builds on remote
+   workers and ships the artifact back; the local `CARGO_TARGET_DIR` only
+   affects where the returned artifact lands.
+5. **If the USB drive is unplugged**, the `if [ -d ... ]` guard falls
+   through and cargo writes to the in-repo `./target/` as usual — slower
+   to fill the disk but builds still work. Re-plug the drive and open a
+   new shell to restore the redirect.
+6. **Disk-pressure cleanup playbook**: when the internal SSD gets tight,
+   the safe-now wins are (in order of size):
+   - `rm -rf "$CARGO_TARGET_DIR/debug/incremental"` — ~7–9 GB, only when
+     no `cargo build`/`cargo test` is running.
+   - `rm -rf "$CARGO_TARGET_DIR/release"` — ~2 GB, only when no release
+     build is running.
+   - `rm -rf fuzz/target` — only when no `cargo fuzz` is running.
+   - `rm -rf ~/.cargo/registry ~/.cargo/advisory-db` — ~300 MB, cargo
+     refetches automatically on next build.
+   Don't touch `target/debug/deps` casually; it forces a full
+   rebuild-from-source of every transitive dependency (10–15 min cost).
+   Never delete `~/.local/share/ee/` (the source-of-truth DB),
+   `~/.local/share/mcp_agent_mail/` (multi-agent coordination), or
+   anything in `~/.agent_settings_backups/` (explicit git-versioned
+   recovery snapshots).
+
+This is a **local dev environment** note, not a project requirement. CI,
+the Linux server checkout, and other contributors are unaffected. The
+note lives in AGENTS.md so any agent working on this Mac understands why
+`target/` looks empty and where the real artifacts are.
+
+---
+
+## Code Editing Discipline
+
+### No Script-Based Changes
+
+**NEVER** run a script that processes/changes code files in this repo. Brittle regex-based transformations create far more problems than they solve.
+
+- **Always make code changes manually**, even when there are many instances
+- For many simple changes: use parallel subagents
+- For subtle/complex changes: do them methodically yourself
+
+### No File Proliferation
+
+If you want to change something or add a feature, **revise existing code files in place**.
+
+**NEVER** create variations like:
+- `mainV2.rs`
+- `main_improved.rs`
+- `main_enhanced.rs`
+
+New files are reserved for **genuinely new functionality** that makes zero sense to include in any existing file. The bar for creating new files is **incredibly high**. The plan calls for a single binary crate with a library surface in the same package — do not split into multiple crates until the dependency graph clearly justifies it.
+
+---
+
+## Backwards Compatibility
+
+We do not care about backwards compatibility—we're in early development with no users. We want to do things the **RIGHT** way with **NO TECH DEBT**.
+
+- Never create "compatibility shims"
+- Never create wrapper functions for deprecated APIs
+- Just fix the code directly
+
+ADRs record decisions; they are not excuses for keeping old APIs alive.
+
+---
+
+## Compiler Checks (CRITICAL)
+
+**After any substantive code changes, you MUST verify no errors were introduced:**
+
+```bash
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+```
+
+If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
+
+### Full Verification (Recommended)
+
+For complete readiness-gate verification, run the central orchestrator:
+
+```bash
+./scripts/verify.sh
+```
+
+This runs all gates in the correct order with per-stage exit codes and durations:
+1. Forbidden dependency check (`./scripts/check-forbidden-deps.sh`)
+2. Closure linter (`./scripts/closure-lint.sh --audit --json`)
+3. Verification drift guard (`./scripts/verification-drift-guard.sh --json`)
+4. Vision coverage (`./scripts/vision-coverage.sh --json`)
+5. Unit, contract, and golden tests (`cargo test --workspace --lib --bins --tests --examples`)
+6. Basic E2E (`./scripts/e2e_test.sh`)
+7. Advanced E2E (`./scripts/e2e_advanced.sh`)
+8. Boundary migration E2E (`./scripts/e2e_boundary_migration.sh`)
+
+Criterion benchmarks are excluded from the normal test gate and run only through
+the explicit benchmark gate (`./scripts/verify.sh --include-bench` or
+`./scripts/bench_perf_regression.sh --check-regression`).
+
+The script fails fast on the first failing gate.
+
+---
+
+## Testing
+
+### Testing Policy
+
+Every module includes inline `#[cfg(test)]` unit tests alongside the implementation. Tests must cover:
+- Happy path
+- Edge cases (empty input, max values, boundary conditions)
+- Error conditions
+
+### Test Categories Required By The Plan
+
+| Category | Purpose |
+|----------|---------|
+| Unit tests | Per-module behavior, scoring math, ID generation, hashing |
+| Integration tests | End-to-end CLI flows against temporary DBs and indexes |
+| Deterministic runtime tests | Asupersync `LabRuntime` tests for cancellation, budgets, supervision |
+| Golden tests | Stable JSON / Markdown / TOON output contracts (`ee context`, `ee search`, `ee why`, etc.) |
+| Memory evaluation harness | Retrieval quality fixtures with deterministic embeddings |
+| Property and fuzz tests | Query parser, packing budgets, JSONL header parsing |
+| Forbidden-dependency audit | Fails if `tokio`, `rusqlite`, `petgraph`, etc. appear |
+
+### Determinism Rules
+
+- Given the same database, indexes, config, and query, JSON output must be stable.
+- Ranking ties must be deterministic.
+- Context pack hashes must be reproducible.
+- Tests must use `LabRuntime` and a hash embedder (not real models) where applicable.
+
+---
+
+## Third-Party Library Usage
+
+If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to find the latest documentation and current best practices. The franken-stack crates (`asupersync`, `fsqlite`, `sqlmodel`, `frankensearch`, `franken_networkx`) live in `/dp/` — read their source rather than guessing.
+
+---
+
+## ee (Eidetic Engine CLI) — This Project
+
+**This is the project you're working on.** `ee` is a local-first Rust CLI memory substrate for coding agents. It captures durable facts, work history, decisions, procedural rules, failures, and evidence; indexes them with hybrid search; reasons over their relationships with graph algorithms; and emits compact, explainable context packs that an existing agent harness (Codex, Claude Code, etc.) can consume before, during, and after work.
+
+### The Controlling Idea
+
+> `ee` does not replace agent harnesses. It is the durable memory layer those harnesses call.
+
+Agents push evidence and lessons in; agents pull context out. `ee` should not reach into the agent's work unless explicitly invoked by a hook or command. If a proposed feature requires `ee` to become the agent loop, planner, tool router, chat shell, autonomous worker, or central web service, it is probably a regression toward the old Eidetic Engine and should be rejected.
+
+### Hard Requirements (Non-Negotiable)
+
+- The binary is named `ee`.
+- Implementation language is Rust (edition 2024, nightly).
+- Runtime foundation is `/dp/asupersync`. **No Tokio.**
+- Database foundation is `/dp/frankensqlite` through `/dp/sqlmodel_rust`. **No `rusqlite`.**
+- Raw session history comes from `/dp/coding_agent_session_search` (`cass`) — consume robot/JSON output, do not duplicate the store.
+- General search is `/dp/frankensearch` — no custom RRF/BM25/vector code.
+- Graph analytics is `/dp/franken_networkx` — no `petgraph`, no hand-rolled algorithms for core metrics.
+- Procedural-memory concepts come from `/dp/cass_memory_system` (concept only — no TS runtime dependency).
+- The original Eidetic Engine repos are design sources only; do not copy their Python/FastAPI/MCP-first architecture.
+- The first deliverable is a robust local CLI, not a web app, daemon, or MCP server.
+- All machine-facing commands must support stable JSON output.
+- All generated context must include provenance and an explanation of why it was selected.
+
+### Non-Goals For V1
+
+- No replacement for Codex, Claude Code, or other agent harnesses.
+- No general-purpose workflow engine.
+- No web UI before the CLI is useful.
+- MCP is not required for normal operation (it is an optional adapter).
+- No paid LLM APIs required.
+- No reliance on multi-process concurrent SQLite writers for correctness.
+- No leading with Browser Edition / QUIC / RaptorQ / distributed surfaces from Asupersync.
+- No custom RRF / vector store / BM25 — use Frankensearch.
+- No secrets in context packs.
+- Forgetting and decay are features; do not try to make all memories permanent.
+
+### Five Core Jobs
+
+1. **Ingest** — import session history (`cass`) and explicit notes into a durable local store
+2. **Retrieve** — hybrid search over memories, sessions, rules, artifacts, and decisions
+3. **Pack** — assemble compact task-specific context with provenance and explanations
+4. **Learn** — distill repeated experiences into procedural rules and anti-patterns
+5. **Maintain** — link, score, decay, consolidate, validate, and repair memory over time
+
+The most important workflow is:
+
+```bash
+ee pack "fix failing release workflow" --workspace . --max-tokens 4000 --json
+```
+
+### High-Level Architecture
+
+```text
+Agent/Human
+  |
+  | ee context/search/remember/import/curate
+  v
+ee-cli  ->  ee-core
+                |
+                +--> ee-db        (SQLModel / FrankenSQLite — source of truth)
+                +--> ee-search    (Frankensearch — derived lexical + vector indexes)
+                +--> ee-cass      (imports evidence from coding_agent_session_search)
+                +--> ee-graph     (FrankenNetworkX graph projections)
+                +--> ee-pack      (deterministic context packs with provenance)
+                +--> ee-curate    (procedural rules, candidates, validation)
+                +--> ee-steward   (maintenance jobs, optional supervised daemon)
+                +--> ee-policy    (redaction, privacy, scope, retention, trust)
+                +--> ee-output    (JSON / Markdown / TOON / human terminal)
+                +--> ee-config / ee-hooks / ee-mcp / ee-serve / ee-obs
+```
+
+### Module Layout (Phase 0 — Single Crate)
+
+These are module boundaries inside one binary crate. They become separate crates only when the dependency graph or release process clearly justifies it.
+
+```text
+src/
+  main.rs
+  lib.rs
+  cli/        # Clap commands, process I/O, formatting, exit codes
+  core/       # Use cases, application services, runtime wiring
+  models/     # Domain types, IDs, enums, output contracts
+  db/         # SQLModel models, migrations, repositories
+  search/     # Frankensearch integration, indexing, scoring
+  cass/       # CASS import adapter (robot/JSON contracts)
+  graph/      # FrankenNetworkX projection and metrics
+  pack/       # Context packing, token budgets, MMR, provenance
+  curate/     # Rule candidates, validation, feedback, maturity
+  steward/    # Maintenance jobs, optional daemon
+  policy/     # Redaction, privacy, scope, retention, trust
+  output/     # JSON / Markdown / TOON / human rendering
+  config/     # Config loading, path resolution, workspace discovery
+  hooks/      # Optional hook helpers for agent harnesses
+  mcp/        # Optional MCP stdio adapter (feature-gated)
+  serve/      # Optional localhost HTTP/SSE adapter (feature-gated)
+  obs/        # Tracing, audit log, diagnostics
+docs/
+  adr/        # Architectural decision records
+  ...
+tests/
+  fixtures/
+```
+
+### Dependency Direction (Strict)
+
+```text
+cli  ->  core  ->  { db, search, cass, graph, pack, curate, policy, output }
+                       |
+                       v
+                    models
+```
+
+- Lower-level modules must not depend on `cli`.
+- Domain types live in `models`, not in CLI code.
+- Repositories return domain types, not CLI output structs.
+- Search indexes are written through `search`, never directly.
+- Graph metrics are derived from DB records; never hand-maintained elsewhere.
+
+### Walking Skeleton (First Implementation Slice)
+
+The walking skeleton is the smallest build that proves the architecture, not the smallest code that compiles. It must demonstrate:
+
+```text
+manual memory -> FrankenSQLite -> search document -> Frankensearch
+              -> context pack -> pack record -> why output
+```
+
+Required commands for the first slice:
+
+```bash
+ee init --workspace .
+ee remember --workspace . --level procedural --kind rule "Run cargo fmt --check before release." --json
+ee search "format before release" --workspace . --json
+ee pack "prepare release" --workspace . --format markdown
+ee why <memory-id> --json
+ee status --json
+```
+
+> `ee pack "<task>"` is the canonical context-pack surface after the triad promotion
+> (see `docs/triad_compat_plan.md`). `ee context "<task>"` is retained as a
+> soft-deprecated alias and emits a `deprecated_alias` info-severity degraded entry
+> pointing to `ee pack`. The alias still executes the same behavior during the
+> deprecation window.
+
+Acceptance gate:
+
+- All commands work without daemon mode
+- All commands have stable JSON mode
+- Memory is stored in FrankenSQLite through `ee-db`
+- Search results come from Frankensearch or a documented degraded lexical path
+- Context pack includes provenance
+- `ee why` explains storage, retrieval, and pack selection
+- Pack record is persisted
+- `ee status` reports DB, index, and degraded capabilities
+- Cancellation tests cover at least one command path
+- No Tokio or `rusqlite` dependency appears in the dep tree
+
+**Do NOT start with:** daemon, MCP server, web UI, automatic LLM curation, graph analytics, or JSONL sync. Those come after the core context loop works.
+
+### Product Principles (Apply When In Doubt)
+
+- **Local first** — no cloud dependency required; remote APIs and model downloads are explicit opt-in
+- **Harness agnostic** — works from any shell; never assumes control of the agent loop
+- **CLI first, daemon later** — no core command may require the daemon in v1
+- **Deterministic by default** — same DB + indexes + config + query → stable JSON output
+- **Explainable retrieval** — every returned memory answers: why selected, what supports it, how fresh, how reliable, what scores mattered
+- **Search indexes are derived assets** — FrankenSQLite/SQLModel are truth; indexes are rebuildable
+- **Graceful degradation** — semantic down → lexical works; graph stale → retrieval works; CASS missing → explicit memories work
+- **No silent memory mutation** — every promotion, consolidation, or tombstone is audited
+- **Evidence over vibes** — rules without source/feedback/validation stay low-confidence
+
+### Agent UX Patterns (post-2026-05 overhaul)
+
+The 2026-05 agent-first UX overhaul rewrote how `ee` talks to coding agents. This subsection captures the contract every agent should rely on; the meta-docs cross-linked below are the authoritative reference.
+
+#### Canonical workflow (the 5-command core path)
+
+```bash
+ee init    --workspace . --json
+ee remember "<text>" --workspace . --level <l> --kind <k> --json
+ee search   "<query>" --workspace . --json
+ee pack     "<task>"  --workspace . --max-tokens N --json   # use pack.text as a ready-to-prepend prompt fragment
+ee why      <id>      --workspace . --json                  # explain why a memory was selected
+```
+
+`ee pack "<task>"` is the canonical post-triad-promotion surface; `ee context "<task>"` is retained as a soft-deprecated alias that runs the same code path and emits `deprecated_alias` (severity `info`) in its `degraded[]`. Prefer `ee pack` in new agent harnesses, scripts, and docs (see `docs/triad_compat_plan.md`). Everything else (`ee curate`, `ee graph`, `ee handoff`, `ee diag`, `ee lab`, …) is in service of these five.
+
+#### Graph-derived explanation surfaces
+
+Pack DNA explains why graph structure shaped a context pack. When debugging a
+surprising `ee pack --explain --json` result (or the equivalent
+`ee context --explain --json` alias), inspect `data.pack.packDna` before
+changing retrieval code or weakening tests. The block is explanatory, not
+authoritative: ordinary pack items, provenance, and degraded signals still
+decide whether the pack is usable.
+
+Agent rules:
+
+- Use `ee pack "<task>" --explain --json` when selected memories look
+  plausible but their graph relationship is unclear.
+- Inspect `packDna.voronoiDominator`, `packDna.communityOfMass`,
+  `packDna.egoSubgraph`, and `packDna.pprNeighbors` as separate signals.
+- Treat non-empty `packDna.degraded[]` as a graph-explanation gap, not as a
+  failed context pack.
+- Use `ee insights --section <name> --json`, `ee health --robot-insights
+  --json`, `ee status --skyline --json`, and `ee proximity <id1> <id2> --json`
+  for narrower graph questions instead of repeatedly running full-bundle
+  commands.
+- Start with `docs/agent-ux/insights-onboarding.md` when wiring a new agent
+  harness to graph-derived fields.
+
+#### Response envelope contract
+
+Every machine-facing command emits one of:
+
+```jsonc
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {},
+  "degraded": []
+}
+{
+  "schema": "ee.error.v2",
+  "error": {
+    "code": "migration_required",
+    "message": "Database schema migration is required.",
+    "severity": "high",
+    "repair": "ee migrate run --workspace .",
+    "details": {
+      "recovery": [
+        {
+          "priority": 0,
+          "kind": "migration",
+          "rationale": "Apply pending local schema migrations.",
+          "command": "ee migrate run --workspace ."
+        }
+      ]
+    }
+  }
+}
+```
+
+Field invariants:
+
+- **`schema`** pins the surface version. v1 is end-of-life as of 0.2.0; consumers must migrate (see `docs/migration_v0.1_to_v0.2.md`).
+- **`content`** is the single canonical field for memory body text. List views may set `content_truncated: true` and `content_preview` (in addition to, not in place of, `content`).
+- **`degraded[]`** is **only** populated when the response was actually affected by a degradation. Build-time feature flags belong in `capabilities.unimplemented[]`, not in per-response `degraded[]` (see E5 / `bd-17c65.5.5`).
+- **`error.details.recovery[]`** is a structured array of recovery actions (each with `priority`, `kind`, `command`), not prose-only repair strings.
+- **`posture`** (in `ee status` / `ee doctor`) is a five-state enum `ok | initializing | degraded_recoverable | degraded_required | blocked`, not a `healthy: bool`.
+
+#### Severity vocabulary (6 tiers, ordered)
+
+`info < low < warning < medium < high < critical`. See `tests/fixtures/failure_modes/SCHEMA.md` for the canonical definition and `docs/degraded_code_taxonomy.md` for per-code classification.
+
+#### Failure-mode catalog
+
+Every `degraded[]` code is documented at `tests/fixtures/failure_modes/<code>.json` with its surface, severity, trigger setup, and expected message substrings. The agent-readable summary lives at `docs/degraded_codes.md` (auto-generated from the fixture catalog by K3).
+
+When `ee` emits a new degraded code, the implementing PR must land both the source emission AND a fixture under `tests/fixtures/failure_modes/`. The J6 catalog validator (`tests/contracts/failure_mode_fixtures.rs`) fails CI on drift.
+
+#### Code taxonomy
+
+`docs/degraded_code_taxonomy.md` classifies every code as one of:
+
+- **`build_time`** — feature-flag dependent; surfaced through `capabilities.unimplemented[]`. Examples: `lexical_unavailable`, `mcp_unavailable`, `toon_unavailable`.
+- **`mixed`** — both feature-flag AND state dependent. Presence in `capabilities.available[]`; runtime variant in `degraded[]`. Examples: `cass_unavailable`, `graph_unavailable`.
+- **`response_time`** — query/state dependent; stays in `degraded[]`. Examples: `no_relevant_results`, `index_stale`, `weak_query_recall`.
+
+#### Schema versions
+
+| Surface | Schema |
+| --- | --- |
+| Response envelope (success) | `ee.response.v2` |
+| Response envelope (error) | `ee.error.v2` |
+| Context pack | `ee.pack.v2` |
+| Search result | `ee.search.document.v1` |
+| Failure-mode fixture | `ee.failure_mode_fixture.v1` |
+| Test event log line | `ee.test_event.v1` |
+| Performance bench | `ee.perf.v1` |
+
+Per-envelope JSON Schema files live in `docs/schemas/` (K2). The drift gate in `tests/contracts/schema_drift.rs` fails CI when an emitted response doesn't validate against its declared schema.
+
+#### Env var registry
+
+Every `EE_*` variable honored by `ee` is enumerated in `docs/env_vars.md` and registered in `src/config/env_registry.rs` (K4 / F5). Raw `std::env::var("EE_*")` calls outside the registry are forbidden by a Clippy lint.
+
+#### Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | success |
+| 1 | usage error |
+| 2 | configuration error |
+| 3 | storage error |
+| 4 | search/index error |
+| 5 | import error |
+| 6 | degraded but command could not satisfy required mode |
+| 7 | policy denied operation |
+| 8 | migration required |
+
+Agents should treat exit 8 as the explicit signal to run `ee migrate run --workspace .`.
+
+#### Determinism (non-negotiable)
+
+Same DB + indexes + config + query → byte-identical JSON output. Same workspace → byte-identical context pack hash. Same evaluation fixture → byte-identical pack-quality report. The J7 harness (`scripts/e2e_overhaul/determinism.sh` + `tests/determinism_unit.rs`) gates this contract across cross-process and in-process paths.
+
+#### When the contract drifts
+
+- Schema field rename / addition → bump the schema version AND update `docs/migration_v0.1_to_v0.2.md` (or the next migration file).
+- New degraded code → land a fixture at `tests/fixtures/failure_modes/<code>.json` in the same commit; classify it in `docs/degraded_code_taxonomy.md`.
+- New env var → register in `src/config/env_registry.rs` + document in `docs/env_vars.md`.
+- New CLI subcommand → add a Most-used-commands or category entry to the `ee --help` prelude (F3).
+
+The CI gates that enforce each of these are the load-bearing surface for the overhaul. Adding a feature without updating its gate is a regression.
+
+After any of the above changes, run the **contract drift radar** to catch
+stale docs that reference the old surface:
+
+```bash
+scripts/contract-drift-radar.sh           # static gate, no Cargo
+```
+
+It runs as Gate 3.8 of `scripts/verify.sh` and writes
+`.contract-drift-radar-report.json` (schema `ee.contract_drift_radar.v1`). The
+report flags stale envelope-version references in agent-facing docs, JSONC
+example blocks with unknown schema ids, and degraded-code documentation that
+lacks a matching `tests/fixtures/failure_modes/<code>.json` fixture. See
+`docs/contract-drift-radar.md` for interpretation, allow-marker syntax, and
+the RCH command template for the Cargo-backed schema-drift contract test.
+
+### CLI Output Rules
+
+- JSON data goes to **stdout**.
+- Human diagnostics go to **stderr**.
+- `--json` output must be parseable and stable (stable field names, explicit schema, stable ordering, no terminal styling, no localized strings in machine-critical fields).
+- Do not mix progress bars into JSON stdout.
+- Long-running commands use stderr progress only when attached to a TTY.
+- Color only when stderr is a TTY and `--no-color` is not set.
+
+Human error shape:
+
+```text
+error: search index is stale
+
+The memory database has generation 12, but the search index was built at generation 9.
+
+Next:
+  ee index rebuild --workspace .
+
+Details:
+  ee index status --workspace . --json
+```
+
+JSON error shape:
+
+```json
+{
+  "schema": "ee.error.v2",
+  "error": {
+    "code": "search_index_stale",
+    "message": "Search index is stale.",
+    "severity": "medium",
+    "repair": "ee index rebuild --workspace .",
+    "details": {
+      "databaseGeneration": 12,
+      "indexGeneration": 9,
+      "recovery": [
+        {
+          "priority": 0,
+          "kind": "rebuild",
+          "rationale": "Rebuild the derived search index from the database generation.",
+          "command": "ee index rebuild --workspace .",
+          "resultsIn": "Search index generation catches up to the database."
+        }
+      ]
+    }
+  }
+}
+```
+
+### Exit Codes
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | success |
+| 1 | usage error |
+| 2 | configuration error |
+| 3 | storage error |
+| 4 | search/index error |
+| 5 | import error |
+| 6 | degraded but command could not satisfy required mode |
+| 7 | policy denied operation |
+| 8 | migration required |
+
+### Architectural Decision Records
+
+ADRs live in `docs/adr/` and capture the "why" behind major decisions so future contributors don't re-litigate settled choices or accidentally rebuild the old system.
+
+Initial ADRs to write:
+
+- CLI-first memory substrate (no daemon/MCP/web-first regressions)
+- FrankenSQLite + SQLModel as source of truth
+- Native Asupersync runtime (no Tokio, `&Cx` first, `Outcome` preserved; universal storage retry cancellation remains tracked by `bd-37r5a`)
+- Frankensearch for retrieval (no custom RRF/BM25/vector stack)
+- CASS as the raw session source (no duplicate stores)
+- Procedural memory requires evidence (no promotion without provenance)
+- Context packs as primary UX
+- Graph metrics are explainable derived features
+
+Every major new subsystem gets an ADR before implementation, including rejected alternatives and at least one verification hook.
+
+---
+
+## CI/CD Pipeline
+
+The CI must enforce, at minimum:
+
+- `cargo fmt --check`
+- `cargo clippy --all-targets -- -D warnings` (pedantic + nursery enabled)
+- `cargo test` (unit + integration + golden)
+- Forbidden-dependency audit (`cargo tree -e features` greps for `tokio`, `rusqlite`, `petgraph`, etc. — fail on hit)
+- Determinism check (same fixture → same JSON / pack hash)
+- UBS static analysis on changed Rust files
+
+Coverage thresholds, performance budgets, and benchmark gates should be added milestone-by-milestone as the corresponding subsystems land. Documented thresholds in this file must stay in sync with the workflow — add a `coverage_threshold_docs` test as soon as coverage gates exist.
+
+### Quick Verify
+
+Run all readiness gates with a single command:
+
+```bash
+./scripts/verify.sh
+```
+
+This runs forbidden-dep audit, cargo tests, and all E2E harnesses in order, reporting per-gate results and artifact paths. See `docs/testing-strategy.md` for gate details.
+
+---
+
+## Release Process
+
+When fixes are ready for release:
+
+### 1. Verify Locally
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo tree -e features | grep -E '(tokio|rusqlite|petgraph|sqlx|diesel)' && echo "FORBIDDEN DEP" || echo "ok"
+```
+
+### 2. Commit Changes
+
+```bash
+git add -A
+git commit -m "fix: description of fixes
+
+- List specific fixes
+- Include any breaking changes
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+```
+
+### 3. Bump Version
+
+The version in `Cargo.toml` determines the release tag.
+
+- **Patch** (0.1.x → 0.1.x+1): Bug fixes
+- **Minor** (0.1.x → 0.2.0): New features, backward compatible
+- **Major** (0.x → 1.0): Breaking changes (rare; we are still pre-1.0)
+
+Plan-targeted version milestones:
+
+| Version | Slice |
+| ------- | ----- |
+| `0.1.0` | Walking skeleton: `init`, `remember`, `search`, `context`, `why`, `status` |
+| `0.2.0` | CASS import MVP, indexing queue |
+| `0.3.0` | Procedural rules and curation |
+| `0.4.0` | Graph analytics |
+| `0.5.0` | Steward + optional daemon |
+| `0.6.0` | Export, backup, MCP adapter |
+
+### 4. Push And Trigger Release
+
+```bash
+git push origin main
+```
+
+The release workflow should detect a version change in `Cargo.toml`, tag, build cross-platform binaries, sign with Sigstore, and upload to GitHub Releases. Expected assets per release:
+
+- `ee-{target}.tar.xz`
+- `ee-{target}.tar.xz.sha256`
+- `ee-{target}.tar.xz.sigstore.json`
+- `install.sh`, `install.ps1`
+
+### 5. Verify
+
+```bash
+gh release list --limit 5
+gh release view v0.1.0
+```
+
+---
+
+## MCP Agent Mail — Multi-Agent Coordination
+
+A mail-like layer that lets coding agents coordinate asynchronously via MCP tools and resources. Provides identities, inbox/outbox, searchable threads, and advisory file reservations with human-auditable artifacts in Git.
+
+### Why It's Useful
+
+- **Prevents conflicts:** Explicit file reservations (leases) for files/globs
+- **Token-efficient:** Messages stored in per-project archive, not in context
+- **Quick reads:** `resource://inbox/...`, `resource://thread/...`
+
+### Same Repository Workflow
+
+1. **Register identity:**
+   ```
+   ensure_project(project_key=<abs-path>)
+   register_agent(project_key, program, model)
+   ```
+
+2. **Reserve files before editing:**
+   ```
+   file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true)
+   ```
+
+3. **Communicate with threads:**
+   ```
+   send_message(..., thread_id="FEAT-123")
+   fetch_inbox(project_key, agent_name)
+   acknowledge_message(project_key, agent_name, message_id)
+   ```
+
+4. **Quick reads:**
+   ```
+   resource://inbox/{Agent}?project=<abs-path>&limit=20
+   resource://thread/{id}?project=<abs-path>&include_bodies=true
+   ```
+
+### Macros vs Granular Tools
+
+- **Prefer macros for speed:** `macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`, `macro_contact_handshake`
+- **Use granular tools for control:** `register_agent`, `file_reservation_paths`, `send_message`, `fetch_inbox`, `acknowledge_message`
+
+### Common Pitfalls
+
+- `"from_agent not registered"`: Always `register_agent` in the correct `project_key` first
+- `"FILE_RESERVATION_CONFLICT"`: Adjust patterns, wait for expiry, or use non-exclusive reservation
+- **Auth errors:** If JWT+JWKS enabled, include bearer token with matching `kid`
+
+---
+
+## Beads (br) — Dependency-Aware Issue Tracking
+
+Beads provides a lightweight, dependency-aware issue database and CLI (`br` - beads_rust) for selecting "ready work," setting priorities, and tracking status. It complements MCP Agent Mail's messaging and file reservations.
+
+**Important:** `br` is non-invasive—it NEVER runs git commands automatically. You must manually commit changes after `br sync --flush-only`.
+
+### Transient JSONL Read Races
+
+If `br ready --json`, `br list --json`, or `br stats --json` fails with a
+configuration/parse error like `Invalid JSON at line N` or
+`invalid type: integer ..., expected struct Issue`, assume a concurrent
+`br sync --flush-only` rewrite is the first suspect, not durable corruption.
+Wait briefly and retry once before escalating. The canonical wrapper for agent
+work selection is:
+
+```bash
+scripts/br_retry.sh ready --json
+scripts/br_retry.sh actionable --json
+scripts/br_retry.sh list --status open --json
+scripts/br_retry.sh stats --json
+```
+
+The wrapper retries only the transient partial-write signatures, backs off for
+50ms, 200ms, then 500ms, and emits an `ee.beads_retry.v1` diagnostic envelope
+to stderr. The degraded code for this condition is
+`beads_jsonl_partial_write_transient` with low severity. Permanent JSONL
+corruption, missing workspaces, and ordinary `br` usage errors are not retried.
+
+Use `scripts/br_retry.sh actionable --json` as the claimable leaf queue. It
+runs `br ready --json` through the retry guard, then filters to open,
+unassigned, non-epic rows. Treat `[]` as "no safe claimable leaf right now";
+do not fall back to a parent epic, a raw `br ready` row, or a BV copy-paste
+claim command without explicit cross-checking. Raw `br ready` remains useful
+for broad inspection, but current tool output may include parent epics or rows
+whose status/assignment makes them unsafe to claim.
+
+### Conventions
+
+- **Single source of truth:** Beads for task status/priority/dependencies; Agent Mail for conversation and audit
+- **Shared identifiers:** Use Beads issue ID (e.g., `br-123`) as Mail `thread_id` and prefix subjects with `[br-123]`
+- **Reservations:** When starting a task, call `file_reservation_paths()` with the issue ID in `reason`
+
+### Bead Taxonomy: honesty-only vs implements-surface
+
+These two labels are **mutually exclusive** and govern what "closing a bead" means:
+
+| Label | Closes when... | Does NOT mean... |
+|-------|---------------|------------------|
+| `honesty-only` | The abstention sentinel is correctly wired: stable code, message, severity, repair hint, evidence-source, and follow-up bead. | The feature works. This label explicitly marks work that shipped degraded-honesty infrastructure, not implementation. |
+| `implements-surface:<name>` | The real feature works end-to-end with real persisted data, real golden tests, and the `*_UNAVAILABLE_CODE` constant deleted in the same PR. | Can close with just an abstention sentinel. |
+
+**Rules:**
+
+1. Every surface that currently has an `*_UNAVAILABLE_CODE` constant needs both labels — the existing closed bead carries `honesty-only` (retroactively), and a new open bead carries `implements-surface:<name>`.
+2. The closure linter in CI and `./scripts/verify.sh` runs `./scripts/closure-lint.sh --audit --json`; a green closure-lint gate means **all** closed `implements-surface:*` and `honesty-only` beads pass the taxonomy, not only beads changed in the latest commit. This blocks any commit while a closed `implements-surface:X` bead still has the matching `*_UNAVAILABLE` constant in `src/cli/mod.rs`.
+3. A bead closed with `close_reason` containing `"abstain"`, `"unavailable"`, `"degraded"`, `"stub"`, or `"placeholder"` must carry `honesty-only` and must have a sibling `implements-surface:<same-name>` bead in the open queue.
+
+**Why this matters:** The 2026-05-06 reality-check audit found 14 follow-up beads closed without implementation — each added an abstention sentinel as a SUBSTITUTE for implementation. This taxonomy prevents that pattern from recurring.
+
+### Typical Agent Flow
+
+1. **Pick candidate work (Beads/BV):**
+   ```bash
+   scripts/br_retry.sh actionable --json  # Claimable open, unassigned, non-epic leaves
+   br ready --json                        # Broad ready-work inspection records
+   bv --robot-triage                      # Graph-aware ranking and planning, robot mode only
+   ```
+
+2. **Gate the claim (read-only work packet):**
+   ```bash
+   ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json
+   ```
+   In crowded or dirty shared checkouts, the work-packet claim gate is the
+   safety decision before mutation. `bv` copy-paste claim commands are
+   advisory ranking output; do not run them unless the claim gate reports
+   `safeToClaim=true`, `verdict=safe_to_claim`, and a structured
+   `claimCommandAction` for the same candidate. If the gate is degraded,
+   stale, blocked by RCH, or reports any other verdict, stop at inspection and
+   coordinate through Agent Mail or Beads comments.
+
+   The RCH authority fields are intentionally separate: when
+   `sourceAuthority.rchRemoteOnlyRequired` is true,
+   `sourceAuthority.rchSafeToLaunchCargoVerification` must also be true.
+   Harnesses fail closed when remote-only verification is required and the
+   positive RCH proof is missing or false; a green local compile posture is not
+   enough to claim Rust work.
+
+   Version guard: if the installed `ee` rejects `--claim-gate` or
+   `--candidate` as an unexpected argument, treat that binary as stale relative
+   to the current source/docs contract. Stop at inspection, coordinate for an
+   approved RCH/release-path rebuild, run no BV claim command, and do not
+   rebuild or install `ee` locally with Cargo as a workaround.
+
+3. **Reserve edit surface (Mail):**
+   ```
+   file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true, reason="br-123")
+   ```
+
+4. **Announce start (Mail):**
+   ```
+   send_message(..., thread_id="br-123", subject="[br-123] Start: <title>", ack_required=true)
+   ```
+
+5. **Claim after the gate and reservation are safe:**
+   ```bash
+   br update <id> --status=in_progress --json
+   ```
+
+6. **Work and update:** Reply in-thread with progress
+
+7. **Complete and release:**
+   ```bash
+   br close 123 --reason "Completed"
+   br sync --flush-only  # Export to JSONL (no git operations)
+   ```
+   ```
+   release_file_reservations(project_key, agent_name, paths=["src/**"])
+   ```
+   Final Mail reply: `[br-123] Completed` with summary
+
+### Mapping Cheat Sheet
+
+| Concept | Value |
+|---------|-------|
+| Mail `thread_id` | `br-###` |
+| Mail subject | `[br-###] ...` |
+| File reservation `reason` | `br-###` |
+| Commit messages | Include `br-###` for traceability |
+
+---
+
+## bv — Graph-Aware Triage Engine
+
+bv is a graph-aware triage engine for Beads projects (`.beads/beads.jsonl`). It computes PageRank, betweenness, critical path, cycles, HITS, eigenvector, and k-core metrics deterministically.
+
+**Scope boundary:** bv handles *what to work on* (triage, priority, planning). For agent-to-agent coordination (messaging, work claiming, file reservations), use MCP Agent Mail.
+
+**CRITICAL: Use ONLY `--robot-*` flags. Bare `bv` launches an interactive TUI that blocks your session.**
+
+### The Workflow: Start With Triage
+
+**`bv --robot-triage` is your single entry point.** It returns:
+- `quick_ref`: at-a-glance counts + top 3 picks
+- `recommendations`: ranked actionable items with scores, reasons, unblock info
+- `quick_wins`: low-effort high-impact items
+- `blockers_to_clear`: items that unblock the most downstream work
+- `project_health`: status/type/priority distributions, graph metrics
+- `commands`: copy-paste shell commands for next steps
+
+```bash
+bv --robot-triage        # THE MEGA-COMMAND: start here
+bv --robot-next          # Minimal: just the single top pick + claim command
+```
+
+The `claim_command` field in BV robot output is advisory. Before mutating
+Beads in a shared checkout, first cross-check that the candidate appears in
+`scripts/br_retry.sh actionable --json`; if it is absent, treat the BV claim as
+unsafe stale/advisory output. Then check the same candidate with:
+
+```bash
+ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json
+```
+
+Only a matching `safeToClaim=true` / `verdict=safe_to_claim` claim gate may
+unlock the Beads claim. Treat every other verdict, tracker-integrity downgrade,
+Agent Mail semantic-readiness failure, or RCH verification blocker as a stop
+condition for auto-claiming.
+
+If the installed `ee` binary rejects `--claim-gate` or `--candidate`, it is
+stale relative to this source contract. Stop and coordinate instead of running
+the BV claim command, and do not rebuild or install with local Cargo.
+
+### Command Reference
+
+**Planning:**
+| Command | Returns |
+|---------|---------|
+| `--robot-plan` | Parallel execution tracks with `unblocks` lists |
+| `--robot-priority` | Priority misalignment detection with confidence |
+
+**Graph Analysis:**
+| Command | Returns |
+|---------|---------|
+| `--robot-insights` | Full metrics: PageRank, betweenness, HITS, eigenvector, critical path, cycles, k-core, articulation points, slack |
+| `--robot-label-health` | Per-label health: `health_level`, `velocity_score`, `staleness`, `blocked_count` |
+| `--robot-label-flow` | Cross-label dependency: `flow_matrix`, `dependencies`, `bottleneck_labels` |
+| `--robot-label-attention [--attention-limit=N]` | Attention-ranked labels |
+
+**History & Change Tracking:**
+| Command | Returns |
+|---------|---------|
+| `--robot-history` | Bead-to-commit correlations |
+| `--robot-diff --diff-since <ref>` | Changes since ref: new/closed/modified issues, cycles |
+
+**Other:**
+| Command | Returns |
+|---------|---------|
+| `--robot-burndown <sprint>` | Sprint burndown, scope changes, at-risk items |
+| `--robot-forecast <id\|all>` | ETA predictions with dependency-aware scheduling |
+| `--robot-alerts` | Stale issues, blocking cascades, priority mismatches |
+| `--robot-suggest` | Hygiene: duplicates, missing deps, label suggestions |
+| `--robot-graph [--graph-format=json\|dot\|mermaid]` | Dependency graph export |
+| `--export-graph <file.html>` | Interactive HTML visualization |
+
+### Scoping & Filtering
+
+```bash
+bv --robot-plan --label backend              # Scope to label's subgraph
+bv --robot-insights --as-of HEAD~30          # Historical point-in-time
+bv --recipe actionable --robot-plan          # Pre-filter: ready to work
+bv --recipe high-impact --robot-triage       # Pre-filter: top PageRank
+bv --robot-triage --robot-triage-by-track    # Group by parallel work streams
+bv --robot-triage --robot-triage-by-label    # Group by domain
+```
+
+### Understanding Robot Output
+
+**All robot JSON includes:**
+- `data_hash` — Fingerprint of source beads.jsonl
+- `status` — Per-metric state: `computed|approx|timeout|skipped` + elapsed ms
+- `as_of` / `as_of_commit` — Present when using `--as-of`
+
+**Two-phase analysis:**
+- **Phase 1 (instant):** degree, topo sort, density
+- **Phase 2 (async, 500ms timeout):** PageRank, betweenness, HITS, eigenvector, cycles
+
+### jq Quick Reference
+
+```bash
+bv --robot-triage | jq '.quick_ref'                        # At-a-glance summary
+bv --robot-triage | jq '.recommendations[0]'               # Top recommendation
+bv --robot-plan | jq '.plan.summary.highest_impact'        # Best unblock target
+bv --robot-insights | jq '.status'                         # Check metric readiness
+bv --robot-insights | jq '.Cycles'                         # Circular deps (must fix!)
+```
+
+---
+
+## UBS — Ultimate Bug Scanner
+
+**Golden Rule:** `ubs <changed-files>` before every commit when the selected UBS
+modules are static-only for the touched files. Exit 0 = safe. Exit >0 = fix &
+re-run.
+
+**RCH-only caveat for Rust on this Mac:** the UBS Rust module currently runs
+`cargo fmt`, `cargo clippy`, `cargo check`, and `cargo test --no-run`
+internally. That means `ubs --only=rust ...` is a local Cargo verification path
+unless UBS grows an explicit no-Cargo mode or is itself wrapped by an approved
+RCH path. Do **not** run UBS Rust scans in Codex sessions as a substitute for
+RCH-only verification. For Rust source changes, use the repo's RCH verification
+commands for Cargo work; for comment/docs-only Rust-file edits, prefer
+`rustfmt --edition 2024 --check <file>` plus `git diff --check`. If a UBS run
+accidentally starts local Cargo, report it honestly and do not count it as
+remote proof.
+
+### Commands
+
+```bash
+ubs file.rs file2.rs                    # Specific files (< 1s) — USE THIS
+ubs $(git diff --name-only --cached)    # Staged files — before commit
+ubs --only=rust,toml src/               # Avoid in RCH-only Codex sessions; invokes local Cargo today
+ubs --ci --fail-on-warning .            # CI mode — before PR
+ubs .                                   # Whole project (ignores target/, Cargo.lock)
+```
+
+### Output Format
+
+```
+Warning  Category (N errors)
+    file.rs:42:5 - Issue description
+    Suggested fix
+Exit code: 1
+```
+
+Parse: `file:line:col` -> location | fix hint -> how to fix | Exit 0/1 -> pass/fail
+
+### Fix Workflow
+
+1. Read finding -> category + fix suggestion
+2. Navigate `file:line:col` -> view context
+3. Verify real issue (not false positive)
+4. Fix root cause (not symptom)
+5. Re-run `ubs <file>` -> exit 0
+6. Commit
+
+### Bug Severity
+
+- **Critical (always fix):** Memory safety, use-after-free, data races, SQL injection
+- **Important (production):** Unwrap panics, resource leaks, overflow checks
+- **Contextual (judgment):** TODO/FIXME, println! debugging
+
+---
+
+## RCH — Remote Compilation Helper
+
+RCH offloads `cargo build`, `cargo test`, `cargo clippy`, and other compilation commands to a fleet of 8 remote Contabo VPS workers instead of building locally. This prevents compilation storms from overwhelming csd when many agents run simultaneously.
+
+**RCH is installed at `~/.local/bin/rch` and is hooked into Claude Code's PreToolUse automatically.** Most of the time you don't need to do anything if you are Claude Code — builds are intercepted and offloaded transparently.
+
+To manually offload a build from this Mac, use the repo wrapper. It fails closed
+to remote execution and avoids direct `rch exec -- cargo ...` fallback paths
+that can inherit the Mac USB `TMPDIR` or run local Cargo.
+
+```bash
+TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp \
+RCH_VISIBILITY=summary \
+RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects \
+RCH_ALIAS_PROJECT_ROOT=/data/projects \
+scripts/rch_verify.sh --summary --no-write \
+  --rch-bin /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 -- \
+  cargo test --lib
+```
+
+Do not call `/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch`
+directly from this Mac; that path can contain a Linux worker artifact and fail
+with `exec format error`. Prefer `scripts/rch_verify.sh -- cargo ...`, or the
+current Mach-O sidecar above when a low-level RCH incident/debug command is
+needed.
+
+Quick commands:
+```bash
+rch doctor                    # Health check
+rch workers probe --all       # Test connectivity to all 8 workers
+rch status                    # Overview of current state
+rch queue                     # See active/waiting builds
+```
+
+If rch or its workers are unavailable, do not let Codex/GPT agents fall back to
+local Cargo. Treat remote refusal as a verification blocker unless the user
+explicitly authorizes a local run.
+
+**Note for Codex/GPT-5.2:** Codex does not have the automatic PreToolUse hook,
+but you can (and should) still manually offload compute-intensive compilation
+commands using the fail-closed command shape above. This avoids local resource
+contention when multiple agents are building simultaneously.
+
+---
+
+## ast-grep vs ripgrep
+
+**Use `ast-grep` when structure matters.** It parses code and matches AST nodes, ignoring comments/strings, and can **safely rewrite** code.
+
+- Refactors/codemods: rename APIs, change import forms
+- Policy checks: enforce patterns across a repo
+- Editor/automation: LSP mode, `--json` output
+
+**Use `ripgrep` when text is enough.** Fastest way to grep literals/regex.
+
+- Recon: find strings, TODOs, log lines, config values
+- Pre-filter: narrow candidate files before ast-grep
+
+### Rule of Thumb
+
+- Need correctness or **applying changes** -> `ast-grep`
+- Need raw speed or **hunting text** -> `rg`
+- Often combine: `rg` to shortlist files, then `ast-grep` to match/modify
+
+### Rust Examples
+
+```bash
+# Find structured code (ignores comments)
+ast-grep run -l Rust -p 'fn $NAME($$$ARGS) -> $RET { $$$BODY }'
+
+# Find all unwrap() calls
+ast-grep run -l Rust -p '$EXPR.unwrap()'
+
+# Quick textual hunt
+rg -n 'println!' -t rust
+
+# Combine speed + precision
+rg -l -t rust 'unwrap\(' | xargs ast-grep run -l Rust -p '$X.unwrap()' --json
+```
+
+---
+
+## Morph Warp Grep — AI-Powered Code Search
+
+**Use `mcp__morph-mcp__warp_grep` for exploratory "how does X work?" questions.** An AI agent expands your query, greps the codebase, reads relevant files, and returns precise line ranges with full context.
+
+**Use `ripgrep` for targeted searches.** When you know exactly what you're looking for.
+
+**Use `ast-grep` for structural patterns.** When you need AST precision for matching/rewriting.
+
+### When to Use What
+
+| Scenario | Tool | Why |
+|----------|------|-----|
+| "How is the context packer wired up?" | `warp_grep` | Exploratory; don't know where to start |
+| "Where is the Frankensearch indexer invoked?" | `warp_grep` | Need to understand architecture |
+| "Find all uses of `Outcome::ok`" | `ripgrep` | Targeted literal search |
+| "Find files with `println!`" | `ripgrep` | Simple pattern |
+| "Replace all `unwrap()` with `expect()`" | `ast-grep` | Structural refactor |
+
+### warp_grep Usage
+
+```
+mcp__morph-mcp__warp_grep(
+  repoPath: "/data/projects/eidetic_engine_cli",
+  query: "How does the context packing budget enforcement work?"
+)
+```
+
+Returns structured results with file paths, line ranges, and extracted code snippets.
+
+### Anti-Patterns
+
+- **Don't** use `warp_grep` to find a specific function name -> use `ripgrep`
+- **Don't** use `ripgrep` to understand "how does X work" -> wastes time with manual reads
+- **Don't** use `ripgrep` for codemods -> risks collateral edits
+
+<!-- bv-agent-instructions-v1 -->
+
+---
+
+## Beads Workflow Integration
+
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue tracking. Issues are stored in `.beads/` and tracked in git.
+
+**Important:** `br` is non-invasive—it NEVER executes git commands. After `br sync --flush-only`, you must manually run `git add .beads/ && git commit`.
+
+### Crowded-Checkout Commit Hygiene
+
+Before committing source, docs, or test changes in this shared checkout, stage
+only the paths you intend to commit and run:
+
+```bash
+scripts/commit-hygiene-classifier.sh --strict --json
+```
+
+The classifier is read-only. It inspects staged path names plus
+`.beads/issues.jsonl` numstat/record-count churn and emits
+`ee.commit_hygiene_classifier.v1`. Treat
+`mixed_full_tracker_export_churn` as a stop signal: split the source commit from
+the tracker export instead of sweeping `.beads/issues.jsonl` into unrelated
+source proof. `tracker_only` commits remain allowed for intentional Beads syncs,
+and `mixed_small_tracker_metadata` means review the staged tracker diff before
+deciding.
+
+Default split workflow:
+
+```bash
+git diff --cached --name-only
+scripts/commit-hygiene-classifier.sh --strict --json
+git commit -m "..." -- <explicit-source-doc-test-paths>
+br sync --flush-only
+git add .beads/issues.jsonl
+scripts/commit-hygiene-classifier.sh --strict --json
+git commit -m "tracker: sync beads metadata" -- .beads/issues.jsonl
+```
+
+If a mixed source-plus-tracker commit is truly intentional, do not bypass this
+silently. Re-run the classifier without `--strict`, paste the JSON verdict into
+the Beads closeout or Agent Mail thread, state why the mix is intentional, and
+commit with an explicit pathspec.
+
+### Reality-Check Cadence
+
+Every 90 days, or whenever `scripts/vision-coverage.sh --json` reports
+`gap_percentage > 5`, run the `reality-check-for-project` skill end-to-end.
+The active bridge plan lives at `CLOSE_THE_GAP_PLAN.md` while a bridge is
+in flight. When a bridge completes its parts and substantially executes, the
+file is archived to `docs/archive/close_the_gap_<YYYY-MM>.md` (e.g. the
+2026-05 bridge archive is `docs/archive/close_the_gap_2026-05.md`). When
+opening the next bridge, update the existing `CLOSE_THE_GAP_PLAN.md` from
+Part N to Part N+1 instead of creating another plan file at the repo root.
+
+Historical bridges (most recent first):
+- Part I + Part II (2026-05-06 / 2026-05-14) — archived at
+  `docs/archive/close_the_gap_2026-05.md`. Closed once the bd-3usjw Part II
+  tree was substantially executed.
+
+The last bridge began on 2026-05-14. The next scheduled bridge target is
+2026-08-13, unless the vision-coverage gap exceeds 5% before then.
+
+### Essential Commands
+
+```bash
+# View issues (launches TUI - avoid in automated sessions)
+bv
+
+# CLI commands for agents (use these instead)
+scripts/br_retry.sh actionable --json # Show claimable open, unassigned, non-epic leaves
+br ready              # Broad ready-work inspection; cross-check before claiming
+br list --status=open # All open issues
+br show <id>          # Full issue details with dependencies
+br create --title="..." --type=task --priority=2
+br update <id> --status=in_progress
+br close <id> --reason "Completed"
+br close <id1> <id2>  # Close multiple issues at once
+br sync --flush-only  # Export to JSONL (NO git operations)
+```
+
+### Workflow Pattern
+
+1. **Start**: Run `scripts/br_retry.sh actionable --json` for claimable leaves,
+   then use `br ready --json` and `bv --robot-triage` for broader
+   inspection/ranking.
+2. **Gate**: Run `ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json`.
+3. **Reserve**: Reserve the intended edit paths through Agent Mail.
+4. **Claim**: Use `br update <id> --status=in_progress --json` only after the gate and reservation are safe.
+5. **Work**: Implement the task.
+6. **Complete**: Use `br close <id> --reason "Completed"`.
+7. **Sync**: Run `br sync --flush-only` then manually commit.
+
+### Key Concepts
+
+- **Dependencies**: Issues can block other issues. `br ready` shows only unblocked work.
+- **Priority**: P0=critical, P1=high, P2=medium, P3=low, P4=backlog (use numbers, not words)
+- **Types**: task, bug, feature, epic, question, docs
+- **Blocking**: `br dep add <issue> <depends-on>` to add dependencies
+
+### Session Protocol
+
+**Before ending any session, run this checklist:**
+
+```bash
+git status              # Check what changed
+git add <files>         # Stage only your intended source/docs/test changes
+scripts/commit-hygiene-classifier.sh --strict --json
+git commit -m "..." -- <explicit-source-doc-test-paths>
+br sync --flush-only    # Export beads to JSONL
+git add .beads/issues.jsonl
+scripts/commit-hygiene-classifier.sh --strict --json
+git commit -m "tracker: sync beads metadata" -- .beads/issues.jsonl
+git push                # Push to remote
+```
+
+### Best Practices
+
+- Check `scripts/br_retry.sh actionable --json` at session start to find claimable work
+- Update status as you work (in_progress -> closed)
+- Create new issues with `br create` when you discover tasks
+- Use descriptive titles and set appropriate priority/type
+- Always `br sync --flush-only && git add .beads/` before ending session
+
+<!-- end-bv-agent-instructions -->
+
+## ee doctor — Agent First-Aid Surface
+
+`ee doctor` is the canonical first stop for workspace health, repair planning,
+and agent-readable recovery guidance. Use it before falling back to manual
+playbooks whenever a local environment, workspace, index, graph, migration, or
+coordination problem might be diagnosable by the CLI.
+
+Agent-safe read-only surfaces:
+
+```bash
+ee doctor --json
+ee doctor --robot-triage --json
+ee doctor --robot-docs --json
+ee doctor --capabilities --json
+ee doctor --franken-health --json
+ee doctor --list-runs --json
+ee doctor --gc-plan 30 --json
+```
+
+Mutation and audit rules:
+
+- `ee doctor --fix-plan --json` is a dry-run planning surface. It reports
+  proposed repairs and blast radius; it must not write files.
+- `ee doctor --robot-docs --json` is the machine-readable index of currently
+  wired doctor flags. Prefer it over scraping `ee doctor --help`.
+- `ee doctor --robot-triage --json` ranks non-ok checks for agents. Use
+  `topActionable[]` as the short list before inspecting the full report.
+- `ee doctor --capabilities --json` declares supported operation kinds,
+  blast-radius classes, exit codes, and environment controls.
+- `ee doctor --list-runs --json` and `ee doctor --gc-plan <days> --json` are
+  read-only run-ledger inspection surfaces. `--gc-plan` emits candidates only;
+  it never deletes anything.
+- `ee doctor --diff <RUN_A> --diff <RUN_B> --json` compares two prior runs'
+  `state.json` payloads and emits `ee.doctor.run_diff.v1` with
+  `actionCountDelta`, `sameTargetSha`, `finishedAtTransition`, and
+  `statusTransition`. Read-only.
+- `ee doctor --fix --json` invokes the runtime chokepoint (lock,
+  `<workspace>/.doctor/runs/<run-id>/` allocation, `RunContext::finish`) and
+  emits `ee.doctor.fix_summary.v1`. Until the per-FM fixer dispatch table
+  lands (`bd-tu4s8`), this surface returns `actionCount: 0` and
+  `fixerDispatchPending: true`. Pair with `--undo <run-id>` to release the
+  run state.
+- `ee doctor --undo <run-id> --json` replays a prior doctor run's undo log
+  through `src/core/doctor_runtime::replay_undo`. Per RULE NUMBER 1, undo
+  never deletes files; files created by the original run are quarantined by
+  rename instead.
+- Any future doctor fixer that writes must route every byte through
+  `src/core/doctor_runtime::mutate`, with backup, before/after BLAKE3 hashes,
+  `actions.jsonl`, a run directory under `<workspace>/.doctor/runs/`, and a
+  blast-radius check. Direct writes outside that chokepoint are bugs.
+
+## Landing the Plane (Session Completion)
+
+**When ending a work session**, you MUST complete ALL steps below.
+
+**MANDATORY WORKFLOW:**
+
+1. **File issues for remaining work** - Create issues for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds, forbidden-dep audit
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Sync beads** - `br sync --flush-only` to export to JSONL
+5. **Hand off** - Provide context for next session
+
+
+---
+
+## cass — Cross-Agent Session Search
+
+`cass` indexes prior agent conversations (Claude Code, Codex, Cursor, Gemini, ChatGPT, etc.) so we can reuse solved problems.
+
+**Note:** `cass` is also the *raw session source* that `ee` itself imports. Inside this codebase, treat `cass` as both (a) a tool you use to find prior solutions, and (b) the upstream contract that `ee-cass` consumes via robot/JSON output. Never depend on bare interactive `cass` output — fixtures must pin every consumed JSON contract.
+
+**Rules:** Never run bare `cass` (TUI). Always use `--robot` or `--json`.
+
+### Examples
+
+```bash
+cass health
+cass search "async runtime" --robot --limit 5
+cass view /path/to/session.jsonl -n 42 --json
+cass expand /path/to/session.jsonl -n 42 -C 3 --json
+cass capabilities --json
+cass robot-docs guide
+```
+
+### Tips
+
+- Use `--fields minimal` for lean output
+- Filter by agent with `--agent`
+- Use `--days N` to limit to recent history
+
+stdout is data-only, stderr is diagnostics; exit code 0 means success.
+
+Treat cass as a way to avoid re-solving problems other agents already handled.
+
+---
+
+Note for Codex/GPT-5.2:
+
+You constantly bother me and stop working with concerned questions that look similar to this:
+
+```
+Unexpected changes (need guidance)
+
+- Working tree still shows edits I did not make in Cargo.toml, Cargo.lock, src/cli/commands/upgrade.rs, src/storage/sqlite.rs, tests/conformance.rs, tests/storage_deps.rs. Please advise whether to keep/commit/revert these before any further work. I did not touch them.
+
+Next steps (pick one)
+
+1. Decide how to handle the unrelated modified files above so we can resume cleanly.
+2. Triage beads_rust-orko (clippy/cargo warnings) and beads_rust-ydqr (rustfmt failures).
+3. If you want a full suite run later, fix conformance/clippy blockers and re-run cargo test --all.
+```
+
+NEVER EVER DO THAT AGAIN. The answer is literally ALWAYS the same: those are changes created by the potentially dozen of other agents working on the project at the same time. This is not only a common occurrence, it happens multiple times PER MINUTE. The way to deal with it is simple: you NEVER, under ANY CIRCUMSTANCE, stash, revert, overwrite, or otherwise disturb in ANY way the work of other agents. Just treat those changes identically to changes that you yourself made. Just fool yourself into thinking YOU made the changes and simply don't recall it for some reason.
+
+---
+
+## Note on Built-in TODO Functionality
+
+Also, if I ask you to explicitly use your built-in TODO functionality, don't complain about this and say you need to use beads. You can use built-in TODOs if I tell you specifically to do so. Always comply with such orders.

@@ -1,0 +1,194 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/ee.agentsmd.import.v1.json",
+  "title": "ee.agentsmd.import.v1",
+  "description": "AGENTS.md bridge import report (ADR 0065 §5). Emitted under data by `ee import agentsmd`. Rule-like statements outside the ee markers become pending curation candidates only (never direct memories), trust class capped at agent_assertion, provenance file://<path>#L<n>; near-duplicates of existing memories become reinforce proposals with the ADR 0062 distillation dedup semantics. --dry-run (the default) writes nothing and applied is null.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "workspaceId",
+    "file",
+    "dryRun",
+    "scannedLines",
+    "managedBlockExcluded",
+    "proposals",
+    "abstentions",
+    "applied",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.agentsmd.import.v1"
+    },
+    "command": {
+      "const": "import agentsmd"
+    },
+    "status": {
+      "enum": ["ok", "file_missing"],
+      "description": "ok for a completed parse; file_missing when the source file is absent (an honest empty result, not a failure)."
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "file": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Workspace-relative source path (AGENTS.md by default)."
+    },
+    "dryRun": {
+      "type": "boolean",
+      "description": "true (the default) previews the full proposal set and writes nothing; --apply sets false."
+    },
+    "scannedLines": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "managedBlockExcluded": {
+      "type": "boolean",
+      "description": "true when an ee:agentsmd managed block was present and excluded from parsing (the bridge never re-imports its own export)."
+    },
+    "proposals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "proposalId",
+          "action",
+          "targetMemoryId",
+          "level",
+          "kind",
+          "contentDraft",
+          "evidence",
+          "lineNumber",
+          "modality",
+          "dedup"
+        ],
+        "properties": {
+          "proposalId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Deterministic proposal id (stable across re-runs over the same statement text)."
+          },
+          "action": {
+            "enum": ["create_candidate", "reinforce_existing"],
+            "description": "reinforce_existing when the neighbor machinery found a near-duplicate at or above [curation] duplicate_similarity."
+          },
+          "targetMemoryId": {
+            "type": ["string", "null"],
+            "description": "Existing memory absorbed by a reinforce_existing proposal; null for create_candidate."
+          },
+          "level": {
+            "const": "procedural"
+          },
+          "kind": {
+            "enum": ["rule", "convention"],
+            "description": "rule for hard modality (MUST/NEVER/ALWAYS/DO NOT), convention for soft preference cues (Avoid/Prefer)."
+          },
+          "contentDraft": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The extracted statement text, verbatim (no LLM)."
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^file://.+#L[0-9]+$"
+            },
+            "description": "file://<workspace-relative-path>#L<n> provenance URI for the source line."
+          },
+          "lineNumber": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "modality": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The modality token that admitted the statement (explainability)."
+          },
+          "dedup": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["nearestMemoryId", "similarity"],
+            "properties": {
+              "nearestMemoryId": {
+                "type": ["string", "null"]
+              },
+              "similarity": {
+                "type": ["number", "null"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "abstentions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["lineNumber", "text", "reason"],
+        "properties": {
+          "lineNumber": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "text": {
+            "type": "string"
+          },
+          "reason": {
+            "enum": ["already_imported"]
+          }
+        }
+      }
+    },
+    "applied": {
+      "description": "Durable write summary; null under --dry-run.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["candidateIds", "auditIds"],
+          "properties": {
+            "candidateIds": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "auditIds": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      ]
+    },
+    "degraded": {
+      "type": "array",
+      "description": "Standard ee.response.v2 degraded entries (agentsmd_file_missing, agentsmd_markers_missing).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "severity", "message"],
+        "properties": {
+          "code": {
+            "enum": ["agentsmd_file_missing", "agentsmd_markers_missing"]
+          },
+          "severity": { "type": "string" },
+          "message": { "type": "string" },
+          "repair": { "type": ["string", "null"] }
+        }
+      }
+    }
+  },
+  "x-ee-status": {
+    "shipped": true,
+    "available_in_build": true,
+    "tracking_bead": "bd-39tzu.4"
+  }
+}

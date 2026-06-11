@@ -474,6 +474,13 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `primer_graph_unavailable` | info | bd-39tzu.2 — ADR 0065 §6: persisted centrality rows missing/unusable; loadBearing omitted, rules authority factor neutral; repair `ee graph centrality-refresh --workspace .` |
 | `primer_budget_floor` | info | bd-39tzu.2 — ADR 0065 §6: proportional shrink hit the rules floor; lower-priority items evicted |
 
+#### AGENTS.md bridge (3)
+| Code | Severity | Bead |
+|------|----------|------|
+| `agentsmd_file_missing` | info | bd-39tzu.4 — ADR 0065 §6: bridge target absent and `--create` not passed; honest file_missing status, never invents a file |
+| `agentsmd_markers_missing` | info | bd-39tzu.4 — ADR 0065 §6: file exists without a managed block (import-only file or first export); export appends the block, import parses the whole file |
+| `agentsmd_unmanaged_edit_detected` | warning | bd-39tzu.4 — ADR 0065 §6: managed-block hash mismatch (hand-edited); export refuses without `--force-managed-block`, the edit is preserved in the `.ee-backup` sibling |
+
 #### Output-token governor (4)
 | Code | Severity | Bead |
 |------|----------|------|

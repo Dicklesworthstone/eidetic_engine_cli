@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "agentsmd_markers_missing",
+  "introduced_by": {
+    "bead": "bd-39tzu.4",
+    "epic_letter": "PRM"
+  },
+  "surfaces": [
+    "export agentsmd",
+    "import agentsmd",
+    "diag agentsmd-drift"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "The bridge target exists but carries no ee:agentsmd managed block yet — an import-only file or the first export into a hand-written AGENTS.md. Export appends a fresh managed block at the end of the file (after backing the file up) and never touches the existing content; import parses the whole file; drift reports no managed-block status (ADR 0065 §6).",
+    "setup_commands": [
+      "ee init --workspace .",
+      "printf '# AGENTS.md\\n\\n- Always run the verify script before pushing changes.\\n' > AGENTS.md"
+    ],
+    "invocation": "ee import agentsmd --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "agentsmd_markers_missing",
+    "severity": "info",
+    "message_contains": [
+      "no ee:agentsmd managed block",
+      "between its own markers"
+    ]
+  },
+  "notes": "Informational by design: a file without markers is the normal starting state of the bridge. The first `ee export agentsmd` writes the markers; until then import treats every rule-like line as hand-written."
+}

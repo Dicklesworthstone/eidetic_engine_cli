@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "agentsmd_file_missing",
+  "introduced_by": {
+    "bead": "bd-39tzu.4",
+    "epic_letter": "PRM"
+  },
+  "surfaces": [
+    "export agentsmd",
+    "import agentsmd",
+    "diag agentsmd-drift"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "The bridge target file (AGENTS.md by default, or the --file override) does not exist and --create was not passed. The run succeeds with an honest file_missing status and an info-severity degraded entry instead of inventing a file (ADR 0065 §6); export only ever creates files under explicit --create.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "rm -f AGENTS.md"
+    ],
+    "invocation": "ee export agentsmd --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "agentsmd_file_missing",
+    "severity": "info",
+    "message_contains": [
+      "does not exist",
+      "--create"
+    ],
+    "repair_contains": "ee export agentsmd --workspace . --file AGENTS.md --create"
+  },
+  "notes": "Agents should treat this as 'decide whether the file should exist', never as an error to retry. ee import agentsmd and ee diag agentsmd-drift emit the same code (without the --create repair on import) when asked to read a missing file."
+}

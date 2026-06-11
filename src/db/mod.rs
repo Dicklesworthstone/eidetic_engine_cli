@@ -142,6 +142,11 @@ pub mod audit_actions {
     /// `ee.audit.journal_distill.v1`: proposalId, action, evidence
     /// `journal://` URIs, clusterSize, and the dedup verdict.
     pub const JOURNAL_DISTILL: &str = "journal.distill";
+    /// `ee import agentsmd --apply` turned a rule-like AGENTS.md statement
+    /// into one curation candidate (ADR 0065 §5 / bd-39tzu.4). One row per
+    /// proposal; details carry `ee.audit.agentsmd_import.v1`: proposalId,
+    /// action, `file://<path>#L<n>` evidence, and the dedup verdict.
+    pub const AGENTSMD_IMPORT: &str = "agentsmd.import";
     pub const WORKFLOW_CREATE: &str = "workflow.create";
     pub const ADVISORY_LOCK_RECLAIM: &str = "advisory_lock.reclaim";
     pub const ADVISORY_LOCK_RELEASE: &str = "advisory_lock.release";

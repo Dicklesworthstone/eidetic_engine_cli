@@ -1,0 +1,10 @@
+agentsmd import — AGENTS.md (dry run)
+status: ok, scanned 34 lines
+proposals: 6 (create 5, reinforce 1), abstentions: 0
+- L8 rule reinforce_existing: Always run the verify script before pushing changes to main.
+- L9 rule create_candidate: The release pipeline MUST wait for the smoke suite before tagging.
+- L10 rule create_candidate: You MUST NOT regenerate goldens on a Mac-local checkout.
+- L11 convention create_candidate: Prefer structured logging over print-style debugging in handlers.
+- L15 rule create_candidate: Do not commit generated artifacts into the source tree, ever.
+- L33 rule create_candidate: The deploy job MUST drain in-flight requests before restarting workers.
+degraded: agentsmd_markers_missing (info)

@@ -9621,7 +9621,40 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             category: "envelope",
             definition: cursor_schema_definition,
         },
+        SchemaEntry {
+            id: crate::core::agentsmd::AGENTSMD_EXPORT_SCHEMA_V1,
+            version: "1",
+            description: "AGENTS.md bridge export report emitted by ee export agentsmd (managed block render, backup, hand-edit refusal).",
+            category: "memory",
+            definition: agentsmd_export_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::agentsmd::AGENTSMD_IMPORT_SCHEMA_V1,
+            version: "1",
+            description: "AGENTS.md bridge import report emitted by ee import agentsmd (rule-statement proposals into curation candidates).",
+            category: "memory",
+            definition: agentsmd_import_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::agentsmd::AGENTSMD_DRIFT_SCHEMA_V1,
+            version: "1",
+            description: "AGENTS.md bridge drift diagnostic emitted by ee diag agentsmd-drift (stale export, contradictions, missing rules).",
+            category: "memory",
+            definition: agentsmd_drift_schema_definition,
+        },
     ]
+}
+
+fn agentsmd_export_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.agentsmd.export.v1.json").to_string()
+}
+
+fn agentsmd_import_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.agentsmd.import.v1.json").to_string()
+}
+
+fn agentsmd_drift_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.agentsmd.drift.v1.json").to_string()
 }
 
 fn journal_entry_schema_definition() -> String {

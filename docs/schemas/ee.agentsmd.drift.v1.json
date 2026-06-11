@@ -1,0 +1,168 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/ee.agentsmd.drift.v1.json",
+  "title": "ee.agentsmd.drift.v1",
+  "description": "AGENTS.md bridge drift diagnostic (ADR 0065 §5). Emitted under data by `ee diag agentsmd-drift`. Read-only and advisory: reports stale exports (managed-block generation behind the DB generation), file-vs-memory contradictions in the conflict-surface vocabulary, and memory rules absent from the file, with suggested commands. Never mutates.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "workspaceId",
+    "file",
+    "dbGeneration",
+    "managedBlock",
+    "contradictions",
+    "missingRules",
+    "suggestedCommands",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.agentsmd.drift.v1"
+    },
+    "command": {
+      "const": "diag agentsmd-drift"
+    },
+    "status": {
+      "enum": ["ok", "file_missing"],
+      "description": "ok for a completed diagnostic; file_missing when the bridge target is absent."
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "file": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Workspace-relative bridge target path (AGENTS.md by default)."
+    },
+    "dbGeneration": {
+      "type": "integer",
+      "description": "Current workspace DB generation the managed block is compared against."
+    },
+    "managedBlock": {
+      "description": "Managed-block freshness summary; null when the file has no managed block.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["generation", "stale", "hashMatches"],
+          "properties": {
+            "generation": {
+              "type": ["integer", "null"],
+              "description": "generation= attribute on the begin marker; null when unparseable."
+            },
+            "stale": {
+              "type": "boolean",
+              "description": "true when the block generation is behind the current DB generation (or unparseable)."
+            },
+            "hashMatches": {
+              "type": "boolean",
+              "description": "false when the recorded body hash no longer matches the block bytes (hand-edited)."
+            }
+          }
+        }
+      ]
+    },
+    "contradictions": {
+      "type": "array",
+      "description": "Hand-written statements that pair with a high-confidence procedural rule on the same topic with opposite polarity.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "lineNumber",
+          "fileText",
+          "filePolarity",
+          "memoryId",
+          "memoryPolarity",
+          "similarity",
+          "signal"
+        ],
+        "properties": {
+          "lineNumber": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "fileText": {
+            "type": "string",
+            "minLength": 1
+          },
+          "filePolarity": {
+            "enum": ["positive", "negative"]
+          },
+          "memoryId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "memoryPolarity": {
+            "enum": ["positive", "negative"]
+          },
+          "similarity": {
+            "type": "number"
+          },
+          "signal": {
+            "const": "contradiction_link",
+            "description": "Conflict-surface signal vocabulary (ADR 0065 §5)."
+          }
+        }
+      }
+    },
+    "missingRules": {
+      "type": "array",
+      "description": "Primer-selected memory rules with no sufficiently similar statement anywhere in the file (managed block included).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["memoryId", "line"],
+        "properties": {
+          "memoryId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "line": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The primer-rendered rule line (with the short provenance ref)."
+          }
+        }
+      }
+    },
+    "suggestedCommands": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Advisory follow-up commands; the diagnostic itself never mutates."
+    },
+    "degraded": {
+      "type": "array",
+      "description": "Standard ee.response.v2 degraded entries (agentsmd_file_missing, agentsmd_markers_missing, agentsmd_unmanaged_edit_detected).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "severity", "message"],
+        "properties": {
+          "code": {
+            "enum": [
+              "agentsmd_file_missing",
+              "agentsmd_markers_missing",
+              "agentsmd_unmanaged_edit_detected"
+            ]
+          },
+          "severity": { "type": "string" },
+          "message": { "type": "string" },
+          "repair": { "type": ["string", "null"] }
+        }
+      }
+    }
+  },
+  "x-ee-status": {
+    "shipped": true,
+    "available_in_build": true,
+    "tracking_bead": "bd-39tzu.4"
+  }
+}
