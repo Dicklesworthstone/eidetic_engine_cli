@@ -271,10 +271,10 @@ pub fn classify_unsafe_claim_evidence(
         .enumerate()
     {
         let category = categorize_unsafe_claim_reason(reason);
-        let group = groups
-            .iter_mut()
-            .find(|group| group.category == category)
-            .expect("every category has a pre-allocated group");
+        // Groups are pre-allocated in ALL order, so the category's rank is
+        // its index — no fallible lookup needed.
+        let rank = category as usize;
+        let group = &mut groups[rank];
         group.raw_reason_indexes.push(index);
         if group.reason_codes.len() < MAX_RAW_REASONS_PER_GROUP {
             group.reason_codes.push(bounded_reason(reason));
@@ -317,17 +317,17 @@ fn has_category(groups: &[UnsafeClaimReasonGroup], category: UnsafeClaimReasonCa
 pub fn rank_unsafe_claim_actions(
     groups: &[UnsafeClaimReasonGroup],
 ) -> Vec<UnsafeClaimPlannerAction> {
-    use UnsafeClaimReasonCategory as Category;
+    use UnsafeClaimReasonCategory as UnsafeCategory;
     let mut actions = Vec::new();
 
     // stop: policy/suppression evidence — a human or policy gate said no.
-    if has_category(groups, Category::ActionSuppression) {
+    if has_category(groups, UnsafeCategory::ActionSuppression) {
         actions.push(UnsafeClaimPlannerAction {
             kind: UnsafeClaimActionKind::Stop,
             rationale: "An action-suppression or policy signal is present; do not work around \
                         it — surface it to a human."
                 .to_owned(),
-            reason_group_refs: vec![Category::ActionSuppression.as_str()],
+            reason_group_refs: vec![UnsafeCategory::ActionSuppression.as_str()],
             advisory_only: true,
             mutates_state: false,
         });
@@ -335,14 +335,14 @@ pub fn rank_unsafe_claim_actions(
 
     // retry_with_snapshot: missing Agent Mail evidence is bridgeable
     // read-only.
-    if has_category(groups, Category::AgentMailReadiness) {
+    if has_category(groups, UnsafeCategory::AgentMailReadiness) {
         actions.push(UnsafeClaimPlannerAction {
             kind: UnsafeClaimActionKind::RetryWithSnapshot,
             rationale: "Agent Mail evidence is missing or non-authoritative; generate a \
                         redacted ee.agent_mail.snapshot.v1 and retry the same claim gate with \
                         --agent-mail-snapshot (read-only evidence, not authorization)."
                 .to_owned(),
-            reason_group_refs: vec![Category::AgentMailReadiness.as_str()],
+            reason_group_refs: vec![UnsafeCategory::AgentMailReadiness.as_str()],
             advisory_only: true,
             mutates_state: false,
         });
@@ -353,10 +353,10 @@ pub fn rank_unsafe_claim_actions(
     {
         let mut refs = Vec::new();
         for category in [
-            Category::ReservationConflict,
-            Category::TrackerAuthority,
-            Category::RchProofAdmission,
-            Category::ResourceAdmission,
+            UnsafeCategory::ReservationConflict,
+            UnsafeCategory::TrackerAuthority,
+            UnsafeCategory::RchProofAdmission,
+            UnsafeCategory::ResourceAdmission,
         ] {
             if has_category(groups, category) {
                 refs.push(category.as_str());
@@ -380,7 +380,7 @@ pub fn rank_unsafe_claim_actions(
     // surfaces other agents hold.
     {
         let mut refs = Vec::new();
-        for category in [Category::SourceOverlap, Category::DirtyCheckout] {
+        for category in [UnsafeCategory::SourceOverlap, UnsafeCategory::DirtyCheckout] {
             if has_category(groups, category) {
                 refs.push(category.as_str());
             }
@@ -401,7 +401,10 @@ pub fn rank_unsafe_claim_actions(
     // alternate_candidate: the gate itself recommends a different leaf.
     {
         let mut refs = Vec::new();
-        for category in [Category::RecommendationMismatch, Category::BvStaleness] {
+        for category in [
+            UnsafeCategory::RecommendationMismatch,
+            UnsafeCategory::BvStaleness,
+        ] {
             if has_category(groups, category) {
                 refs.push(category.as_str());
             }
@@ -425,9 +428,9 @@ pub fn rank_unsafe_claim_actions(
     {
         let mut refs = Vec::new();
         for category in [
-            Category::InstalledBinaryFreshness,
-            Category::MemorySourceDrift,
-            Category::Unknown,
+            UnsafeCategory::InstalledBinaryFreshness,
+            UnsafeCategory::MemorySourceDrift,
+            UnsafeCategory::Unknown,
         ] {
             if has_category(groups, category) {
                 refs.push(category.as_str());
