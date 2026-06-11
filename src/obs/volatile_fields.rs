@@ -15,9 +15,24 @@ use super::test_log::{EventKind, TestEvent, log_event, test_id_or};
 pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "generatedAt",
     "generated_at",
+    "createdAt",
     "created_at",
+    "updatedAt",
+    "completedAt",
+    "finishedAt",
+    "expiresAt",
+    "capturedAt",
     "captured_at",
+    "computedAt",
     "computed_at",
+    "observedAt",
+    "recordedAt",
+    "refreshedAt",
+    "selectedAt",
+    "decidedAt",
+    "estimatedAt",
+    "exposedAt",
+    "lastValidatedAt",
     "last_accessed",
     "last_accessed_at",
     "last_seen_at",
@@ -25,6 +40,9 @@ pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "audit_ts",
     "elapsedMs",
     "elapsed_ms",
+    "elapsedMsBucket",
+    "durationMs",
+    "wallClockMs",
     "startedAt",
     "started_at",
     "endedAt",
@@ -66,6 +84,10 @@ pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "witnessElapsedMs",
     "witnessRecordedAt",
     "algorithmStartedAt",
+    "projectionMs",
+    "pagerankMs",
+    "betweennessMs",
+    "totalMs",
     // Tailscale local-probe identity fields are machine/network specific and
     // sensitive in shared support bundles.
     "selfNodeKey",
@@ -208,9 +230,12 @@ mod tests {
             "schema": "ee.response.v2",
             "generatedAt": "2026-05-13T00:00:00Z",
             "data": {
+                "createdAt": "2026-05-13T00:00:00Z",
+                "updatedAt": "2026-05-13T00:00:01Z",
                 "computed_at": "2026-05-13T00:00:01Z",
+                "observedAt": "2026-05-13T00:00:02Z",
                 "items": [
-                    {"id": "mem_a", "elapsedMs": 12, "content": "keep"},
+                    {"id": "mem_a", "elapsedMs": 12, "durationMs": 11, "content": "keep"},
                     {"id": "mem_b", "last_seen_at": "2026-05-13T00:00:01Z"}
                 ],
                 "workspacePath": "/tmp/ws"
@@ -218,8 +243,12 @@ mod tests {
         });
         let report = strip_volatile_fields(&mut value);
         if value.pointer("/generatedAt").is_some()
+            || value.pointer("/data/createdAt").is_some()
+            || value.pointer("/data/updatedAt").is_some()
             || value.pointer("/data/computed_at").is_some()
+            || value.pointer("/data/observedAt").is_some()
             || value.pointer("/data/items/0/elapsedMs").is_some()
+            || value.pointer("/data/items/0/durationMs").is_some()
             || value.pointer("/data/items/1/last_seen_at").is_some()
             || value.pointer("/data/workspacePath").is_some()
         {
@@ -234,8 +263,12 @@ mod tests {
         }
         for expected in [
             "generatedAt",
+            "createdAt",
+            "updatedAt",
             "computed_at",
+            "observedAt",
             "elapsedMs",
+            "durationMs",
             "last_seen_at",
             "workspacePath",
         ] {
@@ -249,7 +282,16 @@ mod tests {
     #[test]
     fn registry_predicate_matches_list() {
         assert!(is_volatile_field_name("generatedAt"));
+        assert!(is_volatile_field_name("createdAt"));
         assert!(is_volatile_field_name("created_at"));
+        assert!(is_volatile_field_name("updatedAt"));
+        assert!(is_volatile_field_name("completedAt"));
+        assert!(is_volatile_field_name("expiresAt"));
+        assert!(is_volatile_field_name("observedAt"));
+        assert!(is_volatile_field_name("recordedAt"));
+        assert!(is_volatile_field_name("selectedAt"));
+        assert!(is_volatile_field_name("lastValidatedAt"));
+        assert!(is_volatile_field_name("durationMs"));
         assert!(is_volatile_field_name("captured_at"));
         assert!(is_volatile_field_name("last_accessed_at"));
         assert!(is_volatile_field_name("capsule_id"));

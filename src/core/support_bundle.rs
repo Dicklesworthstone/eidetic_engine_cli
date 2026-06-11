@@ -1314,7 +1314,8 @@ fn scale_benchmark_summary_json(workspace: &Path, swarm_reports: &[Value]) -> St
     stable_json(&json!({
         "schema": "ee.support_bundle.scale_benchmark_summary.v1",
         "owningBead": "eidetic_engine_cli-fcq1.7",
-        "workspacePath": workspace.display().to_string(),
+        "workspaceHash": support_cache_key(&workspace.display().to_string()),
+        "rawWorkspacePathIncluded": false,
         "sourceArtifacts": [
             "tests/perf_bench_status.rs",
             "tests/e2e_swarm_contention_recovery.rs",
@@ -1333,7 +1334,7 @@ fn scale_benchmark_summary_json(workspace: &Path, swarm_reports: &[Value]) -> St
                 .collect::<Vec<_>>(),
         },
         "swarmSmokeReports": swarm_reports,
-        "redactionStatus": "content_redacted_before_manifest_write",
+        "redactionStatus": "counts_hashes_only_no_raw_paths",
     }))
 }
 
@@ -1374,9 +1375,10 @@ fn cache_reports_json(workspace: &Path) -> String {
 
     stable_json(&json!({
         "schema": "ee.support_bundle.scale_cache_reports.v1",
-        "redactionStatus": "content_not_stored",
+        "redactionStatus": "counts_hashes_only_no_raw_paths",
         "source": "workspace_database_and_cache_state",
-        "workspacePath": workspace.display().to_string(),
+        "workspaceHash": support_cache_key(&workspace.display().to_string()),
+        "rawWorkspacePathIncluded": false,
         "database": {
             "present": snapshot.database_present,
             "readable": snapshot.database_readable,
@@ -9695,6 +9697,64 @@ mod tests {
             value.pointer("/manifest/schema"),
             Some(&json!("ee.swarm_scale.workloads.v1"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn support_bundle_scale_and_cache_summaries_hash_workspace_path() -> TestResult {
+        let root = unique_test_path("summary-workspace-hash");
+        let workspace = root.join("private-workspace");
+        fs::create_dir_all(workspace.join(".ee"))
+            .map_err(|error| format!("failed to create workspace metadata dir: {error}"))?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize workspace: {error}"))?;
+        let raw_workspace = workspace.display().to_string();
+
+        let scale_rendered = scale_benchmark_summary_json(&workspace, &[]);
+        assert!(
+            !scale_rendered.contains(&raw_workspace),
+            "scale benchmark summary must not contain the raw workspace path"
+        );
+        let scale: Value = serde_json::from_str(&scale_rendered)
+            .map_err(|error| format!("scale summary must parse: {error}"))?;
+        assert_eq!(scale.pointer("/workspacePath"), None);
+        assert_eq!(
+            scale.pointer("/rawWorkspacePathIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            scale.pointer("/redactionStatus"),
+            Some(&json!("counts_hashes_only_no_raw_paths"))
+        );
+        require_blake3_hash(
+            scale.pointer("/workspaceHash"),
+            "scale benchmark summary",
+            "/workspaceHash",
+        )?;
+
+        let cache_rendered = cache_reports_json(&workspace);
+        assert!(
+            !cache_rendered.contains(&raw_workspace),
+            "cache report summary must not contain the raw workspace path"
+        );
+        let cache: Value = serde_json::from_str(&cache_rendered)
+            .map_err(|error| format!("cache report summary must parse: {error}"))?;
+        assert_eq!(cache.pointer("/workspacePath"), None);
+        assert_eq!(
+            cache.pointer("/rawWorkspacePathIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            cache.pointer("/redactionStatus"),
+            Some(&json!("counts_hashes_only_no_raw_paths"))
+        );
+        require_blake3_hash(
+            cache.pointer("/workspaceHash"),
+            "cache report summary",
+            "/workspaceHash",
+        )?;
+
         Ok(())
     }
 

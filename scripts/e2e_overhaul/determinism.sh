@@ -54,9 +54,24 @@ hash_stdin() {
 VOLATILE_FIELD_NAMES=(
     generatedAt
     generated_at
+    createdAt
     created_at
+    updatedAt
+    completedAt
+    finishedAt
+    expiresAt
+    capturedAt
     captured_at
+    computedAt
     computed_at
+    observedAt
+    recordedAt
+    refreshedAt
+    selectedAt
+    decidedAt
+    estimatedAt
+    exposedAt
+    lastValidatedAt
     last_accessed
     last_accessed_at
     last_seen_at
@@ -64,6 +79,9 @@ VOLATILE_FIELD_NAMES=(
     audit_ts
     elapsedMs
     elapsed_ms
+    elapsedMsBucket
+    durationMs
+    wallClockMs
     startedAt
     started_at
     endedAt
@@ -92,6 +110,10 @@ VOLATILE_FIELD_NAMES=(
     witnessElapsedMs
     witnessRecordedAt
     algorithmStartedAt
+    projectionMs
+    pagerankMs
+    betweennessMs
+    totalMs
     selfNodeKey
     selfTailscaleIp
     selfMagicDnsName

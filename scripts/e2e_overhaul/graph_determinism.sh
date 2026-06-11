@@ -42,7 +42,24 @@ hash_stdin() {
 VOLATILE_FIELD_NAMES=(
     generatedAt
     generated_at
+    createdAt
+    created_at
+    updatedAt
+    completedAt
+    finishedAt
+    expiresAt
+    capturedAt
+    captured_at
+    computedAt
     computed_at
+    observedAt
+    recordedAt
+    refreshedAt
+    selectedAt
+    decidedAt
+    estimatedAt
+    exposedAt
+    lastValidatedAt
     last_accessed
     last_accessed_at
     last_seen_at
@@ -51,6 +68,8 @@ VOLATILE_FIELD_NAMES=(
     elapsedMs
     elapsed_ms
     elapsedMsBucket
+    durationMs
+    wallClockMs
     nondeterministic
     projectionMs
     pagerankMs

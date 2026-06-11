@@ -17,6 +17,7 @@ the Rust constant, and the shell list together.
 | `last_used_at` | Per-read update | v0.1 | Usage freshness signal. |
 | `audit_ts` | Per-write timestamp | v0.1 | Audit chain event time. |
 | `elapsedMs` / `elapsed_ms` | Wall-clock elapsed time | v0.1 | Performance-only measurement. |
+| `elapsedMsBucket` / `durationMs` / `wallClockMs` | Wall-clock elapsed time | v0.3 | Bucketed or alternate spellings used by perf, verification, and workload surfaces. |
 | `startedAt` / `started_at` | Wall-clock start time | v0.1 | Maintenance jobs and long-running operations. |
 | `endedAt` / `ended_at` | Wall-clock end time | v0.1 | Maintenance jobs and long-running operations. |
 | `ts` / `timestamp` | Generic wall-clock timestamp | v0.1 | Log envelopes and event records. |
@@ -29,7 +30,10 @@ the Rust constant, and the shell list together.
 | `witnessElapsedMs` | Wall-clock algorithm witness duration | v0.2 | CGSE witness timing varies by host and load. |
 | `witnessRecordedAt` | Wall-clock witness persistence time | v0.2 | Audit timing for the witness record. |
 | `algorithmStartedAt` | Wall-clock graph algorithm start time | v0.2 | Used to explain operations, not rank or selection. |
-| `created_at` / `captured_at` | Per-write wall-clock timestamp | v0.3 | Creation/capture times on capsules, snapshots, and evidence rows. |
+| `projectionMs` / `pagerankMs` / `betweennessMs` / `totalMs` | Wall-clock graph algorithm duration | v0.3 | Algorithm timing varies by host and load; graph content is compared separately. |
+| `createdAt` / `created_at` / `updatedAt` / `completedAt` / `finishedAt` / `expiresAt` | Lifecycle wall-clock timestamp | v0.3 | Creation/update/completion/expiry times on records, locks, runs, snapshots, and evidence rows. |
+| `capturedAt` / `captured_at` / `computedAt` / `computed_at` / `observedAt` / `recordedAt` / `refreshedAt` | Observation wall-clock timestamp | v0.3 | Capture/compute/observe/record/refresh times on diagnostics, graph, support, and evidence surfaces. |
+| `selectedAt` / `decidedAt` / `estimatedAt` / `exposedAt` / `lastValidatedAt` | Derived decision wall-clock timestamp | v0.3 | Selection, decision, estimate, exposure, and validation timestamps that depend on when a run happened. |
 | `run_duration_ms` | Wall-clock run duration (snake_case spelling) | v0.3 | Same measurement class as `runDurationMs`. |
 | `capsule_id` | Per-create random identifier | v0.3 | Handoff capsules mint a fresh id even for identical workspace state. |
 | `integrity` | Per-create HMAC signature block | v0.3 | Signed over volatile content; never part of canonical capsule identity. |
