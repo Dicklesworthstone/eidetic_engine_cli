@@ -755,6 +755,19 @@ fn jsonl_exporter_applies_redaction_and_tracks_counts() -> TestResult {
     )?;
 
     let written = String::from_utf8(output).map_err(|e| e.to_string())?;
+    let footer_json = written
+        .lines()
+        .last()
+        .ok_or_else(|| "export should include a footer line".to_string())?;
+    let footer: ExportFooter =
+        serde_json::from_str(footer_json).map_err(|error| format!("footer parses: {error}"))?;
+    ensure(
+        footer.total_records == stats.total_records,
+        format!(
+            "footer total_records should match stats total_records: footer={}, stats={}",
+            footer.total_records, stats.total_records
+        ),
+    )?;
     ensure(
         written.contains(REDACTED_PLACEHOLDER),
         "export should contain redaction placeholder",

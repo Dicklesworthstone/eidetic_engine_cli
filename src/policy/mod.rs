@@ -410,12 +410,7 @@ fn mesh_export_path_secret_risk(field: &str, value: &str) -> Vec<String> {
 
 fn mesh_secret_redacted_preview(content: &str) -> String {
     let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
-    let path_report = workspace_secret_risk_evidence(
-        &compact,
-        None,
-        WORKSPACE_SECRET_RISK_DEFAULT_MAX_SCAN_BYTES,
-    );
-    if path_report.secret_risk {
+    if mesh_redacted_preview_has_path_risk(&compact) {
         return redaction_placeholder("mesh_export");
     }
     const MAX_CHARS: usize = 160;
@@ -425,6 +420,39 @@ fn mesh_secret_redacted_preview(content: &str) -> String {
     let mut preview = compact.chars().take(MAX_CHARS - 3).collect::<String>();
     preview.push_str("...");
     preview
+}
+
+fn mesh_redacted_preview_has_path_risk(content: &str) -> bool {
+    content
+        .split(mesh_preview_path_separator)
+        .filter_map(mesh_preview_path_candidate)
+        .any(|candidate| {
+            workspace_secret_risk_evidence(
+                candidate,
+                None,
+                WORKSPACE_SECRET_RISK_DEFAULT_MAX_SCAN_BYTES,
+            )
+            .secret_risk
+        })
+}
+
+fn mesh_preview_path_separator(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '"' | '\'' | '`' | '<' | '>' | '[' | ']' | '(' | ')' | '{' | '}' | ',' | ';'
+        )
+}
+
+fn mesh_preview_path_candidate(token: &str) -> Option<&str> {
+    let candidate = token
+        .trim_matches([':', '='])
+        .trim_end_matches(['.', ':', '=']);
+    if candidate.is_empty() || candidate.starts_with("REDACTED:") {
+        None
+    } else {
+        Some(candidate)
+    }
 }
 
 #[must_use]
@@ -2730,17 +2758,48 @@ mod tests {
 
     use super::{
         INSTRUCTION_LIKE_SCORE_THRESHOLD, InstructionRisk, InstructionSignalKind,
+        MESH_SECRET_EXPORT_DENIED_CODE, MeshExportSecretScanSubject,
         SHARE_PREVIEW_CONSENT_AUDIT_SCHEMA_V1, SHARE_PREVIEW_SCHEMA_V1, SharePreviewCandidate,
         SharePreviewInput, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE, build_share_preview,
         detect_instruction_like_content, redact_secret_like_content, redaction_placeholder,
-        screen_external_text_for_ingestion, share_preview_consent_audit, share_preview_hash,
-        subsystem_name, validate_trust_promotion_evidence, workspace_secret_risk_evidence,
-        workspace_secret_risk_overrides_safe_classification,
+        scan_mesh_export_subjects, screen_external_text_for_ingestion, share_preview_consent_audit,
+        share_preview_hash, subsystem_name, validate_trust_promotion_evidence,
+        workspace_secret_risk_evidence, workspace_secret_risk_overrides_safe_classification,
     };
 
     #[test]
     fn subsystem_name_is_stable() {
         assert_eq!(subsystem_name(), "policy");
+    }
+
+    #[test]
+    fn mesh_export_secret_preview_redacts_punctuated_path_after_secret() {
+        let secret = "sk-FAKEabc123def456ghi789";
+        let subjects = [MeshExportSecretScanSubject::new(
+            "event",
+            "evt_flat",
+            "eventJson",
+            &format!("body API_KEY={secret} evidence_path=keys/id_ed25519, rotate soon"),
+        )];
+
+        let report = scan_mesh_export_subjects(&subjects);
+
+        assert_eq!(report.code, MESH_SECRET_EXPORT_DENIED_CODE);
+        assert!(report.denied());
+        assert_eq!(report.finding_count, 1);
+        assert_eq!(
+            report.findings[0].redacted_preview,
+            redaction_placeholder("mesh_export")
+        );
+        assert!(
+            report
+                .denied_secret_classes
+                .iter()
+                .any(|class| class == "api_key")
+        );
+        let rendered = serde_json::to_string(&report).expect("render mesh secret scan report");
+        assert!(!rendered.contains(secret));
+        assert!(!rendered.contains("id_ed25519"));
     }
 
     #[test]

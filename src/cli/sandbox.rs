@@ -39,13 +39,32 @@ pub enum SandboxCommand {
 }
 
 /// Shared `--session` selector (defaults to `default`).
-fn session_name(explicit: &Option<String>) -> String {
-    explicit
+fn session_name(explicit: &Option<String>) -> Result<String, DomainError> {
+    let name = explicit
         .as_deref()
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .unwrap_or("default")
-        .to_owned()
+        .to_owned();
+    if is_safe_session_name(&name) {
+        Ok(name)
+    } else {
+        Err(DomainError::Usage {
+            message: "Invalid sandbox session name: session names must be plain file-safe names."
+                .to_owned(),
+            repair: Some(
+                "Use only ASCII letters, digits, '.', '_' or '-' and do not pass path separators."
+                    .to_owned(),
+            ),
+        })
+    }
+}
+
+fn is_safe_session_name(name: &str) -> bool {
+    !matches!(name, "." | "..")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Args)]
@@ -136,7 +155,7 @@ pub fn propose_remember(
     workspace: &Path,
     args: &SandboxRememberArgs,
 ) -> Result<ProposeOutcome, DomainError> {
-    let name = session_name(&args.session);
+    let name = session_name(&args.session)?;
     let mut session = load_session(workspace, &name);
     session.proposals.push(SandboxProposal::Remember {
         memory_id: synthetic_memory_id(&args.content),
@@ -166,7 +185,7 @@ pub fn propose_import(
     workspace: &Path,
     args: &SandboxImportArgs,
 ) -> Result<ProposeOutcome, DomainError> {
-    let name = session_name(&args.session);
+    let name = session_name(&args.session)?;
     let mut session = load_session(workspace, &name);
     session.proposals.push(SandboxProposal::Import {
         memory_id: synthetic_memory_id(&args.content),
@@ -199,7 +218,7 @@ pub fn propose_curate(
             repair: Some("Pass --retire <id> (repeatable) to propose retirements.".to_owned()),
         });
     }
-    let name = session_name(&args.session);
+    let name = session_name(&args.session)?;
     let mut session = load_session(workspace, &name);
     for memory_id in &args.retire {
         let trimmed = memory_id.trim();
@@ -222,7 +241,7 @@ pub fn build_diff(
     workspace: &Path,
     args: &SandboxDiffArgs,
 ) -> Result<(String, SandboxDiffSurface), DomainError> {
-    let name = session_name(&args.session);
+    let name = session_name(&args.session)?;
     let session = load_session(workspace, &name);
     let baseline = baseline_memories(workspace)?;
     Ok((name, assemble_sandbox_diff(&baseline, &session)))
@@ -279,7 +298,7 @@ pub fn apply_session(
     workspace: &Path,
     args: &SandboxApplyArgs,
 ) -> Result<ApplyOutcome, DomainError> {
-    let name = session_name(&args.session);
+    let name = session_name(&args.session)?;
     let session = load_session(workspace, &name);
 
     let mut persisted = Vec::new();
@@ -455,8 +474,49 @@ mod tests {
 
     #[test]
     fn session_name_defaults_and_trims() {
-        assert_eq!(session_name(&None), "default");
-        assert_eq!(session_name(&Some("  ".to_owned())), "default");
-        assert_eq!(session_name(&Some(" feature-x ".to_owned())), "feature-x");
+        assert_eq!(session_name(&None).expect("default"), "default");
+        assert_eq!(
+            session_name(&Some("  ".to_owned())).expect("blank defaults"),
+            "default"
+        );
+        assert_eq!(
+            session_name(&Some(" feature-x ".to_owned())).expect("trimmed"),
+            "feature-x"
+        );
+    }
+
+    #[test]
+    fn session_name_rejects_path_traversal() {
+        for raw in [
+            ".",
+            "..",
+            "../escape",
+            "nested/name",
+            "/absolute",
+            r"nested\name",
+            "feature name",
+            "feature:name",
+            "feature\nname",
+            "feature-\u{2603}",
+        ] {
+            let error = session_name(&Some(raw.to_owned())).expect_err(raw);
+            assert!(
+                error.to_string().contains("Invalid sandbox session name"),
+                "unexpected error for {raw:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_name_accepts_file_safe_names() {
+        for raw in [
+            "default",
+            "feature-x",
+            "feature_x",
+            "feature.2026",
+            "A1-b_2.c",
+        ] {
+            assert_eq!(session_name(&Some(raw.to_owned())).expect(raw), raw);
+        }
     }
 }

@@ -265,29 +265,51 @@ fn redact_jsonl_import_source_path_segments(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     let mut cursor = 0;
     while cursor < value.len() {
-        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
+        let Some((relative_index, _)) = value[cursor..]
+            .char_indices()
+            .find(|(_, c)| jsonl_import_source_path_separator(*c))
         else {
             output.push_str(&value[cursor..]);
             break;
         };
         let start = cursor + relative_index;
-        if !jsonl_import_source_path_starts_sensitive_segment(&value[start..]) {
+        let Some(redaction_start) = jsonl_import_source_path_redaction_start(value, start) else {
             output.push_str(&value[cursor..=start]);
             cursor = start + 1;
             continue;
-        }
+        };
 
-        output.push_str(&value[cursor..start]);
+        output.push_str(&value[cursor..redaction_start]);
         output.push_str("[REDACTED_PATH]");
-        cursor = value[start..]
+        cursor = value[redaction_start..]
             .char_indices()
-            .find_map(|(index, c)| jsonl_import_source_path_boundary(c).then_some(start + index))
+            .find_map(|(index, c)| {
+                jsonl_import_source_path_boundary(c).then_some(redaction_start + index)
+            })
             .unwrap_or(value.len());
     }
     output
 }
 
-fn jsonl_import_source_path_starts_sensitive_segment(value: &str) -> bool {
+fn jsonl_import_source_path_separator(c: char) -> bool {
+    matches!(c, '/' | '\\')
+}
+
+fn jsonl_import_source_path_redaction_start(value: &str, separator_start: usize) -> Option<usize> {
+    let candidate = &value[separator_start..];
+    if jsonl_import_source_path_starts_sensitive_unix_segment(candidate)
+        || jsonl_import_source_path_starts_sensitive_windows_segment(candidate)
+        || jsonl_import_source_path_starts_unc_path(candidate)
+    {
+        return Some(
+            jsonl_import_source_path_windows_drive_start(value, separator_start)
+                .unwrap_or(separator_start),
+        );
+    }
+    None
+}
+
+fn jsonl_import_source_path_starts_sensitive_unix_segment(value: &str) -> bool {
     const PREFIXES: &[&str] = &[
         "/Users/",
         "/Volumes/",
@@ -305,8 +327,57 @@ fn jsonl_import_source_path_starts_sensitive_segment(value: &str) -> bool {
     PREFIXES.iter().any(|prefix| value.starts_with(prefix))
 }
 
+fn jsonl_import_source_path_starts_sensitive_windows_segment(value: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "\\Users\\",
+        "\\Volumes\\",
+        "\\private\\",
+        "\\var\\",
+        "\\tmp\\",
+        "\\home\\",
+        "\\data\\",
+        "\\dp\\",
+        "\\workspace\\",
+        "\\repo\\",
+        "\\etc\\",
+    ];
+
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn jsonl_import_source_path_starts_unc_path(value: &str) -> bool {
+    value.starts_with("\\\\")
+}
+
+fn jsonl_import_source_path_windows_drive_start(
+    value: &str,
+    separator_start: usize,
+) -> Option<usize> {
+    if separator_start < 2 {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    let drive_start = separator_start - 2;
+    if !bytes[drive_start].is_ascii_alphabetic() || bytes[drive_start + 1] != b':' {
+        return None;
+    }
+    if drive_start == 0 {
+        return Some(drive_start);
+    }
+    let previous = value[..drive_start].chars().next_back()?;
+    jsonl_import_source_path_start_boundary(previous).then_some(drive_start)
+}
+
+fn jsonl_import_source_path_start_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '/' | '\\' | '(' | '[' | '{' | '"' | '\'' | '<' | '=')
+}
+
 fn jsonl_import_source_path_boundary(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
+    c.is_whitespace()
+        || matches!(
+            c,
+            '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';' | '<' | '>' | '`'
+        )
 }
 
 /// Stable subset of header metadata exposed by import reports.
@@ -1813,6 +1884,56 @@ mod tests {
             "/Users/alice/private/export.jsonl?api_key=redaction-fixture".to_owned(),
             "raw report source_path remains available internally",
         )
+    }
+
+    #[test]
+    fn import_report_json_redacts_windows_source_refs() -> TestResult {
+        let report = import_report_fixture(
+            r"C:\Users\Alice\private\export.jsonl?api_key=redaction-fixture",
+            r"jsonl://C:\Users\Alice\private\export.jsonl?api_key=redaction-fixture",
+        );
+        let json = report.data_json();
+        let rendered = json.to_string();
+
+        assert!(
+            rendered.contains("[REDACTED_PATH]"),
+            "source refs should redact Windows path-like values: {rendered}"
+        );
+        assert!(
+            rendered.contains("[REDACTED:"),
+            "source refs should redact secret-like values: {rendered}"
+        );
+        assert!(
+            !rendered.contains("C:\\Users")
+                && !rendered.contains("Alice")
+                && !rendered.contains("redaction-fixture"),
+            "source refs leaked sensitive Windows material: {rendered}"
+        );
+        ensure(
+            report.source_path,
+            r"C:\Users\Alice\private\export.jsonl?api_key=redaction-fixture".to_owned(),
+            "raw Windows report source_path remains available internally",
+        )
+    }
+
+    #[test]
+    fn import_report_json_redacts_unc_source_refs() -> TestResult {
+        let report = import_report_fixture(
+            r"\\fileserver\share\team\export.jsonl",
+            r"jsonl://\\fileserver\share\team\export.jsonl",
+        );
+        let json = report.data_json();
+        let rendered = json.to_string();
+
+        assert!(
+            rendered.contains("[REDACTED_PATH]"),
+            "source refs should redact UNC path-like values: {rendered}"
+        );
+        assert!(
+            !rendered.contains("fileserver") && !rendered.contains("share"),
+            "source refs leaked UNC material: {rendered}"
+        );
+        Ok(())
     }
 
     #[test]

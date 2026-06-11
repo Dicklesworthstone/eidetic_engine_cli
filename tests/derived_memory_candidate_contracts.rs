@@ -231,6 +231,7 @@ fn provenance_uri_accepts_registered_schemes() -> TestResult {
         "bench-run://2026-09-12T14:23/oltp-mixed-small-n",
         "git-sha://9af3c21-pre-revert",
         "flamegraph://artifacts/9af3c21/cpu-prof.svg",
+        "ee-reflect://reflect_req_0123456789abcdef",
     ];
     for input in accepted {
         ProvenanceUri::from_str(input)

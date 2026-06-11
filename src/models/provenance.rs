@@ -6,7 +6,7 @@
 //! and must be both round-trippable through JSON and stable across
 //! tool versions.
 //!
-//! Ten schemes are recognised in v1:
+//! Eleven schemes are recognised in v1:
 //!
 //! | Scheme            | Body shape                                          |
 //! |-------------------|-----------------------------------------------------|
@@ -19,6 +19,7 @@
 //! | `bench-run://`    | Opaque benchmark-run identifier                     |
 //! | `git-sha://`      | Opaque commit/revision identifier                   |
 //! | `flamegraph://`   | Opaque profiler artifact reference                  |
+//! | `ee-reflect://`   | Opaque reflection request/result identifier         |
 //!
 //! The parser is strict about scheme syntax but does not perform deep
 //! semantic validation of opaque bodies — file paths, CASS session ids,
@@ -202,20 +203,21 @@ impl FromStr for ProvenanceUri {
                 });
             }
         };
-        let scheme = &trimmed[..lower_scheme_end];
+        let raw_scheme = &trimmed[..lower_scheme_end];
+        let scheme = raw_scheme.to_ascii_lowercase();
         let body = &trimmed[lower_scheme_end + "://".len()..];
-        match scheme {
+        match scheme.as_str() {
             "cass-session" => parse_cass_session(input, body),
             "file" => parse_file(input, body),
             "ee-mem" => parse_ee_memory(input, body),
-            "http" | "https" => parse_web(input, scheme, body),
+            "http" | "https" => parse_web(input, &scheme, body),
             "agent-mail" => parse_agent_mail(input, body),
-            "manual" | "bench-run" | "git-sha" | "flamegraph" => {
-                parse_external(input, scheme, body)
+            "manual" | "bench-run" | "git-sha" | "flamegraph" | "ee-reflect" => {
+                parse_external(input, &scheme, body)
             }
-            other => Err(ProvenanceUriError::UnknownScheme {
+            _ => Err(ProvenanceUriError::UnknownScheme {
                 input: input.to_owned(),
-                scheme: other.to_owned(),
+                scheme: raw_scheme.to_owned(),
             }),
         }
     }
@@ -228,7 +230,7 @@ fn parse_cass_session(input: &str, body: &str) -> Result<ProvenanceUri, Provenan
             scheme: "cass-session",
         });
     }
-    let (session, span) = split_fragment(input, body)?;
+    let (session, span) = split_fragment(input, body, "cass-session")?;
     Ok(ProvenanceUri::CassSession {
         session: session.to_owned(),
         span,
@@ -242,7 +244,7 @@ fn parse_file(input: &str, body: &str) -> Result<ProvenanceUri, ProvenanceUriErr
             scheme: "file",
         });
     }
-    let (path, span) = split_fragment(input, body)?;
+    let (path, span) = split_fragment(input, body, "file")?;
     Ok(ProvenanceUri::File {
         path: path.to_owned(),
         span,
@@ -277,6 +279,12 @@ fn parse_web(input: &str, scheme: &str, body: &str) -> Result<ProvenanceUri, Pro
         });
     }
     if body.contains(|character: char| character.is_ascii_control() || character == ' ') {
+        return Err(ProvenanceUriError::InvalidWebBody {
+            input: input.to_owned(),
+        });
+    }
+    let authority_end = body.find(['/', '?', '#']).unwrap_or(body.len());
+    if authority_end == 0 {
         return Err(ProvenanceUriError::InvalidWebBody {
             input: input.to_owned(),
         });
@@ -339,6 +347,7 @@ fn external_scheme_name(scheme: &str) -> &'static str {
         "bench-run" => "bench-run",
         "git-sha" => "git-sha",
         "flamegraph" => "flamegraph",
+        "ee-reflect" => "ee-reflect",
         _ => "external",
     }
 }
@@ -348,12 +357,13 @@ fn external_scheme_name(scheme: &str) -> &'static str {
 fn split_fragment<'a>(
     input: &str,
     body: &'a str,
+    scheme: &'static str,
 ) -> Result<(&'a str, Option<LineSpan>), ProvenanceUriError> {
     if let Some((value, fragment)) = body.split_once('#') {
         if value.is_empty() {
             return Err(ProvenanceUriError::EmptyBody {
                 input: input.to_owned(),
-                scheme: "file",
+                scheme,
             });
         }
         let span = parse_line_fragment(input, fragment)?;
@@ -425,7 +435,7 @@ impl fmt::Display for ProvenanceUriError {
             ),
             Self::UnknownScheme { input, scheme } => write!(
                 formatter,
-                "unknown provenance scheme `{scheme}` in `{input}`; expected one of cass-session, file, ee-mem, http, https, agent-mail, manual, bench-run, git-sha, flamegraph"
+                "unknown provenance scheme `{scheme}` in `{input}`; expected one of cass-session, file, ee-mem, http, https, agent-mail, manual, bench-run, git-sha, flamegraph, ee-reflect"
             ),
             Self::EmptyBody { input, scheme } => write!(
                 formatter,
@@ -625,10 +635,44 @@ mod tests {
     }
 
     #[test]
+    fn scheme_case_is_canonicalized() {
+        for (input, expected) in [
+            ("HTTPS://example.com/path", "https://example.com/path"),
+            (
+                "FILE:///etc/ee/config.toml#L7",
+                "file:///etc/ee/config.toml#L7",
+            ),
+            (
+                "Git-SHA://9af3c21-pre-revert",
+                "git-sha://9af3c21-pre-revert",
+            ),
+            (
+                "EE-REFLECT://reflect_req_0123456789abcdef",
+                "ee-reflect://reflect_req_0123456789abcdef",
+            ),
+            ("AGENT-MAIL://br-123/msg-42", "agent-mail://br-123/msg-42"),
+        ] {
+            let parsed = must_parse(input);
+            assert_eq!(parsed.to_string(), expected);
+        }
+    }
+
+    #[test]
     fn web_rejects_whitespace_or_controls() {
         for bad in ["https://exam ple.com", "http://example.com\u{0001}/x"] {
             let err = must_fail(bad);
             assert!(matches!(err, ProvenanceUriError::InvalidWebBody { .. }));
+        }
+    }
+
+    #[test]
+    fn web_rejects_missing_authority() {
+        for bad in ["https:///path", "http://?q=1", "https://#section"] {
+            let err = must_fail(bad);
+            assert!(
+                matches!(err, ProvenanceUriError::InvalidWebBody { .. }),
+                "expected InvalidWebBody for `{bad}`, got {err:?}"
+            );
         }
     }
 
@@ -673,6 +717,7 @@ mod tests {
             "bench-run://2026-09-12T14:23/oltp-mixed-small-n",
             "git-sha://9af3c21-pre-revert",
             "flamegraph://artifacts/9af3c21/cpu-prof.svg",
+            "ee-reflect://reflect_req_0123456789abcdef",
         ] {
             let parsed = must_parse(input);
             match &parsed {
@@ -695,6 +740,7 @@ mod tests {
             ("bench-run://", "bench-run"),
             ("git-sha://", "git-sha"),
             ("flamegraph://", "flamegraph"),
+            ("ee-reflect://", "ee-reflect"),
         ] {
             let err = must_fail(input);
             match err {
@@ -739,7 +785,9 @@ mod tests {
     fn empty_body_returns_typed_error_per_scheme() {
         for (input, expected_scheme) in [
             ("cass-session://", "cass-session"),
+            ("cass-session://#L1", "cass-session"),
             ("file://", "file"),
+            ("file://#L1", "file"),
             ("ee-mem://", "ee-mem"),
             ("https://", "https"),
             ("http://", "http"),
@@ -748,6 +796,7 @@ mod tests {
             ("bench-run://", "bench-run"),
             ("git-sha://", "git-sha"),
             ("flamegraph://", "flamegraph"),
+            ("ee-reflect://", "ee-reflect"),
         ] {
             let err = must_fail(input);
             match err {
@@ -816,6 +865,10 @@ mod tests {
         assert_eq!(
             must_parse("flamegraph://artifact.svg").scheme(),
             "flamegraph"
+        );
+        assert_eq!(
+            must_parse("ee-reflect://reflect_req_abcdef").scheme(),
+            "ee-reflect"
         );
     }
 

@@ -17305,7 +17305,7 @@ mod tests {
                 "confidence": 0.61,
                 "utility": 0.50,
                 "importance": 0.40,
-                "provenanceUri": "ee-mem://mem_validator_source",
+                "provenanceUri": "ee-reflect://reflect_req_validator_source",
                 "trustClass": "agent_assertion",
                 "trustSubclass": "reflection",
                 "tags": ["reflection"]
