@@ -127,6 +127,7 @@ pub mod tailscale_probe;
 pub mod task_frame;
 pub mod trauma_guard;
 pub mod tripwire;
+pub mod unsafe_claim_planner;
 pub mod verify;
 pub mod verify_ledger;
 pub mod why;
