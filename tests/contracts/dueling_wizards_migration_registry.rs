@@ -224,7 +224,8 @@ fn planned_allocations_are_contiguous_and_complete() -> TestResult {
     let allocations = array_field(&manifest, "/allocations", MANIFEST_REL)?;
     let mut ids = BTreeSet::new();
     let mut owner_beads = BTreeSet::new();
-    let mut versions = Vec::new();
+    let mut implemented_versions = Vec::new();
+    let mut planned_versions = Vec::new();
     let mut first_planned_version: Option<u64> = None;
 
     for (index, allocation) in allocations.iter().enumerate() {
@@ -235,7 +236,6 @@ fn planned_allocations_are_contiguous_and_complete() -> TestResult {
         }
 
         let version = u64_field(allocation, "/version", &context)?;
-        versions.push(version);
         let expected_name_prefix = format!("V{version:03}_");
         let migration_name = string_field(allocation, "/migrationName", &context)?;
         if !migration_name.starts_with(&expected_name_prefix) {
@@ -254,8 +254,13 @@ fn planned_allocations_are_contiguous_and_complete() -> TestResult {
         if !matches!(status, "planned" | "implemented") {
             return Err(format!("{id}: unsupported status {status}"));
         }
-        if status == "planned" && first_planned_version.is_none() {
-            first_planned_version = Some(version);
+        if status == "planned" {
+            planned_versions.push(version);
+            if first_planned_version.is_none() {
+                first_planned_version = Some(version);
+            }
+        } else {
+            implemented_versions.push(version);
         }
 
         for pointer in [
@@ -305,20 +310,24 @@ fn planned_allocations_are_contiguous_and_complete() -> TestResult {
         ));
     }
 
-    versions.sort_unstable();
-    let first = *versions
-        .first()
-        .ok_or_else(|| "registry must contain at least one allocation".to_owned())?;
-    for (offset, version) in versions.iter().enumerate() {
-        let expected = first
-            + u64::try_from(offset)
-                .map_err(|error| format!("offset {offset} exceeds u64: {error}"))?;
-        if *version != expected {
+    // The migration number line is shared with non-initiative workstreams, so
+    // implemented allocations record historical fact (ascending, behind the
+    // compiled tail; two allocations may share one compiled migration), while
+    // planned allocations are reservations and must stay strictly contiguous
+    // from nextPlannedMigration so future slots cannot collide.
+    let compiled_tail = u64_field(&manifest, "/currentLastCompiledMigration", MANIFEST_REL)?;
+    implemented_versions.sort_unstable();
+    if implemented_versions.is_empty() {
+        return Err("registry must contain at least one implemented allocation".to_owned());
+    }
+    for version in &implemented_versions {
+        if *version > compiled_tail {
             return Err(format!(
-                "migration allocations must be contiguous from V{first:03}; expected V{expected:03}, got V{version:03}"
+                "implemented allocation V{version:03} is ahead of compiled tail V{compiled_tail:03}"
             ));
         }
     }
+
     let next_planned = u64_field(&manifest, "/nextPlannedMigration", MANIFEST_REL)?;
     let first_planned_version = first_planned_version
         .ok_or_else(|| "registry must keep at least one planned allocation".to_owned())?;
@@ -326,6 +335,17 @@ fn planned_allocations_are_contiguous_and_complete() -> TestResult {
         return Err(format!(
             "first planned allocation must match nextPlannedMigration: first planned V{first_planned_version:03}, next V{next_planned:03}"
         ));
+    }
+    planned_versions.sort_unstable();
+    for (offset, version) in planned_versions.iter().enumerate() {
+        let expected = next_planned
+            + u64::try_from(offset)
+                .map_err(|error| format!("offset {offset} exceeds u64: {error}"))?;
+        if *version != expected {
+            return Err(format!(
+                "planned allocations must be contiguous from V{next_planned:03}; expected V{expected:03}, got V{version:03}"
+            ));
+        }
     }
     Ok(())
 }

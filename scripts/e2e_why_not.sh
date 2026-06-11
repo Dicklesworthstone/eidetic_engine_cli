@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # bd-1n0np.1.6 - real-binary E2E coverage for `ee why-not`.
 
-set -euo pipefail
+# NOTE: no `set -e` — the harness assert_* helpers accumulate pass/fail and
+# `harness_summary` decides the exit code (same pattern as e2e_primer_agentsmd.sh).
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -13,9 +15,42 @@ REQUESTED_EE_BIN="${EE_BIN:-}"
 export EE_E2E_KEEP="${EE_E2E_KEEP:-1}"
 export EE_E2E_KEEP_ARTIFACTS="${EE_E2E_KEEP_ARTIFACTS:-1}"
 
-# shellcheck source=scripts/e2e_lib.sh
+# shellcheck source=scripts/lib/e2e_harness.sh
 # shellcheck disable=SC1091
-source "$REPO_ROOT/scripts/e2e_lib.sh"
+source "$REPO_ROOT/scripts/lib/e2e_harness.sh"
+
+# log_event <kind> [key value]... — ee.test_event.v1 event plus a compact
+# human-readable mirror on stderr.
+log_event() {
+    local kind="${1:?log_event: kind required}"
+    shift
+    if [ $(( $# % 2 )) -ne 0 ]; then
+        _harness_fail "log_event $kind: expected key/value pairs"
+        return 1
+    fi
+    _e2e_emit_event "$kind" "$@"
+    printf '[harness] event %s' "$kind" >&2
+    while [ $# -gt 0 ]; do
+        printf ' %s=%s' "$1" "$2" >&2
+        shift 2
+    done
+    printf '\n' >&2
+}
+
+# assert_json <json> <jq-filter> <expected> <label> — scalar extraction + eq.
+assert_json() {
+    local json="${1:?assert_json: json required}"
+    local filter="${2:?assert_json: jq filter required}"
+    local expected="${3:-}"
+    local label="${4:-assert_json}"
+    local actual
+    if ! actual="$(printf '%s' "$json" | jq -r "$filter" 2>/dev/null)"; then
+        e2e_log_assert_eq "jq_error" "$expected" "$label" || true
+        _harness_fail "$label: jq filter failed [$filter]"
+        return 0
+    fi
+    assert_eq "$actual" "$expected" "$label"
+}
 
 require_tool() {
     local tool="${1:?tool required}"
@@ -83,17 +118,18 @@ run_ee_capture() {
     local __out_var="${1:?output variable required}"
     local label="${2:?label required}"
     shift 2
-    local output
-    local exit_code
-    set +e
-    output="$(run_ee_json "$@")"
-    exit_code=$?
-    set -e
-    printf -v "$__out_var" '%s' "$output"
-    if [ "$exit_code" -eq 0 ]; then
+    # Locals deliberately avoid common caller variable names: printf -v writes
+    # through bash dynamic scoping, so a `local output` here would shadow the
+    # caller's variable and leave it unset.
+    local __captured
+    local __exit_code
+    __captured="$(run_ee_json "$@")"
+    __exit_code=$?
+    printf -v "$__out_var" '%s' "$__captured"
+    if [ "$__exit_code" -eq 0 ]; then
         _harness_pass "$label command exit 0"
     else
-        _harness_fail "$label command exit $exit_code"
+        _harness_fail "$label command exit $__exit_code"
     fi
     return 0
 }
@@ -102,14 +138,12 @@ run_ee_capture_status() {
     local __out_var="${1:?output variable required}"
     local __status_var="${2:?status variable required}"
     shift 2
-    local output
-    local exit_code
-    set +e
-    output="$(run_ee_json "$@")"
-    exit_code=$?
-    set -e
-    printf -v "$__out_var" '%s' "$output"
-    printf -v "$__status_var" '%s' "$exit_code"
+    local __captured
+    local __exit_code
+    __captured="$(run_ee_json "$@")"
+    __exit_code=$?
+    printf -v "$__out_var" '%s' "$__captured"
+    printf -v "$__status_var" '%s' "$__exit_code"
     return 0
 }
 
@@ -195,7 +229,7 @@ if [ -n "$selected_ee_bin" ]; then
     _harness_pass "ee binary supports why-not: $EE_BIN"
 else
     _harness_fail "no resolved ee binary supports why-not; build through RCH first or set EE_BIN"
-    summary
+    harness_summary
     exit $?
 fi
 
@@ -252,24 +286,28 @@ assert_eq \
     "$(printf '%s' "$selected_second" | jq -c '.data')" \
     "why-not selected output is deterministic"
 
-step "unretrieved memory reports reconstructed not_retrieved"
+# With the candidate pool (20) larger than the seeded memory count, every
+# memory reaches the selection ledger, so the unrelated memory gets an
+# authoritative omitted_by_score_floor verdict rather than the reconstructed
+# not_retrieved path (which needs a memory absent from the candidate universe).
+step "unrelated memory reports authoritative omitted_by_score_floor"
 unretrieved_output=""
 run_ee_capture unretrieved_output \
-    "why-not unretrieved" \
+    "why-not low-score" \
     why-not "$unrelated_memory_id" \
     --task "prepare release verification gate" \
     --workspace "$workspace" \
     --candidate-pool 20 \
     --max-tokens 1000 \
     --json
-assert_json "$unretrieved_output" '.schema' "ee.response.v2" "why-not unretrieved envelope"
-assert_json "$unretrieved_output" '.success' "true" "why-not unretrieved succeeds"
-assert_json "$unretrieved_output" '.data.schema' "ee.why_not_selected.v1" "why-not unretrieved data schema"
-assert_json "$unretrieved_output" '.data.memoryId' "$unrelated_memory_id" "why-not unretrieved memory id"
-assert_json "$unretrieved_output" '.data.selected' "false" "why-not unretrieved selected flag"
-assert_json "$unretrieved_output" '.data.primaryReason' "not_retrieved" "why-not unretrieved primary reason"
-assert_json "$unretrieved_output" '.data.reasonSource' "reconstructed" "why-not unretrieved reason source"
-assert_jq "$unretrieved_output" '.data.counterfactualHints | length >= 1' "why-not unretrieved offers hint"
+assert_json "$unretrieved_output" '.schema' "ee.response.v2" "why-not low-score envelope"
+assert_json "$unretrieved_output" '.success' "true" "why-not low-score succeeds"
+assert_json "$unretrieved_output" '.data.schema' "ee.why_not_selected.v1" "why-not low-score data schema"
+assert_json "$unretrieved_output" '.data.memoryId' "$unrelated_memory_id" "why-not low-score memory id"
+assert_json "$unretrieved_output" '.data.selected' "false" "why-not low-score selected flag"
+assert_json "$unretrieved_output" '.data.primaryReason' "omitted_by_score_floor" "why-not low-score primary reason"
+assert_json "$unretrieved_output" '.data.reasonSource' "authoritative" "why-not low-score reason source"
+assert_jq "$unretrieved_output" '.data.counterfactualHints | length >= 1' "why-not low-score offers hint"
 
 step "missing memory id fails closed"
 missing_memory_id="mem_00000000000000000000000000"
@@ -288,8 +326,8 @@ assert_jq "$missing_output" '.error.message | contains("not found")' "why-not mi
 
 log_event "note" \
     "phase" "selector_contract_coverage" \
-    "realBinaryReasons" "selected,not_retrieved,missing_memory_id" \
-    "libraryPinnedReasons" "omitted_by_token_budget,omitted_by_score_floor,excluded_by_scope,excluded_by_redaction,excluded_by_validity_window,not_retrieved_due_to_degraded_index"
+    "realBinaryReasons" "selected,omitted_by_score_floor,missing_memory_id" \
+    "libraryPinnedReasons" "omitted_by_token_budget,not_retrieved,excluded_by_scope,excluded_by_redaction,excluded_by_validity_window,not_retrieved_due_to_degraded_index"
 
 end_temp_workspace
-summary
+harness_summary

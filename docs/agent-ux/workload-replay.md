@@ -4,7 +4,9 @@
 redaction-safe `ee.swarm_workload.v1` fixture into a deterministic
 admission-only `ee.swarm_replay_result.v1` ledger. Use
 `ee lab promote-workload --trace <trace.jsonl> --agents 64 --json` first when
-the source is a recorded `ee.agent_workload_trace.v1` JSONL file.
+the source is a recorded `ee.agent_workload_trace.v1` JSONL file, or replay a
+trace directly without recording a fixture via
+`ee lab replay --trace <trace.jsonl> --agents 64 --json`.
 
 The promotion harness is read-only. It does not call Agent Mail, Beads, RCH,
 the workspace database, search indexes, or external services. It consumes only

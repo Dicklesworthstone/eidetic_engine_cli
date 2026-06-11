@@ -4,15 +4,25 @@
   "gateBead": "bd-1n0np.23.1",
   "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
   "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
-  "currentLastCompiledMigration": 68,
-  "nextPlannedMigration": 69,
+  "currentLastCompiledMigration": 77,
+  "nextPlannedMigration": 78,
   "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
   "backupCoverageBead": "bd-1n0np.23.2",
   "policy": {
     "ordering": "strictly_contiguous",
     "idempotency": "required",
     "runtimeUpdateRule": "Update this registry in the same change that adds a compiled migration.",
-    "rollbackPosture": "forward_only_reversible_where_safe"
+    "rollbackPosture": "forward_only_reversible_where_safe",
+    "nonInitiativeCompiledMigrations": {
+      "note": "Compiled migrations between the initiative allocations and the tail that belong to other workstreams; tracked by sourceOfTruth, not allocated here.",
+      "versions": {
+        "V073": "V073_ERROR_REPAIR_LINKS (extension of the error_fingerprints allocation scope)",
+        "V074": "V074_JOURNAL_ENTRIES",
+        "V075": "V075_REMEMBER_IDEMPOTENCY_KEYS",
+        "V076": "V076_MEMORY_ANCHOR_INDEX",
+        "V077": "V077_PRIMER_CACHE"
+      }
+    }
   },
   "transitionMatrix": [
     {
@@ -46,48 +56,58 @@
       "proofPosture": "rch_only_no_local_fallback"
     },
     {
-      "id": "error_fingerprints",
-      "version": 69,
-      "status": "planned",
-      "runtimeRule": "planned_allocation_only",
-      "migrationConstant": "required_before_implemented",
-      "boundaryMigrationEvidence": "required_before_implemented",
-      "backupCoverageEvidence": "required_before_implemented",
-      "proofPosture": "rch_only_no_local_fallback"
-    },
-    {
       "id": "memory_sentinel_specs",
-      "version": 70,
-      "status": "planned",
-      "runtimeRule": "planned_allocation_only",
-      "migrationConstant": "required_before_implemented",
-      "boundaryMigrationEvidence": "required_before_implemented",
-      "backupCoverageEvidence": "required_before_implemented",
+      "version": 69,
+      "status": "implemented",
+      "runtimeRule": "compiled_migration_present",
+      "migrationConstant": "V069_MEMORY_SENTINELS",
+      "boundaryMigrationEvidence": "required_and_current",
+      "backupCoverageEvidence": "required_and_current",
       "proofPosture": "rch_only_no_local_fallback"
     },
     {
       "id": "memory_sentinel_results",
-      "version": 71,
-      "status": "planned",
-      "runtimeRule": "planned_allocation_only",
-      "migrationConstant": "required_before_implemented",
-      "boundaryMigrationEvidence": "required_before_implemented",
-      "backupCoverageEvidence": "required_before_implemented",
+      "version": 69,
+      "status": "implemented",
+      "runtimeRule": "compiled_migration_present",
+      "migrationConstant": "V069_MEMORY_SENTINELS",
+      "boundaryMigrationEvidence": "required_and_current",
+      "backupCoverageEvidence": "required_and_current",
       "proofPosture": "rch_only_no_local_fallback"
     },
     {
       "id": "typed_memory_kind_sidecar",
+      "version": 70,
+      "status": "implemented",
+      "runtimeRule": "compiled_migration_present",
+      "migrationConstant": "V070_MEMORY_TYPED_FIELDS",
+      "boundaryMigrationEvidence": "required_and_current",
+      "backupCoverageEvidence": "required_and_current",
+      "proofPosture": "rch_only_no_local_fallback"
+    },
+    {
+      "id": "workspace_generations",
+      "version": 71,
+      "status": "implemented",
+      "runtimeRule": "compiled_migration_present",
+      "migrationConstant": "V071_WORKSPACE_GENERATIONS",
+      "boundaryMigrationEvidence": "required_and_current",
+      "backupCoverageEvidence": "required_and_current",
+      "proofPosture": "rch_only_no_local_fallback"
+    },
+    {
+      "id": "error_fingerprints",
       "version": 72,
-      "status": "planned",
-      "runtimeRule": "planned_allocation_only",
-      "migrationConstant": "required_before_implemented",
-      "boundaryMigrationEvidence": "required_before_implemented",
-      "backupCoverageEvidence": "required_before_implemented",
+      "status": "implemented",
+      "runtimeRule": "compiled_migration_present",
+      "migrationConstant": "V072_ERROR_FINGERPRINTS",
+      "boundaryMigrationEvidence": "required_and_current",
+      "backupCoverageEvidence": "required_and_current",
       "proofPosture": "rch_only_no_local_fallback"
     },
     {
       "id": "attestation_bundles",
-      "version": 73,
+      "version": 78,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -97,17 +117,7 @@
     },
     {
       "id": "query_miss_ledger",
-      "version": 74,
-      "status": "planned",
-      "runtimeRule": "planned_allocation_only",
-      "migrationConstant": "required_before_implemented",
-      "boundaryMigrationEvidence": "required_before_implemented",
-      "backupCoverageEvidence": "required_before_implemented",
-      "proofPosture": "rch_only_no_local_fallback"
-    },
-    {
-      "id": "workspace_generations",
-      "version": 75,
+      "version": 79,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -117,7 +127,7 @@
     },
     {
       "id": "source_write_stats",
-      "version": 76,
+      "version": 80,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -134,7 +144,9 @@
       "ownerBead": "bd-1n0np.3.2",
       "ownerSurface": "anchors_freshness",
       "status": "implemented",
-      "tables": ["memory_anchors"],
+      "tables": [
+        "memory_anchors"
+      ],
       "backupAssetKind": "memory_anchors",
       "reversibleClass": "reversible_where_safe",
       "idempotency": "create table/index only if absent; no destructive rewrite",
@@ -171,7 +183,9 @@
       "ownerBead": "bd-1n0np.2.2",
       "ownerSurface": "evidence_harvester",
       "status": "implemented",
-      "tables": ["pack_candidate_impressions"],
+      "tables": [
+        "pack_candidate_impressions"
+      ],
       "backupAssetKind": "pack_candidate_impressions",
       "reversibleClass": "reversible_where_safe",
       "idempotency": "append-only table with deterministic indexes"
@@ -183,103 +197,124 @@
       "ownerBead": "bd-1n0np.2.3",
       "ownerSurface": "evidence_harvester",
       "status": "implemented",
-      "tables": ["outcome_evidence_rows"],
+      "tables": [
+        "outcome_evidence_rows"
+      ],
       "backupAssetKind": "derived_outcome_evidence",
       "reversibleClass": "reversible_where_safe",
       "idempotency": "append-only table with explicit source/provenance keys"
     },
     {
-      "id": "error_fingerprints",
-      "version": 69,
-      "migrationName": "V069_ERROR_FINGERPRINTS",
-      "ownerBead": "bd-1n0np.4.3",
-      "ownerSurface": "error_recall",
-      "status": "planned",
-      "tables": ["error_fingerprints", "error_repair_links"],
-      "backupAssetKind": "error_fingerprints",
-      "reversibleClass": "reversible_where_safe",
-      "idempotency": "fingerprint/link tables with stable uniqueness constraints"
-    },
-    {
       "id": "memory_sentinel_specs",
-      "version": 70,
-      "migrationName": "V070_MEMORY_SENTINEL_SPECS",
+      "version": 69,
+      "migrationName": "V069_MEMORY_SENTINELS",
       "ownerBead": "bd-1n0np.16.2",
       "ownerSurface": "memory_sentinels",
-      "status": "planned",
-      "tables": ["memory_sentinel_specs"],
+      "status": "implemented",
+      "tables": [
+        "memory_sentinel_specs"
+      ],
       "backupAssetKind": "memory_sentinel_specs",
       "reversibleClass": "reversible_where_safe",
       "idempotency": "spec table plus validation metadata only if absent"
     },
     {
       "id": "memory_sentinel_results",
-      "version": 71,
-      "migrationName": "V071_MEMORY_SENTINEL_RESULTS",
+      "version": 69,
+      "migrationName": "V069_MEMORY_SENTINELS",
       "ownerBead": "bd-1n0np.16.2",
       "ownerSurface": "memory_sentinels",
-      "status": "planned",
-      "tables": ["memory_sentinel_results"],
+      "status": "implemented",
+      "tables": [
+        "memory_sentinel_results"
+      ],
       "backupAssetKind": "memory_sentinel_results",
       "reversibleClass": "reversible_where_safe",
       "idempotency": "result table with deterministic result_hash uniqueness"
     },
     {
       "id": "typed_memory_kind_sidecar",
-      "version": 72,
-      "migrationName": "V072_TYPED_MEMORY_KIND_SIDECAR",
+      "version": 70,
+      "migrationName": "V070_MEMORY_TYPED_FIELDS",
       "ownerBead": "bd-1n0np.12.1",
       "ownerSurface": "typed_memory_kinds",
-      "status": "planned",
-      "tables": ["memories"],
+      "status": "implemented",
+      "tables": [
+        "memories"
+      ],
       "backupAssetKind": "typed_memory_fields",
       "reversibleClass": "reversible_where_safe",
       "idempotency": "add nullable validated sidecar columns if absent"
     },
     {
+      "id": "workspace_generations",
+      "version": 71,
+      "migrationName": "V071_WORKSPACE_GENERATIONS",
+      "ownerBead": "bd-1n0np.8.2",
+      "ownerSurface": "read_fence",
+      "status": "implemented",
+      "tables": [
+        "workspace_generations",
+        "derived_asset_generations"
+      ],
+      "backupAssetKind": "workspace_generations",
+      "reversibleClass": "forward_only",
+      "idempotency": "monotonic generation state with deterministic bootstrap defaults"
+    },
+    {
+      "id": "error_fingerprints",
+      "version": 72,
+      "migrationName": "V072_ERROR_FINGERPRINTS",
+      "ownerBead": "bd-1n0np.4.3",
+      "ownerSurface": "error_recall",
+      "status": "implemented",
+      "tables": [
+        "error_fingerprints",
+        "error_repair_links"
+      ],
+      "backupAssetKind": "error_fingerprints",
+      "reversibleClass": "reversible_where_safe",
+      "idempotency": "fingerprint/link tables with stable uniqueness constraints"
+    },
+    {
       "id": "attestation_bundles",
-      "version": 73,
-      "migrationName": "V073_ATTESTATION_BUNDLES",
+      "version": 78,
+      "migrationName": "V078_ATTESTATION_BUNDLES",
       "ownerBead": "bd-1n0np.22.1",
       "ownerSurface": "attestation_bundles",
       "status": "planned",
-      "tables": ["attestation_bundles", "attestation_bundle_items"],
+      "tables": [
+        "attestation_bundles",
+        "attestation_bundle_items"
+      ],
       "backupAssetKind": "attestation_bundles",
       "reversibleClass": "reversible_where_safe",
       "idempotency": "bundle tables keyed by deterministic bundle hash"
     },
     {
       "id": "query_miss_ledger",
-      "version": 74,
-      "migrationName": "V074_QUERY_MISS_LEDGER",
+      "version": 79,
+      "migrationName": "V079_QUERY_MISS_LEDGER",
       "ownerBead": "bd-1n0np.6.3",
       "ownerSurface": "gap_honesty",
       "status": "planned",
-      "tables": ["query_miss_ledger"],
+      "tables": [
+        "query_miss_ledger"
+      ],
       "backupAssetKind": "query_miss_ledger",
       "reversibleClass": "reversible_where_safe",
       "idempotency": "redacted TTL ledger table with bounded indexes"
     },
     {
-      "id": "workspace_generations",
-      "version": 75,
-      "migrationName": "V075_WORKSPACE_GENERATIONS",
-      "ownerBead": "bd-1n0np.8.2",
-      "ownerSurface": "read_fence",
-      "status": "planned",
-      "tables": ["workspace_generations", "derived_asset_generations"],
-      "backupAssetKind": "workspace_generations",
-      "reversibleClass": "forward_only",
-      "idempotency": "monotonic generation state with deterministic bootstrap defaults"
-    },
-    {
       "id": "source_write_stats",
-      "version": 76,
-      "migrationName": "V076_SOURCE_WRITE_STATS",
+      "version": 80,
+      "migrationName": "V080_SOURCE_WRITE_STATS",
       "ownerBead": "bd-1n0np.8.5",
       "ownerSurface": "read_fence",
       "status": "planned",
-      "tables": ["source_write_stats"],
+      "tables": [
+        "source_write_stats"
+      ],
       "backupAssetKind": "source_write_stats",
       "reversibleClass": "reversible_where_safe",
       "idempotency": "per-source rolling stat table over explicit windows"

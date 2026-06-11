@@ -5,11 +5,21 @@ This registry is the human-facing companion to
 owned by `bd-1n0np.23.1` and enforced by
 `tests/contracts/dueling_wizards_migration_registry.rs`.
 
-The current compiled migration tail in `src/db/mod.rs` is `V068`. The next
-planned allocation starts at `V069`. Every dueling-wizards schema task must
+The current compiled migration tail in `src/db/mod.rs` is `V077`. The next
+planned allocation starts at `V078`. Every dueling-wizards schema task must
 allocate from the registry before adding a runtime migration, then keep the
 runtime `MIGRATIONS` array contiguous. The registry is a plan artifact, not a
 substitute for the real migration constants.
+
+The migration number line is shared with non-initiative workstreams:
+`V073_ERROR_REPAIR_LINKS` (an extension of the `error_fingerprints` allocation
+scope), `V074_JOURNAL_ENTRIES`, `V075_REMEMBER_IDEMPOTENCY_KEYS`,
+`V076_MEMORY_ANCHOR_INDEX`, and `V077_PRIMER_CACHE` landed between the
+initiative's implemented allocations and the compiled tail. Implemented
+allocations therefore record historical fact (two allocations may share one
+compiled migration, as the sentinel pair does under `V069_MEMORY_SENTINELS`),
+while planned allocations stay strictly contiguous from
+`nextPlannedMigration`.
 
 ## Policy
 
@@ -19,37 +29,39 @@ rollback must never be required for ordinary repair. A task that adds durable
 or derived storage must also name the backup/export/restore asset class and the
 boundary migration coverage path before source work starts.
 
-Do not reuse migration numbers. If the compiled tail moves past `V068`, update
+Do not reuse migration numbers. If the compiled tail moves past `V077`, update
 this registry in the same change that adds the runtime migration.
 
-## Planned Allocations
+## Allocations
 
-| Version | Allocation | Bead | Durable scope |
-| --- | --- | --- | --- |
-| `V066` | `memory_anchors` | `bd-1n0np.3.2` | Implemented typed anchors for paths, commands, env vars, schemas, degraded codes, dependencies, and config keys. |
-| `V067` | `pack_candidate_impressions` | `bd-1n0np.2.2` | Pack selected/omitted candidate impressions. |
-| `V068` | `outcome_evidence_rows` | `bd-1n0np.2.3` | Derived outcome evidence rows from verification, Beads, commit, and recorder sources. |
-| `V069` | `error_fingerprints` | `bd-1n0np.4.3` | Error fingerprints plus repair, proof, and outcome links. |
-| `V070` | `memory_sentinel_specs` | `bd-1n0np.16.2` | Declarative sentinel specifications attached to memories. |
-| `V071` | `memory_sentinel_results` | `bd-1n0np.16.2` | Sentinel check results and hashes. |
-| `V072` | `typed_memory_kind_sidecar` | `bd-1n0np.12.1` | Optional validated per-kind memory JSON sidecar fields. |
-| `V073` | `attestation_bundles` | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
-| `V074` | `query_miss_ledger` | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
-| `V075` | `workspace_generations` | `bd-1n0np.8.2` | Monotonic workspace and derived-asset generation state. |
-| `V076` | `source_write_stats` | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
+| Version | Allocation | Status | Bead | Durable scope |
+| --- | --- | --- | --- | --- |
+| `V066` | `memory_anchors` | implemented | `bd-1n0np.3.2` | Implemented typed anchors for paths, commands, env vars, schemas, degraded codes, dependencies, and config keys. |
+| `V067` | `pack_candidate_impressions` | implemented | `bd-1n0np.2.2` | Pack selected/omitted candidate impressions. |
+| `V068` | `outcome_evidence_rows` | implemented | `bd-1n0np.2.3` | Derived outcome evidence rows from verification, Beads, commit, and recorder sources. |
+| `V069` | `memory_sentinel_specs` | implemented | `bd-1n0np.16.2` | Declarative sentinel specifications attached to memories (landed with the results table in `V069_MEMORY_SENTINELS`). |
+| `V069` | `memory_sentinel_results` | implemented | `bd-1n0np.16.2` | Sentinel check results and hashes (same compiled migration as the specs table). |
+| `V070` | `typed_memory_kind_sidecar` | implemented | `bd-1n0np.12.1` | Optional validated per-kind memory JSON sidecar fields (landed as `V070_MEMORY_TYPED_FIELDS` on `memories`). |
+| `V071` | `workspace_generations` | implemented | `bd-1n0np.8.2` | Monotonic workspace and derived-asset generation state. |
+| `V072` | `error_fingerprints` | implemented | `bd-1n0np.4.3` | Error fingerprints plus repair, proof, and outcome links (`error_repair_links` landed separately as `V073_ERROR_REPAIR_LINKS`). |
+| `V078` | `attestation_bundles` | planned | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
+| `V079` | `query_miss_ledger` | planned | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
+| `V080` | `source_write_stats` | planned | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
 
 ## Transition Matrix
 
 The manifest's `transitionMatrix` mirrors the allocation table one-for-one.
 This is the implementation gate: `implemented` rows must name the compiled
-migration constant and stay at or behind the current compiled tail (`V068` at
+migration constant and stay at or behind the current compiled tail (`V077` at
 the time of this registry). `planned` rows must stay ahead of the compiled tail
 and keep `migrationConstant`, `boundaryMigrationEvidence`, and
 `backupCoverageEvidence` set to `required_before_implemented`.
 
 The implemented constants currently covered by the registry are
-`V066_MEMORY_ANCHORS`, `V067_PACK_CANDIDATE_IMPRESSIONS`, and
-`V068_OUTCOME_EVIDENCE_ROWS`.
+`V066_MEMORY_ANCHORS`, `V067_PACK_CANDIDATE_IMPRESSIONS`,
+`V068_OUTCOME_EVIDENCE_ROWS`, `V069_MEMORY_SENTINELS`,
+`V070_MEMORY_TYPED_FIELDS`, `V071_WORKSPACE_GENERATIONS`, and
+`V072_ERROR_FINGERPRINTS`.
 
 All transition rows use `proofPosture: rch_only_no_local_fallback`. Moving an
 allocation from `planned` to `implemented` requires the runtime migration,
@@ -57,12 +69,13 @@ boundary migration coverage, backup coverage, and RCH-only proof to land in the
 same change.
 
 `scripts/e2e_cross_cutting.sh` statically pins the registry's conservative
-posture before runtime proof is available. The shell gate checks that migration
-versions stay contiguous from `V066` through `V076`, transition rows mirror
-allocation rows by ID, version, and status, implemented rows stay at or behind
-the compiled tail, planned rows stay at or beyond the next allocation, and
-backup assets mirror each allocation's asset kind, allocation ID, owner bead,
-hash policy, and fail-visible missing-asset policy.
+posture before runtime proof is available. The shell gate pins the exact
+implemented version layout (`V066` through `V072`, with the sentinel pair
+sharing `V069`) plus the planned reservations (`V078` through `V080`),
+transition rows mirror allocation rows by ID, version, and status, implemented
+rows stay at or behind the compiled tail, planned rows stay at or beyond the
+next allocation, and backup assets mirror each allocation's asset kind,
+allocation ID, owner bead, hash policy, and fail-visible missing-asset policy.
 
 ### `V066_MEMORY_ANCHORS` Implemented Shape
 
