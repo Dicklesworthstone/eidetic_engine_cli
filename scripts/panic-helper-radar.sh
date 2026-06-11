@@ -37,6 +37,14 @@ clippy::unwrap_used allow annotations as suppressions.
 USAGE
 }
 
+require_flag_value() {
+  local flag="$1"
+  if [ "$#" -lt 2 ] || [ -z "${2:-}" ] || [[ "${2:-}" == --* ]]; then
+    printf 'panic-helper-radar: %s requires a value\n' "$flag" >&2
+    exit 2
+  fi
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --json)
@@ -56,7 +64,8 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --output)
-      OUTPUT_PATH="${2:-}"
+      require_flag_value "$@"
+      OUTPUT_PATH="$2"
       shift 2
       ;;
     --help|-h)

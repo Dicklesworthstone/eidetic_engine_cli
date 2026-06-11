@@ -23,6 +23,14 @@ QUIET_FLAG=""
 SELF_TEST=""
 BEAD_FILTER=""
 
+require_flag_value() {
+  local flag="$1"
+  if [ "$#" -lt 2 ] || [ -z "${2:-}" ] || [[ "${2:-}" == --* ]]; then
+    echo "error: ${flag} requires a value" >&2
+    exit 2
+  fi
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --json)
@@ -38,19 +46,23 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --bead)
-      BEAD_FILTER="${2:-}"
+      require_flag_value "$@"
+      BEAD_FILTER="$2"
       shift 2
       ;;
     --plan)
-      PLAN_PATH="${2:-}"
+      require_flag_value "$@"
+      PLAN_PATH="$2"
       shift 2
       ;;
     --beads)
-      BEADS_JSONL="${2:-}"
+      require_flag_value "$@"
+      BEADS_JSONL="$2"
       shift 2
       ;;
     --output)
-      OUTPUT_PATH="${2:-}"
+      require_flag_value "$@"
+      OUTPUT_PATH="$2"
       shift 2
       ;;
     --help)

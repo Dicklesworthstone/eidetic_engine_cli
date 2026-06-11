@@ -42,6 +42,15 @@ OUTPUT_PATH="${ROOT}/.bridge-staleness-report.json"
 JSON_FLAG=""
 QUIET_FLAG=""
 SELF_TEST=""
+
+require_flag_value() {
+  local flag="$1"
+  if [ "$#" -lt 2 ] || [ -z "${2:-}" ] || [[ "${2:-}" == --* ]]; then
+    echo "error: ${flag} requires a path" >&2
+    exit 2
+  fi
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --json)
@@ -57,19 +66,23 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --plan)
-      PLAN_PATH="${2:-}"
+      require_flag_value "$@"
+      PLAN_PATH="$2"
       shift 2
       ;;
     --vision)
-      VISION_REPORT="${2:-}"
+      require_flag_value "$@"
+      VISION_REPORT="$2"
       shift 2
       ;;
     --beads)
-      BEADS_JSONL="${2:-}"
+      require_flag_value "$@"
+      BEADS_JSONL="$2"
       shift 2
       ;;
     --output)
-      OUTPUT_PATH="${2:-}"
+      require_flag_value "$@"
+      OUTPUT_PATH="$2"
       shift 2
       ;;
     --help)
@@ -156,6 +169,14 @@ JSONL
     ))
   assert_report_jq "$quiet_report" '.signals | length == 0' "active Part II or high vision gap should not emit advisory signals"
 
+  local malformed_gap_report
+  malformed_gap_report=$(bash "${BASH_SOURCE[0]}" --json --quiet --output /dev/null \
+    --plan <(printf '%s\n' '# Synthetic Active Bridge') \
+    --vision <(printf '%s\n' '{"gap_percentage":"1); system(\"false\")"}') \
+    --beads <(printf '%s\n' ''))
+  assert_report_jq "$malformed_gap_report" '.inputs.visionCoverageReportPresent == true' "malformed vision report should still be recorded as present"
+  assert_report_jq "$malformed_gap_report" '(.signals | map(.code) | index("vision_coverage_gap_low")) == null' "malformed vision gap should not emit low-gap signal"
+
   echo "ok: bridge-staleness self-test passed"
 }
 
@@ -199,12 +220,11 @@ vision_present=false
 gap_percentage=null
 if [ -r "$VISION_REPORT" ]; then
   vision_present=true
-  gap_percentage=$(jq -r '.gap_percentage // empty' "$VISION_REPORT" 2>/dev/null || true)
+  gap_percentage=$(jq -r 'if (.gap_percentage | type) == "number" then .gap_percentage else empty end' "$VISION_REPORT" 2>/dev/null || true)
 fi
 
 if [ "$vision_present" = true ] && [ -n "$gap_percentage" ] && [ "$gap_percentage" != "null" ]; then
-  # Compare numerically. awk avoids the bash arithmetic float limitation.
-  if awk "BEGIN { exit !($gap_percentage < 2.0) }"; then
+  if jq -e -n --argjson gap "$gap_percentage" '$gap < 2.0' >/dev/null; then
     signal_two=$(jq -n \
       --arg code "vision_coverage_gap_low" \
       --arg severity "low" \

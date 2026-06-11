@@ -34,6 +34,17 @@ SKIP=0
 FAILED_FMS=""
 SKIPPED_FMS=""
 
+normalize_doctor_json() {
+    local input="$1"
+    local output="$2"
+    jq 'walk(if type == "object" then with_entries(select(.key | test("^(committed_at|started_at|finished_at|ts|now|generatedAt|durationMs|elapsedMs)$") | not)) else . end)' "$input" >"$output"
+}
+
+hash_file() {
+    local input="$1"
+    shasum -a 256 "$input" | awk '{print $1}'
+}
+
 shopt -s nullglob
 for fm_dir in "$FIXTURES_SRC"/fm-*; do
     fm_id="$(basename "$fm_dir")"
@@ -56,8 +67,21 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
     "$EE_BIN" doctor --workspace "$target" --json > "$target/.diag1.json" 2>/dev/null || true
     "$EE_BIN" doctor --workspace "$target" --json > "$target/.diag2.json" 2>/dev/null || true
 
-    h1=$(jq 'walk(if type == "object" then with_entries(select(.key | test("^(committed_at|started_at|finished_at|ts|now|generatedAt|durationMs|elapsedMs)$") | not)) else . end)' "$target/.diag1.json" 2>/dev/null | shasum -a 256 | awk '{print $1}')
-    h2=$(jq 'walk(if type == "object" then with_entries(select(.key | test("^(committed_at|started_at|finished_at|ts|now|generatedAt|durationMs|elapsedMs)$") | not)) else . end)' "$target/.diag2.json" 2>/dev/null | shasum -a 256 | awk '{print $1}')
+    if ! normalize_doctor_json "$target/.diag1.json" "$target/.diag1.normalized.json" 2>/dev/null; then
+        FAIL=$((FAIL + 1))
+        FAILED_FMS="$FAILED_FMS $fm_id"
+        echo "verify-metamorphic[$fm_id]: first diagnose output was not valid JSON" >&2
+        continue
+    fi
+    if ! normalize_doctor_json "$target/.diag2.json" "$target/.diag2.normalized.json" 2>/dev/null; then
+        FAIL=$((FAIL + 1))
+        FAILED_FMS="$FAILED_FMS $fm_id"
+        echo "verify-metamorphic[$fm_id]: second diagnose output was not valid JSON" >&2
+        continue
+    fi
+
+    h1=$(hash_file "$target/.diag1.normalized.json")
+    h2=$(hash_file "$target/.diag2.normalized.json")
 
     if [ -n "$h1" ] && [ "$h1" = "$h2" ]; then
         PASS=$((PASS + 1))
@@ -65,7 +89,7 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
         FAIL=$((FAIL + 1))
         FAILED_FMS="$FAILED_FMS $fm_id"
         echo "verify-metamorphic[$fm_id]: diagnose output non-deterministic" >&2
-        diff <(jq -S . "$target/.diag1.json") <(jq -S . "$target/.diag2.json") 2>&1 | head -30 >&2 || true
+        diff <(jq -S . "$target/.diag1.normalized.json") <(jq -S . "$target/.diag2.normalized.json") 2>&1 | head -30 >&2 || true
     fi
 done
 shopt -u nullglob

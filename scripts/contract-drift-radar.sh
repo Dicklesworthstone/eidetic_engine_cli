@@ -64,14 +64,22 @@ Exit codes: 0=advisory/self-test pass, 1=self-test failure, 4=violations detecte
 USAGE
 }
 
+require_path_arg() {
+  local flag="$1"
+  if [ "$#" -lt 2 ] || [ -z "${2:-}" ] || [[ "${2:-}" == --* ]]; then
+    printf 'contract-drift-radar: %s requires a path\n' "$flag" >&2
+    exit 2
+  fi
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --json) JSON_FLAG=1; shift ;;
     --quiet) QUIET=1; shift ;;
     --strict) STRICT=1; shift ;;
     --self-test) SELF_TEST=1; QUIET=1; shift ;;
-    --events-out) EVENTS_OUT="${2:-}"; shift 2 ;;
-    --output) OUTPUT_PATH="${2:-}"; shift 2 ;;
+    --events-out) require_path_arg "$@"; EVENTS_OUT="$2"; shift 2 ;;
+    --output) require_path_arg "$@"; OUTPUT_PATH="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 1 ;;
   esac

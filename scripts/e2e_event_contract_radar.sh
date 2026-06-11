@@ -39,25 +39,37 @@ ee.e2e_event_contract_radar.v1.
 USAGE
 }
 
+require_flag_value() {
+  local flag="$1"
+  if [ "$#" -lt 2 ] || [ -z "${2:-}" ] || [[ "${2:-}" == --* ]]; then
+    printf 'e2e-event-contract-radar: %s requires a value\n' "$flag" >&2
+    exit 2
+  fi
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --json) JSON_FLAG=1; shift ;;
     --quiet) QUIET=1; shift ;;
     --strict) STRICT=1; shift ;;
     --mode)
-      MODE="${2:-}"
+      require_flag_value "$@"
+      MODE="$2"
       shift 2
       ;;
     --output)
-      OUTPUT_PATH="${2:-}"
+      require_flag_value "$@"
+      OUTPUT_PATH="$2"
       shift 2
       ;;
     --allowlist)
-      ALLOWLIST_PATH="${2:-}"
+      require_flag_value "$@"
+      ALLOWLIST_PATH="$2"
       shift 2
       ;;
     --scripts-root)
-      INPUTS+=("${2:-}")
+      require_flag_value "$@"
+      INPUTS+=("$2")
       shift 2
       ;;
     --help|-h)
