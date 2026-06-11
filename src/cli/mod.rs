@@ -11184,6 +11184,8 @@ pub struct CoordinationEvidenceIngestArgs {
 pub enum SituationCommand {
     /// Classify task text into a situation category.
     Classify(SituationClassifyArgs),
+    /// Adopt task text as a reviewed persisted situation record.
+    Adopt(SituationAdoptArgs),
     /// Compare two task situations and report a dry-run link recommendation.
     Compare(SituationCompareArgs),
     /// Plan a curation-backed situation link in dry-run mode.
@@ -11200,6 +11202,34 @@ pub struct SituationClassifyArgs {
     /// Task text to classify.
     #[arg(value_name = "TEXT")]
     pub text: String,
+}
+
+/// Arguments for `ee situation adopt`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SituationAdoptArgs {
+    /// Task text to classify and adopt as a persisted situation record.
+    #[arg(value_name = "TEXT")]
+    pub text: String,
+
+    /// Database file override (defaults to <workspace>/.ee/ee.db).
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Agent or human identity recorded as the adopter.
+    #[arg(long, value_name = "NAME")]
+    pub adopted_by: Option<String>,
+
+    /// Reason recorded with the adoption.
+    #[arg(long, value_name = "REASON")]
+    pub reason: Option<String>,
+
+    /// Evidence IDs supporting the adoption (repeatable).
+    #[arg(long = "evidence-id", value_name = "EVIDENCE_ID")]
+    pub evidence_ids: Vec<String>,
+
+    /// Deterministic created/adopted timestamp (RFC 3339) for replay.
+    #[arg(long, value_name = "RFC3339")]
+    pub as_of: Option<String>,
 }
 
 /// Arguments for `ee situation compare`.
@@ -13072,6 +13102,9 @@ where
         Some(Command::Mesh(ref command)) => mesh::handle_mesh(&cli, command, stdout, stderr),
         Some(Command::Situation(SituationCommand::Classify(ref args))) => {
             handle_situation_classify(&cli, args, stdout, stderr)
+        }
+        Some(Command::Situation(SituationCommand::Adopt(ref args))) => {
+            handle_situation_adopt(&cli, args, stdout, stderr)
         }
         Some(Command::Situation(SituationCommand::Compare(ref args))) => {
             handle_situation_compare(&cli, args, stdout, stderr)
@@ -47832,6 +47865,45 @@ where
     ProcessExitCode::Success
 }
 
+fn handle_situation_adopt<W, E>(
+    cli: &Cli,
+    args: &SituationAdoptArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let report = match crate::core::situation::adopt_situation_command(
+        &crate::core::situation::AdoptSituationCommandOptions {
+            workspace_path: &workspace_path,
+            database_path: args.database.as_deref(),
+            task_text: &args.text,
+            adopted_by: args.adopted_by.as_deref(),
+            adoption_reason: args.reason.as_deref(),
+            evidence_ids: &args.evidence_ids,
+            as_of: args.as_of.as_deref(),
+        },
+    ) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    if cli.wants_json() {
+        let envelope = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": true,
+            "data": report.data_json(),
+            "degraded": [],
+        });
+        let _ = write_stdout(stdout, &(envelope.to_string() + "\n"));
+    } else {
+        let _ = write_stdout(stdout, &report.human_summary());
+    }
+    ProcessExitCode::Success
+}
+
 fn situation_dry_run_required_error() -> DomainError {
     DomainError::PolicyDenied {
         message: "Situation compare/link currently supports dry-run mode only.".to_string(),
@@ -55857,6 +55929,7 @@ impl NormalizedInvocation {
                 },
                 Command::Situation(sit) => match sit {
                     SituationCommand::Classify(_) => "situation classify".to_string(),
+                    SituationCommand::Adopt(_) => "situation adopt".to_string(),
                     SituationCommand::Compare(_) => "situation compare".to_string(),
                     SituationCommand::Link(_) => "situation link".to_string(),
                     SituationCommand::Show(_) => "situation show".to_string(),
