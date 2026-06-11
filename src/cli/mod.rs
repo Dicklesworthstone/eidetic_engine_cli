@@ -34180,6 +34180,9 @@ where
     }
 
     let rendered = if markdown_delta {
+        // The envelope's serverDecision.format must describe the emission
+        // honestly even though markdown consumers never see the JSON form.
+        delta.data.server_decision.format = "markdown";
         crate::core::context_delta::render_context_delta_markdown(&delta)
     } else {
         serde_json::to_string(&delta).unwrap_or_else(|_| {

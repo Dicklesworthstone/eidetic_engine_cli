@@ -302,6 +302,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `context_delta_prior_unknown` | low | bd-muovx.5 (M) |
 | `context_delta_format_unsupported` | info | bd-muovx.6 (M) |
 | `context_delta_larger_than_full` | info | bd-muovx |
+| `context_delta_no_baseline` | info | bd-7lvbg.6 (GOV) |
 | `context_profile_budget_capped` | info | bd-17c65.2.4 (B7) |
 | `context_stream_partial_emission` | warning | bd-17c65.10.18 |
 | `cass_prefetch_budget_exceeded` | info | bd-16pwc.2 (SRR5) |

@@ -49,7 +49,7 @@
           "properties": {
             "computedFromServerVerifiedPackRecord": {"type": "boolean", "const": true},
             "deltaChained": {"type": "boolean", "const": false},
-            "format": {"type": "string", "const": "json"},
+            "format": {"type": "string", "enum": ["json", "markdown"]},
             "fallbackReason": {
               "type": ["string", "null"],
               "enum": [

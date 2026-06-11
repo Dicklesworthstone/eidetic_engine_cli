@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "context_delta_no_baseline",
+  "introduced_by": {
+    "bead": "bd-7lvbg.6",
+    "epic_letter": "GOV"
+  },
+  "surfaces": [
+    "ee pack --since last (per-agent baseline ledger resolution)",
+    "ee context --since last (same lane, historical delta surface)"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "`--since last` asked the per-agent pack-baseline ledger for this agent's most recent persisted pack, but no baseline resolved: EE_AGENT_NAME is unset, the agent has no recorded baseline in this workspace (no persisted pack yet, every row evicted past the cap, or pack-record GC cascaded the rows away), or the ledger read failed. The response falls back to the FULL pack honestly instead of guessing a baseline — a wrong prior would make the delta silently incorrect. Baselines are recorded automatically whenever a pack persists (not --read-only / --no-persist / --no-baseline-write) and an agent identity is set.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "unset EE_AGENT_NAME   # or: a fresh agent name with no persisted packs"
+    ],
+    "invocation": "EE_AGENT_NAME=FreshAgent ee pack \"release prep\" --workspace . --since last --json"
+  },
+  "expected_emission": {
+    "code": "context_delta_no_baseline",
+    "severity": "info",
+    "message_contains": [
+      "emitting the full pack instead"
+    ]
+  }
+}

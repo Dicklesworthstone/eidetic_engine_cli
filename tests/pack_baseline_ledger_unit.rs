@@ -74,6 +74,12 @@ fn temp_workspace(label: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// `pack_records.id` enforces `id GLOB 'pack_*' AND length(id) = 31`
+/// (ULID-shaped); pad short test tags to a valid id.
+fn pack_id(tag: &str) -> String {
+    format!("pack_{tag:0>26}")
+}
+
 /// Insert a minimal persisted pack record so baseline FK targets exist.
 fn seed_pack_record(
     connection: &DbConnection,
@@ -137,34 +143,55 @@ fn resolution_is_per_agent_and_prefers_exact_task_key() -> TestResult {
     let workspace = temp_workspace("resolve")?;
     let (connection, workspace_id) = initialized_connection(&workspace)?;
     for (pack_id, hash) in [
-        ("pack_a1", "h1"),
-        ("pack_a2", "h2"),
-        ("pack_b1", "h3"),
-        ("pack_a3", "h4"),
+        (&pack_id("A1"), "h1"),
+        (&pack_id("A2"), "h2"),
+        (&pack_id("B1"), "h3"),
+        (&pack_id("A3"), "h4"),
     ] {
         seed_pack_record(&connection, &workspace_id, pack_id, hash)?;
     }
 
     // AgentA: an any-task baseline, then a task-scoped one, then a newer
     // any-task one. AgentB gets its own row.
-    record_baseline(&connection, &workspace_id, "AgentA", None, "pack_a1", 32)?;
+    record_baseline(
+        &connection,
+        &workspace_id,
+        "AgentA",
+        None,
+        &pack_id("A1"),
+        32,
+    )?;
     record_baseline(
         &connection,
         &workspace_id,
         "AgentA",
         Some("release"),
-        "pack_a2",
+        &pack_id("A2"),
         32,
     )?;
-    record_baseline(&connection, &workspace_id, "AgentB", None, "pack_b1", 32)?;
-    record_baseline(&connection, &workspace_id, "AgentA", None, "pack_a3", 32)?;
+    record_baseline(
+        &connection,
+        &workspace_id,
+        "AgentB",
+        None,
+        &pack_id("B1"),
+        32,
+    )?;
+    record_baseline(
+        &connection,
+        &workspace_id,
+        "AgentA",
+        None,
+        &pack_id("A3"),
+        32,
+    )?;
 
     let exact = connection
         .resolve_pack_baseline(&workspace_id, "AgentA", Some("release"))
         .map_err(|error| error.to_string())?
         .ok_or("exact task-key baseline must resolve")?;
     ensure(
-        exact.pack_id == "pack_a2",
+        exact.pack_id == pack_id("A2"),
         format!("exact task key must win, got {}", exact.pack_id),
     )?;
 
@@ -173,7 +200,7 @@ fn resolution_is_per_agent_and_prefers_exact_task_key() -> TestResult {
         .map_err(|error| error.to_string())?
         .ok_or("any-key fallback must resolve")?;
     ensure(
-        any.pack_id == "pack_a3",
+        any.pack_id == pack_id("A3"),
         format!(
             "unknown task key must fall back to the newest any-key row, got {}",
             any.pack_id
@@ -185,7 +212,7 @@ fn resolution_is_per_agent_and_prefers_exact_task_key() -> TestResult {
         .map_err(|error| error.to_string())?
         .ok_or("agent baseline must resolve")?;
     ensure(
-        no_key.pack_id == "pack_a3",
+        no_key.pack_id == pack_id("A3"),
         format!(
             "no task key resolves the newest row, got {}",
             no_key.pack_id
@@ -197,7 +224,7 @@ fn resolution_is_per_agent_and_prefers_exact_task_key() -> TestResult {
         .map_err(|error| error.to_string())?
         .ok_or("AgentB baseline must resolve")?;
     ensure(
-        other.pack_id == "pack_b1",
+        other.pack_id == pack_id("B1"),
         format!("agents must not share baselines, got {}", other.pack_id),
     )?;
 
@@ -215,14 +242,17 @@ fn eviction_caps_rows_oldest_first_with_audit() -> TestResult {
     let workspace = temp_workspace("evict")?;
     let (connection, workspace_id) = initialized_connection(&workspace)?;
     const CAP: u32 = 3;
-    let pack_ids = ["pack_e1", "pack_e2", "pack_e3", "pack_e4", "pack_e5"];
-    for pack_id in pack_ids {
-        seed_pack_record(&connection, &workspace_id, pack_id, pack_id)?;
+    let pack_ids: Vec<String> = ["E1", "E2", "E3", "E4", "E5"]
+        .iter()
+        .map(|tag| pack_id(tag))
+        .collect();
+    for id in &pack_ids {
+        seed_pack_record(&connection, &workspace_id, id, id)?;
     }
 
     let mut total_evicted = 0u32;
-    for pack_id in pack_ids {
-        total_evicted += record_baseline(&connection, &workspace_id, "AgentE", None, pack_id, CAP)?;
+    for id in &pack_ids {
+        total_evicted += record_baseline(&connection, &workspace_id, "AgentE", None, id, CAP)?;
     }
     ensure(
         total_evicted == 2,
@@ -238,7 +268,7 @@ fn eviction_caps_rows_oldest_first_with_audit() -> TestResult {
     )?;
     let kept: Vec<&str> = rows.iter().map(|row| row.pack_id.as_str()).collect();
     ensure(
-        !kept.contains(&"pack_e1") && !kept.contains(&"pack_e2"),
+        !kept.contains(&pack_id("E1").as_str()) && !kept.contains(&pack_id("E2").as_str()),
         format!("oldest rows must be evicted first, kept {kept:?}"),
     )?;
 
@@ -247,7 +277,7 @@ fn eviction_caps_rows_oldest_first_with_audit() -> TestResult {
         .map_err(|error| error.to_string())?
         .ok_or("capped ledger must still resolve")?;
     ensure(
-        resolved.pack_id == "pack_e5",
+        resolved.pack_id == pack_id("E5"),
         format!("newest row must resolve, got {}", resolved.pack_id),
     )?;
 
@@ -263,7 +293,7 @@ fn eviction_caps_rows_oldest_first_with_audit() -> TestResult {
         .and_then(|row| row.details.clone())
         .ok_or("eviction audit must carry details")?;
     ensure(
-        details.contains("evictedPackIds") && details.contains("pack_e"),
+        details.contains("evictedPackIds") && details.contains("pack_0"),
         format!("eviction audit must name the evicted packs, got {details}"),
     )
 }
@@ -272,10 +302,24 @@ fn eviction_caps_rows_oldest_first_with_audit() -> TestResult {
 fn rerecording_the_same_pack_is_idempotent() -> TestResult {
     let workspace = temp_workspace("idem")?;
     let (connection, workspace_id) = initialized_connection(&workspace)?;
-    seed_pack_record(&connection, &workspace_id, "pack_i1", "h1")?;
+    seed_pack_record(&connection, &workspace_id, &pack_id("I1"), "h1")?;
 
-    record_baseline(&connection, &workspace_id, "AgentI", None, "pack_i1", 32)?;
-    record_baseline(&connection, &workspace_id, "AgentI", None, "pack_i1", 32)?;
+    record_baseline(
+        &connection,
+        &workspace_id,
+        "AgentI",
+        None,
+        &pack_id("I1"),
+        32,
+    )?;
+    record_baseline(
+        &connection,
+        &workspace_id,
+        "AgentI",
+        None,
+        &pack_id("I1"),
+        32,
+    )?;
 
     let rows = connection
         .list_pack_baselines(&workspace_id, "AgentI")

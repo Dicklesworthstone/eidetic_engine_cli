@@ -2,14 +2,36 @@
 
 Delta payloads add to your prompt; they do not replace the base pack.
 
-`ee pack --since <pack-hash> --json` is a JSON-only transport optimization
-for long agent sessions. The normal context pack is still the canonical state.
-The delta envelope describes how to update a pack that the agent already has in
+`ee pack --since <pack-hash> --json` is the machine-apply transport
+optimization for long agent sessions. `--format markdown` is also supported as
+a prompt-ready delta document for agents that do not need to reconstruct the
+pack object. The normal context pack is still the canonical state. The JSON
+delta envelope describes how to update a pack that the agent already has in
 memory.
 
 ## Base Hash
 
-Pass a hash from a prior `ee pack --json` response's `data.pack.hash`.
+Pass a hash from a prior `ee pack --json` response's `data.pack.hash`,
+or pass the literal `last` (bd-7lvbg.6) to resolve this agent's most
+recent recorded baseline from the per-agent ledger: every persisted
+pack records a (EE_AGENT_NAME, optional `--task-key`) baseline row
+automatically, so cross-session bookkeeping of pack hashes is no longer
+the agent's job. `--since last` needs `EE_AGENT_NAME`; when no baseline
+resolves the command falls back to the full pack with the
+`context_delta_no_baseline` degraded entry (info). `--no-baseline-write`
+skips the recording; `--read-only` / `--no-persist` never record. See
+[`docs/migrations/pack-baselines.md`](../migrations/pack-baselines.md)
+for ledger semantics (cap, audited eviction, GC cascade).
+
+`--format markdown` with `--since` emits a markdown delta document
+(added items in full, changed items as field lines, removed items as
+one-line id stubs) instead of the JSON envelope — unchanged items are
+never re-emitted. Markdown output is not an `ee.response.v2` envelope,
+so `--max-output-tokens` does not govern it; the delta's size follows
+the pack's own `--max-tokens` budget rules. Other non-JSON formats
+still fall back to the full pack with
+`context_delta_format_unsupported`.
+
 The server verifies that the hash names a pack record emitted by `ee` for the
 same workspace. Locally computed hashes, hashes from another workspace, and
 evicted records are rejected as delta bases. In those cases the command returns
@@ -89,10 +111,13 @@ That keeps agents on a two-shape contract: full pack or delta.
 
 ## Format Support
 
-Delta v1 is JSON-only. Markdown, TOON, Mermaid, handoff capsules, and backup
-manifests should use full packs. If an agent requests `--since` with an
-unsupported renderer, the command should return the full renderer output with
-`context_delta_format_unsupported`.
+Delta v1 supports JSON envelopes and markdown delta documents. Use JSON when a
+consumer needs `items.added`, `items.removed`, `items.modified`, and
+`tokenSavings` as structured fields. Use markdown when the delta is being
+appended directly to an agent prompt. TOON, Mermaid, handoff capsules, backup
+manifests, and other renderers should use full packs. If an agent requests
+`--since` with an unsupported renderer, the command should return the full
+renderer output with `context_delta_format_unsupported`.
 
 ## No Apply Command
 
