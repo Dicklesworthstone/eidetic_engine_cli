@@ -7115,3 +7115,55 @@ pub fn build_outcome_trace(
         events: traced,
     })
 }
+
+#[cfg(test)]
+mod outcome_batch_tests {
+    use super::*;
+
+    /// bd-1pi9m.5: the JSONL line parser enforces required fields, type
+    /// shapes, and defaults exactly.
+    #[test]
+    fn outcome_batch_line_parsing_contract() {
+        let full = parse_outcome_batch_line(
+            r#"{"target":"mem_x","signal":"harmful","targetType":"rule","weight":2.5,
+                "sourceType":"automated_check","sourceId":"run-1","reason":"r",
+                "evidenceJson":"{\"k\":1}","sessionId":"s","eventId":"fb_1"}"#,
+        )
+        .expect("full line parses");
+        assert_eq!(full.target, "mem_x");
+        assert_eq!(full.signal, "harmful");
+        assert_eq!(full.target_type, "rule");
+        assert_eq!(full.weight, Some(2.5));
+        assert_eq!(full.event_id.as_deref(), Some("fb_1"));
+
+        let minimal = parse_outcome_batch_line(r#"{"target":"mem_y","signal":"helpful"}"#)
+            .expect("minimal line parses");
+        assert_eq!(
+            minimal.target_type, "memory",
+            "targetType defaults to memory"
+        );
+        assert_eq!(
+            minimal.source_type, "outcome_observed",
+            "sourceType defaults to outcome_observed"
+        );
+        assert_eq!(minimal.weight, None);
+
+        assert!(
+            parse_outcome_batch_line(r#"{"signal":"helpful"}"#).is_err(),
+            "missing target must fail the line"
+        );
+        assert!(
+            parse_outcome_batch_line(r#"{"target":"mem_z"}"#).is_err(),
+            "missing signal must fail the line"
+        );
+        assert!(
+            parse_outcome_batch_line(r#"{"target":"mem_z","signal":"helpful","weight":"heavy"}"#)
+                .is_err(),
+            "non-numeric weight must fail the line"
+        );
+        assert!(
+            parse_outcome_batch_line("[1,2,3]").is_err(),
+            "non-object lines must fail"
+        );
+    }
+}
