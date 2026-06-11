@@ -158,6 +158,10 @@ pub const GUIDE_SECTIONS: &[GuideSection] = &[
         content: "ee pack \"<task>\" --workspace . --max-tokens 4000 --json",
     },
     GuideSection {
+        title: "Session Start",
+        content: "ee orient \"<task>\" --include-primer --fast --json folds the cached workspace primer (top rules, unresolved warnings, key decisions, load-bearing memories; every line provenance-backed) into one cold-start call. Standalone `ee primer --json` serves the same charter from primer_cache; warm hits are byte-identical and fast enough for SessionStart hooks. Keep AGENTS.md honest with `ee export agentsmd` and audit it with `ee diag agentsmd-drift --json`.",
+    },
+    GuideSection {
         title: "Task Lenses",
         content: "Use `ee lens list --json` to discover named pack policies, `ee lens explain <id> --json` to inspect effective options and the stable lens hash, and `ee pack \"<task>\" --lens <id> --json` to bind that policy into the persisted pack replay ledger.",
     },
@@ -1228,6 +1232,32 @@ pub const SUPPORT_BUNDLE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     },
 ];
 
+pub const PRIMER_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "primer assembled fresh instead of serving the cache",
+        jq: r#".data.primer.degraded[]? // .data.degraded[]? | select(.code == "primer_cache_cold")"#,
+        next_action: "Informational: the same call just warmed primer_cache, so the next identical call is a byte-identical hit. Never retry on this code.",
+    },
+    FailureBranchEntry {
+        condition: "loadBearing section is honestly omitted",
+        jq: r#".data.primer.degraded[]? // .data.degraded[]? | select(.code == "primer_graph_unavailable")"#,
+        next_action: "Run `ee graph centrality-refresh --workspace .` to persist centrality rows; the next assembly includes the loadBearing section.",
+    },
+];
+
+pub const AGENTSMD_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "managed block was hand-edited since the last export",
+        jq: r#".data.degraded[]? | select(.code == "agentsmd_unmanaged_edit_detected")"#,
+        next_action: "Review with `ee export agentsmd --workspace . --dry-run`, then re-run with --force-managed-block; the hand edit is preserved in the .ee-backup sibling.",
+    },
+    FailureBranchEntry {
+        condition: "bridge target file is absent",
+        jq: r#".data.degraded[]? | select(.code == "agentsmd_file_missing")"#,
+        next_action: "Pass --create on export to materialize the file with a fresh managed block; import and drift treat a missing file as an honest empty result.",
+    },
+];
+
 pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
     AgentDocsRecipeEntry {
         id: "local-attestation",
@@ -1399,6 +1429,26 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#"{outputPath: .data.outputPath, totalSizeBytes: .data.totalSizeBytes, filesCollected: .data.filesCollected, redaction: .data.redactionSummary}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: SUPPORT_BUNDLE_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "cold-session-primer",
+        title: "Cold session start with the workspace primer",
+        description: "Fold the cached, provenance-backed workspace charter into the first orientation call of a session.",
+        category: "context",
+        command: "ee orient \"<task>\" --include-primer --fast --json",
+        jq: r#"{posture: .data.posture, primerSections: [.data.primer.sections[]? | {name, items: (.items | length)}], cacheHit: .data.primer.cache_hit, degraded: (.data.primer.degraded // [])}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
+        failure_branches: PRIMER_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "keep-agentsmd-honest",
+        title: "Keep AGENTS.md honest with the bridge",
+        description: "Audit the managed AGENTS.md block against memory (stale export, contradictions, missing rules) before trusting the file; wire the same pair into CI.",
+        category: "context",
+        command: "ee diag agentsmd-drift --workspace . --json",
+        jq: r#"{stale: .data.managedBlock.stale, hashMatches: .data.managedBlock.hashMatches, contradictions: (.data.contradictions | length), missingRules: (.data.missingRules | length), suggested: .data.suggestedCommands}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.agentsmd.drift.v1""#,
+        failure_branches: AGENTSMD_RECIPE_FAILURES,
     },
 ];
 

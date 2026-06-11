@@ -80,7 +80,7 @@ warnings. Each item carries an evidence pointer and a score breakdown.
 For agent use, the core rhythm is small and repetitive:
 
 ```bash
-ee orient "<task>" --workspace . --fast --json
+ee orient "<task>" --workspace . --include-primer --fast --json
 ee swarm brief --workspace . --json
 ee pack "<task>" --workspace . --read-only --source-mode lexical_only --max-tokens 4000 --format markdown
 ee search "<specific question>" --workspace . --limit 20 --explain --json
@@ -92,7 +92,9 @@ ee outcome <memory-id> --workspace . --signal helpful --reason "<what it changed
 
 | Situation | First `ee` command |
 |---|---|
-| Starting from a cold agent session | `ee orient "<task>" --workspace . --fast --json` |
+| Starting from a cold agent session | `ee orient "<task>" --workspace . --include-primer --fast --json` |
+| You want the standing workspace charter | `ee primer --workspace . --format markdown` |
+| AGENTS.md might be lying about the rules | `ee diag agentsmd-drift --workspace . --json` |
 | Starting substantive work | `ee pack "<task>" --workspace . --read-only --source-mode lexical_only --max-tokens 4000 --format markdown` |
 | Joining a crowded checkout | `ee swarm brief --workspace . --json` |
 | Learning a durable rule | `ee remember "<text>" --workspace . --level procedural --kind rule --json` |
@@ -444,6 +446,10 @@ Current top-level groups:
 | `ee doctor [--json]` | Health checks with repair commands for every failure |
 | `ee capabilities [--json]` | Feature, schema, renderer, env-var, and capability posture |
 | `ee orient "<task>" --fast --json` | Fast read-only session-start bundle: bounded swarm brief, install/path posture, workspace hygiene, and explicit follow-up commands for full doctor/pack surfaces |
+| `ee primer [--tokens N] [--refresh] [--json]` | Deterministic, cached workspace charter (~600 tokens): top rules, unresolved warnings, key decisions, load-bearing memories, every line provenance-backed (`ee orient --include-primer` folds it into orientation) |
+| `ee export agentsmd [--file AGENTS.md] [--create] [--dry-run]` | Render the primer rules+warnings into a marker-delimited managed block; never edits outside its markers, backs up before mutating, refuses hand-edited blocks without `--force-managed-block` |
+| `ee import agentsmd [--apply] [--json]` | Parse rule-like statements outside the ee markers into curation candidates (trust capped at agent_assertion, `file://<path>#L<n>` provenance); dry-run by default |
+| `ee diag agentsmd-drift [--json]` | Read-only audit of AGENTS.md vs memory: stale export, file-vs-memory contradictions, missing rules, suggested commands |
 | `ee pack "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the headline command) |
 | `ee lens list --json` / `ee lens explain <id> --json` | Inspect named task lenses such as `bugfix`, `code-review`, and `release-readiness` before applying them |
 | `ee search "<query>" [--limit N] [--explain] [--json]` | Hybrid retrieval over memories, sessions, rules, evidence |
