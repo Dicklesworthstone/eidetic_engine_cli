@@ -60,18 +60,18 @@ Options:
   -h, --help                Show this help
 
 Environment:
-  RCH_VERIFY_ATTEMPT_TIMEOUT_MS  Live rch exec timeout budget (default: 900000)
+  RCH_VERIFY_ATTEMPT_TIMEOUT_MS  Live rch exec timeout budget (default: 1800000)
   RCH_VERIFY_PREFLIGHT_TIMEOUT_MS  Local helper probe timeout budget (default: 10000)
   RCH_VERIFY_TAIL_BYTES          Diagnostic stdout/stderr tail size (default: 4000)
   RCH_VERIFY_TMPDIR              Retained diagnostic artifact directory (default: /tmp)
   RCH_BUILD_TIMEOUT_SEC          Remote build timeout forwarded to rch exec
                                  (default: 900 for cargo build/check/bench/clippy)
   RCH_TEST_TIMEOUT_SEC           Remote test timeout forwarded to rch exec
-                                 (default: 900 for cargo test)
+                                 (default: 1800 for cargo test)
   RCH_VERIFY_DEFAULT_BUILD_TIMEOUT_SEC
                                  Default RCH_BUILD_TIMEOUT_SEC when unset (default: 900)
   RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC
-                                 Default RCH_TEST_TIMEOUT_SEC when unset (default: 900)
+                                 Default RCH_TEST_TIMEOUT_SEC when unset (default: 1800)
 
 Accepted Cargo verifier shapes:
   cargo check ...
@@ -111,12 +111,12 @@ PROOF_BROKER_LEDGER="${RCH_VERIFY_PROOF_BROKER_LEDGER:-}"
 PROOF_BROKER_EE_BIN="${RCH_VERIFY_PROOF_BROKER_EE_BIN:-}"
 PROOF_BROKER_BYPASS_REASON="${RCH_VERIFY_PROOF_BROKER_BYPASS_REASON:-}"
 PROOF_BROKER_JSON="null"
-RCH_VERIFY_ATTEMPT_TIMEOUT_MS="${RCH_VERIFY_ATTEMPT_TIMEOUT_MS:-900000}"
+RCH_VERIFY_ATTEMPT_TIMEOUT_MS="${RCH_VERIFY_ATTEMPT_TIMEOUT_MS:-1800000}"
 RCH_VERIFY_PREFLIGHT_TIMEOUT_MS="${RCH_VERIFY_PREFLIGHT_TIMEOUT_MS:-10000}"
 RCH_VERIFY_TAIL_BYTES="${RCH_VERIFY_TAIL_BYTES:-4000}"
 RCH_VERIFY_TMPDIR="${RCH_VERIFY_TMPDIR:-/tmp}"
 RCH_VERIFY_DEFAULT_BUILD_TIMEOUT_SEC="${RCH_VERIFY_DEFAULT_BUILD_TIMEOUT_SEC:-900}"
-RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC="${RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC:-900}"
+RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC="${RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC:-1800}"
 RCH_ATTEMPT_TIMED_OUT=false
 RCH_STDOUT_BYTES=0
 RCH_STDERR_BYTES=0

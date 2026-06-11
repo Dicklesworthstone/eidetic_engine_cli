@@ -18,6 +18,7 @@
     "recommendedSafeToClaim",
     "sourceAuthority",
     "actionableQueue",
+    "resourceAdmission",
     "unsafeReasons",
     "staleReasons",
     "sourceRefs",
@@ -683,6 +684,50 @@
         "bvAdvisoryContradiction": false,
         "trackerAuthorityDegraded": false,
         "contradictionEvidence": []
+      },
+      "resourceAdmission": {
+        "schema": "ee.resource_admission.v1",
+        "policyDomain": "resource_profile_budget_admission",
+        "policyId": "candidate.resource_profile_budget_admission",
+        "sideEffectFree": true,
+        "advisoryOnly": true,
+        "canAuthorizeClaim": false,
+        "surface": "claim_gate",
+        "commandClass": "coordination",
+        "decision": "admit",
+        "requestedProfile": "workstation",
+        "effectiveProfile": "workstation",
+        "recommendedProfile": "workstation",
+        "estimatedCostClass": "standard",
+        "sourcePosture": {
+          "hostCalibration": "fresh",
+          "resourceBudget": "within_budget",
+          "rch": "remote_ready",
+          "localCargo": "refused",
+          "lanePressure": "clear",
+          "workloadPressure": "within_budget",
+          "daemon": "not_required",
+          "replay": "not_required",
+          "redactionPostureVerified": true,
+          "sourceCount": 4
+        },
+        "evidenceFreshness": "fresh",
+        "reasonCodes": ["redaction_posture_verified"],
+        "abstentionReasons": [],
+        "nextCommands": [],
+        "nextCommandActions": [
+          {
+            "commandId": "resource_admission_diag",
+            "displayCommand": "ee diag resource-admission --surface claim-gate --command-class coordination --json",
+            "argv": ["ee", "diag", "resource-admission", "--surface", "claim-gate", "--command-class", "coordination", "--json"],
+            "shellRequired": false,
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "requiredSubstrate": "ee",
+            "when": "inspect_resource_admission_advice",
+            "rationale": "Reproduce the advisory resource admission decision."
+          }
+        ]
       },
       "unsafeReasons": [],
       "staleReasons": [],

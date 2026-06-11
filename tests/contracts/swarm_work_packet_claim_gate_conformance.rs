@@ -152,6 +152,7 @@ fn claim_gate_required_fields() -> Vec<String> {
         "recommendedSafeToClaim",
         "sourceAuthority",
         "actionableQueue",
+        "resourceAdmission",
         "unsafeReasons",
         "staleReasons",
         "sourceRefs",
@@ -223,7 +224,7 @@ fn assert_next_actions_are_read_only(payload: &Value, context: &str) -> TestResu
 
 fn assert_resource_admission_is_advisory(payload: &Value, context: &str) -> TestResult {
     let Some(admission) = payload.get("resourceAdmission") else {
-        return Ok(());
+        return Err(format!("{context} missing required resourceAdmission"));
     };
     if admission
         .pointer("/canAuthorizeClaim")
