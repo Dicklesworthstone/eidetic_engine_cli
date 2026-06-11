@@ -192,6 +192,52 @@ fn stale_and_conflicting_coordination_snapshot_is_compact_but_loud() -> TestResu
 }
 
 #[test]
+fn fresh_conflicting_coordination_snapshot_reports_conflict_status() -> TestResult {
+    let response = response_with_snapshot(
+        r#"{
+          "schema": "ee.coordination_snapshot.v1",
+          "captured_at": "2026-05-13T10:00:00Z",
+          "scope": "workspace",
+          "sources": [
+            {
+              "kind": "file_reservation",
+              "source_id": "agent-mail snapshot",
+              "freshness_ms": 1000,
+              "entries": [
+                {
+                  "path_pattern": "src/pack/**",
+                  "holder": "BlueLake",
+                  "exclusive": true,
+                  "conflict": true
+                }
+              ]
+            }
+          ]
+        }"#,
+    )?;
+    let rendered = render_context_response_json(&response);
+    let value: Value = serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        value.pointer("/data/pack/coordination/freshness/status"),
+        Some(&json!("conflict"))
+    );
+    assert_eq!(
+        value.pointer("/data/pack/coordination/summary/staleSourceCount"),
+        Some(&json!(0))
+    );
+    assert_eq!(
+        value.pointer("/data/pack/coordination/summary/activeConflictCount"),
+        Some(&json!(1))
+    );
+
+    let markdown = render_context_response_markdown(&response);
+    assert!(markdown.contains("**Status:** `conflict`"));
+    assert!(markdown.contains("**Conflict:**"));
+    Ok(())
+}
+
+#[test]
 fn unavailable_coordination_source_is_preserved_with_repair_hint() -> TestResult {
     let snapshot =
         include_str!("fixtures/coordination_snapshots/coordination_source_unavailable.json");

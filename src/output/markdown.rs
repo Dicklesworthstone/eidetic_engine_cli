@@ -21,8 +21,8 @@
 //! - **`` ` ``**: always escape — could open a code span anywhere.
 //! - **`#`**: escape only at start of a line (ATX heading marker).
 //! - **`+` `-`**: escape only at start of a line followed by space
-//!   (unordered list marker). A run of three or more `-` markers that
-//!   occupies the whole line is escaped as a thematic break marker.
+//!   (unordered list marker). A run of only `-` markers that occupies
+//!   the whole line is escaped as a setext heading / thematic break marker.
 //! - **`=`**: escape only when a run occupies the whole line, where it
 //!   could turn the preceding paragraph into a setext heading.
 //! - **`.` `)`** (after a digit): escape only at line start preceded by
@@ -102,7 +102,7 @@ pub(crate) fn escape_text(input: &str) -> String {
                 output.push('+');
             }
             '-' if line_start
-                && (next_is_space_or_eol(next_ch) || line_is_marker_run(&chars, i, '-', 3)) =>
+                && (next_is_space_or_eol(next_ch) || line_is_marker_run(&chars, i, '-', 1)) =>
             {
                 output.push('\\');
                 output.push('-');
@@ -448,7 +448,9 @@ mod tests {
 
     #[test]
     fn thematic_break_and_setext_lines_are_escaped() {
+        assert_eq!(escape_text("Before\n--\nAfter"), "Before\n\\--\nAfter");
         assert_eq!(escape_text("Before\n---\nAfter"), "Before\n\\---\nAfter");
+        assert_eq!(escape_text("Before\n----\nAfter"), "Before\n\\----\nAfter");
         assert_eq!(escape_text("Before\n===\nAfter"), "Before\n\\===\nAfter");
         assert_eq!(escape_text("--- not a rule"), "--- not a rule");
     }

@@ -920,6 +920,8 @@ fn coordination_overall_status(summary: &PackCoordinationSummary) -> &'static st
         "degraded"
     } else if summary.stale_source_count > 0 {
         "stale"
+    } else if summary.active_conflict_count > 0 {
+        "conflict"
     } else {
         "fresh"
     }

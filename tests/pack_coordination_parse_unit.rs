@@ -243,6 +243,11 @@ fn coordination_snapshot_parser_infers_entries_summaries_severity_and_provenance
             snapshot.summary.active_conflict_count
         ));
     }
+    if snapshot.freshness.status != "conflict" {
+        return Err(format!(
+            "fresh active conflict should set overall status to conflict: {snapshot:?}"
+        ));
+    }
     if snapshot.active_conflict_entries().len() != 1 {
         return Err(format!(
             "expected one active conflict entry, got {}",

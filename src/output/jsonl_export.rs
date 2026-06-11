@@ -406,7 +406,10 @@ fn whitespace_starts_path_continuation(
 }
 
 fn path_redaction_hard_boundary(c: char) -> bool {
-    matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
+    matches!(
+        c,
+        '?' | '#' | '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}' | ',' | ';' | '|'
+    )
 }
 
 /// Redact a path string.
@@ -1333,6 +1336,34 @@ mod tests {
             format!("open {REDACTED_PATH_PLACEHOLDER} now"),
             "standard redacts short paths without losing trailing text",
         )
+    }
+
+    #[test]
+    fn redact_content_standard_preserves_path_boundary_punctuation() -> TestResult {
+        let cases = [
+            (
+                "path `/Users/alice/project` rest",
+                format!("path `{REDACTED_PATH_PLACEHOLDER}` rest"),
+            ),
+            (
+                "path </Users/alice/project> rest",
+                format!("path <{REDACTED_PATH_PLACEHOLDER}> rest"),
+            ),
+            (
+                "path /Users/alice/project|rest",
+                format!("path {REDACTED_PATH_PLACEHOLDER}|rest"),
+            ),
+        ];
+
+        for (input, expected) in cases {
+            ensure(
+                redact_content(input, RedactionLevel::Standard),
+                expected,
+                input,
+            )?;
+        }
+
+        Ok(())
     }
 
     #[test]
