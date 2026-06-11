@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://eidetic-engine/schemas/ee.cursor.v1.json",
   "title": "ee.cursor.v1",
-  "description": "Continuation-cursor payload for output-token-governed list surfaces (ADR 0063 §3). The wire form is opaque: base64url(payload).base64url(blake3_mac), where the MAC is a keyed BLAKE3 over the canonical payload bytes using a deterministic per-workspace key (BLAKE3 derive_key with context 'ee.cursor.v1 workspace mac key v1' over the workspace scope string). This document describes the decoded payload object. Cursors never embed secrets or raw query text; paramsHash is a BLAKE3 of the normalized invocation parameters. Resuming with a MAC or paramsHash mismatch yields the cursor_invalid degraded code; resuming after the workspace DB generation advanced yields cursor_stale (repair for both: re-run without --cursor).",
+  "description": "Continuation-cursor payload for output-token-governed list surfaces (ADR 0063 §3, payload amended by bd-7lvbg.3). The wire form is opaque: base64url(payload).base64url(blake3_mac), where the MAC is a keyed BLAKE3 over the canonical payload bytes using a deterministic per-workspace key (BLAKE3 derive_key with context 'ee.cursor.v1 workspace mac key v1' over the workspace scope string). This document describes the decoded payload object. Cursors never embed secrets or raw query text; paramsHash is a BLAKE3 of the normalized invocation parameters. Resuming with a MAC or paramsHash mismatch yields the cursor_invalid degraded code; resuming after the workspace DB generation advanced yields cursor_stale (repair for both: re-run without --cursor). A rejected cursor always yields an empty page plus the degraded entry, never a restarted page, so a page sequence can never duplicate items.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -10,6 +10,7 @@
     "targetSchema",
     "dbGeneration",
     "positionKey",
+    "droppedCount",
     "paramsHash"
   ],
   "properties": {
@@ -28,17 +29,22 @@
     },
     "positionKey": {
       "type": "string",
-      "description": "Stable ordered-position key of the last emitted element at the declared truncation point (the element's registered key field, falling back to its original array index)."
+      "description": "Honesty cross-check on resume (the element's registered key field, falling back to its original array index). Flat truncation points name the last emitted element; per-section points (sections[].items[]) name the last withheld element in the engine's deterministic round-robin drop order, which is the form that stays coordinate-stable across pages. A recomputation mismatch on resume rejects the cursor as cursor_invalid."
+    },
+    "droppedCount": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Count of elements still unemitted when the cursor was issued. This is what reconstructs the emitted set on resume: per-section round-robin shapes map many drop counts onto the same last-kept element, so a position key alone is ambiguous. Pre-amendment payloads without this field are rejected as cursor_invalid (legacy format)."
     },
     "paramsHash": {
       "type": "string",
       "pattern": "^blake3:[0-9a-f]{64}$",
-      "description": "BLAKE3 of the length-prefixed normalized query/filter parameters, excluding the governor's own flags so the same query at a different ceiling stays resumable."
+      "description": "BLAKE3 of the length-prefixed normalized query/filter parameters, excluding the governor's own flags (--max-output-tokens and the --cursor token itself) so the same query at a different ceiling stays resumable."
     }
   },
   "x-ee-status": {
     "shipped": true,
     "available_in_build": true,
-    "tracking_bead": "bd-7lvbg.2"
+    "tracking_bead": "bd-7lvbg.3"
   }
 }

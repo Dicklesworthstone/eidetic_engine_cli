@@ -25,9 +25,15 @@
 //! [`estimator_invocation_count`] instrumentation counter proves the
 //! invariant in tests.
 //!
-//! Per-surface wiring (cursor resume flags, capabilities advertisement,
-//! surface-specific golden coverage) is bd-7lvbg.3; this module is the
-//! middleware only.
+//! **Resume engine** (bd-7lvbg.3): surfaces that accept `--cursor` route the
+//! token through [`govern_response_json_with_resume`]. A validated cursor
+//! removes the already-emitted elements (the page-1 prefix; round-robin
+//! reconstruction for per-section shapes) before the ceiling pass, so a page
+//! sequence partitions one DB generation's result set exactly — no
+//! duplicates, no gaps. A rejected cursor yields an **empty page** plus a
+//! `cursor_invalid` / `cursor_stale` degraded entry (never a restarted page,
+//! mirroring the recall house contract), so a sequence can never re-emit
+//! items it already delivered.
 
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -154,8 +160,9 @@ pub struct TruncationPoint {
     pub position_key_field: &'static str,
 }
 
-/// Decoded `ee.cursor.v1` payload (ADR 0063 appendix). Field order is the
-/// canonical wire order; cursors never embed secrets or raw query text.
+/// Decoded `ee.cursor.v1` payload (ADR 0063 appendix, amended by
+/// bd-7lvbg.3). Field order is the canonical wire order; cursors never embed
+/// secrets or raw query text.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CursorPayload {
@@ -167,6 +174,12 @@ pub struct CursorPayload {
     pub db_generation: u64,
     /// Stable ordered-position key of the last emitted element.
     pub position_key: String,
+    /// Count of elements still unemitted when the cursor was issued. This —
+    /// not `position_key` — is what reconstructs the emitted set on resume:
+    /// per-section round-robin shapes (insights) map many drop counts onto
+    /// the same last-kept element, so the position key alone is ambiguous.
+    /// `position_key` stays as the honesty cross-check (bd-7lvbg.3).
+    pub dropped_count: u64,
     /// BLAKE3 of the normalized query/filter parameters.
     pub params_hash: String,
 }
@@ -288,9 +301,8 @@ pub fn truncated_degraded_entry(
             "Dropped {dropped_count} trailing element(s) at the declared truncation point to \
              satisfy the output ceiling of {ceiling_tokens} tokens."
         ),
-        "repair": "Re-run with a larger --max-output-tokens ceiling or a narrower --fields \
-                   preset; details.continuationCursor resumes the page sequence once cursor \
-                   resume is wired (bd-7lvbg.3).",
+        "repair": "Resume with --cursor <details.continuationCursor>, or re-run with a larger \
+                   --max-output-tokens ceiling or a narrower --fields preset.",
         "details": {
             "droppedCount": dropped_count,
             "continuationCursor": continuation_cursor,
@@ -413,10 +425,29 @@ pub fn govern_response_json(
     ctx: &GovernorContext<'_>,
     registry: &[TruncationPoint],
 ) -> Result<String, DomainError> {
-    let Ok(mut value) = serde_json::from_str::<JsonValue>(json) else {
+    govern_response_json_with_resume(json, ctx, registry, None)
+}
+
+/// [`govern_response_json`] with an optional `--cursor` resume token
+/// (bd-7lvbg.3 per-surface wiring).
+///
+/// A validated cursor removes the elements already emitted by the earlier
+/// pages (prefix removal for flat arrays; round-robin reconstruction via the
+/// cursor's `droppedCount` for per-section shapes) before the ceiling pass
+/// runs, so chained pages partition one generation's result set exactly. A
+/// rejected cursor empties the declared truncation point and appends the
+/// `cursor_invalid` / `cursor_stale` degraded entry — an empty page, never a
+/// restarted one.
+pub fn govern_response_json_with_resume(
+    json: &str,
+    ctx: &GovernorContext<'_>,
+    registry: &[TruncationPoint],
+    resume_cursor: Option<&str>,
+) -> Result<String, DomainError> {
+    let Ok(mut original) = serde_json::from_str::<JsonValue>(json) else {
         return Ok(json.to_owned());
     };
-    if value
+    if original
         .as_object()
         .and_then(|object| object.get("schema"))
         .and_then(JsonValue::as_str)
@@ -425,19 +456,26 @@ pub fn govern_response_json(
         return Ok(json.to_owned());
     }
 
+    if let Some(token) = resume_cursor {
+        apply_resume_to_envelope(&mut original, ctx, registry, token);
+    }
+    govern_envelope(&original, ctx, registry)
+}
+
+fn govern_envelope(
+    original: &JsonValue,
+    ctx: &GovernorContext<'_>,
+    registry: &[TruncationPoint],
+) -> Result<String, DomainError> {
     let mut estimator = TokenEstimator::new();
-    let (serialized, estimate) = finalize_with_meta(&mut value, &mut estimator)?;
+    // Sizing pass on a clone so the over-ceiling probe baseline does not
+    // carry the meta stamp.
+    let mut sizing = original.clone();
+    let (serialized, estimate) = finalize_with_meta(&mut sizing, &mut estimator)?;
     if fits(estimate, serialized.len(), ctx.ceiling_tokens) {
         debug_assert_round_trip(&serialized);
         return Ok(serialized);
     }
-
-    // Over ceiling: re-parse the pristine input so the probe baseline does
-    // not carry the meta stamp from the sizing pass.
-    let original: JsonValue = serde_json::from_str(json).map_err(|error| DomainError::Usage {
-        message: format!("Failed to re-parse response for output governing: {error}."),
-        repair: Some("Re-run without --max-output-tokens and report the failure.".to_string()),
-    })?;
 
     let data = original.get("data").and_then(JsonValue::as_object);
     let schema_id = data
@@ -448,7 +486,7 @@ pub fn govern_response_json(
         .and_then(JsonValue::as_str);
     let Some(point) = truncation_point_for(registry, schema_id, command) else {
         let out = fail_closed_unsatisfiable(
-            &original,
+            original,
             ctx,
             &mut estimator,
             estimate,
@@ -458,12 +496,12 @@ pub fn govern_response_json(
         return Ok(out);
     };
 
-    let total = droppable_element_count(&original, point);
+    let total = droppable_element_count(original, point);
     if total <= 1 {
         // Nothing droppable (or dropping everything but the envelope shell
         // would still be required): the envelope minimum is the floor.
         let out = fail_closed_unsatisfiable(
-            &original,
+            original,
             ctx,
             &mut estimator,
             estimate,
@@ -487,7 +525,7 @@ pub fn govern_response_json(
     while low <= high {
         let mid = low + (high - low) / 2;
         let (_, candidate_serialized, candidate_estimate) =
-            candidate_with_drops(&original, point, mid, ctx, db_generation, &mut estimator)?;
+            candidate_with_drops(original, point, mid, ctx, db_generation, &mut estimator)?;
         if fits(
             candidate_estimate,
             candidate_serialized.len(),
@@ -505,7 +543,7 @@ pub fn govern_response_json(
 
     let Some(mut drops) = best else {
         let out = fail_closed_unsatisfiable(
-            &original,
+            original,
             ctx,
             &mut estimator,
             estimate,
@@ -520,7 +558,7 @@ pub fn govern_response_json(
     // reachable or we fail closed above).
     loop {
         let (_, candidate_serialized, candidate_estimate) =
-            candidate_with_drops(&original, point, drops, ctx, db_generation, &mut estimator)?;
+            candidate_with_drops(original, point, drops, ctx, db_generation, &mut estimator)?;
         if fits(
             candidate_estimate,
             candidate_serialized.len(),
@@ -531,7 +569,7 @@ pub fn govern_response_json(
         }
         if drops >= max_drops {
             let out = fail_closed_unsatisfiable(
-                &original,
+                original,
                 ctx,
                 &mut estimator,
                 candidate_estimate,
@@ -661,6 +699,7 @@ fn candidate_with_drops(
         target_schema: cursor_target_schema(original, point),
         db_generation,
         position_key,
+        dropped_count: drops,
         params_hash: ctx.params_hash.clone(),
     };
     let cursor = encode_cursor(&payload, &ctx.mac_key)?;
@@ -702,46 +741,29 @@ fn apply_drops(
     let target = resolve_data_path_mut(candidate, point.array_path).ok_or_else(missing_point)?;
     if point.per_section_items {
         let sections = target.as_array_mut().ok_or_else(missing_point)?;
-        let mut lens: Vec<usize> = sections
-            .iter()
-            .map(|section| {
-                section
+        // Round-robin from the last section backwards (ADR 0063 §2). The
+        // per-section positionKey names the last DROPPED element in the
+        // engine's deterministic drop order — unlike a "last kept" key it
+        // is identical in page-local and full-set coordinates (the drop
+        // sequence is preserved across pages), so resume can recompute and
+        // verify it from `droppedCount` alone (bd-7lvbg.3).
+        let (lens, last_dropped) = round_robin_reduction(&section_item_lens(sections), drops);
+        let position_key = last_dropped
+            .and_then(|(section_index, item_index)| {
+                let items = sections
+                    .get(section_index)?
                     .get("items")
-                    .and_then(JsonValue::as_array)
-                    .map_or(0, Vec::len)
+                    .and_then(JsonValue::as_array)?;
+                Some(element_position_key(
+                    items.get(item_index)?,
+                    point,
+                    item_index,
+                ))
             })
-            .collect();
-        // Round-robin from the last section backwards (ADR 0063 §2).
-        let mut remaining = drops;
-        while remaining > 0 {
-            let mut progressed = false;
-            for len in lens.iter_mut().rev() {
-                if remaining == 0 {
-                    break;
-                }
-                if *len > 0 {
-                    *len -= 1;
-                    remaining -= 1;
-                    progressed = true;
-                }
-            }
-            if !progressed {
-                break;
-            }
-        }
-        let mut position_key = String::new();
+            .unwrap_or_default();
         for (index, section) in sections.iter_mut().enumerate() {
             if let Some(items) = section.get_mut("items").and_then(JsonValue::as_array_mut) {
                 items.truncate(lens[index]);
-            }
-        }
-        for (index, section) in sections.iter().enumerate().rev() {
-            if lens[index] > 0 {
-                if let Some(items) = section.get("items").and_then(JsonValue::as_array) {
-                    position_key =
-                        element_position_key(&items[lens[index] - 1], point, lens[index] - 1);
-                }
-                break;
             }
         }
         Ok(position_key)
@@ -763,6 +785,204 @@ fn element_position_key(element: &JsonValue, point: &TruncationPoint, index: usi
         Some(JsonValue::String(key)) => key.clone(),
         Some(JsonValue::Null) | None => index.to_string(),
         Some(other) => other.to_string(),
+    }
+}
+
+/// Per-section `items[]` lengths for a per-section truncation point.
+fn section_item_lens(sections: &[JsonValue]) -> Vec<usize> {
+    sections
+        .iter()
+        .map(|section| {
+            section
+                .get("items")
+                .and_then(JsonValue::as_array)
+                .map_or(0, Vec::len)
+        })
+        .collect()
+}
+
+/// Reduce per-section item lengths by `drops` whole elements, one element
+/// per non-empty section per pass, starting from the last section (ADR 0063
+/// §2). Returns the kept lengths plus the `(section index, item index)` of
+/// the LAST element dropped.
+///
+/// Drops form a fixed total order over the elements, so the kept set for a
+/// smaller drop count strictly contains the kept set for a larger one — the
+/// nesting that lets cursor resume reconstruct page boundaries from
+/// `droppedCount` alone — and the drop sequence over a page remainder is a
+/// prefix of the drop sequence over the full set, which is what makes the
+/// last-dropped element a coordinate-stable cursor `positionKey`
+/// (bd-7lvbg.3).
+fn round_robin_reduction(lens: &[usize], drops: u64) -> (Vec<usize>, Option<(usize, usize)>) {
+    let mut kept = lens.to_vec();
+    let mut remaining = drops;
+    let mut last_dropped = None;
+    while remaining > 0 {
+        let mut progressed = false;
+        for index in (0..kept.len()).rev() {
+            if remaining == 0 {
+                break;
+            }
+            if kept[index] > 0 {
+                kept[index] -= 1;
+                last_dropped = Some((index, kept[index]));
+                remaining -= 1;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    (kept, last_dropped)
+}
+
+/// Resolve a `--cursor` resume token against the parsed envelope, mutating
+/// it in place (bd-7lvbg.3).
+///
+/// Valid cursor: the already-emitted elements are removed so the remaining
+/// page sequence partitions the result set exactly. Rejected cursor: the
+/// declared truncation point is emptied (an empty page, never a restarted
+/// one — recall house contract) and the matching degraded entry appended.
+/// Reading the DB generation is unconditional here: resume is explicitly
+/// requested, so the generation read is part of the contract, unlike the
+/// lazy ceiling path.
+fn apply_resume_to_envelope(
+    envelope: &mut JsonValue,
+    ctx: &GovernorContext<'_>,
+    registry: &[TruncationPoint],
+    token: &str,
+) {
+    let data = envelope.get("data").and_then(JsonValue::as_object);
+    let schema_id = data
+        .and_then(|map| map.get("schema"))
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
+    let command = data
+        .and_then(|map| map.get("command"))
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
+    let Some(point) = truncation_point_for(registry, schema_id.as_deref(), command.as_deref())
+    else {
+        // No declared truncation point means this surface never issued a
+        // cursor; reject without emptying (there is no page array to empty)
+        // so the defensive path stays observable instead of destructive.
+        append_degraded_entry(envelope, cursor_invalid_degraded_entry());
+        return;
+    };
+    let current_generation = (ctx.db_generation)();
+    match decode_cursor(token, &ctx.mac_key, &ctx.params_hash, current_generation) {
+        Err(CursorRejection::Invalid) => {
+            empty_truncation_point(envelope, point);
+            append_degraded_entry(envelope, cursor_invalid_degraded_entry());
+        }
+        Err(CursorRejection::Stale {
+            cursor_generation,
+            current_generation,
+        }) => {
+            empty_truncation_point(envelope, point);
+            append_degraded_entry(
+                envelope,
+                cursor_stale_degraded_entry(cursor_generation, current_generation),
+            );
+        }
+        Ok(payload) => {
+            let target_matches = payload.target_schema == cursor_target_schema(envelope, point);
+            if !target_matches || !apply_resume_drop(envelope, point, &payload) {
+                empty_truncation_point(envelope, point);
+                append_degraded_entry(envelope, cursor_invalid_degraded_entry());
+            }
+        }
+    }
+}
+
+/// Remove the elements pages 1..N already emitted, leaving exactly the
+/// unemitted remainder. Returns `false` when the cursor's `droppedCount` /
+/// `positionKey` pair does not honestly describe this result set (the
+/// caller then rejects as `cursor_invalid`).
+fn apply_resume_drop(
+    envelope: &mut JsonValue,
+    point: &TruncationPoint,
+    payload: &CursorPayload,
+) -> bool {
+    let Some(target) = resolve_data_path_mut(envelope, point.array_path) else {
+        return false;
+    };
+    if point.per_section_items {
+        let Some(sections) = target.as_array_mut() else {
+            return false;
+        };
+        let lens = section_item_lens(sections);
+        let total: usize = lens.iter().sum();
+        let Ok(remaining) = usize::try_from(payload.dropped_count) else {
+            return false;
+        };
+        // The engine always keeps at least one element when it issues a
+        // cursor, so a droppedCount of zero or >= total cannot be honest.
+        if remaining == 0 || remaining >= total {
+            return false;
+        }
+        let (kept, last_dropped) = round_robin_reduction(&lens, payload.dropped_count);
+        // Honesty cross-check: the cursor's positionKey must name the last
+        // element the reduction withholds (drop-order coordinates, stable
+        // across pages — see round_robin_reduction).
+        let recomputed_key = last_dropped.and_then(|(section_index, item_index)| {
+            let items = sections
+                .get(section_index)?
+                .get("items")
+                .and_then(JsonValue::as_array)?;
+            Some(element_position_key(
+                items.get(item_index)?,
+                point,
+                item_index,
+            ))
+        });
+        if recomputed_key.as_deref() != Some(payload.position_key.as_str()) {
+            return false;
+        }
+        for (index, section) in sections.iter_mut().enumerate() {
+            if let Some(items) = section.get_mut("items").and_then(JsonValue::as_array_mut) {
+                items.drain(..kept[index]);
+            }
+        }
+        true
+    } else {
+        let Some(items) = target.as_array_mut() else {
+            return false;
+        };
+        let total = items.len();
+        let Ok(remaining) = usize::try_from(payload.dropped_count) else {
+            return false;
+        };
+        if remaining == 0 || remaining >= total {
+            return false;
+        }
+        let kept = total - remaining;
+        if element_position_key(&items[kept - 1], point, kept - 1) != payload.position_key {
+            return false;
+        }
+        items.drain(..kept);
+        true
+    }
+}
+
+/// Empty the declared truncation point for a rejected-cursor page: flat
+/// arrays are cleared; per-section shapes keep their section scaffolding
+/// with every `items[]` cleared.
+fn empty_truncation_point(envelope: &mut JsonValue, point: &TruncationPoint) {
+    let Some(target) = resolve_data_path_mut(envelope, point.array_path) else {
+        return;
+    };
+    if point.per_section_items {
+        if let Some(sections) = target.as_array_mut() {
+            for section in sections {
+                if let Some(items) = section.get_mut("items").and_then(JsonValue::as_array_mut) {
+                    items.clear();
+                }
+            }
+        }
+    } else if let Some(items) = target.as_array_mut() {
+        items.clear();
     }
 }
 
@@ -854,7 +1074,7 @@ mod tests {
         TokenEstimator, TruncationPoint, cursor_invalid_degraded_entry,
         cursor_stale_degraded_entry, decode_cursor, derive_workspace_mac_key, encode_cursor,
         estimator_invocation_count, fits, govern_if_ceiling, govern_response_json,
-        hash_invocation_params, truncation_point_for,
+        govern_response_json_with_resume, hash_invocation_params, truncation_point_for,
     };
 
     type TestResult = Result<(), String>;
@@ -1238,6 +1458,7 @@ mod tests {
             target_schema: "ee.search.v1".to_string(),
             db_generation: 12,
             position_key: "mem_0042".to_string(),
+            dropped_count: 17,
             params_hash: hash_invocation_params(["search", "query text", "--json"]),
         };
         let token = encode_cursor(&payload, &key).map_err(|error| format!("encode: {error:?}"))?;
@@ -1257,6 +1478,7 @@ mod tests {
             target_schema: "ee.search.v1".to_string(),
             db_generation: 3,
             position_key: "mem_0001".to_string(),
+            dropped_count: 2,
             params_hash: hash_invocation_params(["search", "q"]),
         };
         let first = encode_cursor(&payload, &key).map_err(|error| format!("encode: {error:?}"))?;
@@ -1276,6 +1498,7 @@ mod tests {
             target_schema: "ee.search.v1".to_string(),
             db_generation: 5,
             position_key: "mem_0009".to_string(),
+            dropped_count: 4,
             params_hash: params_hash.clone(),
         };
         let token = encode_cursor(&payload, &key).map_err(|error| format!("encode: {error:?}"))?;
@@ -1334,6 +1557,7 @@ mod tests {
             target_schema: "ee.search.v1".to_string(),
             db_generation: 5,
             position_key: "mem_0009".to_string(),
+            dropped_count: 4,
             params_hash: params_hash.clone(),
         };
         let token = encode_cursor(&payload, &key).map_err(|error| format!("encode: {error:?}"))?;
@@ -1403,6 +1627,290 @@ mod tests {
             if governed != raw {
                 return Err(format!("non-envelope output must pass through: {raw:?}"));
             }
+        }
+        Ok(())
+    }
+
+    fn continuation_cursor(value: &JsonValue) -> Option<String> {
+        degraded_entries(value).iter().find_map(|entry| {
+            entry
+                .pointer("/details/continuationCursor")
+                .and_then(JsonValue::as_str)
+                .map(str::to_owned)
+        })
+    }
+
+    fn sections_envelope(section_count: usize, items_per_section: usize) -> String {
+        let sections: Vec<JsonValue> = (0..section_count)
+            .map(|section_index| {
+                let items: Vec<JsonValue> = (0..items_per_section)
+                    .map(|item_index| {
+                        json!({
+                            "id": format!("s{section_index}_i{item_index}"),
+                            "content": format!(
+                                "section {section_index} item {item_index} deterministic body; "
+                            )
+                            .repeat(4),
+                        })
+                    })
+                    .collect();
+                json!({ "name": format!("section_{section_index}"), "items": items })
+            })
+            .collect();
+        json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": {
+                "command": "test sections",
+                "schema": "ee.test.sections.v1",
+                "sections": sections,
+            },
+            "degraded": [],
+        })
+        .to_string()
+    }
+
+    fn kept_section_item_ids(value: &JsonValue) -> Vec<String> {
+        value
+            .pointer("/data/sections")
+            .and_then(JsonValue::as_array)
+            .map(|sections| {
+                sections
+                    .iter()
+                    .flat_map(|section| {
+                        section
+                            .get("items")
+                            .and_then(JsonValue::as_array)
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(|item| item.get("id"))
+                                    .filter_map(JsonValue::as_str)
+                                    .map(str::to_owned)
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Drain a page sequence to exhaustion: govern, collect ids, resume with
+    /// each emitted cursor against the same pristine input, and return the
+    /// per-page id lists.
+    fn drain_pages(
+        json: &str,
+        ctx: &GovernorContext<'_>,
+        collect: fn(&JsonValue) -> Vec<String>,
+    ) -> Result<Vec<Vec<String>>, String> {
+        let mut pages = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..64 {
+            let governed =
+                govern_response_json_with_resume(json, ctx, TEST_REGISTRY, cursor.as_deref())
+                    .map_err(|error| format!("govern page {}: {error:?}", pages.len() + 1))?;
+            let value = parse(&governed)?;
+            pages.push(collect(&value));
+            match continuation_cursor(&value) {
+                Some(next) => cursor = Some(next),
+                None => return Ok(pages),
+            }
+        }
+        Err("page sequence failed to terminate within 64 pages".to_string())
+    }
+
+    #[test]
+    fn flat_resume_partitions_the_result_set_exactly() -> TestResult {
+        let json = list_envelope(40);
+        let generation = || 7u64;
+        let ctx = test_context(600, &generation);
+        let pages = drain_pages(&json, &ctx, kept_item_ids)?;
+        if pages.len() < 2 {
+            return Err(format!(
+                "ceiling 600 over 40 items must paginate, got {} page(s)",
+                pages.len()
+            ));
+        }
+        let drained: Vec<String> = pages.iter().flatten().cloned().collect();
+        let expected: Vec<String> = (0..40).map(|index| format!("item_{index:04}")).collect();
+        if drained != expected {
+            return Err(format!(
+                "drained sequence must reconstruct the full set exactly once in order; \
+                 got {} ids across {} pages",
+                drained.len(),
+                pages.len()
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn per_section_resume_partitions_the_result_set_exactly() -> TestResult {
+        let json = sections_envelope(3, 8);
+        let generation = || 2u64;
+        let ctx = test_context(500, &generation);
+        let pages = drain_pages(&json, &ctx, kept_section_item_ids)?;
+        if pages.len() < 2 {
+            return Err(format!(
+                "ceiling 500 over 24 section items must paginate, got {} page(s)",
+                pages.len()
+            ));
+        }
+        let mut drained: Vec<String> = pages.iter().flatten().cloned().collect();
+        let total: usize = pages.iter().map(Vec::len).sum();
+        if total != 24 {
+            return Err(format!("expected 24 items exactly once, drained {total}"));
+        }
+        drained.sort();
+        drained.dedup();
+        if drained.len() != 24 {
+            return Err("page sequence must never duplicate a section item".to_string());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resume_works_without_a_truncating_ceiling_on_the_second_page() -> TestResult {
+        let json = list_envelope(40);
+        let generation = || 7u64;
+        let tight = test_context(600, &generation);
+        let first = parse(
+            &govern_response_json(&json, &tight, TEST_REGISTRY)
+                .map_err(|error| format!("govern page 1: {error:?}"))?,
+        )?;
+        let page_one = kept_item_ids(&first);
+        let cursor = continuation_cursor(&first).ok_or("page 1 must carry a cursor")?;
+        // Page 2 resumes under an effectively unbounded ceiling (the CLI
+        // models `--cursor` without `--max-output-tokens` as u64::MAX) and
+        // must emit the exact remainder in one page.
+        let unbounded = test_context(u64::MAX, &generation);
+        let second = parse(
+            &govern_response_json_with_resume(&json, &unbounded, TEST_REGISTRY, Some(&cursor))
+                .map_err(|error| format!("govern page 2: {error:?}"))?,
+        )?;
+        let page_two = kept_item_ids(&second);
+        if continuation_cursor(&second).is_some() {
+            return Err("an unbounded resume page must not issue another cursor".to_string());
+        }
+        let mut drained = page_one;
+        drained.extend(page_two);
+        let expected: Vec<String> = (0..40).map(|index| format!("item_{index:04}")).collect();
+        if drained != expected {
+            return Err("tight page + unbounded resume must partition exactly".to_string());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejected_cursor_yields_an_empty_page_not_a_restarted_one() -> TestResult {
+        let json = list_envelope(12);
+        let generation = || 7u64;
+        let ctx = test_context(100_000, &generation);
+        let governed = govern_response_json_with_resume(
+            &json,
+            &ctx,
+            TEST_REGISTRY,
+            Some("not-a-valid-cursor"),
+        )
+        .map_err(|error| format!("govern: {error:?}"))?;
+        let value = parse(&governed)?;
+        if !kept_item_ids(&value).is_empty() {
+            return Err("an invalid cursor must yield an empty page".to_string());
+        }
+        let entry = degraded_entry_with_code(&value, CURSOR_INVALID_CODE)?;
+        if entry.get("severity").and_then(JsonValue::as_str) != Some("low") {
+            return Err("cursor_invalid must be severity low".to_string());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn generation_advance_mid_sequence_is_an_empty_stale_page() -> TestResult {
+        let json = list_envelope(40);
+        let issue_generation = || 7u64;
+        let issue_ctx = test_context(600, &issue_generation);
+        let first = parse(
+            &govern_response_json(&json, &issue_ctx, TEST_REGISTRY)
+                .map_err(|error| format!("govern page 1: {error:?}"))?,
+        )?;
+        let cursor = continuation_cursor(&first).ok_or("page 1 must carry a cursor")?;
+        let advanced_generation = || 9u64;
+        let resume_ctx = test_context(600, &advanced_generation);
+        let second = parse(
+            &govern_response_json_with_resume(&json, &resume_ctx, TEST_REGISTRY, Some(&cursor))
+                .map_err(|error| format!("govern page 2: {error:?}"))?,
+        )?;
+        if !kept_item_ids(&second).is_empty() {
+            return Err("a stale cursor must yield an empty page".to_string());
+        }
+        let entry = degraded_entry_with_code(&second, CURSOR_STALE_CODE)?;
+        let message = entry
+            .get("message")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default();
+        if !message.contains("generation 7") || !message.contains("generation 9") {
+            return Err(format!(
+                "stale entry must name both generations, got: {message}"
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn dishonest_position_key_is_rejected_as_invalid() -> TestResult {
+        let json = list_envelope(40);
+        let generation = || 7u64;
+        let ctx = test_context(600, &generation);
+        let first = parse(
+            &govern_response_json(&json, &ctx, TEST_REGISTRY)
+                .map_err(|error| format!("govern page 1: {error:?}"))?,
+        )?;
+        let cursor = continuation_cursor(&first).ok_or("page 1 must carry a cursor")?;
+        let payload = decode_cursor(&cursor, &ctx.mac_key, &ctx.params_hash, 7)
+            .map_err(|rejection| format!("decode: {rejection:?}"))?;
+        let forged = CursorPayload {
+            position_key: "item_9999".to_string(),
+            ..payload
+        };
+        let forged_token =
+            encode_cursor(&forged, &ctx.mac_key).map_err(|error| format!("encode: {error:?}"))?;
+        let second = parse(
+            &govern_response_json_with_resume(&json, &ctx, TEST_REGISTRY, Some(&forged_token))
+                .map_err(|error| format!("govern page 2: {error:?}"))?,
+        )?;
+        if !kept_item_ids(&second).is_empty() {
+            return Err("a dishonest positionKey must yield an empty page".to_string());
+        }
+        degraded_entry_with_code(&second, CURSOR_INVALID_CODE)?;
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_payload_without_dropped_count_is_rejected_as_invalid() -> TestResult {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let key = derive_workspace_mac_key("/tmp/test-workspace");
+        let params_hash = hash_invocation_params(["test", "list", "--json"]);
+        // Hand-encode the pre-bd-7lvbg.3 payload shape (no droppedCount)
+        // with a VALID MAC: the missing field itself must reject the cursor.
+        let legacy_payload = serde_json::to_vec(&json!({
+            "schema": CURSOR_SCHEMA_V1,
+            "targetSchema": "ee.test.list.v1",
+            "dbGeneration": 7,
+            "positionKey": "item_0009",
+            "paramsHash": params_hash,
+        }))
+        .map_err(|error| format!("serialize legacy payload: {error}"))?;
+        let mac = blake3::keyed_hash(&key, &legacy_payload);
+        let token = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(&legacy_payload),
+            URL_SAFE_NO_PAD.encode(mac.as_bytes())
+        );
+        if decode_cursor(&token, &key, &params_hash, 7) != Err(CursorRejection::Invalid) {
+            return Err("legacy payloads without droppedCount must be cursor_invalid".to_string());
         }
         Ok(())
     }

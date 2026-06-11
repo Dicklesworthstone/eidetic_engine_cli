@@ -161,7 +161,7 @@ Per the same-commit rule, `tests/fixtures/failure_modes/<code>.json` and
   exact-count partition checks, mid-pagination generation advance ⇒
   `cursor_stale`, env/flag equivalence; `ee.test_event.v1` logging per step.
 
-## Appendix: `ee.cursor.v1` (normative draft)
+## Appendix: `ee.cursor.v1` (normative; amended by bd-7lvbg.3)
 
 Standalone `docs/schemas/ee.cursor.v1.json` ships with bd-7lvbg.2
 (`x-ee-status` `shipped:false` until then); this draft is normative.
@@ -172,8 +172,31 @@ payload object
   schema        const "ee.cursor.v1"
   targetSchema  string            (schema id of the governed response)
   dbGeneration  integer
-  positionKey   string            (stable order key of last emitted element)
-  paramsHash    string            (blake3 of normalized query/filter params)
+  positionKey   string            (honesty cross-check; see basis note below)
+  droppedCount  integer >= 1      (elements still unemitted at issue time)
+  paramsHash    string            (blake3 of normalized query/filter params,
+                                   excluding --max-output-tokens and the
+                                   --cursor token itself)
 mac: blake3 keyed over payload bytes (workspace-local key; never a secret
      leak vector — cursors are workspace-scoped and short-lived)
 ```
+
+Amendment (bd-7lvbg.3, surface-wiring implementation): `droppedCount` — the
+count of elements still unemitted when the cursor was issued — is the field
+that reconstructs the emitted set on resume. The per-section round-robin
+shape (insights `sections[].items[]`) maps many distinct drop counts onto
+the same last-kept element, so a position key alone cannot identify the page
+boundary. `positionKey` stays as the honesty cross-check, with a
+shape-specific basis: flat truncation points name the last emitted element;
+per-section points name the last **withheld** element in the engine's
+deterministic drop order, the form that is identical in page-local and
+full-set coordinates (the round-robin drop sequence over a page remainder is
+a prefix of the drop sequence over the full set). A recomputation mismatch —
+including elements whose declared key field is absent, where the key falls
+back to the array index — rejects the cursor as `cursor_invalid`; combined
+with the empty-page rejection contract (a rejected cursor yields an empty
+page plus the degraded entry, never a restarted page, mirroring the recall
+house contract), a page sequence can never duplicate or silently skip
+elements. Pre-amendment payloads without `droppedCount` reject as
+`cursor_invalid` (legacy format, same class as the bespoke audit-timeline
+cursors this contract replaces).
