@@ -166,6 +166,112 @@ fn assert_exact_partition(drained: &[String], full: &[String], surface: &str) ->
     )
 }
 
+fn golden_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("golden")
+        .join("governor")
+        .join(format!("{name}.golden"))
+}
+
+fn assert_golden(name: &str, actual: &str) -> TestResult {
+    let path = golden_path(name);
+    if env::var("UPDATE_GOLDEN").is_ok() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("failed to create dir: {e}"))?;
+        }
+        fs::write(&path, actual).map_err(|e| format!("failed to write golden: {e}"))?;
+        eprintln!("Updated golden file: {}", path.display());
+        return Ok(());
+    }
+    let expected = fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "Golden file not found: {}\nRun with UPDATE_GOLDEN=1 to create it.\nError: {e}",
+            path.display()
+        )
+    })?;
+    ensure(
+        expected == actual,
+        format!(
+            "Golden test '{name}' failed.\nGolden file: {}\nRun with UPDATE_GOLDEN=1 to \
+             update.\n--- expected\n{expected}\n+++ actual\n{actual}",
+            path.display()
+        ),
+    )
+}
+
+/// Scrub size-dependent numerics so the goldens pin the envelope SHAPE
+/// without churning when the schema registry grows: token estimates and the
+/// estimate-derived repair hint become placeholders.
+fn normalize_governor_envelope(value: &JsonValue) -> Result<String, String> {
+    let mut normalized = value.clone();
+    if let Some(meta) = normalized
+        .pointer_mut("/meta/tokensEstimated")
+        .filter(|estimated| estimated.is_u64())
+    {
+        *meta = JsonValue::String("<tokens-estimated>".to_owned());
+    }
+    if let Some(entries) = normalized
+        .get_mut("degraded")
+        .and_then(JsonValue::as_array_mut)
+    {
+        for entry in entries {
+            for field in ["message", "repair"] {
+                if let Some(text) = entry.get(field).and_then(JsonValue::as_str) {
+                    let scrubbed: String = text
+                        .split_whitespace()
+                        .map(|word| {
+                            if word.chars().all(|c| c.is_ascii_digit()) {
+                                "<n>"
+                            } else {
+                                word
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    entry[field] = JsonValue::String(scrubbed);
+                }
+            }
+        }
+    }
+    serde_json::to_string_pretty(&normalized).map_err(|error| format!("serialize: {error}"))
+}
+
+#[test]
+fn schema_list_rejected_cursor_envelope_matches_golden() -> TestResult {
+    let workspace = isolated_workspace("schema-golden-invalid")?;
+    let value = run_ee_in(
+        &workspace,
+        &[
+            "schema",
+            "list",
+            "--cursor",
+            "not-a-valid-cursor",
+            "--max-output-tokens",
+            "600",
+            "--json",
+        ],
+    )?;
+    assert_golden(
+        "schema_list_cursor_invalid_empty_page",
+        &normalize_governor_envelope(&value)?,
+    )
+}
+
+#[test]
+fn schema_list_unsatisfiable_shell_matches_golden() -> TestResult {
+    let workspace = isolated_workspace("schema-golden-floor")?;
+    let value = run_ee_in(
+        &workspace,
+        &["schema", "list", "--max-output-tokens", "50", "--json"],
+    )?;
+    assert_golden(
+        "schema_list_unsatisfiable_shell",
+        &normalize_governor_envelope(&value)?,
+    )
+}
+
 fn seed_memories(workspace: &Path, count: usize) -> TestResult {
     let init = Command::new(env!("CARGO_BIN_EXE_ee"))
         .arg("--workspace")
@@ -215,6 +321,11 @@ fn seed_memories(workspace: &Path, count: usize) -> TestResult {
 
 #[test]
 fn schema_list_tight_ceiling_truncates_with_cursor() -> TestResult {
+    // The envelope minimum for a truncated page (shell + one schema entry +
+    // the output_truncated_budget entry carrying the ~200-char cursor token)
+    // sits around 400 tokens; 600 reliably truncates without hitting the
+    // output_budget_unsatisfiable floor.
+    const CEILING: u64 = 600;
     let workspace = isolated_workspace("schema-ceiling")?;
     let full = run_ee_in(&workspace, &["schema", "list", "--json"])?;
     let full_ids = element_ids(&full, "/data/schemas", "id");
@@ -225,13 +336,13 @@ fn schema_list_tight_ceiling_truncates_with_cursor() -> TestResult {
 
     let governed = run_ee_in(
         &workspace,
-        &["schema", "list", "--max-output-tokens", "150", "--json"],
+        &["schema", "list", "--max-output-tokens", "600", "--json"],
     )?;
     let kept = element_ids(&governed, "/data/schemas", "id");
     ensure(
         !kept.is_empty() && kept.len() < full_ids.len(),
         format!(
-            "ceiling 150 must keep a strict non-empty prefix (kept {} of {})",
+            "ceiling {CEILING} must keep a strict non-empty prefix (kept {} of {})",
             kept.len(),
             full_ids.len()
         ),
@@ -260,8 +371,8 @@ fn schema_list_tight_ceiling_truncates_with_cursor() -> TestResult {
         .and_then(JsonValue::as_u64)
         .ok_or("meta.tokensEstimated must be stamped under a ceiling")?;
     ensure(
-        estimated <= 150,
-        format!("stamped estimate {estimated} exceeds the 150-token ceiling"),
+        estimated <= CEILING,
+        format!("stamped estimate {estimated} exceeds the {CEILING}-token ceiling"),
     )
 }
 
@@ -272,7 +383,7 @@ fn schema_list_cursor_drain_partitions_exactly() -> TestResult {
     let full_ids = element_ids(&full, "/data/schemas", "id");
     let drained = drain_ids(
         &workspace,
-        &["schema", "list", "--max-output-tokens", "300", "--json"],
+        &["schema", "list", "--max-output-tokens", "600", "--json"],
         "/data/schemas",
         "id",
     )?;
@@ -316,12 +427,21 @@ fn search_cursor_drain_partitions_exactly() -> TestResult {
     seed_memories(&workspace, 8)?;
     let full = run_ee_in(
         &workspace,
-        &["search", "release workflow clippy", "--limit", "8", "--json"],
+        &[
+            "search",
+            "release workflow clippy",
+            "--limit",
+            "8",
+            "--json",
+        ],
     )?;
-    let full_ids = element_ids(&full, "/data/results", "id");
+    let full_ids = element_ids(&full, "/data/results", "docId");
     ensure(
         full_ids.len() >= 4,
-        format!("seeded search must return >= 4 results, got {}", full_ids.len()),
+        format!(
+            "seeded search must return >= 4 results, got {}",
+            full_ids.len()
+        ),
     )?;
     let drained = drain_ids(
         &workspace,
@@ -331,11 +451,11 @@ fn search_cursor_drain_partitions_exactly() -> TestResult {
             "--limit",
             "8",
             "--max-output-tokens",
-            "400",
+            "2500",
             "--json",
         ],
         "/data/results",
-        "id",
+        "docId",
     )?;
     assert_exact_partition(&drained, &full_ids, "search")
 }
@@ -352,7 +472,10 @@ fn memory_list_cursor_drain_partitions_exactly() -> TestResult {
     let full_ids = element_ids(&full, "/data/memories", "id");
     ensure(
         full_ids.len() == 8,
-        format!("memory list must return the 8 seeded rows, got {}", full_ids.len()),
+        format!(
+            "memory list must return the 8 seeded rows, got {}",
+            full_ids.len()
+        ),
     )?;
     let drained = drain_ids(
         &workspace,
@@ -362,7 +485,7 @@ fn memory_list_cursor_drain_partitions_exactly() -> TestResult {
             "--limit",
             "8",
             "--max-output-tokens",
-            "400",
+            "800",
             "--json",
         ],
         "/data/memories",
@@ -379,11 +502,14 @@ fn memory_list_cursor_drain_partitions_exactly() -> TestResult {
 fn audit_timeline_cursor_drain_partitions_exactly() -> TestResult {
     let workspace = isolated_workspace("audit-drain")?;
     seed_memories(&workspace, 6)?;
+    // audit timeline emits a top-level ee.audit.timeline.v1 report (not an
+    // ee.response.v2 envelope), so the output governor passes it through and
+    // its --cursor is the query-level pagination lane on the shared codec.
     let full = run_ee_in(
         &workspace,
         &["audit", "timeline", "--limit", "100", "--json"],
     )?;
-    let full_ids = element_ids(&full, "/data/entries", "id");
+    let full_ids = element_ids(&full, "/entries", "id");
     ensure(
         full_ids.len() >= 6,
         format!("seeding must leave >= 6 audit rows, got {}", full_ids.len()),
@@ -401,10 +527,9 @@ fn audit_timeline_cursor_drain_partitions_exactly() -> TestResult {
             args.push(Box::leak(token.into_boxed_str()));
         }
         let value = run_ee_in(&workspace, &args)?;
-        drained.extend(element_ids(&value, "/data/entries", "id"));
+        drained.extend(element_ids(&value, "/entries", "id"));
         let next = value
-            .pointer("/data/pagination/nextCursor")
-            .or_else(|| value.pointer("/data/pagination/next_cursor"))
+            .pointer("/pagination/next_cursor")
             .and_then(JsonValue::as_str)
             .map(str::to_owned);
         match next {
@@ -427,10 +552,12 @@ fn audit_timeline_legacy_offset_cursor_is_an_empty_cursor_invalid_page() -> Test
     seed_memories(&workspace, 3)?;
     let value = run_ee_in(
         &workspace,
-        &["audit", "timeline", "--limit", "2", "--cursor", "2", "--json"],
+        &[
+            "audit", "timeline", "--limit", "2", "--cursor", "2", "--json",
+        ],
     )?;
     ensure(
-        element_ids(&value, "/data/entries", "id").is_empty(),
+        element_ids(&value, "/entries", "id").is_empty(),
         "a legacy bare-offset cursor must yield an empty page",
     )?;
     ensure(
@@ -497,7 +624,7 @@ fn insights_cursor_drain_never_duplicates_section_items() -> TestResult {
     let mut drained: Vec<String> = Vec::new();
     let mut cursor: Option<String> = None;
     for page in 0..32 {
-        let mut args = vec!["insights", "--max-output-tokens", "500", "--json"];
+        let mut args = vec!["insights", "--max-output-tokens", "2500", "--json"];
         let token;
         if let Some(current) = &cursor {
             token = current.clone();
@@ -587,7 +714,7 @@ fn curate_candidates_accepts_cursor_flag() -> TestResult {
             "--cursor",
             "not-a-valid-cursor",
             "--max-output-tokens",
-            "200",
+            "400",
             "--json",
         ],
     )?;

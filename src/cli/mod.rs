@@ -11647,16 +11647,15 @@ where
     // never register, and the unengaged state stays zero-cost.
     let has_cursor_flag = args_contain_cursor_flag(&args);
     ACTIVE_OUTPUT_GOVERNOR.with(|governor| {
-        *governor.borrow_mut() = (output_token_ceiling.is_some() || has_cursor_flag).then(|| {
-            ActiveOutputGovernor {
+        *governor.borrow_mut() =
+            (output_token_ceiling.is_some() || has_cursor_flag).then(|| ActiveOutputGovernor {
                 ceiling_tokens: output_token_ceiling,
                 params_hash: output::governor::hash_invocation_params(governor_params_for_hash(
                     &args,
                 )),
                 workspace_root: resolve_workspace_for_cli(cli.workspace.as_deref()).0,
                 resume_cursor: None,
-            }
-        });
+            });
     });
 
     if cli.schema {

@@ -926,18 +926,18 @@ fn apply_resume_drop(
         // Honesty cross-check: the cursor's positionKey must name the last
         // element the reduction withholds (drop-order coordinates, stable
         // across pages — see round_robin_reduction).
-        let recomputed_key = last_dropped.and_then(|(section_index, item_index)| {
-            let items = sections
+        let boundary_element = last_dropped.and_then(|(section_index, item_index)| {
+            sections
                 .get(section_index)?
                 .get("items")
-                .and_then(JsonValue::as_array)?;
-            Some(element_position_key(
-                items.get(item_index)?,
-                point,
-                item_index,
-            ))
+                .and_then(JsonValue::as_array)?
+                .get(item_index)
+                .map(|element| (element, item_index))
         });
-        if recomputed_key.as_deref() != Some(payload.position_key.as_str()) {
+        let Some((element, item_index)) = boundary_element else {
+            return false;
+        };
+        if !position_key_honest(element, point, item_index, &payload.position_key) {
             return false;
         }
         for (index, section) in sections.iter_mut().enumerate() {
@@ -958,11 +958,33 @@ fn apply_resume_drop(
             return false;
         }
         let kept = total - remaining;
-        if element_position_key(&items[kept - 1], point, kept - 1) != payload.position_key {
+        if !position_key_honest(&items[kept - 1], point, kept - 1, &payload.position_key) {
             return false;
         }
         items.drain(..kept);
         true
+    }
+}
+
+/// Whether the cursor's `positionKey` honestly names the recomputed
+/// boundary element.
+///
+/// Elements that lack the declared key field fall back to their array index
+/// at ISSUE time — and a page-2 cursor is issued in page-local coordinates,
+/// which a later resume (recomputing in full-set coordinates) cannot
+/// reproduce. The cursor is already MAC-protected, params-bound, and
+/// generation-bound, so for fallback-key elements `droppedCount` is the
+/// sole (and sufficient) authority and the positional cross-check is
+/// skipped; elements that carry the declared field must match exactly.
+fn position_key_honest(
+    element: &JsonValue,
+    point: &TruncationPoint,
+    index: usize,
+    claimed_key: &str,
+) -> bool {
+    match element.get(point.position_key_field) {
+        Some(JsonValue::Null) | None => true,
+        _ => element_position_key(element, point, index) == claimed_key,
     }
 }
 
@@ -1012,7 +1034,10 @@ fn append_degraded_entry(envelope: &mut JsonValue, entry: JsonValue) {
 /// Fail closed (ADR 0063 §2): keep the envelope shell, retain only the
 /// identifying `data.command` / `data.schema` fields, and report
 /// `output_budget_unsatisfiable`. The minimal shell is emitted even when it
-/// still exceeds the ceiling (documented floor).
+/// still exceeds the ceiling (documented floor). Cursor-rejection entries
+/// (`cursor_invalid` / `cursor_stale`) survive the shell rebuild: a
+/// rejected-resume page that also misses the ceiling must still tell the
+/// agent WHY its page sequence ended (bd-7lvbg.3).
 fn fail_closed_unsatisfiable(
     original: &JsonValue,
     ctx: &GovernorContext<'_>,
@@ -1021,6 +1046,7 @@ fn fail_closed_unsatisfiable(
     reason: &str,
 ) -> Result<String, DomainError> {
     let mut shell = JsonMap::new();
+    let mut degraded_entries: Vec<JsonValue> = Vec::new();
     if let Some(object) = original.as_object() {
         for key in ["schema", "success", "fields"] {
             if let Some(value) = object.get(key) {
@@ -1036,15 +1062,31 @@ fn fail_closed_unsatisfiable(
             }
         }
         shell.insert("data".to_string(), JsonValue::Object(minimal_data));
+        for degraded in [
+            object.get("degraded"),
+            object.get("data").and_then(|data| data.get("degraded")),
+        ] {
+            if let Some(entries) = degraded.and_then(JsonValue::as_array) {
+                degraded_entries.extend(
+                    entries
+                        .iter()
+                        .filter(|entry| {
+                            matches!(
+                                entry.get("code").and_then(JsonValue::as_str),
+                                Some(CURSOR_INVALID_CODE) | Some(CURSOR_STALE_CODE)
+                            )
+                        })
+                        .cloned(),
+                );
+            }
+        }
     }
-    shell.insert(
-        "degraded".to_string(),
-        JsonValue::Array(vec![unsatisfiable_degraded_entry(
-            estimate_tokens,
-            ctx.ceiling_tokens,
-            reason,
-        )]),
-    );
+    degraded_entries.push(unsatisfiable_degraded_entry(
+        estimate_tokens,
+        ctx.ceiling_tokens,
+        reason,
+    ));
+    shell.insert("degraded".to_string(), JsonValue::Array(degraded_entries));
     let mut value = JsonValue::Object(shell);
     let (serialized, _) = finalize_with_meta(&mut value, estimator)?;
     Ok(serialized)
