@@ -27,6 +27,7 @@ pub const DEFAULT_PERSONALIZED_PAGERANK_MAX_ITERATIONS: usize = 50;
 pub const DEFAULT_PERSONALIZED_PAGERANK_TOLERANCE: f64 = 1.0e-3;
 pub const DEFAULT_PPR_PREFETCH_CACHE_ENTRIES: usize = 4096;
 
+const MAX_PERSONALIZED_PAGERANK_ALPHA: f64 = 1.0 - f64::EPSILON;
 const RELATION_WEIGHT_SUPPORTS: f64 = 1.0;
 const RELATION_WEIGHT_DERIVED_FROM: f64 = 0.8;
 const RELATION_WEIGHT_RELATED: f64 = 0.6;
@@ -57,16 +58,16 @@ impl PersonalizedPageRankPolicy {
     pub fn sanitized(self) -> Self {
         let fallback = Self::default();
         Self {
-            alpha: sanitize_unit_interval_or(self.alpha, fallback.alpha),
-            max_iterations: self.max_iterations,
+            alpha: sanitize_ppr_alpha_or(self.alpha, fallback.alpha),
+            max_iterations: self.max_iterations.max(1),
             tolerance: sanitize_non_negative_or(self.tolerance, fallback.tolerance),
         }
     }
 }
 
-fn sanitize_unit_interval_or(value: f64, fallback: f64) -> f64 {
+fn sanitize_ppr_alpha_or(value: f64, fallback: f64) -> f64 {
     if value.is_finite() {
-        value.clamp(0.0, 1.0)
+        value.clamp(0.0, MAX_PERSONALIZED_PAGERANK_ALPHA)
     } else {
         fallback
     }
@@ -1386,7 +1387,7 @@ mod tests {
             tolerance: -1.0,
         };
         let equivalent = PersonalizedPageRankPolicy {
-            alpha: 1.0,
+            alpha: MAX_PERSONALIZED_PAGERANK_ALPHA,
             max_iterations: 7,
             tolerance: 0.0,
         };
@@ -1409,16 +1410,108 @@ mod tests {
 
         assert_eq!(unclamped_params, equivalent_params);
         assert_eq!(unclamped_hash, equivalent_hash);
-        assert_eq!(unclamped_params["alpha"], serde_json::json!(1.0));
+        assert!(
+            unclamped_params["alpha"]
+                .as_f64()
+                .is_some_and(|alpha| alpha < 1.0 && alpha == MAX_PERSONALIZED_PAGERANK_ALPHA),
+            "PPR alpha must stay below 1.0 so the ACL complexity bound remains finite: {unclamped_params}"
+        );
         assert_eq!(unclamped_params["tolerance"], serde_json::json!(0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn personalized_pagerank_zero_max_iterations_sanitizes_to_one_iteration() -> TestResult {
+        let mut graph = DiGraph::strict();
+        let seed = memory_id(46);
+        let middle = memory_id(47);
+        let target = memory_id(48);
+        graph
+            .add_edge_with_attrs(
+                seed.to_string(),
+                middle.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        graph
+            .add_edge_with_attrs(
+                middle.to_string(),
+                target.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        let seeds = BTreeMap::from([(seed.to_string(), 1.0)]);
+        let zero = PersonalizedPageRankPolicy {
+            max_iterations: 0,
+            ..PersonalizedPageRankPolicy::default()
+        };
+        let one = PersonalizedPageRankPolicy {
+            max_iterations: 1,
+            ..PersonalizedPageRankPolicy::default()
+        };
+
+        assert_eq!(zero.sanitized(), one);
+        assert_eq!(
+            personalized_pagerank_cache_params(zero, &seeds),
+            personalized_pagerank_cache_params(one, &seeds),
+            "cache params must reflect the same effective iteration floor used by execution"
+        );
+
+        let zero_result = graph_result(compute_personalized_pagerank_result_with_policy(
+            &graph, &seeds, zero,
+        ))?;
+        let one_result = graph_result(compute_personalized_pagerank_result_with_policy(
+            &graph, &seeds, one,
+        ))?;
+        assert_pagerank_results_equivalent(&zero_result, &one_result);
+        Ok(())
+    }
+
+    #[test]
+    fn personalized_pagerank_exact_one_alpha_keeps_finite_teleport_mass() -> TestResult {
+        let mut graph = DiGraph::strict();
+        let seed = memory_id(49);
+        graph.add_node(seed.to_string());
+        let seeds = BTreeMap::from([(seed.to_string(), 1.0)]);
+        let policy = PersonalizedPageRankPolicy {
+            alpha: 1.0,
+            max_iterations: 1,
+            tolerance: 0.0,
+        };
+
+        let params = personalized_pagerank_cache_params(policy, &seeds);
+        assert!(
+            params["alpha"]
+                .as_f64()
+                .is_some_and(|alpha| alpha < 1.0 && alpha == MAX_PERSONALIZED_PAGERANK_ALPHA),
+            "cache params must expose the same below-one alpha used for execution: {params}"
+        );
+
+        let result = graph_result(compute_personalized_pagerank_result_with_policy(
+            &graph, &seeds, policy,
+        ))?;
+        let seed_score = result
+            .scores
+            .iter()
+            .find(|score| score.node == seed.to_string())
+            .map(|score| score.score)
+            .unwrap_or(0.0);
+        assert!(
+            seed_score > 0.0 && seed_score.is_finite(),
+            "alpha=1.0 should sanitize below one instead of producing zero/undefined PPR mass: {result:?}"
+        );
+        assert!(
+            personalized_pagerank_final_residual_l1(&result).is_some(),
+            "sanitized alpha=1.0 must keep the residual witness finite: {result:?}"
+        );
         Ok(())
     }
 
     #[test]
     fn personalized_pagerank_non_finite_policy_values_fall_back_before_scoring() -> TestResult {
         let mut graph = DiGraph::strict();
-        let seed = memory_id(47);
-        let target = memory_id(48);
+        let seed = memory_id(50);
+        let target = memory_id(51);
         graph
             .add_edge_with_attrs(
                 seed.to_string(),
