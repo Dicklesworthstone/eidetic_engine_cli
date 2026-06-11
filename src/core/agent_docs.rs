@@ -1011,7 +1011,8 @@ pub const OUTPUT_FORMATS: &[FormatEntry] = &[
     FormatEntry {
         name: "json",
         flag: "--format json or --json or -j",
-        description: "Structured JSON with ee.response.v2 envelope",
+        description: "Structured JSON with ee.response.v2 envelope; size-governable via \
+                      --max-output-tokens / EE_MAX_OUTPUT_TOKENS with --cursor resume (ADR 0063)",
         machine_readable: true,
     },
     FormatEntry {

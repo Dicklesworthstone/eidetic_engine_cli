@@ -507,6 +507,8 @@ Machine readers should inspect the JSON contract before trusting a result:
 | Pack identity | `data.pack.hash` for batch packs; `packHash` on stream trailer frames |
 | Graph explanation | `data.pack.packDna` when `ee pack --explain --json` is used |
 | Feature gaps | `ee capabilities --json` at `data.unimplemented[]`, not command `degraded[]` |
+| Output budget | `meta.tokensEstimated` is stamped whenever `--max-output-tokens` / `EE_MAX_OUTPUT_TOKENS` governs the response; never above the ceiling unless the response failed closed with `output_budget_unsatisfiable` |
+| Truncation + resume | `output_truncated_budget` in `degraded[]` carries `details.droppedCount` and `details.continuationCursor`; resume with `--cursor <token>` — a rejected cursor (`cursor_invalid` / `cursor_stale`) is an EMPTY page, never a restart. See [`docs/agent-ux/output-budgets.md`](docs/agent-ux/output-budgets.md) |
 | Streams | `ee.pack.stream.v1` NDJSON frames: `header`, `item`, terminal `trailer`, `error`, or `cancelled` |
 
 Severity vocabulary:
@@ -546,6 +548,8 @@ Common red flags:
 | `embed_model_unavailable` | Continue lexical-only or run `ee index reembed --workspace .` |
 | `graph_snapshot_stale` | Continue retrieval, then refresh graph snapshots when graph scores matter |
 | `pack_budget_too_small` | Raise `--max-tokens` or switch to `--profile compact` |
+| `output_budget_unsatisfiable` | Raise `--max-output-tokens` or narrow the `--fields` preset; the page failed closed rather than lie |
+| `cursor_stale` | A write advanced the DB generation mid-pagination; re-run without `--cursor` for a fresh sequence |
 | `data.workspace.diagnostics[].severity = "warning"` | Workspace selection conflict; use `ee workspace list`, then pass an explicit workspace or alias |
 | exit `7` | Stop and get human approval before using any bypass-token path |
 | exit `8` | Run `ee migrate run --workspace . --json` |

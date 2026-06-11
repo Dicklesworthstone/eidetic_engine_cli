@@ -12317,6 +12317,33 @@ const ERROR_CODES: &[ErrorCodeEntry] = &[
         repair: "ee doctor --fix-plan",
         category: "storage",
     },
+    // Output-governor degraded codes (ADR 0063): these arrive in
+    // `degraded[]`, not `error.code`, but agents triage them through the
+    // same code -> repair lookup.
+    ErrorCodeEntry {
+        code: "output_truncated_budget",
+        message: "Trailing elements dropped to satisfy --max-output-tokens",
+        repair: "Resume with --cursor <details.continuationCursor> or raise the ceiling",
+        category: "output",
+    },
+    ErrorCodeEntry {
+        code: "output_budget_unsatisfiable",
+        message: "Envelope minimum exceeds the output-token ceiling; response failed closed",
+        repair: "Raise --max-output-tokens or narrow the --fields preset",
+        category: "output",
+    },
+    ErrorCodeEntry {
+        code: "cursor_stale",
+        message: "DB generation advanced after the continuation cursor was issued",
+        repair: "Re-run without --cursor to start a fresh page sequence",
+        category: "output",
+    },
+    ErrorCodeEntry {
+        code: "cursor_invalid",
+        message: "Continuation cursor failed MAC, schema, or parameter validation",
+        repair: "Re-run without --cursor to start a fresh page sequence",
+        category: "output",
+    },
 ];
 
 #[must_use]
@@ -12597,6 +12624,20 @@ fn render_agent_docs_topic_json(d: &mut JsonBuilder, topic: AgentDocsTopic) {
                 obj.field_str("includes", level.includes);
                 obj.field_str("useCase", level.use_case);
             });
+            // The fields projection picks the SHAPE; the output governor
+            // (ADR 0063) sizes what remains. Surfaced here so agents reading
+            // the fields topic discover the full output economy.
+            d.field_object("outputBudget", |budget| {
+                budget.field_str("ceilingFlag", "--max-output-tokens");
+                budget.field_str("ceilingEnv", "EE_MAX_OUTPUT_TOKENS");
+                budget.field_str("resumeFlag", "--cursor");
+                budget.field_str(
+                    "note",
+                    "Fields presets choose shape; the ceiling enforces size; cursors resume \
+                     truncated pages. See docs/agent-ux/output-budgets.md and ee capabilities \
+                     --json at data.output.governor.",
+                );
+            });
         }
         AgentDocsTopic::Errors => {
             d.field_array_of_objects("errorCodes", ERROR_CODES, |obj, code| {
@@ -12756,6 +12797,11 @@ fn render_agent_docs_topic_human(output: &mut String, topic: AgentDocsTopic) {
                 output.push_str(&format!("    Includes: {}\n", level.includes));
                 output.push_str(&format!("    Use case: {}\n", level.use_case));
             }
+            output.push_str(
+                "\nOutput budget: fields presets choose shape; --max-output-tokens (env \
+                 EE_MAX_OUTPUT_TOKENS) enforces size; --cursor resumes truncated pages.\n\
+                 See docs/agent-ux/output-budgets.md.\n",
+            );
         }
         AgentDocsTopic::Errors => {
             output.push_str("\nError codes:\n");
