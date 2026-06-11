@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "cursor_invalid",
+  "introduced_by": {
+    "bead": "bd-7lvbg.2"
+  },
+  "surfaces": [
+    "governed list surfaces accepting --cursor (per-surface wiring lands with bd-7lvbg.3)"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "An ee.cursor.v1 continuation cursor fails validation (ADR 0063 §3): the BLAKE3 MAC does not verify (tampering or a different workspace key), the paramsHash does not match the new invocation's normalized parameters, the embedded dbGeneration is from the future, or the token is a legacy/garbage format (including pre-migration bespoke audit-timeline cursors). The codec and degraded contract ship with bd-7lvbg.2; the per-surface --cursor resume flag lands with bd-7lvbg.3.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee schema list --cursor not-a-valid-cursor --max-output-tokens 150 --json"
+  },
+  "expected_emission": {
+    "code": "cursor_invalid",
+    "severity": "low",
+    "message_contains": [
+      "failed validation",
+      "MAC mismatch"
+    ]
+  }
+}

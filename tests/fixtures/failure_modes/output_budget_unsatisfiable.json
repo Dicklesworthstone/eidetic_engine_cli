@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "output_budget_unsatisfiable",
+  "introduced_by": {
+    "bead": "bd-7lvbg.2"
+  },
+  "surfaces": [
+    "all ee.response.v2 machine surfaces"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A machine response exceeds the --max-output-tokens ceiling and either its schema declares no truncation point in the output-governor registry, or even the envelope minimum (one kept element) still exceeds the ceiling. The response fails closed (ADR 0063 §2): the envelope shell and identifying data.command/data.schema fields are kept, the oversized payload is withheld, and the degraded entry's repair names the estimated ceiling that would satisfy the request. No special cases, no exemptions — a schema that cannot declare a clean point needs redesign, not a carve-out.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee status --max-output-tokens 10 --json"
+  },
+  "expected_emission": {
+    "code": "output_budget_unsatisfiable",
+    "severity": "medium",
+    "message_contains": [
+      "Output budget unsatisfiable",
+      "payload withheld"
+    ]
+  }
+}

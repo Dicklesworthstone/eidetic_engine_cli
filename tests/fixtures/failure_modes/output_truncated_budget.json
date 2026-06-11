@@ -1,0 +1,35 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "output_truncated_budget",
+  "introduced_by": {
+    "bead": "bd-7lvbg.2"
+  },
+  "surfaces": [
+    "schema list",
+    "search",
+    "memory list",
+    "insights",
+    "curate candidates",
+    "audit timeline",
+    "pack (skipped[] only)",
+    "recall",
+    "journal list"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "A machine response exceeds the declared --max-output-tokens (or EE_MAX_OUTPUT_TOKENS) ceiling and the response schema declares a truncation point in the output-governor registry. The engine drops trailing whole elements from the declared array until the estimate fits (ADR 0063 §2 — no mid-object truncation, ever), then reports the drop with details.droppedCount and an ee.cursor.v1 details.continuationCursor. meta.tokensEstimated reflects the final emitted payload.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee schema list --max-output-tokens 150 --json"
+  },
+  "expected_emission": {
+    "code": "output_truncated_budget",
+    "severity": "info",
+    "message_contains": [
+      "trailing element(s)",
+      "declared truncation point"
+    ]
+  }
+}

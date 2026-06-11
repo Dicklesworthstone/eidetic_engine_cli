@@ -68,6 +68,7 @@ fn inferred_command_name(args: &[OsString]) -> String {
                 | "--format"
                 | "--schema-version"
                 | "--fields"
+                | "--max-output-tokens"
                 | "--cards"
                 | "--policy"
                 | "--shadow"
@@ -81,6 +82,7 @@ fn inferred_command_name(args: &[OsString]) -> String {
             || value.starts_with("--format=")
             || value.starts_with("--schema-version=")
             || value.starts_with("--fields=")
+            || value.starts_with("--max-output-tokens=")
             || value.starts_with("--cards=")
             || value.starts_with("--policy=")
             || value.starts_with("--shadow=")
