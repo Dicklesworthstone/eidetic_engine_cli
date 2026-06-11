@@ -1223,8 +1223,10 @@ pub(crate) fn process_pending_index_jobs_coalesced(
     let holder_id = generate_index_holder_id();
     acquire_index_publish_lock(db, workspace_id, &holder_id)?;
     let build_result = (|| -> Result<(), String> {
-        let _recovery_action = recover_interrupted_publish(index_dir).map_err(|error| error.to_string())?;
-        let staging_dir = create_publish_staging_dir(index_dir).map_err(|error| error.to_string())?;
+        let _recovery_action =
+            recover_interrupted_publish(index_dir).map_err(|error| error.to_string())?;
+        let staging_dir =
+            create_publish_staging_dir(index_dir).map_err(|error| error.to_string())?;
         build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs).and_then(
             |_stats| {
                 write_index_metadata(&staging_dir, published_generation, documents_total)
