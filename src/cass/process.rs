@@ -780,11 +780,17 @@ fn cass_spawn_retry_delay(attempt: usize) -> Duration {
     Duration::from_millis(BASE_DELAY_MS.saturating_mul(multiplier).min(MAX_DELAY_MS))
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CassStdoutLine {
+    text: String,
+    delimiter_bytes: usize,
+}
+
 fn spawn_stdout_line_reader(
     stdout: std::process::ChildStdout,
     peak_buffer_bytes: Arc<AtomicUsize>,
 ) -> (
-    Receiver<Result<String, CassError>>,
+    Receiver<Result<CassStdoutLine, CassError>>,
     thread::JoinHandle<Result<(), CassError>>,
 ) {
     let (sender, receiver) = mpsc::channel();
@@ -822,7 +828,7 @@ fn read_bounded_stdout_line<R: BufRead>(
     reader: &mut R,
     buf: &mut Vec<u8>,
     peak_buffer_bytes: &AtomicUsize,
-) -> Result<Option<String>, CassError> {
+) -> Result<Option<CassStdoutLine>, CassError> {
     buf.clear();
     // `take(READ_LIMIT).read_until(b'\n', ...)` reads at most one logical
     // line plus CRLF delimiter slack and stops the moment either a newline
@@ -850,9 +856,12 @@ fn read_bounded_stdout_line<R: BufRead>(
     // match the byte-stripping behavior of `BufRead::read_line` /
     // `BufRead::lines`.
     let mut line_bytes: &[u8] = buf.as_slice();
+    let mut delimiter_bytes = 0_usize;
     if has_newline {
+        delimiter_bytes = 1;
         line_bytes = &line_bytes[..line_bytes.len() - 1];
         if line_bytes.last() == Some(&b'\r') {
+            delimiter_bytes += 1;
             line_bytes = &line_bytes[..line_bytes.len() - 1];
         }
     }
@@ -868,7 +877,10 @@ fn read_bounded_stdout_line<R: BufRead>(
             message: format!("cass subprocess stdout line was not valid UTF-8: {error}"),
         })?
         .to_owned();
-    Ok(Some(line))
+    Ok(Some(CassStdoutLine {
+        text: line,
+        delimiter_bytes,
+    }))
 }
 
 #[doc(hidden)]
@@ -892,9 +904,12 @@ pub fn fuzz_decode_cass_stdout_stream(
     let mut peak_line_bytes = 0_usize;
 
     while let Some(line) = read_bounded_stdout_line(&mut reader, &mut buf, &peak_buffer_bytes)? {
-        line_count = checked_stdout_stat_add(line_count, 1, "fuzz line count")?;
-        bytes_seen = checked_stdout_stat_add(bytes_seen, line.len(), "fuzz byte count")?;
-        peak_line_bytes = peak_line_bytes.max(line.len());
+        record_stdout_line_stats(
+            &line,
+            &mut line_count,
+            &mut bytes_seen,
+            &mut peak_line_bytes,
+        )?;
     }
 
     Ok(CassStdoutDecodeFuzzSummary {
@@ -907,7 +922,7 @@ pub fn fuzz_decode_cass_stdout_stream(
 
 #[allow(clippy::too_many_arguments)]
 fn drain_available_stdout_lines<F, E>(
-    receiver: &Receiver<Result<String, CassError>>,
+    receiver: &Receiver<Result<CassStdoutLine, CassError>>,
     stdout_done: &mut bool,
     stdout_line_count: &mut usize,
     stdout_bytes_seen: &mut usize,
@@ -932,7 +947,7 @@ fn drain_available_stdout_lines<F, E>(
                 }
                 if stream_error.is_none()
                     && handler_error.is_none()
-                    && let Err(error) = handle_line(line)
+                    && let Err(error) = handle_line(line.text)
                 {
                     *handler_error = Some(error);
                 }
@@ -950,7 +965,7 @@ fn drain_available_stdout_lines<F, E>(
 }
 
 fn drain_stdout_line_reader_after_stop(
-    receiver: &Receiver<Result<String, CassError>>,
+    receiver: &Receiver<Result<CassStdoutLine, CassError>>,
     stdout_done: &mut bool,
     stdout_line_count: &mut usize,
     stdout_bytes_seen: &mut usize,
@@ -984,18 +999,19 @@ fn drain_stdout_line_reader_after_stop(
 }
 
 fn record_stdout_line_stats(
-    line: &str,
+    line: &CassStdoutLine,
     stdout_line_count: &mut usize,
     stdout_bytes_seen: &mut usize,
     peak_stdout_line_bytes: &mut usize,
 ) -> Result<(), CassError> {
     let next_line_count = checked_stdout_stat_add(*stdout_line_count, 1, "line count")?;
-    let line_bytes_with_delimiter = checked_stdout_stat_add(line.len(), 1, "byte count")?;
+    let line_bytes_with_delimiter =
+        checked_stdout_stat_add(line.text.len(), line.delimiter_bytes, "byte count")?;
     let next_bytes_seen =
         checked_stdout_stat_add(*stdout_bytes_seen, line_bytes_with_delimiter, "byte count")?;
     *stdout_line_count = next_line_count;
     *stdout_bytes_seen = next_bytes_seen;
-    *peak_stdout_line_bytes = (*peak_stdout_line_bytes).max(line.len());
+    *peak_stdout_line_bytes = (*peak_stdout_line_bytes).max(line.text.len());
     Ok(())
 }
 
@@ -2023,15 +2039,23 @@ mod tests {
 
     #[test]
     fn stdout_line_stats_reject_line_count_overflow() {
-        use super::record_stdout_line_stats;
+        use super::{CassStdoutLine, record_stdout_line_stats};
 
         let mut line_count = usize::MAX;
         let mut bytes_seen = 0_usize;
         let mut peak_line_bytes = 0_usize;
+        let line = CassStdoutLine {
+            text: String::new(),
+            delimiter_bytes: 1,
+        };
 
-        let error =
-            record_stdout_line_stats("", &mut line_count, &mut bytes_seen, &mut peak_line_bytes)
-                .expect_err("line count overflow should fail explicitly");
+        let error = record_stdout_line_stats(
+            &line,
+            &mut line_count,
+            &mut bytes_seen,
+            &mut peak_line_bytes,
+        )
+        .expect_err("line count overflow should fail explicitly");
 
         assert!(
             error.to_string().contains("line count overflowed"),
@@ -2044,15 +2068,23 @@ mod tests {
 
     #[test]
     fn stdout_line_stats_reject_byte_count_overflow_without_partial_update() {
-        use super::record_stdout_line_stats;
+        use super::{CassStdoutLine, record_stdout_line_stats};
 
         let mut line_count = 7_usize;
         let mut bytes_seen = usize::MAX;
         let mut peak_line_bytes = 3_usize;
+        let line = CassStdoutLine {
+            text: String::new(),
+            delimiter_bytes: 1,
+        };
 
-        let error =
-            record_stdout_line_stats("", &mut line_count, &mut bytes_seen, &mut peak_line_bytes)
-                .expect_err("byte count overflow should fail explicitly");
+        let error = record_stdout_line_stats(
+            &line,
+            &mut line_count,
+            &mut bytes_seen,
+            &mut peak_line_bytes,
+        )
+        .expect_err("byte count overflow should fail explicitly");
 
         assert!(
             error.to_string().contains("byte count overflowed"),
@@ -2083,8 +2115,9 @@ mod tests {
             .map_err(|error| error.to_string())?
             .ok_or("expected one CRLF-terminated line at the cap")?;
 
-        assert_eq!(line.len(), CASS_STDOUT_LINE_MAX_BYTES);
-        assert!(line.bytes().all(|byte| byte == b'x'));
+        assert_eq!(line.text.len(), CASS_STDOUT_LINE_MAX_BYTES);
+        assert_eq!(line.delimiter_bytes, 2);
+        assert!(line.text.bytes().all(|byte| byte == b'x'));
         assert!(peak_buffer_bytes.load(Ordering::Relaxed) <= CASS_STDOUT_LINE_READ_LIMIT_BYTES);
         assert!(
             read_bounded_stdout_line(&mut reader, &mut buf, &peak_buffer_bytes)
@@ -2114,9 +2147,46 @@ mod tests {
             .map_err(|error| error.to_string())?
             .ok_or("expected one LF-terminated line at the cap")?;
 
-        assert_eq!(line.len(), CASS_STDOUT_LINE_MAX_BYTES);
-        assert!(line.bytes().all(|byte| byte == b'x'));
+        assert_eq!(line.text.len(), CASS_STDOUT_LINE_MAX_BYTES);
+        assert_eq!(line.delimiter_bytes, 1);
+        assert!(line.text.bytes().all(|byte| byte == b'x'));
         assert!(peak_buffer_bytes.load(Ordering::Relaxed) <= CASS_STDOUT_LINE_READ_LIMIT_BYTES);
+        Ok(())
+    }
+
+    #[test]
+    fn read_bounded_stdout_line_tracks_eof_without_delimiter() -> Result<(), String> {
+        use std::io::BufReader;
+        use std::sync::atomic::AtomicUsize;
+
+        use super::{
+            bounded_stdout_line_buffer, read_bounded_stdout_line, record_stdout_line_stats,
+        };
+
+        let input = b"unterminated";
+        let mut reader = BufReader::new(input.as_slice());
+        let mut buf = bounded_stdout_line_buffer();
+        let peak_buffer_bytes = AtomicUsize::new(0);
+        let mut line_count = 0_usize;
+        let mut bytes_seen = 0_usize;
+        let mut peak_line_bytes = 0_usize;
+
+        let line = read_bounded_stdout_line(&mut reader, &mut buf, &peak_buffer_bytes)
+            .map_err(|error| error.to_string())?
+            .ok_or("expected one EOF-terminated line")?;
+        record_stdout_line_stats(
+            &line,
+            &mut line_count,
+            &mut bytes_seen,
+            &mut peak_line_bytes,
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(line.text, "unterminated");
+        assert_eq!(line.delimiter_bytes, 0);
+        assert_eq!(line_count, 1);
+        assert_eq!(bytes_seen, input.len());
+        assert_eq!(peak_line_bytes, input.len());
         Ok(())
     }
 
