@@ -695,6 +695,65 @@ fn pack_items_are_never_a_registered_truncation_point() -> TestResult {
 }
 
 // ============================================================================
+// capabilities feature detection
+// ============================================================================
+
+#[test]
+fn capabilities_advertises_governor_feature_detection() -> TestResult {
+    let workspace = isolated_workspace("capabilities-governor")?;
+    let value = run_ee_in(&workspace, &["capabilities", "--json"])?;
+    let governor = value
+        .pointer("/data/output/governor")
+        .ok_or("data.output.governor must be advertised (ADR 0063 §4)")?;
+    ensure(
+        governor.pointer("/available").and_then(JsonValue::as_bool) == Some(true),
+        "governor must advertise availability",
+    )?;
+    ensure(
+        governor.pointer("/ceilingFlag").and_then(JsonValue::as_str) == Some("--max-output-tokens"),
+        "governor must name the ceiling flag",
+    )?;
+    ensure(
+        governor.pointer("/ceilingEnv").and_then(JsonValue::as_str) == Some("EE_MAX_OUTPUT_TOKENS"),
+        "governor must name the env mirror",
+    )?;
+    ensure(
+        governor
+            .pointer("/cursorSchema")
+            .and_then(JsonValue::as_str)
+            == Some("ee.cursor.v1"),
+        "governor must name the cursor schema",
+    )?;
+    let points = governor
+        .pointer("/truncationPoints")
+        .and_then(JsonValue::as_array)
+        .ok_or("governor must publish the truncation-point table")?;
+    ensure(
+        points.len() >= 9,
+        format!("expected >= 9 truncation points, got {}", points.len()),
+    )?;
+    let pack_point = points
+        .iter()
+        .find(|point| point.get("command").and_then(JsonValue::as_str) == Some("pack"))
+        .ok_or("pack must declare its truncation point")?;
+    ensure(
+        pack_point.get("arrayPath").and_then(JsonValue::as_str) == Some("data.pack.skipped"),
+        "pack's advertised truncation point must be data.pack.skipped (items[] hard rule)",
+    )?;
+    let search_point = points
+        .iter()
+        .find(|point| point.get("command").and_then(JsonValue::as_str) == Some("search"))
+        .ok_or("search must declare its truncation point")?;
+    ensure(
+        search_point
+            .get("positionKeyField")
+            .and_then(JsonValue::as_str)
+            == Some("docId"),
+        "search's advertised position key must be docId",
+    )
+}
+
+// ============================================================================
 // curate candidates
 // ============================================================================
 

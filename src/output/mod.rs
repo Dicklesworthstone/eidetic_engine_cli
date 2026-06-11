@@ -1715,10 +1715,14 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
             FieldProfile::Full => &["*"],
         },
         "doctor" => match preset {
-            FieldProfile::Minimal | FieldProfile::Summary => {
-                &["command", "version", "posture", "healthy"]
+            FieldProfile::Minimal => &["command", "version", "posture", "healthy"],
+            // The QoS active-lane summary is a compact block built for lean
+            // agent views; the read_pool/qos contract pins it into summary and
+            // standard (tests/contracts/read_pool_status_schema.rs).
+            FieldProfile::Summary => &["command", "version", "posture", "healthy", "qos"],
+            FieldProfile::Standard => {
+                &["command", "version", "posture", "healthy", "checks", "qos"]
             }
-            FieldProfile::Standard => &["command", "version", "posture", "healthy", "checks"],
             FieldProfile::Full => &["*"],
         },
         "health" | "check" => match preset {
@@ -8272,6 +8276,37 @@ fn write_capabilities_output_metadata(
             toon.field_str("defaultFormatEnv", report.toon.default_format_env);
             toon.field_array_of_strs("errorCodes", &report.toon.error_codes);
         });
+        // Output-token governor feature detection (ADR 0063 §4, bd-7lvbg.3):
+        // availability, the budget controls, and the per-schema truncation
+        // points so harnesses can predict which surfaces page and how to
+        // resume them.
+        output.field_object("governor", |governor_meta| {
+            governor_meta.field_bool("available", true);
+            governor_meta.field_str("ceilingFlag", "--max-output-tokens");
+            governor_meta.field_str("ceilingEnv", "EE_MAX_OUTPUT_TOKENS");
+            governor_meta.field_str("resumeFlag", "--cursor");
+            governor_meta.field_str("cursorSchema", governor::CURSOR_SCHEMA_V1);
+            governor_meta.field_array_of_strs(
+                "degradedCodes",
+                &[
+                    governor::OUTPUT_TRUNCATED_BUDGET_CODE,
+                    governor::OUTPUT_BUDGET_UNSATISFIABLE_CODE,
+                    governor::CURSOR_STALE_CODE,
+                    governor::CURSOR_INVALID_CODE,
+                ],
+            );
+            governor_meta.field_array_of_objects(
+                "truncationPoints",
+                OUTPUT_TRUNCATION_REGISTRY,
+                |obj, point| {
+                    obj.field_str("schemaId", point.schema_id);
+                    obj.field_str("command", point.command);
+                    obj.field_str("arrayPath", &format!("data.{}", point.array_path.join(".")));
+                    obj.field_bool("perSectionItems", point.per_section_items);
+                    obj.field_str("positionKeyField", point.position_key_field);
+                },
+            );
+        });
         if include_size_diagnostics {
             let diagnostics = compute_representative_size_diagnostics();
             output.field_array_of_objects("sizeDiagnostics", &diagnostics, |obj, item| {
@@ -9693,18 +9728,21 @@ fn recall_schema_definition() -> String {
 /// extension that asserts inventory coverage is bd-7lvbg.4.
 ///
 /// Path notes vs the ADR 0063 table (reconciled to the shipped payload
-/// shapes): memory list's droppable array is currently `data.memories[]`
-/// (the ADR table's `data.items[]` names the planned rename, tracked by the
-/// bd-7lvbg.3 wiring); pack's skipped omissions live at
-/// `data.pack.skipped[]`. `ee schema list` (`data.schemas[]`) is registered
-/// as the middleware demonstration surface.
+/// shapes): memory list's droppable array is `data.memories[]` — the ADR
+/// table's `data.items[]` rename was REJECTED by the bd-7lvbg.3 wiring
+/// (renaming a shipped agent-facing field for cosmetic uniformity breaks
+/// consumers); pack's skipped omissions live at `data.pack.skipped[]`.
+/// `ee schema list` (`data.schemas[]`) is registered as the middleware
+/// demonstration surface.
 pub const OUTPUT_TRUNCATION_REGISTRY: &[governor::TruncationPoint] = &[
     governor::TruncationPoint {
         schema_id: "ee.search.v1",
         command: "search",
         array_path: &["results"],
         per_section_items: false,
-        position_key_field: "id",
+        // Search result elements key by docId (bd-7lvbg.3; the ADR table's
+        // `id` predates the shipped payload shape).
+        position_key_field: "docId",
     },
     governor::TruncationPoint {
         schema_id: "",
