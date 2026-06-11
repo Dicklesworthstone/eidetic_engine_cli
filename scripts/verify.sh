@@ -74,6 +74,7 @@ set -euo pipefail
 #   6. Unit/Contract/Golden    - cargo test --workspace --lib --bins --tests --examples
 #   6. Basic E2E               - scripts/e2e_test.sh
 #   6.05 Output Budget E2E     - scripts/e2e_output_budget.sh
+#   6.055 Output Governor E2E  - scripts/e2e_output_governor.sh
 #   6.06 Replay Lab Smoke E2E  - scripts/e2e_overhaul/swarm_replay_lab_smoke.sh
 #   6.07 Why-Not E2E          - scripts/e2e_why_not.sh
 #   6.075 Primer/AGENTS.md E2E - scripts/e2e_primer_agentsmd.sh
@@ -1057,6 +1058,15 @@ run_stage "Basic E2E Scripts" "./scripts/e2e_test.sh"
 
 # Gate 6.05: Agent-facing output budget guard for status and swarm brief.
 run_stage "Output Budget E2E (bd-kua65)" "./scripts/e2e_output_budget.sh"
+
+# Gate 6.055: Output-token governor contract — deterministic corpus,
+# ceiling sweep across the wired surfaces, exact-count cursor drains,
+# mid-pagination staleness, and EE_MAX_OUTPUT_TOKENS equivalence
+# (ADR 0063, bd-7lvbg.4). Corpus pinned below the script's 500-row
+# default until the remember --batch per-line index swap (bd-2efx1)
+# is fixed — the drain/staleness assertions are corpus-size
+# independent.
+run_stage "Output Governor E2E (bd-7lvbg.4)" "EE_GOVERNOR_E2E_CORPUS=120 ./scripts/e2e_output_governor.sh"
 
 # Gate 6.06: Replay lab smoke. This is intentionally no-Cargo and exercises
 # the public `ee lab swarm replay --dry-run` path plus ee.test_event.v1 logging

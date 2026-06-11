@@ -356,3 +356,108 @@ fn db_check_integrity_json_reproduces_across_three_invocations() -> TestResult {
     )?;
     Ok(())
 }
+
+/// Extract the continuation cursor from a governed envelope's
+/// `output_truncated_budget` degraded entry.
+fn continuation_cursor_of(stdout: &str) -> Result<String, String> {
+    let value: Value = serde_json::from_str(stdout)
+        .map_err(|error| format!("governed stdout not JSON: {error}"))?;
+    value
+        .get("degraded")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries.iter().find_map(|entry| {
+                if entry.get("code").and_then(Value::as_str) == Some("output_truncated_budget") {
+                    entry
+                        .pointer("/details/continuationCursor")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                } else {
+                    None
+                }
+            })
+        })
+        .ok_or_else(|| "governed page offered no continuation cursor".to_string())
+}
+
+/// J7 governor lane (bd-7lvbg.4): governed output — including the
+/// MAC'd ee.cursor.v1 continuation token and the stamped
+/// meta.tokensEstimated — must be byte-identical across separate
+/// child-process invocations, and so must a cursor-resumed second
+/// page. A per-process MAC key, RNG, or wall-clock leak in the
+/// governor path surfaces here and nowhere else.
+#[test]
+fn governed_pages_reproduce_across_three_invocations() -> TestResult {
+    let workspace = tmp_workspace("governor")?;
+    init_workspace(&workspace)?;
+    for index in 0..6 {
+        remember(
+            &workspace,
+            &format!("Governor determinism corpus row {index:02}: byte-identity gate filler."),
+        )?;
+    }
+    let workspace_arg = workspace.to_str().unwrap();
+
+    let first_page = || {
+        run_ee_stdout(
+            &[
+                "--workspace",
+                workspace_arg,
+                "memory",
+                "list",
+                "--limit",
+                "6",
+                "--max-output-tokens",
+                "700",
+                "--json",
+            ],
+            "governed memory list",
+        )
+    };
+    let run1 = first_page()?;
+    let run2 = first_page()?;
+    let run3 = first_page()?;
+    ensure(
+        run1 == run2 && run2 == run3,
+        format!(
+            "governed first page diverged across processes:\nrun1={run1}\nrun2={run2}\nrun3={run3}"
+        ),
+    )?;
+
+    let cursor = continuation_cursor_of(&run1)?;
+    let resumed_page = || {
+        run_ee_stdout(
+            &[
+                "--workspace",
+                workspace_arg,
+                "memory",
+                "list",
+                "--limit",
+                "6",
+                "--max-output-tokens",
+                "700",
+                "--cursor",
+                &cursor,
+                "--json",
+            ],
+            "resumed memory list",
+        )
+    };
+    let resume1 = resumed_page()?;
+    let resume2 = resumed_page()?;
+    let resume3 = resumed_page()?;
+    ensure(
+        resume1 == resume2 && resume2 == resume3,
+        format!(
+            "cursor-resumed page diverged across processes:\nrun1={resume1}\nrun2={resume2}\nrun3={resume3}"
+        ),
+    )?;
+    ensure(
+        resume1
+            .find("cursor_invalid")
+            .or_else(|| resume1.find("cursor_stale"))
+            .is_none(),
+        format!("resumed page rejected its own cursor: {resume1}"),
+    )?;
+    Ok(())
+}
