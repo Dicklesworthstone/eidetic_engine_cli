@@ -1,12 +1,15 @@
 # EE_* environment variables
 
 This file documents every `EE_*` environment variable honored by `ee`.
-The source of truth in code is `src/config/env_registry.rs`; update both the
-registry and this table when adding a new variable.
+The source of truth for runtime variables is `src/config/env_registry.rs`;
+update both the registry and the runtime table when adding a new runtime
+variable.
 
 `ee capabilities --json` exposes the same registry through
 `data.envOverrides[]`. Sensitive variables may report that they are set, but
 must not expose their current value.
+
+## Runtime variables
 
 | Name | Category | Type | Default | Controls | Notes |
 |---|---|---|---|---|---|
@@ -117,3 +120,15 @@ must not expose their current value.
 | `EE_WORKSPACE` | paths | path | none | Override workspace root discovery. | Used after explicit `--workspace` and before cwd walk-up. |
 | `EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S` | tuning | integer seconds | `5` | Override workspace-close wait time for read snapshot pins in seconds. | Bounds how long workspace-close lifecycle waits for active SnapshotPins before force-poisoning remaining read snapshots. |
 | `EE_WORKSPACE_REGISTRY` | paths | path | none | Override the workspace alias registry database path. | Controls where workspace aliases are stored. |
+
+## Build-time variables
+
+These names are read by compile-time Rust macros such as `option_env!` or
+`env!`. They are not runtime registry entries and do not appear in
+`data.envOverrides[]`.
+
+| Name | Consumer | Controls | Notes |
+|---|---|---|---|
+| `EE_BUILD_TARGET` | `src/core/mod.rs` | Target triple reported in build/version provenance. | Missing or invalid values emit the `target_triple_unavailable` build-provenance degradation. |
+| `EE_RELEASE_CHANNEL` | `src/core/mod.rs` | Release channel label. | Accepted values are `stable`, `beta`, `nightly`, and `dev`; invalid values fall back to `dev` for debug builds and `stable` for release builds. |
+| `EE_TRACE_BEAD_ID` | tracing checkpoints | Compile-time bead id embedded in selected tracing events. | Set this before compilation for debug or verification builds that need a different static trace bead id. |

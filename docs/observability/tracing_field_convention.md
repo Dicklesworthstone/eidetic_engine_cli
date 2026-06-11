@@ -10,7 +10,7 @@ fields below whenever the value is available.
 | --- | --- | --- |
 | `workspace_id` | Stable workspace identifier used by the command. | The command has resolved a workspace. |
 | `request_id` | Per-invocation ULID assigned at CLI entry. | The command is handling a user or agent request. |
-| `bead_id` | Bead that introduced the code path. | Debug builds or verification runs set `EE_TRACE_BEAD_ID`. |
+| `bead_id` | Bead that introduced the code path. | Debug or verification builds may set compile-time `EE_TRACE_BEAD_ID` before compilation. |
 | `surface` | Stable surface name such as `db_inspect` or `trauma_guard`. | Every new Part II surface. |
 | `phase` | Current phase: `input`, `dispatch`, `dependency_check`, `persistence`, or `response`. | Every span or event that reports progress through a surface. |
 | `elapsed_ms` | Wall-clock duration in milliseconds. | Exit events and measured sub-operations. |

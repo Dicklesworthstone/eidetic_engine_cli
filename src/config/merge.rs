@@ -1214,7 +1214,7 @@ pub fn config_from_env(
                     EnvVar::ReadPoolMaxPinSeconds.name(),
                 )?,
                 acquire_timeout_ms: optional_env_u64(env, EnvVar::ReadPoolAcquireTimeoutMs.name())?,
-                pin_snapshot: optional_env_bool(env, EnvVar::ReadPoolDisablePin.name())?
+                pin_snapshot: optional_env_bool_flag(env, EnvVar::ReadPoolDisablePin.name())?
                     .map(|disabled| !disabled),
             },
         },
@@ -1234,7 +1234,7 @@ pub fn config_from_env(
         handoff: HandoffConfig::default(),
         cache: CacheConfig {
             pack_l2: PackL2CacheConfig {
-                enabled: optional_env_bool(env, EnvVar::L2PackCacheDisable.name())?
+                enabled: optional_env_bool_flag(env, EnvVar::L2PackCacheDisable.name())?
                     .map(|disabled| !disabled),
                 directory: optional_env_path(env, EnvVar::L2PackCacheDir.name(), expander)?,
                 max_bytes: optional_env_u64(env, EnvVar::L2PackCacheBytes.name())?,
@@ -1242,7 +1242,7 @@ pub fn config_from_env(
             },
         },
         mesh: MeshConfig {
-            enabled: optional_env_bool(env, EnvVar::MeshEnabled.name())?,
+            enabled: optional_env_bool_flag(env, EnvVar::MeshEnabled.name())?,
             command_mode: optional_env_mesh_command_mode(env, EnvVar::MeshMode.name())?,
             peer_group_bindings: None,
             peer_policies: None,
@@ -3058,6 +3058,33 @@ mod tests {
                 value: "maybe".to_string(),
             },
             "invalid bool error",
+        )
+    }
+
+    #[test]
+    fn environment_layer_boolean_flags_accept_numeric_forms() -> TestResult {
+        let mut env = BTreeMap::new();
+        env.insert("EE_READ_POOL_DISABLE_PIN".to_string(), OsString::from("0"));
+        env.insert("EE_L2_PACK_CACHE_DISABLE".to_string(), OsString::from("1"));
+        env.insert("EE_MESH_ENABLED".to_string(), OsString::from("1"));
+
+        let parsed =
+            config_from_env(&env, &expander()).map_err(|error| format!("env failed: {error}"))?;
+
+        ensure_equal(
+            &parsed.storage.read_pool.pin_snapshot,
+            &Some(true),
+            "numeric false must preserve read-pool pinning",
+        )?;
+        ensure_equal(
+            &parsed.cache.pack_l2.enabled,
+            &Some(false),
+            "numeric true must disable L2 pack cache",
+        )?;
+        ensure_equal(
+            &parsed.mesh.enabled,
+            &Some(true),
+            "numeric true must enable mesh",
         )
     }
 

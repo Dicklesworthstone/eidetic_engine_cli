@@ -1325,7 +1325,7 @@ Environment variable overrides:
 | `EE_TAILSCALE_DISCOVERY_MODE` / `EE_TAILSCALE_RESPOND_MODE` | Tailscale discovery and responder policy |
 | `EE_TAILSCALE_PEER_PROBE_TIMEOUT_MS` / `EE_TAILSCALE_DISCOVERY_BUDGET_MS` | Tailscale peer-discovery budgets |
 | `EE_FLIGHT_RECORDER` / `EE_FLIGHT_RECORDER_DIR` / `EE_FLIGHT_RECORDER_RETENTION_DAYS` | flight-recorder controls; see [`docs/agent-ux/flight-recorder.md`](docs/agent-ux/flight-recorder.md) |
-| `EE_WORKSPACE_HYGIENE_SECRET_PATTERNS` / `EE_WORKSPACE_HYGIENE_GENERATED_PATTERNS` / `EE_WORKSPACE_HYGIENE_SCRATCH_PATTERNS` / `EE_WORKSPACE_HYGIENE_IGNORE_PATTERNS` | workspace hygiene classifier overlays |
+| `EE_WORKSPACE_HYGIENE_ALWAYS_REVIEW_PATTERNS` / `EE_WORKSPACE_HYGIENE_GENERATED_PATTERNS` / `EE_WORKSPACE_HYGIENE_LOCAL_MACHINE_PATTERNS` / `EE_WORKSPACE_HYGIENE_SCRATCH_PATTERNS` | workspace hygiene classifier overlays |
 | `EE_SCIENCE_BACKEND_PATH` | optional science analytics backend health path |
 | `EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS` | disables Frankensearch neighbors for remember-time curation proposal |
 | `EE_DISABLE_TOON` | disables TOON capability reporting and auto-selection |
