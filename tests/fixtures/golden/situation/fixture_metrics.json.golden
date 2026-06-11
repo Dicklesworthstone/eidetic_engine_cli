@@ -1,6 +1,6 @@
 {
   "schema": "ee.situation.fixture_metrics.v1",
-  "version": "0.6.0",
+  "version": "0.8.1",
   "caseCount": 9,
   "classificationPrecision": 1.0,
   "routingUsefulness": 1.0,
