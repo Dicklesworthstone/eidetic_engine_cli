@@ -583,14 +583,17 @@ impl WorkspaceHygieneSwarmBriefSummary {
 
     #[must_use]
     pub fn from_report(report: &WorkspaceHygieneReport) -> Self {
-        let needs_total = report.needs_human_review.len();
+        let visible_needs_human_review_count = report.needs_human_review.len();
+        let needs_total = visible_needs_human_review_count
+            .saturating_add(report.output_truncation.omitted_needs_human_review);
         let needs_top: Vec<String> = report
             .needs_human_review
             .iter()
             .take(WORKSPACE_HYGIENE_SWARM_BRIEF_TOP_PATHS_LIMIT)
             .cloned()
             .collect();
-        let needs_truncated = needs_total > needs_top.len();
+        let needs_truncated = visible_needs_human_review_count > needs_top.len()
+            || report.output_truncation.omitted_needs_human_review > 0;
 
         let coordination_blocker_count = report.coordination.blocked_by_coordination.len();
         let mut pattern_set: BTreeSet<String> = BTreeSet::new();
@@ -3913,6 +3916,17 @@ mod tests {
         assert!(report.output_truncation.truncated);
         assert_eq!(report.output_truncation.omitted_do_not_commit, 50);
         assert_eq!(report.output_truncation.omitted_needs_human_review, 25);
+        let swarm_summary = WorkspaceHygieneSwarmBriefSummary::from_report(&report);
+        assert_eq!(swarm_summary.needs_human_review_top.len(), 10);
+        assert_eq!(swarm_summary.needs_human_review_total, 10_025);
+        assert!(swarm_summary.needs_human_review_truncated);
+        assert_eq!(
+            swarm_summary
+                .needs_human_review_top
+                .last()
+                .map(String::as_str),
+            Some("configs/00009/secrets.toml")
+        );
         assert!(
             report
                 .degraded_codes
