@@ -20,6 +20,9 @@ pub const SITUATION_SHOW_SCHEMA_V1: &str = "ee.situation.show.v1";
 /// Schema for situation explanation command output.
 pub const SITUATION_EXPLAIN_SCHEMA_V1: &str = "ee.situation.explain.v1";
 
+/// Schema for the audited situation adoption command output.
+pub const SITUATION_ADOPT_SCHEMA_V1: &str = "ee.situation.adopt.v1";
+
 /// Schema for a normalized situation record.
 pub const SITUATION_SCHEMA_V1: &str = "ee.situation.v1";
 
