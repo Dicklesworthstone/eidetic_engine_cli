@@ -190,3 +190,151 @@ fn category_all_includes_new_variants() {
         assert!(SituationCategory::ALL.contains(&v), "ALL is missing {v:?}",);
     }
 }
+
+// ============================================================================
+// Persisted adoption surface (bd-1tp6p.2.3)
+// ============================================================================
+
+mod adoption_cli {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn unique_adoption_workspace(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        // Canonicalize so the macOS /tmp symlink never trips the
+        // database path symlink guard.
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir());
+        base.join(format!(
+            "ee-situation-adopt-{label}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    fn run_ee(workspace: &PathBuf, args: &[&str]) -> serde_json::Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .arg("--json")
+            .arg("--workspace")
+            .arg(workspace)
+            .args(args)
+            .output()
+            .expect("ee binary runs");
+        assert!(
+            output.status.success(),
+            "ee {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("ee emits JSON")
+    }
+
+    #[test]
+    fn adopt_emits_v2_envelope_with_adopted_then_already_exists_postures() {
+        let workspace = unique_adoption_workspace("postures");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        run_ee(&workspace, &["init"]);
+
+        let adopt_args = [
+            "situation",
+            "adopt",
+            "fix the failing release workflow gate",
+            "--adopted-by",
+            "test-agent",
+            "--reason",
+            "integration test",
+            "--evidence-id",
+            "cass-session://abc#L1",
+            "--as-of",
+            "2026-06-11T00:00:00Z",
+        ];
+        let first = run_ee(&workspace, &adopt_args);
+        assert_eq!(first["schema"], "ee.response.v2");
+        assert_eq!(first["success"], true);
+        assert_eq!(first["degraded"], serde_json::json!([]));
+        assert_eq!(first["data"]["command"], "situation adopt");
+        assert_eq!(first["data"]["version"], "ee.situation.adopt.v1");
+        assert_eq!(first["data"]["posture"], "adopted");
+        assert_eq!(
+            first["data"]["recordSchemaVersion"],
+            "ee.situation.record.v1"
+        );
+        assert_eq!(first["data"]["evidenceIds"][0], "cass-session://abc#L1");
+        assert_eq!(first["data"]["adoptedAt"], "2026-06-11T00:00:00Z");
+        let situation_id = first["data"]["situationId"]
+            .as_str()
+            .expect("situation id is a string")
+            .to_owned();
+        assert!(situation_id.starts_with("sit_"));
+
+        let second = run_ee(&workspace, &adopt_args);
+        assert_eq!(second["data"]["posture"], "already_exists");
+        assert_eq!(second["data"]["situationId"], situation_id.as_str());
+    }
+
+    #[test]
+    fn classify_compare_and_link_do_not_persist_situations() {
+        let workspace = unique_adoption_workspace("non-mutation");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        run_ee(&workspace, &["init"]);
+
+        let text = "investigate the flaky importer retry path";
+        run_ee(&workspace, &["situation", "classify", text]);
+        run_ee(
+            &workspace,
+            &[
+                "situation",
+                "compare",
+                text,
+                "fix the importer",
+                "--dry-run",
+            ],
+        );
+        run_ee(
+            &workspace,
+            &["situation", "link", text, "fix the importer", "--dry-run"],
+        );
+
+        // The read-only family must leave no fingerprint behind: the
+        // adoption lookup for the same text stays empty.
+        let connection = ee::db::DbConnection::open_file(&workspace.join(".ee").join("ee.db"))
+            .expect("database opens");
+        let input_hash = {
+            // Same convention the classifier reports as inputHash.
+            let classify = run_ee(&workspace, &["situation", "classify", text]);
+            classify["data"]["inputHash"]
+                .as_str()
+                .expect("classify reports inputHash")
+                .to_owned()
+        };
+        let found = connection
+            .find_situation_record_by_fingerprint(
+                "any-workspace-scope-is-fine-none-should-exist",
+                &input_hash,
+                "ee.situation.heuristics.v1",
+                "ee.situation.record.v1",
+            )
+            .expect("fingerprint lookup works");
+        assert!(found.is_none(), "read-only commands must not persist");
+
+        // And adoption through the CLI does persist, proving the lookup
+        // path itself is wired.
+        let adopted = run_ee(&workspace, &["situation", "adopt", text]);
+        assert_eq!(adopted["data"]["posture"], "adopted");
+        let scope = adopted["data"]["workspaceScope"]
+            .as_str()
+            .expect("workspace scope");
+        let found = connection
+            .find_situation_record_by_fingerprint(
+                scope,
+                &input_hash,
+                "ee.situation.heuristics.v1",
+                "ee.situation.record.v1",
+            )
+            .expect("fingerprint lookup works");
+        assert!(found.is_some(), "adopt must persist the fingerprint");
+    }
+}
