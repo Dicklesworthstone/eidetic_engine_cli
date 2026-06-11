@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "anchor_index_empty",
+  "introduced_by": {
+    "bead": "bd-u875s.3",
+    "epic_letter": "RECALL"
+  },
+  "surfaces": [
+    "recall"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "The memory_anchor_index reverse index has no rows for the workspace (nothing anchored yet) when ee recall runs. Never a hard error (ADR 0064 §5): the response succeeds with empty items and this info entry, so a pre-edit hook can distinguish 'no anchored knowledge' from a failure.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee recall --path 'src/**' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "anchor_index_empty",
+    "severity": "info",
+    "message_contains": [
+      "anchor reverse index has no rows",
+      "nothing is anchored yet"
+    ]
+  }
+}

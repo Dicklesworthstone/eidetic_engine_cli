@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "recall_filtered_empty",
+  "introduced_by": {
+    "bead": "bd-u875s.3",
+    "epic_letter": "RECALL"
+  },
+  "surfaces": [
+    "recall"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "Anchored rows matched the requested recall surface (paths/symbols/diff) but the conjunctive --kind/--level/--stale filters removed them all. Distinct from anchor_index_empty so hook authors can tell 'nothing anchored' apart from 'anchored but filtered out' (ADR 0064 §5); an empty post-filter result is a normal empty recall.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember \"Anchored rule about src/db/mod.rs\" --workspace . --level procedural --kind rule --json"
+    ],
+    "invocation": "ee recall --path 'src/**' --kind failure --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "recall_filtered_empty",
+    "severity": "info",
+    "message_contains": [
+      "matched the surface",
+      "filters removed them all"
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "anchor_index_stale",
+  "introduced_by": {
+    "bead": "bd-u875s.3",
+    "epic_letter": "RECALL"
+  },
+  "surfaces": [
+    "recall"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "The memory_anchor_index reverse-index generation is behind the workspace DB generation when ee recall runs (memories changed since the derived index was last maintained), so results may miss recent memories. Repair: ee index rebuild --workspace . (ADR 0064 §5).",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember \"Anchored rule about src/db/mod.rs\" --workspace . --level procedural --kind rule --json",
+      "# advance the DB generation without refreshing the derived anchor index"
+    ],
+    "invocation": "ee recall --path 'src/**' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "anchor_index_stale",
+    "severity": "low",
+    "message_contains": [
+      "behind database generation",
+      "results may miss recent memories"
+    ]
+  }
+}
