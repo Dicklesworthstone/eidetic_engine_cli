@@ -5,6 +5,7 @@
 //! readers can make cooperative throttling decisions without raw queries,
 //! memory bodies, peer paths, or secrets.
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -343,9 +344,20 @@ impl QosActiveLaneRegistry {
     }
 
     pub fn normalize(&mut self) {
+        let mut records_by_id: BTreeMap<String, QosLaneRecord> = BTreeMap::new();
+        for record in self.records.drain(..) {
+            match records_by_id.get_mut(&record.record_id) {
+                Some(existing) if should_replace_qos_record(existing, &record) => {
+                    *existing = record;
+                }
+                Some(_) => {}
+                None => {
+                    records_by_id.insert(record.record_id.clone(), record);
+                }
+            }
+        }
+        self.records = records_by_id.into_values().collect();
         self.records.sort_by(compare_records);
-        self.records
-            .dedup_by(|left, right| left.record_id == right.record_id);
     }
 
     pub fn upsert(&mut self, record: QosLaneRecord) {
@@ -799,6 +811,23 @@ fn compare_records(left: &QosLaneRecord, right: &QosLaneRecord) -> std::cmp::Ord
         .then_with(|| left.record_id.cmp(&right.record_id))
 }
 
+fn should_replace_qos_record(existing: &QosLaneRecord, candidate: &QosLaneRecord) -> bool {
+    qos_record_replacement_key(candidate) > qos_record_replacement_key(existing)
+}
+
+fn qos_record_replacement_key(
+    record: &QosLaneRecord,
+) -> (u64, u64, u64, QosLaneStatus, Option<&str>, Option<&str>) {
+    (
+        record.started_at_epoch_ms,
+        record.deadline_epoch_ms,
+        record.ttl_ms,
+        record.status,
+        record.profile_label.as_deref(),
+        record.budget_label.as_deref(),
+    )
+}
+
 fn record_id(
     workspace_hash: &str,
     lane: QosLane,
@@ -977,6 +1006,63 @@ mod tests {
         assert_eq!(summary.stale_ignored_count, 1);
         assert_eq!(summary.active_records[0].lane, QosLane::ForegroundRead);
         assert_eq!(summary.active_records[1].lane, QosLane::VerificationRch);
+        Ok(())
+    }
+
+    #[test]
+    fn registry_normalize_deduplicates_non_adjacent_ids_and_keeps_newest() -> TestResult {
+        let older = QosLaneRecord::from_input(&record_input(
+            QosLane::ForegroundRead,
+            "context",
+            "same foreground query",
+            100,
+        ));
+        let middle = QosLaneRecord::from_input(&record_input(
+            QosLane::ForegroundRead,
+            "context",
+            "different foreground query",
+            200,
+        ));
+        let newer = QosLaneRecord::from_input(&record_input(
+            QosLane::ForegroundRead,
+            "context",
+            "same foreground query",
+            300,
+        ));
+
+        assert_eq!(older.record_id, newer.record_id);
+        assert_ne!(older.record_id, middle.record_id);
+
+        let registry =
+            QosActiveLaneRegistry::new(vec![older.clone(), middle.clone(), newer.clone()]);
+
+        assert_eq!(registry.records.len(), 2);
+        let retained = registry
+            .records
+            .iter()
+            .find(|record| record.record_id == newer.record_id)
+            .expect("newer duplicate record retained");
+        assert_eq!(retained.started_at_epoch_ms, newer.started_at_epoch_ms);
+        assert!(registry.records.iter().any(|record| record == &middle));
+        Ok(())
+    }
+
+    #[test]
+    fn registry_normalize_prefers_progressed_status_for_same_record_time() -> TestResult {
+        let mut starting = QosLaneRecord::from_input(&record_input(
+            QosLane::VerificationRch,
+            "cargo-test",
+            "same verification request",
+            500,
+        ));
+        starting.status = QosLaneStatus::Starting;
+        let mut completing = starting.clone();
+        completing.status = QosLaneStatus::Completing;
+
+        let registry = QosActiveLaneRegistry::new(vec![starting, completing.clone()]);
+
+        assert_eq!(registry.records.len(), 1);
+        assert_eq!(registry.records[0], completing);
         Ok(())
     }
 

@@ -1256,7 +1256,7 @@ impl WriteOwner {
 
         WriteOwnerStatus {
             schema: WRITE_OWNER_STATUS_SCHEMA_V1,
-            running: true,
+            running: false,
             queue_depth: self.rx.len(),
             total_processed: self.stats.total_processed,
             avg_wait_ms,
@@ -3577,6 +3577,7 @@ mod tests {
     #[test]
     fn write_owner_status_reports_enqueued_requests() -> Result<(), String> {
         let (owner, handle) = WriteOwner::new(4);
+        assert!(!owner.status().running);
         assert_eq!(owner.status().queue_depth, 0);
 
         let _first_response = handle
@@ -3585,6 +3586,7 @@ mod tests {
                 payload: serde_json::json!({}),
             })
             .ok_or_else(|| "first write request should enqueue".to_string())?;
+        assert!(!owner.status().running);
         assert_eq!(owner.status().queue_depth, 1);
 
         let _second_response = handle
@@ -3593,6 +3595,7 @@ mod tests {
                 payload: serde_json::json!({}),
             })
             .ok_or_else(|| "second write request should enqueue".to_string())?;
+        assert!(!owner.status().running);
         assert_eq!(owner.status().queue_depth, 2);
 
         Ok(())

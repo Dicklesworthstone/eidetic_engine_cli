@@ -75,7 +75,7 @@ pub struct DerivedAssetFreshnessInput {
     /// this catches config / feature-flag / input-manifest drift that
     /// happens without source-table mutation. `None` skips the check
     /// (callers that don't track a baseline hash treat all unmatched
-    /// states as Fresh provided the watermarks agree).
+    /// states as Fresh provided the watermarks agree exactly).
     pub previous_dependency_hash: Option<String>,
     pub repair_action: &'static str,
 }
@@ -198,6 +198,9 @@ fn freshness_verdict(
         (Some(source), Some(asset)) if source > asset => {
             return DerivedAssetFreshnessVerdict::RebuildNeeded;
         }
+        (Some(source), Some(asset)) if asset > source => {
+            return DerivedAssetFreshnessVerdict::Incompatible;
+        }
         (Some(_), None) => return DerivedAssetFreshnessVerdict::RebuildNeeded,
         _ => {}
     }
@@ -284,6 +287,19 @@ mod tests {
 
         assert_eq!(report.verdict, DerivedAssetFreshnessVerdict::RebuildNeeded);
         assert_eq!(report.invalidates, vec!["search_index"]);
+    }
+
+    #[test]
+    fn asset_ahead_of_source_is_incompatible_not_fresh() {
+        let mut input = planner_input();
+        input.source_high_watermark = Some(7);
+        input.asset_high_watermark = Some(9);
+
+        let report = plan_derived_asset_freshness(input);
+
+        assert_eq!(report.verdict, DerivedAssetFreshnessVerdict::Incompatible);
+        assert_eq!(report.invalidates, vec!["search_index"]);
+        assert_eq!(report.repair_action, "ee index rebuild --workspace .");
     }
 
     #[test]

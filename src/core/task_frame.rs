@@ -1073,8 +1073,7 @@ fn suggested_commands(frame_id: Option<&str>) -> Vec<String> {
     match frame_id {
         Some(id) => vec![
             format!("ee task-frame show {id} --json"),
-            format!("ee focus show --json --task-frame-id {id}"),
-            format!("ee handoff resume --task-frame-id {id} --json"),
+            format!("ee focus suggest --task-frame {id} --json"),
         ],
         None => vec![
             "ee task-frame show --active --json".to_owned(),
@@ -1690,5 +1689,28 @@ mod tests {
         assert!(!serialized.contains("abcdef"));
         assert!(!serialized.contains("done"));
         Ok(())
+    }
+
+    #[test]
+    fn suggested_commands_use_existing_cli_shapes() {
+        let commands = suggested_commands(Some("tf_example"));
+
+        assert_eq!(
+            commands,
+            vec![
+                "ee task-frame show tf_example --json",
+                "ee focus suggest --task-frame tf_example --json",
+            ]
+        );
+        assert!(
+            commands
+                .iter()
+                .all(|command| !command.contains("--task-frame-id"))
+        );
+        assert!(
+            commands
+                .iter()
+                .all(|command| !command.starts_with("ee handoff resume "))
+        );
     }
 }
