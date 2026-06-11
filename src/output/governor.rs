@@ -473,6 +473,10 @@ pub fn govern_response_json(
         return Ok(out);
     }
 
+    // The DB generation is read exactly once per truncated response (the
+    // fitting path never pays it; ADR 0063 §1 cost posture).
+    let db_generation = (ctx.db_generation)();
+
     // Binary search the smallest drop count whose candidate fits. fits() is
     // monotone in the drop count up to tokenizer boundary noise; the linear
     // guard below absorbs that noise deterministically.
@@ -483,7 +487,7 @@ pub fn govern_response_json(
     while low <= high {
         let mid = low + (high - low) / 2;
         let (_, candidate_serialized, candidate_estimate) =
-            candidate_with_drops(&original, point, mid, ctx, &mut estimator)?;
+            candidate_with_drops(&original, point, mid, ctx, db_generation, &mut estimator)?;
         if fits(
             candidate_estimate,
             candidate_serialized.len(),
@@ -516,7 +520,7 @@ pub fn govern_response_json(
     // reachable or we fail closed above).
     loop {
         let (_, candidate_serialized, candidate_estimate) =
-            candidate_with_drops(&original, point, drops, ctx, &mut estimator)?;
+            candidate_with_drops(&original, point, drops, ctx, db_generation, &mut estimator)?;
         if fits(
             candidate_estimate,
             candidate_serialized.len(),
@@ -646,6 +650,7 @@ fn candidate_with_drops(
     point: &TruncationPoint,
     drops: u64,
     ctx: &GovernorContext<'_>,
+    db_generation: u64,
     estimator: &mut TokenEstimator,
 ) -> Result<(JsonValue, String, u64), DomainError> {
     let mut candidate = original.clone();
@@ -654,7 +659,7 @@ fn candidate_with_drops(
     let payload = CursorPayload {
         schema: CURSOR_SCHEMA_V1.to_string(),
         target_schema: cursor_target_schema(original, point),
-        db_generation: (ctx.db_generation)(),
+        db_generation,
         position_key,
         params_hash: ctx.params_hash.clone(),
     };
