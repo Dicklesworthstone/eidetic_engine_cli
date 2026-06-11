@@ -273,14 +273,24 @@ fn redaction_level_minimal_redacts_secrets() -> TestResult {
 #[test]
 fn redaction_level_standard_redacts_paths_and_truncates_ids() -> TestResult {
     use ee::models::RedactionLevel;
-    use ee::output::jsonl_export::{REDACTED_PATH_PLACEHOLDER, redact_identifier, redact_path};
+    use ee::output::jsonl_export::{
+        REDACTED_PATH_PLACEHOLDER, REDACTED_PLACEHOLDER, redact_identifier, redact_path,
+    };
 
-    let home_path = "/home/user/secrets/credentials.json";
+    let home_path = "/home/user/notes/journal.txt";
+    let secret_home_path = "/home/user/secrets/credentials.json";
     let data_path = "/data/projects/private/config.yaml";
 
     ensure(
         redact_path(home_path, RedactionLevel::Standard) == REDACTED_PATH_PLACEHOLDER,
         "standard should redact home paths",
+    )?;
+    // f23290e1: a path that itself looks secret-like ("secrets",
+    // "credentials") takes the stronger content placeholder before the
+    // path-prefix branch is consulted.
+    ensure(
+        redact_path(secret_home_path, RedactionLevel::Standard) == REDACTED_PLACEHOLDER,
+        "standard should fully redact secret-looking paths",
     )?;
     ensure(
         redact_path(data_path, RedactionLevel::Standard) == REDACTED_PATH_PLACEHOLDER,
@@ -357,7 +367,11 @@ fn strict_memory_redaction_truncates_content_and_adds_hash() -> TestResult {
     use ee::output::jsonl_export::redact_memory_record;
 
     let content = "strict-redaction-fixture ".repeat(16);
-    let expected_hash = format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex());
+    // e02f110e: the export builder canonicalizes required string fields
+    // (trim), so the stored body — and therefore the attached digest —
+    // covers the trimmed content, not the raw builder input.
+    let canonical_body = content.trim();
+    let expected_hash = format!("blake3:{}", blake3::hash(canonical_body.as_bytes()).to_hex());
     let memory = ExportMemoryRecord::builder()
         .memory_id("mem-strict-001234567890")
         .workspace_id("ws-test")
@@ -552,8 +566,10 @@ fn export_record_redaction_covers_all_record_types() -> TestResult {
             a.snippet == Some(REDACTED_PLACEHOLDER.to_owned()),
             "artifact snippet should be redacted",
         )?;
+        // f23290e1: "secrets.env" makes this path secret-looking, so it
+        // takes the stronger content placeholder, not the path one.
         ensure(
-            a.canonical_path == Some(REDACTED_PATH_PLACEHOLDER.to_owned()),
+            a.canonical_path == Some(REDACTED_PLACEHOLDER.to_owned()),
             "artifact canonical_path should be redacted",
         )?;
     } else {
