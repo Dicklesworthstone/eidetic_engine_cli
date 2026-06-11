@@ -2,9 +2,7 @@
 
 //! Fuzz target for `ProvenanceUri::from_str` (eidetic_engine_cli-3seem).
 //!
-//! Stresses the URI parser against the four scheme variants
-//! (`cass-session://`, `file://`, `ee-mem://`, `agent-mail://`) plus the
-//! `http(s)://` web variant. Asserts:
+//! Stresses the URI parser against the accepted provenance schemes. Asserts:
 //!
 //! 1. The parser never panics on any byte sequence ≤ 8 KiB.
 //! 2. For every input the parser accepts, `Display(parsed) -> reparsed ==
@@ -52,8 +50,8 @@ fuzz_target!(|data: &[u8]| {
         // trailing whitespace from carelessly-formatted source records.
         let trimmed = input.trim();
         if trimmed != input {
-            let trimmed_parse = ProvenanceUri::from_str(trimmed)
-                .expect("trimming a valid URI should still parse");
+            let trimmed_parse =
+                ProvenanceUri::from_str(trimmed).expect("trimming a valid URI should still parse");
             assert_eq!(
                 uri, trimmed_parse,
                 "trim invariant: input {input:?} != trimmed {trimmed:?}"
@@ -64,7 +62,20 @@ fuzz_target!(|data: &[u8]| {
         // documented values.
         let scheme = uri.scheme();
         assert!(
-            matches!(scheme, "cass-session" | "file" | "ee-mem" | "http" | "https" | "agent-mail"),
+            matches!(
+                scheme,
+                "cass-session"
+                    | "file"
+                    | "ee-mem"
+                    | "http"
+                    | "https"
+                    | "agent-mail"
+                    | "manual"
+                    | "bench-run"
+                    | "git-sha"
+                    | "flamegraph"
+                    | "ee-reflect"
+            ),
             "unexpected scheme `{scheme}` for URI `{rendered}`"
         );
     }
