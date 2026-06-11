@@ -1,6 +1,11 @@
 {
   "schema": "ee.failure_mode_fixture.v1",
   "code": "situation_decisioning_unavailable",
+  "retired": true,
+  "retired_by": {
+    "bead": "bd-1tp6p.2",
+    "reason": "Persisted situation storage landed in V079 and `ee situation show` / `ee situation explain` now read stored situation_records rows. Missing records surface as `not_found` or storage initialization errors instead of the old honesty-only unavailable code."
+  },
   "introduced_by": {
     "bead": "bd-14tio",
     "epic_letter": "J"
@@ -12,9 +17,10 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "Situation show/explain return an explicit unavailable error because persisted situation storage is not implemented.",
+    "description": "Retired legacy code. Situation show/explain used to return an explicit unavailable error while persisted situation storage was not implemented.",
     "setup_commands": [
-      "ee init --workspace ."
+      "ee init --workspace .",
+      "ee situation adopt 'fix the failing release workflow' --workspace . --json"
     ],
     "invocation": "ee situation explain sit.release_bug --workspace . --json"
   },
@@ -22,8 +28,8 @@
     "code": "situation_decisioning_unavailable",
     "severity": "medium",
     "message_contains": [
-      "persisted situation storage",
-      "not implemented"
+      "situation_decisioning_unavailable is retired",
+      "show/explain read persisted situation_records"
     ],
     "repair_contains": "ee situation classify"
   }

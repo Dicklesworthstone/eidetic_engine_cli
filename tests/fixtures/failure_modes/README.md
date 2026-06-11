@@ -241,7 +241,7 @@ in the same commit, keeping the catalog complete by construction.
 | `learn_decay_config_invalid` | maintenance run | medium | bd-17c65.10.6 (J6) |
 | `learn_decay_config_read_failed` | maintenance run | medium | bd-17c65.10.6 (J6) |
 | `graph_feature_disabled` | graph, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
-| `insights_section_unavailable` | insights | info | bd-113r0 |
+| `insights_section_unavailable` | insights | info | bd-113r0 (retired by bd-2pos6.4) |
 | `graph_algorithm_unavailable` | graph centrality | medium | bd-3usjw.2 |
 | `graph_snapshot_missing` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
 | `graph_snapshot_stale` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
@@ -316,7 +316,7 @@ in the same commit, keeping the catalog complete by construction.
 | `write_queue_full` | write spool | low | bd-17c65.12.2 (L1) |
 | `write_hot_path_cancelled_before_commit` | write hot path fake runner | medium | bd-2lsxf.2.4 (SRR3) |
 | `write_hot_path_fsync_failure` | write hot path fake runner | high | bd-2lsxf.2.4 (SRR3) |
-| `situation_decisioning_unavailable` | situation show, situation explain | medium | bd-14tio |
+| `situation_decisioning_unavailable` | situation show, situation explain | medium | bd-14tio (retired tombstone) |
 | `clustering_insufficient_data` | learn cluster, curate candidates | warning | bd-17c65.10.6 (J6) |
 | `clustering_threshold_too_strict` | learn cluster, curate candidates | warning | bd-17c65.10.6 (J6) |
 | `science_not_compiled` | science status, analyze drift, analyze clustering | high | bd-17c65.10.6 (J6) |

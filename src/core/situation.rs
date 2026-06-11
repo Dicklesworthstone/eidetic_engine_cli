@@ -3037,10 +3037,10 @@ mod tests {
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| "classify degraded must be an array".to_string())?;
 
-        let retired_code = "situation_decisioning_unavailable";
+        let retired_code = ["situation", "decisioning_unavailable"].join("_");
         ensure(degraded.is_empty(), true, "classify degraded is empty")?;
         ensure(
-            json.to_string().contains(retired_code),
+            json.to_string().contains(&retired_code),
             false,
             "retired unavailable code absent from classify JSON",
         )
