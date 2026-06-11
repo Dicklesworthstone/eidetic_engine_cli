@@ -57,6 +57,7 @@ CLAIM_GATE_REQUIRED_FIELDS = [
     ("recommendedAction", "missing_claim_gate_recommended_action"),
     ("recommendedSafeToClaim", "missing_claim_gate_recommended_safe_to_claim"),
     ("sourceAuthority", "missing_claim_gate_source_authority"),
+    ("actionableQueue", "missing_claim_gate_actionable_queue"),
     ("unsafeReasons", "missing_claim_gate_unsafe_reasons"),
     ("staleReasons", "missing_claim_gate_stale_reasons"),
     ("sourceRefs", "missing_claim_gate_source_refs"),
@@ -96,6 +97,24 @@ CLAIM_GATE_SOURCE_AUTHORITY_REQUIRED_FIELDS = [
     ),
     ("installFreshnessRepair", "missing_claim_gate_install_freshness_repair"),
     ("sourceCount", "missing_claim_gate_source_count"),
+]
+CLAIM_GATE_ACTIONABLE_QUEUE_REQUIRED_FIELDS = [
+    ("commandId", "command_id"),
+    ("displayCommand", "display_command"),
+    ("mutatesState", "mutates_state"),
+    ("collectionMode", "collection_mode"),
+    ("queueState", "queue_state"),
+    ("exitClass", "exit_class"),
+    ("authoritative", "authoritative"),
+    ("rowCount", "row_count"),
+    ("candidateIds", "candidate_ids"),
+    ("truncatedCandidateCount", "truncated_candidate_count"),
+    ("filterContract", "filter_contract"),
+    ("exclusionAccounting", "exclusion_accounting"),
+    ("candidateState", "candidate_state"),
+    ("bvAdvisoryContradiction", "bv_advisory_contradiction"),
+    ("trackerAuthorityDegraded", "tracker_authority_degraded"),
+    ("contradictionEvidence", "contradiction_evidence"),
 ]
 CLAIM_GATE_COMMAND_ACTION_REQUIRED_FIELDS = [
     ("commandId", "command_id"),
@@ -403,6 +422,75 @@ def malformed_claim_gate_authority_reasons(gate):
     return reasons
 
 
+def malformed_actionable_queue_reasons(gate):
+    queue = gate.get("actionableQueue")
+    if not isinstance(queue, dict):
+        return []
+
+    reasons = []
+    for field, suffix in CLAIM_GATE_ACTIONABLE_QUEUE_REQUIRED_FIELDS:
+        if field not in queue:
+            reasons.append(f"missing_claim_gate_actionable_queue_{suffix}")
+
+    for field, suffix in [
+        ("commandId", "command_id"),
+        ("displayCommand", "display_command"),
+        ("collectionMode", "collection_mode"),
+        ("queueState", "queue_state"),
+        ("exitClass", "exit_class"),
+        ("candidateState", "candidate_state"),
+    ]:
+        value = queue.get(field)
+        if field in queue and not isinstance(value, str):
+            reasons.append(f"malformed_claim_gate_actionable_queue_{suffix}")
+
+    for field, reason in [
+        ("mutatesState", "malformed_claim_gate_actionable_queue_mutates_state"),
+        ("authoritative", "malformed_claim_gate_actionable_queue_authoritative"),
+        (
+            "bvAdvisoryContradiction",
+            "malformed_claim_gate_actionable_queue_bv_advisory_contradiction",
+        ),
+        (
+            "trackerAuthorityDegraded",
+            "malformed_claim_gate_actionable_queue_tracker_authority_degraded",
+        ),
+    ]:
+        value = queue.get(field)
+        if field in queue and not isinstance(value, bool):
+            reasons.append(reason)
+
+    row_count = queue.get("rowCount")
+    if (
+        "rowCount" in queue
+        and row_count is not None
+        and nonnegative_int_or_none(row_count) is None
+    ):
+        reasons.append("malformed_claim_gate_actionable_queue_row_count")
+
+    truncated_count = queue.get("truncatedCandidateCount")
+    if "truncatedCandidateCount" in queue and nonnegative_int_or_none(truncated_count) is None:
+        reasons.append("malformed_claim_gate_actionable_queue_truncated_candidate_count")
+
+    for field, suffix in [
+        ("candidateIds", "candidate_ids"),
+        ("contradictionEvidence", "contradiction_evidence"),
+    ]:
+        value = queue.get(field)
+        if field in queue and not isinstance(value, list):
+            reasons.append(f"malformed_claim_gate_actionable_queue_{suffix}")
+
+    for field, suffix in [
+        ("filterContract", "filter_contract"),
+        ("exclusionAccounting", "exclusion_accounting"),
+    ]:
+        value = queue.get(field)
+        if field in queue and not isinstance(value, dict):
+            reasons.append(f"malformed_claim_gate_actionable_queue_{suffix}")
+
+    return reasons
+
+
 def malformed_command_action_reasons(action, reason_prefix, reason_scope="claim_gate"):
     if not isinstance(action, dict):
         return []
@@ -607,6 +695,10 @@ def malformed_claim_gate_reasons(gate):
         value = gate.get(field)
         if field in gate and value is not None and not isinstance(value, list):
             reasons.append(reason)
+
+    if "actionableQueue" in gate and not isinstance(gate.get("actionableQueue"), dict):
+        reasons.append("malformed_claim_gate_actionable_queue")
+    reasons.extend(malformed_actionable_queue_reasons(gate))
 
     next_actions = gate.get("nextCommandActions")
     if isinstance(next_actions, list):
@@ -1370,6 +1462,20 @@ def claim_gate_consistency_reasons(gate, envelope_degraded=None):
         and authority.get("rchSafeToLaunchCargoVerification") is not True
     ):
         reasons.append("rch_remote_verification_required")
+
+    actionable_queue = gate.get("actionableQueue")
+    if isinstance(actionable_queue, dict):
+        candidate_state = actionable_queue.get("candidateState")
+        if gate.get("safeToClaim") is True and candidate_state not in (
+            "candidate_present_actionable",
+            "not_evaluated",
+        ):
+            reasons.append(
+                "claim_gate_actionable_queue_candidate_state:"
+                f"{redact_text(candidate_state or 'unknown', 64)}"
+            )
+        if actionable_queue.get("bvAdvisoryContradiction") is True:
+            reasons.append("claim_gate_bv_advisory_contradiction")
 
     return compact_list(reasons)
 

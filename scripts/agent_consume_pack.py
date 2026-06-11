@@ -1,22 +1,59 @@
 #!/usr/bin/env python3
-import argparse, json, subprocess, sys
+import argparse
+import json
+import subprocess
+import sys
+from collections.abc import Mapping
+
+
+MALFORMED_RESPONSE_CODE = "malformed_pack_response"
+
+
+def error_comment(code):
+    return f"<!-- ee error: {code or 'unknown'} -->"
+
+
+def error_code(response):
+    if not isinstance(response, Mapping):
+        return MALFORMED_RESPONSE_CODE
+    error = response.get("error", {})
+    if isinstance(error, Mapping):
+        return error.get("code", "unknown")
+    return "unknown"
 
 
 def consume(response):
-    if not response.get("success"):
-        error = response.get("error", {})
-        return f"<!-- ee error: {error.get('code', 'unknown')} -->"
+    if not isinstance(response, Mapping):
+        return error_comment(MALFORMED_RESPONSE_CODE)
+    if response.get("success") is not True:
+        return error_comment(error_code(response))
 
-    pack = response["data"]["pack"]
-    if pack.get("text"):
-        return pack["text"]
+    data = response.get("data")
+    if not isinstance(data, Mapping):
+        return error_comment(MALFORMED_RESPONSE_CODE)
+    pack = data.get("pack")
+    if not isinstance(pack, Mapping):
+        return error_comment(MALFORMED_RESPONSE_CODE)
+
+    text = pack.get("text")
+    if text:
+        if not isinstance(text, str):
+            return error_comment(MALFORMED_RESPONSE_CODE)
+        return text
 
     budget = pack.get("budget", {})
+    if not isinstance(budget, Mapping):
+        return error_comment(MALFORMED_RESPONSE_CODE)
+    items = pack.get("items", [])
+    if not isinstance(items, list):
+        return error_comment(MALFORMED_RESPONSE_CODE)
     lines = [
         f"# Context Pack: {pack.get('query', '')}\n\n",
         f"**Budget:** {budget.get('usedTokens', 0)}/{budget.get('maxTokens', 0)} tokens\n",
     ]
-    for item in pack.get("items", []):
+    for item in items:
+        if not isinstance(item, Mapping):
+            return error_comment(MALFORMED_RESPONSE_CODE)
         why = item.get("why", "")
         lines.append(
             f"\n## {item.get('section', 'memory')} {item.get('rank', '?')}. "

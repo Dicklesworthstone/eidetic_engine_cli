@@ -47,6 +47,41 @@ def safe_action(command_id, argv, mutates=False, copy_safety="safe_structured_ar
     }
 
 
+def safe_actionable_queue():
+    return {
+        "commandId": "beads_actionable_queue",
+        "displayCommand": "scripts/br_retry.sh actionable --json",
+        "mutatesState": False,
+        "collectionMode": "br_retry_script",
+        "queueState": "ready",
+        "exitClass": "ok",
+        "authoritative": True,
+        "rowCount": 1,
+        "candidateIds": ["bd-safe.1"],
+        "truncatedCandidateCount": 0,
+        "filterContract": {
+            "excludesEpics": True,
+            "excludesAssigned": True,
+            "excludesBlocked": True,
+            "excludesDeferred": True,
+            "excludesInProgress": True,
+        },
+        "exclusionAccounting": {
+            "rawReadyCount": 1,
+            "excludedEpicCount": 0,
+            "excludedAssignedCount": 0,
+            "excludedBlockedCount": 0,
+            "excludedDeferredCount": 0,
+            "excludedInProgressCount": 0,
+            "excludedOtherCount": 0,
+        },
+        "candidateState": "candidate_present_actionable",
+        "bvAdvisoryContradiction": False,
+        "trackerAuthorityDegraded": False,
+        "contradictionEvidence": [],
+    }
+
+
 def safe_gate():
     return {
         "schema": "ee.swarm.work_packet.claim_gate.v1",
@@ -86,6 +121,7 @@ def safe_gate():
             "installFreshnessRepair": None,
             "sourceCount": 4,
         },
+        "actionableQueue": safe_actionable_queue(),
         "unsafeReasons": [],
         "staleReasons": [],
         "sourceRefs": ["br://bd-safe.1"],
@@ -484,6 +520,80 @@ class ClaimGateConsumer(unittest.TestCase):
             "malformed_claim_gate_next_command_action",
             decision["whyNotSafe"],
         )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
+    def test_malformed_actionable_queue_shape_fails_closed(self):
+        gate = safe_gate()
+        gate["actionableQueue"] = ["bd-safe.1"]
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn("malformed_claim_gate_actionable_queue", decision["whyNotSafe"])
+        self.assertFalse(
+            any(
+                action["runnable"] and action["mutatesState"]
+                for action in decision["argvActions"]
+            )
+        )
+
+    def test_missing_required_actionable_queue_fields_fail_closed(self):
+        for field, suffix in consumer.CLAIM_GATE_ACTIONABLE_QUEUE_REQUIRED_FIELDS:
+            with self.subTest(field=field):
+                gate = safe_gate()
+                gate["actionableQueue"].pop(field)
+
+                decision = consumer.consume(envelope(gate))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertIn(
+                    f"missing_claim_gate_actionable_queue_{suffix}",
+                    decision["whyNotSafe"],
+                )
+                self.assertFalse(
+                    any(
+                        action["runnable"] and action["mutatesState"]
+                        for action in decision["argvActions"]
+                    )
+                )
+
+    def test_null_required_actionable_queue_fields_fail_closed_except_row_count(self):
+        for field, suffix in consumer.CLAIM_GATE_ACTIONABLE_QUEUE_REQUIRED_FIELDS:
+            if field == "rowCount":
+                continue
+            with self.subTest(field=field):
+                gate = safe_gate()
+                gate["actionableQueue"][field] = None
+
+                decision = consumer.consume(envelope(gate))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertIn(
+                    f"malformed_claim_gate_actionable_queue_{suffix}",
+                    decision["whyNotSafe"],
+                )
+                self.assertFalse(
+                    any(
+                        action["runnable"] and action["mutatesState"]
+                        for action in decision["argvActions"]
+                    )
+                )
+
+    def test_unsafe_actionable_queue_state_fails_closed(self):
+        gate = safe_gate()
+        gate["actionableQueue"]["candidateState"] = "candidate_absent_from_actionable"
+        gate["actionableQueue"]["bvAdvisoryContradiction"] = True
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_actionable_queue_candidate_state:candidate_absent_from_actionable",
+            decision["whyNotSafe"],
+        )
+        self.assertIn("claim_gate_bv_advisory_contradiction", decision["whyNotSafe"])
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
         self.assertFalse(claim["runnable"])
         self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
@@ -3410,6 +3520,7 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
             "docs/schemas/swarm/ee.swarm.work_packet.claim_gate.v1.json"
         )
         source_authority = schema["definitions"]["sourceAuthority"]
+        actionable_queue = schema["definitions"]["actionableQueueAuthority"]
         command_action = schema["definitions"]["commandAction"]
 
         self.assertEqual(schema["title"], consumer.CLAIM_GATE_SCHEMA)
@@ -3421,9 +3532,10 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
             ],
             schema["required"],
         )
+        optional_claim_gate_fields = {"resourceAdmission"}
         self.assertEqual(
+            set(schema["required"]) | optional_claim_gate_fields,
             set(schema["properties"]),
-            set(schema["required"]),
         )
         self.assertEqual(
             [
@@ -3443,6 +3555,14 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
             set(source_authority["properties"]),
         )
         self.assertFalse(source_authority["additionalProperties"])
+        self.assertEqual(
+            [
+                field
+                for field, _suffix in consumer.CLAIM_GATE_ACTIONABLE_QUEUE_REQUIRED_FIELDS
+            ],
+            actionable_queue["required"],
+        )
+        self.assertFalse(actionable_queue["additionalProperties"])
         self.assertEqual(
             [
                 field

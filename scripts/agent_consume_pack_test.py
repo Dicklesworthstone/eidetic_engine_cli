@@ -177,6 +177,37 @@ class ConsumeErrorEnvelope(unittest.TestCase):
         self.assertIn("<!-- ee error:", out)
         self.assertNotIn("should not appear", out)
 
+    def test_non_object_response_fails_closed(self) -> None:
+        out = consume(["not", "an", "envelope"])
+        self.assertEqual(out, "<!-- ee error: malformed_pack_response -->")
+
+    def test_success_without_data_pack_fails_closed(self) -> None:
+        for resp in [
+            {"success": True},
+            {"success": True, "data": None},
+            {"success": True, "data": {}},
+            {"success": True, "data": {"pack": None}},
+        ]:
+            with self.subTest(resp=resp):
+                out = consume(resp)
+                self.assertEqual(out, "<!-- ee error: malformed_pack_response -->")
+
+    def test_malformed_pack_text_fails_closed(self) -> None:
+        resp = {"success": True, "data": {"pack": {"text": {"not": "markdown"}}}}
+        out = consume(resp)
+        self.assertEqual(out, "<!-- ee error: malformed_pack_response -->")
+
+    def test_malformed_items_fails_closed(self) -> None:
+        for pack in [
+            {"items": {"not": "a list"}},
+            {"items": ["not an item object"]},
+            {"budget": ["not", "an", "object"], "items": []},
+        ]:
+            with self.subTest(pack=pack):
+                resp = {"success": True, "data": {"pack": pack}}
+                out = consume(resp)
+                self.assertEqual(out, "<!-- ee error: malformed_pack_response -->")
+
 
 class LoadResponseCommand(unittest.TestCase):
     """Live command mode uses the canonical `ee pack` surface."""
