@@ -49,14 +49,12 @@ const CASS_STDOUT_LINE_READ_LIMIT_BYTES: usize =
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CassSpawnTarget {
-    PathLookup,
     Absolute(PathBuf),
 }
 
 impl CassSpawnTarget {
     fn command(&self) -> Command {
         match self {
-            Self::PathLookup => Command::new(ALLOWLISTED_CASS_EXECUTABLE),
             Self::Absolute(executable) => Command::new(executable.as_os_str()),
         }
     }
@@ -710,8 +708,16 @@ impl CassInvocation {
     }
 
     fn validated_spawn_target(&self) -> Result<CassSpawnTarget, CassError> {
+        let inherited_path = std::env::var_os("PATH");
+        self.validated_spawn_target_from_path_var(inherited_path.as_deref())
+    }
+
+    fn validated_spawn_target_from_path_var(
+        &self,
+        inherited_path: Option<&OsStr>,
+    ) -> Result<CassSpawnTarget, CassError> {
         if self.binary == Path::new(ALLOWLISTED_CASS_EXECUTABLE) {
-            return Ok(CassSpawnTarget::PathLookup);
+            return resolve_path_lookup_cass_binary(inherited_path).map(CassSpawnTarget::Absolute);
         }
 
         if self.binary.is_absolute()
@@ -727,6 +733,28 @@ impl CassInvocation {
                 .to_string(),
         })
     }
+}
+
+fn resolve_path_lookup_cass_binary(inherited_path: Option<&OsStr>) -> Result<PathBuf, CassError> {
+    let Some(path_var) = inherited_path else {
+        return Err(CassError::BinaryNotFound {
+            binary: PathBuf::from(ALLOWLISTED_CASS_EXECUTABLE),
+        });
+    };
+
+    for directory in std::env::split_paths(path_var) {
+        let candidate = directory.join(ALLOWLISTED_CASS_EXECUTABLE);
+        if validate_absolute_cass_binary(&candidate).is_ok() {
+            return candidate.canonicalize().map_err(|error| CassError::InvalidBinary {
+                binary: candidate,
+                reason: format!("CASS binary canonicalization failed: {error}"),
+            });
+        }
+    }
+
+    Err(CassError::BinaryNotFound {
+        binary: PathBuf::from(ALLOWLISTED_CASS_EXECUTABLE),
+    })
 }
 
 fn retry_cass_spawn<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
@@ -1961,6 +1989,56 @@ mod tests {
         assert!(
             !marker.exists(),
             "absolute cass invocation must not execute PATH override binary",
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_lookup_resolves_before_invocation_path_env_override() -> Result<(), String> {
+        let dir = unique_test_dir("path-lookup-ignores-env")?;
+        let trusted_dir = dir.join("trusted");
+        let malicious_dir = dir.join("malicious");
+        fs::create_dir_all(&trusted_dir).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&malicious_dir).map_err(|error| error.to_string())?;
+        let trusted_binary = trusted_dir.join("cass");
+        let malicious_binary = malicious_dir.join("cass");
+        let marker = dir.join("malicious-ran");
+        write_executable_script(
+            &trusted_binary,
+            "#!/bin/sh\nprintf '{\"trusted\":true}\\n'\n",
+            0o755,
+        )?;
+        write_executable_script(
+            &malicious_binary,
+            &format!(
+                "#!/bin/sh\nprintf malicious > '{}'\nprintf '{{\"trusted\":false}}\\n'\n",
+                marker.display()
+            ),
+            0o755,
+        )?;
+
+        let inv = CassInvocation::new("cass", ["health", "--json"])
+            .with_env("PATH", malicious_dir.as_os_str());
+        let spawn_target = inv
+            .validated_spawn_target_from_path_var(Some(trusted_dir.as_os_str()))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(spawn_target, super::CassSpawnTarget::Absolute(trusted_binary));
+
+        let mut command = spawn_target.command();
+        command.args(inv.args());
+        for (key, value) in inv.env_overrides() {
+            command.env(key, value);
+        }
+        let outcome = inv
+            .run_with_capped_pipes(command, Instant::now(), Some(Duration::from_secs(5)), 1024)
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(outcome.exit_code(), Some(CASS_EXIT_OK));
+        assert_eq!(outcome.stdout_utf8_lossy(), "{\"trusted\":true}\n");
+        assert!(
+            !marker.exists(),
+            "PATH lookup must resolve before invocation PATH overrides are applied",
         );
         Ok(())
     }
