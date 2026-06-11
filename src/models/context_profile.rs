@@ -17,7 +17,7 @@ pub const AGENT_CONTEXT_PROFILE_SCHEMA_V1: &str = "ee.context.agent_profile.v1";
 pub const AGENT_PROFILE_COLD_START_CODE: &str = "agent_profile_cold_start";
 
 const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
-const TOTAL_BASIS_POINTS: u16 = 10_000;
+const TOTAL_BASIS_POINTS: u32 = 10_000;
 pub const AGENT_PROFILE_BIAS_CAP: f64 = 0.05;
 pub const AGENT_PROFILE_COLD_START_OUTCOMES: u32 = 10;
 
@@ -406,12 +406,12 @@ impl ContextProfileSectionMix {
     }
 
     #[must_use]
-    pub const fn total_bps(self) -> u16 {
-        self.procedural_rules_bps
-            .saturating_add(self.decisions_bps)
-            .saturating_add(self.failures_bps)
-            .saturating_add(self.evidence_bps)
-            .saturating_add(self.artifacts_bps)
+    pub const fn total_bps(self) -> u32 {
+        self.procedural_rules_bps as u32
+            + self.decisions_bps as u32
+            + self.failures_bps as u32
+            + self.evidence_bps as u32
+            + self.artifacts_bps as u32
     }
 
     #[must_use]
@@ -570,7 +570,7 @@ impl ContextProfile {
 pub enum ContextProfileValidationError {
     EmptyDisplayName,
     ZeroCandidatePool,
-    UnnormalizedSectionMix { total_bps: u16 },
+    UnnormalizedSectionMix { total_bps: u32 },
 }
 
 impl ContextProfileValidationError {
@@ -1094,6 +1094,20 @@ mod tests {
             profile.validate(),
             Err(ContextProfileValidationError::UnnormalizedSectionMix { total_bps: 15 }),
             "unnormalized section mix",
+        )
+    }
+
+    #[test]
+    fn context_profile_validation_reports_unsaturated_section_total() -> TestResult {
+        let profile = ContextProfile {
+            section_mix: ContextProfileSectionMix::new(u16::MAX, u16::MAX, 0, 0, 0),
+            ..ContextProfile::builtin(ContextProfileName::Balanced)
+        };
+
+        ensure(
+            profile.validate(),
+            Err(ContextProfileValidationError::UnnormalizedSectionMix { total_bps: 131_070 }),
+            "unnormalized section mix reports true total",
         )
     }
 
