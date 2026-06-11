@@ -15642,10 +15642,12 @@ where
 {
     set_governor_resume_cursor(args.cursor.as_deref());
     let workspace = cli.resolve_workspace();
+    let env_database_path = read_os(EnvVar::DatabasePath).map(PathBuf::from);
     let report = match insights::build_insights_report_with_options(
         args,
         insights::InsightsBuildOptions {
             workspace: Some(&workspace),
+            database_path: env_database_path.as_deref(),
         },
     ) {
         Ok(report) => report,
@@ -32952,6 +32954,19 @@ fn validate_context_stream_request(cli: &Cli, args: &ContextArgs) -> Result<(), 
     }
 }
 
+fn context_json_cache_enabled(cli: &Cli, args: &ContextArgs, deprecated_alias: bool) -> bool {
+    cli.context_renderer() == output::Renderer::Json
+        && cli.format != OutputFormat::Binary
+        && !deprecated_alias
+        && !args.explain
+        && !args.explain_performance
+        && !args.stream
+        && args.mesh_mode == MeshCommandMode::Off
+        && args.changed_symbols.is_empty()
+        && !args.changed_symbols_from_git
+        && !args.read_only
+}
+
 fn write_context_stream_response<W>(
     response: &ContextResponse,
     workspace_path: &Path,
@@ -33747,17 +33762,7 @@ where
         args.no_meta,
         args.include_non_affecting_degradations,
     )
-    .with_cache_json_response(
-        cli.context_renderer() == output::Renderer::Json
-            && cli.format != OutputFormat::Binary
-            && !args.explain
-            && !args.explain_performance
-            && !args.stream
-            && args.mesh_mode == MeshCommandMode::Off
-            && args.changed_symbols.is_empty()
-            && !args.changed_symbols_from_git
-            && !args.read_only,
-    );
+    .with_cache_json_response(context_json_cache_enabled(cli, args, deprecated_alias));
     let redaction = effective_redaction_level(
         &workspace_path,
         args.redaction,
@@ -66933,6 +66938,28 @@ mod tests {
             &output::Renderer::Markdown,
             "context default renderer should be Markdown",
         )
+    }
+
+    #[test]
+    fn context_deprecated_alias_disables_json_l2_cache() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "--json", "context", "prepare release"])
+            .map_err(|e| format!("failed to parse context alias: {:?}", e.kind()))?;
+
+        match &cli.command {
+            Some(Command::Context(args)) => {
+                ensure_equal(
+                    &super::context_json_cache_enabled(&cli, args, true),
+                    &false,
+                    "deprecated context alias must not replay cached JSON without alias degradation",
+                )?;
+                ensure_equal(
+                    &super::context_json_cache_enabled(&cli, args, false),
+                    &true,
+                    "canonical JSON pack surface remains cache eligible",
+                )
+            }
+            other => Err(format!("expected context command, got {other:?}")),
+        }
     }
 
     #[test]

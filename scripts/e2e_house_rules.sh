@@ -8,12 +8,11 @@
 #   * hard (always true on a current binary): the `houseRules` insights section
 #     lists the global-tagged memory in its origin workspace (wsA) but NOT the
 #     untagged one.
+#   * hard: cross-workspace visibility from wsB through the shared
+#     EE_DATABASE_PATH, with originating-workspace provenance.
 #   * condition-guarded (no-silent-cap log_drop when the surface is not present
-#     in the binary under test): CROSS-WORKSPACE visibility from wsB (insights
-#     reads the per-workspace <ws>/.ee/ee.db and the 10.1 union is within a single
-#     DB, so a shared/global-DB read path is a bd-1n0np.10 follow-on); the
-#     `house_rule` tag alias; and the audited promotion CLI `ee remember --scope
-#     global` (bd-1n0np.10.2, cli-gated).
+#     in the binary under test): the `house_rule` tag alias and the audited
+#     promotion CLI `ee remember --scope global` (bd-1n0np.10.2, cli-gated).
 # Every step emits an ee.test_event.v1 event + a human line via the shared
 # harness (scripts/lib/e2e_harness.sh, surfaced through scripts/e2e_lib.sh), and
 # harness_summary prints PASS/FAIL with an artifact dir and owns the exit code.
@@ -71,19 +70,12 @@ assert_jq "$hr_a" \
 step "cross-workspace union: the global rule surfaces from wsB (bd-1n0np.10.1)"
 hr_b="$(ee_json --workspace "$WS_B" insights --section houseRules --json)"
 assert_jq "$hr_b" '.success == true' "ee insights --section houseRules succeeds (wsB)"
-hr_b_count="$(printf '%s' "$hr_b" | jq -r '[.data.sections[]? | select(.name == "houseRules") | .items[]?] | length' 2>/dev/null || printf '0')"
-if [ "${hr_b_count:-0}" -ge 1 ]; then
-    _harness_pass "global house rule is visible cross-workspace from wsB (candidate-load union)"
-    assert_jq "$hr_b" \
-        '[.data.sections[]? | select(.name == "houseRules") | .items[]? | select(has("originatingWorkspace"))] | length >= 1' \
-        "house rules carry originating-workspace provenance"
-else
-    # No-silent-cap: `ee insights` reads the per-workspace <ws>/.ee/ee.db, and the
-    # 10.1 candidate-load union is within a single DB (workspace_id OR global tag),
-    # so two separately-init'd workspaces do not share a DB. Cross-workspace
-    # surfacing needs a shared/global-DB read path that is not wired yet.
-    log_drop 1 "cross-workspace house-rule visibility from wsB is empty: insights reads per-workspace .ee/ee.db; shared/global-DB read path not wired (bd-1n0np.10 follow-on)"
-fi
+assert_jq "$hr_b" \
+    '[.data.sections[]? | select(.name == "houseRules") | .items[]?] | length >= 1' \
+    "global house rule is visible cross-workspace from wsB (candidate-load union)"
+assert_jq "$hr_b" \
+    '[.data.sections[]? | select(.name == "houseRules") | .items[]? | select(has("originatingWorkspace"))] | length >= 1' \
+    "house rules carry originating-workspace provenance"
 
 step "house_rule tag alias is also recognized (no-silent-cap if not)"
 alias_out="$(ee_json --workspace "$WS_A" remember "house rule alias check" \

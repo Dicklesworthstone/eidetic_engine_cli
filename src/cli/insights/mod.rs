@@ -356,6 +356,7 @@ struct GraphFeatureGate {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InsightsBuildOptions<'a> {
     pub workspace: Option<&'a Path>,
+    pub database_path: Option<&'a Path>,
 }
 
 fn section_registry() -> Vec<SectionRegistryEntry> {
@@ -426,44 +427,52 @@ pub fn build_insights_report_with_options(
         InsightsMode::FullBundle
     };
 
-    let (selected_section, sections, pagination, gated_degraded_signals) = if let Some(section) =
-        args.section.as_deref()
-    {
-        let normalized = normalize_section_name(section);
-        let Some((_, display_name, builder)) = registry
-            .iter()
-            .find(|(lookup_name, _, _)| *lookup_name == normalized)
-        else {
-            let available = available_sections.join(", ");
-            return Err(DomainError::Usage {
-                message: format!(
-                    "Unknown insights section `{section}`. Available sections: {available}."
-                ),
-                repair: Some("ee insights --help".to_owned()),
-            });
-        };
-        let built =
-            build_registry_section_with_runtime_gate(display_name, *builder, options.workspace)?;
-        let section = paginate_section(built.section, args.offset, args.limit);
-        (
-            Some((*display_name).to_owned()),
-            vec![section.section],
-            Some(section.pagination),
-            built.degraded_signal.into_iter().collect::<Vec<_>>(),
-        )
-    } else {
-        (
-            None,
-            registry
+    let (selected_section, sections, pagination, gated_degraded_signals) =
+        if let Some(section) = args.section.as_deref() {
+            let normalized = normalize_section_name(section);
+            let Some((_, display_name, builder)) = registry
                 .iter()
-                .map(|(_, display_name, builder)| {
-                    build_registry_section(display_name, *builder, options.workspace)
-                })
-                .collect::<Result<Vec<_>, DomainError>>()?,
-            None,
-            Vec::new(),
-        )
-    };
+                .find(|(lookup_name, _, _)| *lookup_name == normalized)
+            else {
+                let available = available_sections.join(", ");
+                return Err(DomainError::Usage {
+                    message: format!(
+                        "Unknown insights section `{section}`. Available sections: {available}."
+                    ),
+                    repair: Some("ee insights --help".to_owned()),
+                });
+            };
+            let built = build_registry_section_with_runtime_gate(
+                display_name,
+                *builder,
+                options.workspace,
+                options.database_path,
+            )?;
+            let section = paginate_section(built.section, args.offset, args.limit);
+            (
+                Some((*display_name).to_owned()),
+                vec![section.section],
+                Some(section.pagination),
+                built.degraded_signal.into_iter().collect::<Vec<_>>(),
+            )
+        } else {
+            (
+                None,
+                registry
+                    .iter()
+                    .map(|(_, display_name, builder)| {
+                        build_registry_section(
+                            display_name,
+                            *builder,
+                            options.workspace,
+                            options.database_path,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, DomainError>>()?,
+                None,
+                Vec::new(),
+            )
+        };
 
     let explain_memory_id = args.explain.clone();
     let explain_command = explain_memory_id
@@ -472,9 +481,10 @@ pub fn build_insights_report_with_options(
     let raw_degraded_signals = if gated_degraded_signals.is_empty() {
         // Load the workspace graph counts so an all-empty bundle can explain *why* it is
         // empty (no memories vs. memories-but-no-links) instead of returning silent success.
-        let insights_graph_data = load_workspace_insights_graph_data(options.workspace)
-            .ok()
-            .flatten();
+        let insights_graph_data =
+            load_workspace_insights_graph_data(options.workspace, options.database_path)
+                .ok()
+                .flatten();
         degraded_signals_for_sections(&sections, insights_graph_data.as_ref())
     } else {
         gated_degraded_signals
@@ -510,6 +520,7 @@ fn build_registry_section_with_runtime_gate(
     display_name: &'static str,
     builder: SectionBuilder,
     workspace: Option<&Path>,
+    database_path: Option<&Path>,
 ) -> Result<BuiltSection, DomainError> {
     if let Some(gate) = graph_feature_gate_for_section(display_name) {
         if !runtime_graph_feature_enabled(workspace, gate.key)? {
@@ -528,7 +539,7 @@ fn build_registry_section_with_runtime_gate(
         }
     }
 
-    let section = build_registry_section(display_name, builder, workspace)?;
+    let section = build_registry_section(display_name, builder, workspace, database_path)?;
     // Keep selected-section output honest even when broad full-bundle
     // degraded aggregation is not running.
     let degraded_signal = if PLACEHOLDER_BACKED_SECTIONS.contains(&display_name) {
@@ -555,62 +566,63 @@ fn build_registry_section(
     display_name: &str,
     builder: SectionBuilder,
     workspace: Option<&Path>,
+    database_path: Option<&Path>,
 ) -> Result<InsightsSection, DomainError> {
     match display_name {
         "authorities" => {
-            let scores = load_hits_scores(workspace)?;
+            let scores = load_hits_scores(workspace, database_path)?;
             Ok(authorities_section_from_scores(&scores))
         }
         "blindSpots" => {
-            let inputs = load_blind_spot_inputs(workspace)?;
+            let inputs = load_blind_spot_inputs(workspace, database_path)?;
             Ok(blind_spots_section_from_inputs(&inputs))
         }
         "causalBottlenecks" => {
-            let reports = load_causal_bottleneck_reports(workspace)?;
+            let reports = load_causal_bottleneck_reports(workspace, database_path)?;
             Ok(causal_bottlenecks_section_from_reports(&reports))
         }
         "comprehensiveRules" => {
-            let inputs = load_comprehensive_rule_inputs(workspace)?;
+            let inputs = load_comprehensive_rule_inputs(workspace, database_path)?;
             Ok(comprehensive_rules_section_from_inputs(&inputs))
         }
         "bridges" => {
-            let inputs = load_bridge_inputs(workspace)?;
+            let inputs = load_bridge_inputs(workspace, database_path)?;
             Ok(bridges_section_from_inputs(&inputs))
         }
         "contradictionClusters" => {
-            let clusters = load_contradiction_clusters(workspace)?;
+            let clusters = load_contradiction_clusters(workspace, database_path)?;
             Ok(contradiction_clusters_section_from_clusters(&clusters))
         }
         "hubs" => {
-            let scores = load_hits_scores(workspace)?;
+            let scores = load_hits_scores(workspace, database_path)?;
             Ok(hubs_section_from_scores(&scores))
         }
         "knowledgeSkyline" => {
-            let skyline = load_knowledge_skyline(workspace)?;
+            let skyline = load_knowledge_skyline(workspace, database_path)?;
             Ok(knowledge_skyline_section_from_report(skyline.as_ref()))
         }
         "knowledgeGaps" => {
-            let gaps = load_knowledge_gap_inputs(workspace)?;
+            let gaps = load_knowledge_gap_inputs(workspace, database_path)?;
             Ok(knowledge_gaps_section_from_inputs(&gaps))
         }
         "loadBearingMemories" => {
-            let items = load_bearing_memory_items(workspace)?;
+            let items = load_bearing_memory_items(workspace, database_path)?;
             Ok(load_bearing_memories_section_from_items(&items))
         }
         "proximityHotspots" => {
-            let reports = load_proximity_hotspot_reports(workspace)?;
+            let reports = load_proximity_hotspot_reports(workspace, database_path)?;
             Ok(proximity_hotspots_section_from_reports(&reports))
         }
         "revisionFrontiers" => {
-            let inputs = load_revision_frontier_inputs(workspace)?;
+            let inputs = load_revision_frontier_inputs(workspace, database_path)?;
             Ok(revision_frontiers_section_from_inputs(&inputs))
         }
         "topMemories" => {
-            let inputs = load_top_memory_inputs(workspace)?;
+            let inputs = load_top_memory_inputs(workspace, database_path)?;
             Ok(top_memories_section_from_inputs(&inputs))
         }
         "houseRules" => {
-            let inputs = load_house_rules_inputs(workspace)?;
+            let inputs = load_house_rules_inputs(workspace, database_path)?;
             Ok(house_rules_section_from_inputs(&inputs))
         }
         _ => Ok(builder()),
@@ -746,22 +758,44 @@ struct WorkspaceInsightsGraphData {
     links: Vec<StoredMemoryLink>,
 }
 
-fn load_workspace_insights_graph_data(
+fn insights_database_path(
     workspace: Option<&Path>,
-) -> Result<Option<WorkspaceInsightsGraphData>, DomainError> {
-    let Some(workspace) = workspace else {
+    database_path: Option<&Path>,
+) -> Option<PathBuf> {
+    database_path
+        .map(Path::to_path_buf)
+        .or_else(|| workspace.map(|workspace| workspace.join(".ee").join("ee.db")))
+}
+
+fn open_insights_database(
+    workspace: Option<&Path>,
+    database_path: Option<&Path>,
+) -> Result<Option<DbConnection>, DomainError> {
+    let Some(database_path) = insights_database_path(workspace, database_path) else {
         return Ok(None);
     };
-    let database_path = workspace.join(".ee").join("ee.db");
     if !database_path.exists() {
         return Ok(None);
     }
 
-    let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+    DbConnection::open_file(&database_path)
+        .map(Some)
+        .map_err(|error| DomainError::Storage {
             message: format!("Failed to open workspace database: {error}"),
             repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
-        })?;
+        })
+}
+
+fn load_workspace_insights_graph_data(
+    workspace: Option<&Path>,
+    database_path: Option<&Path>,
+) -> Result<Option<WorkspaceInsightsGraphData>, DomainError> {
+    let Some(workspace) = workspace else {
+        return Ok(None);
+    };
+    let Some(connection) = open_insights_database(Some(workspace), database_path)? else {
+        return Ok(None);
+    };
     let Some(workspace_id) = insights_workspace_id(&connection, workspace)? else {
         return Ok(None);
     };
@@ -791,14 +825,20 @@ fn load_workspace_insights_graph_data(
     Ok(Some(WorkspaceInsightsGraphData { memories, links }))
 }
 
-fn load_bridge_inputs(workspace: Option<&Path>) -> Result<Vec<BridgeInsightInput>, DomainError> {
-    let Some(data) = load_workspace_insights_graph_data(workspace)? else {
+fn load_bridge_inputs(
+    workspace: Option<&Path>,
+    database_path: Option<&Path>,
+) -> Result<Vec<BridgeInsightInput>, DomainError> {
+    let Some(data) = load_workspace_insights_graph_data(workspace, database_path)? else {
         return Ok(Vec::new());
     };
     bridge_inputs_from_links(&data.links)
 }
 
-fn load_blind_spot_inputs(workspace: Option<&Path>) -> Result<Vec<BlindSpotInput>, DomainError> {
+fn load_blind_spot_inputs(
+    workspace: Option<&Path>,
+    database_path: Option<&Path>,
+) -> Result<Vec<BlindSpotInput>, DomainError> {
     let Some(workspace) = workspace else {
         return Ok(Vec::new());
     };
@@ -809,7 +849,7 @@ fn load_blind_spot_inputs(workspace: Option<&Path>) -> Result<Vec<BlindSpotInput
     let snapshot = crate::core::symbol_graph::SymbolGraphExtractor::default()
         .extract_paths(workspace, rust_paths);
     let git_churn = load_blind_spot_git_churn(workspace);
-    let memories = load_workspace_insights_graph_data(Some(workspace))?
+    let memories = load_workspace_insights_graph_data(Some(workspace), database_path)?
         .map(|data| data.memories)
         .unwrap_or_default();
     Ok(blind_spot_inputs_from_symbol_snapshot_with_churn(
@@ -822,8 +862,9 @@ fn load_blind_spot_inputs(workspace: Option<&Path>) -> Result<Vec<BlindSpotInput
 
 fn load_contradiction_clusters(
     workspace: Option<&Path>,
+    database_path: Option<&Path>,
 ) -> Result<Vec<crate::graph::health::ContradictionCluster>, DomainError> {
-    let Some(data) = load_workspace_insights_graph_data(workspace)? else {
+    let Some(data) = load_workspace_insights_graph_data(workspace, database_path)? else {
         return Ok(Vec::new());
     };
     contradiction_clusters_from_links(&data.links)
@@ -831,8 +872,9 @@ fn load_contradiction_clusters(
 
 fn load_knowledge_gap_inputs(
     workspace: Option<&Path>,
+    database_path: Option<&Path>,
 ) -> Result<Vec<KnowledgeGapInput>, DomainError> {
-    let Some(data) = load_workspace_insights_graph_data(workspace)? else {
+    let Some(data) = load_workspace_insights_graph_data(workspace, database_path)? else {
         return Ok(Vec::new());
     };
     knowledge_gap_inputs_from_graph_data(&data)
@@ -840,8 +882,9 @@ fn load_knowledge_gap_inputs(
 
 fn load_top_memory_inputs(
     workspace: Option<&Path>,
+    database_path: Option<&Path>,
 ) -> Result<Vec<TopMemoryInsightInput>, DomainError> {
-    let Some(data) = load_workspace_insights_graph_data(workspace)? else {
+    let Some(data) = load_workspace_insights_graph_data(workspace, database_path)? else {
         return Ok(Vec::new());
     };
     top_memory_inputs_from_graph_data(&data)
@@ -856,20 +899,14 @@ struct ComprehensiveRuleInsightInput {
 
 fn load_comprehensive_rule_inputs(
     workspace: Option<&Path>,
+    database_path: Option<&Path>,
 ) -> Result<Vec<ComprehensiveRuleInsightInput>, DomainError> {
     let Some(workspace) = workspace else {
         return Ok(Vec::new());
     };
-    let database_path = workspace.join(".ee").join("ee.db");
-    if !database_path.exists() {
+    let Some(connection) = open_insights_database(Some(workspace), database_path)? else {
         return Ok(Vec::new());
-    }
-
-    let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open workspace database: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
-        })?;
+    };
     let Some(workspace_id) = insights_workspace_id(&connection, workspace)? else {
         return Ok(Vec::new());
     };
@@ -920,19 +957,14 @@ struct HouseRuleInsightInput {
 /// counts as a house rule iff it carries a `global`/`house_rule` tag.
 fn load_house_rules_inputs(
     workspace: Option<&Path>,
+    database_path: Option<&Path>,
 ) -> Result<Vec<HouseRuleInsightInput>, DomainError> {
     let Some(workspace) = workspace else {
         return Ok(Vec::new());
     };
-    let database_path = workspace.join(".ee").join("ee.db");
-    if !database_path.exists() {
+    let Some(connection) = open_insights_database(Some(workspace), database_path)? else {
         return Ok(Vec::new());
-    }
-    let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open workspace database: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
-        })?;
+    };
     let Some(workspace_id) = insights_workspace_id(&connection, workspace)? else {
         return Ok(Vec::new());
     };
@@ -969,8 +1001,9 @@ fn load_house_rules_inputs(
 
 fn load_knowledge_skyline(
     workspace: Option<&Path>,
+    database_path: Option<&Path>,
 ) -> Result<Option<KnowledgeSkyline>, DomainError> {
-    let Some(data) = load_workspace_insights_graph_data(workspace)? else {
+    let Some(data) = load_workspace_insights_graph_data(workspace, database_path)? else {
         return Ok(None);
     };
     if data.memories.is_empty() {
@@ -1015,20 +1048,14 @@ fn load_knowledge_skyline(
 
 fn load_proximity_hotspot_reports(
     workspace: Option<&Path>,
+    database_path: Option<&Path>,
 ) -> Result<Vec<ProximityHotspotInput>, DomainError> {
     let Some(workspace) = workspace else {
         return Ok(Vec::new());
     };
-    let database_path = workspace.join(".ee").join("ee.db");
-    if !database_path.exists() {
+    let Some(connection) = open_insights_database(Some(workspace), database_path)? else {
         return Ok(Vec::new());
-    }
-
-    let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open workspace database: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
-        })?;
+    };
     let links = connection
         .list_all_memory_links(None)
         .map_err(|error| DomainError::Storage {
@@ -1041,20 +1068,14 @@ fn load_proximity_hotspot_reports(
 
 fn load_causal_bottleneck_reports(
     workspace: Option<&Path>,
+    database_path: Option<&Path>,
 ) -> Result<Vec<CausalBottleneckInput>, DomainError> {
     let Some(workspace) = workspace else {
         return Ok(Vec::new());
     };
-    let database_path = workspace.join(".ee").join("ee.db");
-    if !database_path.exists() {
+    let Some(connection) = open_insights_database(Some(workspace), database_path)? else {
         return Ok(Vec::new());
-    }
-
-    let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open workspace database: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
-        })?;
+    };
     let Some(workspace_id) = insights_workspace_id(&connection, workspace)? else {
         return Ok(Vec::new());
     };
@@ -1070,20 +1091,16 @@ fn load_causal_bottleneck_reports(
     Ok(causal_bottleneck_reports_from_scores(&betweenness.scores))
 }
 
-fn load_hits_scores(workspace: Option<&Path>) -> Result<HitsScores, DomainError> {
+fn load_hits_scores(
+    workspace: Option<&Path>,
+    database_path: Option<&Path>,
+) -> Result<HitsScores, DomainError> {
     let Some(workspace) = workspace else {
         return Ok(HitsScores::default());
     };
-    let database_path = workspace.join(".ee").join("ee.db");
-    if !database_path.exists() {
+    let Some(connection) = open_insights_database(Some(workspace), database_path)? else {
         return Ok(HitsScores::default());
-    }
-
-    let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open workspace database: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
-        })?;
+    };
     let projection =
         crate::graph::build_memory_graph(&connection, &crate::graph::ProjectionOptions::default())
             .map_err(|error| DomainError::Graph {
@@ -1110,20 +1127,14 @@ fn load_hits_scores(workspace: Option<&Path>) -> Result<HitsScores, DomainError>
 
 fn load_bearing_memory_items(
     workspace: Option<&Path>,
+    database_path: Option<&Path>,
 ) -> Result<Vec<crate::graph::bipartite_provenance::LoadBearingMemoryItem>, DomainError> {
     let Some(workspace) = workspace else {
         return Ok(Vec::new());
     };
-    let database_path = workspace.join(".ee").join("ee.db");
-    if !database_path.exists() {
+    let Some(connection) = open_insights_database(Some(workspace), database_path)? else {
         return Ok(Vec::new());
-    }
-
-    let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open workspace database: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
-        })?;
+    };
     let Some(workspace_id) = insights_workspace_id(&connection, workspace)? else {
         return Ok(Vec::new());
     };
@@ -3136,20 +3147,14 @@ fn revision_frontiers_section_from_inputs(
 
 fn load_revision_frontier_inputs(
     workspace: Option<&Path>,
+    database_path: Option<&Path>,
 ) -> Result<Vec<RevisionFrontierInsightInput>, DomainError> {
     let Some(workspace) = workspace else {
         return Ok(Vec::new());
     };
-    let database_path = workspace.join(".ee").join("ee.db");
-    if !database_path.exists() {
+    let Some(connection) = open_insights_database(Some(workspace), database_path)? else {
         return Ok(Vec::new());
-    }
-
-    let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open workspace database: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
-        })?;
+    };
     let Some(workspace_id) = insights_workspace_id(&connection, workspace)? else {
         return Ok(Vec::new());
     };
@@ -3446,6 +3451,70 @@ mod tests {
 
         connection.close().map_err(|error| error.to_string())?;
         Ok("mem_loadbearinganchor000000001".to_owned())
+    }
+
+    fn seed_shared_house_rules_database(
+        database_path: &std::path::Path,
+        origin_workspace: &std::path::Path,
+        reader_workspace: &std::path::Path,
+    ) -> Result<String, String> {
+        if let Some(parent) = database_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        fs::create_dir_all(origin_workspace.join(".ee")).map_err(|error| error.to_string())?;
+        fs::create_dir_all(reader_workspace.join(".ee")).map_err(|error| error.to_string())?;
+
+        let connection =
+            DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let origin_workspace_id = crate::core::curate::stable_workspace_id(origin_workspace);
+        let reader_workspace_id = crate::core::curate::stable_workspace_id(reader_workspace);
+        for (workspace, workspace_id, name) in [
+            (
+                origin_workspace,
+                origin_workspace_id.as_str(),
+                "house-rules origin",
+            ),
+            (
+                reader_workspace,
+                reader_workspace_id.as_str(),
+                "house-rules reader",
+            ),
+        ] {
+            connection
+                .insert_workspace(
+                    workspace_id,
+                    &CreateWorkspaceInput {
+                        path: workspace.to_string_lossy().into_owned(),
+                        name: Some(name.to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        connection
+            .insert_memory(
+                "mem_houserulesglobal000000001",
+                &CreateMemoryInput {
+                    workspace_id: origin_workspace_id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "house rule: run cargo fmt before committing".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.95,
+                    utility: 0.9,
+                    importance: 0.85,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["global".to_owned()],
+                    valid_from: Some("2026-06-01T00:00:00Z".to_owned()),
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(origin_workspace_id)
     }
 
     fn seed_insights_graph_workspace(workspace: &std::path::Path) -> Result<(), String> {
@@ -3927,6 +3996,7 @@ mod tests {
                 },
                 InsightsBuildOptions {
                     workspace: Some(&workspace),
+                    ..InsightsBuildOptions::default()
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -3963,6 +4033,7 @@ mod tests {
             },
             InsightsBuildOptions {
                 workspace: Some(&workspace),
+                ..InsightsBuildOptions::default()
             },
         )
         .map_err(|error| error.to_string())?;
@@ -4009,6 +4080,7 @@ mod tests {
             },
             InsightsBuildOptions {
                 workspace: Some(&workspace),
+                ..InsightsBuildOptions::default()
             },
         )
         .map_err(|error| error.to_string())?;
@@ -4067,6 +4139,52 @@ mod tests {
     }
 
     #[test]
+    fn house_rules_section_reads_shared_database_path() -> TestResult {
+        let root = unique_insights_workspace("house-rules-shared")?;
+        let origin_workspace = root.join("ws-a");
+        let reader_workspace = root.join("ws-b");
+        let database_path = root.join(".ee").join("shared.ee.db");
+        let origin_workspace_id =
+            seed_shared_house_rules_database(&database_path, &origin_workspace, &reader_workspace)?;
+
+        let report = build_insights_report_with_options(
+            &InsightsArgs {
+                section: Some("houseRules".to_owned()),
+                explain: None,
+                limit: DEFAULT_SECTION_LIMIT,
+                offset: 0,
+                json_stream: false,
+                cursor: None,
+            },
+            InsightsBuildOptions {
+                workspace: Some(&reader_workspace),
+                database_path: Some(&database_path),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.mode, InsightsMode::Section);
+        assert_eq!(report.selected_section.as_deref(), Some("houseRules"));
+        assert!(report.degraded_signals.is_empty());
+        let item = report
+            .sections
+            .first()
+            .and_then(|section| section.items.first())
+            .ok_or_else(|| "shared DB houseRules section should emit an item".to_owned())?;
+        assert_eq!(
+            item["memoryId"].as_str(),
+            Some("mem_houserulesglobal000000001")
+        );
+        assert_eq!(item["interpretation"].as_str(), Some("house_rule"));
+        assert_eq!(
+            item["originatingWorkspace"].as_str(),
+            Some(origin_workspace_id.as_str())
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn selected_comprehensive_rules_does_not_emit_placeholder_degradation() -> TestResult {
         let report = build_insights_report(&InsightsArgs {
             section: Some("comprehensiveRules".to_owned()),
@@ -4116,6 +4234,7 @@ mod tests {
                 },
                 InsightsBuildOptions {
                     workspace: Some(&workspace),
+                    ..InsightsBuildOptions::default()
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -5603,7 +5722,7 @@ mod tests {
         let workspace = unique_insights_workspace("revision-frontiers")?;
         seed_revision_frontier_workspace(&workspace)?;
 
-        let inputs = load_revision_frontier_inputs(Some(&workspace))
+        let inputs = load_revision_frontier_inputs(Some(&workspace), None)
             .map_err(|error| format!("{error:?}"))?;
         let ids = inputs
             .iter()
@@ -5629,7 +5748,7 @@ mod tests {
         }
 
         // Determinism across loads.
-        let again = load_revision_frontier_inputs(Some(&workspace))
+        let again = load_revision_frontier_inputs(Some(&workspace), None)
             .map_err(|error| format!("{error:?}"))?;
         assert_eq!(
             inputs
@@ -5648,7 +5767,7 @@ mod tests {
     fn revision_frontiers_loader_handles_missing_revision_data() -> TestResult {
         // No DB at all → honest empty inputs, not an error.
         let workspace = unique_insights_workspace("revision-frontiers-empty")?;
-        let inputs = load_revision_frontier_inputs(Some(&workspace))
+        let inputs = load_revision_frontier_inputs(Some(&workspace), None)
             .map_err(|error| format!("{error:?}"))?;
         assert!(inputs.is_empty());
         Ok(())
