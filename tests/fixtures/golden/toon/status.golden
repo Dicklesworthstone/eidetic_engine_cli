@@ -3,7 +3,7 @@ success: true
 fields: standard
 data:
   command: status
-  version: 0.3.3
+  version: <ee-version>
   workspace:
     source: explicit
     root: $STATUS_WORKSPACE
@@ -68,36 +68,8 @@ data:
     redactionLevel: strict
     reason: null
     repair: null
-  qos:
-    schema: ee.qos.active_lane_summary.v1
-    workspaceHash: "sha256:9c785a5a43040ce5d22c9d2c0dd619286bfcb104080583c8859784706caf0ca5"
-    foregroundActiveCount: 0
-    backgroundActiveCount: 0
-    verificationActiveCount: 0
-    maintenanceActiveCount: 0
-    staleIgnoredCount: 0
-    foregroundPressure: false
-    backgroundWorkActive: false
-    registryHealthy: true
-    degraded[0]:
-  rchWorkerPressure:
-    schema: ee.rch.worker_pressure.v1
-    status: pressure_clear
-    workerCount: 9
-    usableWorkerCount: 8
-    blockedWorkerCount: 0
-    staleWorkerCount: 0
-    unknownWorkerCount: 0
-    workers[9]{workerId,pressureState,confidence,reasonCode,freeGb,freeRatioBps,telemetryFreshness,admissionImpact}:
-      ts2,warning,high,disk_pressure_warning,null,null,unknown,degraded
-      vmi1149989,clear,high,pressure_clear,null,null,unknown,usable
-      vmi1152480,clear,high,pressure_clear,null,null,unknown,usable
-      vmi1153651,clear,high,pressure_clear,null,null,unknown,usable
-      vmi1156319,clear,high,pressure_clear,null,null,unknown,usable
-      vmi1167313,clear,high,pressure_clear,null,null,unknown,usable
-      vmi1227854,clear,high,pressure_clear,null,null,unknown,usable
-      vmi1264463,clear,high,pressure_clear,null,null,unknown,usable
-      vmi1293453,clear,high,pressure_clear,null,null,unknown,usable
+  qos: <scrubbed:qos>
+  rchWorkerPressure: <scrubbed:rchWorkerPressure>
   verificationPosture:
     schema: ee.verification.posture.v1
     status: not_initialized
@@ -138,30 +110,7 @@ data:
     blockerRefs[0]:
     recoveryActions[1]{priority,kind,command,message}:
       1,inspect_verification_ledger,ee init --workspace .,Initialize the workspace before relying on durable RCH verifier blockers.
-  hostCalibration:
-    schema: ee.host_calibration.posture.v1
-    redactionStatus: label_only_paths_presence_only_env_no_raw_values
-    hostProfileSchema: ee.host_profile.v1
-    hostClass: portable
-    calibrationFreshness: missing
-    confidence: low
-    profileCeiling: portable
-    configuredProfile: swarm
-    recommendedProfile: portable
-    effectiveProfile: portable
-    targetDirPosture: shared
-    topologyWarnings[0]:
-    reasonCodes[7]: calibration_missing,conservative_calibration_missing,cpu_logical_cores_swarm,disk_capacity_swarm_ready,memory_available_swarm,rch_topology_available,target_dir_shared
-    repairActions[1]{priority,kind,command,message}:
-      20,calibration,rch exec -- scripts/e2e_overhaul/host_calibration.sh,Collect host calibration evidence before enabling higher-resource classes.
-    budgetDeltas[5]{surface,unit,configuredProfile,recommendedProfile,effectiveProfile,configuredValue,recommendedValue,effectiveValue,reasonCode}:
-      context_pack,tokens,swarm,portable,portable,32000,8000,8000,lower_to_recommended_profile
-      cache,bytes,swarm,portable,portable,4294967296,268435456,268435456,lower_to_recommended_profile
-      graph_snapshot,bytes,swarm,portable,portable,8589934592,536870912,536870912,lower_to_recommended_profile
-      index_rebuild,concurrent_jobs,swarm,portable,portable,16,2,2,lower_to_recommended_profile
-      burst_admission,queued_admissions,swarm,portable,portable,64,8,8,lower_to_recommended_profile
-    degraded[1]{code,severity,message,repair}:
-      host_calibration_missing,warning,"Host calibration evidence is missing, so high-resource recommendations are capped conservatively.",Run `rch exec -- scripts/e2e_overhaul/host_calibration.sh`.
+  hostCalibration: <scrubbed:hostCalibration>
   capabilities:
     runtime: ready
     storage: pending
@@ -198,14 +147,14 @@ data:
     schema: ee.shard_fanout.status.v1
     enabled: false
     posture: disabled
-    workspaceId: wsp_1XEHK7T01V18QJJ63T5MM0S0RA
+    workspaceId: <workspace-id>
     workspaceRoot: $STATUS_WORKSPACE
     legacyDatabasePath: $STATUS_WORKSPACE/.ee/ee.db
-    dataRoot: /home/ubuntu/.local/share/ee
-    shardRoot: /home/ubuntu/.local/share/ee/shards
-    catalogPath: /home/ubuntu/.local/share/ee/catalog.db
-    shardPath: /home/ubuntu/.local/share/ee/shards/wsp_1XEHK7T01V18QJJ63T5MM0S0RA.db
-    shardId: wsp_1XEHK7T01V18QJJ63T5MM0S0RA
+    dataRoot: <data-root>
+    shardRoot: <shard-root>
+    catalogPath: <catalog-path>
+    shardPath: <shard-path>
+    shardId: <shard-id>
     catalogExists: false
     shardExists: false
     catalogContract:
@@ -296,23 +245,7 @@ data:
       availability: live_compute_available
     nextRefreshVia: ee graph centrality-refresh --workspace .
   search:
-    lexicalRamTier:
-      schema: ee.status.search.lexical_ram_tier.v1
-      platform: linux
-      supported: true
-      enabled: false
-      attempted: false
-      succeeded: false
-      hugepagesRequested: false
-      hugepagesGranted: false
-      populateRequested: true
-      bytesMmapped: 0
-      pageFaultsPre: 0
-      pageFaultsPost: 0
-      fallbackPath: disabled_by_operator
-      indexPath: $STATUS_WORKSPACE/.ee/index/lexical
-      indexRevision: null
-      degradedCodes[1]: lexical_ram_tier_disabled
+    lexicalRamTier: <scrubbed:lexicalRamTier>
   derivedAssets[3]:
     - name: search_index
       kind: persisted_index
@@ -324,10 +257,10 @@ data:
       freshness:
         schema: ee.derived_asset_freshness.v1
         verdict: missing
-        dependencyHash: "blake3:ca0cc62b3dcf8c624db40791d748193a1b396761d754a834f5f2a34bc5c50b14"
-        sourceDependencyHash: "blake3:0cec6dc73f52df67492422861255fd54ca9d285a40db6c373b0fd0c6288d86e8"
-        configHash: "blake3:7d60abf3029c739da79f300681f9b05f106a2166af0c478bd56421dd53a5c8b0"
-        featureFlagsHash: "blake3:cd0aa529fa4ff4d11da4f98e7d38693dc06113320ebcf56d77e67c1d75900648"
+        dependencyHash: <derived-asset-hash>
+        sourceDependencyHash: <derived-asset-hash>
+        configHash: <derived-asset-hash>
+        featureFlagsHash: <derived-asset-hash>
         inputManifestHash: null
         invalidates[1]: search_index
         repairAction: ee index rebuild --workspace .
@@ -341,10 +274,10 @@ data:
       freshness:
         schema: ee.derived_asset_freshness.v1
         verdict: unavailable
-        dependencyHash: "blake3:982a1d75b530e71125d08b948b54a35b28f533cea93c4418a7c34439cc3c9cb3"
-        sourceDependencyHash: "blake3:002dc6c96c6fe99b6b630622be4855ed95e0569e2848e92bea74796e5f965efd"
-        configHash: "blake3:f8683d52e3f251d64f4c20192d6227d15e4f23cffe22861550ac8206c015a4c3"
-        featureFlagsHash: "blake3:2a5ed65ad4f349a30395a192e329a365016a42c771b9d044b465e6ffb3c41203"
+        dependencyHash: <derived-asset-hash>
+        sourceDependencyHash: <derived-asset-hash>
+        configHash: <derived-asset-hash>
+        featureFlagsHash: <derived-asset-hash>
         inputManifestHash: null
         invalidates[0]:
         repairAction: ee graph centrality-refresh --workspace .
@@ -365,10 +298,10 @@ data:
       freshness:
         schema: ee.derived_asset_freshness.v1
         verdict: fresh
-        dependencyHash: "blake3:a7bd8ed167236e7c0374e3bf886496a0788eaf78fbea70f0088fc1651ab949a9"
-        sourceDependencyHash: "blake3:9aecd8e838e0242427cbdb4f08520677ddb8446b0533de8ab7642c963836b736"
-        configHash: "blake3:f37df2ca8700bc4e985bfe0f5a3d389f8b412cbc76d7a106dfa84800f5c99851"
-        featureFlagsHash: "blake3:428f554144a34f636adab9e088c836c14d1bd663357383a33c280d128cf98515"
+        dependencyHash: <derived-asset-hash>
+        sourceDependencyHash: <derived-asset-hash>
+        configHash: <derived-asset-hash>
+        featureFlagsHash: <derived-asset-hash>
         inputManifestHash: null
         invalidates[0]:
         repairAction: ee pack --workspace . --json

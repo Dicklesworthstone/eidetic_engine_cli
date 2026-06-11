@@ -217,12 +217,19 @@ fn normalize_status_toon(raw: &str, workspace: &Path) -> String {
             in_agent_inventory = true;
         }
 
-        let replacement = if matches!(trimmed, "hostCalibration:" | "qos:" | "rchWorkerPressure:") {
+        let replacement = if matches!(
+            trimmed,
+            "hostCalibration:" | "qos:" | "rchWorkerPressure:" | "lexicalRamTier:"
+        ) {
             skip_block_indent = Some(indent_len);
             Some(match trimmed {
                 "hostCalibration:" => "hostCalibration: <scrubbed:hostCalibration>",
                 "qos:" => "qos: <scrubbed:qos>",
                 "rchWorkerPressure:" => "rchWorkerPressure: <scrubbed:rchWorkerPressure>",
+                // lexicalRamTier reports the host platform (platform/supported/
+                // bytesWarmloaded differ between linux CI and macOS), so the
+                // golden cannot pin its contents.
+                "lexicalRamTier:" => "lexicalRamTier: <scrubbed:lexicalRamTier>",
                 _ => unreachable!("matched known volatile status block"),
             })
         } else if trimmed.starts_with("fingerprint: ") {
@@ -602,8 +609,14 @@ fn toon_handles_null_values_gracefully() -> TestResult {
 
 #[test]
 fn toon_format_is_deterministic() -> TestResult {
-    let output1 = run_ee(&["status", "--format", "toon"])?;
-    let output2 = run_ee(&["status", "--format", "toon"])?;
+    // Isolated workspace: sibling tests in this suite invoke `ee` against the
+    // shared repo workspace concurrently, and the resulting DB lock contention
+    // flips status posture (storage ok vs degraded) between two back-to-back
+    // runs. Determinism is contracted for identical state, not for a DB that
+    // other processes are mutating mid-test.
+    let workspace = isolated_workspace("determinism")?;
+    let output1 = run_ee_in_workspace(&workspace, &["status", "--format", "toon"])?;
+    let output2 = run_ee_in_workspace(&workspace, &["status", "--format", "toon"])?;
 
     ensure(output1.status.success(), "first run should succeed")?;
     ensure(output2.status.success(), "second run should succeed")?;
@@ -613,7 +626,10 @@ fn toon_format_is_deterministic() -> TestResult {
 
     ensure(
         stdout1 == stdout2,
-        "TOON output must be deterministic across runs",
+        format!(
+            "TOON output must be deterministic across runs ({})",
+            comparison_diagnosis(&stdout1, &stdout2)
+        ),
     )
 }
 
@@ -791,6 +807,19 @@ mod unit_tests {
         let toon = render_toon_from_json("");
 
         ensure_contains(&toon, "schema: ee.error.v2", "error uses error schema")
+    }
+
+    #[test]
+    fn render_toon_is_deterministic_for_identical_json() -> TestResult {
+        let json = r#"{"schema":"ee.response.v2","success":true,"data":{"command":"status","items":[{"a":1,"b":2},{"a":3,"b":4}],"nested":{"x":null,"y":[1,2,3],"z":"text"}}}"#;
+        let first = render_toon_from_json(json);
+        for _ in 0..100 {
+            ensure(
+                render_toon_from_json(json) == first,
+                "render_toon_from_json must produce identical output for identical input",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
