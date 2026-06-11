@@ -231,7 +231,6 @@ where
             self.complete_leader(&key_hash, &entry, leader_started, result)
         } else {
             self.counters.follower_joins.fetch_add(1, Ordering::SeqCst);
-            entry.followers.fetch_add(1, Ordering::SeqCst);
             trace_singleflight_checkpoint(SINGLEFLIGHT_FOLLOWER_JOIN_EVENT, &key_hash, 0, &[]);
             self.wait_for_leader(&key_hash, &entry, follower_timeout)
         }
@@ -303,6 +302,7 @@ where
                 key_hash: key_hash.to_owned(),
             })?;
         if let Some(entry) = entries.get(key_hash) {
+            entry.followers.fetch_add(1, Ordering::SeqCst);
             return Ok((Arc::clone(entry), false));
         }
 
@@ -1178,6 +1178,37 @@ mod tests {
         assert_eq!(posture.completed_leader_count, 1);
         assert_eq!(posture.follower_join_count, 5);
         assert_eq!(posture.reused_result_count, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn leader_reports_shared_when_follower_claimed_entry_before_completion() -> TestResult {
+        let group = SingleFlightGroup::<String>::new();
+        let key = key("fast shared read");
+        let (leader_entry, is_leader) = group
+            .entry_for(&key.key_hash)
+            .map_err(|error| format!("leader entry failed: {error:?}"))?;
+        assert!(is_leader);
+
+        let (_follower_entry, follower_is_leader) = group
+            .entry_for(&key.key_hash)
+            .map_err(|error| format!("follower entry failed: {error:?}"))?;
+        assert!(!follower_is_leader);
+
+        let run = group
+            .complete_leader(
+                &key.key_hash,
+                &leader_entry,
+                Instant::now(),
+                Ok("shared-result".to_owned()),
+            )
+            .map_err(|error| format!("leader completion failed: {error:?}"))?;
+        assert_eq!(run.role, SingleFlightRole::Leader);
+        assert!(
+            run.shared,
+            "leader must report a shared result once a follower has claimed the entry"
+        );
+        assert_eq!(group.active_len().map_err(|error| format!("{error:?}"))?, 0);
         Ok(())
     }
 
