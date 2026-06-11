@@ -171,11 +171,17 @@ pub struct AgentContextProfileBias {
 
 #[must_use]
 pub fn decay_factor(age_days: f64, half_life_days: f64) -> f64 {
-    if !age_days.is_finite() || age_days <= 0.0 {
+    if age_days.is_nan() || age_days <= 0.0 {
         return 1.0;
     }
-    if !half_life_days.is_finite() || half_life_days <= 0.0 {
+    if age_days.is_infinite() {
         return 0.0;
+    }
+    if half_life_days.is_nan() || half_life_days <= 0.0 {
+        return 0.0;
+    }
+    if half_life_days.is_infinite() {
+        return 1.0;
     }
     0.5_f64.powf(age_days / half_life_days)
 }
@@ -958,7 +964,27 @@ mod tests {
             1.0,
             "negative age does not amplify counts",
         )?;
-        ensure(decay_factor(1.0, 0.0), 0.0, "zero half-life expires counts")
+        ensure(
+            decay_factor(f64::NAN, 365.0),
+            1.0,
+            "unknown age does not amplify counts",
+        )?;
+        ensure(
+            decay_factor(f64::INFINITY, 365.0),
+            0.0,
+            "infinitely old counts expire",
+        )?;
+        ensure(decay_factor(1.0, 0.0), 0.0, "zero half-life expires counts")?;
+        ensure(
+            decay_factor(1.0, f64::NAN),
+            0.0,
+            "unknown half-life expires counts",
+        )?;
+        ensure(
+            decay_factor(1.0, f64::INFINITY),
+            1.0,
+            "infinite half-life preserves counts",
+        )
     }
 
     #[test]

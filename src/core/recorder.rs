@@ -985,18 +985,26 @@ fn classify_cass_line_event_type(content: &str) -> RecorderEventType {
         _ => {}
     }
 
-    let role = value
-        .get("message")
-        .and_then(|message| message.get("role"))
-        .and_then(JsonValue::as_str)
-        .or_else(|| value.get("role").and_then(JsonValue::as_str))
-        .unwrap_or_default();
+    let role = cass_line_role(&value).unwrap_or_default();
     match role {
         "assistant" | "model" => RecorderEventType::AssistantMessage,
         "system" => RecorderEventType::SystemMessage,
         "tool" | "function" => RecorderEventType::ToolResult,
         _ => RecorderEventType::UserMessage,
     }
+}
+
+fn cass_line_role(value: &JsonValue) -> Option<&str> {
+    value
+        .pointer("/message/role")
+        .and_then(JsonValue::as_str)
+        .or_else(|| {
+            value
+                .pointer("/message/author/role")
+                .and_then(JsonValue::as_str)
+        })
+        .or_else(|| value.pointer("/role").and_then(JsonValue::as_str))
+        .or_else(|| value.pointer("/author/role").and_then(JsonValue::as_str))
 }
 
 fn default_agent_id(source_type: ImportSourceType) -> &'static str {
@@ -2950,6 +2958,31 @@ mod tests {
             "hash chain",
         )?;
         ensure(report.chain_complete, true, "chain complete")
+    }
+
+    #[test]
+    fn cass_line_classifier_reads_nested_author_roles() -> TestResult {
+        ensure(
+            classify_cass_line_event_type(
+                r#"{"type":"message","message":{"author":{"role":"assistant"},"content":"done"}}"#,
+            ),
+            RecorderEventType::AssistantMessage,
+            "message author assistant role",
+        )?;
+        ensure(
+            classify_cass_line_event_type(
+                r#"{"type":"message","message":{"author":{"role":"tool"},"content":"ok"}}"#,
+            ),
+            RecorderEventType::ToolResult,
+            "message author tool role",
+        )?;
+        ensure(
+            classify_cass_line_event_type(
+                r#"{"type":"message","author":{"role":"system"},"content":"policy"}"#,
+            ),
+            RecorderEventType::SystemMessage,
+            "top-level author system role",
+        )
     }
 
     #[test]

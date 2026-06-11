@@ -57,7 +57,7 @@ fn normalized_learning_token(input: &str) -> String {
 
     for character in trimmed.chars() {
         match character {
-            '-' | '_' => {
+            character if character.is_whitespace() || character == '-' || character == '_' => {
                 if !normalized.is_empty() && !previous_was_separator {
                     normalized.push('_');
                 }
@@ -1526,6 +1526,11 @@ mod tests {
             "camel question status alias",
         )?;
         ensure(
+            LearningQuestionStatus::from_str("ready for experiment"),
+            Ok(LearningQuestionStatus::ReadyForExperiment),
+            "space question status alias",
+        )?;
+        ensure(
             LearningTargetKind::from_str(" Decision "),
             Ok(LearningTargetKind::Decision),
             "target kind alias",
@@ -1541,6 +1546,11 @@ mod tests {
             "camel experiment status alias",
         )?;
         ensure(
+            LearningExperimentStatus::from_str("dry run ready"),
+            Ok(LearningExperimentStatus::DryRunReady),
+            "space experiment status alias",
+        )?;
+        ensure(
             ExperimentSafetyBoundary::from_str("ask-before-acting"),
             Ok(ExperimentSafetyBoundary::AskBeforeActing),
             "safety boundary alias",
@@ -1549,6 +1559,11 @@ mod tests {
             ExperimentSafetyBoundary::from_str("AskBeforeActing"),
             Ok(ExperimentSafetyBoundary::AskBeforeActing),
             "pascal safety boundary alias",
+        )?;
+        ensure(
+            ExperimentSafetyBoundary::from_str("human review"),
+            Ok(ExperimentSafetyBoundary::HumanReview),
+            "space safety boundary alias",
         )?;
         ensure(
             LearningObservationSignal::from_str(" Positive "),

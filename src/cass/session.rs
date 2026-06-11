@@ -35,6 +35,13 @@ fn normalized_cass_token(input: &str) -> String {
                 previous_was_lowercase = false;
                 previous_was_separator = true;
             }
+            character if character.is_whitespace() => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
             character if character.is_ascii_uppercase() => {
                 if previous_was_lowercase && !previous_was_separator {
                     normalized.push('_');
@@ -314,6 +321,11 @@ fn parse_cass_line_fragment(
 }
 
 fn parse_positive_cass_line(value: &str) -> Result<u32, CassSessionReferenceError> {
+    if value.is_empty() || !value.chars().all(|character| character.is_ascii_digit()) {
+        return Err(CassSessionReferenceError {
+            reason: "invalid_line_number",
+        });
+    }
     let parsed = value
         .parse::<u32>()
         .map_err(|_| CassSessionReferenceError {
@@ -847,7 +859,7 @@ impl ImportCursor {
         if self.sessions_discovered == 0 {
             return 0.0;
         }
-        let processed = self.sessions_imported + self.sessions_skipped;
+        let processed = self.sessions_imported.saturating_add(self.sessions_skipped);
         (processed as f32 / self.sessions_discovered as f32) * 100.0
     }
 
@@ -855,7 +867,8 @@ impl ImportCursor {
     #[must_use]
     pub const fn is_complete(&self) -> bool {
         self.sessions_discovered > 0
-            && (self.sessions_imported + self.sessions_skipped) >= self.sessions_discovered
+            && self.sessions_imported.saturating_add(self.sessions_skipped)
+                >= self.sessions_discovered
     }
 }
 
@@ -915,12 +928,30 @@ mod tests {
         }
     }
 
+    fn ensure_session_uri_error(input: &str, expected_reason: &'static str) -> TestResult {
+        match normalize_cass_session_uri(input) {
+            Ok(reference) => Err(format!(
+                "{input}: expected error {expected_reason}, got Ok({reference:?})"
+            )),
+            Err(error) => ensure_equal(
+                &error.reason(),
+                &expected_reason,
+                &format!("reason for {input:?}"),
+            ),
+        }
+    }
+
     #[test]
     fn cass_agent_parsing_handles_variants() -> TestResult {
         ensure_equal(
             &CassAgent::parse_lossy("claude-code"),
             &CassAgent::ClaudeCode,
             "claude-code",
+        )?;
+        ensure_equal(
+            &CassAgent::parse_lossy("Claude Code"),
+            &CassAgent::ClaudeCode,
+            "space-separated claude code",
         )?;
         ensure_equal(
             &CassAgent::parse_lossy("ClaudeCode"),
@@ -951,6 +982,11 @@ mod tests {
             &CassAgent::parse_lossy("chatgpt"),
             &CassAgent::ChatGpt,
             "chatgpt",
+        )?;
+        ensure_equal(
+            &CassAgent::parse_lossy("Chat GPT"),
+            &CassAgent::ChatGpt,
+            "space-separated Chat GPT",
         )?;
         ensure_equal(
             &CassAgent::parse_lossy("ChatGpt"),
@@ -991,6 +1027,11 @@ mod tests {
             "tool_call",
         )?;
         ensure_equal(
+            &CassSpanKind::parse_lossy("tool call"),
+            &CassSpanKind::ToolCall,
+            "space-separated tool call",
+        )?;
+        ensure_equal(
             &CassSpanKind::parse_lossy("ToolCall"),
             &CassSpanKind::ToolCall,
             "PascalCase tool call",
@@ -1006,6 +1047,11 @@ mod tests {
             "tool_result whitespace and case",
         )?;
         ensure_equal(
+            &CassSpanKind::parse_lossy("tool result"),
+            &CassSpanKind::ToolResult,
+            "space-separated tool result",
+        )?;
+        ensure_equal(
             &CassSpanKind::parse_lossy("toolResult"),
             &CassSpanKind::ToolResult,
             "camelCase tool result",
@@ -1019,6 +1065,11 @@ mod tests {
             &CassSpanKind::parse_lossy("fileHistorySnapshot"),
             &CassSpanKind::File,
             "camelCase file history snapshot",
+        )?;
+        ensure_equal(
+            &CassSpanKind::parse_lossy("file history snapshot"),
+            &CassSpanKind::File,
+            "space-separated file history snapshot",
         )?;
         ensure_equal(
             &CassSpanKind::parse_lossy("summary"),
@@ -1050,6 +1101,11 @@ mod tests {
             "assistant",
         )?;
         ensure_equal(
+            &CassRole::parse_lossy("AI"),
+            &CassRole::Assistant,
+            "AI uppercase alias",
+        )?;
+        ensure_equal(
             &CassRole::parse_lossy(" Assistant "),
             &CassRole::Assistant,
             "assistant whitespace and case",
@@ -1068,6 +1124,14 @@ mod tests {
         ensure_equal(&CassRole::Assistant.as_str(), &"assistant", "assistant")?;
         ensure_equal(&CassRole::System.as_str(), &"system", "system")?;
         ensure_equal(&CassRole::Tool.as_str(), &"tool", "tool")
+    }
+
+    #[test]
+    fn cass_session_uri_rejects_signed_or_empty_line_tokens() -> TestResult {
+        ensure_session_uri_error("cass-session://abc#L+1", "invalid_line_number")?;
+        ensure_session_uri_error("cass-session://abc#L1-+2", "invalid_line_number")?;
+        ensure_session_uri_error("cass-session://abc#L1-", "invalid_line_number")?;
+        ensure_session_uri_error("cass-session://abc#L-L2", "invalid_line_number")
     }
 
     #[test]
@@ -1390,6 +1454,17 @@ mod tests {
     fn import_cursor_completion_percent_handles_zero() {
         let cursor = ImportCursor::new();
         assert!((cursor.completion_percent() - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn import_cursor_processed_count_math_saturates() {
+        let mut cursor = ImportCursor::new();
+        cursor.sessions_discovered = u32::MAX;
+        cursor.sessions_imported = u32::MAX;
+        cursor.sessions_skipped = 1;
+
+        assert!(cursor.is_complete());
+        assert!((cursor.completion_percent() - 100.0).abs() < 0.01);
     }
 
     #[test]
