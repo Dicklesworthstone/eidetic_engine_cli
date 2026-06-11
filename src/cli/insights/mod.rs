@@ -94,6 +94,13 @@ pub struct InsightsArgs {
     /// Emit insights as newline-delimited JSON: header, sections, footer.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub json_stream: bool,
+
+    /// Resume a budget-truncated page sequence from an `ee.cursor.v1`
+    /// continuation cursor (ADR 0063 §3, bd-7lvbg.3). Only meaningful with
+    /// `--json`; rejected cursors yield an empty page plus a
+    /// `cursor_invalid`/`cursor_stale` degraded entry.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -3609,6 +3616,7 @@ mod tests {
             limit: DEFAULT_SECTION_LIMIT,
             offset: 0,
             json_stream: false,
+            cursor: None,
         })
         .map_err(|error| error.to_string())?;
 
@@ -3676,6 +3684,7 @@ mod tests {
             limit: DEFAULT_SECTION_LIMIT,
             offset: 0,
             json_stream: false,
+            cursor: None,
         })
         .map_err(|error| error.to_string())?;
 
@@ -3698,6 +3707,7 @@ mod tests {
             limit: DEFAULT_SECTION_LIMIT,
             offset: 0,
             json_stream: false,
+            cursor: None,
         })
         .map_err(|error| error.to_string())?;
         let json: serde_json::Value = serde_json::from_str(&render_insights_json(&report))
@@ -3732,6 +3742,7 @@ mod tests {
             limit: DEFAULT_SECTION_LIMIT,
             offset: 0,
             json_stream: false,
+            cursor: None,
         })
         .map_err(|error| error.to_string())?;
         let rendered = render_insights_json_stream(&report);
@@ -3777,6 +3788,7 @@ mod tests {
             limit: DEFAULT_SECTION_LIMIT,
             offset: 0,
             json_stream: false,
+            cursor: None,
         })
         .map_err(|error| error.to_string())?;
         report.sections = vec![InsightsSection {
@@ -3822,6 +3834,7 @@ mod tests {
             limit: DEFAULT_SECTION_LIMIT,
             offset: 0,
             json_stream: false,
+            cursor: None,
         })
         .map_err(|error| error.to_string())?;
         let json = render_insights_json(&report);
@@ -3851,6 +3864,7 @@ mod tests {
                 limit: DEFAULT_SECTION_LIMIT,
                 offset: 0,
                 json_stream: false,
+                cursor: None,
             })
             .map_err(|error| error.to_string())?;
 
@@ -3909,6 +3923,7 @@ mod tests {
                     limit: DEFAULT_SECTION_LIMIT,
                     offset: 0,
                     json_stream: false,
+                    cursor: None,
                 },
                 InsightsBuildOptions {
                     workspace: Some(&workspace),
@@ -3944,6 +3959,7 @@ mod tests {
                 limit: DEFAULT_SECTION_LIMIT,
                 offset: 0,
                 json_stream: false,
+                cursor: None,
             },
             InsightsBuildOptions {
                 workspace: Some(&workspace),
@@ -3989,6 +4005,7 @@ mod tests {
                 limit: DEFAULT_SECTION_LIMIT,
                 offset: 0,
                 json_stream: false,
+                cursor: None,
             },
             InsightsBuildOptions {
                 workspace: Some(&workspace),
@@ -4057,6 +4074,7 @@ mod tests {
             limit: DEFAULT_SECTION_LIMIT,
             offset: 0,
             json_stream: false,
+            cursor: None,
         })
         .map_err(|error| error.to_string())?;
 
@@ -4094,6 +4112,7 @@ mod tests {
                     limit: DEFAULT_SECTION_LIMIT,
                     offset: 0,
                     json_stream: false,
+                    cursor: None,
                 },
                 InsightsBuildOptions {
                     workspace: Some(&workspace),
@@ -4175,6 +4194,7 @@ mod tests {
                 limit: DEFAULT_SECTION_LIMIT,
                 offset: 0,
                 json_stream: false,
+                cursor: None,
             })
             .map_err(|error| error.to_string())?;
 
@@ -5007,6 +5027,7 @@ mod tests {
             limit: 500,
             offset: 50,
             json_stream: false,
+            cursor: None,
         })
         .map_err(|error| error.to_string())?;
 

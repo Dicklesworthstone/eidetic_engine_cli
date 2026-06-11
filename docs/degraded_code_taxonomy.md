@@ -487,8 +487,8 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 |------|----------|------|
 | `output_truncated_budget` | info | bd-7lvbg.2 — ADR 0063 §5: trailing whole elements dropped at the schema's declared truncation point to satisfy `--max-output-tokens`; carries `details.droppedCount` + `details.continuationCursor` (`ee.cursor.v1`) |
 | `output_budget_unsatisfiable` | medium | bd-7lvbg.2 — ADR 0063 §5: the envelope minimum (or a schema with no declared truncation point) exceeds the ceiling; the response fails closed with a minimal identifying payload |
-| `cursor_stale` | low | bd-7lvbg.2 — ADR 0063 §5: cursor `dbGeneration` < current workspace generation; honest pagination requires partitioning one generation's result set; repair: re-run without `--cursor` (surface wiring bd-7lvbg.3) |
-| `cursor_invalid` | low | bd-7lvbg.2 — ADR 0063 §5: cursor MAC failure, `paramsHash` mismatch, future generation, or legacy format; repair: re-run without `--cursor` (surface wiring bd-7lvbg.3) |
+| `cursor_stale` | low | bd-7lvbg.2 — ADR 0063 §5: cursor `dbGeneration` < current workspace generation; honest pagination requires partitioning one generation's result set; repair: re-run without `--cursor`. Wired (bd-7lvbg.3) on schema list, search, memory list, insights, curate candidates, pack, and audit timeline; a rejected cursor yields an empty page plus this entry, never a restarted page |
+| `cursor_invalid` | low | bd-7lvbg.2 — ADR 0063 §5: cursor MAC failure, `paramsHash` mismatch, future generation, dishonest `positionKey`/`droppedCount`, or legacy format (including pre-migration bespoke audit-timeline offset cursors); repair: re-run without `--cursor`. Wired (bd-7lvbg.3) on schema list, search, memory list, insights, curate candidates, pack, and audit timeline; a rejected cursor yields an empty page plus this entry, never a restarted page |
 
 #### Feedback (5)
 | Code | Severity | Bead |

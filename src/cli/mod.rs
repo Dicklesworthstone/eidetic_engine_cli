@@ -20,7 +20,7 @@ use crate::cass::{
 use crate::config::env_registry::{EnvVar, read, read_os};
 use crate::config::{
     GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY, GRAPH_FEATURE_PROXIMITY_ENABLED_KEY,
-    GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY, MeshCommandMode,
+    GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY, MeshCommandMode, PathExpander,
 };
 use crate::core::VersionReport;
 use crate::core::agent_detect::{
@@ -517,11 +517,15 @@ pub fn find_workspace_via_walk_up(start: &Path) -> Option<PathBuf> {
 #[must_use]
 pub fn resolve_workspace_for_cli(cli_workspace: Option<&Path>) -> (PathBuf, WorkspaceSource) {
     if let Some(explicit) = cli_workspace {
-        return (explicit.to_path_buf(), WorkspaceSource::Flag);
+        return (
+            expand_workspace_path_for_cli(explicit),
+            WorkspaceSource::Flag,
+        );
     }
     if let Some(env_path) = read(EnvVar::Workspace) {
         if !env_path.is_empty() {
-            return (PathBuf::from(env_path), WorkspaceSource::Env);
+            let raw = PathBuf::from(env_path);
+            return (expand_workspace_path_for_cli(&raw), WorkspaceSource::Env);
         }
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -529,6 +533,20 @@ pub fn resolve_workspace_for_cli(cli_workspace: Option<&Path>) -> (PathBuf, Work
         return (walked, WorkspaceSource::WalkUp);
     }
     (cwd, WorkspaceSource::Cwd)
+}
+
+fn expand_workspace_path_for_cli(raw: &Path) -> PathBuf {
+    let expander = PathExpander::from_process_env();
+    expand_workspace_path_for_cli_with_expander(raw, &expander)
+}
+
+fn expand_workspace_path_for_cli_with_expander(raw: &Path, expander: &PathExpander) -> PathBuf {
+    let Some(raw_str) = raw.to_str() else {
+        return raw.to_path_buf();
+    };
+    expander
+        .expand(raw_str)
+        .unwrap_or_else(|_| raw.to_path_buf())
 }
 
 impl Cli {
@@ -685,14 +703,46 @@ thread_local! {
 }
 
 /// Active output-token governor settings for the current invocation
-/// (ADR 0063, bd-7lvbg.2). Set once in [`run`] when `--max-output-tokens`
-/// or `EE_MAX_OUTPUT_TOKENS` declares a ceiling; `None` keeps the render
-/// path byte-identical and never invokes the estimator.
+/// (ADR 0063, bd-7lvbg.2/.3). Set once in [`run`] when `--max-output-tokens`
+/// or `EE_MAX_OUTPUT_TOKENS` declares a ceiling, or when argv carries a
+/// `--cursor` resume flag; `None` keeps the render path byte-identical and
+/// never invokes the estimator.
 #[derive(Clone, Debug)]
 struct ActiveOutputGovernor {
-    ceiling_tokens: u64,
+    /// Declared output ceiling; `None` when only a resume cursor engaged
+    /// the governor (the resumed remainder is then emitted unbounded).
+    ceiling_tokens: Option<u64>,
     params_hash: String,
     workspace_root: PathBuf,
+    /// `ee.cursor.v1` resume token registered by a wired surface handler
+    /// via [`set_governor_resume_cursor`] (bd-7lvbg.3). Surfaces with
+    /// non-governor `--cursor` flags (subscribe's monotonic delta cursor,
+    /// audit timeline's query-level pagination) never register one, so the
+    /// governed render path stays inert for them.
+    resume_cursor: Option<String>,
+}
+
+impl ActiveOutputGovernor {
+    /// Whether the governed render path must engage (ceiling set or a
+    /// wired surface registered a resume cursor).
+    const fn engaged(&self) -> bool {
+        self.ceiling_tokens.is_some() || self.resume_cursor.is_some()
+    }
+}
+
+/// Register a wired surface's `--cursor` resume token with the active
+/// output governor (bd-7lvbg.3). No-op when the token is absent; the
+/// governor state itself always exists when argv carries `--cursor`
+/// (see [`run`]).
+fn set_governor_resume_cursor(cursor: Option<&str>) {
+    let Some(token) = cursor else {
+        return;
+    };
+    ACTIVE_OUTPUT_GOVERNOR.with(|governor| {
+        if let Some(active) = governor.borrow_mut().as_mut() {
+            active.resume_cursor = Some(token.to_owned());
+        }
+    });
 }
 
 const EXPORT_REPORT_SCHEMA_V1: &str = "ee.export.report.v1";
@@ -2957,6 +3007,15 @@ pub struct PackArgs {
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
+
+    /// Resume a budget-truncated ENVELOPE page sequence from an
+    /// `ee.cursor.v1` continuation cursor (ADR 0063 §3, bd-7lvbg.3). Only
+    /// `data.pack.skipped[]` pages — `data.pack.items[]` are never
+    /// governor-truncated (pack content is governed solely by
+    /// `--max-tokens`). Combine with `--read-only` to avoid persisting a
+    /// new pack row per page.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
 }
 
 /// Pack subcommands: build, replay, diff.
@@ -3103,6 +3162,15 @@ pub struct PackBuildArgs {
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
+
+    /// Resume a budget-truncated ENVELOPE page sequence from an
+    /// `ee.cursor.v1` continuation cursor (ADR 0063 §3, bd-7lvbg.3). Only
+    /// `data.pack.skipped[]` pages — `data.pack.items[]` are never
+    /// governor-truncated (pack content is governed solely by
+    /// `--max-tokens`). Combine with `--read-only` to avoid persisting a
+    /// new pack row per page.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
 }
 
 impl PackArgs {
@@ -3128,6 +3196,7 @@ impl PackArgs {
             profile: self.profile.clone(),
             pack_profile: self.pack_profile,
             resource_profile: self.resource_profile,
+            cursor: self.cursor.clone(),
             no_coverage_fill: self.no_coverage_fill,
             no_rendered_text: self.no_rendered_text,
             no_skipped: self.no_skipped,
@@ -8280,6 +8349,11 @@ pub struct SearchArgs {
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
+
+    /// Resume a budget-truncated page sequence from an `ee.cursor.v1`
+    /// continuation cursor (ADR 0063 §3, bd-7lvbg.3).
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
 }
 
 /// Arguments for `ee impact`.
@@ -9072,6 +9146,11 @@ pub struct CurateCandidatesArgs {
     /// Group likely duplicate candidates together in queue output.
     #[arg(long, action = ArgAction::SetTrue)]
     pub group_duplicates: bool,
+
+    /// Resume a budget-truncated page sequence from an `ee.cursor.v1`
+    /// continuation cursor (ADR 0063 §3, bd-7lvbg.3).
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
 }
 
 /// Arguments for `ee curate show` (bd-18z8x).
@@ -10422,13 +10501,23 @@ pub struct EconomyPrunePlanArgs {
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum SchemaCommand {
     /// List all available public schemas.
-    List,
+    List(SchemaListArgs),
     /// Export a schema's JSON Schema definition.
     Export {
         /// Schema ID to export (e.g., "ee.response.v2"). Omit for all schemas.
         #[arg(value_name = "SCHEMA_ID")]
         schema_id: Option<String>,
     },
+}
+
+/// Arguments for `ee schema list` — the no-DB output-governor
+/// demonstration surface (ADR 0063, bd-7lvbg.3).
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct SchemaListArgs {
+    /// Resume a budget-truncated page sequence from an `ee.cursor.v1`
+    /// continuation cursor (ADR 0063 §3, bd-7lvbg.3).
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -10913,6 +11002,11 @@ pub struct MemoryListArgs {
     /// Exclude tombstoned memories from the list.
     #[arg(long = "no-tombstoned", action = ArgAction::SetTrue)]
     pub no_tombstoned: bool,
+
+    /// Resume a budget-truncated page sequence from an `ee.cursor.v1`
+    /// continuation cursor (ADR 0063 §3, bd-7lvbg.3).
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
 }
 
 /// Arguments for `ee memory show`.
@@ -11546,11 +11640,22 @@ where
         // ungoverned (registry-default fallback convention).
         read(EnvVar::MaxOutputTokens).and_then(|raw| raw.trim().parse::<u64>().ok())
     });
+    // A `--cursor` flag also engages the governor state (bd-7lvbg.3) so a
+    // resume without a fresh ceiling can still re-partition the page
+    // sequence; handlers with a wired flag register the token via
+    // [`set_governor_resume_cursor`]. Non-governor `--cursor` surfaces
+    // never register, and the unengaged state stays zero-cost.
+    let has_cursor_flag = args_contain_cursor_flag(&args);
     ACTIVE_OUTPUT_GOVERNOR.with(|governor| {
-        *governor.borrow_mut() = output_token_ceiling.map(|ceiling_tokens| ActiveOutputGovernor {
-            ceiling_tokens,
-            params_hash: output::governor::hash_invocation_params(governor_params_for_hash(&args)),
-            workspace_root: resolve_workspace_for_cli(cli.workspace.as_deref()).0,
+        *governor.borrow_mut() = (output_token_ceiling.is_some() || has_cursor_flag).then(|| {
+            ActiveOutputGovernor {
+                ceiling_tokens: output_token_ceiling,
+                params_hash: output::governor::hash_invocation_params(governor_params_for_hash(
+                    &args,
+                )),
+                workspace_root: resolve_workspace_for_cli(cli.workspace.as_deref()).0,
+                resume_cursor: None,
+            }
         });
     });
 
@@ -12791,20 +12896,23 @@ where
             handle_model_command(&cli, model_cmd, stdout, stderr)
         }
         Some(Command::Schema(ref schema_cmd)) => match schema_cmd {
-            SchemaCommand::List => match cli.renderer() {
-                output::Renderer::Human | output::Renderer::Markdown => {
-                    write_stdout(stdout, &output::render_schema_list_human())
+            SchemaCommand::List(args) => {
+                set_governor_resume_cursor(args.cursor.as_deref());
+                match cli.renderer() {
+                    output::Renderer::Human | output::Renderer::Markdown => {
+                        write_stdout(stdout, &output::render_schema_list_human())
+                    }
+                    output::Renderer::Toon => {
+                        write_stdout(stdout, &(output::render_schema_list_toon() + "\n"))
+                    }
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => {
+                        write_stdout(stdout, &(output::render_schema_list_json() + "\n"))
+                    }
                 }
-                output::Renderer::Toon => {
-                    write_stdout(stdout, &(output::render_schema_list_toon() + "\n"))
-                }
-                output::Renderer::Json
-                | output::Renderer::Jsonl
-                | output::Renderer::Compact
-                | output::Renderer::Hook => {
-                    write_stdout(stdout, &(output::render_schema_list_json() + "\n"))
-                }
-            },
+            }
             SchemaCommand::Export { schema_id } => match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => write_stdout(
                     stdout,
@@ -13170,6 +13278,25 @@ fn args_contain_format_flag(args: &[OsString]) -> bool {
             continue;
         };
         if arg == "--format" || arg.starts_with("--format=") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether argv carries a `--cursor` flag (any subcommand's). Used only to
+/// decide whether the governor state must exist for a possible resume
+/// registration (bd-7lvbg.3); surfaces with non-governor cursors simply
+/// never register a token.
+fn args_contain_cursor_flag(args: &[OsString]) -> bool {
+    for arg in args.iter().skip(1) {
+        if arg == OsStr::new("--") {
+            return false;
+        }
+        let Some(arg) = arg.to_str() else {
+            continue;
+        };
+        if arg == "--cursor" || arg.starts_with("--cursor=") {
             return true;
         }
     }
@@ -15514,6 +15641,7 @@ where
     W: Write,
     E: Write,
 {
+    set_governor_resume_cursor(args.cursor.as_deref());
     let workspace = cli.resolve_workspace();
     let report = match insights::build_insights_report_with_options(
         args,
@@ -17270,12 +17398,14 @@ fn active_response_schema_stdout(text: &str) -> Result<Cow<'_, str>, DomainError
     let selector = ACTIVE_FIELD_SELECTOR.with(|selector| selector.borrow().clone());
     let schema_version = ACTIVE_RESPONSE_SCHEMA_VERSION.with(Cell::get);
     let governor = ACTIVE_OUTPUT_GOVERNOR.with(|governor| governor.borrow().clone());
+    let governor_engaged = governor.as_ref().is_some_and(ActiveOutputGovernor::engaged);
     if selector.is_none()
-        && governor.is_none()
+        && !governor_engaged
         && matches!(schema_version, output::ResponseSchemaVersion::V1)
     {
-        // Zero-cost-when-unused invariant (ADR 0063 §1): no ceiling and no
-        // projection means the rendered bytes pass through untouched.
+        // Zero-cost-when-unused invariant (ADR 0063 §1): no ceiling, no
+        // registered resume cursor, and no projection means the rendered
+        // bytes pass through untouched.
         return Ok(Cow::Borrowed(text));
     }
     response_schema_stdout(text, schema_version, selector.as_ref(), governor.as_ref())
@@ -17314,19 +17444,27 @@ fn response_schema_stdout(
         body.to_owned()
     };
     // Output-token governor (ADR 0063 §2): explicit --fields projection
-    // applies FIRST, then the governor truncates the projected payload.
-    let governed = if let Some(active) = governor {
+    // applies FIRST, then the governor truncates the projected payload. A
+    // registered resume cursor re-partitions the page sequence before the
+    // ceiling pass (bd-7lvbg.3); resume without a ceiling emits the
+    // remainder unbounded (modeled as a u64::MAX ceiling).
+    let governed = if let Some(active) = governor.filter(|active| active.engaged()) {
         let workspace_root = active.workspace_root.clone();
         let db_generation = move || governed_db_generation(&workspace_root);
         let ctx = output::governor::GovernorContext {
-            ceiling_tokens: active.ceiling_tokens,
+            ceiling_tokens: active.ceiling_tokens.unwrap_or(u64::MAX),
             params_hash: active.params_hash.clone(),
             mac_key: output::governor::derive_workspace_mac_key(
                 &active.workspace_root.to_string_lossy(),
             ),
             db_generation: &db_generation,
         };
-        output::governor::govern_response_json(&selected, &ctx, output::OUTPUT_TRUNCATION_REGISTRY)?
+        output::governor::govern_response_json_with_resume(
+            &selected,
+            &ctx,
+            output::OUTPUT_TRUNCATION_REGISTRY,
+            active.resume_cursor.as_deref(),
+        )?
     } else {
         selected
     };
@@ -17338,8 +17476,9 @@ fn response_schema_stdout(
 }
 
 /// Normalized invocation parameters for the cursor `paramsHash`: the raw
-/// argv minus the binary name and minus the governor's own ceiling flag, so
-/// the same query at a different ceiling stays resumable (ADR 0063 §3).
+/// argv minus the binary name, minus the governor's own ceiling flag, and
+/// minus the `--cursor` token itself, so the same query at a different
+/// ceiling — or at a later page — stays resumable (ADR 0063 §3).
 fn governor_params_for_hash(args: &[OsString]) -> Vec<String> {
     let mut params = Vec::with_capacity(args.len().saturating_sub(1));
     let mut skip_next = false;
@@ -17349,11 +17488,11 @@ fn governor_params_for_hash(args: &[OsString]) -> Vec<String> {
             skip_next = false;
             continue;
         }
-        if value == "--max-output-tokens" {
+        if value == "--max-output-tokens" || value == "--cursor" {
             skip_next = true;
             continue;
         }
-        if value.starts_with("--max-output-tokens=") {
+        if value.starts_with("--max-output-tokens=") || value.starts_with("--cursor=") {
             continue;
         }
         params.push(value.into_owned());
@@ -31510,6 +31649,7 @@ where
     if let Some(exit_code) = reject_unsupported_mermaid_format(cli, "memory show", stdout, stderr) {
         return exit_code;
     }
+    set_governor_resume_cursor(args.cursor.as_deref());
 
     let workspace = cli.resolve_workspace();
 
@@ -36554,6 +36694,11 @@ where
     W: Write,
     E: Write,
 {
+    // Envelope resume lane only (data.pack.skipped[] pages, bd-7lvbg.3);
+    // replay/diff subcommands are separate surfaces and never register.
+    if args.command.is_none() {
+        set_governor_resume_cursor(args.cursor.as_deref());
+    }
     if args.error_log.is_some() && args.query_file.is_some() {
         let error = DomainError::Usage {
             message: "`ee pack --error-log` is only supported with `ee pack <task>` or `ee pack build --query-file ... --error-log ...`, not legacy top-level --query-file.".to_string(),
@@ -36697,6 +36842,7 @@ where
     W: Write,
     E: Write,
 {
+    set_governor_resume_cursor(args.cursor.as_deref());
     let mut request = match load_query_file(&args.query_file) {
         Ok(request) => request,
         Err(error) => return write_query_file_error(&error, cli.wants_json(), stdout, stderr),
@@ -39051,6 +39197,7 @@ where
     if let Some(exit_code) = reject_unsupported_mermaid_format(cli, "search", stdout, stderr) {
         return exit_code;
     }
+    set_governor_resume_cursor(args.cursor.as_deref());
 
     let handler_start = Instant::now();
     let mut command_timings = Vec::new();
@@ -45583,6 +45730,7 @@ where
     {
         return exit_code;
     }
+    set_governor_resume_cursor(args.cursor.as_deref());
 
     let workspace_path = cli.resolve_workspace();
     if args.all && args.status.is_some() {
@@ -55478,7 +55626,7 @@ impl NormalizedInvocation {
                     RuleCommand::Update(_) => "rule update".to_string(),
                 },
                 Command::Schema(schema) => match schema {
-                    SchemaCommand::List => "schema list".to_string(),
+                    SchemaCommand::List(_) => "schema list".to_string(),
                     SchemaCommand::Export { .. } => "schema export".to_string(),
                 },
                 Command::Impact(_) => "impact".to_string(),
@@ -71934,6 +72082,50 @@ mod tests {
         ensure(
             source == super::WorkspaceSource::Flag,
             format!("expected Flag source, got {source:?}"),
+        )
+    }
+
+    #[test]
+    fn cli_workspace_path_expands_tilde_with_explicit_expander() -> TestResult {
+        let expander = crate::config::PathExpander::with_env(
+            Some(PathBuf::from("/home/agent")),
+            std::collections::BTreeMap::new(),
+        );
+        let expanded =
+            super::expand_workspace_path_for_cli_with_expander(Path::new("~/project"), &expander);
+        ensure(
+            expanded == PathBuf::from("/home/agent/project"),
+            format!("expected tilde-expanded workspace, got {expanded:?}"),
+        )
+    }
+
+    #[test]
+    fn cli_workspace_path_expands_environment_variable_with_explicit_expander() -> TestResult {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert(
+            "EE_TEST_WORKSPACE_ROOT".to_string(),
+            OsString::from("/tmp/ee-workspaces"),
+        );
+        let expander = crate::config::PathExpander::with_env(None, env);
+        let expanded = super::expand_workspace_path_for_cli_with_expander(
+            Path::new("$EE_TEST_WORKSPACE_ROOT/project"),
+            &expander,
+        );
+        ensure(
+            expanded == PathBuf::from("/tmp/ee-workspaces/project"),
+            format!("expected env-expanded workspace, got {expanded:?}"),
+        )
+    }
+
+    #[test]
+    fn cli_workspace_path_preserves_raw_value_when_expansion_fails() -> TestResult {
+        let expander =
+            crate::config::PathExpander::with_env(None, std::collections::BTreeMap::new());
+        let raw = PathBuf::from("$EE_TEST_MISSING_WORKSPACE/project");
+        let expanded = super::expand_workspace_path_for_cli_with_expander(&raw, &expander);
+        ensure(
+            expanded == raw,
+            format!("expected failed expansion to preserve raw path, got {expanded:?}"),
         )
     }
 
