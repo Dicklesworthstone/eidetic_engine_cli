@@ -312,6 +312,7 @@ pub fn apply_session(
 
     let mut persisted = Vec::new();
     let mut retire_pending = Vec::new();
+    let mut applied_additive_count = 0_usize;
     for proposal in &session.proposals {
         match proposal {
             SandboxProposal::Remember {
@@ -343,8 +344,20 @@ pub fn apply_session(
                     auto_link: false,
                     propose_candidates: false,
                 };
-                let report = remember_memory(&options)?;
+                let report = match remember_memory(&options) {
+                    Ok(report) => report,
+                    Err(error) => {
+                        return Err(record_partial_apply_failure(
+                            workspace,
+                            &name,
+                            &session,
+                            applied_additive_count,
+                            error,
+                        ));
+                    }
+                };
                 persisted.push(report.memory_id.to_string());
+                applied_additive_count += 1;
             }
             SandboxProposal::Retire { memory_id } => retire_pending.push(memory_id.clone()),
         }
@@ -359,12 +372,7 @@ pub fn apply_session(
     }
 
     // Clear the applied additive proposals; keep un-promoted retires.
-    let mut remaining = SandboxSession::default();
-    for proposal in &session.proposals {
-        if matches!(proposal, SandboxProposal::Retire { .. }) {
-            remaining.proposals.push(proposal.clone());
-        }
-    }
+    let remaining = remaining_after_applied_additives(&session, applied_additive_count);
     save_session(workspace, &name, &remaining)?;
 
     Ok(ApplyOutcome {
@@ -373,6 +381,59 @@ pub fn apply_session(
         retire_pending,
         notes,
     })
+}
+
+fn record_partial_apply_failure(
+    workspace: &Path,
+    name: &str,
+    session: &SandboxSession,
+    applied_additive_count: usize,
+    apply_error: DomainError,
+) -> DomainError {
+    if applied_additive_count == 0 {
+        return apply_error;
+    }
+
+    let remaining = remaining_after_applied_additives(session, applied_additive_count);
+    match save_session(workspace, name, &remaining) {
+        Ok(()) => DomainError::Storage {
+            message: format!(
+                "Sandbox apply persisted {applied_additive_count} additive proposal(s), then stopped before completing: {apply_error}. The scratch session was updated to keep only unapplied proposals."
+            ),
+            repair: Some(format!(
+                "Review `ee sandbox diff --session {name}` and rerun after fixing the remaining proposal."
+            )),
+        },
+        Err(cleanup_error) => DomainError::Storage {
+            message: format!(
+                "Sandbox apply failed after {applied_additive_count} additive proposal(s) persisted; also failed to update the scratch session: {cleanup_error}. Original apply error: {apply_error}"
+            ),
+            repair: Some(
+                "Inspect <workspace>/.ee/sandbox and avoid retrying the same session until the persisted proposals are reconciled."
+                    .to_owned(),
+            ),
+        },
+    }
+}
+
+fn remaining_after_applied_additives(
+    session: &SandboxSession,
+    applied_additive_count: usize,
+) -> SandboxSession {
+    let mut remaining = SandboxSession::default();
+    let mut seen_additives = 0_usize;
+    for proposal in &session.proposals {
+        match proposal {
+            SandboxProposal::Remember { .. } | SandboxProposal::Import { .. } => {
+                if seen_additives >= applied_additive_count {
+                    remaining.proposals.push(proposal.clone());
+                }
+                seen_additives += 1;
+            }
+            SandboxProposal::Retire { .. } => remaining.proposals.push(proposal.clone()),
+        }
+    }
+    remaining
 }
 
 /// Render an `ee.response.v2` envelope for an apply outcome.
@@ -479,7 +540,10 @@ pub fn render_diff_human(session_name: &str, surface: &SandboxDiffSurface) -> St
 
 #[cfg(test)]
 mod tests {
-    use super::{SandboxCurateArgs, SandboxProposal, load_session, propose_curate, session_name};
+    use super::{
+        SandboxCurateArgs, SandboxProposal, SandboxSession, load_session, propose_curate,
+        remaining_after_applied_additives, session_name,
+    };
 
     #[test]
     fn session_name_defaults_and_trims() {
@@ -580,5 +644,49 @@ mod tests {
 
         let stored = load_session(workspace.path(), "trim-retire");
         assert_eq!(stored.proposals, outcome.session.proposals);
+    }
+
+    #[test]
+    fn sandbox_apply_remaining_session_drops_only_confirmed_additives() {
+        let first = SandboxProposal::Remember {
+            memory_id: "sandbox_mem_first".to_owned(),
+            content: "first".to_owned(),
+            content_hash: "blake3:first".to_owned(),
+            level: "episodic".to_owned(),
+            kind: "fact".to_owned(),
+        };
+        let retire = SandboxProposal::Retire {
+            memory_id: "mem_existing".to_owned(),
+        };
+        let second = SandboxProposal::Import {
+            memory_id: "sandbox_mem_second".to_owned(),
+            content: "second".to_owned(),
+            content_hash: "blake3:second".to_owned(),
+            level: "episodic".to_owned(),
+            kind: "fact".to_owned(),
+        };
+        let third = SandboxProposal::Remember {
+            memory_id: "sandbox_mem_third".to_owned(),
+            content: "third".to_owned(),
+            content_hash: "blake3:third".to_owned(),
+            level: "episodic".to_owned(),
+            kind: "fact".to_owned(),
+        };
+        let session = SandboxSession {
+            proposals: vec![first.clone(), retire.clone(), second.clone(), third.clone()],
+        };
+
+        assert_eq!(
+            remaining_after_applied_additives(&session, 0).proposals,
+            session.proposals
+        );
+        assert_eq!(
+            remaining_after_applied_additives(&session, 2).proposals,
+            vec![retire.clone(), third.clone()]
+        );
+        assert_eq!(
+            remaining_after_applied_additives(&session, usize::MAX).proposals,
+            vec![retire]
+        );
     }
 }
