@@ -543,9 +543,10 @@ where
     }
 
     fn update_pressure(&mut self) {
+        let was_active = self.fallback_active;
         self.pressure = assess_pressure(self.primary.len(), &self.budget);
-        if self.pressure == MemoryPressure::Critical && !self.fallback_active {
-            self.fallback_active = true;
+        self.fallback_active = self.pressure == MemoryPressure::Critical;
+        if self.fallback_active && !was_active {
             self.fallback_activations += 1;
         }
     }
@@ -632,5 +633,57 @@ impl CacheDegradationReport {
             budget_max_entries: cache.budget.max_entries,
             usage_ratio,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CacheBudget, CacheFallbackPolicy, CachePolicy, FallbackCache, LruCache, MemoryPressure,
+    };
+
+    #[test]
+    fn fallback_cache_recovers_after_pressure_drops_below_critical() {
+        let budget = CacheBudget::new(4, usize::MAX).with_watermarks(0.5, 0.75);
+        let mut cache = FallbackCache::new(
+            Box::new(LruCache::new(8)),
+            CacheFallbackPolicy::NoCache,
+            budget,
+        );
+
+        cache.put("a", 1);
+        cache.put("b", 2);
+        cache.put("c", 3);
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.pressure(), MemoryPressure::Critical);
+        assert!(cache.is_fallback_active());
+        assert_eq!(cache.fallback_activations(), 1);
+
+        cache.put("blocked", 4);
+        assert_eq!(cache.len(), 3, "NoCache fallback blocks critical puts");
+        assert_eq!(
+            cache.fallback_activations(),
+            1,
+            "remaining critical must not count as a fresh activation"
+        );
+
+        assert_eq!(cache.remove(&"a"), Some(1));
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.pressure(), MemoryPressure::High);
+        assert!(
+            !cache.is_fallback_active(),
+            "fallback state should reflect current pressure"
+        );
+
+        cache.put("admitted_after_recovery", 5);
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.get(&"admitted_after_recovery"), Some(&5));
+        assert_eq!(cache.pressure(), MemoryPressure::Critical);
+        assert!(cache.is_fallback_active());
+        assert_eq!(
+            cache.fallback_activations(),
+            2,
+            "re-entering critical pressure is a new activation"
+        );
     }
 }

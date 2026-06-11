@@ -1904,58 +1904,70 @@ fn partition_search_entries(
     entries: Vec<SearchHotsetEntry>,
     threshold: u64,
 ) -> (Vec<SearchHotsetEntry>, Vec<SearchHotsetEntry>) {
-    let mut merged: BTreeMap<(SearchHotsetEntryKind, String), SearchHotsetEntry> = BTreeMap::new();
+    let mut admitted: BTreeMap<(SearchHotsetEntryKind, String), SearchHotsetEntry> =
+        BTreeMap::new();
+    let mut rejected: BTreeMap<(SearchHotsetEntryKind, String), SearchHotsetEntry> =
+        BTreeMap::new();
     for entry in entries {
-        let key = (entry.kind, entry.key.clone());
-        merged
-            .entry(key)
-            .and_modify(|existing| {
-                existing.hit_count = existing.hit_count.saturating_add(entry.hit_count);
-                existing.estimated_bytes = existing.estimated_bytes.max(entry.estimated_bytes);
-                existing.generation = existing.generation.max(entry.generation);
-            })
-            .or_insert(entry);
-    }
-
-    let mut admitted = Vec::new();
-    let mut rejected = Vec::new();
-    for entry in merged.into_values() {
         if entry.generation >= threshold {
-            admitted.push(entry);
+            merge_search_entry(&mut admitted, entry);
         } else {
-            rejected.push(entry);
+            merge_search_entry(&mut rejected, entry);
         }
     }
-    (admitted, rejected)
+    (
+        admitted.into_values().collect(),
+        rejected.into_values().collect(),
+    )
+}
+
+fn merge_search_entry(
+    entries: &mut BTreeMap<(SearchHotsetEntryKind, String), SearchHotsetEntry>,
+    entry: SearchHotsetEntry,
+) {
+    let key = (entry.kind, entry.key.clone());
+    entries
+        .entry(key)
+        .and_modify(|existing| {
+            existing.hit_count = existing.hit_count.saturating_add(entry.hit_count);
+            existing.estimated_bytes = existing.estimated_bytes.max(entry.estimated_bytes);
+            existing.generation = existing.generation.max(entry.generation);
+        })
+        .or_insert(entry);
 }
 
 fn partition_pack_entries(
     entries: Vec<PackHotsetEntry>,
     threshold: u64,
 ) -> (Vec<PackHotsetEntry>, Vec<PackHotsetEntry>) {
-    let mut merged: BTreeMap<(PackHotsetEntryKind, String), PackHotsetEntry> = BTreeMap::new();
+    let mut admitted: BTreeMap<(PackHotsetEntryKind, String), PackHotsetEntry> = BTreeMap::new();
+    let mut rejected: BTreeMap<(PackHotsetEntryKind, String), PackHotsetEntry> = BTreeMap::new();
     for entry in entries {
-        let key = (entry.kind, entry.key.clone());
-        merged
-            .entry(key)
-            .and_modify(|existing| {
-                existing.hit_count = existing.hit_count.saturating_add(entry.hit_count);
-                existing.estimated_bytes = existing.estimated_bytes.max(entry.estimated_bytes);
-                existing.generation = existing.generation.max(entry.generation);
-            })
-            .or_insert(entry);
-    }
-
-    let mut admitted = Vec::new();
-    let mut rejected = Vec::new();
-    for entry in merged.into_values() {
         if entry.generation >= threshold {
-            admitted.push(entry);
+            merge_pack_entry(&mut admitted, entry);
         } else {
-            rejected.push(entry);
+            merge_pack_entry(&mut rejected, entry);
         }
     }
-    (admitted, rejected)
+    (
+        admitted.into_values().collect(),
+        rejected.into_values().collect(),
+    )
+}
+
+fn merge_pack_entry(
+    entries: &mut BTreeMap<(PackHotsetEntryKind, String), PackHotsetEntry>,
+    entry: PackHotsetEntry,
+) {
+    let key = (entry.kind, entry.key.clone());
+    entries
+        .entry(key)
+        .and_modify(|existing| {
+            existing.hit_count = existing.hit_count.saturating_add(entry.hit_count);
+            existing.estimated_bytes = existing.estimated_bytes.max(entry.estimated_bytes);
+            existing.generation = existing.generation.max(entry.generation);
+        })
+        .or_insert(entry);
 }
 
 /// Immutable hotset manifest produced by [`HotsetManifestBuilder`].
@@ -2291,6 +2303,70 @@ mod tests {
             "merged entry should report hitCount=5 (3+2). entries={entries:?}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn stale_duplicate_search_entries_are_rejected_before_merge() {
+        let fresh = SearchHotsetEntry::memory("mem_dup", 10, 2);
+        let stale = SearchHotsetEntry::memory("mem_dup", 4, 9);
+
+        let manifest = builder(10).search_entries([stale, fresh]).build();
+
+        assert_eq!(manifest.admitted_count(), 1);
+        assert_eq!(manifest.rejected_stale_count(), 1);
+        let json = manifest.to_json();
+        let admitted = json["searchEntries"].as_array().expect("search entries");
+        let rejected = json["rejectedStaleSearchEntries"]
+            .as_array()
+            .expect("rejected search entries");
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(
+            admitted[0]["hitCount"], 2,
+            "fresh hit count should not absorb stale hits"
+        );
+        assert_eq!(rejected[0]["hitCount"], 9);
+        assert_eq!(json["degraded"][0]["code"], "cache_hotset_stale");
+    }
+
+    #[test]
+    fn stale_duplicate_pack_entries_are_rejected_before_merge() {
+        let fresh = PackHotsetEntry {
+            key: "pack:audit:duplicate".to_owned(),
+            kind: PackHotsetEntryKind::SelectionAudit,
+            section: None,
+            generation: 10,
+            estimated_bytes: 256,
+            hit_count: 2,
+            redaction_status: "content_not_stored",
+        };
+        let stale = PackHotsetEntry {
+            key: "pack:audit:duplicate".to_owned(),
+            kind: PackHotsetEntryKind::SelectionAudit,
+            section: None,
+            generation: 4,
+            estimated_bytes: 512,
+            hit_count: 9,
+            redaction_status: "content_not_stored",
+        };
+
+        let manifest = builder(10).pack_entries([stale, fresh]).build();
+
+        assert_eq!(manifest.admitted_count(), 1);
+        assert_eq!(manifest.rejected_stale_count(), 1);
+        let json = manifest.to_json();
+        let admitted = json["packEntries"].as_array().expect("pack entries");
+        let rejected = json["rejectedStalePackEntries"]
+            .as_array()
+            .expect("rejected pack entries");
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(
+            admitted[0]["hitCount"], 2,
+            "fresh hit count should not absorb stale hits"
+        );
+        assert_eq!(rejected[0]["hitCount"], 9);
+        assert_eq!(json["degraded"][0]["details"]["rejectedStaleCount"], 1);
     }
 
     #[test]
