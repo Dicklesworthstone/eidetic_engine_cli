@@ -1904,9 +1904,43 @@ fn inline_script_mentions_repo_code(body: &str) -> bool {
 
 fn script_body_mentions_file_deletion(body: &str) -> bool {
     matches_file_deletion(body)
+        || inline_script_mentions_file_deletion_api(body)
         || quoted_string_literals(body)
             .iter()
             .any(|literal| matches_file_deletion(literal))
+}
+
+fn inline_script_mentions_file_deletion_api(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    let compact = lower
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect::<String>();
+
+    [
+        ".unlink(",
+        "os.remove(",
+        "os.unlink(",
+        "shutil.rmtree(",
+        "fs.unlink(",
+        "fs.unlinksync(",
+        "fs.rm(",
+        "fs.rmsync(",
+        "fs.rmdir(",
+        "fs.rmdirsync(",
+        "deno.remove(",
+        "deno.removesync(",
+        "file.delete(",
+        "fileutils.rm_rf(",
+        "fileutils.rm_r(",
+        "remove_file(",
+        "remove_dir_all(",
+        "unlink(",
+    ]
+    .iter()
+    .any(|needle| compact.contains(needle))
+        || lower.contains("unlink \"")
+        || lower.contains("unlink '")
 }
 
 fn script_body_mentions_rm_rf_target(body: &str, target_class: RmTargetClass) -> bool {
@@ -3931,6 +3965,32 @@ action = "explode"
                     .iter()
                     .any(|matched| matched.rule_id == rule_id),
                 "command `{command}` did not cite {rule_id}: {:?}",
+                report.matches,
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_file_deletion_rule_halts_inline_interpreter_delete_apis() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for command in [
+            "python -c 'from pathlib import Path; Path(\"src/lib.rs\").unlink()'",
+            "python -c 'import os; os.remove(\"src/lib.rs\")'",
+            "python -c 'import shutil; shutil.rmtree(\"target/tmp\")'",
+            "node -e 'require(\"fs\").unlinkSync(\"src/lib.rs\")'",
+            "node -e 'require(\"fs\").rmSync(\"target/tmp\", {recursive: true})'",
+            "ruby -e 'File.delete(\"src/lib.rs\")'",
+            "perl -e 'unlink \"src/lib.rs\"'",
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert!(
+                report
+                    .matches
+                    .iter()
+                    .any(|matched| matched.rule_id == "builtin:file_deletion"),
+                "command `{command}` did not cite file deletion guard: {:?}",
                 report.matches,
             );
         }

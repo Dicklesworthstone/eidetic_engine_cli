@@ -22,7 +22,7 @@
 //! Dry-run reports carry no wall-clock timestamps, no absolute paths, and
 //! no binary version, so golden tests stay byte-identical across machines.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
 
@@ -621,7 +621,7 @@ fn storage_error(context: &str, error: impl std::fmt::Display) -> DomainError {
 /// Options for `ee export agentsmd`.
 #[derive(Clone, Debug, Default)]
 pub struct AgentsmdExportOptions {
-    /// Target file; relative paths resolve against the workspace root.
+    /// Workspace-relative target file.
     pub file: Option<PathBuf>,
     /// Primer budget override (`--tokens`).
     pub tokens: Option<u32>,
@@ -718,23 +718,67 @@ impl AgentsmdExportReport {
     }
 }
 
-fn resolve_bridge_file(workspace_path: &Path, file: Option<&Path>) -> (PathBuf, String) {
-    let absolute = file.map_or_else(
-        || workspace_path.join(AGENTSMD_DEFAULT_FILE),
-        |file| {
-            if file.is_absolute() {
-                file.to_path_buf()
-            } else {
-                workspace_path.join(file)
+fn invalid_bridge_file_path(path: &Path, reason: &str) -> DomainError {
+    DomainError::Usage {
+        message: format!(
+            "Invalid agentsmd bridge file path {}: {reason}. The path must stay inside the \
+             selected workspace.",
+            path.display()
+        ),
+        repair: Some(
+            "Pass a workspace-relative file path such as AGENTS.md or CLAUDE.md.".to_owned(),
+        ),
+    }
+}
+
+fn bridge_file_relative_path(path: &Path) -> Result<PathBuf, DomainError> {
+    if path.as_os_str().is_empty() {
+        return Err(invalid_bridge_file_path(path, "path is empty"));
+    }
+    if path.is_absolute() {
+        return Err(invalid_bridge_file_path(
+            path,
+            "absolute paths are not allowed",
+        ));
+    }
+    if path.to_string_lossy().contains('\\') {
+        return Err(invalid_bridge_file_path(
+            path,
+            "backslash paths are not portable",
+        ));
+    }
+
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::Prefix(_)
+            | Component::RootDir
+            | Component::CurDir
+            | Component::ParentDir => {
+                return Err(invalid_bridge_file_path(
+                    path,
+                    "only normal relative path components are allowed",
+                ));
             }
-        },
-    );
-    let display = absolute
-        .strip_prefix(workspace_path)
-        .unwrap_or(&absolute)
-        .display()
-        .to_string();
-    (absolute, display)
+        }
+    }
+
+    if relative.as_os_str().is_empty() {
+        return Err(invalid_bridge_file_path(path, "path is empty"));
+    }
+    Ok(relative)
+}
+
+fn resolve_bridge_file(
+    workspace_path: &Path,
+    file: Option<&Path>,
+) -> Result<(PathBuf, String), DomainError> {
+    let requested = file.unwrap_or_else(|| Path::new(AGENTSMD_DEFAULT_FILE));
+    let relative = bridge_file_relative_path(requested)?;
+    let absolute = workspace_path.join(&relative);
+    let display = relative.display().to_string();
+    Ok((absolute, display))
 }
 
 fn read_bridge_file(path: &Path, display_path: &str) -> Result<Option<String>, DomainError> {
@@ -788,7 +832,7 @@ pub fn run_agentsmd_export(
             .find(|section| section.name == name)
             .map_or(0, |section| section.items.len())
     };
-    let (path, display_path) = resolve_bridge_file(workspace_path, options.file.as_deref());
+    let (path, display_path) = resolve_bridge_file(workspace_path, options.file.as_deref())?;
 
     let mut report = AgentsmdExportReport {
         status: "ok",
@@ -903,7 +947,7 @@ pub fn run_agentsmd_export(
 /// Options for `ee import agentsmd`.
 #[derive(Clone, Debug, Default)]
 pub struct AgentsmdImportOptions {
-    /// Source file; relative paths resolve against the workspace root.
+    /// Workspace-relative source file.
     pub file: Option<PathBuf>,
     /// Write pending candidates + audit rows; the default is a dry run
     /// that writes NOTHING.
@@ -1087,7 +1131,7 @@ pub fn run_agentsmd_import(
     workspace_path: &Path,
     options: &AgentsmdImportOptions,
 ) -> Result<AgentsmdImportReport, DomainError> {
-    let (path, display_path) = resolve_bridge_file(workspace_path, options.file.as_deref());
+    let (path, display_path) = resolve_bridge_file(workspace_path, options.file.as_deref())?;
     let mut report = AgentsmdImportReport {
         status: "ok",
         workspace_id: workspace_id.to_owned(),
@@ -1465,7 +1509,7 @@ fn apply_import_proposals(
 /// Options for `ee diag agentsmd-drift`.
 #[derive(Clone, Debug, Default)]
 pub struct AgentsmdDriftOptions {
-    /// Target file; relative paths resolve against the workspace root.
+    /// Workspace-relative target file.
     pub file: Option<PathBuf>,
 }
 
@@ -1622,7 +1666,7 @@ pub fn run_agentsmd_drift(
             .unwrap_or(0),
     )
     .unwrap_or(i64::MAX);
-    let (path, display_path) = resolve_bridge_file(workspace_path, options.file.as_deref());
+    let (path, display_path) = resolve_bridge_file(workspace_path, options.file.as_deref())?;
 
     let mut report = AgentsmdDriftReport {
         status: "ok",
@@ -1967,6 +2011,31 @@ The deploy job MUST wait for the smoke suite to finish.
     fn block_diff_lists_removed_then_added_lines() {
         let diff = render_block_diff("old line", "new one\nnew two");
         assert_eq!(diff, "- old line\n+ new one\n+ new two\n");
+    }
+
+    #[test]
+    fn bridge_file_resolution_stays_inside_workspace() {
+        let workspace = Path::new("/workspace/project");
+        let (path, display) =
+            resolve_bridge_file(workspace, Some(Path::new("docs/CLAUDE.md"))).expect("resolve");
+        assert_eq!(path, PathBuf::from("/workspace/project/docs/CLAUDE.md"));
+        assert_eq!(display, "docs/CLAUDE.md");
+
+        for invalid in [
+            "",
+            "/tmp/AGENTS.md",
+            "../AGENTS.md",
+            "docs/../AGENTS.md",
+            "./AGENTS.md",
+            "docs/./AGENTS.md",
+            "C:\\tmp\\AGENTS.md",
+            "\\\\server\\share\\AGENTS.md",
+        ] {
+            assert!(
+                resolve_bridge_file(workspace, Some(Path::new(invalid))).is_err(),
+                "{invalid:?} must not resolve as an agentsmd bridge file"
+            );
+        }
     }
 
     #[test]

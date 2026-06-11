@@ -8,7 +8,7 @@ use std::cmp::Reverse;
 use std::env;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -600,10 +600,14 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
                 Ok(component) => (component, false),
                 Err(_) => (None, true),
             };
+        let lexical_external_path = path.starts_with(external_root);
+        let has_parent_dir_component = path_has_parent_dir_component(&path);
         let external_required_active = external_available && external_required;
-        let untrusted_external_path =
-            external_required_active && (symlink_component.is_some() || symlink_inspection_failed);
-        let external = path.starts_with(external_root) && !untrusted_external_path;
+        let untrusted_external_path = external_required_active
+            && (symlink_component.is_some()
+                || symlink_inspection_failed
+                || (lexical_external_path && has_parent_dir_component));
+        let external = trusted_external_path(&path, external_root);
 
         if required && !has_required_space {
             degraded.push(BuildAdmissionDegradation {
@@ -617,10 +621,13 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
         }
 
         if required && untrusted_external_path {
-            let reason = symlink_component.as_ref().map_or_else(
-                || "could not be inspected for symlink components".to_owned(),
-                |component| format!("traverses symlink component `{}`", component.display()),
-            );
+            let reason = if let Some(component) = symlink_component.as_ref() {
+                format!("traverses symlink component `{}`", component.display())
+            } else if symlink_inspection_failed {
+                "could not be inspected for symlink components".to_owned()
+            } else {
+                "contains parent-directory components".to_owned()
+            };
             degraded.push(BuildAdmissionDegradation {
                 code: "build_admission_denied",
                 severity: "medium",
@@ -657,6 +664,11 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
             } else if symlink_inspection_failed {
                 format!(
                     "{label} path `{}` could not be inspected for symlink components; external build-root placement cannot be trusted.",
+                    path.display()
+                )
+            } else if lexical_external_path && has_parent_dir_component {
+                format!(
+                    "{label} path `{}` contains parent-directory components; external build-root placement cannot be trusted.",
                     path.display()
                 )
             } else {
@@ -1848,9 +1860,15 @@ fn path_string_is_within(path: &str, root: &Path) -> bool {
 
 fn trusted_external_path(path: &Path, root: &Path) -> bool {
     path.starts_with(root)
+        && !path_has_parent_dir_component(path)
         && first_existing_symlink_component(path)
             .map(|component| component.is_none())
             .unwrap_or(false)
+}
+
+fn path_has_parent_dir_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
 }
 
 fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
@@ -2436,6 +2454,14 @@ mod tests {
             path_string_is_within("./target/debug", external_root),
             false,
             "relative target path",
+        )?;
+        ensure(
+            trusted_external_path(
+                &external_root.join("..").join("escaped-target"),
+                external_root,
+            ),
+            false,
+            "parent-directory escape must not be trusted as external",
         )
     }
 
