@@ -275,20 +275,22 @@ fn restore_relocation(
         reject_existing_symlink_component(&destination)?;
         if original.exists() {
             if let Some(expected) = entry.blake3.as_deref() {
-                let actual = hash_file(&original)?;
-                if actual != expected {
-                    return Err(DomainError::Storage {
-                        message: format!(
-                            "Original path exists with different hash: {}.",
-                            original.display()
-                        ),
-                        repair: Some(
-                            "Move the conflicting file aside manually before restore.".to_owned(),
-                        ),
-                    });
-                }
+                verify_relocation_file_hash(
+                    &original,
+                    expected,
+                    "existing original artifact",
+                    "Move the conflicting file aside manually before restore.",
+                )?;
             }
             continue;
+        }
+        if let Some(expected) = entry.blake3.as_deref() {
+            verify_relocation_file_hash(
+                &destination,
+                expected,
+                "relocated artifact",
+                "Verify the relocation manifest and preserved artifact before restore.",
+            )?;
         }
         if let Some(parent) = original.parent() {
             reject_existing_symlink_component(parent)?;
@@ -304,6 +306,14 @@ fn restore_relocation(
         reject_existing_symlink_component(&destination)?;
         reject_existing_symlink_component(&original)?;
         copy_relocation_file_no_overwrite(&destination, &original, "restore relocated artifact")?;
+        if let Some(expected) = entry.blake3.as_deref() {
+            verify_relocation_file_hash(
+                &original,
+                expected,
+                "restored original artifact",
+                "Remove the partial restored file manually after reviewing it, then retry.",
+            )?;
+        }
         restored = true;
     }
 
@@ -416,6 +426,14 @@ fn apply_manifest_copy(manifest: &ArtifactRelocationManifest) -> Result<(), Doma
                 ),
             });
         }
+        if let Some(expected) = entry.blake3.as_deref() {
+            verify_relocation_file_hash(
+                &original,
+                expected,
+                "source artifact",
+                "Regenerate the relocation manifest from the current artifact bytes.",
+            )?;
+        }
         if let Some(parent) = destination.parent() {
             reject_existing_symlink_component(parent)?;
             fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
@@ -430,8 +448,35 @@ fn apply_manifest_copy(manifest: &ArtifactRelocationManifest) -> Result<(), Doma
         reject_existing_symlink_component(&original)?;
         reject_existing_symlink_component(&destination)?;
         copy_relocation_file_no_overwrite(&original, &destination, "copy relocated artifact")?;
+        if let Some(expected) = entry.blake3.as_deref() {
+            verify_relocation_file_hash(
+                &destination,
+                expected,
+                "copied relocated artifact",
+                "Inspect the partial destination artifact manually before retrying.",
+            )?;
+        }
     }
     Ok(())
+}
+
+fn verify_relocation_file_hash(
+    path: &Path,
+    expected: &str,
+    role: &str,
+    repair: &str,
+) -> Result<(), DomainError> {
+    let actual = hash_file(path)?;
+    if actual == expected {
+        return Ok(());
+    }
+    Err(DomainError::Storage {
+        message: format!(
+            "{role} hash mismatch at {}: expected {expected}, got {actual}.",
+            path.display()
+        ),
+        repair: Some(repair.to_owned()),
+    })
 }
 
 fn copy_relocation_file_no_overwrite(
@@ -603,7 +648,7 @@ fn publish_relocation_manifest_temp_file(
     manifest_path: &Path,
 ) -> Result<(), DomainError> {
     reject_existing_symlink_component(manifest_path)?;
-    ensure_relocation_manifest_final_path_regular_or_missing(manifest_path)?;
+    ensure_relocation_manifest_final_path_missing(manifest_path)?;
     reject_existing_symlink_component(temp_path)?;
     ensure_relocation_manifest_temp_path_is_regular(temp_path)?;
     fs::rename(temp_path, manifest_path).map_err(|error| DomainError::Storage {
@@ -615,11 +660,15 @@ fn publish_relocation_manifest_temp_file(
     })
 }
 
-fn ensure_relocation_manifest_final_path_regular_or_missing(
-    manifest_path: &Path,
-) -> Result<(), DomainError> {
+fn ensure_relocation_manifest_final_path_missing(manifest_path: &Path) -> Result<(), DomainError> {
     match fs::symlink_metadata(manifest_path) {
-        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(metadata) if metadata.file_type().is_file() => Err(DomainError::Storage {
+            message: format!(
+                "relocation manifest path already exists before publish: {}",
+                manifest_path.display()
+            ),
+            repair: Some("Choose a new manifest path; this command will not overwrite.".to_owned()),
+        }),
         Ok(_) => Err(DomainError::Storage {
             message: format!(
                 "relocation manifest path is not a regular file: {}",
@@ -1475,6 +1524,46 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn relocation_manifest_publish_rejects_existing_final_file_without_overwriting() -> TestResult {
+        let root = temp_path("manifest-existing-final-recheck");
+        let manifest = root.join("relocation.json");
+        fs::create_dir_all(parent_dir(&manifest)?).map_err(|error| error.to_string())?;
+        let mut temp_manifest = manifest.clone();
+        temp_manifest.set_extension("tmp");
+        fs::write(&temp_manifest, r#"{"schema":"new"}"#).map_err(|error| error.to_string())?;
+        fs::write(&manifest, "keep final").map_err(|error| error.to_string())?;
+
+        let result = publish_relocation_manifest_temp_file(&temp_manifest, &manifest);
+
+        match result {
+            Err(DomainError::Storage { message, repair }) => {
+                if !message.contains("relocation manifest path already exists before publish") {
+                    return Err(format!("unexpected storage error message: {message}"));
+                }
+                if repair.as_deref()
+                    != Some("Choose a new manifest path; this command will not overwrite.")
+                {
+                    return Err(format!("unexpected repair hint: {repair:?}"));
+                }
+            }
+            other => {
+                return Err(format!(
+                    "expected existing final storage error, got {other:?}"
+                ));
+            }
+        }
+        let final_content = fs::read_to_string(&manifest).map_err(|error| error.to_string())?;
+        if final_content != "keep final" {
+            return Err("existing final manifest was unexpectedly overwritten".to_owned());
+        }
+        let temp_content = fs::read_to_string(&temp_manifest).map_err(|error| error.to_string())?;
+        if temp_content != r#"{"schema":"new"}"# {
+            return Err("temporary manifest was unexpectedly removed or mutated".to_owned());
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn relocation_manifest_publish_rechecks_final_symlink_before_rename() -> TestResult {
@@ -1679,6 +1768,61 @@ mod tests {
     }
 
     #[test]
+    fn relocation_apply_rejects_source_hash_mismatch_before_copying() -> TestResult {
+        let workspace = temp_path("apply-source-hash-workspace");
+        let original = workspace.join("target/debug/source-hash.o");
+        fs::create_dir_all(parent_dir(&original)?).map_err(|error| error.to_string())?;
+        fs::write(&original, "original bytes\n").map_err(|error| error.to_string())?;
+        let expected_hash = hash_file(&original).map_err(|error| error.to_string())?;
+        fs::write(&original, "changed bytes\n").map_err(|error| error.to_string())?;
+
+        let destination = temp_path("apply-source-hash-destination")
+            .join(RELOCATION_DIR)
+            .join("target/debug/source-hash.o");
+        let manifest = ArtifactRelocationManifest {
+            schema: ARTIFACT_RELOCATION_SCHEMA_V1.to_owned(),
+            command_version: env!("CARGO_PKG_VERSION").to_owned(),
+            actor: "test".to_owned(),
+            created_at: "2026-05-13T00:00:00Z".to_owned(),
+            workspace_path: path_to_string(&workspace),
+            source_path: path_to_string(&original),
+            destination_root: path_to_string(parent_dir(&destination)?),
+            restoration_command: "ee artifact relocate --restore --manifest manifest.json --json"
+                .to_owned(),
+            force_with_explicit_path: false,
+            entries: vec![ArtifactRelocationEntry {
+                original_path: path_to_string(&original),
+                destination_path: path_to_string(&destination),
+                kind: "file".to_owned(),
+                size_bytes: 15,
+                mtime_unix_seconds: None,
+                blake3: Some(expected_hash),
+                status: "planned".to_owned(),
+            }],
+        };
+
+        let result = apply_manifest_copy(&manifest);
+
+        match result {
+            Err(DomainError::Storage { message, repair }) => {
+                if !message.contains("source artifact hash mismatch") {
+                    return Err(format!("unexpected hash mismatch message: {message}"));
+                }
+                if repair.as_deref()
+                    != Some("Regenerate the relocation manifest from the current artifact bytes.")
+                {
+                    return Err(format!("unexpected repair hint: {repair:?}"));
+                }
+            }
+            other => return Err(format!("expected source hash mismatch, got {other:?}")),
+        }
+        if destination.exists() {
+            return Err("destination was copied after source hash mismatch".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn relocation_restore_copies_missing_original_from_manifest() -> TestResult {
         let workspace = temp_path("restore-workspace");
         let original = workspace.join("target/debug/restored.o");
@@ -1713,6 +1857,51 @@ mod tests {
         }
         if !report.restored {
             return Err("restore report did not mark restored=true".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn relocation_restore_rejects_relocated_hash_mismatch_before_writing_original() -> TestResult {
+        let workspace = temp_path("restore-corrupt-destination-workspace");
+        let original = workspace.join("target/debug/restored.o");
+        let destination = temp_path("restore-corrupt-destination")
+            .join(RELOCATION_DIR)
+            .join("target/debug/restored.o");
+        fs::create_dir_all(parent_dir(&destination)?).map_err(|error| error.to_string())?;
+        fs::write(&destination, "restore bytes\n").map_err(|error| error.to_string())?;
+        let manifest_path =
+            temp_path("restore-corrupt-destination-manifest").join("relocation.json");
+        let manifest =
+            relocation_manifest_for(&workspace, &original, &destination, &manifest_path)?;
+        write_relocation_manifest(&manifest_path, &manifest)?;
+        fs::write(&destination, "corrupted bytes\n").map_err(|error| error.to_string())?;
+
+        let result = relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &workspace,
+            source_path: None,
+            destination_root: None,
+            manifest_path: &manifest_path,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Restore,
+            force_with_explicit_path: false,
+        });
+
+        match result {
+            Err(DomainError::Storage { message, repair }) => {
+                if !message.contains("relocated artifact hash mismatch") {
+                    return Err(format!("unexpected hash mismatch message: {message}"));
+                }
+                if repair.as_deref()
+                    != Some("Verify the relocation manifest and preserved artifact before restore.")
+                {
+                    return Err(format!("unexpected repair hint: {repair:?}"));
+                }
+            }
+            other => return Err(format!("expected relocated hash mismatch, got {other:?}")),
+        }
+        if original.exists() {
+            return Err("restore wrote original after relocated hash mismatch".to_owned());
         }
         Ok(())
     }
