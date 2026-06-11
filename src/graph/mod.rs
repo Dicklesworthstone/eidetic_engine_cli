@@ -52,6 +52,7 @@ pub mod decay;
 pub mod dominance;
 pub mod gomory_hu;
 pub mod health;
+pub mod structural;
 pub mod hits;
 pub mod minhash_rank;
 pub mod numa_pin;
