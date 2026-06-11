@@ -1989,12 +1989,6 @@ mod tests {
         {
             return Ok(());
         }
-        if std::env::var("TMPDIR")
-            .unwrap_or_default()
-            .contains("USBNVME")
-        {
-            return Ok(());
-        }
         use std::os::unix::fs::PermissionsExt;
 
         let dir = kept_temp_dir("ee-rehearse-runner-perms")?;
