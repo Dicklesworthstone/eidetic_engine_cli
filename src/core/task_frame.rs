@@ -283,9 +283,11 @@ pub fn create_task_frame(options: &TaskFrameCreateOptions) -> Result<TaskFrameRe
     let store_path = task_frame_store_path(&options.workspace_path);
     let mut store = read_store(&store_path)?;
     let now = options.created_at.clone().unwrap_or_else(now_rfc3339);
+    let (root_goal, goal_redacted) = redact_task_text(options.goal.trim());
+    let actor = options.actor.trim().to_owned();
     let frame_id = stable_id(
         TASK_FRAME_ID_PREFIX,
-        &[&workspace_root, &options.goal, &options.actor, &now],
+        &[&workspace_root, &root_goal, &actor, &now],
     );
     if store.frames.iter().any(|frame| frame.id == frame_id) {
         return Err(DomainError::Usage {
@@ -294,7 +296,6 @@ pub fn create_task_frame(options: &TaskFrameCreateOptions) -> Result<TaskFrameRe
         });
     }
 
-    let (root_goal, goal_redacted) = redact_task_text(options.goal.trim());
     let (current_focus, focus_redacted) = redact_optional_task_text(options.current_focus.clone());
     let (blockers, blockers_redacted) = redact_task_strings(&options.blockers);
     let redacted = goal_redacted || focus_redacted || blockers_redacted;
@@ -305,7 +306,7 @@ pub fn create_task_frame(options: &TaskFrameCreateOptions) -> Result<TaskFrameRe
         workspace_root,
         root_goal,
         status: options.status,
-        actor: options.actor.trim().to_owned(),
+        actor,
         source: "ee task-frame create".to_owned(),
         current_focus,
         blockers,
@@ -498,7 +499,7 @@ pub fn add_task_subgoal(options: &TaskSubgoalAddOptions) -> Result<TaskFrameRepo
     let (title, title_redacted) = redact_task_text(options.title.trim());
     let (blockers, blockers_redacted) = redact_task_strings(&options.blockers);
     let subgoal = TaskSubgoal {
-        id: stable_id(TASK_SUBGOAL_ID_PREFIX, &[&frame.id, &options.title, &now]),
+        id: stable_id(TASK_SUBGOAL_ID_PREFIX, &[&frame.id, &title, &now]),
         parent_id,
         title,
         status: options.status,
@@ -1156,6 +1157,41 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn create_frame_id_uses_normalized_stored_text() -> TestResult {
+        let workspace = temp_workspace("normalized-frame-id")?;
+        let mut raw = create_options(workspace.clone());
+        raw.goal = " Rotate token=abc123 ".to_owned();
+        raw.actor = " cod-pane6 ".to_owned();
+        raw.current_focus = None;
+        raw.blockers = Vec::new();
+        raw.evidence_links = Vec::new();
+        raw.dry_run = true;
+
+        let mut normalized = raw.clone();
+        normalized.goal = format!(
+            "Rotate token={}",
+            crate::policy::redaction_placeholder("token")
+        );
+        normalized.actor = "cod-pane6".to_owned();
+
+        let raw_frame = create_task_frame(&raw)
+            .map_err(|e| e.message())?
+            .frame
+            .ok_or_else(|| "missing raw frame".to_owned())?;
+        let normalized_frame = create_task_frame(&normalized)
+            .map_err(|e| e.message())?
+            .frame
+            .ok_or_else(|| "missing normalized frame".to_owned())?;
+
+        assert_eq!(raw_frame.root_goal, normalized_frame.root_goal);
+        assert_eq!(raw_frame.actor, normalized_frame.actor);
+        assert_eq!(raw_frame.id, normalized_frame.id);
+        assert_eq!(raw_frame.redaction_status, "redacted");
+        assert!(!task_frame_store_path(&workspace).exists());
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn create_frame_rejects_symlinked_ee_directory() -> TestResult {
@@ -1538,6 +1574,42 @@ mod tests {
         .ok_or_else(|| "missing subgoal".to_owned())?;
 
         assert_eq!(subgoal.parent_id, None);
+        Ok(())
+    }
+
+    #[test]
+    fn subgoal_id_uses_normalized_stored_title() -> TestResult {
+        let workspace = temp_workspace("normalized-subgoal-id")?;
+        let created =
+            create_task_frame(&create_options(workspace.clone())).map_err(|e| e.message())?;
+        let frame_id = created.frame.ok_or_else(|| "missing frame".to_owned())?.id;
+        let raw = TaskSubgoalAddOptions {
+            workspace_path: workspace.clone(),
+            frame_id: frame_id.clone(),
+            parent_id: None,
+            title: " Remove private_key=abcdef ".to_owned(),
+            status: TaskFrameStatus::Open,
+            blockers: Vec::new(),
+            created_at: Some("2026-05-04T00:01:00Z".to_owned()),
+            dry_run: true,
+        };
+        let mut normalized = raw.clone();
+        normalized.title = format!(
+            "Remove private_key={}",
+            crate::policy::redaction_placeholder("private_key")
+        );
+
+        let raw_subgoal = add_task_subgoal(&raw)
+            .map_err(|e| e.message())?
+            .selected_subgoal
+            .ok_or_else(|| "missing raw subgoal".to_owned())?;
+        let normalized_subgoal = add_task_subgoal(&normalized)
+            .map_err(|e| e.message())?
+            .selected_subgoal
+            .ok_or_else(|| "missing normalized subgoal".to_owned())?;
+
+        assert_eq!(raw_subgoal.title, normalized_subgoal.title);
+        assert_eq!(raw_subgoal.id, normalized_subgoal.id);
         Ok(())
     }
 
