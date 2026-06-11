@@ -825,6 +825,45 @@ fn load_workspace_insights_graph_data(
     Ok(Some(WorkspaceInsightsGraphData { memories, links }))
 }
 
+/// bd-2pos6.7: shared DB-backed structural-graph input for the kCore and
+/// kTruss section builders. Loads workspace graph data ONCE (same
+/// tombstone/workspace filtering as every other insights loader), attaches
+/// the latest memory_links snapshot version when one exists, and projects
+/// through [`crate::graph::structural::build_structural_graph_input`] so
+/// both sections share one reviewed loading/evidence path.
+#[allow(
+    dead_code,
+    reason = "consumed by the kCore/kTruss section builder beads (bd-2pos6.x)"
+)]
+fn load_structural_graph_input(
+    workspace: Option<&Path>,
+    database_path: Option<&Path>,
+) -> Result<Option<crate::graph::structural::StructuralGraphInput>, DomainError> {
+    let Some(data) = load_workspace_insights_graph_data(workspace, database_path)? else {
+        return Ok(None);
+    };
+    // Snapshot metadata is advisory: a missing snapshot or read failure
+    // must not block live structural sections, so only a present row
+    // contributes a version.
+    let snapshot_version = (|| -> Option<u64> {
+        let workspace = workspace?;
+        let connection = open_insights_database(Some(workspace), database_path).ok()??;
+        let workspace_id = insights_workspace_id(&connection, workspace).ok()??;
+        connection
+            .get_latest_graph_snapshot(&workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
+            .ok()
+            .flatten()
+            .map(|snapshot| u64::from(snapshot.snapshot_version))
+    })();
+    Ok(Some(
+        crate::graph::structural::build_structural_graph_input(
+            &data.memories,
+            &data.links,
+            snapshot_version,
+        ),
+    ))
+}
+
 fn load_bridge_inputs(
     workspace: Option<&Path>,
     database_path: Option<&Path>,

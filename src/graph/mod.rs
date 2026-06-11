@@ -52,7 +52,6 @@ pub mod decay;
 pub mod dominance;
 pub mod gomory_hu;
 pub mod health;
-pub mod structural;
 pub mod hits;
 pub mod minhash_rank;
 pub mod numa_pin;
@@ -62,6 +61,7 @@ pub mod ppr_prefetch_cache;
 pub mod result_cache_keys;
 pub mod scale_policy;
 pub mod skyline;
+pub mod structural;
 
 pub const SUBSYSTEM: &str = "graph";
 pub const MODULE_CONTRACT: &str = GRAPH_MODULE_SCHEMA_V1;

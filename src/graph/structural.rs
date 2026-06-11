@@ -112,20 +112,26 @@ pub fn build_structural_graph_input(
             // Self-links carry no structural membership signal.
             continue;
         }
-        if edges
-            .last()
-            .is_some_and(|edge| edge.a == a && edge.b == b)
-        {
+        if edges.last().is_some_and(|edge| edge.a == a && edge.b == b) {
             // Duplicate or reversed of the previous canonical edge.
             continue;
         }
         let mut attrs = AttrMap::new();
-        attrs.insert("weight", CgseValue::Float(f64::from(link.weight)));
-        attrs.insert("confidence", CgseValue::Float(f64::from(link.confidence)));
-        attrs.insert("relation", CgseValue::String(link.relation.clone()));
-        attrs.insert("source", CgseValue::String(link.source.clone()));
         attrs.insert(
-            "evidence_count",
+            "weight".to_owned(),
+            CgseValue::Float(f64::from(link.weight)),
+        );
+        attrs.insert(
+            "confidence".to_owned(),
+            CgseValue::Float(f64::from(link.confidence)),
+        );
+        attrs.insert(
+            "relation".to_owned(),
+            CgseValue::String(link.relation.clone()),
+        );
+        attrs.insert("source".to_owned(), CgseValue::String(link.source.clone()));
+        attrs.insert(
+            "evidence_count".to_owned(),
             CgseValue::Int(i64::from(link.evidence_count)),
         );
         if graph
@@ -273,8 +279,14 @@ mod tests {
 
         let one = build_structural_graph_input(&memories, &forward, None);
         let two = build_structural_graph_input(&memories, &reversed, None);
-        assert_eq!(one.edge_count, 1, "dup/reverse/self links collapse to one edge");
-        assert_eq!(one.edges, two.edges, "projection is input-order independent");
+        assert_eq!(
+            one.edge_count, 1,
+            "dup/reverse/self links collapse to one edge"
+        );
+        assert_eq!(
+            one.edges, two.edges,
+            "projection is input-order independent"
+        );
         assert_eq!(
             (one.edges[0].a.as_str(), one.edges[0].b.as_str()),
             ("mem_a", "mem_b")
