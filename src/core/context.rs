@@ -75,7 +75,8 @@ use crate::db::read_pool::{
     SnapshotPin, SnapshotPinMetadata, registered_process_read_pool,
 };
 use crate::db::{
-    CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, CreatePackTaskLensInput,
+    CreatePackBaselineInput, CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput,
+    CreatePackTaskLensInput,
     DatabaseConfig, DbConnection, PackRecordInsertTimings, StoredAgentContextProfileForPack,
     StoredMemory,
 };
@@ -2670,6 +2671,7 @@ fn run_context_pack_with_performance_inner(
                         &draft,
                         &degraded,
                         options.task_lens.as_ref(),
+                        options.baseline_write.as_ref(),
                         &mut pack_persistence,
                     )
                     .map_err(|error| error.to_string()),
@@ -2682,6 +2684,7 @@ fn run_context_pack_with_performance_inner(
                             &degraded,
                             pack_id_seed,
                             options.task_lens.as_ref(),
+                            options.baseline_write.as_ref(),
                             &mut pack_persistence,
                         )
                         .map(|_| ())
@@ -2704,6 +2707,7 @@ fn run_context_pack_with_performance_inner(
                                 &draft,
                                 &degraded,
                                 options.task_lens.as_ref(),
+                                options.baseline_write.as_ref(),
                                 &mut pack_persistence,
                             )
                             .map_err(|error| error.to_string()),
@@ -2716,6 +2720,7 @@ fn run_context_pack_with_performance_inner(
                                     &degraded,
                                     pack_id_seed,
                                     options.task_lens.as_ref(),
+                                    options.baseline_write.as_ref(),
                                     &mut pack_persistence,
                                 )
                                 .map(|_| ())
@@ -4395,7 +4400,7 @@ fn persist_pack_record_with_pack_id(
                 agent_name: baseline.agent_name.clone(),
                 task_key: baseline.task_key.clone(),
                 pack_id: pack_id.to_string(),
-                pack_hash: pack_hash.clone(),
+                pack_hash: input.pack_hash.clone(),
             },
             baseline.max_rows,
             Some(baseline.agent_name.as_str()),

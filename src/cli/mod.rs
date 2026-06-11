@@ -33426,6 +33426,7 @@ where
             require_fresh_sentinels: false,
             output_options,
             persist_pack: false,
+            baseline_write: None,
             no_lod: false,
         };
         match run_context_pack_with_performance(&pack_options, "orient") {
@@ -33824,6 +33825,7 @@ where
         filters,
         output_options,
         persist_pack: !args.read_only,
+        baseline_write: None,
         no_lod: args.no_lod,
     };
 
@@ -37051,6 +37053,7 @@ where
         require_fresh_sentinels: args.require_fresh_sentinels,
         output_options,
         persist_pack: !args.read_only,
+        baseline_write: None,
         no_lod: args.no_lod,
     };
     let renderer = effective_pack_renderer(cli, request.renderer);
@@ -42975,6 +42978,7 @@ where
         output_options: ContextPackOutputOptions::default(),
         // why-not is read-only and never persists a pack record (reverse of `ee why`).
         persist_pack: false,
+        baseline_write: None,
         no_lod: false,
     };
 
