@@ -2273,6 +2273,127 @@ pub fn explain_situation_record(
 }
 
 // ============================================================================
+// Audited adoption use case (bd-1tp6p.2.2)
+// ============================================================================
+
+/// Domain request for the audited adoption use case: turn raw task text
+/// into a reviewed persisted situation record. `ee situation classify`
+/// stays non-mutating; this is the single write path (bd-1tp6p.1
+/// product decision).
+#[derive(Clone, Debug)]
+pub struct AdoptSituationRequest {
+    pub task_text: String,
+    pub workspace_scope: String,
+    pub adopted_by: Option<String>,
+    pub adoption_reason: Option<String>,
+    pub evidence_ids: Vec<String>,
+    /// Deterministic timestamp override for tests and replay; `None`
+    /// stamps the current time.
+    pub as_of: Option<String>,
+}
+
+fn classify_signals_json(result: &ClassifyResult) -> String {
+    let signals: Vec<serde_json::Value> = result
+        .signals
+        .iter()
+        .map(|signal| {
+            serde_json::json!({
+                "signalType": signal.signal_type,
+                "pattern": signal.pattern,
+                "weight": stable_score_json(signal.weight),
+                "sourceKind": "static_keyword_catalog",
+                "sourceId": SITUATION_HEURISTIC_SOURCE_V1,
+                "evidenceIds": [],
+            })
+        })
+        .collect();
+    serde_json::Value::Array(signals).to_string()
+}
+
+fn classify_alternatives_json(result: &ClassifyResult) -> String {
+    let alternatives: Vec<serde_json::Value> = result
+        .alternative_categories
+        .iter()
+        .map(|(category, score)| {
+            serde_json::json!({
+                "category": category.as_str(),
+                "score": stable_score_json(*score),
+            })
+        })
+        .collect();
+    serde_json::Value::Array(alternatives).to_string()
+}
+
+/// Run the deterministic classifier over the task text and persist (or
+/// idempotently reuse) a situation record. Raw task text never reaches
+/// storage: the stored body passes secret redaction first, and the
+/// fingerprint uses the stable input hash that `ee situation classify`
+/// already reports.
+pub fn adopt_situation_from_text(
+    connection: &crate::db::DbConnection,
+    request: &AdoptSituationRequest,
+) -> Result<SituationAdoption, crate::models::DomainError> {
+    let classify = classify_task(&request.task_text);
+    let input_hash = stable_hash_id("situation_input", &request.task_text);
+    let redacted_text = crate::policy::redact_secret_like_content(&request.task_text).content;
+
+    // Context hints derive from the matched signal patterns; sorted and
+    // deduplicated so adoption is order-independent and deterministic.
+    let mut context_hints: Vec<String> = classify
+        .signals
+        .iter()
+        .map(|signal| signal.pattern.clone())
+        .collect();
+    context_hints.sort();
+    context_hints.dedup();
+
+    // Evidence ids are caller-supplied provenance; canonicalize ordering
+    // so alternate input orderings produce identical stored records.
+    let mut evidence_ids = request.evidence_ids.clone();
+    evidence_ids.sort();
+    evidence_ids.dedup();
+    let provenance_json = serde_json::Value::Array(
+        evidence_ids
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect(),
+    )
+    .to_string();
+
+    let timestamp = request
+        .as_of
+        .clone()
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+    create_or_adopt_situation_record(
+        connection,
+        &AdoptSituationRecordInput {
+            workspace_scope: request.workspace_scope.clone(),
+            input_hash,
+            original_text_redacted: Some(redacted_text),
+            category: classify.category,
+            confidence: classify.confidence,
+            confidence_score: f64::from(classify.confidence_score),
+            signals_json: classify_signals_json(&classify),
+            alternative_categories_json: classify_alternatives_json(&classify),
+            routing_decisions_json: serde_json::Value::Array(routing_decisions_json(
+                &classify.routing_decisions,
+            ))
+            .to_string(),
+            context_hints,
+            provenance_json,
+            adopted_by: request.adopted_by.clone(),
+            adoption_reason: request.adoption_reason.clone(),
+            created_at: timestamp.clone(),
+            adopted_at: timestamp,
+            classifier_algorithm: SITUATION_HEURISTIC_SOURCE_V1.to_owned(),
+            classifier_version: "1".to_owned(),
+            build_version: build_info().version.to_owned(),
+        },
+    )
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -2405,6 +2526,133 @@ mod tests {
         check(
             adoption.details.original_text == "[redacted]",
             "absent redacted text must render the explicit redaction placeholder",
+        )
+    }
+
+    fn adopt_request(task_text: &str) -> AdoptSituationRequest {
+        AdoptSituationRequest {
+            task_text: task_text.to_owned(),
+            workspace_scope: "wsp_01234567890123456789012345".to_owned(),
+            adopted_by: Some("test-agent".to_owned()),
+            adoption_reason: Some("unit test".to_owned()),
+            evidence_ids: Vec::new(),
+            as_of: Some("2026-06-11T00:00:00Z".to_owned()),
+        }
+    }
+
+    #[test]
+    fn adopt_from_text_persists_classification_and_redacts_secrets() -> TestResult {
+        let connection = open_situation_test_db()?;
+        let mut request = adopt_request("fix the failing release with api_key=sk-test-secret-1234");
+        request.evidence_ids = vec!["cass-session://abc#L1".to_owned()];
+
+        let adoption =
+            adopt_situation_from_text(&connection, &request).map_err(|e| e.to_string())?;
+        check(!adoption.already_existed, "first adoption must create")?;
+        check(
+            adoption.details.category == SituationCategory::BugFix,
+            "classifier category must persist",
+        )?;
+        check(
+            adoption.details.created_at == "2026-06-11T00:00:00Z",
+            "deterministic as_of timestamp must be honored",
+        )?;
+
+        let stored = connection
+            .get_situation_record(&adoption.situation_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("adopted record must be stored")?;
+        check(
+            !stored
+                .original_text_redacted
+                .as_deref()
+                .unwrap_or("")
+                .contains("sk-test-secret-1234"),
+            "secret-like task text must be redacted before storage",
+        )?;
+        check(
+            stored.input_hash == stable_hash_id("situation_input", &request.task_text),
+            "stored input hash must match the classify inputHash convention",
+        )?;
+        check(
+            stored.provenance_json == "[\"cass-session://abc#L1\"]",
+            "evidence ids must persist as canonical provenance",
+        )
+    }
+
+    #[test]
+    fn adopt_from_text_is_idempotent_and_deterministic() -> TestResult {
+        let connection = open_situation_test_db()?;
+        let request = adopt_request("fix the flaky retry bug in the importer");
+
+        let first = adopt_situation_from_text(&connection, &request).map_err(|e| e.to_string())?;
+        let second = adopt_situation_from_text(&connection, &request).map_err(|e| e.to_string())?;
+        check(second.already_existed, "repeat adoption must be idempotent")?;
+        check(
+            second.situation_id == first.situation_id,
+            "repeat adoption must return the same deterministic id",
+        )?;
+
+        let expected_id = deterministic_situation_record_id(
+            &request.workspace_scope,
+            &stable_hash_id("situation_input", &request.task_text),
+            SITUATION_HEURISTIC_SOURCE_V1,
+            SITUATION_RECORD_SCHEMA_VERSION,
+        );
+        check(
+            first.situation_id == expected_id,
+            "adopted id must derive from the idempotence fingerprint",
+        )
+    }
+
+    #[test]
+    fn adopt_from_text_canonicalizes_evidence_ordering() -> TestResult {
+        let text = "investigate the slow startup path";
+
+        let connection_a = open_situation_test_db()?;
+        let mut request_a = adopt_request(text);
+        request_a.evidence_ids = vec!["ev:b".to_owned(), "ev:a".to_owned(), "ev:a".to_owned()];
+        let adoption_a =
+            adopt_situation_from_text(&connection_a, &request_a).map_err(|e| e.to_string())?;
+        let stored_a = connection_a
+            .get_situation_record(&adoption_a.situation_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("record a must be stored")?;
+
+        let connection_b = open_situation_test_db()?;
+        let mut request_b = adopt_request(text);
+        request_b.evidence_ids = vec!["ev:a".to_owned(), "ev:b".to_owned()];
+        let adoption_b =
+            adopt_situation_from_text(&connection_b, &request_b).map_err(|e| e.to_string())?;
+        let stored_b = connection_b
+            .get_situation_record(&adoption_b.situation_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("record b must be stored")?;
+
+        check(
+            stored_a.provenance_json == stored_b.provenance_json,
+            "alternate evidence orderings must store identical provenance",
+        )?;
+        check(
+            stored_a.provenance_json == "[\"ev:a\",\"ev:b\"]",
+            "provenance must be sorted and deduplicated",
+        )
+    }
+
+    #[test]
+    fn adopt_from_text_with_empty_evidence_stays_empty() -> TestResult {
+        let connection = open_situation_test_db()?;
+        let request = adopt_request("document the new mesh onboarding flow");
+
+        let adoption =
+            adopt_situation_from_text(&connection, &request).map_err(|e| e.to_string())?;
+        let stored = connection
+            .get_situation_record(&adoption.situation_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("record must be stored")?;
+        check(
+            stored.provenance_json == "[]",
+            "empty evidence must persist as an empty array, never null",
         )
     }
 
