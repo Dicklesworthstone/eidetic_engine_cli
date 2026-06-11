@@ -128,6 +128,7 @@ where
         debug_assert_eq!(rows.len(), len);
     }
 
+    sort_equal_payload_runs_by_full_key(&mut rows, &key);
     items.extend(rows.into_iter().map(|(item, _)| item));
     Ok(())
 }
@@ -166,8 +167,37 @@ pub fn compare_ulid_payload_or_lexical(left: &str, right: &str) -> Ordering {
     ) {
         (Ok(left_offset), Ok(right_offset)) => {
             compare_validated_payloads(left, left_offset, right, right_offset)
+                .then_with(|| left.cmp(right))
         }
         _ => left.cmp(right),
+    }
+}
+
+fn sort_equal_payload_runs_by_full_key<T, F>(rows: &mut [(T, usize)], key: &F)
+where
+    F: Fn(&T) -> &str,
+{
+    let mut run_start = 0;
+    while run_start < rows.len() {
+        let mut run_end = run_start + 1;
+        let (first_item, first_offset) = &rows[run_start];
+        while run_end < rows.len() {
+            let (next_item, next_offset) = &rows[run_end];
+            if compare_validated_payloads(
+                key(first_item),
+                *first_offset,
+                key(next_item),
+                *next_offset,
+            ) != Ordering::Equal
+            {
+                break;
+            }
+            run_end += 1;
+        }
+        if run_end - run_start > 1 {
+            rows[run_start..run_end].sort_by(|(left, _), (right, _)| key(left).cmp(key(right)));
+        }
+        run_start = run_end;
     }
 }
 
@@ -276,6 +306,34 @@ mod tests {
     }
 
     #[test]
+    fn same_payload_distinct_keys_sort_by_full_key() -> Result<(), String> {
+        let payload = "01J0000000000000000000000A";
+        let mut rows = vec![
+            (format!("rule_{payload}"), 0_usize),
+            (format!("mem_{payload}"), 1),
+            (format!("pack_{payload}"), 2),
+            (format!("mem_{payload}"), 3),
+        ];
+
+        sort_by_ulid_payload(&mut rows, |row| &row.0).map_err(|error| error.to_string())?;
+
+        let sorted = rows
+            .iter()
+            .map(|row| (row.0.clone(), row.1))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sorted,
+            vec![
+                (format!("mem_{payload}"), 1),
+                (format!("mem_{payload}"), 3),
+                (format!("pack_{payload}"), 2),
+                (format!("rule_{payload}"), 0),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn invalid_payload_leaves_input_order_unchanged() {
         let original = vec![
             "mem_01J0000000000000000000000B".to_owned(),
@@ -327,6 +385,19 @@ mod tests {
         assert_eq!(
             compare_ulid_payload_or_lexical("mem_fixture_b", "mem_fixture_a"),
             std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn payload_comparator_ties_same_payload_by_full_key() {
+        let payload = "01J0000000000000000000000A";
+        assert_eq!(
+            compare_ulid_payload_or_lexical(&format!("rule_{payload}"), &format!("mem_{payload}")),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_ulid_payload_or_lexical(&format!("mem_{payload}"), &format!("rule_{payload}")),
+            std::cmp::Ordering::Less
         );
     }
 }

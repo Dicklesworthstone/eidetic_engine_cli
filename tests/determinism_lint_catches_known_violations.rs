@@ -333,12 +333,30 @@ fn function_signature_has_deterministic_seed(lines: &[String], attribute_index: 
         if line.trim().is_empty() {
             continue;
         }
-        if line.contains("Deterministic<Seed>") {
+        if line_contains_deterministic_seed_type(line) {
             return true;
         }
         if line.contains('{') || line.contains(';') {
             return false;
         }
+    }
+
+    false
+}
+
+fn line_contains_deterministic_seed_type(line: &str) -> bool {
+    let needle = "Deterministic<Seed>";
+    let mut search_start = 0;
+    while let Some(relative_index) = line[search_start..].find(needle) {
+        let index = search_start + relative_index;
+        let before = line[..index].chars().next_back();
+        let after = line[index + needle.len()..].chars().next();
+        if !matches!(before, Some(ch) if is_identifier_char(ch))
+            && !matches!(after, Some(ch) if is_identifier_char(ch))
+        {
+            return true;
+        }
+        search_start = index + needle.len();
     }
 
     false
@@ -646,6 +664,19 @@ mod self_tests {
         "#;
         let report = render_report(&scan_fixture(fixture));
         assert!(!report.contains("missing_seed_param"));
+    }
+
+    #[test]
+    fn similarly_named_seed_type_still_emits_missing_seed() {
+        let fixture = r#"
+            #[determinism::required]
+            fn seeded(_: &ee::runtime::determinism::NonDeterministic<Seed>) {}
+
+            #[determinism::required]
+            fn also_seeded(_: &NotDeterministic<Seed>) {}
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert_eq!(report.matches("missing_seed_param").count(), 2);
     }
 
     #[test]

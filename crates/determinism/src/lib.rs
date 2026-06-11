@@ -215,13 +215,50 @@ fn has_deterministic_seed_parameter(tokens: TokenStream) -> bool {
             TokenTree::Group(group)
                 if saw_function_keyword && group.delimiter() == Delimiter::Parenthesis =>
             {
-                return compact_non_literal_tokens(group.stream()).contains("Deterministic<Seed>");
+                return contains_deterministic_seed_type(group.stream());
             }
             _ => {}
         }
     }
 
     false
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NonLiteralToken {
+    Ident(String),
+    Punct(char),
+}
+
+fn contains_deterministic_seed_type(tokens: TokenStream) -> bool {
+    let mut non_literal_tokens = Vec::new();
+    collect_non_literal_token_markers(tokens, &mut non_literal_tokens);
+    markers_contain_deterministic_seed_type(&non_literal_tokens)
+}
+
+fn collect_non_literal_token_markers(tokens: TokenStream, output: &mut Vec<NonLiteralToken>) {
+    for token in tokens {
+        match token {
+            TokenTree::Group(group) => collect_non_literal_token_markers(group.stream(), output),
+            TokenTree::Ident(ident) => output.push(NonLiteralToken::Ident(ident.to_string())),
+            TokenTree::Punct(punct) => output.push(NonLiteralToken::Punct(punct.as_char())),
+            TokenTree::Literal(_) => {}
+        }
+    }
+}
+
+fn markers_contain_deterministic_seed_type(markers: &[NonLiteralToken]) -> bool {
+    markers.windows(4).any(|window| {
+        matches!(
+            window,
+            [
+                NonLiteralToken::Ident(type_name),
+                NonLiteralToken::Punct('<'),
+                NonLiteralToken::Ident(seed_name),
+                NonLiteralToken::Punct('>'),
+            ] if type_name == "Deterministic" && seed_name == "Seed"
+        )
+    })
 }
 
 fn append_non_literal_tokens(tokens: TokenStream, output: &mut String) {
@@ -272,4 +309,95 @@ fn compile_error(message: &str) -> TokenStream {
     format!("compile_error!({message:?});")
         .parse()
         .expect("compile_error token stream")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NonLiteralToken, markers_contain_deterministic_seed_type};
+
+    fn ident(value: &str) -> NonLiteralToken {
+        NonLiteralToken::Ident(value.to_owned())
+    }
+
+    fn punct(value: char) -> NonLiteralToken {
+        NonLiteralToken::Punct(value)
+    }
+
+    #[test]
+    fn exact_deterministic_seed_parameter_shapes_are_accepted() {
+        assert!(markers_contain_deterministic_seed_type(&[
+            punct('&'),
+            ident("Deterministic"),
+            punct('<'),
+            ident("Seed"),
+            punct('>'),
+        ]));
+        assert!(markers_contain_deterministic_seed_type(&[
+            punct('&'),
+            ident("mut"),
+            ident("Deterministic"),
+            punct('<'),
+            ident("Seed"),
+            punct('>'),
+        ]));
+        assert!(markers_contain_deterministic_seed_type(&[
+            ident("ee"),
+            punct(':'),
+            punct(':'),
+            ident("runtime"),
+            punct(':'),
+            punct(':'),
+            ident("determinism"),
+            punct(':'),
+            punct(':'),
+            ident("Deterministic"),
+            punct('<'),
+            ident("Seed"),
+            punct('>'),
+        ]));
+        assert!(markers_contain_deterministic_seed_type(&[
+            ident("Option"),
+            punct('<'),
+            punct('&'),
+            ident("Deterministic"),
+            punct('<'),
+            ident("Seed"),
+            punct('>'),
+            punct('>'),
+        ]));
+    }
+
+    #[test]
+    fn similarly_named_seed_parameter_shapes_are_rejected() {
+        assert!(!markers_contain_deterministic_seed_type(&[
+            punct('&'),
+            ident("NonDeterministic"),
+            punct('<'),
+            ident("Seed"),
+            punct('>'),
+        ]));
+        assert!(!markers_contain_deterministic_seed_type(&[
+            punct('&'),
+            ident("NotDeterministic"),
+            punct('<'),
+            ident("Seed"),
+            punct('>'),
+        ]));
+        assert!(!markers_contain_deterministic_seed_type(&[
+            punct('&'),
+            ident("Deterministic"),
+            punct('<'),
+            ident("Seeded"),
+            punct('>'),
+        ]));
+        assert!(!markers_contain_deterministic_seed_type(&[
+            punct('&'),
+            ident("Deterministic"),
+            punct('<'),
+            ident("Seed"),
+            punct(','),
+            ident("Other"),
+            punct('>'),
+        ]));
+    }
 }
