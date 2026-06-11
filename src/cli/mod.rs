@@ -11298,6 +11298,10 @@ pub struct SituationShowArgs {
     /// Situation ID to show.
     #[arg(value_name = "SITUATION_ID")]
     pub situation_id: String,
+
+    /// Database file override (defaults to <workspace>/.ee/ee.db).
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee situation explain`.
@@ -11306,6 +11310,10 @@ pub struct SituationExplainArgs {
     /// Situation ID to explain.
     #[arg(value_name = "SITUATION_ID")]
     pub situation_id: String,
+
+    /// Database file override (defaults to <workspace>/.ee/ee.db).
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Subcommands for `ee support`.
@@ -48015,6 +48023,39 @@ where
     ProcessExitCode::Success
 }
 
+fn situation_read_database_path(cli: &Cli, database: Option<&Path>) -> PathBuf {
+    database
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| cli.resolve_workspace().join(".ee").join("ee.db"))
+}
+
+fn open_situation_read_database(
+    database_path: &Path,
+) -> Result<crate::db::DbConnection, DomainError> {
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_owned()),
+        });
+    }
+
+    crate::db::DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to open situation database at {}: {error}",
+            database_path.display()
+        ),
+        repair: Some("ee init --workspace .".to_owned()),
+    })
+}
+
+fn situation_not_found_error(situation_id: &str) -> DomainError {
+    DomainError::NotFound {
+        resource: "situation".to_owned(),
+        id: situation_id.to_owned(),
+        repair: Some("ee situation adopt <task text> --workspace .".to_owned()),
+    }
+}
+
 fn handle_situation_show<W, E>(
     cli: &Cli,
     args: &SituationShowArgs,
@@ -48025,25 +48066,34 @@ where
     W: Write,
     E: Write,
 {
-    match crate::core::situation::show_situation(&args.situation_id) {
-        Ok(details) => {
+    let database_path = situation_read_database_path(cli, args.database.as_deref());
+    let connection = match open_situation_read_database(&database_path) {
+        Ok(connection) => connection,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    match crate::core::situation::show_situation(&connection, &args.situation_id) {
+        Ok(Some(details)) => {
             if cli.wants_json() {
                 let json = serde_json::json!({
-                    "schema": crate::models::SITUATION_SHOW_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
-                    "data": {
-                        "situationId": &args.situation_id,
-                        "category": details.category.as_str(),
-                    }
+                    "data": details.data_json(),
+                    "degraded": [],
                 });
                 let _ = stdout.write_all(json.to_string().as_bytes());
                 let _ = stdout.write_all(b"\n");
             } else {
-                let _ = writeln!(stdout, "Situation: {}", args.situation_id);
-                let _ = writeln!(stdout, "Category: {}", details.category.as_str());
+                let _ = stdout.write_all(details.human_summary().as_bytes());
             }
             ProcessExitCode::Success
         }
+        Ok(None) => write_domain_error(
+            &situation_not_found_error(&args.situation_id),
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -48058,28 +48108,34 @@ where
     W: Write,
     E: Write,
 {
-    match crate::core::situation::explain_situation(&args.situation_id) {
-        Ok(explanation) => {
+    let database_path = situation_read_database_path(cli, args.database.as_deref());
+    let connection = match open_situation_read_database(&database_path) {
+        Ok(connection) => connection,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    match crate::core::situation::explain_situation(&connection, &args.situation_id) {
+        Ok(Some(explanation)) => {
             if cli.wants_json() {
                 let json = serde_json::json!({
-                    "schema": crate::models::SITUATION_EXPLAIN_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
-                    "data": {
-                        "situationId": &args.situation_id,
-                        "category": explanation.category.as_str(),
-                        "recommendations": explanation.recommendations,
-                    }
+                    "data": explanation.data_json(),
+                    "degraded": [],
                 });
                 let _ = stdout.write_all(json.to_string().as_bytes());
                 let _ = stdout.write_all(b"\n");
             } else {
-                let _ = writeln!(stdout, "Explanation for: {}", args.situation_id);
-                for rec in &explanation.recommendations {
-                    let _ = writeln!(stdout, "  - {}", rec);
-                }
+                let _ = stdout.write_all(explanation.human_summary().as_bytes());
             }
             ProcessExitCode::Success
         }
+        Ok(None) => write_domain_error(
+            &situation_not_found_error(&args.situation_id),
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -48238,11 +48294,18 @@ where
         .clone()
         .or_else(|| cli.workspace.clone())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let resolved_workspace_path = resolve_cli_workspace_path(&workspace_path);
+    let manifest_path = args.manifest.clone().or_else(|| {
+        let default_manifest_path = resolved_workspace_path.join(CERTIFICATE_DEFAULT_MANIFEST_FILE);
+        default_manifest_path
+            .exists()
+            .then_some(default_manifest_path)
+    });
     let options = crate::core::certificate::SignOptions {
         certificate_id: args.certificate_id.clone(),
-        manifest_path: args.manifest.clone(),
+        manifest_path,
         key_path: args.key.clone(),
-        workspace_path: Some(workspace_path),
+        workspace_path: Some(resolved_workspace_path),
     };
     let report = crate::core::certificate::sign_certificate(&options);
     match cli.renderer() {
@@ -59624,6 +59687,55 @@ mod tests {
             &verify_json["data"]["hashVerified"],
             &serde_json::json!(true),
             "certificate verify default manifest hash",
+        )?;
+
+        let key_path = dir.path().join("default-sign-key.ed25519");
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| e.to_string())?;
+        fs::write(&key_path, pkcs8.as_ref())
+            .map_err(|error| format!("failed to write certificate signing key: {error}"))?;
+
+        let (sign_exit, sign_stdout, sign_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "certificate",
+            "sign",
+            "cert_pack_default",
+            "--key",
+            key_path
+                .to_str()
+                .ok_or_else(|| "key path must be UTF-8".to_owned())?,
+        ]);
+        ensure_equal(
+            &sign_exit,
+            &ProcessExitCode::Success,
+            "certificate sign exit",
+        )?;
+        ensure(sign_stderr.is_empty(), "certificate sign JSON stderr clean")?;
+        let sign_json: serde_json::Value =
+            serde_json::from_str(&sign_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &sign_json["schema"],
+            &serde_json::json!("ee.certificate.sign.v1"),
+            "certificate sign schema",
+        )?;
+        ensure_equal(
+            &sign_json["certificateId"],
+            &serde_json::json!("cert_pack_default"),
+            "certificate sign default manifest id",
+        )?;
+        ensure_equal(
+            &sign_json["payloadHash"],
+            &serde_json::json!(payload_hash),
+            "certificate sign default manifest payload hash",
+        )?;
+        ensure_equal(
+            &sign_json["success"],
+            &serde_json::json!(true),
+            "certificate sign default manifest success",
         )
     }
 

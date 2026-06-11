@@ -215,14 +215,18 @@ mod adoption_cli {
         ))
     }
 
-    fn run_ee(workspace: &PathBuf, args: &[&str]) -> serde_json::Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    fn run_ee_raw(workspace: &PathBuf, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_ee"))
             .arg("--json")
             .arg("--workspace")
             .arg(workspace)
             .args(args)
             .output()
-            .expect("ee binary runs");
+            .expect("ee binary runs")
+    }
+
+    fn run_ee(workspace: &PathBuf, args: &[&str]) -> serde_json::Value {
+        let output = run_ee_raw(workspace, args);
         assert!(
             output.status.success(),
             "ee {:?} failed: {}",
@@ -269,6 +273,59 @@ mod adoption_cli {
             .expect("situation id is a string")
             .to_owned();
         assert!(situation_id.starts_with("sit_"));
+
+        let show = run_ee(&workspace, &["situation", "show", &situation_id]);
+        assert_eq!(show["schema"], "ee.response.v2");
+        assert_eq!(show["success"], true);
+        assert_eq!(show["degraded"], serde_json::json!([]));
+        assert_eq!(show["data"]["command"], "situation show");
+        assert_eq!(show["data"]["situationId"], situation_id.as_str());
+        assert_eq!(show["data"]["category"], first["data"]["category"]);
+        assert_eq!(show["data"]["createdAt"], "2026-06-11T00:00:00Z");
+
+        let explain = run_ee(&workspace, &["situation", "explain", &situation_id]);
+        assert_eq!(explain["schema"], "ee.response.v2");
+        assert_eq!(explain["success"], true);
+        assert_eq!(explain["degraded"], serde_json::json!([]));
+        assert_eq!(explain["data"]["command"], "situation explain");
+        assert_eq!(explain["data"]["situationId"], situation_id.as_str());
+        assert!(
+            explain["data"]["explanation"]
+                .as_str()
+                .is_some_and(|message| message.contains("ee.situation.heuristics.v1")),
+            "explain should name classifier provenance"
+        );
+
+        for command in ["show", "explain"] {
+            let missing = run_ee_raw(
+                &workspace,
+                &["situation", command, "sit_missing000000000000000001"],
+            );
+            assert_eq!(
+                missing.status.code(),
+                Some(1),
+                "missing situation {command} should be a usage/not-found error"
+            );
+            let missing_json: serde_json::Value =
+                serde_json::from_slice(&missing.stdout).expect("ee emits JSON error");
+            assert_eq!(missing_json["schema"], "ee.error.v2");
+            assert_eq!(missing_json["error"]["code"], "not_found");
+            assert!(
+                missing_json["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| {
+                        message.contains("situation not found")
+                            && message.contains("sit_missing000000000000000001")
+                    }),
+                "missing situation {command} should name the missing id"
+            );
+            assert!(
+                missing_json["error"]["repair"]
+                    .as_str()
+                    .is_some_and(|repair| repair.contains("ee situation adopt")),
+                "missing situation {command} should point to explicit adoption"
+            );
+        }
 
         let second = run_ee(&workspace, &adopt_args);
         assert_eq!(second["data"]["posture"], "already_exists");

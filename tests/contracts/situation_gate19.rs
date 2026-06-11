@@ -91,6 +91,20 @@ fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
+fn unique_gate19_workspace(label: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let base = env::temp_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| env::temp_dir());
+    base.join(format!(
+        "ee-situation-gate19-{label}-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
 fn assert_situation_cli_success(
     output: std::process::Output,
     command: &str,
@@ -279,12 +293,27 @@ fn gate19_heuristic_tag_goldens_are_stable_and_non_decisioning() -> TestResult {
 }
 
 #[test]
-fn gate19_cli_explain_reports_unavailable_until_stored_situations_exist() -> TestResult {
-    let output = run_ee(&["--json", "situation", "explain", "sit.release_bug"])?;
-    ensure(
-        output.status.code() == Some(6),
+fn gate19_cli_explain_reports_storage_error_without_initialized_workspace() -> TestResult {
+    let workspace = unique_gate19_workspace("explain-no-init");
+    fs::create_dir_all(&workspace).map_err(|error| {
         format!(
-            "situation explain must return degraded-required exit while no stored situation exists: {}",
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let output = run_ee(&[
+        "--json",
+        "--workspace",
+        &workspace_arg,
+        "situation",
+        "explain",
+        "sit.release_bug",
+    ])?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "situation explain without initialized DB must fail: {}",
             output.status
         ),
     )?;
@@ -303,29 +332,25 @@ fn gate19_cli_explain_reports_unavailable_until_stored_situations_exist() -> Tes
     ensure_json_equal(
         actual.get("schema"),
         JsonValue::String(ERROR_SCHEMA_V2.to_owned()),
-        "unavailable schema",
-    )?;
-    ensure_json_equal(
-        actual.pointer("/error/code"),
-        JsonValue::String("situation_decisioning_unavailable".to_owned()),
-        "unavailable code",
+        "storage error schema",
     )?;
     ensure(
         actual
             .pointer("/error/message")
             .and_then(JsonValue::as_str)
             .is_some_and(|message| {
-                message.contains("persisted situation storage is not implemented")
-                    && message.contains("sit.release_bug")
+                message.contains("Database not found")
+                    && message.contains(".ee")
+                    && message.contains("ee.db")
             }),
-        "unavailable message must name storage gap and requested id",
+        "storage error message must name the missing workspace database",
     )?;
     ensure(
         actual
             .pointer("/error/repair")
             .and_then(JsonValue::as_str)
-            .is_some_and(|repair| repair.contains("ee situation classify")),
-        "unavailable repair must point to deterministic classification",
+            .is_some_and(|repair| repair.contains("ee init")),
+        "storage error repair must point to workspace initialization",
     )
 }
 
