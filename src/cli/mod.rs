@@ -2661,9 +2661,19 @@ pub struct ContextArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub stream: bool,
 
-    /// Prior pack hash to delta against. Supported for JSON context responses.
+    /// Prior pack hash to delta against, or `last` to resolve this agent's
+    /// most recent recorded baseline (requires EE_AGENT_NAME). Supported for
+    /// JSON context responses.
     #[arg(long, value_name = "PACK_HASH")]
     pub since: Option<String>,
+
+    /// Task scope for baseline recording and `--since last` resolution.
+    #[arg(long = "task-key", value_name = "KEY")]
+    pub task_key: Option<String>,
+
+    /// Skip recording this pack as the agent's `--since last` baseline.
+    #[arg(long = "no-baseline-write", action = ArgAction::SetTrue)]
+    pub no_baseline_write: bool,
 
     /// Maximum serialized context-delta bytes before falling back to the full pack.
     #[arg(long = "max-delta-bytes", value_name = "BYTES")]
