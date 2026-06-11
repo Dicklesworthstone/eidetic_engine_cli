@@ -520,6 +520,9 @@ pub enum JobType {
     GarbageCollection,
     /// Re-warm the ADR 0065 primer cache for the workspace (bd-39tzu.2).
     PrimerRefresh,
+    /// Distill journal entries into curation candidates (ADR 0062 §6 /
+    /// bd-1pi9m.3).
+    JournalDistill,
     /// Custom job type for extensions.
     Custom,
 }
@@ -544,6 +547,7 @@ impl JobType {
             Self::BackupExport => "backup_export",
             Self::GarbageCollection => "garbage_collection",
             Self::PrimerRefresh => "primer_refresh",
+            Self::JournalDistill => "journal_distill",
             Self::Custom => "custom",
         }
     }
@@ -566,6 +570,7 @@ impl JobType {
             Self::IntegrityCheck,
             Self::BackupExport,
             Self::GarbageCollection,
+            Self::JournalDistill,
             Self::Custom,
         ]
     }
@@ -593,6 +598,9 @@ impl JobType {
             Self::BackupExport => "Export backup snapshot",
             Self::GarbageCollection => "Clean up expired or orphaned data",
             Self::PrimerRefresh => "Re-warm the workspace primer cache",
+            Self::JournalDistill => {
+                "Distill undistilled journal entries into pending curation candidates"
+            }
             Self::Custom => "Custom job type",
         }
     }
@@ -640,6 +648,7 @@ impl FromStr for JobType {
             "backup_export" => Ok(Self::BackupExport),
             "garbage_collection" => Ok(Self::GarbageCollection),
             "primer_refresh" => Ok(Self::PrimerRefresh),
+            "journal_distill" => Ok(Self::JournalDistill),
             "custom" => Ok(Self::Custom),
             _ => Err(ParseJobTypeError {
                 input: s.to_owned(),
@@ -1908,6 +1917,10 @@ pub fn default_budgets_for_job_type(job_type: JobType) -> Vec<ResourceBudget> {
         JobType::GarbageCollection => vec![
             ResourceBudget::time_limit_ms(60_000), // 1 minute
             ResourceBudget::item_limit(1000),
+        ],
+        JobType::JournalDistill => vec![
+            ResourceBudget::time_limit_ms(60_000), // 1 minute
+            ResourceBudget::item_limit(4096),      // distill scan cap
         ],
         JobType::Custom => vec![
             ResourceBudget::time_soft_limit_ms(60_000), // 1 minute soft default
@@ -3273,6 +3286,7 @@ impl ManualRunner {
             JobType::BackupExport => self.execute_backup_export(budget),
             JobType::GarbageCollection => self.execute_garbage_collection(budget),
             JobType::PrimerRefresh => self.execute_primer_refresh(budget),
+            JobType::JournalDistill => self.execute_journal_distill(budget),
             JobType::Custom => self.execute_custom_job(),
         }
     }
@@ -3698,6 +3712,123 @@ impl ManualRunner {
                 "formatsWarmed": warmed,
             })),
         )
+    }
+
+    /// Bounded journal distillation (ADR 0062 §6 / bd-1pi9m.3): the same
+    /// deterministic pipeline as `ee journal distill`, run under the job
+    /// ledger and budget. A read-only preview pass records consumption
+    /// first; the durable apply phase only runs when the budget allows
+    /// it, and the job respects `[journal] enabled` exactly like the CLI.
+    fn execute_journal_distill(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let Some(database_path) = self.resolve_database_path() else {
+            let message =
+                "Journal distill requires a database path or workspace path with .ee/ee.db"
+                    .to_owned();
+            return (RunOutcome::Failed, None, Some(message), None);
+        };
+        if !database_path.exists() {
+            let message = format!(
+                "Journal distill database does not exist: {}",
+                database_path.display()
+            );
+            return (RunOutcome::Failed, None, Some(message), None);
+        }
+        let workspace_path = self.normalized_workspace_path();
+        if !crate::core::journal::journal_capture_enabled(&workspace_path) {
+            return (
+                RunOutcome::Skipped,
+                None,
+                Some(
+                    "journal capture is disabled by config ([journal] enabled = false)".to_owned(),
+                ),
+                Some(json!({
+                    "schema": "ee.steward.journal_distill.v1",
+                    "status": "skipped_journal_disabled",
+                })),
+            );
+        }
+
+        let started = Instant::now();
+        let distill_options = |apply: bool| crate::core::journal::JournalDistillOptions {
+            workspace_path: workspace_path.as_path(),
+            database_path: Some(database_path.as_path()),
+            session_key: None,
+            agent_name: None,
+            since: None,
+            apply,
+        };
+        let job_details = |report: &crate::core::journal::JournalDistillReport, status: &str| {
+            json!({
+                "schema": "ee.steward.journal_distill.v1",
+                "status": status,
+                "scannedCount": report.scanned_count,
+                "proposalCount": report.proposals.len(),
+                "abstentionCount": report.abstentions.len(),
+                "candidateIds": report
+                    .applied
+                    .as_ref()
+                    .map(|applied| applied.candidate_ids.clone())
+                    .unwrap_or_default(),
+                "auditIds": report
+                    .applied
+                    .as_ref()
+                    .map(|applied| applied.audit_ids.clone())
+                    .unwrap_or_default(),
+            })
+        };
+
+        // Read-only preview pass: scan + draft proposals, record budget
+        // consumption, and decide before any durable write (mirrors the
+        // index-rebuild preflight pattern).
+        let preview = match crate::core::journal::distill_journal_entries(&distill_options(false)) {
+            Ok(report) => report,
+            Err(error) => {
+                return (
+                    RunOutcome::Failed,
+                    None,
+                    Some(format!("Journal distill preview failed: {error}")),
+                    None,
+                );
+            }
+        };
+        let scanned = preview.scanned_count as u64;
+        budget.record(ResourceType::Items, scanned);
+        budget.record(ResourceType::TimeMs, millis_to_u64(started.elapsed()));
+
+        if budget_cancels_before_mutation(budget) {
+            return (
+                RunOutcome::Cancelled,
+                Some(scanned),
+                Some("Budget exceeded before durable journal distillation".to_owned()),
+                Some(job_details(&preview, "previewed")),
+            );
+        }
+        if self.options.dry_run {
+            return (
+                RunOutcome::Success,
+                Some(scanned),
+                None,
+                Some(job_details(&preview, "previewed")),
+            );
+        }
+
+        match crate::core::journal::distill_journal_entries(&distill_options(true)) {
+            Ok(report) => (
+                RunOutcome::Success,
+                Some(report.scanned_count as u64),
+                None,
+                Some(job_details(&report, "applied")),
+            ),
+            Err(error) => (
+                RunOutcome::Failed,
+                Some(scanned),
+                Some(format!("Journal distill apply failed: {error}")),
+                None,
+            ),
+        }
     }
 
     fn execute_decay_sweep(

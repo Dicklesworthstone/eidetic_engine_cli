@@ -43,7 +43,7 @@ Bead: eidetic_engine_cli-i6vu
 | `init` | `core::init` | Mechanical | filesystem | Workspace initialization |
 | `install *` | `core::install` | Mechanical | filesystem | Installation checks |
 | `introspect` | `core::introspect` | Mechanical | static | Command/schema maps |
-| `journal *` | `core::journal` | Mechanical | DB | Append-only observation journal (append/list/show) |
+| `journal *` | `core::journal` | Mechanical | DB | Append-only observation journal (append/list/show) plus deterministic extractive distillation into curation candidates (distill; dry-run default, --apply writes) |
 | `memory *` | `core::memory` | Mechanical | DB | Memory show/list/history |
 | `mcp *` | `core::mcp` | Mechanical | DB, config | MCP adapter inspection |
 | `model *` | `core::model` | Mechanical | DB | Model registry |

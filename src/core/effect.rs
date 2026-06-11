@@ -2005,6 +2005,17 @@ impl EffectManifest {
                 "Append a redaction-screened observation to the agent journal",
             ),
             CommandEffect::durable_write(
+                "journal distill",
+                vec![
+                    "journal_entries",
+                    "curation_candidates",
+                    "evidence_spans",
+                    "sessions",
+                    "audit_log",
+                ],
+                "Distill journal entries into pending curation candidates; dry-run by default, --apply writes",
+            ),
+            CommandEffect::durable_write(
                 "learn close",
                 vec!["learning_experiments", "audit_log"],
                 "Close a learning experiment",

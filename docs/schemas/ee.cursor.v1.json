@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/ee.cursor.v1.json",
+  "title": "ee.cursor.v1",
+  "description": "Continuation-cursor payload for output-token-governed list surfaces (ADR 0063 §3). The wire form is opaque: base64url(payload).base64url(blake3_mac), where the MAC is a keyed BLAKE3 over the canonical payload bytes using a deterministic per-workspace key (BLAKE3 derive_key with context 'ee.cursor.v1 workspace mac key v1' over the workspace scope string). This document describes the decoded payload object. Cursors never embed secrets or raw query text; paramsHash is a BLAKE3 of the normalized invocation parameters. Resuming with a MAC or paramsHash mismatch yields the cursor_invalid degraded code; resuming after the workspace DB generation advanced yields cursor_stale (repair for both: re-run without --cursor).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "targetSchema",
+    "dbGeneration",
+    "positionKey",
+    "paramsHash"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.cursor.v1"
+    },
+    "targetSchema": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Schema id of the governed response the cursor continues (e.g. ee.search.v1). Surfaces identified only by data.command use the ee.command:<command> form."
+    },
+    "dbGeneration": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Workspace DB generation the page sequence was issued at. Pages must partition exactly one generation's result set (no duplicates, no gaps); a lower value than the current generation is rejected as cursor_stale, a higher value as cursor_invalid."
+    },
+    "positionKey": {
+      "type": "string",
+      "description": "Stable ordered-position key of the last emitted element at the declared truncation point (the element's registered key field, falling back to its original array index)."
+    },
+    "paramsHash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$",
+      "description": "BLAKE3 of the length-prefixed normalized query/filter parameters, excluding the governor's own flags so the same query at a different ceiling stays resumable."
+    }
+  },
+  "x-ee-status": {
+    "shipped": true,
+    "available_in_build": true,
+    "tracking_bead": "bd-7lvbg.2"
+  }
+}

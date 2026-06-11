@@ -415,6 +415,10 @@ pub struct Cli {
     #[arg(skip)]
     fields_explicit: bool,
 
+    /// Cap estimated response tokens for machine output (ADR 0063 governor); env mirror EE_MAX_OUTPUT_TOKENS, flag wins.
+    #[arg(long, global = true, value_name = "TOKENS")]
+    pub max_output_tokens: Option<u64>,
+
     /// Control cards output verbosity (none/summary/math/full).
     #[arg(long, global = true, value_enum, default_value_t = CardsLevel::Math)]
     pub cards: CardsLevel,
@@ -676,6 +680,19 @@ thread_local! {
         const { Cell::new(output::ResponseSchemaVersion::V1) };
     static ACTIVE_FIELD_SELECTOR: RefCell<Option<output::FieldSelector>> =
         const { RefCell::new(None) };
+    static ACTIVE_OUTPUT_GOVERNOR: RefCell<Option<ActiveOutputGovernor>> =
+        const { RefCell::new(None) };
+}
+
+/// Active output-token governor settings for the current invocation
+/// (ADR 0063, bd-7lvbg.2). Set once in [`run`] when `--max-output-tokens`
+/// or `EE_MAX_OUTPUT_TOKENS` declares a ceiling; `None` keeps the render
+/// path byte-identical and never invokes the estimator.
+#[derive(Clone, Debug)]
+struct ActiveOutputGovernor {
+    ceiling_tokens: u64,
+    params_hash: String,
+    workspace_root: PathBuf,
 }
 
 const EXPORT_REPORT_SCHEMA_V1: &str = "ee.export.report.v1";
@@ -5353,6 +5370,8 @@ pub struct LabCounterfactualArgs {
 pub enum JournalCommand {
     /// Append one observation, or a JSONL batch via --stdin.
     Append(JournalAppendArgs),
+    /// Distill journal entries into curation candidates (dry-run default).
+    Distill(JournalDistillArgs),
     /// List journal entries newest-first with optional filters.
     List(JournalListArgs),
     /// Show one journal entry (full record incl. structured sidecar).
@@ -5468,6 +5487,35 @@ pub struct JournalShowArgs {
     /// Journal entry id (jrn_...).
     #[arg(value_name = "ENTRY_ID")]
     pub entry_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee journal distill` (ADR 0062 §6 / bd-1pi9m.3).
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct JournalDistillArgs {
+    /// Limit the distillation scope to one session key.
+    #[arg(long, value_name = "KEY")]
+    pub session: Option<String>,
+
+    /// Limit the distillation scope to one agent name.
+    #[arg(long, value_name = "AGENT")]
+    pub agent: Option<String>,
+
+    /// Only entries created at or after this RFC 3339 timestamp.
+    #[arg(long, value_name = "RFC3339")]
+    pub since: Option<String>,
+
+    /// Preview the full proposal set without writing anything (default).
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "apply")]
+    pub dry_run: bool,
+
+    /// Write pending curation candidates, set distilled_at on consumed
+    /// entries, and append one journal.distill audit row per proposal.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub apply: bool,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -11356,6 +11404,20 @@ where
     ACTIVE_FIELD_SELECTOR.with(|selector| {
         *selector.borrow_mut() = cli.fields_explicit.then(|| cli.field_selector().clone());
     });
+    let output_token_ceiling = cli.max_output_tokens.or_else(|| {
+        // Env mirror; the flag wins. Unparseable values leave output
+        // ungoverned (registry-default fallback convention).
+        read(EnvVar::MaxOutputTokens).and_then(|raw| raw.trim().parse::<u64>().ok())
+    });
+    ACTIVE_OUTPUT_GOVERNOR.with(|governor| {
+        *governor.borrow_mut() = output_token_ceiling.map(|ceiling_tokens| ActiveOutputGovernor {
+            ceiling_tokens,
+            params_hash: output::governor::hash_invocation_params(
+                governor_params_for_hash(&args),
+            ),
+            workspace_root: resolve_workspace_for_cli(cli.workspace.as_deref()).0,
+        });
+    });
 
     if cli.schema {
         return write_stdout(stdout, &(output::schema_json() + "\n"));
@@ -12309,6 +12371,9 @@ where
         }
         Some(Command::Journal(JournalCommand::Append(ref args))) => {
             handle_journal_append(&cli, args, stdout, stderr)
+        }
+        Some(Command::Journal(JournalCommand::Distill(ref args))) => {
+            handle_journal_distill(&cli, args, stdout, stderr)
         }
         Some(Command::Journal(JournalCommand::List(ref args))) => {
             handle_journal_list(&cli, args, stdout, stderr)
@@ -17057,16 +17122,24 @@ where
 fn active_response_schema_stdout(text: &str) -> Result<Cow<'_, str>, DomainError> {
     let selector = ACTIVE_FIELD_SELECTOR.with(|selector| selector.borrow().clone());
     let schema_version = ACTIVE_RESPONSE_SCHEMA_VERSION.with(Cell::get);
-    if selector.is_none() && matches!(schema_version, output::ResponseSchemaVersion::V1) {
+    let governor = ACTIVE_OUTPUT_GOVERNOR.with(|governor| governor.borrow().clone());
+    if selector.is_none()
+        && governor.is_none()
+        && matches!(schema_version, output::ResponseSchemaVersion::V1)
+    {
+        // Zero-cost-when-unused invariant (ADR 0063 §1): no ceiling and no
+        // projection means the rendered bytes pass through untouched.
         return Ok(Cow::Borrowed(text));
     }
-    response_schema_stdout(text, schema_version, selector.as_ref()).map(Cow::Owned)
+    response_schema_stdout(text, schema_version, selector.as_ref(), governor.as_ref())
+        .map(Cow::Owned)
 }
 
 fn response_schema_stdout(
     text: &str,
     schema_version: output::ResponseSchemaVersion,
     selector: Option<&output::FieldSelector>,
+    governor: Option<&ActiveOutputGovernor>,
 ) -> Result<String, DomainError> {
     let (body, has_newline) = match text.strip_suffix('\n') {
         Some(body) => (body, true),
@@ -17093,11 +17166,80 @@ fn response_schema_stdout(
     } else {
         body.to_owned()
     };
-    let mut converted = output::render_response_json_for_schema_version(&selected, schema_version);
+    // Output-token governor (ADR 0063 §2): explicit --fields projection
+    // applies FIRST, then the governor truncates the projected payload.
+    let governed = if let Some(active) = governor {
+        let workspace_root = active.workspace_root.clone();
+        let db_generation = move || governed_db_generation(&workspace_root);
+        let ctx = output::governor::GovernorContext {
+            ceiling_tokens: active.ceiling_tokens,
+            params_hash: active.params_hash.clone(),
+            mac_key: output::governor::derive_workspace_mac_key(
+                &active.workspace_root.to_string_lossy(),
+            ),
+            db_generation: &db_generation,
+        };
+        output::governor::govern_response_json(
+            &selected,
+            &ctx,
+            output::OUTPUT_TRUNCATION_REGISTRY,
+        )?
+    } else {
+        selected
+    };
+    let mut converted = output::render_response_json_for_schema_version(&governed, schema_version);
     if has_newline {
         converted.push('\n');
     }
     Ok(converted)
+}
+
+/// Normalized invocation parameters for the cursor `paramsHash`: the raw
+/// argv minus the binary name and minus the governor's own ceiling flag, so
+/// the same query at a different ceiling stays resumable (ADR 0063 §3).
+fn governor_params_for_hash(args: &[OsString]) -> Vec<String> {
+    let mut params = Vec::with_capacity(args.len().saturating_sub(1));
+    let mut skip_next = false;
+    for arg in args.iter().skip(1) {
+        let value = arg.to_string_lossy();
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if value == "--max-output-tokens" {
+            skip_next = true;
+            continue;
+        }
+        if value.starts_with("--max-output-tokens=") {
+            continue;
+        }
+        params.push(value.into_owned());
+    }
+    params
+}
+
+/// Lazily read the workspace DB generation for continuation cursors. Only
+/// invoked when truncation actually engages; read-only (no migrate, no
+/// workspace-row insert). Any failure degrades to generation 0, which a
+/// later resume against a written workspace reports as `cursor_stale` —
+/// the conservative direction.
+fn governed_db_generation(workspace_root: &Path) -> u64 {
+    let database_path = workspace_root.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return 0;
+    }
+    let Ok(connection) = crate::db::DbConnection::open_file(&database_path) else {
+        return 0;
+    };
+    let workspace_path = workspace_root.to_string_lossy().into_owned();
+    let Ok(Some(workspace)) = connection.get_workspace_by_path(&workspace_path) else {
+        return 0;
+    };
+    connection
+        .get_workspace_generation(&workspace.id)
+        .ok()
+        .flatten()
+        .unwrap_or(0)
 }
 
 fn log_field_selector_event(
@@ -39524,6 +39666,54 @@ where
     }
 }
 
+fn handle_journal_distill<W, E>(
+    cli: &Cli,
+    args: &JournalDistillArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    // Dry-run is the default (ADR 0062 §6): --apply is the only way to
+    // write; --dry-run is accepted explicitly and conflicts with --apply
+    // at the clap layer.
+    let options = crate::core::journal::JournalDistillOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        session_key: args.session.clone(),
+        agent_name: args.agent.clone(),
+        since: args.since.clone(),
+        apply: args.apply,
+    };
+
+    match crate::core::journal::distill_journal_entries(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(
+                    &serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
+                        "success": true,
+                        "data": report.data_json(),
+                    })
+                    .to_string(),
+                ) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_journal_data_json(stdout, &report.data_json()),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn handle_outcome_quarantine_list<W, E>(
     cli: &Cli,
     args: &OutcomeQuarantineListArgs,
@@ -54540,6 +54730,7 @@ impl NormalizedInvocation {
                 Command::Primer(_) => "primer".to_string(),
                 Command::Journal(journal) => match journal {
                     JournalCommand::Append(_) => "journal append".to_string(),
+                    JournalCommand::Distill(_) => "journal distill".to_string(),
                     JournalCommand::List(_) => "journal list".to_string(),
                     JournalCommand::Show(_) => "journal show".to_string(),
                 },
@@ -55161,6 +55352,7 @@ const GLOBAL_FLAGS: &[&str] = &[
     "robot",
     "format",
     "fields",
+    "max-output-tokens",
     "schema",
     "schema-version",
     "legacy-schema",

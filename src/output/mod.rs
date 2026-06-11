@@ -64,6 +64,7 @@ use crate::steward::{
     MAINTENANCE_RUN_SCHEMA_V1, MAINTENANCE_STATUS_SCHEMA_V1,
 };
 
+pub mod governor;
 pub mod jsonl_export;
 pub(crate) mod markdown;
 pub mod streaming;
@@ -9606,12 +9607,118 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             category: "memory",
             definition: journal_entry_schema_definition,
         },
+        SchemaEntry {
+            id: crate::core::journal::JOURNAL_DISTILL_SCHEMA_V1,
+            version: "1",
+            description: "Deterministic extractive distillation report emitted by ee journal distill (proposals, abstentions, applied ids).",
+            category: "memory",
+            definition: journal_distill_schema_definition,
+        },
+        SchemaEntry {
+            id: governor::CURSOR_SCHEMA_V1,
+            version: "1",
+            description: "Opaque continuation-cursor contract for output-token-governed list surfaces (wire form base64url(payload).base64url(blake3_mac)).",
+            category: "envelope",
+            definition: cursor_schema_definition,
+        },
     ]
 }
 
 fn journal_entry_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.journal.entry.v1.json").to_string()
 }
+
+fn journal_distill_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.journal.distill.v1.json").to_string()
+}
+
+fn cursor_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.cursor.v1.json").to_string()
+}
+
+/// Per-schema output-token truncation-point registry (ADR 0063 §2,
+/// bd-7lvbg.2). Lives adjacent to the schema-id catalog above so schema
+/// registration and truncation declaration stay in one review surface.
+///
+/// Each list-like response schema declares exactly one truncation point —
+/// the array whose trailing whole elements the governor may drop. Pack
+/// `data.pack.items[]` is NEVER governor-truncated (hard rule: pack content
+/// is governed solely by its own `--max-tokens` contract); the pack entry
+/// below declares `data.pack.skipped[]` only. Per-surface enforcement
+/// wiring and golden coverage land with bd-7lvbg.3; the schema-drift gate
+/// extension that asserts inventory coverage is bd-7lvbg.4.
+///
+/// Path notes vs the ADR 0063 table (reconciled to the shipped payload
+/// shapes): memory list's droppable array is currently `data.memories[]`
+/// (the ADR table's `data.items[]` names the planned rename, tracked by the
+/// bd-7lvbg.3 wiring); pack's skipped omissions live at
+/// `data.pack.skipped[]`. `ee schema list` (`data.schemas[]`) is registered
+/// as the middleware demonstration surface.
+pub const OUTPUT_TRUNCATION_REGISTRY: &[governor::TruncationPoint] = &[
+    governor::TruncationPoint {
+        schema_id: "ee.search.v1",
+        command: "search",
+        array_path: &["results"],
+        per_section_items: false,
+        position_key_field: "id",
+    },
+    governor::TruncationPoint {
+        schema_id: "",
+        command: "memory list",
+        array_path: &["memories"],
+        per_section_items: false,
+        position_key_field: "id",
+    },
+    governor::TruncationPoint {
+        schema_id: "ee.insights.v1",
+        command: "insights",
+        array_path: &["sections"],
+        per_section_items: true,
+        position_key_field: "id",
+    },
+    governor::TruncationPoint {
+        schema_id: "ee.curate.candidates.v1",
+        command: "curate candidates",
+        array_path: &["candidates"],
+        per_section_items: false,
+        position_key_field: "id",
+    },
+    governor::TruncationPoint {
+        schema_id: "ee.audit.timeline.v1",
+        command: "audit timeline",
+        array_path: &["entries"],
+        per_section_items: false,
+        position_key_field: "id",
+    },
+    governor::TruncationPoint {
+        schema_id: PACK_SCHEMA_V2,
+        command: "pack",
+        array_path: &["pack", "skipped"],
+        per_section_items: false,
+        position_key_field: "id",
+    },
+    governor::TruncationPoint {
+        schema_id: "ee.recall.v1",
+        command: "recall",
+        array_path: &["recall", "items"],
+        per_section_items: false,
+        position_key_field: "memoryId",
+    },
+    governor::TruncationPoint {
+        schema_id: "",
+        command: "journal list",
+        array_path: &["entries"],
+        per_section_items: false,
+        position_key_field: "entryId",
+    },
+    governor::TruncationPoint {
+        schema_id: "",
+        command: "schema list",
+        array_path: &["schemas"],
+        per_section_items: false,
+        position_key_field: "id",
+    },
+];
 
 /// Render the schema list as JSON (ee.response.v2 envelope).
 #[must_use]
@@ -10948,6 +11055,12 @@ const GLOBAL_OPTIONS: &[GlobalOption] = &[
         opt_type: "enum",
     },
     GlobalOption {
+        name: "--max-output-tokens",
+        short: "",
+        description: "Cap estimated response tokens for machine output (ADR 0063 governor; env mirror EE_MAX_OUTPUT_TOKENS)",
+        opt_type: "integer",
+    },
+    GlobalOption {
         name: "--schema",
         short: "",
         description: "Print JSON schema for response envelope",
@@ -11146,6 +11259,10 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
             SubcommandEntry {
                 name: "append",
                 description: "Append one observation or a JSONL batch via --stdin",
+            },
+            SubcommandEntry {
+                name: "distill",
+                description: "Distill entries into curation candidates (dry-run default)",
             },
             SubcommandEntry {
                 name: "list",

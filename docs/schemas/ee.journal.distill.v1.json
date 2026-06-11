@@ -1,0 +1,214 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/ee.journal.distill.v1.json",
+  "title": "ee.journal.distill.v1",
+  "description": "Deterministic extractive distillation report (ADR 0062 Appendix B). Emitted under data by `ee journal distill` and produced by the journal-distill steward job. Proposals are curation candidates only (never direct memories); --dry-run (the default) writes nothing and applied is null.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "scope",
+    "dryRun",
+    "proposals",
+    "abstentions",
+    "applied",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.journal.distill.v1"
+    },
+    "command": {
+      "const": "journal distill"
+    },
+    "version": {
+      "type": "string",
+      "description": "ee package version that produced the report."
+    },
+    "status": {
+      "enum": ["ok", "journal_disabled"],
+      "description": "ok for a completed pipeline run; journal_disabled when [journal] enabled = false refused the run."
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scannedCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Journal entries inspected in scope (tombstoned entries are excluded before this count)."
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session", "agent", "since"],
+      "properties": {
+        "session": {
+          "type": ["string", "null"],
+          "description": "--session selector; null means all sessions."
+        },
+        "agent": {
+          "type": ["string", "null"],
+          "description": "--agent selector; null means all agents."
+        },
+        "since": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "--since selector; null means no time floor."
+        }
+      }
+    },
+    "dryRun": {
+      "type": "boolean",
+      "description": "true (the default) previews the full proposal set and writes nothing; --apply sets false."
+    },
+    "proposals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "proposalId",
+          "action",
+          "targetMemoryId",
+          "level",
+          "kind",
+          "contentDraft",
+          "typedFields",
+          "evidence",
+          "clusterSize",
+          "dedup"
+        ],
+        "properties": {
+          "proposalId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Deterministic proposal id (stable across re-runs over the same entries)."
+          },
+          "action": {
+            "enum": ["create_candidate", "reinforce_existing"],
+            "description": "reinforce_existing when the remember-time neighbor machinery found a near-duplicate at or above [curation] duplicate_similarity."
+          },
+          "targetMemoryId": {
+            "type": ["string", "null"],
+            "description": "Existing memory absorbed by a reinforce_existing proposal; null for create_candidate."
+          },
+          "level": {
+            "const": "episodic"
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Proposed memory kind (failure for command-failure clusters, fact for lone surprises)."
+          },
+          "contentDraft": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Deterministic extractive content draft (no LLM)."
+          },
+          "typedFields": {
+            "description": "Typed fields per the memory-kind registry (family from the normalized command root, cause from dominant stderr_tail tokens); null when the kind carries none.",
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "family": { "type": "string" },
+                  "cause": { "type": "string" }
+                }
+              }
+            ]
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^journal://jrn_[0-9a-fA-F-]{36}$"
+            },
+            "description": "One journal://<entry-id> provenance URI per consumed member entry."
+          },
+          "clusterSize": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "dedup": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["nearestMemoryId", "similarity"],
+            "properties": {
+              "nearestMemoryId": {
+                "type": ["string", "null"]
+              },
+              "similarity": {
+                "type": ["number", "null"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "abstentions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["entryId", "reason"],
+        "properties": {
+          "entryId": {
+            "type": "string",
+            "pattern": "^jrn_[0-9a-fA-F-]{36}$"
+          },
+          "reason": {
+            "enum": [
+              "instruction_risk_excluded",
+              "below_signal_threshold",
+              "already_distilled"
+            ]
+          }
+        }
+      }
+    },
+    "applied": {
+      "description": "Durable write summary; null under --dry-run (and when journal_disabled refused the run).",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["candidateIds", "auditIds"],
+          "properties": {
+            "candidateIds": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "auditIds": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      ]
+    },
+    "degraded": {
+      "type": "array",
+      "description": "Standard ee.response.v2 degraded entries (journal_disabled, distill_no_candidates).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "severity", "message"],
+        "properties": {
+          "code": { "type": "string" },
+          "severity": { "type": "string" },
+          "message": { "type": "string" }
+        }
+      }
+    }
+  },
+  "x-ee-status": {
+    "shipped": true,
+    "available_in_build": true,
+    "tracking_bead": "bd-1pi9m.3"
+  }
+}

@@ -136,6 +136,12 @@ pub mod audit_actions {
     pub const CURATION_CANDIDATE_MERGE: &str = "curation_candidate.merge";
     pub const CURATION_CANDIDATE_DISPOSITION: &str = "curation_candidate.disposition";
     pub const CURATION_CANDIDATE_RETIRE: &str = "curation_candidate.retire";
+    /// `ee journal distill --apply` (or the journal-distill steward job)
+    /// turned journal evidence into one curation candidate (ADR 0062 §6 /
+    /// bd-1pi9m.3). One row per proposal; details carry
+    /// `ee.audit.journal_distill.v1`: proposalId, action, evidence
+    /// `journal://` URIs, clusterSize, and the dedup verdict.
+    pub const JOURNAL_DISTILL: &str = "journal.distill";
     pub const WORKFLOW_CREATE: &str = "workflow.create";
     pub const ADVISORY_LOCK_RECLAIM: &str = "advisory_lock.reclaim";
     pub const ADVISORY_LOCK_RELEASE: &str = "advisory_lock.release";
@@ -13049,6 +13055,30 @@ impl DbConnection {
             &[Value::Text(entry_id.to_string())],
         )?;
         rows.first().map(stored_journal_entry_from_row).transpose()
+    }
+
+    /// Set `distilled_at` on consumed journal entries (bd-1pi9m.3 / ADR
+    /// 0062 §6). Only undistilled rows are touched, which is what makes
+    /// `ee journal distill --apply` idempotent: a second run over the
+    /// same scope finds nothing left to consume. Returns the number of
+    /// rows newly marked.
+    pub fn mark_journal_entries_distilled(
+        &self,
+        entry_ids: &[String],
+        distilled_at: &str,
+    ) -> Result<u64> {
+        let mut marked = 0_u64;
+        for entry_id in entry_ids {
+            marked += self.execute_for(
+                DbOperation::Execute,
+                "UPDATE journal_entries SET distilled_at = ?1 WHERE entry_id = ?2 AND distilled_at IS NULL",
+                &[
+                    Value::Text(distilled_at.to_string()),
+                    Value::Text(entry_id.clone()),
+                ],
+            )?;
+        }
+        Ok(marked)
     }
 
     /// Insert one remember idempotency key row (bd-1pi9m.4 / V075). The

@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "distill_no_candidates",
+  "introduced_by": {
+    "bead": "bd-1pi9m.3",
+    "epic_letter": "CAP"
+  },
+  "surfaces": [
+    "journal distill"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "The distillation scope contained journal entries but none met the proposal thresholds: every entry was a low-signal note/observation, instruction-risk excluded, or already distilled. The run succeeds with an empty proposals[] array and an info-severity distill_no_candidates degraded entry — an honest empty result, not a failure (ADR 0062 §7).",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee journal append 'plain note with no failure signal' --workspace . --json"
+    ],
+    "invocation": "ee journal distill --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "distill_no_candidates",
+    "severity": "info",
+    "message_contains": [
+      "proposal thresholds",
+      "honest empty"
+    ]
+  },
+  "notes": "Distillation only promotes command_failure clusters, first-seen failure shapes, and lone surprises; notes and observations abstain below_signal_threshold by design. Agents should treat this code as 'capture more failure/surprise evidence or widen --session/--agent/--since', never as an error to retry."
+}

@@ -112,6 +112,8 @@ pub enum EnvVar {
     LogFormat,
     /// `EE_LOG_JSON`
     LogJson,
+    /// `EE_MAX_OUTPUT_TOKENS`
+    MaxOutputTokens,
     /// `EE_MAX_TOKENS`
     MaxTokens,
     /// `EE_MCP_MAX_REQUEST_BYTES`
@@ -280,6 +282,7 @@ impl EnvVar {
             Self::LexicalIndexPinRam,
             Self::LogFormat,
             Self::LogJson,
+            Self::MaxOutputTokens,
             Self::MaxTokens,
             Self::McpMaxRequestBytes,
             Self::MeshDiscoveryCacheTtlSeconds,
@@ -395,6 +398,7 @@ impl EnvVar {
             Self::LexicalIndexPinRam => "EE_LEXICAL_INDEX_PIN_RAM",
             Self::LogFormat => "EE_LOG_FORMAT",
             Self::LogJson => "EE_LOG_JSON",
+            Self::MaxOutputTokens => "EE_MAX_OUTPUT_TOKENS",
             Self::MaxTokens => "EE_MAX_TOKENS",
             Self::McpMaxRequestBytes => "EE_MCP_MAX_REQUEST_BYTES",
             Self::MeshDiscoveryCacheTtlSeconds => "EE_MESH_DISCOVERY_CACHE_TTL_SECONDS",
@@ -575,6 +579,9 @@ impl EnvVar {
             Self::LexicalIndexPinRam => "Opt in to lexical index RAM-tier page-cache population.",
             Self::LogFormat => "Select structured log format.",
             Self::LogJson => "Enable JSON command-start logs on stderr.",
+            Self::MaxOutputTokens => {
+                "Cap estimated response tokens for machine output (output governor ceiling)."
+            }
             Self::MaxTokens => "Override the default context pack token budget.",
             Self::McpMaxRequestBytes => {
                 "Override the MCP stdio JSON-RPC request and response byte cap."
@@ -806,6 +813,7 @@ impl EnvVar {
             | Self::HookMode
             | Self::Json
             | Self::LegacySelectionCertificate
+            | Self::MaxOutputTokens
             | Self::NoColor
             | Self::OutputFormat => "output",
             Self::FlightRecorder
