@@ -1381,6 +1381,333 @@
       },
       "recoveryActions": []
     },
+    "ee.swarm.unsafe_claim_plan.v1": {
+      "schema": "ee.swarm.unsafe_claim_plan.v1",
+      "planId": "unsafe_claim_plan_111111111111111111111111",
+      "generatedAt": "2026-06-09T20:35:51Z",
+      "workspace": "repo:25e38e130474e7f0292de2a3",
+      "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+      "ordering": {
+        "reasonGroups": "reasonCategory enum order, then groupId ascending byte order",
+        "candidatePlans": "candidateId ascending byte order",
+        "plannerActions": "plannerActionKind enum order, then actionId ascending byte order",
+        "evidenceSources": "sourceId ascending byte order"
+      },
+      "sourceGate": {
+        "schema": "ee.swarm.work_packet.claim_gate.v1",
+        "gateId": "swarm_work_packet_claim_gate_111111111111111111111111",
+        "packetId": "swarm_work_packet_222222222222222222222222",
+        "requestedCandidateId": "bd-1n3x1.16.1",
+        "selectedCandidateId": "bd-1n3x1.16.1",
+        "verdict": "unsafe_due_to_conflict",
+        "safeToClaim": false,
+        "recommendedAction": "coordinate_before_claim",
+        "recommendedSafeToClaim": false,
+        "claimCommandAction": null,
+        "unsafeReasons": [
+          "beads_tracker_not_authoritative:external_changes_pending_import",
+          "agent_mail_unavailable",
+          "related_bead_collision:docs/schemas/swarm",
+          "dirty_checkout_path_count:69",
+          "rch_unavailable",
+          "bv_command_timeout",
+          "future_gate_reason:opaque_value"
+        ],
+        "staleReasons": [
+          "tracker_authority_external_changes_pending_import"
+        ],
+        "degradedCodes": [
+          "agent_mail_unavailable",
+          "bv_command_timeout",
+          "rch_unavailable"
+        ],
+        "sourceRefs": [
+          "br://bd-1n3x1.16.1",
+          "gate://swarm_work_packet_claim_gate_111111111111111111111111"
+        ],
+        "nextCommandActions": [
+          {
+            "commandId": "bead_show_candidate_stale_safe",
+            "displayCommand": "br show bd-1n3x1.16.1 --json",
+            "argv": ["br", "show", "bd-1n3x1.16.1", "--json"],
+            "shellRequired": false,
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "requiredSubstrate": "beads",
+            "when": "before_claim",
+            "rationale": "Inspect the candidate without mutating tracker state."
+          }
+        ]
+      },
+      "reasonGroups": [
+        {
+          "groupId": "rg-tracker-authority",
+          "category": "tracker_authority",
+          "severity": "high",
+          "reasonCodes": ["beads_tracker_not_authoritative:external_changes_pending_import"],
+          "rawReasonIndexes": [0],
+          "sourceFields": ["sourceGate.sourceAuthority.trackerHealth"],
+          "evidenceSourceIds": ["src-beads"],
+          "candidateCoverage": ["requested_candidate"],
+          "boundedPreview": "Tracker metadata is not authoritative; the plan cannot infer claim safety from stale or contradictory tracker state.",
+          "preservesUnknown": false
+        },
+        {
+          "groupId": "rg-agent-mail-readiness",
+          "category": "agent_mail_readiness",
+          "severity": "medium",
+          "reasonCodes": ["agent_mail_unavailable"],
+          "rawReasonIndexes": [1],
+          "sourceFields": ["sourceGate.sourceAuthority.agentMailStatus"],
+          "evidenceSourceIds": ["src-agent-mail"],
+          "candidateCoverage": ["all_candidates"],
+          "boundedPreview": "Agent Mail readiness is unavailable, so reservation and inbox evidence are not authoritative.",
+          "preservesUnknown": false
+        },
+        {
+          "groupId": "rg-source-overlap",
+          "category": "source_overlap",
+          "severity": "medium",
+          "reasonCodes": ["related_bead_collision:docs/schemas/swarm"],
+          "rawReasonIndexes": [2],
+          "sourceFields": ["sourceGate.unsafeReasons"],
+          "evidenceSourceIds": ["src-workspace-hygiene"],
+          "candidateCoverage": ["requested_candidate"],
+          "boundedPreview": "Related work overlaps the schema/doc surface, so coordination is required before editing.",
+          "preservesUnknown": false
+        },
+        {
+          "groupId": "rg-dirty-checkout",
+          "category": "dirty_checkout",
+          "severity": "warning",
+          "reasonCodes": ["dirty_checkout_path_count:69"],
+          "rawReasonIndexes": [3],
+          "sourceFields": ["sourceGate.unsafeReasons"],
+          "evidenceSourceIds": ["src-git"],
+          "candidateCoverage": ["all_candidates"],
+          "boundedPreview": "The checkout has dirty paths; the planner can advise inspection but cannot make a claim safe.",
+          "preservesUnknown": false
+        },
+        {
+          "groupId": "rg-rch-proof-admission",
+          "category": "rch_proof_admission",
+          "severity": "medium",
+          "reasonCodes": ["rch_unavailable"],
+          "rawReasonIndexes": [4],
+          "sourceFields": ["sourceGate.degradedCodes"],
+          "evidenceSourceIds": ["src-rch"],
+          "candidateCoverage": ["all_candidates"],
+          "boundedPreview": "Remote proof admission is not available; do not substitute local Cargo.",
+          "preservesUnknown": false
+        },
+        {
+          "groupId": "rg-bv-staleness",
+          "category": "bv_staleness",
+          "severity": "warning",
+          "reasonCodes": ["bv_command_timeout"],
+          "rawReasonIndexes": [5],
+          "sourceFields": ["sourceGate.degradedCodes"],
+          "evidenceSourceIds": ["src-bv"],
+          "candidateCoverage": ["all_candidates"],
+          "boundedPreview": "BV did not return inside budget and remains advisory only.",
+          "preservesUnknown": false
+        },
+        {
+          "groupId": "rg-unknown",
+          "category": "unknown",
+          "severity": "warning",
+          "reasonCodes": ["future_gate_reason:opaque_value"],
+          "rawReasonIndexes": [6],
+          "sourceFields": ["sourceGate.unsafeReasons"],
+          "evidenceSourceIds": ["src-source-authority"],
+          "candidateCoverage": ["unknown"],
+          "boundedPreview": "An unrecognized gate reason is preserved verbatim in bounded form for future classifiers.",
+          "preservesUnknown": true
+        }
+      ],
+      "candidatePlans": [
+        {
+          "candidateId": "bd-1n3x1.16.1",
+          "candidateState": "scanned_and_unsafe",
+          "gateVerdict": "unsafe_due_to_conflict",
+          "safeToClaim": false,
+          "reasonGroupRefs": [
+            "rg-tracker-authority",
+            "rg-agent-mail-readiness",
+            "rg-source-overlap",
+            "rg-dirty-checkout",
+            "rg-rch-proof-admission",
+            "rg-bv-staleness",
+            "rg-unknown"
+          ],
+          "candidateSpecificDeltas": [
+            "requested_candidate_preserved",
+            "claim_command_suppressed"
+          ],
+          "needsFreshClaimGate": true,
+          "mayEmitClaimCommand": false,
+          "evidenceSourceIds": ["src-beads", "src-source-authority"]
+        }
+      ],
+      "plannerActions": [
+        {
+          "actionId": "act-inspect-source-gate",
+          "kind": "inspect",
+          "mutatesState": false,
+          "advisoryOnly": true,
+          "requiredSubstrate": "beads",
+          "copySafety": "safe_structured_argv",
+          "when": "before_any_mutation",
+          "rationale": "Inspect the Bead and gate evidence before choosing alternate work.",
+          "reasonGroupRefs": ["rg-tracker-authority"],
+          "evidenceSourceIds": ["src-beads"],
+          "commandAction": {
+            "commandId": "bead_show_candidate_stale_safe",
+            "displayCommand": "br show bd-1n3x1.16.1 --json",
+            "argv": ["br", "show", "bd-1n3x1.16.1", "--json"],
+            "shellRequired": false,
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "requiredSubstrate": "beads",
+            "when": "before_any_mutation",
+            "rationale": "Read current candidate details without claiming it."
+          },
+          "bodyTemplate": null
+        },
+        {
+          "actionId": "act-comment-template-coordinate",
+          "kind": "comment_template",
+          "mutatesState": false,
+          "advisoryOnly": true,
+          "requiredSubstrate": "human",
+          "copySafety": "display_only",
+          "when": "if_operator_chooses_to_coordinate",
+          "rationale": "Prepare a bounded coordination note without sending or posting it automatically.",
+          "reasonGroupRefs": ["rg-agent-mail-readiness", "rg-source-overlap"],
+          "evidenceSourceIds": ["src-agent-mail", "src-workspace-hygiene"],
+          "commandAction": null,
+          "bodyTemplate": {
+            "templateKind": "beads_comment",
+            "title": "Unsafe claim gate coordination needed",
+            "bodyPreview": "Claim gate is unsafe because tracker authority, Agent Mail readiness, and overlapping source surfaces are not authoritative. This is a template only.",
+            "truncated": false
+          }
+        },
+        {
+          "actionId": "act-retry-with-snapshot",
+          "kind": "retry_with_snapshot",
+          "mutatesState": false,
+          "advisoryOnly": true,
+          "requiredSubstrate": "ee",
+          "copySafety": "safe_structured_argv",
+          "when": "after_fresh_redacted_snapshot",
+          "rationale": "Retry the claim gate only after fresh redacted coordination evidence exists.",
+          "reasonGroupRefs": ["rg-agent-mail-readiness", "rg-bv-staleness"],
+          "evidenceSourceIds": ["src-agent-mail", "src-bv"],
+          "commandAction": {
+            "commandId": "claim_gate_retry_with_snapshot",
+            "displayCommand": "ee swarm work-packet --claim-gate --candidate bd-1n3x1.16.1 --json",
+            "argv": ["ee", "swarm", "work-packet", "--claim-gate", "--candidate", "bd-1n3x1.16.1", "--json"],
+            "shellRequired": false,
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "requiredSubstrate": "ee",
+            "when": "after_fresh_redacted_snapshot",
+            "rationale": "Regenerate a read-only gate verdict; this does not claim work."
+          },
+          "bodyTemplate": null
+        },
+        {
+          "actionId": "act-stop-on-unknown",
+          "kind": "stop",
+          "mutatesState": false,
+          "advisoryOnly": true,
+          "requiredSubstrate": "none",
+          "copySafety": "display_only",
+          "when": "if_unknown_reason_is_material",
+          "rationale": "Stop instead of dropping an unknown gate reason or inventing claim safety.",
+          "reasonGroupRefs": ["rg-unknown"],
+          "evidenceSourceIds": ["src-source-authority"],
+          "commandAction": null,
+          "bodyTemplate": null
+        }
+      ],
+      "nextCommandActions": [
+        {
+          "commandId": "beads_doctor_no_db",
+          "displayCommand": "br doctor --json --no-db",
+          "argv": ["br", "doctor", "--json", "--no-db"],
+          "shellRequired": false,
+          "copySafety": "safe_structured_argv",
+          "mutatesState": false,
+          "requiredSubstrate": "beads",
+          "when": "inspect_tracker_authority",
+          "rationale": "Check tracker metadata without mutating Beads state."
+        }
+      ],
+      "evidenceSources": [
+        {
+          "sourceId": "src-agent-mail",
+          "sourceKind": "agent_mail",
+          "sourceRef": "degraded://agent_mail_unavailable",
+          "freshnessState": "unknown",
+          "authoritative": false
+        },
+        {
+          "sourceId": "src-beads",
+          "sourceKind": "beads",
+          "sourceRef": "br://bd-1n3x1.16.1",
+          "freshnessState": "stale",
+          "authoritative": false
+        },
+        {
+          "sourceId": "src-bv",
+          "sourceKind": "bv",
+          "sourceRef": "degraded://bv_command_timeout",
+          "freshnessState": "unknown",
+          "authoritative": false
+        },
+        {
+          "sourceId": "src-git",
+          "sourceKind": "git",
+          "sourceRef": "git://dirty-checkout-redacted",
+          "freshnessState": "fresh",
+          "authoritative": true
+        },
+        {
+          "sourceId": "src-rch",
+          "sourceKind": "rch",
+          "sourceRef": "degraded://rch_unavailable",
+          "freshnessState": "unknown",
+          "authoritative": false
+        },
+        {
+          "sourceId": "src-source-authority",
+          "sourceKind": "source_authority",
+          "sourceRef": "gate://swarm_work_packet_claim_gate_111111111111111111111111",
+          "freshnessState": "stale",
+          "authoritative": false
+        },
+        {
+          "sourceId": "src-workspace-hygiene",
+          "sourceKind": "workspace_hygiene",
+          "sourceRef": "workspace://dirty-path-summary-redacted",
+          "freshnessState": "fresh",
+          "authoritative": true
+        }
+      ],
+      "nonMutationPolicy": {
+        "advisoryOnly": true,
+        "claimsBeads": false,
+        "reservesFiles": false,
+        "sendsAgentMail": false,
+        "runsCargo": false,
+        "stagesGit": false,
+        "deletesFiles": false
+      },
+      "degraded": [],
+      "provenanceHash": "blake3:11111111111111111111111111111111"
+    },
     "ee.swarm_incident.v1": {
       "schema": "ee.swarm_incident.v1",
       "scenarioId": "rch_topology_blocked",
