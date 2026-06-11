@@ -66,6 +66,9 @@ pub struct AuditTimelineOptions {
     pub since: Option<String>,
     pub surface: Option<String>,
     pub action: Option<String>,
+    /// bd-1pi9m.5: only rows whose target_id matches exactly — "show me
+    /// everything that ever happened to this memory" in one bounded call.
+    pub target: Option<String>,
     pub limit: u32,
     pub cursor: Option<String>,
 }
@@ -270,12 +273,14 @@ pub fn list_timeline(options: &AuditTimelineOptions) -> Result<AuditTimelineRepo
         None,
         options.surface.as_deref(),
         options.action.as_deref(),
+        options.target.as_deref(),
     )?;
     let cursor_binding = TimelineCursorBinding {
         params_hash: timeline_params_hash(
             options.since.as_deref(),
             options.surface.as_deref(),
             options.action.as_deref(),
+            options.target.as_deref(),
         ),
         mac_key: crate::output::governor::derive_workspace_mac_key(
             &options.workspace.to_string_lossy(),
@@ -321,6 +326,7 @@ pub fn list_sharded_timeline(
             options.since.as_deref(),
             options.surface.as_deref(),
             options.action.as_deref(),
+            None,
         ),
         mac_key: crate::output::governor::derive_workspace_mac_key(&format!(
             "ee.audit.sharded:{}",
@@ -445,7 +451,7 @@ pub fn show_diff(options: &AuditDiffOptions) -> Result<AuditDiffReport, DomainEr
     }
 
     let entries = load_entries(&options.workspace, options.database_path.as_deref())?;
-    let filtered = filter_entries(entries, Some(from), Some(to), None, None)?;
+    let filtered = filter_entries(entries, Some(from), Some(to), None, None, None)?;
     let row_count = u32::try_from(filtered.len()).unwrap_or(u32::MAX);
 
     Ok(AuditDiffReport {
@@ -576,7 +582,7 @@ fn verify_entries_with_shard(
 ) -> Result<AuditVerifyReport, DomainError> {
     let mut ordered = entries.to_vec();
     sort_entries_chronological(&mut ordered);
-    let filtered = filter_entries(ordered, since, until, None, None)?;
+    let filtered = filter_entries(ordered, since, until, None, None, None)?;
     let mut expected_prev_hash = if since.is_some() {
         filtered
             .first()
@@ -688,9 +694,11 @@ fn filter_entries(
     until: Option<DateTime<Utc>>,
     surface: Option<&str>,
     action: Option<&str>,
+    target: Option<&str>,
 ) -> Result<Vec<StoredAuditEntry>, DomainError> {
     let surface = surface.map(str::trim).filter(|value| !value.is_empty());
     let action = action.map(str::trim).filter(|value| !value.is_empty());
+    let target = target.map(str::trim).filter(|value| !value.is_empty());
     let mut filtered = Vec::new();
 
     for entry in entries {
@@ -705,6 +713,9 @@ fn filter_entries(
             continue;
         }
         if action.is_some_and(|wanted| !audit_action_filter_matches(&entry.action, wanted)) {
+            continue;
+        }
+        if target.is_some_and(|wanted| entry.target_id.as_deref() != Some(wanted)) {
             continue;
         }
         filtered.push(entry);
@@ -985,12 +996,16 @@ fn timeline_params_hash(
     since: Option<&str>,
     surface: Option<&str>,
     action: Option<&str>,
+    target: Option<&str>,
 ) -> String {
     crate::output::governor::hash_invocation_params([
         "audit timeline".to_owned(),
         format!("since={}", since.unwrap_or("")),
         format!("surface={}", surface.unwrap_or("")),
         format!("action={}", action.unwrap_or("")),
+        // bd-1pi9m.5: the target filter binds into the cursor params hash
+        // so a page sequence can never silently mix filter scopes.
+        format!("target={}", target.unwrap_or("")),
     ])
 }
 

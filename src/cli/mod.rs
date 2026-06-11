@@ -6069,6 +6069,11 @@ pub struct AuditTimelineArgs {
     #[arg(long, value_name = "ACTION")]
     pub action: Option<String>,
 
+    /// Only include rows targeting this exact id (memory, pack, candidate, …) —
+    /// everything that ever happened to one record, in one bounded call.
+    #[arg(long, value_name = "TARGET_ID")]
+    pub target: Option<String>,
+
     /// Maximum entries to show.
     #[arg(long, short = 'n', default_value_t = 20)]
     pub limit: u32,
@@ -20257,9 +20262,10 @@ where
     let options = AuditTimelineOptions {
         workspace: cli.resolve_workspace(),
         database_path: args.database.clone(),
-        since: args.since.clone(),
+since: args.since.clone(),
         surface: args.surface.clone(),
         action: args.action.clone(),
+        target: args.target.clone(),
         limit: args.limit,
         cursor: args.cursor.clone(),
     };
