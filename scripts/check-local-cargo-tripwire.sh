@@ -31,6 +31,7 @@ JSON_OUTPUT=false
 SELF_TEST=false
 MODE="cmd_classify"
 CMD=""
+CMD_PROVIDED=false
 PS_FIXTURE=""
 PACKAGE_CACHE_PIDS_FIXTURE=""
 WORKTREE_FIXTURE=""
@@ -94,6 +95,7 @@ while [ $# -gt 0 ]; do
                 exit 2
             fi
             CMD="$1"
+            CMD_PROVIDED=true
             shift
             ;;
         -h|--help) usage; exit 0 ;;
@@ -190,16 +192,12 @@ classify_command() {
 
     # Detect the bare `cargo <forbidden-subcommand>` shape with no rch
     # prefix anywhere.
-    for sub in $FORBIDDEN_CARGO_SUBCOMMANDS; do
-        # Match "cargo <sub>" at start of line, after whitespace, or
-        # after env-prefix tokens like `FOO=bar`, but NOT inside a
-        # path-component such as "/usr/local/bin/cargo-test".
-        if printf '%s' "$cmd" | grep -Eq "(^|[[:space:]/]|^[A-Z_]+=[^[:space:]]+([[:space:]]+[A-Z_]+=[^[:space:]]+)*[[:space:]]+)cargo[[:space:]]+${sub}([[:space:]]|$)"; then
-            subcommand="$sub"
-            detail="cargo $sub invocation has no rch exec wrapper in the command string"
-            break
-        fi
-    done
+    subcommand=$(cargo_subcommand_from_command "$cmd")
+    if is_forbidden_cargo_subcommand "$subcommand"; then
+        detail="cargo $subcommand invocation has no rch exec wrapper in the command string"
+    else
+        subcommand=""
+    fi
 
     if [ -z "$subcommand" ]; then
         printf 'allowed\tnot a forbidden cargo compilation subcommand\t-\t-\n'
@@ -609,24 +607,98 @@ command_kind_from_command() {
 }
 
 cargo_subcommand_from_command() {
-    printf '%s\n' "$1" | awk '
+    printf '%s\n' "$1" | awk \
+        -v forbidden_list="$FORBIDDEN_CARGO_SUBCOMMANDS" \
+        -v read_only_list="$READ_ONLY_CARGO_SUBCOMMANDS" '
+        BEGIN {
+            split(forbidden_list, forbidden_words, " ")
+            for (forbidden_index in forbidden_words) {
+                forbidden[forbidden_words[forbidden_index]] = 1
+            }
+            split(read_only_list, read_only_words, " ")
+            for (read_only_index in read_only_words) {
+                read_only[read_only_words[read_only_index]] = 1
+            }
+        }
+        function clean(value) {
+            gsub(/^[^A-Za-z0-9_+\/.-]+/, "", value)
+            gsub(/[^A-Za-z0-9_+\/.-]+$/, "", value)
+            return value
+        }
+        function is_cargo_token(value) {
+            return value == "cargo" || value ~ /\/cargo$/
+        }
+        function option_takes_value(value) {
+            return value == "--config" || value == "--color" || value == "-Z" || value == "-C"
+        }
+        function is_standalone_global_option(value) {
+            return value == "--locked" || value == "--frozen" || value == "--offline" ||
+                value == "--verbose" || value == "-v" || value == "-vv" || value == "-vvv" ||
+                value == "--quiet" || value == "-q"
+        }
+        function is_attached_global_option(value) {
+            return value ~ /^--config=/ || value ~ /^--color=/ || value ~ /^-Z./ || value ~ /^-C./
+        }
         {
+            after_cargo = 0
+            skip_next = 0
+            first_candidate = ""
             for (i = 1; i <= NF; i++) {
-                word = $i
-                gsub(/^[^A-Za-z0-9_\/.-]+/, "", word)
-                gsub(/[^A-Za-z0-9_\/.-]+$/, "", word)
-                if (word == "cargo" || word ~ /\/cargo$/) {
-                    if (i + 1 <= NF) {
-                        next_word = $(i + 1)
-                        gsub(/^[^A-Za-z0-9_-]+/, "", next_word)
-                        gsub(/[^A-Za-z0-9_-]+$/, "", next_word)
-                        print next_word
+                word = clean($i)
+                if (!after_cargo) {
+                    if (is_cargo_token(word)) {
+                        after_cargo = 1
+                    }
+                    continue
+                }
+                if (skip_next) {
+                    skip_next = 0
+                    continue
+                }
+                if (word == "" || word ~ /^[A-Za-z_][A-Za-z0-9_]*=.*/) {
+                    continue
+                }
+                if (word in forbidden) {
+                    print word
+                    exit
+                }
+                if (word ~ /^\+[^[:space:]]+$/) {
+                    continue
+                }
+                if (option_takes_value(word)) {
+                    skip_next = 1
+                    continue
+                }
+                if (is_standalone_global_option(word) || is_attached_global_option(word)) {
+                    continue
+                }
+                if (word == "--" || word ~ /^-/) {
+                    continue
+                }
+                if (first_candidate == "") {
+                    first_candidate = word
+                    if (word in read_only) {
+                        print word
                         exit
                     }
                 }
             }
+            if (first_candidate != "") {
+                print first_candidate
+            }
         }
     '
+}
+
+is_forbidden_cargo_subcommand() {
+    local candidate="$1"
+    [ -n "$candidate" ] || return 1
+    for forbidden in $FORBIDDEN_CARGO_SUBCOMMANDS; do
+        if [ "$candidate" = "$forbidden" ]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 manifest_path_from_command() {
@@ -1169,6 +1241,27 @@ run_self_test() {
         denied*) ;;
         *) printf 'self-test FAILED: absolute cargo path must be denied; got %s\n' "$result" >&2; exit 1 ;;
     esac
+    # Cargo toolchain and global flags still execute a compile subcommand locally.
+    result=$(classify_command "cargo +nightly test --lib")
+    case "$result" in
+        denied*) ;;
+        *) printf 'self-test FAILED: cargo +toolchain test must be denied; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    result=$(classify_command "cargo --locked test --lib")
+    case "$result" in
+        denied*) ;;
+        *) printf 'self-test FAILED: cargo --locked test must be denied; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    result=$(classify_command "cargo -Z timings test --lib")
+    case "$result" in
+        denied*) ;;
+        *) printf 'self-test FAILED: cargo -Z timings test must be denied; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    result=$(classify_command "cargo --config 'build.rustflags = [\"-Dwarnings\"]' test --lib")
+    case "$result" in
+        denied*) ;;
+        *) printf 'self-test FAILED: cargo --config with spaced value before test must be denied; got %s\n' "$result" >&2; exit 1 ;;
+    esac
     # Bare rch exec can fall back to local Cargo → DENIED.
     result=$(classify_command "rch exec -- env TMPDIR=/tmp cargo test --lib foo")
     case "$result" in
@@ -1210,6 +1303,11 @@ run_self_test() {
     case "$result" in
         allowed*) ;;
         *) printf 'self-test FAILED: cargo metadata must be allowed; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    result=$(classify_command "cargo metadata --filter-platform test")
+    case "$result" in
+        allowed*) ;;
+        *) printf 'self-test FAILED: cargo metadata arguments that mention test must be allowed; got %s\n' "$result" >&2; exit 1 ;;
     esac
     # Absolute path wrapped remote-required rch exec → ALLOWED.
     result=$(classify_command "RCH_REQUIRE_REMOTE=1 /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 exec -- env TMPDIR=/tmp cargo bench --bench foo")
@@ -1342,7 +1440,7 @@ EOF
             exit 1
         fi
     fi
-    printf 'self-test PASSED: 24 classifier cases, JSON repair action, stable-wrapper/ssh exclusion, process/tmux fixture, and worktree fixtures produced expected outcomes\n'
+    printf 'self-test PASSED: 29 classifier cases, JSON repair action, stable-wrapper/ssh exclusion, process/tmux fixture, and worktree fixtures produced expected outcomes\n'
     exit 0
 }
 
@@ -1352,13 +1450,15 @@ fi
 
 case "$MODE" in
     cmd_classify)
+        if [ "$CMD_PROVIDED" != true ]; then
+            printf -- '--cmd requires a value\n' >&2
+            usage >&2
+            exit 2
+        fi
         # An explicit `--cmd ""` is treated as a classifier query for the
         # empty command and returns allowed (the classifier already handles
-        # empty input). Only complain when --cmd was never passed at all,
-        # which is detectable here only via $MODE staying at the default
-        # AND no positional fallback being supplied. For practical use,
-        # the harness always passes --cmd, so allow the empty-string path
-        # to flow through classify_command rather than hard-fail.
+        # empty input). Missing --cmd is a usage error because otherwise a
+        # miswired hook would silently report "allowed: empty command".
         RESULT=$(classify_command "$CMD")
         ALLOWED=$(printf '%s' "$RESULT" | awk -F'\t' '{print $1}')
         REASON=$(printf '%s' "$RESULT" | awk -F'\t' '{print $2}')
