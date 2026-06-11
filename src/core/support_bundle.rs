@@ -1456,8 +1456,10 @@ struct CacheHotsetSnapshot {
 
 fn collect_cache_directory_state(workspace: &Path) -> CacheDirectoryState {
     let cache_root = workspace.join(".ee").join("cache");
+    let root_present =
+        support_bundle_directory_is_real_directory(&cache_root, "support bundle cache directory");
     let mut state = CacheDirectoryState {
-        root_present: cache_root.is_dir(),
+        root_present,
         ..CacheDirectoryState::default()
     };
     if state.root_present {
@@ -1896,6 +1898,12 @@ pub(crate) fn collect_shadow_policy_summary(workspace: &Path) -> Value {
 
 fn discover_shadow_policy_artifacts(workspace: &Path) -> Vec<ShadowPolicyArtifactSample> {
     let artifact_dir = workspace.join(".ee").join(SHADOW_POLICY_ARTIFACT_DIR);
+    if !support_bundle_directory_is_real_directory(
+        &artifact_dir,
+        "support bundle shadow policy artifact directory",
+    ) {
+        return Vec::new();
+    }
     let Ok(entries) = fs::read_dir(artifact_dir) else {
         return Vec::new();
     };
@@ -4292,6 +4300,12 @@ fn read_support_bundle_sample_file_bounded(path: &Path) -> Option<String> {
 
 fn discover_performance_explain_samples(workspace: &Path) -> Vec<Value> {
     let report_dir = workspace.join(".ee").join(PERFORMANCE_EXPLAIN_SAMPLE_DIR);
+    if !support_bundle_directory_is_real_directory(
+        &report_dir,
+        "support bundle performance sample directory",
+    ) {
+        return Vec::new();
+    }
     let Ok(entries) = fs::read_dir(report_dir) else {
         return Vec::new();
     };
@@ -4439,6 +4453,12 @@ fn triage_summary_json(status: &StatusReport, swarm_reports: &[Value]) -> String
 
 fn discover_swarm_report_summaries(workspace: &Path) -> Vec<Value> {
     let report_dir = workspace.join(".ee").join("swarm-contention");
+    if !support_bundle_directory_is_real_directory(
+        &report_dir,
+        "support bundle swarm report directory",
+    ) {
+        return Vec::new();
+    }
     let Ok(entries) = fs::read_dir(report_dir) else {
         return Vec::new();
     };
@@ -5678,6 +5698,15 @@ fn regular_file_no_symlink(path: &Path) -> bool {
     }
     fs::symlink_metadata(path)
         .map(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+fn support_bundle_directory_is_real_directory(path: &Path, label: &str) -> bool {
+    if reject_existing_symlink_component(path, label).is_err() {
+        return false;
+    }
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_dir())
         .unwrap_or(false)
 }
 
@@ -9965,6 +9994,44 @@ mod tests {
             "pack hotset must include selection audit entries from pack records"
         );
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_directory_state_ignores_symlinked_cache_root() -> TestResult {
+        let root = unique_test_path("cache-root-symlink");
+        let workspace = root.join("workspace");
+        let ee_dir = workspace.join(".ee");
+        fs::create_dir_all(&ee_dir)
+            .map_err(|error| format!("failed to create workspace metadata dir: {error}"))?;
+
+        let outside_cache = root.join("outside-cache");
+        fs::create_dir_all(outside_cache.join("search"))
+            .map_err(|error| format!("failed to create outside cache dir: {error}"))?;
+        fs::write(
+            outside_cache.join("search").join("hotset.bin"),
+            b"external-cache",
+        )
+        .map_err(|error| format!("failed to write outside cache fixture: {error}"))?;
+
+        let cache_root = ee_dir.join("cache");
+        std::os::unix::fs::symlink(&outside_cache, &cache_root)
+            .map_err(|error| format!("failed to create cache-root symlink: {error}"))?;
+
+        let state = collect_cache_directory_state(&workspace);
+        assert!(
+            !state.root_present,
+            "support bundle cache scan must reject symlinked cache roots"
+        );
+        assert_eq!(
+            state.search.entries, 0,
+            "support bundle cache scan must not count external search cache files"
+        );
+        assert_eq!(
+            state.search.bytes, 0,
+            "support bundle cache scan must not size external search cache files"
+        );
         Ok(())
     }
 
