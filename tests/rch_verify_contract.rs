@@ -1824,6 +1824,57 @@ printf '[RCH] remote trj (0.1s)\n'
 }
 
 #[test]
+fn remote_compile_defaults_to_long_build_timeout() -> TestResult {
+    let fake_rch = write_fake_rch(
+        "fake-rch-default-build-timeout.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'RCH_BUILD_TIMEOUT_SEC=%s\n' "${RCH_BUILD_TIMEOUT_SEC:-}"
+printf 'RCH_TEST_TIMEOUT_SEC=%s\n' "${RCH_TEST_TIMEOUT_SEC:-}"
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "check",
+            "--all-targets",
+        ],
+        &[
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "fake rch default-timeout invocation failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse default-timeout proof: {error}"))?;
+    let stdout_tail = report["stdout_tail"]
+        .as_str()
+        .ok_or_else(|| "missing stdout_tail".to_owned())?;
+    if !stdout_tail.contains("RCH_BUILD_TIMEOUT_SEC=900") {
+        return Err(format!(
+            "cargo check should receive the default long build timeout: {report}"
+        ));
+    }
+    if !stdout_tail.contains("RCH_TEST_TIMEOUT_SEC=") {
+        return Err(format!(
+            "test timeout line missing from fake output: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn dry_run_accepts_cargo_fmt_only_when_checking() -> TestResult {
     let report = run_json(&["--dry-run", "--", "cargo", "fmt", "--check"])?;
     if report["command_kind"] != "cargo_fmt_check" {
@@ -4317,6 +4368,149 @@ exit 2
         || !summary.contains("known_blocker_override_used: `false`")
     {
         return Err(format!("summary missing known-blocker fields: {summary}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn known_blocker_remote_timeout_change_allows_new_remote_attempt() -> TestResult {
+    let invocation_log = unique_tmp_path("rch-known-blocker-timeout-invocations");
+    let store = unique_tmp_path("rch-known-blocker-timeout-store").join("known_blockers.jsonl");
+    let fake_rch = write_fake_rch(
+        "fake-rch-known-blocker-timeout.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'rch 1.0.24\n'
+  exit 0
+fi
+if [ "${1:-}" = "status" ]; then
+  cat <<'JSON'
+{"data":{"daemon":{"version":"1.0.24","socket_path":"/tmp/rch.sock","workers":[],"recent_builds":[]}}}
+JSON
+  exit 0
+fi
+if [ "${1:-}" = "exec" ]; then
+  printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+  cat <<'TRANSCRIPT'
+error: failed to load manifest for dependency `frankensearch`
+
+Caused by:
+  failed to parse manifest at `/data/projects/frankensearch/frankensearch/Cargo.toml`
+
+Caused by:
+  error inheriting `license-file` from workspace root manifest's `workspace.package.license-file`
+
+Caused by:
+  `workspace.package.license-file` was not defined
+[RCH] remote vmi1227854 failed (exit 101)
+TRANSCRIPT
+  exit 101
+fi
+printf 'unexpected fake rch args: %s\n' "$*" >&2
+exit 2
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let store_arg = store
+        .to_str()
+        .ok_or_else(|| "store path is not utf-8".to_owned())?;
+    let args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--rch-bin",
+        fake_rch_arg,
+        "--",
+        "cargo",
+        "check",
+        "--all-targets",
+    ];
+    let first_envs = [
+        ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+        ("RCH_BUILD_TIMEOUT_SEC", "300"),
+    ];
+    let second_envs = [
+        ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+        ("RCH_BUILD_TIMEOUT_SEC", "900"),
+    ];
+
+    let (first_status, first_stdout, _first_stderr) = run_script_with_env(&args, &first_envs)?;
+    if first_status.success() {
+        return Err("first timeout-key fixture should preserve remote failure".to_owned());
+    }
+    let first: Value = serde_json::from_str(&first_stdout)
+        .map_err(|error| format!("parse first timeout-key run: {error}"))?;
+    let first_fingerprint = first["known_blocker"]["blocker_fingerprint"]
+        .as_str()
+        .ok_or_else(|| format!("first timeout-key run missing known blocker: {first}"))?
+        .to_owned();
+    if first["known_blocker"]["remote_timeout_fingerprint"] != "build:300,test:unset" {
+        return Err(format!(
+            "first blocker should record the short timeout fingerprint: {first}"
+        ));
+    }
+
+    let (second_status, second_stdout, _second_stderr) = run_script_with_env(&args, &second_envs)?;
+    if second_status.success() {
+        return Err("second timeout-key fixture should still preserve remote failure".to_owned());
+    }
+    let second: Value = serde_json::from_str(&second_stdout)
+        .map_err(|error| format!("parse second timeout-key run: {error}"))?;
+    if second["status"] == "known_blocker_refused" {
+        return Err(format!(
+            "changed timeout must not reuse the short-timeout known blocker: {second}"
+        ));
+    }
+    let second_fingerprint = second["known_blocker"]["blocker_fingerprint"]
+        .as_str()
+        .ok_or_else(|| format!("second timeout-key run missing known blocker: {second}"))?;
+    if second_fingerprint == first_fingerprint {
+        return Err(format!(
+            "timeout-specific blocker fingerprints should differ: {second}"
+        ));
+    }
+    if second["known_blocker"]["remote_timeout_fingerprint"] != "build:900,test:unset" {
+        return Err(format!(
+            "second blocker should record the long timeout fingerprint: {second}"
+        ));
+    }
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read timeout-key invocations: {error}"))?;
+    if invocations.lines().count() != 2 {
+        return Err(format!(
+            "timeout change should launch a second remote attempt: {invocations:?}"
+        ));
+    }
+
+    let (third_status, third_stdout, _third_stderr) = run_script_with_env(&args, &second_envs)?;
+    if third_status.success() {
+        return Err("third timeout-key fixture should fail fast".to_owned());
+    }
+    let third: Value = serde_json::from_str(&third_stdout)
+        .map_err(|error| format!("parse third timeout-key run: {error}"))?;
+    if third["status"] != "known_blocker_refused"
+        || third["known_blocker"]["blocker_fingerprint"] != second_fingerprint
+    {
+        return Err(format!(
+            "matching long-timeout blocker should still fail fast: {third}"
+        ));
+    }
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read post-refusal timeout-key invocations: {error}"))?;
+    if invocations.lines().count() != 2 {
+        return Err(format!(
+            "third matching run should not invoke fake RCH again: {invocations:?}"
+        ));
     }
     Ok(())
 }

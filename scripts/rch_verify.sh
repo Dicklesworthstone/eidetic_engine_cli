@@ -65,7 +65,13 @@ Environment:
   RCH_VERIFY_TAIL_BYTES          Diagnostic stdout/stderr tail size (default: 4000)
   RCH_VERIFY_TMPDIR              Retained diagnostic artifact directory (default: /tmp)
   RCH_BUILD_TIMEOUT_SEC          Remote build timeout forwarded to rch exec
+                                 (default: 900 for cargo build/check/bench/clippy)
   RCH_TEST_TIMEOUT_SEC           Remote test timeout forwarded to rch exec
+                                 (default: 900 for cargo test)
+  RCH_VERIFY_DEFAULT_BUILD_TIMEOUT_SEC
+                                 Default RCH_BUILD_TIMEOUT_SEC when unset (default: 900)
+  RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC
+                                 Default RCH_TEST_TIMEOUT_SEC when unset (default: 900)
 
 Accepted Cargo verifier shapes:
   cargo check ...
@@ -109,6 +115,8 @@ RCH_VERIFY_ATTEMPT_TIMEOUT_MS="${RCH_VERIFY_ATTEMPT_TIMEOUT_MS:-900000}"
 RCH_VERIFY_PREFLIGHT_TIMEOUT_MS="${RCH_VERIFY_PREFLIGHT_TIMEOUT_MS:-10000}"
 RCH_VERIFY_TAIL_BYTES="${RCH_VERIFY_TAIL_BYTES:-4000}"
 RCH_VERIFY_TMPDIR="${RCH_VERIFY_TMPDIR:-/tmp}"
+RCH_VERIFY_DEFAULT_BUILD_TIMEOUT_SEC="${RCH_VERIFY_DEFAULT_BUILD_TIMEOUT_SEC:-900}"
+RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC="${RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC:-900}"
 RCH_ATTEMPT_TIMED_OUT=false
 RCH_STDOUT_BYTES=0
 RCH_STDERR_BYTES=0
@@ -311,6 +319,34 @@ positive_integer_or_die() {
             exit 2
             ;;
     esac
+}
+
+positive_integer_if_set_or_die() {
+    local name="$1"
+    local value="${2:-}"
+    if [ -z "$value" ]; then
+        return 0
+    fi
+    positive_integer_or_die "$name" "$value"
+}
+
+apply_default_remote_timeouts() {
+    case "$COMMAND_KIND" in
+        cargo_build|cargo_check|cargo_bench|cargo_clippy)
+            if [ -z "${RCH_BUILD_TIMEOUT_SEC:-}" ]; then
+                RCH_BUILD_TIMEOUT_SEC="$RCH_VERIFY_DEFAULT_BUILD_TIMEOUT_SEC"
+            fi
+            ;;
+        cargo_test)
+            if [ -z "${RCH_TEST_TIMEOUT_SEC:-}" ]; then
+                RCH_TEST_TIMEOUT_SEC="$RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC"
+            fi
+            ;;
+    esac
+}
+
+remote_timeout_fingerprint() {
+    printf 'build:%s,test:%s' "${RCH_BUILD_TIMEOUT_SEC:-unset}" "${RCH_TEST_TIMEOUT_SEC:-unset}"
 }
 
 json_file_field() {
@@ -1549,6 +1585,7 @@ known_blocker_lookup_json() {
     REQUESTED_WORKERS_VALUE="${REQUESTED_WORKERS_CSV:-}" \
     CONFIGURED_WORKERS_VALUE="${CONFIGURED_WORKERS_CSV:-}" \
     RCH_RUNTIME_JSON_INPUT="${RCH_RUNTIME_JSON:-}" \
+    REMOTE_TIMEOUT_FINGERPRINT_VALUE="$(remote_timeout_fingerprint)" \
     KNOWN_BLOCKER_NOW="${RCH_VERIFY_NOW:-}" \
     python3 - <<'PY'
 import datetime as dt
@@ -1615,6 +1652,10 @@ source_state_hash = (
 verifier_source_mode = source_state.get("verification_attribution") or None
 requested_workers = csv_items(os.environ.get("REQUESTED_WORKERS_VALUE", ""))
 configured_workers = csv_items(os.environ.get("CONFIGURED_WORKERS_VALUE", ""))
+remote_timeout_fingerprint = (
+    os.environ.get("REMOTE_TIMEOUT_FINGERPRINT_VALUE")
+    or "build:unset,test:unset"
+)
 runtime_fingerprint = {
     "client_compat": runtime.get("client_compat"),
     "daemon_compat": runtime.get("daemon_compat"),
@@ -1627,6 +1668,7 @@ current = {
     "verifier_source_mode": verifier_source_mode,
     "requested_workers": requested_workers,
     "configured_workers": configured_workers,
+    "remote_timeout_fingerprint": remote_timeout_fingerprint,
     "runtime_fingerprint": runtime_fingerprint,
 }
 
@@ -1659,6 +1701,8 @@ for line in lines:
     if (entry.get("requested_workers") or []) != current["requested_workers"]:
         continue
     if (entry.get("configured_workers") or []) != current["configured_workers"]:
+        continue
+    if entry.get("remote_timeout_fingerprint") != current["remote_timeout_fingerprint"]:
         continue
     if (entry.get("runtime_fingerprint") or {}) != current["runtime_fingerprint"]:
         continue
@@ -2471,6 +2515,7 @@ EOF
     KNOWN_BLOCKER_FAKE_OUTPUT_PRESENT="${RCH_VERIFY_FAKE_OUTPUT:+1}" \
     PROOF_BROKER_LEDGER_PATH="$PROOF_BROKER_LEDGER" \
     RCH_QUEUE_SNAPSHOT_JSON="${RCH_QUEUE_SNAPSHOT_JSON:-null}" \
+    REMOTE_TIMEOUT_FINGERPRINT_VALUE="$(remote_timeout_fingerprint)" \
     RUN_STARTED_AT="$RUN_STARTED_AT" \
     python3 - <<'PY'
 import datetime as dt
@@ -2891,6 +2936,10 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
     source_state_hash = proof.get("source_manifest_hash") or proof.get("dirty_status_hash")
     runtime = proof.get("rch_runtime") or {}
     details = proof.get("cargo_workspace_inheritance") or proof.get("cargo_path_dependency_version") or {}
+    remote_timeout_fingerprint = (
+        os.environ.get("REMOTE_TIMEOUT_FINGERPRINT_VALUE")
+        or "build:unset,test:unset"
+    )
     normalized_argv_hash = "sha256:" + hashlib.sha256(
         json.dumps(proof.get("command") or [], separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -2914,6 +2963,7 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
         "normalized_argv_hash": normalized_argv_hash,
         "requested_workers": csv_fingerprint(proof.get("requested_workers")),
         "configured_workers": csv_fingerprint(proof.get("configured_workers")),
+        "remote_timeout_fingerprint": remote_timeout_fingerprint,
         "runtime_fingerprint": runtime_fingerprint,
         "dependency": details.get("dependency") or details.get("crate"),
         "manifest_path": details.get("manifest_path") or details.get("location_searched"),
@@ -2940,6 +2990,7 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
         "normalized_argv_hash": normalized_argv_hash,
         "requested_workers": csv_fingerprint(proof.get("requested_workers")),
         "configured_workers": csv_fingerprint(proof.get("configured_workers")),
+        "remote_timeout_fingerprint": remote_timeout_fingerprint,
         "runtime_fingerprint": runtime_fingerprint,
         "dependency": details.get("dependency") or details.get("crate"),
         "manifest_path": details.get("manifest_path") or details.get("location_searched"),
@@ -3489,8 +3540,13 @@ PY
 positive_integer_or_die "RCH_VERIFY_ATTEMPT_TIMEOUT_MS" "$RCH_VERIFY_ATTEMPT_TIMEOUT_MS"
 positive_integer_or_die "RCH_VERIFY_PREFLIGHT_TIMEOUT_MS" "$RCH_VERIFY_PREFLIGHT_TIMEOUT_MS"
 positive_integer_or_die "RCH_VERIFY_TAIL_BYTES" "$RCH_VERIFY_TAIL_BYTES"
+positive_integer_or_die "RCH_VERIFY_DEFAULT_BUILD_TIMEOUT_SEC" "$RCH_VERIFY_DEFAULT_BUILD_TIMEOUT_SEC"
+positive_integer_or_die "RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC" "$RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC"
 
 COMMAND_KIND="$(classify_command)"
+apply_default_remote_timeouts
+positive_integer_if_set_or_die "RCH_BUILD_TIMEOUT_SEC" "${RCH_BUILD_TIMEOUT_SEC:-}"
+positive_integer_if_set_or_die "RCH_TEST_TIMEOUT_SEC" "${RCH_TEST_TIMEOUT_SEC:-}"
 WOULD_OFFLOAD=false
 WORKER_ID_JSON=null
 REMOTE_PROJECT_ROOT="/data/projects/eidetic_engine_cli"
