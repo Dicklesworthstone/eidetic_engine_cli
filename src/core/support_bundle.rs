@@ -8727,8 +8727,8 @@ mod tests {
 
         let replay_result = json!({
             "schema": "ee.swarm_replay_result.v1",
-            "workloadId": "workload_redaction",
-            "runId": "run_redaction",
+            "workloadId": "swarmwl_0123456789abcdef",
+            "runId": "swarmrun_0123456789abcdef",
             "sideEffectFree": true,
             "status": "degraded",
             "hostProfileAdmission": {
@@ -8785,6 +8785,7 @@ mod tests {
                 "fullFileListingPresent": false,
                 "redactionProbesPassed": true
             },
+            "resourceUsage": {},
             "firstFailure": {
                 "stepId": "remember_secret",
                 "agentSlot": 0,

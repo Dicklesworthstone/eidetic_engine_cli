@@ -6475,6 +6475,27 @@ memories_revised = 3
 
         let dir = repo_tempdir()?;
         let salt_dir = repo_tempdir()?;
+        // ExFAT/FAT temp mounts (agent shells on the Mac dev host point
+        // TMPDIR at an ExFAT volume) silently ignore POSIX mode bits, so
+        // the 0o600 contract is unverifiable there — skip rather than
+        // fail on a filesystem limitation (bd-29o1y env-sensitivity
+        // class). The contract stays enforced wherever modes stick.
+        let probe = dir.path().join("mode-probe");
+        fs::write(&probe, b"probe").map_err(|error| error.to_string())?;
+        let mut probe_perms = fs::metadata(&probe)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        probe_perms.set_mode(0o600);
+        fs::set_permissions(&probe, probe_perms).map_err(|error| error.to_string())?;
+        let probe_mode = fs::metadata(&probe)
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+        if probe_mode != 0o600 {
+            return Ok(());
+        }
+
         let machine_salt = salt_dir.path().join("machine-salt");
         let _output = create_test_capsule(dir.path(), true, Some(machine_salt.clone()))?;
 

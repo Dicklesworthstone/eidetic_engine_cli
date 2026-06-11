@@ -8140,6 +8140,14 @@ mod tests {
             .permissions();
         perms.set_mode(0o000);
         std::fs::set_permissions(&path, perms).map_err(|error| error.to_string())?;
+        // ExFAT/FAT temp mounts (agent shells on the Mac dev host point
+        // TMPDIR at an ExFAT volume) silently ignore POSIX mode bits.
+        // When the strip does not take effect, the PermissionDenied
+        // branch under test is unreachable on this host — skip like the
+        // root-user guard above (bd-29o1y env-sensitivity class).
+        if std::fs::File::open(&path).is_ok() {
+            return Ok(());
+        }
 
         let calibration = SearchScoreCalibration::for_workspace(&workspace);
 
@@ -8759,7 +8767,20 @@ mod tests {
                 .as_str()
                 .is_some_and(|alias| alias.starts_with("mesh_ns_"))
         );
-        assert_eq!(provenance["producerPeer"], "peer_builder_one");
+        // 83600051: a present-but-unsafe producerPeerLabel must alias the
+        // peer instead of falling back to the raw producer_peer_id, so an
+        // unsafe label can never leak the underlying peer identity.
+        let producer_peer = provenance["producerPeer"]
+            .as_str()
+            .expect("producerPeer must be a string");
+        assert!(
+            producer_peer.starts_with("mesh_peer_"),
+            "unsafe producerPeerLabel must yield a stable mesh_peer_ alias, got {producer_peer}"
+        );
+        assert_ne!(
+            producer_peer, "peer_builder_one",
+            "raw producer peer id must not leak when the label is unsafe"
+        );
         assert_eq!(provenance["materialLane"], "metadata");
         assert_eq!(provenance["importDecisionRef"], "mesh_dec_456");
         assert_eq!(provenance["trustLane"], "mesh_metadata");
