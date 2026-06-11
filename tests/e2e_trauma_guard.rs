@@ -170,6 +170,74 @@ fn destructive_command_surfaces_matching_risk_memory_provenance() -> TestResult 
 }
 
 #[test]
+fn malformed_workspace_rules_still_halt_destructive_command() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = tempdir.path().to_string_lossy().into_owned();
+
+    let init = run_ee(&["--workspace", &workspace, "--json", "init"])?;
+    ensure_exit(&init, EXIT_SUCCESS, "ee init exit")?;
+    assert_clean_stderr(&init, "ee init")?;
+
+    let rules_path = tempdir.path().join(".ee").join("preflight_rules.toml");
+    std::fs::write(
+        &rules_path,
+        r#"
+[[rules]]
+id = "bad_action"
+pattern = "*rm -rf*"
+action = "explode"
+"#,
+    )
+    .map_err(|error| format!("write malformed preflight rules: {error}"))?;
+
+    let preflight = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
+        "preflight",
+        "check",
+        "--cmd",
+        "rm -rf /tmp/work",
+    ])?;
+    ensure_exit(
+        &preflight,
+        EXIT_POLICY_DENIED,
+        "malformed-rule destructive preflight exit",
+    )?;
+    assert_clean_stderr(&preflight, "malformed-rule destructive preflight")?;
+    let report = stdout_json(&preflight, "malformed-rule destructive preflight")?;
+
+    ensure_equal(
+        report.get("schema").and_then(Value::as_str),
+        Some("ee.preflight.guard.v1"),
+        "preflight schema",
+    )?;
+    ensure(
+        report
+            .get("matches")
+            .and_then(Value::as_array)
+            .is_some_and(|matches| {
+                matches.iter().any(|matched| {
+                    matched.get("ruleId").and_then(Value::as_str) == Some("builtin:file_deletion")
+                })
+            }),
+        format!("built-in deletion guard should still match: {report}"),
+    )?;
+    ensure(
+        report
+            .get("degraded")
+            .and_then(Value::as_array)
+            .is_some_and(|degraded| {
+                degraded.iter().any(|entry| {
+                    entry.get("code").and_then(Value::as_str)
+                        == Some("preflight_patterns_unavailable")
+                })
+            }),
+        format!("malformed workspace rules should surface degradation: {report}"),
+    )
+}
+
+#[test]
 fn non_destructive_command_returns_success_without_matches() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let workspace = tempdir.path().to_string_lossy().into_owned();

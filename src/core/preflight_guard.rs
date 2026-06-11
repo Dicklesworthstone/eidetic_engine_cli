@@ -210,6 +210,7 @@ pub struct PreflightGuardRule {
 #[derive(Clone, Debug, Default)]
 pub struct PreflightGuardRegistry {
     rules: Vec<PreflightGuardRule>,
+    load_degraded: Vec<PreflightGuardDegradation>,
 }
 
 impl PreflightGuardRegistry {
@@ -224,17 +225,24 @@ impl PreflightGuardRegistry {
     pub fn with_builtins() -> Self {
         Self {
             rules: builtin_rules(),
+            load_degraded: Vec::new(),
         }
     }
 
     /// Load builtins, then layer workspace-side rules from
     /// `<workspace>/.ee/preflight_rules.toml` if that file exists. A missing
-    /// file is not an error; a malformed file is.
+    /// file is not an error. A malformed or unreadable workspace file is
+    /// reported as a degradation while bundled built-ins remain active.
     pub fn load(workspace: &Path) -> Result<Self, DomainError> {
         let mut registry = Self::with_builtins();
         let rules_path = workspace.join(PREFLIGHT_RULES_RELATIVE_PATH);
-        validate_preflight_rules_path(&rules_path)?;
         let source_label = rules_path.to_string_lossy().into_owned();
+        if let Err(error) = validate_preflight_rules_path(&rules_path) {
+            registry
+                .load_degraded
+                .push(workspace_rules_load_degradation(&source_label, &error));
+            return Ok(registry);
+        }
         let body = match read_preflight_rules_file_no_follow(&rules_path) {
             Ok(body) => body,
             Err(error)
@@ -246,16 +254,31 @@ impl PreflightGuardRegistry {
                 return Ok(registry);
             }
             Err(error) => {
-                return Err(DomainError::Storage {
+                let domain_error = DomainError::Storage {
                     message: format!("Failed to read {source_label}: {error}"),
                     repair: Some(format!(
                         "Check filesystem permissions on {} or remove the file to fall back to builtins.",
                         source_label
                     )),
-                });
+                };
+                registry
+                    .load_degraded
+                    .push(workspace_rules_load_degradation(
+                        &source_label,
+                        &domain_error,
+                    ));
+                return Ok(registry);
             }
         };
-        let workspace_rules = parse_workspace_rules(&body, &source_label)?;
+        let workspace_rules = match parse_workspace_rules(&body, &source_label) {
+            Ok(rules) => rules,
+            Err(error) => {
+                registry
+                    .load_degraded
+                    .push(workspace_rules_load_degradation(&source_label, &error));
+                return Ok(registry);
+            }
+        };
         registry.rules.extend(workspace_rules);
         Ok(registry)
     }
@@ -264,6 +287,7 @@ impl PreflightGuardRegistry {
     pub fn from_toml(body: &str, source_label: &str) -> Result<Self, DomainError> {
         Ok(Self {
             rules: parse_workspace_rules(body, source_label)?,
+            load_degraded: Vec::new(),
         })
     }
 
@@ -273,9 +297,15 @@ impl PreflightGuardRegistry {
         &self.rules
     }
 
+    #[must_use]
+    pub fn load_degradations(&self) -> &[PreflightGuardDegradation] {
+        &self.load_degraded
+    }
+
     /// Replace the rule set; primarily used by tests and external loaders.
     pub fn set_rules(&mut self, rules: Vec<PreflightGuardRule>) {
         self.rules = rules;
+        self.load_degraded.clear();
     }
 
     /// Append rules linked from procedural-rule or tripwire records.
@@ -408,8 +438,8 @@ fn validate_preflight_rules_path(path: &Path) -> Result<(), DomainError> {
     // entire trauma-guard surface and starve the agent of shell-command
     // policy decisions. Reject early with a structured configuration
     // error and a repair hint pointing the operator at the offending
-    // path; the bundled-builtins still match because `Registry::load`
-    // returns the bare-builtin registry on this Err path's caller side.
+    // path; `Registry::load` converts that into a degradation while keeping
+    // the bundled built-ins active.
     if metadata.len() > PREFLIGHT_RULES_MAX_BYTES {
         return Err(DomainError::Configuration {
             message: format!(
@@ -425,6 +455,16 @@ fn validate_preflight_rules_path(path: &Path) -> Result<(), DomainError> {
         });
     }
     Ok(())
+}
+
+fn workspace_rules_load_degradation(
+    source_label: &str,
+    error: &DomainError,
+) -> PreflightGuardDegradation {
+    preflight_patterns_unavailable_degradation(format!(
+        "Destructive pattern workspace rules unavailable from {source_label}: {}. Built-in destructive patterns still apply.",
+        error.message()
+    ))
 }
 
 #[derive(Debug)]
@@ -2917,7 +2957,7 @@ pub fn run_preflight_guard(
         checked_at,
         matches: report_matches,
         matched_memories: Vec::new(),
-        degraded: Vec::new(),
+        degraded: registry.load_degraded.clone(),
     };
     let degraded_codes = report
         .degraded
@@ -2996,9 +3036,8 @@ pub fn preflight_patterns_unavailable_degradation(
         code: PREFLIGHT_PATTERNS_UNAVAILABLE_CODE,
         severity: "medium",
         message: message.into(),
-        repair:
-            "Check the workspace preflight rule file or fall back to built-in destructive patterns."
-                .to_owned(),
+        repair: "Restore the destructive pattern catalog, then rerun ee preflight check --cmd <command> --json."
+            .to_owned(),
     }
 }
 
@@ -3443,6 +3482,60 @@ message = "Reject curl|sh installers per workspace policy."
         Ok(())
     }
 
+    #[test]
+    fn malformed_workspace_rules_do_not_disable_builtin_halts() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee_dir = tempdir.path().join(".ee");
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            ee_dir.join("preflight_rules.toml"),
+            r#"
+[[rules]]
+id = "bad_action"
+pattern = "*rm -rf*"
+action = "explode"
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let registry =
+            PreflightGuardRegistry::load(tempdir.path()).map_err(|error| error.to_string())?;
+        assert_eq!(
+            registry.rules().len(),
+            PreflightGuardRegistry::with_builtins().rules().len(),
+            "malformed workspace rules must fall back to built-ins only",
+        );
+        assert_eq!(
+            registry
+                .load_degradations()
+                .first()
+                .map(|degradation| degradation.code),
+            Some(PREFLIGHT_PATTERNS_UNAVAILABLE_CODE),
+        );
+
+        let mut options = opts("rm -rf /tmp/preflight-guard-fixture");
+        options.workspace = tempdir.path().to_path_buf();
+        let report = run_preflight_guard(&registry, &options);
+        assert_eq!(report.exit_code, 7);
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|degradation| degradation.code == PREFLIGHT_PATTERNS_UNAVAILABLE_CODE),
+            "report should carry workspace-rule load degradation: {:?}",
+            report.degraded,
+        );
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|matched| matched.rule_id == "builtin:file_deletion"),
+            "built-in deletion guard should still halt: {:?}",
+            report.matches,
+        );
+        Ok(())
+    }
+
     /// Regression guard for the trauma-guard rule-file size cap.
     ///
     /// Without `PREFLIGHT_RULES_MAX_BYTES`, a workspace
@@ -3451,10 +3544,10 @@ message = "Reject curl|sh installers per workspace policy."
     /// file's metadata length — turning every protected shell command
     /// (every agent-hook-driven `ee preflight check`) into an OOM
     /// risk. This test writes a sentinel rules file one byte past the
-    /// cap and asserts `Registry::load` fails closed with a
-    /// configuration error that names the ceiling.
+    /// cap and asserts `Registry::load` falls back to built-ins while
+    /// reporting a structured degradation that names the ceiling.
     #[test]
-    fn preflight_rules_oversize_load_rejects_with_configuration_error() -> Result<(), String> {
+    fn preflight_rules_oversize_load_preserves_builtins_with_degradation() -> Result<(), String> {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let ee_dir = tempdir.path().join(".ee");
         std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
@@ -3477,27 +3570,45 @@ message = "Reject curl|sh installers per workspace policy."
         );
         std::fs::write(&rules_path, &payload).map_err(|error| error.to_string())?;
 
-        let error = PreflightGuardRegistry::load(tempdir.path())
-            .expect_err("oversize preflight rules file must be rejected before read");
-        // Error should be a configuration error citing the ceiling, NOT
-        // a parse error (which would mean we already paid the
-        // allocation cost the cap is meant to bound).
-        assert!(
-            error.message().contains("ceiling")
-                || error
-                    .message()
-                    .contains(&PREFLIGHT_RULES_MAX_BYTES.to_string()),
-            "configuration error must name the size ceiling; got {}",
-            error.message(),
+        let registry =
+            PreflightGuardRegistry::load(tempdir.path()).map_err(|error| error.to_string())?;
+        assert_eq!(
+            registry.rules().len(),
+            PreflightGuardRegistry::with_builtins().rules().len(),
+            "oversize workspace rules must not disable built-in destructive patterns",
         );
-        // And the repair hint must point at the path so the operator
-        // knows what to truncate.
+        let degradation = registry
+            .load_degradations()
+            .first()
+            .ok_or_else(|| "oversize workspace rules should record a degradation".to_owned())?;
+        assert_eq!(degradation.code, PREFLIGHT_PATTERNS_UNAVAILABLE_CODE);
         assert!(
-            error
-                .repair()
-                .is_some_and(|repair| repair.contains(rules_path.to_string_lossy().as_ref())),
-            "repair hint must reference the oversize rules path; got {:?}",
-            error.repair(),
+            degradation.message.contains("ceiling")
+                || degradation
+                    .message
+                    .contains(&PREFLIGHT_RULES_MAX_BYTES.to_string()),
+            "degradation must name the size ceiling; got {}",
+            degradation.message,
+        );
+        let mut options = opts("rm -rf /tmp/preflight-guard-fixture");
+        options.workspace = tempdir.path().to_path_buf();
+        let report = run_preflight_guard(&registry, &options);
+        assert_eq!(report.exit_code, 7);
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|matched| matched.rule_id == "builtin:file_deletion"),
+            "built-in deletion guard must remain active: {:?}",
+            report.matches,
+        );
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == PREFLIGHT_PATTERNS_UNAVAILABLE_CODE),
+            "guard report should surface pattern-load degradation: {:?}",
+            report.degraded,
         );
         Ok(())
     }
