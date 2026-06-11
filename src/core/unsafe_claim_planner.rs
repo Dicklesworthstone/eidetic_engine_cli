@@ -12,11 +12,9 @@
 //! - **Nothing dropped**: every raw reason lands in exactly one group
 //!   (unknown inputs stay visible in the `unknown` group), preserved in
 //!   bounded form with its original index for audit.
-//! - **Deterministic**: group order follows the category ranking below;
-//!   action families rank `stop` → `retry_with_snapshot` →
-//!   `wait_or_coordinate` → `decompose_candidate` →
-//!   `alternate_candidate` → `comment_template` → `inspect`; identical
-//!   inputs produce identical output.
+//! - **Deterministic**: group and action order follow the schema enum
+//!   rankings in `ee.swarm.unsafe_claim_plan.v1`; identical inputs produce
+//!   identical output.
 //! - **Advisory only**: every emitted action is non-mutating; the
 //!   classifier can suggest a claim no more than the gate it consumes.
 
@@ -29,18 +27,17 @@ const MAX_RAW_REASONS_PER_GROUP: usize = 16;
 const MAX_RAW_REASON_LEN: usize = 160;
 
 /// Reason-group categories (ee.swarm.unsafe_claim_plan.v1 enum, in
-/// deterministic rank order: the most claim-blocking authority problems
-/// first, unknown always last).
+/// deterministic schema order).
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnsafeClaimReasonCategory {
     TrackerAuthority,
     AgentMailReadiness,
-    ReservationConflict,
     SourceOverlap,
     DirtyCheckout,
     RchProofAdmission,
     InstalledBinaryFreshness,
+    ReservationConflict,
     BvStaleness,
     RecommendationMismatch,
     MemorySourceDrift,
@@ -75,24 +72,46 @@ impl UnsafeClaimReasonCategory {
     #[must_use]
     pub const fn severity(self) -> &'static str {
         match self {
-            Self::TrackerAuthority | Self::AgentMailReadiness | Self::ReservationConflict => "high",
-            Self::SourceOverlap | Self::DirtyCheckout | Self::RchProofAdmission => "medium",
-            Self::InstalledBinaryFreshness | Self::MemorySourceDrift | Self::ResourceAdmission => {
-                "medium"
-            }
-            Self::BvStaleness | Self::RecommendationMismatch | Self::ActionSuppression => "low",
+            Self::TrackerAuthority | Self::ReservationConflict => "high",
+            Self::AgentMailReadiness
+            | Self::SourceOverlap
+            | Self::RchProofAdmission
+            | Self::InstalledBinaryFreshness
+            | Self::MemorySourceDrift
+            | Self::ResourceAdmission => "medium",
+            Self::DirtyCheckout | Self::BvStaleness => "warning",
+            Self::RecommendationMismatch | Self::ActionSuppression => "low",
             Self::Unknown => "warning",
+        }
+    }
+
+    #[must_use]
+    pub const fn rank(self) -> usize {
+        match self {
+            Self::TrackerAuthority => 0,
+            Self::AgentMailReadiness => 1,
+            Self::SourceOverlap => 2,
+            Self::DirtyCheckout => 3,
+            Self::RchProofAdmission => 4,
+            Self::InstalledBinaryFreshness => 5,
+            Self::ReservationConflict => 6,
+            Self::BvStaleness => 7,
+            Self::RecommendationMismatch => 8,
+            Self::MemorySourceDrift => 9,
+            Self::ResourceAdmission => 10,
+            Self::ActionSuppression => 11,
+            Self::Unknown => 12,
         }
     }
 
     const ALL: &'static [Self] = &[
         Self::TrackerAuthority,
         Self::AgentMailReadiness,
-        Self::ReservationConflict,
         Self::SourceOverlap,
         Self::DirtyCheckout,
         Self::RchProofAdmission,
         Self::InstalledBinaryFreshness,
+        Self::ReservationConflict,
         Self::BvStaleness,
         Self::RecommendationMismatch,
         Self::MemorySourceDrift,
@@ -107,26 +126,26 @@ impl UnsafeClaimReasonCategory {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnsafeClaimActionKind {
-    Stop,
-    RetryWithSnapshot,
-    WaitOrCoordinate,
+    Inspect,
+    CommentTemplate,
     DecomposeCandidate,
     AlternateCandidate,
-    CommentTemplate,
-    Inspect,
+    RetryWithSnapshot,
+    WaitOrCoordinate,
+    Stop,
 }
 
 impl UnsafeClaimActionKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Stop => "stop",
-            Self::RetryWithSnapshot => "retry_with_snapshot",
-            Self::WaitOrCoordinate => "wait_or_coordinate",
+            Self::Inspect => "inspect",
+            Self::CommentTemplate => "comment_template",
             Self::DecomposeCandidate => "decompose_candidate",
             Self::AlternateCandidate => "alternate_candidate",
-            Self::CommentTemplate => "comment_template",
-            Self::Inspect => "inspect",
+            Self::RetryWithSnapshot => "retry_with_snapshot",
+            Self::WaitOrCoordinate => "wait_or_coordinate",
+            Self::Stop => "stop",
         }
     }
 }
@@ -220,7 +239,11 @@ pub fn categorize_unsafe_claim_reason(reason: &str) -> UnsafeClaimReasonCategory
                 UnsafeClaimReasonCategory::RchProofAdmission
             } else if head.starts_with("memory_drift") || head.starts_with("memory_probe") {
                 UnsafeClaimReasonCategory::MemorySourceDrift
-            } else if head.starts_with("source_overlap") || head.starts_with("file_surface") {
+            } else if head.starts_with("source_overlap")
+                || head.starts_with("file_surface")
+                || head.starts_with("related_bead_collision")
+                || head.starts_with("high_risk_dirty_surface")
+            {
                 UnsafeClaimReasonCategory::SourceOverlap
             } else if head.starts_with("dirty") || head.starts_with("workspace_hygiene") {
                 UnsafeClaimReasonCategory::DirtyCheckout
@@ -276,7 +299,7 @@ pub fn classify_unsafe_claim_evidence(
         let category = categorize_unsafe_claim_reason(reason);
         // Groups are pre-allocated in ALL order, so the category's rank is
         // its index — no fallible lookup needed.
-        let rank = category as usize;
+        let rank = category.rank();
         let group = &mut groups[rank];
         group.raw_reason_indexes.push(index);
         if group.reason_codes.len() < MAX_RAW_REASONS_PER_GROUP {
@@ -323,43 +346,14 @@ pub fn rank_unsafe_claim_actions(
     use UnsafeClaimReasonCategory as UnsafeCategory;
     let mut actions = Vec::new();
 
-    // stop: policy/suppression evidence — a human or policy gate said no.
-    if has_category(groups, UnsafeCategory::ActionSuppression) {
-        actions.push(UnsafeClaimPlannerAction {
-            kind: UnsafeClaimActionKind::Stop,
-            rationale: "An action-suppression or policy signal is present; do not work around \
-                        it — surface it to a human."
-                .to_owned(),
-            reason_group_refs: vec![UnsafeCategory::ActionSuppression.as_str()],
-            advisory_only: true,
-            mutates_state: false,
-        });
-    }
-
-    // retry_with_snapshot: missing Agent Mail evidence is bridgeable
-    // read-only.
-    if has_category(groups, UnsafeCategory::AgentMailReadiness) {
-        actions.push(UnsafeClaimPlannerAction {
-            kind: UnsafeClaimActionKind::RetryWithSnapshot,
-            rationale: "Agent Mail evidence is missing or non-authoritative; generate a \
-                        redacted ee.agent_mail.snapshot.v1 and retry the same claim gate with \
-                        --agent-mail-snapshot (read-only evidence, not authorization)."
-                .to_owned(),
-            reason_group_refs: vec![UnsafeCategory::AgentMailReadiness.as_str()],
-            advisory_only: true,
-            mutates_state: false,
-        });
-    }
-
-    // wait_or_coordinate: a peer may actively own the surface or the
-    // shared substrate is mid-churn.
+    // inspect: drift/freshness families need evidence-gathering before any
+    // other action family is trustworthy.
     {
         let mut refs = Vec::new();
         for category in [
-            UnsafeCategory::ReservationConflict,
-            UnsafeCategory::TrackerAuthority,
-            UnsafeCategory::RchProofAdmission,
-            UnsafeCategory::ResourceAdmission,
+            UnsafeCategory::InstalledBinaryFreshness,
+            UnsafeCategory::MemorySourceDrift,
+            UnsafeCategory::Unknown,
         ] {
             if has_category(groups, category) {
                 refs.push(category.as_str());
@@ -367,10 +361,10 @@ pub fn rank_unsafe_claim_actions(
         }
         if !refs.is_empty() {
             actions.push(UnsafeClaimPlannerAction {
-                kind: UnsafeClaimActionKind::WaitOrCoordinate,
-                rationale: "Active reservations, tracker churn, or shared verification \
-                            substrate is in motion; coordinate with the owner or wait for the \
-                            evidence to settle instead of claiming through it."
+                kind: UnsafeClaimActionKind::Inspect,
+                rationale: "Freshness, drift, or unrecognized evidence is present; inspect \
+                            (ee diag environment-attestation, ee doctor) before trusting any \
+                            other action family."
                     .to_owned(),
                 reason_group_refs: refs,
                 advisory_only: true,
@@ -378,6 +372,11 @@ pub fn rank_unsafe_claim_actions(
             });
         }
     }
+
+    // comment_template is emitted by the full plan projection once it can
+    // include a bounded body template. This pure classifier has no body text
+    // source, so it intentionally skips that action kind while preserving the
+    // schema order for all emitted families.
 
     // decompose_candidate: broad source overlaps suggest the bead spans
     // surfaces other agents hold.
@@ -426,14 +425,30 @@ pub fn rank_unsafe_claim_actions(
         }
     }
 
-    // inspect: drift/freshness families need evidence-gathering before any
-    // of the above is trustworthy.
+    // retry_with_snapshot: missing Agent Mail evidence is bridgeable
+    // read-only.
+    if has_category(groups, UnsafeCategory::AgentMailReadiness) {
+        actions.push(UnsafeClaimPlannerAction {
+            kind: UnsafeClaimActionKind::RetryWithSnapshot,
+            rationale: "Agent Mail evidence is missing or non-authoritative; generate a \
+                        redacted ee.agent_mail.snapshot.v1 and retry the same claim gate with \
+                        --agent-mail-snapshot (read-only evidence, not authorization)."
+                .to_owned(),
+            reason_group_refs: vec![UnsafeCategory::AgentMailReadiness.as_str()],
+            advisory_only: true,
+            mutates_state: false,
+        });
+    }
+
+    // wait_or_coordinate: a peer may actively own the surface or the
+    // shared substrate is mid-churn.
     {
         let mut refs = Vec::new();
         for category in [
-            UnsafeCategory::InstalledBinaryFreshness,
-            UnsafeCategory::MemorySourceDrift,
-            UnsafeCategory::Unknown,
+            UnsafeCategory::ReservationConflict,
+            UnsafeCategory::TrackerAuthority,
+            UnsafeCategory::RchProofAdmission,
+            UnsafeCategory::ResourceAdmission,
         ] {
             if has_category(groups, category) {
                 refs.push(category.as_str());
@@ -441,16 +456,29 @@ pub fn rank_unsafe_claim_actions(
         }
         if !refs.is_empty() {
             actions.push(UnsafeClaimPlannerAction {
-                kind: UnsafeClaimActionKind::Inspect,
-                rationale: "Freshness, drift, or unrecognized evidence is present; inspect \
-                            (ee diag environment-attestation, ee doctor) before trusting any \
-                            other action family."
+                kind: UnsafeClaimActionKind::WaitOrCoordinate,
+                rationale: "Active reservations, tracker churn, or shared verification \
+                            substrate is in motion; coordinate with the owner or wait for the \
+                            evidence to settle instead of claiming through it."
                     .to_owned(),
                 reason_group_refs: refs,
                 advisory_only: true,
                 mutates_state: false,
             });
         }
+    }
+
+    // stop: policy/suppression evidence — a human or policy gate said no.
+    if has_category(groups, UnsafeCategory::ActionSuppression) {
+        actions.push(UnsafeClaimPlannerAction {
+            kind: UnsafeClaimActionKind::Stop,
+            rationale: "An action-suppression or policy signal is present; do not work around \
+                        it — surface it to a human."
+                .to_owned(),
+            reason_group_refs: vec![UnsafeCategory::ActionSuppression.as_str()],
+            advisory_only: true,
+            mutates_state: false,
+        });
     }
 
     actions
@@ -731,6 +759,97 @@ mod tests {
     }
 
     #[test]
+    fn enum_string_orders_match_unsafe_claim_plan_schema() -> TestResult {
+        let reason_categories: Vec<_> = UnsafeClaimReasonCategory::ALL
+            .iter()
+            .map(|category| category.as_str())
+            .collect();
+        ensure(
+            reason_categories
+                == vec![
+                    "tracker_authority",
+                    "agent_mail_readiness",
+                    "source_overlap",
+                    "dirty_checkout",
+                    "rch_proof_admission",
+                    "installed_binary_freshness",
+                    "reservation_conflict",
+                    "bv_staleness",
+                    "recommendation_mismatch",
+                    "memory_source_drift",
+                    "resource_admission",
+                    "action_suppression",
+                    "unknown",
+                ],
+            format!("reason category schema order drifted: {reason_categories:?}"),
+        )?;
+
+        let action_kinds = [
+            UnsafeClaimActionKind::Inspect,
+            UnsafeClaimActionKind::CommentTemplate,
+            UnsafeClaimActionKind::DecomposeCandidate,
+            UnsafeClaimActionKind::AlternateCandidate,
+            UnsafeClaimActionKind::RetryWithSnapshot,
+            UnsafeClaimActionKind::WaitOrCoordinate,
+            UnsafeClaimActionKind::Stop,
+        ]
+        .into_iter()
+        .map(UnsafeClaimActionKind::as_str)
+        .collect::<Vec<_>>();
+        ensure(
+            action_kinds
+                == vec![
+                    "inspect",
+                    "comment_template",
+                    "decompose_candidate",
+                    "alternate_candidate",
+                    "retry_with_snapshot",
+                    "wait_or_coordinate",
+                    "stop",
+                ],
+            format!("action kind schema order drifted: {action_kinds:?}"),
+        )
+    }
+
+    #[test]
+    fn fixture_category_severities_match_unsafe_claim_plan_schema_example() -> TestResult {
+        for (category, expected) in [
+            (UnsafeClaimReasonCategory::TrackerAuthority, "high"),
+            (UnsafeClaimReasonCategory::AgentMailReadiness, "medium"),
+            (UnsafeClaimReasonCategory::SourceOverlap, "medium"),
+            (UnsafeClaimReasonCategory::DirtyCheckout, "warning"),
+            (UnsafeClaimReasonCategory::RchProofAdmission, "medium"),
+            (UnsafeClaimReasonCategory::BvStaleness, "warning"),
+            (UnsafeClaimReasonCategory::Unknown, "warning"),
+        ] {
+            let got = category.severity();
+            ensure(
+                got == expected,
+                format!(
+                    "{} severity drifted: expected {expected}, got {got}",
+                    category.as_str()
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn category_rank_matches_preallocated_group_order() -> TestResult {
+        for (index, category) in UnsafeClaimReasonCategory::ALL.iter().enumerate() {
+            ensure(
+                category.rank() == index,
+                format!(
+                    "{} rank drifted: expected {index}, got {}",
+                    category.as_str(),
+                    category.rank()
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn classification_is_deterministic_and_loses_nothing() -> TestResult {
         let reasons = strings(&[
             "beads_tracker_not_authoritative:external_changes_pending_import",
@@ -796,6 +915,8 @@ mod tests {
             "reservation_evidence_not_authoritative",
             "agent_mail_unavailable",
             "candidate_not_found:bd-abc",
+            "dirty_checkout_path_count:3",
+            "memory_drift_source_unverifiable",
             "action_suppressed_by_policy",
         ]);
         let classification = classify_unsafe_claim_evidence(&reasons, &[]);
@@ -807,10 +928,12 @@ mod tests {
         ensure(
             kinds
                 == vec![
-                    UnsafeClaimActionKind::Stop,
+                    UnsafeClaimActionKind::Inspect,
+                    UnsafeClaimActionKind::DecomposeCandidate,
+                    UnsafeClaimActionKind::AlternateCandidate,
                     UnsafeClaimActionKind::RetryWithSnapshot,
                     UnsafeClaimActionKind::WaitOrCoordinate,
-                    UnsafeClaimActionKind::AlternateCandidate,
+                    UnsafeClaimActionKind::Stop,
                 ],
             format!("family ranking drifted: {kinds:?}"),
         )?;
@@ -879,6 +1002,14 @@ mod tests {
             (
                 "reservation_collision:src/core/*.rs",
                 UnsafeClaimReasonCategory::ReservationConflict,
+            ),
+            (
+                "related_bead_collision:docs/schemas/swarm",
+                UnsafeClaimReasonCategory::SourceOverlap,
+            ),
+            (
+                "high_risk_dirty_surface:src/core/*.rs",
+                UnsafeClaimReasonCategory::SourceOverlap,
             ),
             (
                 "rch_verify_capacity_or_timeout",
