@@ -1282,6 +1282,24 @@ pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport
     let mut checked_artifacts = Vec::new();
     let mut checked_derived = Vec::new();
 
+    // The manifest cannot list itself (it is rendered before its own hash
+    // exists), but verify still content-addresses it via inspect; report it as
+    // a checked artifact so the verify projection covers every required file.
+    if !inspect
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.path == MANIFEST_FILE)
+    {
+        let manifest_path = backup_path.join(MANIFEST_FILE);
+        checked_artifacts.push(BackupArtifactReport {
+            path: MANIFEST_FILE.to_owned(),
+            kind: "manifest".to_owned(),
+            hash: Some(inspect.manifest_hash.clone()),
+            size_bytes: Some(file_size(&manifest_path)?),
+            required: true,
+        });
+    }
+
     for artifact in &inspect.artifacts {
         let Some(path) = safe_artifact_path(&backup_path, &artifact.path, &mut issues) else {
             continue;
@@ -6546,8 +6564,11 @@ mod tests {
             "symlink artifact verification status",
         )?;
         ensure(
-            verified.checked_artifacts.is_empty(),
-            "symlink artifact should not be hashed as backup evidence",
+            verified
+                .checked_artifacts
+                .iter()
+                .all(|artifact| artifact.path == MANIFEST_FILE),
+            "symlink artifact should not be hashed as backup evidence (only the manifest itself may be reported)",
         )?;
         ensure(
             verified.issues.iter().any(|issue| {

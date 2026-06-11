@@ -40,7 +40,8 @@ use ee::db::DbConnection;
 use ee::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_VERIFY_SCHEMA_V1,
     EXPORT_AUDIT_SCHEMA_V1, EXPORT_FOOTER_SCHEMA_V1, EXPORT_HEADER_SCHEMA_V1,
-    EXPORT_MEMORY_SCHEMA_V1, EXPORT_TAG_SCHEMA_V1, EXPORT_WORKSPACE_SCHEMA_V1, RedactionLevel,
+    EXPORT_LINK_SCHEMA_V1, EXPORT_MEMORY_SCHEMA_V1, EXPORT_TAG_SCHEMA_V1,
+    EXPORT_WORKSPACE_SCHEMA_V1, RedactionLevel,
 };
 use ee::output::jsonl_export::REDACTED_PATH_PLACEHOLDER;
 use serde_json::Value;
@@ -207,6 +208,10 @@ fn records_contract_projection(records_path: &Path) -> Result<Vec<String>, Strin
                     json_bool(record, "redacted")?,
                 )),
                 EXPORT_TAG_SCHEMA_V1 => Ok(format!("tag|tag={}", json_str(record, "tag")?)),
+                EXPORT_LINK_SCHEMA_V1 => Ok(format!(
+                    "link|linkType={}",
+                    json_str(record, "link_type")?,
+                )),
                 EXPORT_AUDIT_SCHEMA_V1 => Ok(format!(
                     "audit|operation={}|targetType={}",
                     json_str(record, "operation")?,
@@ -293,11 +298,16 @@ fn expected_db_domain_records_projection(redaction_level: RedactionLevel) -> Vec
         ),
         expected_tag_projection(redaction_level, "blake3"),
         expected_tag_projection(redaction_level, "dedupe"),
+        // The fixture remembers with auto_link enabled, and the release-themed
+        // memories are similar enough that one deterministic auto-link (plus
+        // its audit row) is part of the canonical shape.
+        "link|linkType=related".to_string(),
+        "audit|operation=memory.create|targetType=memory".to_string(),
+        "audit|operation=memory.link.create|targetType=memory_link".to_string(),
         "audit|operation=memory.create|targetType=memory".to_string(),
         "audit|operation=memory.create|targetType=memory".to_string(),
         "audit|operation=memory.create|targetType=memory".to_string(),
-        "audit|operation=memory.create|targetType=memory".to_string(),
-        "footer|totalRecords=18|memoryRecords=4|linkRecords=0|tagRecords=8|auditRecords=4|success=true".to_string(),
+        "footer|totalRecords=21|memoryRecords=4|linkRecords=1|tagRecords=8|auditRecords=5|success=true".to_string(),
     ]
 }
 
@@ -1034,7 +1044,7 @@ fn backup_records_jsonl_matches_db_domain_golden_shape() -> TestResult {
         report.link_count,
         report.tag_count,
         report.audit_count,
-    ) != (4, 0, 8, 4)
+    ) != (4, 1, 8, 5)
     {
         return Err(format!(
             "backup report counts drifted: memories={}, links={}, tags={}, audits={}",

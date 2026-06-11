@@ -1038,7 +1038,8 @@ impl<W: Write> JsonlExporter<W> {
     ///
     /// Returns an error if writing fails.
     pub fn write_footer(&mut self, mut footer: ExportFooter) -> io::Result<ExportStats> {
-        footer.total_records = self.records_written;
+        let final_record_count = self.records_written.saturating_add(1);
+        footer.total_records = final_record_count;
         footer.memory_count = self.memory_count;
         footer.link_count = self.link_count;
         footer.tag_count = self.tag_count;
@@ -1048,7 +1049,7 @@ impl<W: Write> JsonlExporter<W> {
         let json = serde_json::to_string(&footer)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         writeln!(self.writer, "{json}")?;
-        self.records_written += 1;
+        self.records_written = final_record_count;
 
         Ok(ExportStats {
             total_records: self.records_written,
@@ -1840,6 +1841,10 @@ mod tests {
 
         assert_eq!(stats.memory_count, 3);
         assert_eq!(stats.total_records, 5);
+        let written = String::from_utf8(output).expect("valid utf8");
+        let footer_json = written.lines().last().expect("footer line");
+        let footer: ExportFooter = serde_json::from_str(footer_json).expect("footer parses");
+        assert_eq!(footer.total_records, stats.total_records);
     }
 
     #[test]
