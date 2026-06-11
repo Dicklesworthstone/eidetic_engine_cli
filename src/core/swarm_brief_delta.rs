@@ -535,14 +535,11 @@ fn derive_next_actions(
     rch: &[RchDelta],
 ) -> Vec<NextAction> {
     let mut actions: Vec<NextAction> = Vec::new();
-    if rch
-        .iter()
-        .any(|delta| delta.kind != "appeared" && delta_indicates_pressure(delta))
-    {
+    if rch.iter().any(delta_indicates_pressure) {
         actions.push(NextAction {
             severity: DeltaSeverity::Critical,
             code: "rch_posture_regressed",
-            rationale: "RCH worker posture regressed since the prior snapshot; verify topology before launching new remote builds.",
+            rationale: "RCH worker pressure is present in the latest snapshot; verify topology before launching new remote builds.",
         });
     }
     if reservations
@@ -735,6 +732,28 @@ mod tests {
             .iter()
             .find(|action| action.severity == DeltaSeverity::Critical)
             .expect("critical action emitted");
+        assert_eq!(critical.code, "rch_posture_regressed");
+    }
+
+    #[test]
+    fn newly_observed_rch_pressure_still_produces_critical_action() {
+        let before = SwarmBriefSnapshot::default();
+        let after = SwarmBriefSnapshot {
+            rch_postures: vec![SwarmBriefRchPosture {
+                worker_alias: "vmi_new".to_string(),
+                posture: "critical".to_string(),
+                admission_status: "pressure_blocked".to_string(),
+            }],
+            ..SwarmBriefSnapshot::default()
+        };
+        let capsule = compute_swarm_brief_delta(&before, &after);
+        assert_eq!(capsule.changed_rch.len(), 1);
+        assert_eq!(capsule.changed_rch[0].kind, "appeared");
+        let critical = capsule
+            .recommended_next_actions
+            .iter()
+            .find(|action| action.severity == DeltaSeverity::Critical)
+            .expect("critical action emitted for newly observed RCH pressure");
         assert_eq!(critical.code, "rch_posture_regressed");
     }
 

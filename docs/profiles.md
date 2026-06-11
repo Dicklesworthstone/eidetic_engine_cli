@@ -167,6 +167,31 @@ and pass redacted summaries into the admission report.
 | Replay and SLO evidence | `ee.agent_workload_replay.v1`, `ee.swarm_slo.scorecard.v1`, replay lab artifacts | `sourcePosture.replay` | Fresh only when the replay input hash matches the requested workload class; stale or missing replay evidence cannot prove admission safety | Include scorecard ids, hashes, and summary metrics only | `replay_slo_*` |
 | Coordination and claim evidence | `ee.swarm.work_packet.v1`, claim-gate reports, Beads freshness, Agent Mail snapshot status | `evidence[]` and caller-specific safety gates | Admission advice is advisory and never overrides stale tracker state, reservation collisions, or live owner evidence | No raw mail bodies, raw Beads JSONL excerpts, or unbounded command output | `missing_required_signal`, `stale_source_authority`, `contradictory_evidence` |
 
+### Queue-Pressure Block
+
+`queuePressure` is an optional bounded object for queue-pressure fairness in
+large swarms. Older emitters may omit it; emitters that include it must use the
+schema-pinned fields below and must keep `canAuthorizeClaim = false`.
+
+| Field | Meaning |
+|-------|---------|
+| `level` | One of `idle`, `low`, `moderate`, `saturated`, or `unknown`. |
+| `reasonCodes[]` | Queue-specific reason taxonomy. Current codes are `rch_lane_busy`, `rch_telemetry_gap`, `active_build_slot_exhausted`, `stale_in_progress_bead`, `agent_mail_unavailable`, `agent_mail_recovery_corrupt`, `dirty_checkout_saturated`, `local_cargo_refused`, `output_budget_pressure`, `host_calibration_missing`, and `contradictory_source_state`. |
+| `abstainedSources[]` | Source classes that could not be trusted or inspected. Non-empty when `level = unknown`. |
+| `sourceRefs[]` | Redacted source references with kind, optional source schema, freshness, evidence state, confidence, optional hash, and bounded preview. |
+| `redactionPosture` | Always `counts_ids_statuses_hashes_only_no_mail_body_no_command_argv_no_absolute_paths`. |
+
+Queue-pressure source refs identify only source class and bounded state. They
+must not contain raw mail bodies, raw command argv, host-private absolute paths,
+full dirty file listings, raw Beads JSONL, stack traces, secrets, or unbounded
+command output. Missing telemetry uses `evidenceState = "abstained"` or
+`"missing"` and contributes to `level = "unknown"` unless another trusted,
+fresh source independently establishes the level. Corrupt Agent Mail recovery
+state uses `agent_mail_recovery_corrupt`; unavailable Agent Mail read state uses
+`agent_mail_unavailable`. Contradictory sources use
+`contradictory_source_state` and should make the advice collect more evidence
+rather than authorize work.
+
 Normalization rules:
 
 - Missing required evidence becomes `freshness = missing`, `confidence = low`,

@@ -59,6 +59,9 @@
     "sourcePosture": {
       "$ref": "#/$defs/sourcePosture"
     },
+    "queuePressure": {
+      "$ref": "#/$defs/queuePressure"
+    },
     "reasonCodes": {
       "type": "array",
       "items": {
@@ -271,6 +274,194 @@
         },
         "replay": {
           "$ref": "#/$defs/replayPosture"
+        }
+      }
+    },
+    "queuePressure": {
+      "type": "object",
+      "description": "Bounded, redaction-safe queue-pressure explanation block for massive-swarm resource admission. The block is advisory evidence only and never authorizes claims, local Cargo fallback, Beads mutation, Agent Mail mutation, RCH job creation, or source-control changes.",
+      "additionalProperties": false,
+      "required": [
+        "level",
+        "canAuthorizeClaim",
+        "reasonCodes",
+        "abstainedSources",
+        "sourceRefs",
+        "redactionPosture"
+      ],
+      "properties": {
+        "level": {
+          "$ref": "#/$defs/queuePressureLevel"
+        },
+        "canAuthorizeClaim": {
+          "type": "boolean",
+          "const": false
+        },
+        "reasonCodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/queuePressureReasonCode"
+          },
+          "uniqueItems": true,
+          "maxItems": 16
+        },
+        "abstainedSources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/queuePressureSourceKind"
+          },
+          "uniqueItems": true,
+          "maxItems": 16
+        },
+        "sourceRefs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/queuePressureSourceRef"
+          },
+          "maxItems": 24
+        },
+        "redactionPosture": {
+          "type": "string",
+          "const": "counts_ids_statuses_hashes_only_no_mail_body_no_command_argv_no_absolute_paths"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "level": {
+                "const": "unknown"
+              }
+            },
+            "required": ["level"]
+          },
+          "then": {
+            "properties": {
+              "reasonCodes": {
+                "minItems": 1
+              },
+              "abstainedSources": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "queuePressureLevel": {
+      "type": "string",
+      "enum": [
+        "idle",
+        "low",
+        "moderate",
+        "saturated",
+        "unknown"
+      ]
+    },
+    "queuePressureReasonCode": {
+      "type": "string",
+      "enum": [
+        "rch_lane_busy",
+        "rch_telemetry_gap",
+        "active_build_slot_exhausted",
+        "stale_in_progress_bead",
+        "agent_mail_unavailable",
+        "agent_mail_recovery_corrupt",
+        "dirty_checkout_saturated",
+        "local_cargo_refused",
+        "output_budget_pressure",
+        "host_calibration_missing",
+        "contradictory_source_state"
+      ]
+    },
+    "queuePressureSourceKind": {
+      "type": "string",
+      "enum": [
+        "rch_status",
+        "rch_selector_admission_probe",
+        "build_slot_lease",
+        "beads_in_progress_summary",
+        "agent_mail_health",
+        "agent_mail_recovery_probe",
+        "git_dirty_summary",
+        "local_cargo_tripwire",
+        "output_budget_governor",
+        "host_calibration_posture",
+        "source_authority_snapshot",
+        "manual_fixture"
+      ]
+    },
+    "queuePressureEvidenceState": {
+      "type": "string",
+      "enum": [
+        "observed",
+        "missing",
+        "corrupt",
+        "unavailable",
+        "contradictory",
+        "abstained"
+      ]
+    },
+    "queuePressureSourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "sourceSchema",
+        "freshness",
+        "evidenceState",
+        "confidence",
+        "hash",
+        "boundedPreview"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/queuePressureSourceKind"
+        },
+        "sourceSchema": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^ee\\.[A-Za-z0-9_.-]+\\.v[0-9]+$"
+        },
+        "freshness": {
+          "type": "string",
+          "enum": [
+            "fresh",
+            "stale",
+            "missing",
+            "unavailable",
+            "contradictory"
+          ]
+        },
+        "evidenceState": {
+          "$ref": "#/$defs/queuePressureEvidenceState"
+        },
+        "confidence": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "hash": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/hashRef"
+            }
+          ]
+        },
+        "boundedPreview": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 160
         }
       }
     },
@@ -670,6 +861,37 @@
         "daemon": "not_required",
         "replay": "not_required"
       },
+      "queuePressure": {
+        "level": "saturated",
+        "canAuthorizeClaim": false,
+        "reasonCodes": [
+          "rch_lane_busy",
+          "active_build_slot_exhausted",
+          "local_cargo_refused"
+        ],
+        "abstainedSources": [],
+        "sourceRefs": [
+          {
+            "kind": "rch_status",
+            "sourceSchema": null,
+            "freshness": "fresh",
+            "evidenceState": "observed",
+            "confidence": "high",
+            "hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "boundedPreview": "active build present; slot count exhausted; argv redacted"
+          },
+          {
+            "kind": "local_cargo_tripwire",
+            "sourceSchema": "ee.rch_local_cargo_tripwire.v1",
+            "freshness": "fresh",
+            "evidenceState": "observed",
+            "confidence": "high",
+            "hash": null,
+            "boundedPreview": "remote-required verification; local fallback refused"
+          }
+        ],
+        "redactionPosture": "counts_ids_statuses_hashes_only_no_mail_body_no_command_argv_no_absolute_paths"
+      },
       "reasonCodes": [
         "host_calibration_fresh",
         "budget_within_profile",
@@ -707,6 +929,398 @@
         "secretsPresent": false
       },
       "degraded": []
+    },
+    {
+      "schema": "ee.resource_admission.v1",
+      "sideEffectFree": true,
+      "advisoryOnly": true,
+      "mutationPolicy": "never_mutates_state",
+      "policyDomain": "resource_profile_budget_admission",
+      "policyId": "candidate.resource_profile_budget_admission",
+      "decision": "admit",
+      "subject": {
+        "surface": "pack",
+        "commandClass": "read_only",
+        "requestedProfile": null,
+        "effectiveProfile": "workstation",
+        "estimatedCostClass": "small"
+      },
+      "sourcePosture": {
+        "hostCalibration": "fresh",
+        "resourceBudget": "within_budget",
+        "rch": "not_required",
+        "localCargo": "clean",
+        "lanePressure": "clear",
+        "workloadPressure": "within_budget",
+        "daemon": "available",
+        "replay": "healthy"
+      },
+      "queuePressure": {
+        "level": "idle",
+        "canAuthorizeClaim": false,
+        "reasonCodes": [],
+        "abstainedSources": [],
+        "sourceRefs": [
+          {
+            "kind": "manual_fixture",
+            "sourceSchema": null,
+            "freshness": "fresh",
+            "evidenceState": "observed",
+            "confidence": "high",
+            "hash": null,
+            "boundedPreview": "no queued work or lane blockers in bounded fixture"
+          }
+        ],
+        "redactionPosture": "counts_ids_statuses_hashes_only_no_mail_body_no_command_argv_no_absolute_paths"
+      },
+      "reasonCodes": [
+        "host_calibration_fresh",
+        "budget_within_profile",
+        "rch_not_required",
+        "local_cargo_clean",
+        "lane_pressure_clear",
+        "daemon_available",
+        "replay_slo_healthy",
+        "redaction_posture_verified"
+      ],
+      "abstentionReasons": [],
+      "nextCommands": [],
+      "evidence": [
+        {
+          "kind": "manual_fixture",
+          "sourceSchema": null,
+          "freshness": "fresh",
+          "confidence": "high",
+          "hash": null,
+          "boundedPreview": "idle queue-pressure fixture"
+        }
+      ],
+      "redactionPosture": {
+        "rawMemoryBodyPresent": false,
+        "rawMailBodyPresent": false,
+        "rawCommandOutputPresent": false,
+        "absoluteHostPathPresent": false,
+        "fullEnvironmentPresent": false,
+        "secretsPresent": false
+      },
+      "degraded": []
+    },
+    {
+      "schema": "ee.resource_admission.v1",
+      "sideEffectFree": true,
+      "advisoryOnly": true,
+      "mutationPolicy": "never_mutates_state",
+      "policyDomain": "resource_profile_budget_admission",
+      "policyId": "candidate.resource_profile_budget_admission",
+      "decision": "queue",
+      "subject": {
+        "surface": "work_packet",
+        "commandClass": "coordination",
+        "requestedProfile": "workstation",
+        "effectiveProfile": "workstation",
+        "estimatedCostClass": "standard"
+      },
+      "sourcePosture": {
+        "hostCalibration": "fresh",
+        "resourceBudget": "within_budget",
+        "rch": "remote_ready",
+        "localCargo": "refused",
+        "lanePressure": "background_pressure",
+        "workloadPressure": "within_budget",
+        "daemon": "not_required",
+        "replay": "not_required"
+      },
+      "queuePressure": {
+        "level": "low",
+        "canAuthorizeClaim": false,
+        "reasonCodes": [
+          "stale_in_progress_bead"
+        ],
+        "abstainedSources": [],
+        "sourceRefs": [
+          {
+            "kind": "beads_in_progress_summary",
+            "sourceSchema": null,
+            "freshness": "stale",
+            "evidenceState": "observed",
+            "confidence": "medium",
+            "hash": null,
+            "boundedPreview": "one quiet in-progress bead; id and age only"
+          }
+        ],
+        "redactionPosture": "counts_ids_statuses_hashes_only_no_mail_body_no_command_argv_no_absolute_paths"
+      },
+      "reasonCodes": [
+        "host_calibration_fresh",
+        "budget_within_profile",
+        "rch_remote_ready",
+        "local_cargo_refused",
+        "lane_pressure_background",
+        "daemon_not_required",
+        "replay_slo_healthy",
+        "redaction_posture_verified"
+      ],
+      "abstentionReasons": [],
+      "nextCommands": [
+        {
+          "priority": 10,
+          "kind": "refresh_evidence",
+          "command": "ee swarm brief --json",
+          "destructive": false,
+          "rationale": "Refresh bounded swarm lane pressure before admitting more work."
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "swarm_work_packet",
+          "sourceSchema": "ee.swarm.work_packet.v1",
+          "freshness": "stale",
+          "confidence": "medium",
+          "hash": null,
+          "boundedPreview": "in-progress summary only; no Beads JSONL excerpt"
+        }
+      ],
+      "redactionPosture": {
+        "rawMemoryBodyPresent": false,
+        "rawMailBodyPresent": false,
+        "rawCommandOutputPresent": false,
+        "absoluteHostPathPresent": false,
+        "fullEnvironmentPresent": false,
+        "secretsPresent": false
+      },
+      "degraded": []
+    },
+    {
+      "schema": "ee.resource_admission.v1",
+      "sideEffectFree": true,
+      "advisoryOnly": true,
+      "mutationPolicy": "never_mutates_state",
+      "policyDomain": "resource_profile_budget_admission",
+      "policyId": "candidate.resource_profile_budget_admission",
+      "decision": "degrade_to_lean",
+      "subject": {
+        "surface": "pack",
+        "commandClass": "read_only",
+        "requestedProfile": "swarm",
+        "effectiveProfile": "workstation",
+        "estimatedCostClass": "standard"
+      },
+      "sourcePosture": {
+        "hostCalibration": "partial",
+        "resourceBudget": "recommend_decrease",
+        "rch": "not_required",
+        "localCargo": "not_required",
+        "lanePressure": "mixed_pressure",
+        "workloadPressure": "cache_pressure",
+        "daemon": "available",
+        "replay": "healthy"
+      },
+      "queuePressure": {
+        "level": "moderate",
+        "canAuthorizeClaim": false,
+        "reasonCodes": [
+          "dirty_checkout_saturated",
+          "output_budget_pressure"
+        ],
+        "abstainedSources": [],
+        "sourceRefs": [
+          {
+            "kind": "git_dirty_summary",
+            "sourceSchema": null,
+            "freshness": "fresh",
+            "evidenceState": "observed",
+            "confidence": "high",
+            "hash": null,
+            "boundedPreview": "dirty path count exceeded admission threshold; paths omitted"
+          },
+          {
+            "kind": "output_budget_governor",
+            "sourceSchema": null,
+            "freshness": "fresh",
+            "evidenceState": "observed",
+            "confidence": "medium",
+            "hash": null,
+            "boundedPreview": "response budget pressure present; raw output omitted"
+          }
+        ],
+        "redactionPosture": "counts_ids_statuses_hashes_only_no_mail_body_no_command_argv_no_absolute_paths"
+      },
+      "reasonCodes": [
+        "host_calibration_partial",
+        "budget_delta_recommends_decrease",
+        "rch_not_required",
+        "local_cargo_clean",
+        "lane_pressure_background",
+        "cache_pressure",
+        "daemon_available",
+        "replay_slo_healthy",
+        "redaction_posture_verified"
+      ],
+      "abstentionReasons": [],
+      "nextCommands": [
+        {
+          "priority": 10,
+          "kind": "rerun_with_profile",
+          "command": "ee pack <task> --resource-profile constrained --json",
+          "destructive": false,
+          "rationale": "Use the constrained resource profile while queue pressure is moderate."
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "cache_hotset",
+          "sourceSchema": null,
+          "freshness": "fresh",
+          "confidence": "medium",
+          "hash": null,
+          "boundedPreview": "cache pressure summary; no memory bodies"
+        }
+      ],
+      "redactionPosture": {
+        "rawMemoryBodyPresent": false,
+        "rawMailBodyPresent": false,
+        "rawCommandOutputPresent": false,
+        "absoluteHostPathPresent": false,
+        "fullEnvironmentPresent": false,
+        "secretsPresent": false
+      },
+      "degraded": []
+    },
+    {
+      "schema": "ee.resource_admission.v1",
+      "sideEffectFree": true,
+      "advisoryOnly": true,
+      "mutationPolicy": "never_mutates_state",
+      "policyDomain": "resource_profile_budget_admission",
+      "policyId": "candidate.resource_profile_budget_admission",
+      "decision": "abstain",
+      "subject": {
+        "surface": "support_bundle",
+        "commandClass": "diagnostic",
+        "requestedProfile": "swarm",
+        "effectiveProfile": "workstation",
+        "estimatedCostClass": "unknown"
+      },
+      "sourcePosture": {
+        "hostCalibration": "missing",
+        "resourceBudget": "missing",
+        "rch": "unknown",
+        "localCargo": "unknown",
+        "lanePressure": "unknown",
+        "workloadPressure": "unknown",
+        "daemon": "unknown",
+        "replay": "missing"
+      },
+      "queuePressure": {
+        "level": "unknown",
+        "canAuthorizeClaim": false,
+        "reasonCodes": [
+          "rch_telemetry_gap",
+          "agent_mail_unavailable",
+          "agent_mail_recovery_corrupt",
+          "host_calibration_missing",
+          "contradictory_source_state"
+        ],
+        "abstainedSources": [
+          "rch_status",
+          "agent_mail_health",
+          "agent_mail_recovery_probe",
+          "host_calibration_posture",
+          "source_authority_snapshot"
+        ],
+        "sourceRefs": [
+          {
+            "kind": "rch_status",
+            "sourceSchema": null,
+            "freshness": "missing",
+            "evidenceState": "abstained",
+            "confidence": "low",
+            "hash": null,
+            "boundedPreview": "slot telemetry absent; cannot infer queue level"
+          },
+          {
+            "kind": "agent_mail_health",
+            "sourceSchema": null,
+            "freshness": "unavailable",
+            "evidenceState": "unavailable",
+            "confidence": "low",
+            "hash": null,
+            "boundedPreview": "mail readiness unavailable; no bodies included"
+          },
+          {
+            "kind": "agent_mail_recovery_probe",
+            "sourceSchema": null,
+            "freshness": "unavailable",
+            "evidenceState": "corrupt",
+            "confidence": "low",
+            "hash": null,
+            "boundedPreview": "recovery metadata corrupt; repair command omitted"
+          },
+          {
+            "kind": "host_calibration_posture",
+            "sourceSchema": "ee.host_calibration.posture.v1",
+            "freshness": "missing",
+            "evidenceState": "missing",
+            "confidence": "low",
+            "hash": null,
+            "boundedPreview": "host calibration missing"
+          },
+          {
+            "kind": "source_authority_snapshot",
+            "sourceSchema": "ee.source_authority.snapshot.v1",
+            "freshness": "contradictory",
+            "evidenceState": "contradictory",
+            "confidence": "low",
+            "hash": null,
+            "boundedPreview": "sources disagree on readiness; raw records omitted"
+          }
+        ],
+        "redactionPosture": "counts_ids_statuses_hashes_only_no_mail_body_no_command_argv_no_absolute_paths"
+      },
+      "reasonCodes": [
+        "host_calibration_missing",
+        "missing_required_signal",
+        "redaction_posture_unknown"
+      ],
+      "abstentionReasons": [
+        "missing_required_signal",
+        "redaction_posture_unknown"
+      ],
+      "nextCommands": [
+        {
+          "priority": 10,
+          "kind": "inspect_support_bundle",
+          "command": "ee support bundle --include resource-admission --json",
+          "destructive": false,
+          "rationale": "Collect bounded support evidence before retrying queue-pressure admission."
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "manual_fixture",
+          "sourceSchema": null,
+          "freshness": "contradictory",
+          "confidence": "low",
+          "hash": null,
+          "boundedPreview": "unknown queue-pressure fixture; raw source details omitted"
+        }
+      ],
+      "redactionPosture": {
+        "rawMemoryBodyPresent": false,
+        "rawMailBodyPresent": false,
+        "rawCommandOutputPresent": false,
+        "absoluteHostPathPresent": false,
+        "fullEnvironmentPresent": false,
+        "secretsPresent": false
+      },
+      "degraded": [
+        {
+          "code": "missing_required_signal",
+          "severity": "high",
+          "message": "Resource-admission queue-pressure inputs were unavailable or contradictory.",
+          "repair": "ee support bundle --include resource-admission --json"
+        }
+      ]
     }
   ]
 }

@@ -375,6 +375,11 @@ pub const SITUATION_SCHEMAS: &[SchemaEntry] = &[
         SchemaCategory::Situation,
     ),
     SchemaEntry::new(
+        "situation_adopt",
+        "ee.situation.adopt.v1",
+        SchemaCategory::Situation,
+    ),
+    SchemaEntry::new(
         "situation_show",
         "ee.situation.show.v1",
         SchemaCategory::Situation,
@@ -2765,6 +2770,179 @@ mod tests {
             &JsonValue::Bool(false),
             "local Cargo fallback must be forbidden by schema",
         )
+    }
+
+    #[test]
+    fn resource_admission_queue_pressure_contract_covers_reason_taxonomy() -> TestResult {
+        let schema_path = repo_path("docs/schemas/ee.resource_admission.v1.json");
+        let schema: JsonValue =
+            serde_json::from_str(&fs::read_to_string(&schema_path).map_err(|error| {
+                format!(
+                    "read resource admission schema {}: {error}",
+                    schema_path.display()
+                )
+            })?)
+            .map_err(|error| {
+                format!(
+                    "parse resource admission schema {}: {error}",
+                    schema_path.display()
+                )
+            })?;
+
+        fn string_values_at(schema: &JsonValue, pointer: &str) -> Result<Vec<String>, String> {
+            schema
+                .pointer(pointer)
+                .and_then(JsonValue::as_array)
+                .ok_or_else(|| format!("{pointer} must be an array"))?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("{pointer} must contain only strings"))
+                })
+                .collect()
+        }
+
+        ensure_equal(
+            &schema["properties"]["queuePressure"]["$ref"],
+            &JsonValue::String("#/$defs/queuePressure".to_owned()),
+            "resource admission queuePressure ref",
+        )?;
+        ensure_equal(
+            &schema["$defs"]["queuePressure"]["properties"]["canAuthorizeClaim"]["const"],
+            &JsonValue::Bool(false),
+            "queuePressure must not authorize claims",
+        )?;
+
+        let expected_levels = ["idle", "low", "moderate", "saturated", "unknown"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let levels = string_values_at(&schema, "/$defs/queuePressureLevel/enum")?;
+        ensure_equal(&levels, &expected_levels, "queue-pressure level enum")?;
+
+        let expected_reason_codes = [
+            "rch_lane_busy",
+            "rch_telemetry_gap",
+            "active_build_slot_exhausted",
+            "stale_in_progress_bead",
+            "agent_mail_unavailable",
+            "agent_mail_recovery_corrupt",
+            "dirty_checkout_saturated",
+            "local_cargo_refused",
+            "output_budget_pressure",
+            "host_calibration_missing",
+            "contradictory_source_state",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        let reason_codes = string_values_at(&schema, "/$defs/queuePressureReasonCode/enum")?;
+        ensure_equal(
+            &reason_codes,
+            &expected_reason_codes,
+            "queue-pressure reason-code enum",
+        )?;
+
+        let expected_evidence_states = [
+            "observed",
+            "missing",
+            "corrupt",
+            "unavailable",
+            "contradictory",
+            "abstained",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        let evidence_states = string_values_at(&schema, "/$defs/queuePressureEvidenceState/enum")?;
+        ensure_equal(
+            &evidence_states,
+            &expected_evidence_states,
+            "queue-pressure evidence-state enum",
+        )?;
+
+        let examples = schema["examples"]
+            .as_array()
+            .ok_or("resource admission examples must be an array")?;
+        let mut covered_levels = BTreeSet::new();
+        let mut covered_reasons = BTreeSet::new();
+        let mut saw_unknown_with_abstention = false;
+
+        for example in examples {
+            let Some(queue_pressure) = example.get("queuePressure") else {
+                continue;
+            };
+            ensure_equal(
+                &queue_pressure["canAuthorizeClaim"],
+                &JsonValue::Bool(false),
+                "queuePressure example canAuthorizeClaim",
+            )?;
+            let level = queue_pressure["level"]
+                .as_str()
+                .ok_or("queuePressure example level must be a string")?;
+            covered_levels.insert(level.to_owned());
+            let reason_array = queue_pressure["reasonCodes"]
+                .as_array()
+                .ok_or("queuePressure example reasonCodes must be an array")?;
+            for reason in reason_array {
+                covered_reasons.insert(
+                    reason
+                        .as_str()
+                        .ok_or("queuePressure example reason must be a string")?
+                        .to_owned(),
+                );
+            }
+            if level == "unknown" {
+                let abstained_sources = queue_pressure["abstainedSources"]
+                    .as_array()
+                    .ok_or("unknown queuePressure example abstainedSources must be an array")?;
+                ensure(
+                    !abstained_sources.is_empty(),
+                    "unknown queuePressure examples must name abstained sources",
+                )?;
+                saw_unknown_with_abstention = true;
+            }
+        }
+
+        let expected_level_set = expected_levels.into_iter().collect::<BTreeSet<_>>();
+        ensure_equal(
+            &covered_levels,
+            &expected_level_set,
+            "queue-pressure examples must cover every level",
+        )?;
+        let expected_reason_set = expected_reason_codes.into_iter().collect::<BTreeSet<_>>();
+        ensure_equal(
+            &covered_reasons,
+            &expected_reason_set,
+            "queue-pressure examples must cover every reason code",
+        )?;
+        ensure(
+            saw_unknown_with_abstention,
+            "queue-pressure examples must map unknown pressure to abstained sources",
+        )?;
+
+        let serialized_examples =
+            serde_json::to_string(examples).map_err(|error| error.to_string())?;
+        for forbidden in [
+            "/Users/",
+            "/home/",
+            "BEGIN PRIVATE KEY",
+            "Bearer ",
+            "ghp_",
+            "Subject: ",
+            "Message-ID:",
+            "raw_inbox",
+            "raw command",
+            "raw mail",
+        ] {
+            ensure(
+                !serialized_examples.contains(forbidden),
+                format!("queue-pressure examples must not contain {forbidden}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
