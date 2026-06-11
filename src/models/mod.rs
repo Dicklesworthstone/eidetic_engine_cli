@@ -313,9 +313,10 @@ pub use singleflight::{
 };
 pub use situation::{
     FEATURE_EVIDENCE_SCHEMA_V1, FeatureEvidence, ParseSituationValueError,
-    ROUTING_DECISION_SCHEMA_V1, RoutingDecision, SITUATION_CLASSIFY_SCHEMA_V1,
-    SITUATION_EXPLAIN_SCHEMA_V1, SITUATION_LINK_SCHEMA_V1, SITUATION_SCHEMA_CATALOG_V1,
-    SITUATION_SCHEMA_V1, SITUATION_SHOW_SCHEMA_V1, Situation, SituationCategory,
+    ROUTING_DECISION_SCHEMA_V1, RoutingDecision, SITUATION_ADOPT_SCHEMA_V1,
+    SITUATION_CLASSIFY_SCHEMA_V1, SITUATION_EXPLAIN_SCHEMA_V1, SITUATION_LINK_SCHEMA_V1,
+    SITUATION_SCHEMA_CATALOG_V1, SITUATION_SCHEMA_V1, SITUATION_SHOW_SCHEMA_V1, Situation,
+    SituationCategory,
     SituationConfidence, SituationFeatureType, SituationFieldSchema, SituationLink,
     SituationLinkRelation, SituationObjectSchema, SituationReplayPolicy, SituationRoutingSurface,
     TASK_SIGNATURE_SCHEMA_V1, TaskSignature, situation_schema_catalog_json, situation_schemas,

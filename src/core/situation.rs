@@ -2393,6 +2393,203 @@ pub fn adopt_situation_from_text(
     )
 }
 
+/// Options for the `ee situation adopt` command surface (bd-1tp6p.2.3).
+#[derive(Clone, Debug)]
+pub struct AdoptSituationCommandOptions<'a> {
+    pub workspace_path: &'a std::path::Path,
+    pub database_path: Option<&'a std::path::Path>,
+    pub task_text: &'a str,
+    pub adopted_by: Option<&'a str>,
+    pub adoption_reason: Option<&'a str>,
+    pub evidence_ids: &'a [String],
+    pub as_of: Option<&'a str>,
+}
+
+/// Machine- and human-facing report for an adoption command run. All
+/// fields mirror the PERSISTED record (not the request), so the
+/// already-exists posture reports what is actually stored.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SituationAdoptReport {
+    pub version: &'static str,
+    pub situation_id: String,
+    pub already_existed: bool,
+    pub workspace_scope: String,
+    pub input_hash: String,
+    pub category: SituationCategory,
+    pub confidence: String,
+    pub confidence_score: f64,
+    pub context_hints: Vec<String>,
+    pub evidence_ids: Vec<String>,
+    pub created_at: String,
+    pub adopted_at: String,
+    pub record_schema_version: String,
+    pub classifier_algorithm: String,
+    pub classifier_version: String,
+    pub build_version: String,
+}
+
+impl SituationAdoptReport {
+    #[must_use]
+    pub fn posture(&self) -> &'static str {
+        if self.already_existed {
+            "already_exists"
+        } else {
+            "adopted"
+        }
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "command": "situation adopt",
+            "version": self.version,
+            "situationId": self.situation_id,
+            "posture": self.posture(),
+            "workspaceScope": self.workspace_scope,
+            "inputHash": self.input_hash,
+            "category": self.category.as_str(),
+            "confidence": self.confidence,
+            "confidenceScore": self.confidence_score,
+            "contextHints": self.context_hints,
+            "evidenceIds": self.evidence_ids,
+            "createdAt": self.created_at,
+            "adoptedAt": self.adopted_at,
+            "recordSchemaVersion": self.record_schema_version,
+            "classifierAlgorithm": self.classifier_algorithm,
+            "classifierVersion": self.classifier_version,
+            "buildVersion": self.build_version,
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = format!(
+            "Situation {} ({})\n",
+            self.situation_id,
+            self.posture()
+        );
+        output.push_str(&format!(
+            "Category: {} ({} confidence, score {:.2})\n",
+            self.category.as_str(),
+            self.confidence,
+            self.confidence_score
+        ));
+        output.push_str(&format!("Adopted: {}\n", self.adopted_at));
+        if !self.context_hints.is_empty() {
+            output.push_str(&format!("Context hints: {}\n", self.context_hints.join(", ")));
+        }
+        if !self.evidence_ids.is_empty() {
+            output.push_str(&format!("Evidence: {}\n", self.evidence_ids.join(", ")));
+        }
+        output
+    }
+}
+
+fn adopt_resolve_workspace_path(
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, crate::models::DomainError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(path)
+    };
+    absolute
+        .canonicalize()
+        .map_err(|error| crate::models::DomainError::Configuration {
+            message: format!(
+                "Failed to resolve workspace {}: {error}",
+                absolute.display()
+            ),
+            repair: Some("ee init --workspace .".to_owned()),
+        })
+}
+
+fn adopt_stable_workspace_id(path: &std::path::Path) -> String {
+    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
+    let mut bytes = [0_u8; 16];
+    for (target, source) in bytes.iter_mut().zip(hash.as_bytes()) {
+        *target = *source;
+    }
+    crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+}
+
+/// Run the full `ee situation adopt` command flow: resolve the
+/// workspace, open and migrate the database, run the audited adoption
+/// use case, and report the persisted record.
+pub fn adopt_situation_command(
+    options: &AdoptSituationCommandOptions<'_>,
+) -> Result<SituationAdoptReport, crate::models::DomainError> {
+    let workspace_path = adopt_resolve_workspace_path(options.workspace_path)?;
+    let database_path = options
+        .database_path
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+
+    let connection = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
+        crate::models::DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee init --workspace .".to_owned()),
+        }
+    })?;
+    connection
+        .migrate()
+        .map_err(|error| crate::models::DomainError::Storage {
+            message: format!("Failed to migrate database: {error}"),
+            repair: Some("ee migrate run --workspace .".to_owned()),
+        })?;
+
+    let request = AdoptSituationRequest {
+        task_text: options.task_text.to_owned(),
+        workspace_scope: adopt_stable_workspace_id(&workspace_path),
+        adopted_by: options.adopted_by.map(str::to_owned),
+        adoption_reason: options.adoption_reason.map(str::to_owned),
+        evidence_ids: options.evidence_ids.to_vec(),
+        as_of: options.as_of.map(str::to_owned),
+    };
+    let adoption = adopt_situation_from_text(&connection, &request)?;
+
+    let stored = connection
+        .get_situation_record(&adoption.situation_id)
+        .map_err(|error| situation_storage_error("read back", error))?
+        .ok_or_else(|| crate::models::DomainError::Storage {
+            message: format!(
+                "Situation record `{}` was not readable after adoption.",
+                adoption.situation_id
+            ),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+
+    let context_hints: Vec<String> = serde_json::from_str(&stored.context_hints_json)
+        .map_err(|_| situation_record_corrupt_error(&stored.situation_id, "context_hints_json"))?;
+    let evidence_ids: Vec<String> = serde_json::from_str(&stored.provenance_json)
+        .map_err(|_| situation_record_corrupt_error(&stored.situation_id, "provenance_json"))?;
+    let category = stored
+        .category
+        .parse::<SituationCategory>()
+        .map_err(|_| situation_record_corrupt_error(&stored.situation_id, "category"))?;
+
+    Ok(SituationAdoptReport {
+        version: crate::models::SITUATION_ADOPT_SCHEMA_V1,
+        situation_id: stored.situation_id,
+        already_existed: adoption.already_existed,
+        workspace_scope: stored.workspace_scope,
+        input_hash: stored.input_hash,
+        category,
+        confidence: stored.confidence,
+        confidence_score: stored.confidence_score,
+        context_hints,
+        evidence_ids,
+        created_at: stored.created_at,
+        adopted_at: stored.adopted_at,
+        record_schema_version: stored.schema_version,
+        classifier_algorithm: stored.classifier_algorithm,
+        classifier_version: stored.classifier_version,
+        build_version: stored.build_version,
+    })
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
