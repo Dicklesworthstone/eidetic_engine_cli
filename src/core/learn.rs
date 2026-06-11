@@ -4064,7 +4064,7 @@ mod tests {
         for (index, peer_id) in ["peer_alpha01", "peer_beta002"].into_iter().enumerate() {
             connection
                 .insert_feedback_event(
-                    &format!("fb_peerlearn{index:018}"),
+                    &format!("fb_peerlearn{index:017}"),
                     &CreateFeedbackEventInput {
                         workspace_id: workspace_id.clone(),
                         target_type: "memory".to_string(),

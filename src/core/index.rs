@@ -3212,7 +3212,7 @@ mod tests {
         connection.migrate().map_err(|error| error.to_string())?;
         connection
             .insert_workspace(
-                "wsp_anchorbackfill0000000000000",
+                "wsp_anchorbackfill000000000000",
                 &crate::db::CreateWorkspaceInput {
                     path: "/tmp/ee-anchor-backfill".to_owned(),
                     name: Some("anchor-backfill".to_owned()),
@@ -3222,13 +3222,13 @@ mod tests {
 
         // The revision write path inserts a memory row without extracting
         // anchors, mirroring rows created before the anchor table existed.
-        let memory_id = "mem_anchorbackfill00000000000001";
+        let memory_id = "mem_anchorbackfill000000000001";
         connection
             .insert_memory_revision(
                 memory_id,
                 memory_id,
                 &crate::db::CreateMemoryInput {
-                    workspace_id: "wsp_anchorbackfill0000000000000".to_owned(),
+                    workspace_id: "wsp_anchorbackfill000000000000".to_owned(),
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
                     content: "Run `cargo fmt --check` before touching `src/db/mod.rs`.".to_owned(),
@@ -3254,7 +3254,7 @@ mod tests {
         )?;
 
         let memories = connection
-            .list_memories_for_retrieval_with_global("wsp_anchorbackfill0000000000000", None, false)
+            .list_memories_for_retrieval_with_global("wsp_anchorbackfill000000000000", None, false)
             .map_err(|error| error.to_string())?;
         let documents = memory_documents_with_anchors(&connection, &memories)
             .map_err(|error| error.to_string())?;
