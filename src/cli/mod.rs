@@ -39922,7 +39922,8 @@ where
         .collect();
     degraded.append(&mut extra_degraded);
     if report.truncated
-        && let (Some(budget), Some(cursor)) = (args.budget_tokens, report.continuation_cursor.as_deref())
+        && let (Some(budget), Some(cursor)) =
+            (args.budget_tokens, report.continuation_cursor.as_deref())
     {
         degraded.push(RecallDegradedEntry::budget_truncated(
             report.dropped_count,
