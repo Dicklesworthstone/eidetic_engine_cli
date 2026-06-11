@@ -17514,17 +17514,25 @@ fn response_schema_stdout(
 fn governor_params_for_hash(args: &[OsString]) -> Vec<String> {
     let mut params = Vec::with_capacity(args.len().saturating_sub(1));
     let mut skip_next = false;
+    let mut passthrough = false;
     for arg in args.iter().skip(1) {
         let value = arg.to_string_lossy();
         if skip_next {
             skip_next = false;
             continue;
         }
-        if value == "--max-output-tokens" || value == "--cursor" {
+        if !passthrough && arg == OsStr::new("--") {
+            passthrough = true;
+            params.push(value.into_owned());
+            continue;
+        }
+        if !passthrough && (value == "--max-output-tokens" || value == "--cursor") {
             skip_next = true;
             continue;
         }
-        if value.starts_with("--max-output-tokens=") || value.starts_with("--cursor=") {
+        if !passthrough
+            && (value.starts_with("--max-output-tokens=") || value.starts_with("--cursor="))
+        {
             continue;
         }
         params.push(value.into_owned());
@@ -67381,6 +67389,68 @@ mod tests {
         ensure(
             !super::args_contain_format_flag(&separator),
             "format-looking positional query after -- should not be detected",
+        )
+    }
+
+    #[test]
+    fn cursor_flag_detection_ignores_separator_positionals() -> TestResult {
+        let args = [
+            OsString::from("ee"),
+            OsString::from("pack"),
+            OsString::from("--"),
+            OsString::from("--cursor"),
+            OsString::from("literal task text"),
+        ];
+        ensure(
+            !super::args_contain_cursor_flag(&args),
+            "cursor-looking positional task text after -- should not engage the governor",
+        )
+    }
+
+    #[test]
+    fn governor_params_for_hash_strips_governor_flags_before_separator() -> TestResult {
+        let args = [
+            OsString::from("ee"),
+            OsString::from("--max-output-tokens"),
+            OsString::from("600"),
+            OsString::from("schema"),
+            OsString::from("list"),
+            OsString::from("--cursor=opaque-token"),
+            OsString::from("--json"),
+        ];
+        ensure_equal(
+            &super::governor_params_for_hash(&args),
+            &vec![
+                "schema".to_string(),
+                "list".to_string(),
+                "--json".to_string(),
+            ],
+            "governor-only flags must not bind continuation cursors",
+        )
+    }
+
+    #[test]
+    fn governor_params_for_hash_preserves_separator_positionals() -> TestResult {
+        let args = [
+            OsString::from("ee"),
+            OsString::from("pack"),
+            OsString::from("--max-output-tokens"),
+            OsString::from("600"),
+            OsString::from("--"),
+            OsString::from("--cursor"),
+            OsString::from("literal task text"),
+            OsString::from("--max-output-tokens=not-a-flag"),
+        ];
+        ensure_equal(
+            &super::governor_params_for_hash(&args),
+            &vec![
+                "pack".to_string(),
+                "--".to_string(),
+                "--cursor".to_string(),
+                "literal task text".to_string(),
+                "--max-output-tokens=not-a-flag".to_string(),
+            ],
+            "flag-shaped positional task text after -- must remain cursor-bound",
         )
     }
 
