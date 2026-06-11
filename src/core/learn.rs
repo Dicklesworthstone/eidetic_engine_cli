@@ -4071,7 +4071,7 @@ mod tests {
                         target_id: memory_id.to_string(),
                         signal: "confirmation".to_string(),
                         weight: 1.0,
-                        source_type: "cached_peer_evidence".to_string(),
+                        source_type: "agent_inference".to_string(),
                         source_id: Some(format!(
                             "peer_evidence|{peer_id}|mem_remote_peer_{index}|0.125|2026-05-01T00:0{index}:00Z|0.8"
                         )),
