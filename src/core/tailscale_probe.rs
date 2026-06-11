@@ -200,15 +200,17 @@ impl TailscaleLocalReport {
     }
 
     #[must_use]
-    pub fn timed_out(method: TailscaleProbeMethod, elapsed_ms: u64) -> Self {
+    pub fn timed_out(
+        method: TailscaleProbeMethod,
+        elapsed_ms: u64,
+        timeout_budget_ms: u64,
+    ) -> Self {
         let mut report = Self::base(method, elapsed_ms, TailscalePlatform::Other);
         report.installed = true;
         report.degradations.push(TailscaleProbeDegradation::new(
             TAILSCALE_PROBE_TIMEOUT_CODE,
             "warning",
-            format!(
-                "Tailscale probe exceeded the {DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS}ms default budget."
-            ),
+            format!("Tailscale probe exceeded the configured {timeout_budget_ms}ms budget."),
             "Run tailscale status directly or raise EE_TAILSCALE_PROBE_TIMEOUT_MS.",
         ));
         report
@@ -451,15 +453,21 @@ pub fn probe_tailscale_local_with_runners<
     socket_runner: &mut S,
     cli_runner: &mut C,
 ) -> TailscaleLocalReport {
-    if !socket_config.mesh_enabled || !cli_config.mesh_enabled {
+    if !socket_config.mesh_enabled && !cli_config.mesh_enabled {
         return TailscaleLocalReport::mesh_disabled();
     }
 
-    if let Some(socket_path) = resolve_tailscale_socket(socket_config, socket_runner) {
+    if socket_config.mesh_enabled
+        && let Some(socket_path) = resolve_tailscale_socket(socket_config, socket_runner)
+    {
         return probe_tailscale_socket_with_runner(socket_config, socket_runner, &socket_path);
     }
 
-    probe_tailscale_cli_with_runner(cli_config, cli_runner)
+    if cli_config.mesh_enabled {
+        return probe_tailscale_cli_with_runner(cli_config, cli_runner);
+    }
+
+    TailscaleLocalReport::not_installed(TailscaleProbeMethod::Socket, 0)
 }
 
 pub fn probe_tailscale_socket_with_runner<R: TailscaleSocketProbeRunner>(
@@ -476,6 +484,7 @@ pub fn probe_tailscale_socket_with_runner<R: TailscaleSocketProbeRunner>(
         return TailscaleLocalReport::timed_out(
             TailscaleProbeMethod::Socket,
             status_output.elapsed_ms,
+            config.timeout_ms,
         );
     }
     if !status_output.success {
@@ -498,7 +507,7 @@ pub fn probe_tailscale_socket_with_runner<R: TailscaleSocketProbeRunner>(
         platform_hint: config.platform_hint,
     });
     if prefs_output.timed_out {
-        push_probe_timeout_degradation(&mut report);
+        push_probe_timeout_degradation(&mut report, config.timeout_ms);
     }
     report
 }
@@ -528,6 +537,7 @@ pub fn probe_tailscale_cli_with_runner<R: TailscaleCliProbeRunner>(
         return TailscaleLocalReport::timed_out(
             TailscaleProbeMethod::Cli,
             version_output.elapsed_ms,
+            config.timeout_ms,
         );
     }
     let version_raw = String::from_utf8_lossy(&version_output.stdout).to_string();
@@ -555,6 +565,7 @@ pub fn probe_tailscale_cli_with_runner<R: TailscaleCliProbeRunner>(
         return TailscaleLocalReport::timed_out(
             TailscaleProbeMethod::Cli,
             status_output.elapsed_ms,
+            config.timeout_ms,
         );
     }
     if !status_output.success {
@@ -581,7 +592,7 @@ pub fn probe_tailscale_cli_with_runner<R: TailscaleCliProbeRunner>(
         platform_hint: config.platform_hint,
     });
     if prefs_output.timed_out {
-        push_probe_timeout_degradation(&mut report);
+        push_probe_timeout_degradation(&mut report, config.timeout_ms);
     }
     report
 }
@@ -686,13 +697,11 @@ pub fn classify_status_payload(input: TailscaleStatusProbeInput<'_>) -> Tailscal
     report
 }
 
-fn push_probe_timeout_degradation(report: &mut TailscaleLocalReport) {
+fn push_probe_timeout_degradation(report: &mut TailscaleLocalReport, timeout_budget_ms: u64) {
     report.degradations.push(TailscaleProbeDegradation::new(
         TAILSCALE_PROBE_TIMEOUT_CODE,
         "warning",
-        format!(
-            "Tailscale probe exceeded the {DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS}ms default budget."
-        ),
+        format!("Tailscale probe exceeded the configured {timeout_budget_ms}ms budget."),
         "Run tailscale status directly or raise EE_TAILSCALE_PROBE_TIMEOUT_MS.",
     ));
 }

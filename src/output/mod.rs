@@ -16850,7 +16850,9 @@ mod tests {
     use crate::core::swarm_brief::{
         RCH_WORKER_PRESSURE_SCHEMA_V1, RchWorkerPressureObservation, RchWorkerPressureReport,
     };
-    use crate::core::tailscale_probe::{TailscaleLocalReport, TailscaleProbeMethod};
+    use crate::core::tailscale_probe::{
+        DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS, TailscaleLocalReport, TailscaleProbeMethod,
+    };
     use crate::core::{
         BUILD_TIMESTAMP_POLICY, BuildFeature, BuildInfo, BuildProvenanceDegradation,
         SupportedSchema, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
@@ -18035,9 +18037,18 @@ mod tests {
     #[test]
     fn status_json_aggregates_tailscale_degradation_codes() -> TestResult {
         let mut report = StatusReport::gather();
-        let mut tailscale = TailscaleLocalReport::timed_out(TailscaleProbeMethod::Cli, 1_501);
+        let mut tailscale = TailscaleLocalReport::timed_out(
+            TailscaleProbeMethod::Cli,
+            1_501,
+            DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS,
+        );
         tailscale.degradations.push(
-            TailscaleLocalReport::timed_out(TailscaleProbeMethod::Cli, 1_501).degradations[0]
+            TailscaleLocalReport::timed_out(
+                TailscaleProbeMethod::Cli,
+                1_501,
+                DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS,
+            )
+            .degradations[0]
                 .clone(),
         );
         report.tailscale_local = Some(tailscale);
