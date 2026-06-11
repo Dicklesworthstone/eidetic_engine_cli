@@ -1,0 +1,94 @@
+{
+  "name": "raw br ready rows the actionable queue excludes are accounted, never promoted",
+  "description": "bd-3w4pv.7: raw br ready includes a parent epic and a peer-assigned row that scripts/br_retry.sh actionable --json excludes under its filter contract (open, unassigned, non-epic). The golden actionable-queue block shows the exclusion accounting and the filter contract flags; the excluded rows are never promoted to claims.",
+  "candidateId": "bd-aq-leaf",
+  "brief": {
+    "ready": [
+      {
+        "id": "bd-aq-epic",
+        "title": "Parent epic rollup",
+        "status": "open",
+        "assignee": null,
+        "issueType": "epic"
+      },
+      {
+        "id": "bd-aq-assigned",
+        "title": "Peer-assigned leaf",
+        "status": "open",
+        "assignee": "peer-agent",
+        "issueType": "task"
+      },
+      {
+        "id": "bd-aq-leaf",
+        "title": "Document a small schema improvement",
+        "status": "open",
+        "assignee": null,
+        "issueType": "task"
+      }
+    ],
+    "blocked": [
+      {
+        "id": "bd-aq-blocked",
+        "title": "Blocked leaf",
+        "status": "blocked",
+        "assignee": null,
+        "issueType": "task"
+      }
+    ],
+    "inProgress": [
+      {
+        "id": "bd-aq-owned",
+        "title": "Peer-owned leaf",
+        "status": "in_progress",
+        "assignee": "peer-agent",
+        "issueType": "task"
+      }
+    ],
+    "deferred": []
+  },
+  "scriptStdout": "[{\"id\":\"bd-aq-leaf\",\"status\":\"open\",\"issue_type\":\"task\"}]",
+  "tracker": {
+    "jsonlRecordCount": 5,
+    "dbRecordCount": 5,
+    "autoImportEnabled": true,
+    "externalChangesPendingImport": false,
+    "dirtyIssueCount": 0,
+    "mergeArtifactPaths": [],
+    "jsonlParseError": null
+  },
+  "expectedActionableQueue": {
+    "commandId": "beads_actionable_queue",
+    "displayCommand": "scripts/br_retry.sh actionable --json",
+    "mutatesState": false,
+    "collectionMode": "br_retry_script",
+    "queueState": "ready",
+    "exitClass": "ok",
+    "authoritative": true,
+    "rowCount": 1,
+    "candidateIds": ["bd-aq-leaf"],
+    "truncatedCandidateCount": 0,
+    "filterContract": {
+      "excludesEpics": true,
+      "excludesAssigned": true,
+      "excludesBlocked": true,
+      "excludesDeferred": true,
+      "excludesInProgress": true
+    },
+    "exclusionAccounting": {
+      "rawReadyCount": 3,
+      "excludedEpicCount": 1,
+      "excludedAssignedCount": 1,
+      "excludedBlockedCount": 1,
+      "excludedDeferredCount": 0,
+      "excludedInProgressCount": 1,
+      "excludedOtherCount": 0
+    },
+    "candidateState": "candidate_present_actionable",
+    "bvAdvisoryContradiction": false,
+    "trackerAuthorityDegraded": false,
+    "contradictionEvidence": []
+  },
+  "excludedCandidateId": "bd-aq-epic",
+  "expectedExcludedCandidateState": "candidate_absent_from_actionable",
+  "expectedExcludedUnsafeReason": "actionable_queue_candidate_absent:bd-aq-epic"
+}

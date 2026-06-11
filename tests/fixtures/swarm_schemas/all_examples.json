@@ -17,6 +17,61 @@
       },
       "sources": [
         {
+          "sourceKind": "actionable_queue",
+          "state": "timed_out",
+          "authoritative": false,
+          "freshness": {
+            "capturedAt": null,
+            "ageMs": null,
+            "staleAfterMs": 300000,
+            "freshnessState": "unknown"
+          },
+          "budget": {
+            "commandBudgetMs": 12000,
+            "elapsedMs": 12000,
+            "timedOut": true,
+            "retriesUsed": 0,
+            "retryBudget": 0
+          },
+          "exit": {
+            "exitClass": "timeout",
+            "exitCode": 124
+          },
+          "partialData": {
+            "available": false,
+            "droppedSections": [
+              "actionable_rows"
+            ],
+            "reason": "the actionable-queue probe shares the live br read that timed out"
+          },
+          "fallback": {
+            "active": false,
+            "fallbackKind": null,
+            "fallbackAgeMs": null
+          },
+          "repair": {
+            "guidance": "Retry the safe claimable-leaf queue once the flush settles; timeout is not absence.",
+            "command": "scripts/br_retry.sh actionable --json",
+            "safety": "read_only_probe"
+          },
+          "evidenceId": "sre-actionable-queue-3b81c5d2",
+          "statusDetail": "actionable queue timed out before answering; candidate absence is NOT confirmed",
+          "actionableQueue": {
+            "commandId": "beads_actionable_queue",
+            "commandTemplate": "scripts/br_retry.sh actionable --json",
+            "rowCount": null,
+            "candidateIds": [],
+            "truncatedCandidateCount": 0,
+            "filterContract": {
+              "excludesEpics": true,
+              "excludesAssigned": true,
+              "excludesBlocked": true,
+              "excludesDeferred": true,
+              "excludesInProgress": true
+            }
+          }
+        },
+        {
           "sourceKind": "beads",
           "state": "timed_out",
           "authoritative": false,
@@ -104,6 +159,7 @@
         "presentIn": [],
         "absentFrom": [],
         "unavailableIn": [
+          "actionable_queue",
           "beads"
         ],
         "staleFallbackPresence": {
@@ -119,7 +175,7 @@
         "failClosed": true,
         "authoritativeSourceCount": 1,
         "degradedSourceCount": 0,
-        "unavailableSourceCount": 1
+        "unavailableSourceCount": 2
       },
       "degraded": [
         {
@@ -1247,15 +1303,56 @@
         "installFreshnessRepair": null,
         "sourceCount": 4
       },
+      "actionableQueue": {
+        "commandId": "beads_actionable_queue",
+        "displayCommand": "scripts/br_retry.sh actionable --json",
+        "mutatesState": false,
+        "collectionMode": "br_retry_script",
+        "queueState": "ready",
+        "exitClass": "ok",
+        "authoritative": true,
+        "rowCount": 1,
+        "candidateIds": [
+          "bd-example.1"
+        ],
+        "truncatedCandidateCount": 0,
+        "filterContract": {
+          "excludesEpics": true,
+          "excludesAssigned": true,
+          "excludesBlocked": true,
+          "excludesDeferred": true,
+          "excludesInProgress": true
+        },
+        "exclusionAccounting": {
+          "rawReadyCount": 1,
+          "excludedEpicCount": 0,
+          "excludedAssignedCount": 0,
+          "excludedBlockedCount": 0,
+          "excludedDeferredCount": 0,
+          "excludedInProgressCount": 0,
+          "excludedOtherCount": 0
+        },
+        "candidateState": "candidate_present_actionable",
+        "bvAdvisoryContradiction": false,
+        "trackerAuthorityDegraded": false,
+        "contradictionEvidence": []
+      },
       "unsafeReasons": [],
       "staleReasons": [],
-      "sourceRefs": ["br://bd-example.1"],
+      "sourceRefs": [
+        "br://bd-example.1"
+      ],
       "degradedCodes": [],
       "nextCommandActions": [
         {
           "commandId": "bead_show_candidate",
           "displayCommand": "br show bd-example.1 --json",
-          "argv": ["br", "show", "bd-example.1", "--json"],
+          "argv": [
+            "br",
+            "show",
+            "bd-example.1",
+            "--json"
+          ],
           "shellRequired": false,
           "copySafety": "safe_structured_argv",
           "mutatesState": false,
@@ -1267,7 +1364,14 @@
       "claimCommandAction": {
         "commandId": "bead_claim_candidate",
         "displayCommand": "br update bd-example.1 --status in_progress --json",
-        "argv": ["br", "update", "bd-example.1", "--status", "in_progress", "--json"],
+        "argv": [
+          "br",
+          "update",
+          "bd-example.1",
+          "--status",
+          "in_progress",
+          "--json"
+        ],
         "shellRequired": false,
         "copySafety": "safe_structured_argv",
         "mutatesState": true,

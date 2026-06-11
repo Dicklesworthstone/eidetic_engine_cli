@@ -29,9 +29,9 @@ use crate::core::install::{
 };
 use crate::core::preflight_guard::classify_repair_command_for_preflight;
 use crate::core::swarm_brief::{
-    SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandRunner, SwarmBriefCommit,
-    SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefReport, SwarmBriefSourceKind,
-    SwarmBriefSourceStatus, SwarmBriefThreadSummary,
+    SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandError, SwarmBriefCommandOutput,
+    SwarmBriefCommandRunner, SwarmBriefCommit, SwarmBriefDegradation, SwarmBriefFileReservation,
+    SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus, SwarmBriefThreadSummary,
     agent_mail_snapshot_brief_retry_command_template,
     agent_mail_snapshot_producer_command_template, collect_swarm_brief,
 };
@@ -59,6 +59,29 @@ const AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE: &str = "agent_mail_semantic_rea
 const AGENT_MAIL_SNAPSHOT_TEMPLATE_AGENT: &str = "<AGENT_NAME>";
 const AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH: &str = "/private/tmp/ee-agent-mail-snapshot.json";
 const CLAIM_GATE_INSTALL_FRESHNESS_REPAIR: &str = "Run ee install check --json --offline, adopt a current artifact, or request an operator exception.";
+
+// ---------------------------------------------------------------------------
+// Actionable-queue source authority (bd-3w4pv.7).
+//
+// `scripts/br_retry.sh actionable --json` is the swarm's safe claimable-leaf
+// queue (open, unassigned, non-epic rows served through the transient-read
+// retry guard). Raw `br ready` and `bv --robot-next` are broader advisory
+// views, so the claim gate models the actionable queue as a first-class
+// evidence source with distinct spawn/timeout/parse failure states.
+// ---------------------------------------------------------------------------
+const ACTIONABLE_QUEUE_COMMAND_ID: &str = "beads_actionable_queue";
+const ACTIONABLE_QUEUE_COMMAND_TEMPLATE: &str = "scripts/br_retry.sh actionable --json";
+const ACTIONABLE_QUEUE_SCRIPT_RELATIVE_PATH: &str = "scripts/br_retry.sh";
+const ACTIONABLE_QUEUE_MAX_CANDIDATE_IDS: usize = 32;
+const ACTIONABLE_QUEUE_MAX_CONTRADICTION_EVIDENCE: usize = 8;
+const ACTIONABLE_QUEUE_STATE_NOT_EVALUATED: &str = "not_evaluated";
+const ACTIONABLE_QUEUE_STATE_READY: &str = "ready";
+const ACTIONABLE_QUEUE_STATE_UNAVAILABLE: &str = "unavailable";
+const ACTIONABLE_QUEUE_STATE_TIMED_OUT: &str = "timed_out";
+const ACTIONABLE_QUEUE_STATE_STALE_FALLBACK: &str = "stale_fallback";
+const ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT: &str = "br_retry_script";
+const ACTIONABLE_QUEUE_MODE_BRIEF_READY_FILTER: &str = "brief_ready_filter";
+const ACTIONABLE_QUEUE_MODE_SKIPPED_BY_FLAG: &str = "skipped_by_flag";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SwarmNextActionSnapshot {
@@ -667,6 +690,8 @@ pub struct SwarmWorkPacket {
     pub degraded: Vec<SwarmWorkPacketDegradation>,
     #[serde(skip)]
     claim_gate_install_freshness: SwarmWorkPacketClaimGateInstallFreshness,
+    #[serde(skip)]
+    claim_gate_actionable_queue: SwarmWorkPacketActionableQueueEvidence,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -727,6 +752,7 @@ pub struct SwarmWorkPacketClaimGate {
     pub recommended_action: &'static str,
     pub recommended_safe_to_claim: Option<bool>,
     pub source_authority: SwarmWorkPacketClaimGateSourceAuthority,
+    pub actionable_queue: SwarmWorkPacketClaimGateActionableQueue,
     pub resource_admission: SwarmWorkPacketResourceAdmission,
     pub unsafe_reasons: Vec<String>,
     pub stale_reasons: Vec<String>,
@@ -818,6 +844,140 @@ pub struct SwarmWorkPacketClaimGateRecoveryAction {
     pub mutates_state: bool,
     pub required_substrate: &'static str,
     pub rationale: &'static str,
+}
+
+/// Raw actionable-queue evidence collected once per work packet
+/// (bd-3w4pv.7). The queue command is `scripts/br_retry.sh actionable
+/// --json`, run read-only with the bounded source-command timeout.
+///
+/// Precedence contract (also documented in
+/// `docs/swarm/source_authority_snapshot.md`):
+///
+/// 1. Actionable-queue presence is necessary but never sufficient: a
+///    present candidate still needs tracker authority, Agent Mail
+///    reservation evidence, RCH posture, and the conflict gate to agree
+///    before `claimCommandAction` is emitted.
+/// 2. BV recommendations stay advisory unless the recommended id is in
+///    the actionable queue AND the gate passes; a BV pick that Beads
+///    marks blocked or that is absent from the queue surfaces as a
+///    `bv_advisory_contradiction`, never as a claim command.
+/// 3. Raw `br ready` rows never override the actionable queue or gate
+///    safety; rows the queue excludes are reported through the bounded
+///    exclusion accounting, not promoted to claims.
+/// 4. Timeout is not absence: a timed-out queue read keeps the distinct
+///    `timed_out` state and fails closed instead of reporting the
+///    candidate as absent.
+/// 5. `queue_state == "not_evaluated"` (packets built without the
+///    collector, e.g. archived payloads or snapshot-only consumers)
+///    never blocks; consumers can see the queue was not consulted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SwarmWorkPacketActionableQueueEvidence {
+    pub collection_mode: &'static str,
+    pub queue_state: &'static str,
+    pub exit_class: &'static str,
+    pub row_count: Option<u64>,
+    /// Full sorted, deduplicated id set used for membership checks.
+    /// Bounded to `ACTIONABLE_QUEUE_MAX_CANDIDATE_IDS` only at claim-gate
+    /// serialization time so truncation never corrupts presence checks.
+    pub candidate_ids: Vec<String>,
+    pub exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting,
+}
+
+impl SwarmWorkPacketActionableQueueEvidence {
+    #[must_use]
+    pub const fn not_evaluated() -> Self {
+        Self {
+            collection_mode: ACTIONABLE_QUEUE_STATE_NOT_EVALUATED,
+            queue_state: ACTIONABLE_QUEUE_STATE_NOT_EVALUATED,
+            exit_class: ACTIONABLE_QUEUE_STATE_NOT_EVALUATED,
+            row_count: None,
+            candidate_ids: Vec::new(),
+            exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+        }
+    }
+}
+
+/// Bounded accounting of tracker rows the actionable queue excludes
+/// (counts only, never row content). `raw_ready_count` is the raw
+/// `br ready` row count; the structural buckets count rows the filter
+/// contract excludes by definition, and the ready-row buckets classify
+/// ready rows absent from the queue (parent epics, assigned rows).
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketActionableQueueExclusionAccounting {
+    pub raw_ready_count: Option<u64>,
+    pub excluded_epic_count: u64,
+    pub excluded_assigned_count: u64,
+    pub excluded_blocked_count: u64,
+    pub excluded_deferred_count: u64,
+    pub excluded_in_progress_count: u64,
+    pub excluded_other_count: u64,
+}
+
+impl SwarmWorkPacketActionableQueueExclusionAccounting {
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            raw_ready_count: None,
+            excluded_epic_count: 0,
+            excluded_assigned_count: 0,
+            excluded_blocked_count: 0,
+            excluded_deferred_count: 0,
+            excluded_in_progress_count: 0,
+            excluded_other_count: 0,
+        }
+    }
+}
+
+/// The static filter contract of `scripts/br_retry.sh actionable --json`:
+/// only open, unassigned, non-epic rows pass; blocked, deferred, and
+/// in-progress rows are structurally excluded because the queue is built
+/// from `br ready`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketActionableQueueFilterContract {
+    pub excludes_epics: bool,
+    pub excludes_assigned: bool,
+    pub excludes_blocked: bool,
+    pub excludes_deferred: bool,
+    pub excludes_in_progress: bool,
+}
+
+impl SwarmWorkPacketActionableQueueFilterContract {
+    #[must_use]
+    pub const fn actionable() -> Self {
+        Self {
+            excludes_epics: true,
+            excludes_assigned: true,
+            excludes_blocked: true,
+            excludes_deferred: true,
+            excludes_in_progress: true,
+        }
+    }
+}
+
+/// Claim-gate projection of the actionable-queue evidence chain
+/// (bd-3w4pv.7). Redaction: bounded bead ids and counts only — no row
+/// titles, no raw command stdout, no host-private paths.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketClaimGateActionableQueue {
+    pub command_id: &'static str,
+    pub display_command: &'static str,
+    pub mutates_state: bool,
+    pub collection_mode: &'static str,
+    pub queue_state: &'static str,
+    pub exit_class: &'static str,
+    pub authoritative: bool,
+    pub row_count: Option<u64>,
+    pub candidate_ids: Vec<String>,
+    pub truncated_candidate_count: u64,
+    pub filter_contract: SwarmWorkPacketActionableQueueFilterContract,
+    pub exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting,
+    pub candidate_state: &'static str,
+    pub bv_advisory_contradiction: bool,
+    pub tracker_authority_degraded: bool,
+    pub contradiction_evidence: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1110,6 +1270,7 @@ pub fn collect_swarm_work_packet_with_verifier_evidence(
 ) -> SwarmWorkPacket {
     let brief = collect_swarm_brief(options, runner);
     let tracker_integrity = collect_work_packet_tracker_integrity(options, runner, &brief);
+    let actionable_queue = collect_work_packet_actionable_queue_evidence(options, runner, &brief);
     let mut verifier_evidence = verifier_evidence.to_vec();
     verifier_evidence.extend(collect_work_packet_ledger_verifier_evidence(
         &options.workspace,
@@ -1120,6 +1281,7 @@ pub fn collect_swarm_work_packet_with_verifier_evidence(
         tracker_integrity,
     );
     packet.apply_claim_gate_install_freshness(collect_work_packet_claim_gate_install_freshness());
+    packet.apply_claim_gate_actionable_queue(actionable_queue);
     packet
 }
 
@@ -1235,6 +1397,231 @@ fn brief_has_pending_beads_import(brief: &SwarmBriefReport) -> bool {
         degradation.source == SwarmBriefSourceKind::Beads
             && degradation.code == "beads_tracker_stale"
     })
+}
+
+/// Collect the actionable-queue evidence (bd-3w4pv.7) read-only.
+///
+/// When the workspace ships `scripts/br_retry.sh`, the queue command
+/// `scripts/br_retry.sh actionable --json` is run through the bounded
+/// source-command timeout (`collection_mode = "br_retry_script"`).
+/// Spawn failure, timeout (runner timeout or the script's own exit 124),
+/// and parse failure stay distinct states — a timed-out read must never
+/// be collapsed into candidate absence.
+///
+/// Workspaces without the script fall back to applying the same filter
+/// contract (open, unassigned, non-epic) to the brief's fresh `br ready`
+/// rows (`collection_mode = "brief_ready_filter"`); when the brief's
+/// Beads source was itself degraded or stale the fallback evidence is
+/// marked `stale_fallback` and stays advisory.
+///
+/// This collector never claims Beads, reserves files, sends Agent Mail,
+/// runs Cargo, or changes git state: the only command it may spawn is the
+/// read-only queue probe.
+#[must_use]
+pub fn collect_work_packet_actionable_queue_evidence(
+    options: &SwarmBriefCollectOptions,
+    runner: &impl SwarmBriefCommandRunner,
+    brief: &SwarmBriefReport,
+) -> SwarmWorkPacketActionableQueueEvidence {
+    if !options
+        .enabled_sources
+        .contains(&SwarmBriefSourceKind::Beads)
+    {
+        return SwarmWorkPacketActionableQueueEvidence {
+            collection_mode: ACTIONABLE_QUEUE_MODE_SKIPPED_BY_FLAG,
+            queue_state: ACTIONABLE_QUEUE_STATE_UNAVAILABLE,
+            exit_class: "unknown",
+            row_count: None,
+            candidate_ids: Vec::new(),
+            exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+        };
+    }
+    if options
+        .workspace
+        .join(ACTIONABLE_QUEUE_SCRIPT_RELATIVE_PATH)
+        .is_file()
+    {
+        let outcome = runner.run(
+            "bash",
+            &[
+                ACTIONABLE_QUEUE_SCRIPT_RELATIVE_PATH,
+                "actionable",
+                "--json",
+            ],
+            &options.workspace,
+            options.command_timeout_ms,
+        );
+        actionable_queue_evidence_from_script_outcome(outcome, brief)
+    } else {
+        actionable_queue_evidence_from_brief_fallback(brief)
+    }
+}
+
+fn actionable_queue_failure_evidence(
+    queue_state: &'static str,
+    exit_class: &'static str,
+    brief: &SwarmBriefReport,
+) -> SwarmWorkPacketActionableQueueEvidence {
+    SwarmWorkPacketActionableQueueEvidence {
+        collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+        queue_state,
+        exit_class,
+        row_count: None,
+        candidate_ids: Vec::new(),
+        exclusion_accounting: actionable_queue_exclusion_accounting(brief, &[]),
+    }
+}
+
+fn actionable_queue_evidence_from_script_outcome(
+    outcome: Result<SwarmBriefCommandOutput, SwarmBriefCommandError>,
+    brief: &SwarmBriefReport,
+) -> SwarmWorkPacketActionableQueueEvidence {
+    match outcome {
+        Ok(output) => actionable_queue_evidence_from_script_stdout(&output.stdout, brief),
+        Err(SwarmBriefCommandError::TimedOut { .. }) => {
+            actionable_queue_failure_evidence(ACTIONABLE_QUEUE_STATE_TIMED_OUT, "timeout", brief)
+        }
+        // The retry wrapper signals its own per-attempt br timeout as 124.
+        Err(SwarmBriefCommandError::Failed {
+            status: Some(124), ..
+        }) => actionable_queue_failure_evidence(ACTIONABLE_QUEUE_STATE_TIMED_OUT, "timeout", brief),
+        // 127: bash could not resolve the script or the script could not
+        // resolve br — a spawn failure, not a tracker answer.
+        Err(SwarmBriefCommandError::Failed {
+            status: Some(127), ..
+        })
+        | Err(SwarmBriefCommandError::Unavailable(_)) => actionable_queue_failure_evidence(
+            ACTIONABLE_QUEUE_STATE_UNAVAILABLE,
+            "spawn_failed",
+            brief,
+        ),
+        Err(SwarmBriefCommandError::InvalidUtf8(_)) => actionable_queue_failure_evidence(
+            ACTIONABLE_QUEUE_STATE_UNAVAILABLE,
+            "parse_failed",
+            brief,
+        ),
+        Err(SwarmBriefCommandError::Failed { .. }) => {
+            actionable_queue_failure_evidence(ACTIONABLE_QUEUE_STATE_UNAVAILABLE, "unknown", brief)
+        }
+    }
+}
+
+/// Parse `scripts/br_retry.sh actionable --json` stdout (a JSON array of
+/// already-filtered ready rows) into actionable-queue evidence. Public so
+/// fixture-driven conformance tests can replay captured queue output
+/// without spawning processes. Only bead ids and counts are retained.
+#[must_use]
+pub fn actionable_queue_evidence_from_script_stdout(
+    stdout: &str,
+    brief: &SwarmBriefReport,
+) -> SwarmWorkPacketActionableQueueEvidence {
+    let Ok(rows) = serde_json::from_str::<Vec<Value>>(stdout.trim()) else {
+        return actionable_queue_failure_evidence(
+            ACTIONABLE_QUEUE_STATE_UNAVAILABLE,
+            "parse_failed",
+            brief,
+        );
+    };
+    let mut candidate_ids = rows
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    candidate_ids.sort();
+    candidate_ids.dedup();
+    SwarmWorkPacketActionableQueueEvidence {
+        collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+        queue_state: ACTIONABLE_QUEUE_STATE_READY,
+        exit_class: "ok",
+        row_count: Some(rows.len() as u64),
+        exclusion_accounting: actionable_queue_exclusion_accounting(brief, &candidate_ids),
+        candidate_ids,
+    }
+}
+
+fn actionable_queue_evidence_from_brief_fallback(
+    brief: &SwarmBriefReport,
+) -> SwarmWorkPacketActionableQueueEvidence {
+    let beads_source = brief
+        .sources
+        .iter()
+        .find(|source| source.source == SwarmBriefSourceKind::Beads);
+    let (queue_state, exit_class) = match beads_source {
+        Some(source)
+            if source.status == SwarmBriefSourceStatus::Ready
+                && source.freshness.state == "fresh" =>
+        {
+            (ACTIONABLE_QUEUE_STATE_READY, "ok")
+        }
+        Some(source)
+            if matches!(
+                source.status,
+                SwarmBriefSourceStatus::Ready | SwarmBriefSourceStatus::Degraded
+            ) =>
+        {
+            (ACTIONABLE_QUEUE_STATE_STALE_FALLBACK, "ok")
+        }
+        _ => (ACTIONABLE_QUEUE_STATE_UNAVAILABLE, "unknown"),
+    };
+    let mut candidate_ids = brief
+        .beads
+        .ready
+        .iter()
+        .filter(|bead| brief_bead_is_actionable(bead))
+        .map(|bead| bead.id.clone())
+        .collect::<Vec<_>>();
+    candidate_ids.sort();
+    candidate_ids.dedup();
+    SwarmWorkPacketActionableQueueEvidence {
+        collection_mode: ACTIONABLE_QUEUE_MODE_BRIEF_READY_FILTER,
+        queue_state,
+        exit_class,
+        row_count: (queue_state != ACTIONABLE_QUEUE_STATE_UNAVAILABLE)
+            .then(|| candidate_ids.len() as u64),
+        exclusion_accounting: actionable_queue_exclusion_accounting(brief, &candidate_ids),
+        candidate_ids,
+    }
+}
+
+/// The same filter contract `scripts/br_retry.sh actionable --json`
+/// applies to `br ready` rows: open, unassigned, non-epic.
+fn brief_bead_is_actionable(bead: &SwarmBriefBead) -> bool {
+    bead.status == "open"
+        && bead
+            .assignee
+            .as_deref()
+            .is_none_or(|assignee| assignee.is_empty())
+        && bead.issue_type.as_deref() != Some("epic")
+}
+
+fn actionable_queue_exclusion_accounting(
+    brief: &SwarmBriefReport,
+    queue_ids: &[String],
+) -> SwarmWorkPacketActionableQueueExclusionAccounting {
+    let mut accounting = SwarmWorkPacketActionableQueueExclusionAccounting {
+        raw_ready_count: Some(brief.beads.ready.len() as u64),
+        excluded_blocked_count: brief.beads.blocked.len() as u64,
+        excluded_deferred_count: brief.beads.deferred.len() as u64,
+        excluded_in_progress_count: brief.beads.in_progress.len() as u64,
+        ..SwarmWorkPacketActionableQueueExclusionAccounting::empty()
+    };
+    for bead in &brief.beads.ready {
+        if queue_ids.iter().any(|id| id == &bead.id) {
+            continue;
+        }
+        if bead.issue_type.as_deref() == Some("epic") {
+            accounting.excluded_epic_count += 1;
+        } else if bead
+            .assignee
+            .as_deref()
+            .is_some_and(|assignee| !assignee.is_empty())
+        {
+            accounting.excluded_assigned_count += 1;
+        } else {
+            accounting.excluded_other_count += 1;
+        }
+    }
+    accounting
 }
 
 impl SwarmNextActionSnapshot {
@@ -1419,9 +1806,22 @@ impl SwarmWorkPacket {
             mutation_policy: SwarmWorkPacketMutationPolicy::default_read_only(),
             degraded,
             claim_gate_install_freshness: SwarmWorkPacketClaimGateInstallFreshness::not_evaluated(),
+            claim_gate_actionable_queue: SwarmWorkPacketActionableQueueEvidence::not_evaluated(),
         };
         packet.packet_id = work_packet_id(&packet);
         packet
+    }
+
+    /// Attach actionable-queue evidence collected by
+    /// [`collect_work_packet_actionable_queue_evidence`] (bd-3w4pv.7).
+    /// The evidence is carried outside the serialized packet body and
+    /// only surfaces through the claim-gate projection, so applying it
+    /// never changes the packet contract or its content id.
+    pub fn apply_claim_gate_actionable_queue(
+        &mut self,
+        evidence: SwarmWorkPacketActionableQueueEvidence,
+    ) {
+        self.claim_gate_actionable_queue = evidence;
     }
 
     fn apply_claim_gate_install_freshness(
@@ -1442,6 +1842,8 @@ impl SwarmWorkPacket {
     #[must_use]
     pub fn claim_gate(&self, requested_candidate_id: Option<&str>) -> SwarmWorkPacketClaimGate {
         let candidate = work_packet_claim_gate_candidate(self, requested_candidate_id);
+        let actionable_queue =
+            work_packet_claim_gate_actionable_queue(self, candidate, requested_candidate_id);
         let recommended_safe_to_claim = candidate.map(|candidate| {
             work_packet_claim_gate_candidate_recommended_safe_to_claim(self, candidate)
         });
@@ -1487,8 +1889,13 @@ impl SwarmWorkPacket {
                     .cloned()
             })
             .flatten();
-        let mut unsafe_reasons =
-            work_packet_claim_gate_unsafe_reasons(self, requested_candidate_id, candidate, verdict);
+        let mut unsafe_reasons = work_packet_claim_gate_unsafe_reasons(
+            self,
+            requested_candidate_id,
+            candidate,
+            verdict,
+            &actionable_queue,
+        );
         let mut stale_reasons = candidate
             .map(|candidate| candidate.stale_reasons.clone())
             .unwrap_or_default();
@@ -1500,6 +1907,7 @@ impl SwarmWorkPacket {
             .iter()
             .map(|degradation| degradation.code.clone())
             .collect::<Vec<_>>();
+        degraded_codes.extend(actionable_queue_degraded_codes(&actionable_queue));
         unsafe_reasons.sort();
         unsafe_reasons.dedup();
         stale_reasons.sort();
@@ -1555,6 +1963,7 @@ impl SwarmWorkPacket {
                 install_freshness_repair: install_freshness.repair,
                 source_count: self.source_provenance.len(),
             },
+            actionable_queue,
             resource_admission,
             unsafe_reasons,
             stale_reasons,
@@ -1661,6 +2070,50 @@ fn work_packet_claim_gate_candidate_recommended_safe_to_claim(
         && packet.tracker_integrity.br_reads_authoritative
         && !agent_mail_blocks_claim(&packet.coordination.agent_mail)
         && work_packet_rch_allows_claim(&packet.rch_proof_posture)
+        && work_packet_actionable_queue_allows_claim(packet, candidate)
+}
+
+/// Actionable-queue admission for one candidate (bd-3w4pv.7).
+///
+/// Presence in the actionable queue is necessary but never sufficient:
+/// this helper can only veto a claim, all other gate checks still apply.
+/// `not_evaluated` evidence (packet built without the collector) never
+/// blocks. Every evaluated non-ready state — unavailable, timed out,
+/// stale fallback — fails closed, and a ready queue admits only ids it
+/// actually contains; raw `br ready` or BV evidence never overrides it.
+fn work_packet_actionable_queue_allows_claim(
+    packet: &SwarmWorkPacket,
+    candidate: &SwarmWorkPacketCandidate,
+) -> bool {
+    let evidence = &packet.claim_gate_actionable_queue;
+    match evidence.queue_state {
+        ACTIONABLE_QUEUE_STATE_NOT_EVALUATED => true,
+        ACTIONABLE_QUEUE_STATE_READY => evidence.candidate_ids.iter().any(|id| id == &candidate.id),
+        _ => false,
+    }
+}
+
+/// Verdict-level actionable-queue blocker. Evaluated failure states keep
+/// the gate on `external_state_required` (evidence is missing, late, or
+/// advisory-only — absence is NOT confirmed); a ready queue that does not
+/// contain the candidate downgrades to `coordinate_first` because raw
+/// `br ready`/BV visibility never overrides the safe claimable-leaf queue.
+fn work_packet_actionable_queue_blocking_verdict(
+    packet: &SwarmWorkPacket,
+    candidate: &SwarmWorkPacketCandidate,
+) -> Option<&'static str> {
+    let evidence = &packet.claim_gate_actionable_queue;
+    match evidence.queue_state {
+        ACTIONABLE_QUEUE_STATE_UNAVAILABLE
+        | ACTIONABLE_QUEUE_STATE_TIMED_OUT
+        | ACTIONABLE_QUEUE_STATE_STALE_FALLBACK => Some("external_state_required"),
+        ACTIONABLE_QUEUE_STATE_READY
+            if !evidence.candidate_ids.iter().any(|id| id == &candidate.id) =>
+        {
+            Some("coordinate_first")
+        }
+        _ => None,
+    }
 }
 
 fn work_packet_claim_gate_verdict(
@@ -1695,6 +2148,9 @@ fn work_packet_claim_gate_verdict(
     if work_packet_rch_remote_verification_reason(&packet.rch_proof_posture).is_some() {
         return "blocked_by_verification";
     }
+    if let Some(verdict) = work_packet_actionable_queue_blocking_verdict(packet, candidate) {
+        return verdict;
+    }
     if !work_packet_claim_gate_candidate_recommended_safe_to_claim(packet, candidate) {
         return "coordinate_first";
     }
@@ -1706,10 +2162,29 @@ fn work_packet_claim_gate_unsafe_reasons(
     requested_candidate_id: Option<&str>,
     candidate: Option<&SwarmWorkPacketCandidate>,
     verdict: &str,
+    actionable_queue: &SwarmWorkPacketClaimGateActionableQueue,
 ) -> Vec<String> {
     let mut reasons = candidate
         .map(|candidate| candidate.unsafe_reasons.clone())
         .unwrap_or_default();
+    let queue_candidate_id = candidate
+        .map(|candidate| candidate.id.as_str())
+        .or(requested_candidate_id)
+        .unwrap_or("recommended");
+    match actionable_queue.candidate_state {
+        "candidate_absent_from_actionable" => {
+            reasons.push(format!(
+                "actionable_queue_candidate_absent:{queue_candidate_id}"
+            ));
+        }
+        state @ ("actionable_queue_unavailable"
+        | "actionable_queue_timed_out"
+        | "actionable_queue_stale_fallback") => reasons.push(state.to_owned()),
+        _ => {}
+    }
+    if actionable_queue.bv_advisory_contradiction {
+        reasons.push(format!("bv_advisory_contradiction:{queue_candidate_id}"));
+    }
     match candidate {
         Some(candidate) if candidate.decision != "safe_to_claim" => {
             reasons.push(format!("candidate_decision:{}", candidate.decision));
@@ -1775,6 +2250,155 @@ fn work_packet_claim_gate_unsafe_reasons(
         reasons.push(format!("gate_verdict:{verdict}"));
     }
     reasons
+}
+
+/// Build the claim-gate actionable-queue block (bd-3w4pv.7) from the
+/// packet's collected evidence. Candidate ids are bounded here (the full
+/// set is kept on the evidence for membership checks); the candidate
+/// state explains which precise failure class applies instead of
+/// collapsing everything into `candidate_not_found`.
+fn work_packet_claim_gate_actionable_queue(
+    packet: &SwarmWorkPacket,
+    candidate: Option<&SwarmWorkPacketCandidate>,
+    requested_candidate_id: Option<&str>,
+) -> SwarmWorkPacketClaimGateActionableQueue {
+    let evidence = &packet.claim_gate_actionable_queue;
+    let evaluated = evidence.queue_state != ACTIONABLE_QUEUE_STATE_NOT_EVALUATED;
+    let candidate_id = candidate
+        .map(|candidate| candidate.id.as_str())
+        .or(requested_candidate_id);
+    let candidate_state = actionable_queue_candidate_state(evidence, candidate_id);
+    let tracker_authority_degraded = evaluated && !packet.tracker_integrity.br_reads_authoritative;
+    let contradiction_evidence = if evaluated {
+        actionable_queue_bv_contradiction_evidence(packet, evidence)
+    } else {
+        Vec::new()
+    };
+    let bv_advisory_contradiction = evaluated
+        && candidate.is_some_and(|candidate| {
+            actionable_queue_candidate_contradicts_bv(candidate, evidence)
+        });
+    let mut candidate_ids = evidence.candidate_ids.clone();
+    let truncated_candidate_count = candidate_ids
+        .len()
+        .saturating_sub(ACTIONABLE_QUEUE_MAX_CANDIDATE_IDS)
+        as u64;
+    candidate_ids.truncate(ACTIONABLE_QUEUE_MAX_CANDIDATE_IDS);
+    SwarmWorkPacketClaimGateActionableQueue {
+        command_id: ACTIONABLE_QUEUE_COMMAND_ID,
+        display_command: ACTIONABLE_QUEUE_COMMAND_TEMPLATE,
+        mutates_state: false,
+        collection_mode: evidence.collection_mode,
+        queue_state: evidence.queue_state,
+        exit_class: evidence.exit_class,
+        authoritative: evidence.queue_state == ACTIONABLE_QUEUE_STATE_READY
+            && !tracker_authority_degraded,
+        row_count: evidence.row_count,
+        candidate_ids,
+        truncated_candidate_count,
+        filter_contract: SwarmWorkPacketActionableQueueFilterContract::actionable(),
+        exclusion_accounting: evidence.exclusion_accounting.clone(),
+        candidate_state,
+        bv_advisory_contradiction,
+        tracker_authority_degraded,
+        contradiction_evidence,
+    }
+}
+
+fn actionable_queue_candidate_state(
+    evidence: &SwarmWorkPacketActionableQueueEvidence,
+    candidate_id: Option<&str>,
+) -> &'static str {
+    let Some(candidate_id) = candidate_id else {
+        return ACTIONABLE_QUEUE_STATE_NOT_EVALUATED;
+    };
+    match evidence.queue_state {
+        ACTIONABLE_QUEUE_STATE_READY => {
+            if evidence.candidate_ids.iter().any(|id| id == candidate_id) {
+                "candidate_present_actionable"
+            } else {
+                "candidate_absent_from_actionable"
+            }
+        }
+        ACTIONABLE_QUEUE_STATE_UNAVAILABLE => "actionable_queue_unavailable",
+        ACTIONABLE_QUEUE_STATE_TIMED_OUT => "actionable_queue_timed_out",
+        ACTIONABLE_QUEUE_STATE_STALE_FALLBACK => "actionable_queue_stale_fallback",
+        _ => ACTIONABLE_QUEUE_STATE_NOT_EVALUATED,
+    }
+}
+
+/// True when the selected candidate is a BV recommendation that Beads
+/// contradicts: Beads marks it blocked, or the ready actionable queue
+/// does not contain it. BV stays advisory in both cases.
+fn actionable_queue_candidate_contradicts_bv(
+    candidate: &SwarmWorkPacketCandidate,
+    evidence: &SwarmWorkPacketActionableQueueEvidence,
+) -> bool {
+    if candidate.source != "bv_top_pick" {
+        return false;
+    }
+    let absent_from_ready_queue = evidence.queue_state == ACTIONABLE_QUEUE_STATE_READY
+        && !evidence.candidate_ids.iter().any(|id| id == &candidate.id);
+    let beads_marks_blocked =
+        candidate.decision == "blocked_by_dependency" || candidate.status == "blocked";
+    absent_from_ready_queue || beads_marks_blocked
+}
+
+/// Bounded packet-wide BV-vs-Beads contradiction evidence: ids only,
+/// sorted, capped at `ACTIONABLE_QUEUE_MAX_CONTRADICTION_EVIDENCE`.
+fn actionable_queue_bv_contradiction_evidence(
+    packet: &SwarmWorkPacket,
+    evidence: &SwarmWorkPacketActionableQueueEvidence,
+) -> Vec<String> {
+    let mut entries = BTreeSet::new();
+    for candidate in &packet.candidates {
+        if candidate.source != "bv_top_pick" {
+            continue;
+        }
+        if candidate.decision == "blocked_by_dependency" || candidate.status == "blocked" {
+            entries.insert(format!("bv_recommends_blocked_id:{}", candidate.id));
+        }
+        if evidence.queue_state == ACTIONABLE_QUEUE_STATE_READY
+            && !evidence.candidate_ids.iter().any(|id| id == &candidate.id)
+        {
+            entries.insert(format!(
+                "bv_recommends_id_absent_from_actionable_queue:{}",
+                candidate.id
+            ));
+        }
+    }
+    entries
+        .into_iter()
+        .take(ACTIONABLE_QUEUE_MAX_CONTRADICTION_EVIDENCE)
+        .collect()
+}
+
+/// Gate-level degraded codes derived from evaluated actionable-queue
+/// evidence. `not_evaluated` evidence contributes nothing so archived
+/// payloads and snapshot-only consumers keep their existing shape.
+fn actionable_queue_degraded_codes(
+    actionable_queue: &SwarmWorkPacketClaimGateActionableQueue,
+) -> Vec<String> {
+    let mut codes = Vec::new();
+    match actionable_queue.queue_state {
+        ACTIONABLE_QUEUE_STATE_UNAVAILABLE => {
+            codes.push("actionable_queue_unavailable".to_owned());
+        }
+        ACTIONABLE_QUEUE_STATE_TIMED_OUT => codes.push("actionable_queue_timed_out".to_owned()),
+        ACTIONABLE_QUEUE_STATE_STALE_FALLBACK => {
+            codes.push("actionable_queue_stale_fallback".to_owned());
+        }
+        _ => {}
+    }
+    if actionable_queue.bv_advisory_contradiction
+        || !actionable_queue.contradiction_evidence.is_empty()
+    {
+        codes.push("bv_advisory_contradiction".to_owned());
+    }
+    if actionable_queue.tracker_authority_degraded {
+        codes.push("tracker_authority_degraded".to_owned());
+    }
+    codes
 }
 
 fn work_packet_claim_gate_install_freshness(

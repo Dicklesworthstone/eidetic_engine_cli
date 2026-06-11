@@ -3,17 +3,24 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use std::cell::RefCell;
+
 use ee::core::beads_integrity::{
     BeadsIntegrityInputs, BeadsIntegrityReport, JsonlParseError, compose_integrity_report,
     compose_integrity_report_from_br_doctor_json,
 };
-use ee::core::swarm_brief::SwarmBriefReport;
+use ee::core::swarm_brief::{
+    SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandError, SwarmBriefCommandOutput,
+    SwarmBriefCommandRunner, SwarmBriefReport,
+};
 use ee::core::swarm_next_action::{
     SWARM_NEXT_ACTION_REDACTION_STATUS, SWARM_NEXT_ACTION_SCHEMA_V1, SwarmNextActionCandidate,
     SwarmNextActionCheckoutSummary, SwarmNextActionCompileHealthSummary,
     SwarmNextActionCoordinationSummary, SwarmNextActionEnvironmentSummary,
     SwarmNextActionInputSummary, SwarmNextActionSnapshot, SwarmNextActionVerificationSummary,
-    SwarmWorkPacket, SwarmWorkPacketClaimGate,
+    SwarmWorkPacket, SwarmWorkPacketActionableQueueEvidence,
+    SwarmWorkPacketActionableQueueExclusionAccounting, SwarmWorkPacketClaimGate,
+    actionable_queue_evidence_from_script_stdout, collect_work_packet_actionable_queue_evidence,
 };
 
 type TestResult = Result<(), String>;
@@ -144,6 +151,7 @@ fn claim_gate_required_fields() -> Vec<String> {
         "recommendedAction",
         "recommendedSafeToClaim",
         "sourceAuthority",
+        "actionableQueue",
         "unsafeReasons",
         "staleReasons",
         "sourceRefs",
@@ -377,6 +385,38 @@ fn claim_gate_sample_payloads_are_redacted_and_safe() -> TestResult {
             "installFreshnessAuthoritative": null,
             "installFreshnessRepair": null,
             "sourceCount": 4
+        },
+        "actionableQueue": {
+            "commandId": "beads_actionable_queue",
+            "displayCommand": "scripts/br_retry.sh actionable --json",
+            "mutatesState": false,
+            "collectionMode": "br_retry_script",
+            "queueState": "ready",
+            "exitClass": "ok",
+            "authoritative": true,
+            "rowCount": 0,
+            "candidateIds": [],
+            "truncatedCandidateCount": 0,
+            "filterContract": {
+                "excludesEpics": true,
+                "excludesAssigned": true,
+                "excludesBlocked": true,
+                "excludesDeferred": true,
+                "excludesInProgress": true
+            },
+            "exclusionAccounting": {
+                "rawReadyCount": 1,
+                "excludedEpicCount": 0,
+                "excludedAssignedCount": 1,
+                "excludedBlockedCount": 0,
+                "excludedDeferredCount": 0,
+                "excludedInProgressCount": 0,
+                "excludedOtherCount": 0
+            },
+            "candidateState": "candidate_absent_from_actionable",
+            "bvAdvisoryContradiction": false,
+            "trackerAuthorityDegraded": false,
+            "contradictionEvidence": []
         },
         "resourceAdmission": resource_admission_sample("wait_for_rch", "workstation"),
         "unsafeReasons": ["active_claim", "reserved_file_overlap"],
@@ -950,6 +990,629 @@ fn claim_gate_dirty_checkout_with_clean_tracker_stays_unsafe_due_to_conflict() -
         return Err(format!(
             "{context}: tracker authority must not be blamed for a dirty-checkout conflict"
         ));
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Actionable-queue source authority (bd-3w4pv.7)
+//
+// `scripts/br_retry.sh actionable --json` is the safe claimable-leaf queue;
+// raw `br ready` and `bv --robot-next` are broad/advisory. These fixtures pin
+// the precedence contract: actionable presence is necessary but never
+// sufficient, BV recommendations stay advisory, excluded raw rows are
+// accounted instead of promoted, every evaluated failure state fails closed,
+// and the collection path is read-only.
+// ---------------------------------------------------------------------------
+
+fn actionable_queue_fixture(file_name: &str) -> Result<Value, String> {
+    read_json(&[
+        "tests",
+        "fixtures",
+        "swarm_work_packet",
+        "actionable_queue",
+        file_name,
+    ])
+}
+
+fn queue_label_at(value: &Value, pointer: &str, context: &str) -> Result<&'static str, String> {
+    let raw = string_at(value, pointer, context)?;
+    Ok(match raw {
+        "not_evaluated" => "not_evaluated",
+        "br_retry_script" => "br_retry_script",
+        "brief_ready_filter" => "brief_ready_filter",
+        "skipped_by_flag" => "skipped_by_flag",
+        "ready" => "ready",
+        "unavailable" => "unavailable",
+        "timed_out" => "timed_out",
+        "stale_fallback" => "stale_fallback",
+        "ok" => "ok",
+        "timeout" => "timeout",
+        "spawn_failed" => "spawn_failed",
+        "parse_failed" => "parse_failed",
+        "unknown" => "unknown",
+        other => return Err(format!("{context}: unsupported queue label {other}")),
+    })
+}
+
+fn exclusion_accounting_from_fixture(
+    value: &Value,
+    context: &str,
+) -> Result<SwarmWorkPacketActionableQueueExclusionAccounting, String> {
+    Ok(SwarmWorkPacketActionableQueueExclusionAccounting {
+        raw_ready_count: value.pointer("/rawReadyCount").and_then(Value::as_u64),
+        excluded_epic_count: u64_at(value, "/excludedEpicCount", context)?,
+        excluded_assigned_count: u64_at(value, "/excludedAssignedCount", context)?,
+        excluded_blocked_count: u64_at(value, "/excludedBlockedCount", context)?,
+        excluded_deferred_count: u64_at(value, "/excludedDeferredCount", context)?,
+        excluded_in_progress_count: u64_at(value, "/excludedInProgressCount", context)?,
+        excluded_other_count: u64_at(value, "/excludedOtherCount", context)?,
+    })
+}
+
+fn actionable_queue_evidence_from_fixture(
+    value: &Value,
+    context: &str,
+) -> Result<SwarmWorkPacketActionableQueueEvidence, String> {
+    let accounting = value
+        .pointer("/exclusionAccounting")
+        .ok_or_else(|| format!("{context} missing exclusionAccounting"))?;
+    Ok(SwarmWorkPacketActionableQueueEvidence {
+        collection_mode: queue_label_at(value, "/collectionMode", context)?,
+        queue_state: queue_label_at(value, "/queueState", context)?,
+        exit_class: queue_label_at(value, "/exitClass", context)?,
+        row_count: value.pointer("/rowCount").and_then(Value::as_u64),
+        candidate_ids: string_array_at(value, "/candidateIds", context)?,
+        exclusion_accounting: exclusion_accounting_from_fixture(accounting, context)?,
+    })
+}
+
+fn clean_tracker_report() -> BeadsIntegrityReport {
+    let merge_artifact_paths: &[String] = &[];
+    compose_integrity_report(BeadsIntegrityInputs {
+        jsonl_path: ".beads/issues.jsonl",
+        db_path: ".beads/beads.db",
+        jsonl_record_count: 5,
+        db_record_count: 5,
+        auto_import_enabled: true,
+        external_changes_pending_import: false,
+        dirty_issue_count: 0,
+        merge_artifact_paths,
+        jsonl_parse_error: None,
+    })
+}
+
+fn packet_and_gate_with_actionable_queue(
+    tracker_integrity: BeadsIntegrityReport,
+    snapshot: &SwarmNextActionSnapshot,
+    evidence: SwarmWorkPacketActionableQueueEvidence,
+    candidate_id: &str,
+) -> (SwarmWorkPacket, SwarmWorkPacketClaimGate) {
+    let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+    let mut packet = SwarmWorkPacket::from_brief_and_next_action_with_tracker_integrity(
+        &brief,
+        snapshot,
+        tracker_integrity,
+    );
+    packet.apply_claim_gate_actionable_queue(evidence);
+    let gate = packet.claim_gate(Some(candidate_id));
+    (packet, gate)
+}
+
+fn brief_bead_from_fixture(
+    value: &Value,
+    source_bucket: &str,
+    context: &str,
+) -> Result<SwarmBriefBead, String> {
+    Ok(SwarmBriefBead {
+        id: string_at(value, "/id", context)?.to_owned(),
+        title: string_at(value, "/title", context)?.to_owned(),
+        status: string_at(value, "/status", context)?.to_owned(),
+        priority: Some(2),
+        assignee: value
+            .pointer("/assignee")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        issue_type: value
+            .pointer("/issueType")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        created_at: None,
+        updated_at: None,
+        latest_comment_at: None,
+        comment_count: 0,
+        source_bucket: source_bucket.to_owned(),
+    })
+}
+
+#[test]
+fn claim_gate_actionable_presence_is_necessary_but_not_sufficient() -> TestResult {
+    let fixture = actionable_queue_fixture("present_but_gate_refuses.json")?;
+    let context = "actionable present-but-refused fixture";
+    let candidate_id = string_at(&fixture, "/candidateId", context)?;
+    let candidate_title = string_at(&fixture, "/candidateTitle", context)?;
+    let tracker = fixture
+        .pointer("/tracker")
+        .ok_or_else(|| format!("{context} missing tracker inputs"))?;
+    let report = report_from_matrix_case(tracker, context)?;
+    let evidence = actionable_queue_evidence_from_fixture(
+        fixture
+            .pointer("/evidence")
+            .ok_or_else(|| format!("{context} missing evidence"))?,
+        context,
+    )?;
+
+    let mut snapshot = claim_ready_snapshot(candidate_id, candidate_title);
+    let dirty_paths = string_array_at(&fixture, "/dirtyPaths", context)?;
+    snapshot.checkout.dirty_path_count = dirty_paths.len();
+    snapshot.checkout.dirty_paths = dirty_paths;
+
+    let (_, gate) =
+        packet_and_gate_with_actionable_queue(report, &snapshot, evidence, candidate_id);
+
+    let expected_state = string_at(&fixture, "/expected/candidateState", context)?;
+    if gate.actionable_queue.candidate_state != expected_state {
+        return Err(format!(
+            "{context}: candidateState expected {expected_state}, got {}",
+            gate.actionable_queue.candidate_state
+        ));
+    }
+    if !gate.actionable_queue.tracker_authority_degraded {
+        return Err(format!(
+            "{context}: evaluated queue with a dirty tracker must mark trackerAuthorityDegraded"
+        ));
+    }
+    if gate.actionable_queue.authoritative {
+        return Err(format!(
+            "{context}: the queue inherits degraded tracker authority and must not stay authoritative"
+        ));
+    }
+    let expected_health = string_at(&fixture, "/expected/trackerHealth", context)?;
+    if gate.source_authority.tracker_health != expected_health {
+        return Err(format!(
+            "{context}: trackerHealth expected {expected_health}, got {}",
+            gate.source_authority.tracker_health
+        ));
+    }
+    let expected_verdict = string_at(&fixture, "/expected/verdict", context)?;
+    if gate.verdict != expected_verdict {
+        return Err(format!(
+            "{context}: verdict expected {expected_verdict}, got {}",
+            gate.verdict
+        ));
+    }
+    if gate.safe_to_claim || gate.claim_command_action.is_some() {
+        return Err(format!(
+            "{context}: actionable presence must never be sufficient — claimCommandAction must stay null"
+        ));
+    }
+    let tracker_reason = string_at(&fixture, "/expected/trackerUnsafeReason", context)?;
+    if !gate
+        .unsafe_reasons
+        .iter()
+        .any(|reason| reason == tracker_reason)
+    {
+        return Err(format!(
+            "{context}: missing unsafe reason {tracker_reason}; got {:?}",
+            gate.unsafe_reasons
+        ));
+    }
+    if !gate
+        .unsafe_reasons
+        .iter()
+        .any(|reason| reason.starts_with("dirty_path_overlap:"))
+    {
+        return Err(format!(
+            "{context}: dirty-surface conflict evidence must stay visible alongside queue presence"
+        ));
+    }
+    let degraded_code = string_at(&fixture, "/expected/degradedCode", context)?;
+    if !gate.degraded_codes.iter().any(|code| code == degraded_code) {
+        return Err(format!(
+            "{context}: degradedCodes must carry {degraded_code}; got {:?}",
+            gate.degraded_codes
+        ));
+    }
+
+    let rendered = serde_json::to_value(&gate)
+        .map_err(|error| format!("{context}: serialize gate: {error}"))?;
+    assert_no_forbidden_markers(&rendered, context)?;
+    assert_next_actions_are_read_only(&rendered, context)?;
+
+    Ok(())
+}
+
+#[test]
+fn claim_gate_marks_bv_advisory_contradiction_without_claim_command() -> TestResult {
+    let fixture = actionable_queue_fixture("bv_advisory_contradiction.json")?;
+    let context = "bv advisory contradiction fixture";
+    let candidate_id = string_at(&fixture, "/candidateId", context)?;
+    let candidate_title = string_at(&fixture, "/candidateTitle", context)?;
+    let tracker = fixture
+        .pointer("/tracker")
+        .ok_or_else(|| format!("{context} missing tracker inputs"))?;
+    let report = report_from_matrix_case(tracker, context)?;
+    let evidence = actionable_queue_evidence_from_fixture(
+        fixture
+            .pointer("/evidence")
+            .ok_or_else(|| format!("{context} missing evidence"))?,
+        context,
+    )?;
+
+    let mut snapshot = claim_ready_snapshot(candidate_id, candidate_title);
+    snapshot.candidates[0].source = "bv_top_pick";
+    snapshot.candidates[0].status = string_at(&fixture, "/candidateStatus", context)?.to_owned();
+    snapshot.candidates[0].blocked_by = string_array_at(&fixture, "/candidateBlockedBy", context)?;
+
+    let (_, gate) =
+        packet_and_gate_with_actionable_queue(report, &snapshot, evidence, candidate_id);
+
+    let expected_verdict = string_at(&fixture, "/expected/verdict", context)?;
+    if gate.verdict != expected_verdict {
+        return Err(format!(
+            "{context}: verdict expected {expected_verdict}, got {}",
+            gate.verdict
+        ));
+    }
+    if gate.safe_to_claim || gate.claim_command_action.is_some() {
+        return Err(format!(
+            "{context}: a BV-contradicted candidate must never receive a claim command"
+        ));
+    }
+    if !gate.actionable_queue.bv_advisory_contradiction {
+        return Err(format!(
+            "{context}: bvAdvisoryContradiction must be marked for the selected BV pick"
+        ));
+    }
+    let expected_state = string_at(&fixture, "/expected/candidateState", context)?;
+    if gate.actionable_queue.candidate_state != expected_state {
+        return Err(format!(
+            "{context}: candidateState expected {expected_state}, got {}",
+            gate.actionable_queue.candidate_state
+        ));
+    }
+    let expected_evidence = string_array_at(&fixture, "/expected/contradictionEvidence", context)?;
+    if gate.actionable_queue.contradiction_evidence != expected_evidence {
+        return Err(format!(
+            "{context}: contradiction evidence drifted\nactual: {:?}\nexpected: {expected_evidence:?}",
+            gate.actionable_queue.contradiction_evidence
+        ));
+    }
+    let unsafe_reason = string_at(&fixture, "/expected/unsafeReason", context)?;
+    if !gate
+        .unsafe_reasons
+        .iter()
+        .any(|reason| reason == unsafe_reason)
+    {
+        return Err(format!(
+            "{context}: missing unsafe reason {unsafe_reason}; got {:?}",
+            gate.unsafe_reasons
+        ));
+    }
+    let degraded_code = string_at(&fixture, "/expected/degradedCode", context)?;
+    if !gate.degraded_codes.iter().any(|code| code == degraded_code) {
+        return Err(format!(
+            "{context}: degradedCodes must carry {degraded_code}; got {:?}",
+            gate.degraded_codes
+        ));
+    }
+
+    let rendered = serde_json::to_value(&gate)
+        .map_err(|error| format!("{context}: serialize gate: {error}"))?;
+    assert_no_forbidden_markers(&rendered, context)?;
+
+    Ok(())
+}
+
+#[test]
+fn claim_gate_actionable_queue_exclusion_accounting_matches_golden() -> TestResult {
+    let fixture = actionable_queue_fixture("ready_epic_exclusion.json")?;
+    let context = "actionable exclusion accounting fixture";
+    let candidate_id = string_at(&fixture, "/candidateId", context)?;
+
+    let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+    for (bucket, pointer) in [
+        ("ready", "/brief/ready"),
+        ("blocked", "/brief/blocked"),
+        ("in_progress", "/brief/inProgress"),
+        ("deferred", "/brief/deferred"),
+    ] {
+        let rows = fixture
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{context} missing {pointer}"))?;
+        for row in rows {
+            let bead = brief_bead_from_fixture(row, bucket, context)?;
+            match bucket {
+                "ready" => brief.beads.ready.push(bead),
+                "blocked" => brief.beads.blocked.push(bead),
+                "in_progress" => brief.beads.in_progress.push(bead),
+                _ => brief.beads.deferred.push(bead),
+            }
+        }
+    }
+
+    let stdout = string_at(&fixture, "/scriptStdout", context)?;
+    let evidence = actionable_queue_evidence_from_script_stdout(stdout, &brief);
+    if evidence.queue_state != "ready" || evidence.exit_class != "ok" {
+        return Err(format!(
+            "{context}: parsed script stdout must yield a ready queue, got {} / {}",
+            evidence.queue_state, evidence.exit_class
+        ));
+    }
+
+    let tracker = fixture
+        .pointer("/tracker")
+        .ok_or_else(|| format!("{context} missing tracker inputs"))?;
+    let report = report_from_matrix_case(tracker, context)?;
+    let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+    let mut packet = SwarmWorkPacket::from_brief_and_next_action_with_tracker_integrity(
+        &brief, &snapshot, report,
+    );
+    packet.apply_claim_gate_actionable_queue(evidence);
+
+    let gate = packet.claim_gate(Some(candidate_id));
+    let rendered = serde_json::to_value(&gate)
+        .map_err(|error| format!("{context}: serialize gate: {error}"))?;
+    let actual_block = rendered
+        .pointer("/actionableQueue")
+        .ok_or_else(|| format!("{context}: gate missing actionableQueue block"))?;
+    let expected_block = fixture
+        .pointer("/expectedActionableQueue")
+        .ok_or_else(|| format!("{context} missing expectedActionableQueue golden"))?;
+    if actual_block != expected_block {
+        return Err(format!(
+            "{context}: actionableQueue golden drifted\nactual: {actual_block:#}\nexpected: {expected_block:#}"
+        ));
+    }
+
+    // The excluded parent epic stays visible as exclusion accounting and a
+    // concrete absence reason — it is never promoted into a claim.
+    let excluded_id = string_at(&fixture, "/excludedCandidateId", context)?;
+    let excluded_gate = packet.claim_gate(Some(excluded_id));
+    let expected_excluded_state = string_at(&fixture, "/expectedExcludedCandidateState", context)?;
+    if excluded_gate.actionable_queue.candidate_state != expected_excluded_state {
+        return Err(format!(
+            "{context}: excluded candidateState expected {expected_excluded_state}, got {}",
+            excluded_gate.actionable_queue.candidate_state
+        ));
+    }
+    if excluded_gate.safe_to_claim || excluded_gate.claim_command_action.is_some() {
+        return Err(format!(
+            "{context}: a row the actionable queue excludes must never become claimable"
+        ));
+    }
+    let expected_excluded_reason = string_at(&fixture, "/expectedExcludedUnsafeReason", context)?;
+    if !excluded_gate
+        .unsafe_reasons
+        .iter()
+        .any(|reason| reason == expected_excluded_reason)
+    {
+        return Err(format!(
+            "{context}: missing excluded unsafe reason {expected_excluded_reason}; got {:?}",
+            excluded_gate.unsafe_reasons
+        ));
+    }
+
+    assert_no_forbidden_markers(&rendered, context)?;
+
+    Ok(())
+}
+
+struct RecordingRunner {
+    stdout: String,
+    calls: RefCell<Vec<(String, Vec<String>)>>,
+}
+
+impl SwarmBriefCommandRunner for RecordingRunner {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        _cwd: &Path,
+        _timeout_ms: u64,
+    ) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
+        self.calls.borrow_mut().push((
+            program.to_owned(),
+            args.iter().map(|arg| (*arg).to_owned()).collect(),
+        ));
+        Ok(SwarmBriefCommandOutput {
+            stdout: self.stdout.clone(),
+            stderr: String::new(),
+        })
+    }
+}
+
+#[test]
+fn actionable_queue_collection_is_read_only_and_records_command_ids() -> TestResult {
+    let fixture = actionable_queue_fixture("no_mutation_read_only.json")?;
+    let context = "actionable no-mutation fixture";
+    let stdout = string_at(&fixture, "/scriptStdout", context)?;
+
+    // The repo root ships scripts/br_retry.sh, so the collector takes the
+    // first-class script path; the recording runner proves the only command
+    // it ever issues is the read-only queue probe.
+    let options = SwarmBriefCollectOptions::for_workspace(repo_root());
+    let runner = RecordingRunner {
+        stdout: stdout.to_owned(),
+        calls: RefCell::new(Vec::new()),
+    };
+    let brief = SwarmBriefReport::empty(&repo_root());
+    let evidence = collect_work_packet_actionable_queue_evidence(&options, &runner, &brief);
+
+    let calls = runner.calls.into_inner();
+    if calls.len() != 1 {
+        return Err(format!(
+            "{context}: collection must issue exactly one command, got {calls:?}"
+        ));
+    }
+    let expected_program = string_at(&fixture, "/expected/commandProgram", context)?;
+    let expected_args = string_array_at(&fixture, "/expected/commandArgs", context)?;
+    if calls[0].0 != expected_program || calls[0].1 != expected_args {
+        return Err(format!(
+            "{context}: collection command drifted: {:?} {:?}",
+            calls[0].0, calls[0].1
+        ));
+    }
+    let forbidden_markers = string_array_at(&fixture, "/expected/forbiddenArgvMarkers", context)?;
+    for (program, args) in &calls {
+        for marker in &forbidden_markers {
+            if program.contains(marker.as_str())
+                || args.iter().any(|arg| arg.contains(marker.as_str()))
+            {
+                return Err(format!(
+                    "{context}: read-only collection must never issue `{marker}` commands"
+                ));
+            }
+        }
+    }
+    if evidence.queue_state != "ready" || evidence.collection_mode != "br_retry_script" {
+        return Err(format!(
+            "{context}: script-path collection must report ready/br_retry_script, got {}/{}",
+            evidence.queue_state, evidence.collection_mode
+        ));
+    }
+
+    let snapshot = claim_ready_snapshot("bd-aq-leaf", "Document a small schema improvement");
+    let (packet, gate) = packet_and_gate_with_actionable_queue(
+        clean_tracker_report(),
+        &snapshot,
+        evidence,
+        "bd-aq-leaf",
+    );
+
+    if !packet.mutation_policy.side_effect_free
+        || packet.mutation_policy.claims_beads
+        || packet.mutation_policy.reserves_files
+        || packet.mutation_policy.sends_agent_mail
+        || packet.mutation_policy.runs_cargo
+        || packet.mutation_policy.stages_git
+        || packet.mutation_policy.deletes_files
+    {
+        return Err(format!(
+            "{context}: the work packet mutation policy must stay fully read-only"
+        ));
+    }
+
+    let expected_command_id = string_at(&fixture, "/expected/commandId", context)?;
+    if gate.actionable_queue.command_id != expected_command_id {
+        return Err(format!(
+            "{context}: evidence block command id expected {expected_command_id}, got {}",
+            gate.actionable_queue.command_id
+        ));
+    }
+    let expected_display = string_at(&fixture, "/expected/displayCommand", context)?;
+    if gate.actionable_queue.display_command != expected_display {
+        return Err(format!(
+            "{context}: evidence block display command drifted: {}",
+            gate.actionable_queue.display_command
+        ));
+    }
+    if gate.actionable_queue.mutates_state {
+        return Err(format!(
+            "{context}: the actionable-queue evidence block must record mutatesState=false"
+        ));
+    }
+
+    // Positive control: with clean tracker, clean checkout, healthy RCH, and
+    // the candidate present in the actionable queue, the gate still issues a
+    // claim command — the queue integration fails closed, not always-closed.
+    if !gate.safe_to_claim || gate.claim_command_action.is_none() {
+        return Err(format!(
+            "{context}: fully-agreeing sources must keep the candidate claimable, got verdict {}",
+            gate.verdict
+        ));
+    }
+
+    let rendered = serde_json::to_value(&gate)
+        .map_err(|error| format!("{context}: serialize gate: {error}"))?;
+    assert_no_forbidden_markers(&rendered, context)?;
+    assert_next_actions_are_read_only(&rendered, context)?;
+
+    Ok(())
+}
+
+#[test]
+fn claim_gate_actionable_queue_failure_states_fail_closed() -> TestResult {
+    let fixture = actionable_queue_fixture("failure_states.json")?;
+    let candidate_id = string_at(&fixture, "/candidateId", "actionable failure fixture")?;
+    let candidate_title = string_at(&fixture, "/candidateTitle", "actionable failure fixture")?;
+    let cases = fixture
+        .pointer("/cases")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "actionable failure fixture missing cases[]".to_owned())?;
+    if cases.len() != 4 {
+        return Err(format!(
+            "actionable failure fixture must pin 4 distinct states, found {}",
+            cases.len()
+        ));
+    }
+
+    for case in cases {
+        let name = string_at(case, "/name", "actionable failure case")?;
+        let context = format!("actionable failure case {name}");
+        let evidence = actionable_queue_evidence_from_fixture(
+            case.pointer("/evidence")
+                .ok_or_else(|| format!("{context} missing evidence"))?,
+            &context,
+        )?;
+        let snapshot = claim_ready_snapshot(candidate_id, candidate_title);
+        let (_, gate) = packet_and_gate_with_actionable_queue(
+            clean_tracker_report(),
+            &snapshot,
+            evidence,
+            candidate_id,
+        );
+
+        let expected_state = string_at(case, "/expected/candidateState", &context)?;
+        if gate.actionable_queue.candidate_state != expected_state {
+            return Err(format!(
+                "{context}: candidateState expected {expected_state}, got {}",
+                gate.actionable_queue.candidate_state
+            ));
+        }
+        // Timeout is not absence: no failure state may ever be reported as a
+        // confirmed candidate absence.
+        if gate.actionable_queue.candidate_state == "candidate_absent_from_actionable" {
+            return Err(format!(
+                "{context}: a failed queue read must never be collapsed into candidate absence"
+            ));
+        }
+        let expected_verdict = string_at(case, "/expected/verdict", &context)?;
+        if gate.verdict != expected_verdict {
+            return Err(format!(
+                "{context}: verdict expected {expected_verdict}, got {}",
+                gate.verdict
+            ));
+        }
+        if gate.safe_to_claim || gate.claim_command_action.is_some() {
+            return Err(format!(
+                "{context}: evaluated queue failure states must fail closed"
+            ));
+        }
+        let unsafe_reason = string_at(case, "/expected/unsafeReason", &context)?;
+        if !gate
+            .unsafe_reasons
+            .iter()
+            .any(|reason| reason == unsafe_reason)
+        {
+            return Err(format!(
+                "{context}: missing unsafe reason {unsafe_reason}; got {:?}",
+                gate.unsafe_reasons
+            ));
+        }
+        let degraded_code = string_at(case, "/expected/degradedCode", &context)?;
+        if !gate.degraded_codes.iter().any(|code| code == degraded_code) {
+            return Err(format!(
+                "{context}: degradedCodes must carry {degraded_code}; got {:?}",
+                gate.degraded_codes
+            ));
+        }
+
+        let rendered = serde_json::to_value(&gate)
+            .map_err(|error| format!("{context}: serialize gate: {error}"))?;
+        assert_no_forbidden_markers(&rendered, &context)?;
     }
 
     Ok(())

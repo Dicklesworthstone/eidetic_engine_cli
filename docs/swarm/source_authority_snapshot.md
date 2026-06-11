@@ -19,6 +19,7 @@ byte order:
 
 | `sourceKind` | What it covers |
 | --- | --- |
+| `actionable_queue` | The safe claimable-leaf queue: `scripts/br_retry.sh actionable --json` (bd-3w4pv.7) |
 | `agent_mail` | Reservations, inbox, roster, durability/recovery posture |
 | `beads` | Tracker rows, ready queue, claim-candidate lookups |
 | `bv` | Graph-aware triage ranking (advisory) |
@@ -32,6 +33,71 @@ byte order:
 
 A source that was not consulted still appears with `state=unavailable` and a
 `statusDetail` explaining why. Absence of a record is never meaningful.
+
+## Actionable queue (`scripts/br_retry.sh actionable --json`)
+
+Tracking bead: `bd-3w4pv.7`. AGENTS.md/README establish
+`scripts/br_retry.sh actionable --json` as the **safe claimable-leaf queue**
+(open, unassigned, non-epic rows served through the transient-read retry
+guard), while raw `br ready` and `bv --robot-next` are broader advisory views
+(live evidence class: BV recommended blocked `bd-37ugy` with a copy-paste
+claim command while `br` showed it blocked). The queue is therefore modeled
+as its own first-class source instead of being folded into generic Beads
+health.
+
+`sourceKind=actionable_queue` records carry an `actionableQueue` extension
+block: command id (`beads_actionable_queue`), command template, row count,
+bounded sorted candidate ids (max 32, with `truncatedCandidateCount`), and
+the static filter contract flags (`excludesEpics`, `excludesAssigned`,
+`excludesBlocked`, `excludesDeferred`, `excludesInProgress`). Budget,
+timeout, exit class, freshness, and fallback semantics stay on the shared
+`sourceRecord` fields — that per-source granularity is why the queue is a
+new `sourceKind` rather than a sub-object on the `beads` record.
+
+The claim gate (`ee.swarm.work_packet.claim_gate.v1`, `actionableQueue`
+field) consumes this evidence and emits candidate-conditional states:
+
+| State | Meaning |
+| --- | --- |
+| `candidate_present_actionable` | Queue ready and contains the candidate (necessary, not sufficient) |
+| `candidate_absent_from_actionable` | Queue ready and confirms absence |
+| `actionable_queue_unavailable` | Spawn/parse failure or skipped; no queue answer exists |
+| `actionable_queue_timed_out` | Budget exhausted; absence NOT confirmed |
+| `actionable_queue_stale_fallback` | Only degraded/stale fallback evidence answered; advisory |
+| `bv_advisory_contradiction` | BV recommends an id Beads marks blocked or absent from the queue |
+| `tracker_authority_degraded` | Queue evaluated while tracker reads were not authoritative |
+
+### Precedence rules
+
+The rules below are implemented in
+`src/core/swarm_next_action.rs` (`work_packet_actionable_queue_allows_claim`,
+`work_packet_actionable_queue_blocking_verdict`) and pinned by
+`tests/contracts/swarm_work_packet_claim_gate_conformance.rs`:
+
+1. **Actionable presence is necessary but not sufficient.** A candidate in
+   the queue still needs tracker authority, Agent Mail reservation
+   evidence, RCH posture, and the conflict gate to agree before
+   `claimCommandAction` is emitted.
+2. **BV recommendations are advisory** unless the id is in the actionable
+   queue AND the gate passes. Contradictions surface as bounded id-only
+   evidence (`bv_recommends_blocked_id:<id>`,
+   `bv_recommends_id_absent_from_actionable_queue:<id>`), never claims.
+3. **Raw `br ready` never overrides the actionable queue or gate safety.**
+   Rows the queue excludes appear only in the exclusion accounting
+   (`rawReadyCount` plus epic/assigned/blocked/deferred/in-progress/other
+   counts).
+4. **Timeout is not absence** here either: a timed-out queue read keeps the
+   distinct `timed_out` state and fails closed.
+5. `claimCommandAction` stays `null` unless actionable queue, source
+   authority, reservations, and the gate all agree.
+
+Workspaces that do not ship the script fall back to applying the same
+filter contract in-process to the brief's fresh `br ready` rows
+(`collectionMode=brief_ready_filter`); the fallback is marked
+`stale_fallback` (advisory) when the underlying Beads read was itself
+degraded or stale. Collection is strictly read-only: the only command the
+collector may spawn is the queue probe, pinned by the
+`no_mutation_read_only` fixture.
 
 ## Source-state taxonomy
 
@@ -90,9 +156,14 @@ exactly that case.
 
 | Fixture | Pins |
 | --- | --- |
-| `tests/fixtures/source_authority/all_source_states.json` | Every `state` value across the ten sources |
+| `tests/fixtures/source_authority/all_source_states.json` | Every `state` value across the sources |
 | `tests/fixtures/source_authority/candidate_beads_timeout.json` | Candidate in stale-safe Beads, live lookup timed out, gate fails closed |
 | `tests/fixtures/source_authority/redaction_proof.json` | Redaction posture: forbidden content classes absent |
+| `tests/fixtures/swarm_work_packet/actionable_queue/present_but_gate_refuses.json` | Queue presence necessary but not sufficient; claim stays null |
+| `tests/fixtures/swarm_work_packet/actionable_queue/bv_advisory_contradiction.json` | BV recommends a blocked id absent from the queue |
+| `tests/fixtures/swarm_work_packet/actionable_queue/ready_epic_exclusion.json` | Exclusion accounting + filter contract golden |
+| `tests/fixtures/swarm_work_packet/actionable_queue/failure_states.json` | Distinct spawn/timeout/parse/stale failure states fail closed |
+| `tests/fixtures/swarm_work_packet/actionable_queue/no_mutation_read_only.json` | Collection issues only the read-only queue probe |
 
 The contract test `tests/swarm_schema_lifecycle.rs`
 (`source_authority_snapshot_contract_covers_source_state_taxonomy`) keeps the

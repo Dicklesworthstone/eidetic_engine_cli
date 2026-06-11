@@ -17,6 +17,7 @@
     "recommendedAction",
     "recommendedSafeToClaim",
     "sourceAuthority",
+    "actionableQueue",
     "unsafeReasons",
     "staleReasons",
     "sourceRefs",
@@ -68,6 +69,7 @@
       "description": "Whether the selected or requested candidate is safe under the packet recommendation, candidate identity, tracker authority, Agent Mail authority, and RCH posture."
     },
     "sourceAuthority": {"$ref": "#/definitions/sourceAuthority"},
+    "actionableQueue": {"$ref": "#/definitions/actionableQueueAuthority"},
     "resourceAdmission": {"$ref": "#/definitions/resourceAdmission"},
     "unsafeReasons": {"$ref": "#/definitions/stringArray"},
     "staleReasons": {"$ref": "#/definitions/stringArray"},
@@ -117,7 +119,17 @@
               "decision": {"const": "safe_to_claim"}
             }
           },
-          "claimCommandAction": {"type": "object"}
+          "claimCommandAction": {"type": "object"},
+          "actionableQueue": {
+            "type": "object",
+            "required": ["candidateState", "bvAdvisoryContradiction"],
+            "properties": {
+              "candidateState": {
+                "enum": ["candidate_present_actionable", "not_evaluated"]
+              },
+              "bvAdvisoryContradiction": {"const": false}
+            }
+          }
         }
       }
     }
@@ -391,6 +403,126 @@
         "sourceCount": {"type": "integer", "minimum": 0}
       }
     },
+    "actionableQueueAuthority": {
+      "type": "object",
+      "description": "First-class actionable-queue evidence (bd-3w4pv.7). scripts/br_retry.sh actionable --json is the safe claimable-leaf queue; raw br ready and bv --robot-next are broad/advisory. Precedence: (1) actionable presence is necessary but never sufficient — tracker authority, reservations, RCH posture, and the conflict gate must still agree; (2) BV recommendations are advisory unless the id is in the actionable queue AND the gate passes; a BV pick that Beads marks blocked or that is absent from the queue surfaces as bvAdvisoryContradiction, never as a claim; (3) raw br ready rows never override the actionable queue or gate safety — excluded rows appear only in exclusionAccounting; (4) timed_out is never collapsed into absence; (5) queueState=not_evaluated (archived payloads, snapshot-only consumers) never blocks. Redaction: bounded bead ids and counts only — no row titles, no raw command stdout, no host-private paths.",
+      "required": [
+        "commandId",
+        "displayCommand",
+        "mutatesState",
+        "collectionMode",
+        "queueState",
+        "exitClass",
+        "authoritative",
+        "rowCount",
+        "candidateIds",
+        "truncatedCandidateCount",
+        "filterContract",
+        "exclusionAccounting",
+        "candidateState",
+        "bvAdvisoryContradiction",
+        "trackerAuthorityDegraded",
+        "contradictionEvidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "commandId": {"type": "string", "const": "beads_actionable_queue"},
+        "displayCommand": {"type": "string", "const": "scripts/br_retry.sh actionable --json"},
+        "mutatesState": {"type": "boolean", "const": false},
+        "collectionMode": {
+          "type": "string",
+          "description": "br_retry_script: the queue command ran with a bounded timeout. brief_ready_filter: the workspace does not ship the script, so the same filter contract was applied in-process to the brief's fresh br ready rows. skipped_by_flag: the Beads source was disabled for this collection. not_evaluated: the packet was built without the collector.",
+          "enum": ["not_evaluated", "br_retry_script", "brief_ready_filter", "skipped_by_flag"]
+        },
+        "queueState": {
+          "type": "string",
+          "description": "ready: the queue answered inside budget. unavailable: spawn/parse failure or skipped — no queue answer exists. timed_out: budget exhausted; MUST NOT be collapsed into absence. stale_fallback: only degraded/stale fallback evidence answered; advisory only. not_evaluated: collector not run.",
+          "enum": ["not_evaluated", "ready", "unavailable", "timed_out", "stale_fallback"]
+        },
+        "exitClass": {
+          "type": "string",
+          "enum": ["not_evaluated", "ok", "timeout", "spawn_failed", "parse_failed", "unknown"]
+        },
+        "authoritative": {
+          "type": "boolean",
+          "description": "True only when queueState=ready and tracker authority is intact. The queue is a br view, so a degraded tracker degrades the queue with it."
+        },
+        "rowCount": {"type": ["integer", "null"], "minimum": 0},
+        "candidateIds": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {"type": "string", "minLength": 1, "maxLength": 120}
+        },
+        "truncatedCandidateCount": {"type": "integer", "minimum": 0},
+        "filterContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "excludesEpics",
+            "excludesAssigned",
+            "excludesBlocked",
+            "excludesDeferred",
+            "excludesInProgress"
+          ],
+          "properties": {
+            "excludesEpics": {"type": "boolean", "const": true},
+            "excludesAssigned": {"type": "boolean", "const": true},
+            "excludesBlocked": {"type": "boolean", "const": true},
+            "excludesDeferred": {"type": "boolean", "const": true},
+            "excludesInProgress": {"type": "boolean", "const": true}
+          }
+        },
+        "exclusionAccounting": {
+          "type": "object",
+          "description": "Counts of tracker rows the actionable queue excludes (counts only, never row content). Structural buckets (blocked/deferred/inProgress) come from the tracker buckets br ready already excludes; the epic/assigned/other buckets classify raw ready rows absent from the queue.",
+          "additionalProperties": false,
+          "required": [
+            "rawReadyCount",
+            "excludedEpicCount",
+            "excludedAssignedCount",
+            "excludedBlockedCount",
+            "excludedDeferredCount",
+            "excludedInProgressCount",
+            "excludedOtherCount"
+          ],
+          "properties": {
+            "rawReadyCount": {"type": ["integer", "null"], "minimum": 0},
+            "excludedEpicCount": {"type": "integer", "minimum": 0},
+            "excludedAssignedCount": {"type": "integer", "minimum": 0},
+            "excludedBlockedCount": {"type": "integer", "minimum": 0},
+            "excludedDeferredCount": {"type": "integer", "minimum": 0},
+            "excludedInProgressCount": {"type": "integer", "minimum": 0},
+            "excludedOtherCount": {"type": "integer", "minimum": 0}
+          }
+        },
+        "candidateState": {
+          "type": "string",
+          "description": "Candidate-conditional queue outcome. candidate_present_actionable: the queue is ready and contains the candidate (necessary, not sufficient). candidate_absent_from_actionable: the queue is ready and confirms absence. actionable_queue_unavailable / actionable_queue_timed_out / actionable_queue_stale_fallback: the queue could not confirm presence or absence — the gate fails closed. not_evaluated: no candidate in play or collector not run.",
+          "enum": [
+            "not_evaluated",
+            "candidate_present_actionable",
+            "candidate_absent_from_actionable",
+            "actionable_queue_unavailable",
+            "actionable_queue_timed_out",
+            "actionable_queue_stale_fallback"
+          ]
+        },
+        "bvAdvisoryContradiction": {
+          "type": "boolean",
+          "description": "True when the selected/requested candidate is a BV recommendation that Beads contradicts (marked blocked, or absent from the ready actionable queue)."
+        },
+        "trackerAuthorityDegraded": {
+          "type": "boolean",
+          "description": "True when queue evidence was evaluated while tracker reads were not authoritative; the queue inherits the degraded authority."
+        },
+        "contradictionEvidence": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {"$ref": "#/definitions/safeString"},
+          "description": "Bounded packet-wide BV-vs-Beads contradiction entries, e.g. bv_recommends_blocked_id:<id> or bv_recommends_id_absent_from_actionable_queue:<id>. Ids only."
+        }
+      }
+    },
     "resourceAdmission": {
       "type": "object",
       "description": "Side-effect-free advisory resource-profile admission copied into the claim gate. This block can suggest waiting for RCH or using a lean profile, but canAuthorizeClaim is always false and cannot make an unsafe claim safe.",
@@ -519,6 +651,38 @@
         "installFreshnessAuthoritative": null,
         "installFreshnessRepair": null,
         "sourceCount": 4
+      },
+      "actionableQueue": {
+        "commandId": "beads_actionable_queue",
+        "displayCommand": "scripts/br_retry.sh actionable --json",
+        "mutatesState": false,
+        "collectionMode": "br_retry_script",
+        "queueState": "ready",
+        "exitClass": "ok",
+        "authoritative": true,
+        "rowCount": 1,
+        "candidateIds": ["bd-example.1"],
+        "truncatedCandidateCount": 0,
+        "filterContract": {
+          "excludesEpics": true,
+          "excludesAssigned": true,
+          "excludesBlocked": true,
+          "excludesDeferred": true,
+          "excludesInProgress": true
+        },
+        "exclusionAccounting": {
+          "rawReadyCount": 1,
+          "excludedEpicCount": 0,
+          "excludedAssignedCount": 0,
+          "excludedBlockedCount": 0,
+          "excludedDeferredCount": 0,
+          "excludedInProgressCount": 0,
+          "excludedOtherCount": 0
+        },
+        "candidateState": "candidate_present_actionable",
+        "bvAdvisoryContradiction": false,
+        "trackerAuthorityDegraded": false,
+        "contradictionEvidence": []
       },
       "unsafeReasons": [],
       "staleReasons": [],

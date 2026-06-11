@@ -791,6 +791,7 @@ fn source_authority_snapshot_contract_covers_source_state_taxonomy() -> TestResu
 
     let source_kinds = string_array_at(&schema, "/definitions/sourceKind/enum", schema_case.id)?;
     let expected_kinds = [
+        "actionable_queue",
         "agent_mail",
         "beads",
         "bv",

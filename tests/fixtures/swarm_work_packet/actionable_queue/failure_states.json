@@ -1,0 +1,108 @@
+{
+  "name": "actionable queue failure states stay distinct and fail closed",
+  "description": "bd-3w4pv.7: spawn failure, timeout, parse failure, and stale fallback are distinct states. A timed-out queue read must never be collapsed into candidate absence, and stale-safe fallback presence is advisory only — every evaluated non-ready state keeps claimCommandAction null.",
+  "candidateId": "bd-aq-state",
+  "candidateTitle": "Document tracker authority states",
+  "cases": [
+    {
+      "name": "timed_out",
+      "evidence": {
+        "collectionMode": "br_retry_script",
+        "queueState": "timed_out",
+        "exitClass": "timeout",
+        "rowCount": null,
+        "candidateIds": [],
+        "exclusionAccounting": {
+          "rawReadyCount": 0,
+          "excludedEpicCount": 0,
+          "excludedAssignedCount": 0,
+          "excludedBlockedCount": 0,
+          "excludedDeferredCount": 0,
+          "excludedInProgressCount": 0,
+          "excludedOtherCount": 0
+        }
+      },
+      "expected": {
+        "candidateState": "actionable_queue_timed_out",
+        "verdict": "external_state_required",
+        "unsafeReason": "actionable_queue_timed_out",
+        "degradedCode": "actionable_queue_timed_out"
+      }
+    },
+    {
+      "name": "spawn_failed",
+      "evidence": {
+        "collectionMode": "br_retry_script",
+        "queueState": "unavailable",
+        "exitClass": "spawn_failed",
+        "rowCount": null,
+        "candidateIds": [],
+        "exclusionAccounting": {
+          "rawReadyCount": 0,
+          "excludedEpicCount": 0,
+          "excludedAssignedCount": 0,
+          "excludedBlockedCount": 0,
+          "excludedDeferredCount": 0,
+          "excludedInProgressCount": 0,
+          "excludedOtherCount": 0
+        }
+      },
+      "expected": {
+        "candidateState": "actionable_queue_unavailable",
+        "verdict": "external_state_required",
+        "unsafeReason": "actionable_queue_unavailable",
+        "degradedCode": "actionable_queue_unavailable"
+      }
+    },
+    {
+      "name": "parse_failed",
+      "evidence": {
+        "collectionMode": "br_retry_script",
+        "queueState": "unavailable",
+        "exitClass": "parse_failed",
+        "rowCount": null,
+        "candidateIds": [],
+        "exclusionAccounting": {
+          "rawReadyCount": 0,
+          "excludedEpicCount": 0,
+          "excludedAssignedCount": 0,
+          "excludedBlockedCount": 0,
+          "excludedDeferredCount": 0,
+          "excludedInProgressCount": 0,
+          "excludedOtherCount": 0
+        }
+      },
+      "expected": {
+        "candidateState": "actionable_queue_unavailable",
+        "verdict": "external_state_required",
+        "unsafeReason": "actionable_queue_unavailable",
+        "degradedCode": "actionable_queue_unavailable"
+      }
+    },
+    {
+      "name": "stale_fallback_presence_is_advisory",
+      "evidence": {
+        "collectionMode": "brief_ready_filter",
+        "queueState": "stale_fallback",
+        "exitClass": "ok",
+        "rowCount": 1,
+        "candidateIds": ["bd-aq-state"],
+        "exclusionAccounting": {
+          "rawReadyCount": 1,
+          "excludedEpicCount": 0,
+          "excludedAssignedCount": 0,
+          "excludedBlockedCount": 0,
+          "excludedDeferredCount": 0,
+          "excludedInProgressCount": 0,
+          "excludedOtherCount": 0
+        }
+      },
+      "expected": {
+        "candidateState": "actionable_queue_stale_fallback",
+        "verdict": "external_state_required",
+        "unsafeReason": "actionable_queue_stale_fallback",
+        "degradedCode": "actionable_queue_stale_fallback"
+      }
+    }
+  ]
+}

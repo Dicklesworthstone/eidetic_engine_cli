@@ -1,0 +1,40 @@
+{
+  "name": "actionable queue contains the open leaf but the gate refuses",
+  "description": "bd-3w4pv.7: actionable-queue presence is necessary but never sufficient. The safe claimable-leaf queue (scripts/br_retry.sh actionable --json) contains the candidate, but the checkout is dirty on the candidate surface and tracker reads are not authoritative (dirty issues), so the gate records candidate_present_actionable while keeping claimCommandAction null.",
+  "candidateId": "bd-aq-conflict",
+  "candidateTitle": "Polish swarm next-action conflict surfaces",
+  "dirtyPaths": ["src/core/swarm_next_action.rs"],
+  "tracker": {
+    "jsonlRecordCount": 12,
+    "dbRecordCount": 12,
+    "autoImportEnabled": true,
+    "externalChangesPendingImport": false,
+    "dirtyIssueCount": 2,
+    "mergeArtifactPaths": [],
+    "jsonlParseError": null
+  },
+  "evidence": {
+    "collectionMode": "br_retry_script",
+    "queueState": "ready",
+    "exitClass": "ok",
+    "rowCount": 1,
+    "candidateIds": ["bd-aq-conflict"],
+    "exclusionAccounting": {
+      "rawReadyCount": 1,
+      "excludedEpicCount": 0,
+      "excludedAssignedCount": 0,
+      "excludedBlockedCount": 0,
+      "excludedDeferredCount": 0,
+      "excludedInProgressCount": 0,
+      "excludedOtherCount": 0
+    }
+  },
+  "expected": {
+    "candidateState": "candidate_present_actionable",
+    "trackerAuthorityDegraded": true,
+    "trackerHealth": "dirty_issues",
+    "verdict": "unsafe_due_to_conflict",
+    "trackerUnsafeReason": "beads_tracker_not_authoritative:dirty_issues",
+    "degradedCode": "tracker_authority_degraded"
+  }
+}

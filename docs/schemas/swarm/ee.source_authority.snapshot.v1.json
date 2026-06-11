@@ -152,7 +152,9 @@
     },
     "sourceKind": {
       "type": "string",
+      "description": "actionable_queue is the safe claimable-leaf queue (`scripts/br_retry.sh actionable --json`, bd-3w4pv.7): open, unassigned, non-epic rows served through the transient-read retry guard. It is modeled separately from the broader advisory beads (raw `br ready`) and bv (`bv --robot-next`) views so claim gates can explain which candidate source was authoritative, advisory, stale, absent, timed out, or contradictory. Records with this kind carry the actionableQueue extension block.",
       "enum": [
+        "actionable_queue",
         "agent_mail",
         "beads",
         "bv",
@@ -317,6 +319,61 @@
           "minLength": 1,
           "maxLength": 240,
           "description": "Bounded human-readable detail. Must not contain raw mail bodies, memory bodies, host-private absolute paths, or captured argv."
+        },
+        "actionableQueue": {
+          "$ref": "#/definitions/actionableQueueEvidence",
+          "description": "Required extension block for sourceKind=actionable_queue records; absent for every other source kind. Per-source budget, timeout, and exit semantics stay on the shared sourceRecord fields (budget, exit, freshness, fallback)."
+        }
+      }
+    },
+    "actionableQueueEvidence": {
+      "type": "object",
+      "description": "Actionable-queue evidence (bd-3w4pv.7) for the safe claimable-leaf queue command `scripts/br_retry.sh actionable --json`. Bounded ids and counts only: no row titles, no raw command stdout. Precedence for consumers: actionable presence is necessary but not sufficient for a claim; BV recommendations are advisory unless the id is in this queue AND the claim gate passes; raw `br ready` rows never override the queue — rows it excludes are reported through the filter contract and exclusion counts.",
+      "additionalProperties": false,
+      "required": [
+        "commandId",
+        "commandTemplate",
+        "rowCount",
+        "candidateIds",
+        "truncatedCandidateCount",
+        "filterContract"
+      ],
+      "properties": {
+        "commandId": {"type": "string", "const": "beads_actionable_queue"},
+        "commandTemplate": {
+          "type": "string",
+          "const": "scripts/br_retry.sh actionable --json"
+        },
+        "rowCount": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Null when the queue produced no answer (state=unavailable or timed_out)."
+        },
+        "candidateIds": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {"type": "string", "minLength": 1, "maxLength": 120},
+          "description": "Bounded, sorted bead ids from the queue answer. Truncation is reported via truncatedCandidateCount; membership decisions must be made by the producer against the full set, never re-derived from this bounded list."
+        },
+        "truncatedCandidateCount": {"type": "integer", "minimum": 0},
+        "filterContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "excludesEpics",
+            "excludesAssigned",
+            "excludesBlocked",
+            "excludesDeferred",
+            "excludesInProgress"
+          ],
+          "properties": {
+            "excludesEpics": {"type": "boolean", "const": true},
+            "excludesAssigned": {"type": "boolean", "const": true},
+            "excludesBlocked": {"type": "boolean", "const": true},
+            "excludesDeferred": {"type": "boolean", "const": true},
+            "excludesInProgress": {"type": "boolean", "const": true}
+          },
+          "description": "Static contract of the queue command: only open, unassigned, non-epic rows pass; blocked, deferred, and in-progress rows are structurally excluded because the queue is built from `br ready`."
         }
       }
     },
@@ -452,6 +509,52 @@
       },
       "sources": [
         {
+          "sourceKind": "actionable_queue",
+          "state": "timed_out",
+          "authoritative": false,
+          "freshness": {
+            "capturedAt": null,
+            "ageMs": null,
+            "staleAfterMs": 300000,
+            "freshnessState": "unknown"
+          },
+          "budget": {
+            "commandBudgetMs": 12000,
+            "elapsedMs": 12000,
+            "timedOut": true,
+            "retriesUsed": 0,
+            "retryBudget": 0
+          },
+          "exit": { "exitClass": "timeout", "exitCode": 124 },
+          "partialData": {
+            "available": false,
+            "droppedSections": ["actionable_rows"],
+            "reason": "the actionable-queue probe shares the live br read that timed out"
+          },
+          "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+          "repair": {
+            "guidance": "Retry the safe claimable-leaf queue once the flush settles; timeout is not absence.",
+            "command": "scripts/br_retry.sh actionable --json",
+            "safety": "read_only_probe"
+          },
+          "evidenceId": "sre-actionable-queue-3b81c5d2",
+          "statusDetail": "actionable queue timed out before answering; candidate absence is NOT confirmed",
+          "actionableQueue": {
+            "commandId": "beads_actionable_queue",
+            "commandTemplate": "scripts/br_retry.sh actionable --json",
+            "rowCount": null,
+            "candidateIds": [],
+            "truncatedCandidateCount": 0,
+            "filterContract": {
+              "excludesEpics": true,
+              "excludesAssigned": true,
+              "excludesBlocked": true,
+              "excludesDeferred": true,
+              "excludesInProgress": true
+            }
+          }
+        },
+        {
           "sourceKind": "beads",
           "state": "timed_out",
           "authoritative": false,
@@ -517,7 +620,7 @@
         "lookupOutcome": "candidate_lookup_timed_out",
         "presentIn": [],
         "absentFrom": [],
-        "unavailableIn": ["beads"],
+        "unavailableIn": ["actionable_queue", "beads"],
         "staleFallbackPresence": {
           "present": true,
           "sourceKind": "beads",
@@ -531,7 +634,7 @@
         "failClosed": true,
         "authoritativeSourceCount": 1,
         "degradedSourceCount": 0,
-        "unavailableSourceCount": 1
+        "unavailableSourceCount": 2
       },
       "degraded": [
         {

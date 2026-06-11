@@ -1,0 +1,44 @@
+{
+  "name": "bv recommends a blocked id absent from the actionable queue",
+  "description": "bd-3w4pv.7: BV recommendations are advisory unless the id is in the actionable queue AND the gate passes. BV's top pick is a bead Beads marks blocked and the safe claimable-leaf queue does not contain it (live evidence class: bv recommended blocked bd-37ugy with a copy-paste claim command while br showed it blocked). The gate marks bv_advisory_contradiction with bounded id-only evidence and never emits a claim command.",
+  "candidateId": "bd-aq-bv",
+  "candidateTitle": "BV-recommended but Beads-blocked leaf",
+  "candidateStatus": "blocked",
+  "candidateBlockedBy": ["bd-aq-dep"],
+  "tracker": {
+    "jsonlRecordCount": 9,
+    "dbRecordCount": 9,
+    "autoImportEnabled": true,
+    "externalChangesPendingImport": false,
+    "dirtyIssueCount": 0,
+    "mergeArtifactPaths": [],
+    "jsonlParseError": null
+  },
+  "evidence": {
+    "collectionMode": "br_retry_script",
+    "queueState": "ready",
+    "exitClass": "ok",
+    "rowCount": 1,
+    "candidateIds": ["bd-aq-open"],
+    "exclusionAccounting": {
+      "rawReadyCount": 1,
+      "excludedEpicCount": 0,
+      "excludedAssignedCount": 0,
+      "excludedBlockedCount": 1,
+      "excludedDeferredCount": 0,
+      "excludedInProgressCount": 0,
+      "excludedOtherCount": 0
+    }
+  },
+  "expected": {
+    "verdict": "blocked_by_dependency",
+    "candidateState": "candidate_absent_from_actionable",
+    "bvAdvisoryContradiction": true,
+    "contradictionEvidence": [
+      "bv_recommends_blocked_id:bd-aq-bv",
+      "bv_recommends_id_absent_from_actionable_queue:bd-aq-bv"
+    ],
+    "unsafeReason": "bv_advisory_contradiction:bd-aq-bv",
+    "degradedCode": "bv_advisory_contradiction"
+  }
+}

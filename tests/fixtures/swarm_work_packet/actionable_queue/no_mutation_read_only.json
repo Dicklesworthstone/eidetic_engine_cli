@@ -1,0 +1,23 @@
+{
+  "name": "actionable queue collection is read-only",
+  "description": "bd-3w4pv.7: collecting actionable-queue evidence never claims Beads, reserves files, sends Agent Mail, runs Cargo, or changes git state. The only command the collector may spawn is the read-only queue probe, and the gate's evidence block records read-only command ids only.",
+  "scriptStdout": "[{\"id\":\"bd-aq-leaf\",\"status\":\"open\",\"issue_type\":\"task\"}]",
+  "expected": {
+    "commandProgram": "bash",
+    "commandArgs": ["scripts/br_retry.sh", "actionable", "--json"],
+    "commandId": "beads_actionable_queue",
+    "displayCommand": "scripts/br_retry.sh actionable --json",
+    "mutatesState": false,
+    "forbiddenArgvMarkers": [
+      "update",
+      "create",
+      "close",
+      "claim",
+      "reserve",
+      "send",
+      "cargo",
+      "commit",
+      "push"
+    ]
+  }
+}
