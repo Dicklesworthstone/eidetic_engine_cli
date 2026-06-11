@@ -380,6 +380,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": share_preview_data_json(input),
+                "degraded": [],
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -694,6 +695,47 @@ mod tests {
             report
                 .denied_classes
                 .contains(&"redaction_class:embedding_denied".to_owned())
+        );
+    }
+
+    #[test]
+    fn share_preview_json_envelope_includes_clean_degraded_array() {
+        let cli = Cli::try_parse_from(["ee", "--json"]).expect("parse json cli");
+        let args = share_preview_args();
+        let memories = [stored_memory(
+            "mem_sharepreview00000000000003",
+            "Public release note can be shared after review.",
+        )];
+        let candidates = share_preview_candidates(&memories, false, false);
+        let report = build_share_preview(&SharePreviewInput {
+            target_peer_id: "peer_alpha",
+            candidates: &candidates,
+            consent_required: true,
+            max_examples: 0,
+        });
+        let preview_hash = share_preview_hash(&report);
+        let input = SharePreviewRenderInput {
+            workspace_path: Path::new("/tmp/share-preview-workspace"),
+            database_path: Path::new("/tmp/share-preview-workspace/.ee/ee.db"),
+            workspace_id: "wsp_sharepreview0000000000001",
+            args: &args,
+            report: &report,
+            preview_hash: &preview_hash,
+            consent_record: None,
+        };
+        let mut stdout = Vec::new();
+
+        let exit = write_share_preview_report(&cli, &input, &mut stdout);
+
+        assert_eq!(exit, ProcessExitCode::Success);
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&stdout).expect("share preview json envelope");
+        assert_eq!(envelope["schema"], crate::models::RESPONSE_SCHEMA_V2);
+        assert_eq!(envelope["success"], true);
+        assert_eq!(envelope["degraded"], serde_json::json!([]));
+        assert_eq!(
+            envelope["data"]["schema"],
+            crate::policy::SHARE_PREVIEW_SCHEMA_V1
         );
     }
 }

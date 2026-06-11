@@ -2038,6 +2038,8 @@ fn conflicting_presets_error(selector: &FieldSelector) -> DomainError {
 
 pub struct ResponseEnvelope {
     builder: JsonBuilder,
+    success: bool,
+    degraded_written: bool,
 }
 
 impl ResponseEnvelope {
@@ -2046,7 +2048,11 @@ impl ResponseEnvelope {
         let mut builder = JsonBuilder::with_capacity(256);
         builder.field_str("schema", RESPONSE_SCHEMA_V2);
         builder.field_bool("success", true);
-        Self { builder }
+        Self {
+            builder,
+            success: true,
+            degraded_written: false,
+        }
     }
 
     #[must_use]
@@ -2054,7 +2060,11 @@ impl ResponseEnvelope {
         let mut builder = JsonBuilder::with_capacity(256);
         builder.field_str("schema", RESPONSE_SCHEMA_V2);
         builder.field_bool("success", false);
-        Self { builder }
+        Self {
+            builder,
+            success: false,
+            degraded_written: false,
+        }
     }
 
     pub fn data<F>(mut self, build: F) -> Self
@@ -2076,11 +2086,15 @@ impl ResponseEnvelope {
     {
         self.builder
             .field_array_of_objects("degraded", items, build);
+        self.degraded_written = true;
         self
     }
 
     #[must_use]
-    pub fn finish(self) -> String {
+    pub fn finish(mut self) -> String {
+        if self.success && !self.degraded_written {
+            self.builder.field_raw("degraded", "[]");
+        }
         self.builder.finish()
     }
 }

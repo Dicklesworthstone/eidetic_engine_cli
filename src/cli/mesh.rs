@@ -1131,6 +1131,7 @@ fn write_mesh_status_json_with_autodiscovery<W: Write>(
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
+        "degraded": [],
     });
     write_stdout(stdout, &(json.to_string() + "\n"))
 }
@@ -3290,6 +3291,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
+                "degraded": [],
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -3848,6 +3850,53 @@ mod tests {
 
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE);
+    }
+
+    #[test]
+    fn mesh_json_envelopes_include_clean_degraded_array() {
+        let cli = Cli::try_parse_from(["ee", "--json"]).expect("parse json cli");
+        let mut stdout = Vec::new();
+        let report = json!({
+            "schema": "ee.mesh.test.v1",
+            "command": "mesh test"
+        });
+
+        let exit = write_mesh_report(&cli, &report, "", &mut stdout);
+
+        assert_eq!(exit, ProcessExitCode::Success);
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&stdout).expect("mesh report json envelope");
+        assert_eq!(envelope["schema"], crate::models::RESPONSE_SCHEMA_V2);
+        assert_eq!(envelope["success"], true);
+        assert_eq!(envelope["degraded"], serde_json::json!([]));
+
+        let snapshot = mesh_snapshot_with_peers(Vec::new());
+        let status = snapshot.status_report();
+        let autodiscovery = TailscaleAutodiscoveryReport {
+            schema: crate::mesh::tailscale_autodiscovery::TAILSCALE_AUTODISCOVERY_SCHEMA_V1,
+            tailnet_id: None,
+            tailnet_display_name: None,
+            self_node_key: None,
+            probed_peer_count: 0,
+            eligible_peer_count: 0,
+            ee_capable_peers: Vec::new(),
+            skipped_peers: Vec::new(),
+            degraded: Vec::new(),
+        };
+        stdout.clear();
+
+        let exit = write_mesh_status_json_with_autodiscovery(&mut stdout, &status, &autodiscovery);
+
+        assert_eq!(exit, ProcessExitCode::Success);
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&stdout).expect("mesh status json envelope");
+        assert_eq!(envelope["schema"], crate::models::RESPONSE_SCHEMA_V2);
+        assert_eq!(envelope["success"], true);
+        assert_eq!(envelope["degraded"], serde_json::json!([]));
+        assert_eq!(
+            envelope["data"]["autoEnrollment"]["discovery"]["schema"],
+            crate::mesh::tailscale_autodiscovery::TAILSCALE_AUTODISCOVERY_SCHEMA_V1
+        );
     }
 
     #[test]

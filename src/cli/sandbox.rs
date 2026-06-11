@@ -450,6 +450,7 @@ pub fn render_apply_json(outcome: &ApplyOutcome) -> String {
             "retireProposalsPending": outcome.retire_pending,
             "notes": outcome.notes,
         },
+        "degraded": [],
     })
     .to_string()
 }
@@ -485,6 +486,7 @@ pub fn render_propose_json(command: &str, outcome: &ProposeOutcome) -> String {
             "durableMutation": false,
             "notes": outcome.notes,
         },
+        "degraded": [],
     })
     .to_string()
 }
@@ -499,6 +501,7 @@ pub fn render_diff_json(session_name: &str, surface: &SandboxDiffSurface) -> Str
             "sessionName": session_name,
             "diff": surface,
         },
+        "degraded": [],
     })
     .to_string()
 }
@@ -541,9 +544,11 @@ pub fn render_diff_human(session_name: &str, surface: &SandboxDiffSurface) -> St
 #[cfg(test)]
 mod tests {
     use super::{
-        SandboxCurateArgs, SandboxProposal, SandboxSession, load_session, propose_curate,
-        remaining_after_applied_additives, session_name,
+        ApplyOutcome, ProposeOutcome, SandboxCurateArgs, SandboxProposal, SandboxSession,
+        load_session, propose_curate, remaining_after_applied_additives, render_apply_json,
+        render_diff_json, render_propose_json, session_name,
     };
+    use crate::core::sandbox::{SANDBOX_DIFF_SCHEMA_V1, SandboxDiffSurface};
 
     #[test]
     fn session_name_defaults_and_trims() {
@@ -688,5 +693,53 @@ mod tests {
             remaining_after_applied_additives(&session, usize::MAX).proposals,
             vec![retire]
         );
+    }
+
+    #[test]
+    fn sandbox_success_json_envelopes_include_clean_degraded_array() {
+        let session = SandboxSession {
+            proposals: vec![SandboxProposal::Remember {
+                memory_id: "sandbox_mem_first".to_owned(),
+                content: "first".to_owned(),
+                content_hash: "blake3:first".to_owned(),
+                level: "episodic".to_owned(),
+                kind: "fact".to_owned(),
+            }],
+        };
+        let propose = ProposeOutcome {
+            session_name: "default".to_owned(),
+            session,
+            notes: Vec::new(),
+        };
+        let apply = ApplyOutcome {
+            session_name: "default".to_owned(),
+            persisted: vec!["mem_a".to_owned()],
+            retire_pending: Vec::new(),
+            notes: Vec::new(),
+        };
+        let diff = SandboxDiffSurface {
+            schema: SANDBOX_DIFF_SCHEMA_V1,
+            overlay_hash: "blake3:overlay".to_owned(),
+            added: vec!["sandbox_mem_first".to_owned()],
+            modified: Vec::new(),
+            removed: Vec::new(),
+            unchanged: 0,
+            proposal_count: 1,
+            durable_mutation: false,
+            sandbox_approximation: true,
+            approximation_reason: "test approximation",
+        };
+
+        for raw in [
+            render_propose_json("sandbox remember", &propose),
+            render_apply_json(&apply),
+            render_diff_json("default", &diff),
+        ] {
+            let envelope: serde_json::Value =
+                serde_json::from_str(&raw).expect("sandbox success envelope");
+            assert_eq!(envelope["schema"], crate::models::RESPONSE_SCHEMA_V2);
+            assert_eq!(envelope["success"], true);
+            assert_eq!(envelope["degraded"], serde_json::json!([]));
+        }
     }
 }

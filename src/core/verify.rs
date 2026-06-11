@@ -2693,6 +2693,7 @@ pub fn verification_response_json(data: serde_json::Value) -> serde_json::Value 
         "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
+        "degraded": [],
     })
 }
 
@@ -2962,6 +2963,29 @@ mod tests {
             ensure(step.is_required(), format!("{} should be required", step))?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn verification_response_json_includes_clean_degraded_array() -> TestResult {
+        let response = verification_response_json(serde_json::json!({
+            "command": "verification show"
+        }));
+
+        ensure_equal(
+            response.get("schema").and_then(serde_json::Value::as_str),
+            &Some(RESPONSE_SCHEMA_V2),
+            "response schema",
+        )?;
+        ensure_equal(
+            response.get("success").and_then(serde_json::Value::as_bool),
+            &Some(true),
+            "success",
+        )?;
+        ensure_equal(
+            response.get("degraded"),
+            &Some(&serde_json::json!([])),
+            "clean degraded array",
+        )
     }
 
     #[test]

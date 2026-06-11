@@ -780,28 +780,13 @@ pub fn render_serve_sse_event(event_kind: &str, terminal: bool, payload: &JsonVa
         _ => "ee.response.v2",
     };
     // bd-1zoiw: derive the outer envelope's degradedCodes from the inner
-    // wrapped payload's `degraded[]` codes so terminal SSE frames carrying
-    // ee.response.v2 / ee.error.v2 envelopes with non-empty degraded[]
-    // (pack-stream trailers, cancellation frames, error frames that pick
-    // up pack-pipeline degradations) surface those codes at the
-    // response-metadata level instead of forcing every consumer to drill
-    // into response.payload.degraded[] by convention. Mirrors the
-    // auth-failure envelope path that already populates degradedCodes
-    // with a real value.
-    let degraded_source = if payload_schema == "ee.error.v2" {
-        wrapped_payload.pointer("/error/degraded")
-    } else {
-        wrapped_payload.get("degraded")
-    };
-    let degraded_codes: Vec<&str> = degraded_source
-        .and_then(JsonValue::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| entry.get("code").and_then(JsonValue::as_str))
-                .collect()
-        })
-        .unwrap_or_default();
+    // wrapped payload's top-level `degraded[]` codes so terminal SSE frames
+    // carrying ee.response.v2 / ee.error.v2 envelopes with non-empty
+    // degradations surface those codes at the response-metadata level.
+    // Older synthetic error fixtures placed the array at `error.degraded`;
+    // keep accepting that shape as a compatibility fallback while the
+    // canonical `ee.error.v2` schema and renderer use the top-level field.
+    let degraded_codes = serve_payload_degraded_codes(&wrapped_payload, payload_schema);
     let event_payload = json!({
         "schema": SERVE_ENDPOINT_SCHEMA_V1,
         "request": {
@@ -836,6 +821,39 @@ pub fn render_serve_sse_event(event_kind: &str, terminal: bool, payload: &JsonVa
         }
     });
     format!("event: {event_kind}\ndata: {event_payload}\n\n")
+}
+
+fn serve_payload_degraded_codes<'a>(payload: &'a JsonValue, payload_schema: &str) -> Vec<&'a str> {
+    let mut degraded_codes = Vec::new();
+    push_degraded_codes_from_value(&mut degraded_codes, payload.get("degraded"));
+    if payload_schema == "ee.error.v2" {
+        push_degraded_codes_from_value(&mut degraded_codes, payload.pointer("/error/degraded"));
+    }
+    degraded_codes
+}
+
+fn push_degraded_codes_from_value<'a>(
+    degraded_codes: &mut Vec<&'a str>,
+    degraded_value: Option<&'a JsonValue>,
+) {
+    let Some(entries) = degraded_value.and_then(JsonValue::as_array) else {
+        return;
+    };
+    for code in entries
+        .iter()
+        .filter_map(|entry| entry.get("code").and_then(JsonValue::as_str))
+    {
+        if !degraded_codes.contains(&code) {
+            degraded_codes.push(code);
+        }
+    }
+}
+
+fn serve_error_metadata_codes<'a>(payload: &'a JsonValue, error_code: &'a str) -> Vec<&'a str> {
+    let mut codes = vec![error_code];
+    push_degraded_codes_from_value(&mut codes, payload.get("degraded"));
+    push_degraded_codes_from_value(&mut codes, payload.pointer("/error/degraded"));
+    codes
 }
 
 #[must_use]
@@ -1246,26 +1264,9 @@ fn serve_dispatch_exchange_envelope(
     payload: &JsonValue,
     elapsed_ms: u64,
 ) -> JsonValue {
-    // bd-2eiwy: surface the inner ee.response.v2 payload's `degraded[]`
-    // codes at the response-metadata level so /v1/status (and any
-    // future endpoint whose payload carries degradations from the
-    // wrapped subsystem) doesn't return an outer envelope where
-    // `response.degradedCodes` is empty while
-    // `response.payload.degraded[]` is non-empty. Mirrors the bd-1zoiw
-    // fix for the SSE path (render_serve_sse_event) and the
-    // auth-failure envelope at the top of this file. Sibling
-    // serve_error_exchange_envelope below already populates the field
-    // from `error.code()`.
-    let degraded_codes: Vec<&str> = payload
-        .get("degraded")
-        .and_then(JsonValue::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| entry.get("code").and_then(JsonValue::as_str))
-                .collect()
-        })
-        .unwrap_or_default();
+    // bd-2eiwy: surface inner ee.response.v2 degradations at the
+    // transport-envelope metadata level, matching the SSE extraction path.
+    let degraded_codes = serve_payload_degraded_codes(payload, "ee.response.v2");
     json!({
         "schema": SERVE_ENDPOINT_SCHEMA_V1,
         "request": serve_request_metadata_json(request_id, request, auth_state),
@@ -1288,15 +1289,17 @@ fn serve_error_exchange_envelope(
     error: &DomainError,
     elapsed_ms: u64,
 ) -> JsonValue {
+    let payload = serve_error_payload(error);
+    let degraded_codes = serve_error_metadata_codes(&payload, error.code());
     json!({
         "schema": SERVE_ENDPOINT_SCHEMA_V1,
         "request": serve_request_metadata_json(request_id, request, auth_state),
         "response": {
             "statusCode": status_code,
             "payloadSchema": "ee.error.v2",
-            "payload": serve_error_payload(error),
+            "payload": payload,
             "elapsedMs": elapsed_ms,
-            "degradedCodes": [error.code()],
+            "degradedCodes": degraded_codes,
             "volatileTransportFields": ["request.requestId", "response.elapsedMs"]
         }
     })
@@ -3344,12 +3347,57 @@ mod tests {
         )
     }
 
-    // bd-1zoiw: ee.error.v2 envelopes nest the degraded array under
-    // `error.degraded` rather than at the top level. The outer
-    // degradedCodes must follow that nesting so terminal error frames
-    // surface their codes too.
+    // Canonical ee.error.v2 renderers place degradation entries at the
+    // top-level `degraded[]` field, matching docs/schemas/ee.error.v2.json.
+    // The SSE endpoint envelope must mirror that field too, not only the
+    // success-envelope `degraded[]` shape.
     #[test]
-    fn serve_sse_event_mirrors_inner_error_v2_degraded_codes() -> TestResult {
+    fn serve_sse_event_mirrors_canonical_error_v2_top_level_degraded_codes() -> TestResult {
+        let error = DomainError::Storage {
+            message: "advisory lock timeout while waiting for workspace write lock".to_owned(),
+            repair: Some(
+                "ee diag advisory-lock --workspace . --resource-type workspace --json".to_owned(),
+            ),
+        };
+        let inner: JsonValue = serde_json::from_str(&crate::output::error_response_json(&error))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            inner["degraded"][0]["code"].as_str(),
+            Some(crate::models::degradation::ADVISORY_LOCK_TIMEOUT_CODE),
+            "canonical error degraded code",
+        )?;
+
+        let frame = render_serve_sse_event("error", true, &inner);
+        let data_line = frame
+            .lines()
+            .find(|line| line.starts_with("data: "))
+            .ok_or_else(|| "missing data line".to_string())?;
+        let event: serde_json::Value = serde_json::from_str(&data_line["data: ".len()..])
+            .map_err(|error| error.to_string())?;
+        let codes = event["response"]["degradedCodes"]
+            .as_array()
+            .ok_or_else(|| "degradedCodes must be an array".to_string())?
+            .iter()
+            .filter_map(|entry| entry.as_str())
+            .collect::<Vec<_>>();
+        ensure(
+            codes,
+            vec![crate::models::degradation::ADVISORY_LOCK_TIMEOUT_CODE],
+            "canonical error.v2 mirror",
+        )?;
+        ensure(
+            event["response"]["statusCode"].as_u64(),
+            Some(500),
+            "statusCode flips to 500 for ee.error.v2",
+        )
+    }
+
+    // Older synthetic error envelopes placed degradation entries under
+    // `error.degraded`. Keep accepting that shape as a compatibility
+    // fallback so existing non-canonical producer fixtures still surface
+    // their codes at the endpoint-envelope layer.
+    #[test]
+    fn serve_sse_event_accepts_nested_error_v2_degraded_codes() -> TestResult {
         let inner = json!({
             "schema": "ee.error.v2",
             "success": false,
@@ -3520,6 +3568,43 @@ mod tests {
                 .map(Vec::len),
             Some(0),
             "missing `degraded` field yields empty degradedCodes",
+        )
+    }
+
+    #[test]
+    fn serve_error_exchange_envelope_includes_canonical_error_degraded_codes() -> TestResult {
+        let request = parse_serve_http_request(
+            b"GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            &ServeLimits::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        let error = DomainError::Storage {
+            message: "advisory lock timeout while waiting for workspace write lock".to_owned(),
+            repair: Some(
+                "ee diag advisory-lock --workspace . --resource-type workspace --json".to_owned(),
+            ),
+        };
+
+        let envelope = serve_error_exchange_envelope(
+            "req-error-degraded",
+            &request,
+            "accepted",
+            503,
+            &error,
+            9,
+        );
+        let codes = envelope["response"]["degradedCodes"]
+            .as_array()
+            .ok_or_else(|| "degradedCodes must be an array".to_string())?
+            .iter()
+            .filter_map(|entry| entry.as_str())
+            .collect::<Vec<_>>();
+
+        ensure(codes.contains(&"storage"), true, "domain error code kept")?;
+        ensure(
+            codes.contains(&crate::models::degradation::ADVISORY_LOCK_TIMEOUT_CODE),
+            true,
+            "canonical error degraded code surfaced",
         )
     }
 

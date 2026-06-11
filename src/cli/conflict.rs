@@ -85,6 +85,7 @@ pub fn render_conflict_json(surface: &ConflictSurface) -> String {
         "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": surface,
+        "degraded": [],
     })
     .to_string()
 }
@@ -153,12 +154,15 @@ pub fn render_conflict_human(surface: &ConflictSurface, command: &ConflictComman
 
 #[cfg(test)]
 mod tests {
-    use super::{ConflictCommand, ConflictListArgs, render_conflict_human, truncate_body};
-    use crate::core::contradiction_detect::ConflictSurface;
+    use super::{
+        ConflictCommand, ConflictListArgs, render_conflict_human, render_conflict_json,
+        truncate_body,
+    };
+    use crate::core::contradiction_detect::{CONFLICT_SURFACE_SCHEMA_V1, ConflictSurface};
 
     fn empty_surface() -> ConflictSurface {
         ConflictSurface {
-            schema: "ee.conflict.v1",
+            schema: CONFLICT_SURFACE_SCHEMA_V1,
             pairs: Vec::new(),
             clusters: Vec::new(),
             explicit_edge_count: 0,
@@ -186,5 +190,18 @@ mod tests {
         let truncated = truncate_body(&long);
         assert!(truncated.chars().count() <= 73, "capped with ellipsis");
         assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn conflict_json_envelope_includes_clean_degraded_array() {
+        let surface = empty_surface();
+        let raw = render_conflict_json(&surface);
+        let envelope: serde_json::Value =
+            serde_json::from_str(&raw).expect("conflict json envelope");
+
+        assert_eq!(envelope["schema"], crate::models::RESPONSE_SCHEMA_V2);
+        assert_eq!(envelope["success"], true);
+        assert_eq!(envelope["data"]["schema"], CONFLICT_SURFACE_SCHEMA_V1);
+        assert_eq!(envelope["degraded"], serde_json::json!([]));
     }
 }

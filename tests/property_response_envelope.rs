@@ -21,7 +21,8 @@
 //!    string-field path.
 //!
 //! 4. `ResponseEnvelope::success()` / `failure()` emit a stable
-//!    prefix that downstream consumers can detect without parsing.
+//!    prefix that downstream consumers can detect without parsing, and
+//!    success envelopes always carry a top-level `degraded` array.
 //!
 //! 5. Numeric field writers (`field_bool`, `field_u32`, `field_i32`)
 //!    emit unquoted JSON literals that re-parse to the original value.
@@ -214,6 +215,35 @@ fn response_envelope_success_emits_stable_prefix() {
     let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
     assert_eq!(parsed["schema"], "ee.response.v2");
     assert_eq!(parsed["success"], true);
+    assert_eq!(parsed["degraded"], serde_json::json!([]));
+}
+
+/// A clean success envelope includes exactly one top-level degraded
+/// field, even when the caller does not add one explicitly.
+#[test]
+fn response_envelope_success_appends_clean_degraded_array() {
+    let output = ResponseEnvelope::success().finish();
+    assert_eq!(output.matches("\"degraded\":").count(), 1);
+    let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
+    assert_eq!(parsed["degraded"], serde_json::json!([]));
+}
+
+/// Explicit degradations must not be followed by a second clean
+/// default array at finish time.
+#[test]
+fn response_envelope_success_does_not_duplicate_explicit_degraded_array() {
+    let degradations = [("index_stale", "Search index is stale.")];
+    let output = ResponseEnvelope::success()
+        .data_raw(r#"{"command":"search"}"#)
+        .degraded_array(&degradations, |obj, (code, message)| {
+            obj.field_str("code", code);
+            obj.field_str("message", message);
+        })
+        .finish();
+
+    assert_eq!(output.matches("\"degraded\":").count(), 1);
+    let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
+    assert_eq!(parsed["degraded"][0]["code"], "index_stale");
 }
 
 /// `ResponseEnvelope::failure` emits the parallel failure prefix with
@@ -242,16 +272,18 @@ fn response_envelope_data_raw_round_trips() {
 }
 
 /// Field-order check on the envelope shape: when `data` is set via
-/// `data_raw`, the output is `{"schema":...,"success":...,"data":...}`
-/// in that exact order. This is the byte-identical promise hot
-/// consumers depend on.
+/// `data_raw`, the output keeps `schema`, `success`, then `data` in
+/// that exact order and appends the clean `degraded` array last. This
+/// is the byte-identical promise hot consumers depend on.
 #[test]
-fn response_envelope_field_order_is_schema_success_data() {
+fn response_envelope_field_order_is_schema_success_data_degraded() {
     let raw = r#"{"hit":true}"#;
     let output = ResponseEnvelope::success().data_raw(raw).finish();
     let schema_offset = output.find("\"schema\":").expect("schema present");
     let success_offset = output.find("\"success\":").expect("success present");
     let data_offset = output.find("\"data\":").expect("data present");
+    let degraded_offset = output.find("\"degraded\":").expect("degraded present");
     assert!(schema_offset < success_offset, "schema before success");
     assert!(success_offset < data_offset, "success before data");
+    assert!(data_offset < degraded_offset, "data before degraded");
 }
