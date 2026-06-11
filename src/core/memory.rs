@@ -12679,6 +12679,37 @@ mod tests {
         }
     }
 
+    /// bd-2efx1: the batch lane defers per-line index publishing and
+    /// drains every enqueued job with ONE coalesced rebuild — afterwards
+    /// nothing is pending and the published index exists on disk.
+    #[test]
+    fn remember_batch_drains_index_jobs_with_one_coalesced_rebuild() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let input = concat!(
+            "{\"content\":\"Coalesced batch row one about release gates.\"}\n",
+            "{\"content\":\"Coalesced batch row two about clippy waivers.\"}\n",
+            "{\"content\":\"Coalesced batch row three about index posture.\"}\n",
+        );
+        let report = remember_memory_batch_stdin(&upgrade_batch_options(temp.path(), false), input)
+            .map_err(|error| error.message())?;
+        ensure(report.stored_count, 3, "stored count")?;
+
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        let pending = connection
+            .list_pending_search_index_jobs(&stable_workspace_id(&canonical), None)
+            .map_err(|error| error.to_string())?;
+        ensure(pending.len(), 0, "pending index jobs after the batch drain")?;
+        ensure(
+            canonical.join(".ee").join(DEFAULT_INDEX_SUBDIR).exists(),
+            true,
+            "coalesced rebuild published an index directory",
+        )
+    }
+
     #[test]
     fn remember_batch_isolates_invalid_lines() -> TestResult {
         let temp = upgrade_test_workspace()?;

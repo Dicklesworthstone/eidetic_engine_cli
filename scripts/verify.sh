@@ -1064,8 +1064,9 @@ run_stage "Output Budget E2E (bd-kua65)" "./scripts/e2e_output_budget.sh"
 # ceiling sweep across the wired surfaces, exact-count cursor drains,
 # mid-pagination staleness, and EE_MAX_OUTPUT_TOKENS equivalence
 # (ADR 0063, bd-7lvbg.4). Corpus pinned below the script's 500-row
-# default until the remember --batch per-line index swap (bd-2efx1)
-# is fixed — the drain/staleness assertions are corpus-size
+# default for gate runtime (debug-build seeding; the bd-2efx1 per-line
+# index swap is fixed, the residual cost is per-line dedup/connection
+# overhead) — the drain/staleness assertions are corpus-size
 # independent.
 run_stage "Output Governor E2E (bd-7lvbg.4)" "EE_GOVERNOR_E2E_CORPUS=120 ./scripts/e2e_output_governor.sh"
 
