@@ -12,9 +12,12 @@
 //! - **resume**: Render next-agent payload from a capsule
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -126,6 +129,7 @@ const HANDOFF_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// the round-1 size caps at `PREFLIGHT_RULES_MAX_BYTES`,
 /// `PREFLIGHT_RUN_STORE_MAX_BYTES`, and `GITDIR_POINTER_INSPECT_LIMIT`.
 const HANDOFF_KEY_MATERIAL_MAX_BYTES: u64 = 1024;
+static HANDOFF_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// ID prefix for handoff capsules.
 pub const HANDOFF_CAPSULE_ID_PREFIX: &str = "hcap_";
@@ -2538,7 +2542,7 @@ fn write_regular_file_no_symlinks(
 ) -> Result<(), DomainError> {
     reject_existing_symlink_component(path, label)?;
     ensure_handoff_write_path_is_regular_or_missing(path, label)?;
-    let temp_path = handoff_temp_publish_path(path);
+    let temp_path = unique_handoff_temp_publish_path(path, label)?;
     reject_existing_symlink_component(&temp_path, label)?;
     ensure_handoff_temp_path_is_missing(&temp_path, label)?;
     write_handoff_temp_file(&temp_path, content, label)?;
@@ -2564,10 +2568,37 @@ fn publish_handoff_temp_file(
     ensure_handoff_write_path_is_regular_file(path, label)
 }
 
+#[cfg(test)]
 fn handoff_temp_publish_path(path: &Path) -> PathBuf {
     let mut temp = path.as_os_str().to_os_string();
     temp.push(".tmp");
     PathBuf::from(temp)
+}
+
+fn unique_handoff_temp_publish_path(path: &Path, label: &str) -> Result<PathBuf, DomainError> {
+    let file_name = path.file_name().ok_or_else(|| DomainError::Storage {
+        message: format!(
+            "Failed to build {label} temp path for {}: missing file name.",
+            path.display()
+        ),
+        repair: Some(format!("Use a {label} path that names a file.")),
+    })?;
+    let counter = HANDOFF_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let mut temp_name = OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(OsString::from(format!(
+        ".{}.{}.{}.tmp",
+        std::process::id(),
+        now,
+        counter
+    )));
+    Ok(match path.parent() {
+        Some(parent) => parent.join(&temp_name),
+        None => PathBuf::from(temp_name),
+    })
 }
 
 fn ensure_handoff_temp_path_is_missing(path: &Path, label: &str) -> Result<(), DomainError> {
@@ -2578,8 +2609,7 @@ fn ensure_handoff_temp_path_is_missing(path: &Path, label: &str) -> Result<(), D
                 path.display()
             ),
             repair: Some(format!(
-                "Remove stale temp file {} and retry.",
-                path.display()
+                "Retry writing {label} so a fresh temp file name is chosen."
             )),
         }),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -2605,8 +2635,7 @@ fn ensure_handoff_created_temp_path_is_regular_file(
                 path.display()
             ),
             repair: Some(format!(
-                "Remove stale temp file {} and retry.",
-                path.display()
+                "Retry writing {label} so the temp file is recreated."
             )),
         }),
         Err(error) => Err(DomainError::Storage {
@@ -6664,28 +6693,23 @@ memories_revised = 3
     }
 
     #[test]
-    fn handoff_capsule_write_rejects_existing_temp_file_without_truncating() -> TestResult {
+    fn handoff_capsule_write_ignores_stale_legacy_temp_file_without_truncating() -> TestResult {
         let dir = repo_tempdir()?;
         let capsule_path = dir.path().join("capsule.json");
         let temp_path = handoff_temp_publish_path(&capsule_path);
         fs::write(&temp_path, "stale temp sentinel").map_err(|error| error.to_string())?;
 
-        let error = expect_domain_error(
-            write_regular_file_no_symlinks(&capsule_path, "{}", "handoff capsule"),
-            "existing temp file should reject before write",
-        )?;
-        ensure(
-            error.message().contains("temp file"),
-            format!("unexpected error: {}", error.message()),
-        )?;
+        write_regular_file_no_symlinks(&capsule_path, "{}", "handoff capsule")
+            .map_err(|error| error.message())?;
         ensure_equal(
             &fs::read_to_string(&temp_path).map_err(|error| error.to_string())?,
             &"stale temp sentinel".to_owned(),
             "stale temp content",
         )?;
-        ensure(
-            !capsule_path.exists(),
-            "final capsule should not be published after temp rejection",
+        ensure_equal(
+            &fs::read_to_string(&capsule_path).map_err(|error| error.to_string())?,
+            &"{}".to_owned(),
+            "final capsule content",
         )
     }
 

@@ -1,5 +1,9 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
@@ -54,6 +58,7 @@ const READ_SURFACE_AUDIT_ACTIONS: [&str; 6] = [
 const INDEX_PUBLISH_LOCK_TTL_SECS: u64 = 300;
 const INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS: usize = 200;
 pub const INDEX_PUBLISH_LOCK_CONTENTION_CODE: &str = "index_publish_lock_contention";
+static INDEX_METADATA_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Generate a unique holder ID for advisory locks.
 fn generate_index_holder_id() -> String {
@@ -1601,7 +1606,7 @@ fn write_index_metadata(
     let meta_path = index_dir.join(INDEX_METADATA_FILE);
     ensure_index_path_has_no_symlinks(&meta_path, "write index metadata")?;
     ensure_index_metadata_path_is_regular_or_missing(&meta_path, "write index metadata")?;
-    let temp_path = meta_path.with_extension("json.tmp");
+    let temp_path = unique_index_metadata_temp_path(&meta_path)?;
     ensure_index_path_has_no_symlinks(&temp_path, "write temporary index metadata")?;
     ensure_index_metadata_temp_path_is_missing(&temp_path, "write temporary index metadata")?;
     let mut file = std::fs::OpenOptions::new()
@@ -1626,6 +1631,28 @@ fn write_index_metadata(
     drop(file);
 
     publish_index_metadata_temp_file(&meta_path, &temp_path)
+}
+
+fn unique_index_metadata_temp_path(meta_path: &Path) -> Result<PathBuf, IndexRebuildError> {
+    let file_name = meta_path.file_name().ok_or_else(|| {
+        IndexRebuildError::Index(format!(
+            "Failed to build temporary index metadata path for {}: missing file name",
+            meta_path.display()
+        ))
+    })?;
+    let counter = INDEX_METADATA_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut temp_name = OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(OsString::from(format!(
+        ".{}.{}.{}.tmp",
+        std::process::id(),
+        monotonicish_stamp(),
+        counter
+    )));
+    Ok(match meta_path.parent() {
+        Some(parent) => parent.join(&temp_name),
+        None => PathBuf::from(temp_name),
+    })
 }
 
 fn publish_index_metadata_temp_file(
@@ -4536,7 +4563,7 @@ mod tests {
     }
 
     #[test]
-    fn write_index_metadata_rejects_existing_temp_without_truncating() -> TestResult {
+    fn write_index_metadata_ignores_stale_legacy_temp_without_truncating() -> TestResult {
         let root = unique_test_dir("metadata-write-existing-temp");
         let index_dir = root.join("index");
         std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
@@ -4544,22 +4571,28 @@ mod tests {
         let temp_path = metadata_path.with_extension("json.tmp");
         std::fs::write(&temp_path, "stale metadata temp").map_err(|error| error.to_string())?;
 
-        let error = write_index_metadata(&index_dir, 42, 7)
-            .map(|()| "unexpected metadata write success".to_owned())
-            .expect_err("existing temporary metadata should reject before write");
-
-        ensure(
-            error.to_string().contains("already exists"),
-            format!("unexpected temporary metadata write error: {error}"),
-        )?;
+        write_index_metadata(&index_dir, 42, 7).map_err(|error| error.to_string())?;
         ensure(
             std::fs::read_to_string(&temp_path).map_err(|error| error.to_string())?
                 == "stale metadata temp",
             "temporary metadata content must remain untouched",
         )?;
         ensure(
-            !metadata_path.exists(),
-            "metadata must not be published when temporary metadata exists",
+            metadata_path.is_file(),
+            "metadata should publish through a unique temporary metadata file",
+        )?;
+        let (generation, rebuilt_at, check_error) = read_index_metadata(&index_dir);
+        ensure(
+            generation == Some(42),
+            "metadata generation should be readable after stale temp bypass",
+        )?;
+        ensure(
+            rebuilt_at.is_some(),
+            "metadata rebuild timestamp should be readable after stale temp bypass",
+        )?;
+        ensure(
+            check_error.is_none(),
+            format!("metadata read should not report check error: {check_error:?}"),
         )
     }
 

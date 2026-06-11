@@ -4,10 +4,13 @@
 //! links, and evidence IDs for agent continuity. They never execute shell
 //! commands, route tools, or mutate workspace source files.
 
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -37,6 +40,7 @@ pub const NON_EXECUTING_CONTRACT: &str = "records task state only; never execute
 /// `load_task_frame_evidence` in core::focus_suggest), despite the
 /// existing O_NOFOLLOW + regular-file pre-checks.
 const TASK_FRAME_STORE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+static TASK_FRAME_STORE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -669,11 +673,37 @@ fn write_store(store_path: &Path, store: &TaskFrameStoreDocument) -> Result<(), 
         message: format!("Failed to serialize task-frame store: {error}"),
         repair: Some("Report this serialization bug.".to_owned()),
     })? + "\n";
-    let temp_path = store_path.with_extension("json.tmp");
+    let temp_path = unique_store_temp_path(store_path)?;
     ensure_no_symlink_components(&temp_path, "write")?;
     ensure_write_store_temp_path(&temp_path)?;
     write_store_temp_file(&temp_path, &text)?;
     publish_store_temp_file(store_path, &temp_path)
+}
+
+fn unique_store_temp_path(store_path: &Path) -> Result<PathBuf, DomainError> {
+    let file_name = store_path.file_name().ok_or_else(|| DomainError::Storage {
+        message: format!(
+            "Failed to build task-frame temp store path for `{}`: missing file name.",
+            store_path.display()
+        ),
+        repair: Some("Use a task-frame store path that names a JSON file.".to_owned()),
+    })?;
+    let counter = TASK_FRAME_STORE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let mut temp_name = OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(OsString::from(format!(
+        ".{}.{}.{}.tmp",
+        std::process::id(),
+        now,
+        counter
+    )));
+    Ok(match store_path.parent() {
+        Some(parent) => parent.join(&temp_name),
+        None => PathBuf::from(temp_name),
+    })
 }
 
 fn publish_store_temp_file(store_path: &Path, temp_path: &Path) -> Result<(), DomainError> {
@@ -718,14 +748,16 @@ fn ensure_write_store_temp_path(temp_path: &Path) -> Result<(), DomainError> {
                 "Refusing to write task-frame temp store `{}` because it already exists.",
                 temp_path.display()
             ),
-            repair: Some("Remove stale .ee/task_frames.json.tmp and retry.".to_owned()),
+            repair: Some(
+                "Retry the task-frame command so a fresh temp file name is chosen.".to_owned(),
+            ),
         }),
         Ok(_) => Err(DomainError::Storage {
             message: format!(
                 "Refusing to write task-frame temp store `{}` because it is not a regular file.",
                 temp_path.display()
             ),
-            repair: Some("Replace .ee/task_frames.json.tmp with a regular file.".to_owned()),
+            repair: Some("Inspect the task-frame temp path before retrying.".to_owned()),
         }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(DomainError::Storage {
@@ -746,7 +778,7 @@ fn ensure_created_write_store_temp_path(temp_path: &Path) -> Result<(), DomainEr
                 "Refusing to publish task-frame temp store `{}` because it is not a regular file.",
                 temp_path.display()
             ),
-            repair: Some("Replace .ee/task_frames.json.tmp with a regular file.".to_owned()),
+            repair: Some("Retry the task-frame command so the temp file is recreated.".to_owned()),
         }),
         Err(error) => Err(DomainError::Storage {
             message: format!(
@@ -1242,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn create_frame_rejects_existing_temp_store_without_truncating() -> TestResult {
+    fn create_frame_ignores_stale_legacy_temp_store_without_truncating() -> TestResult {
         let workspace = temp_workspace("write-existing-temp")?;
         let store_path = task_frame_store_path(&workspace);
         let temp_path = store_path.with_extension("json.tmp");
@@ -1252,15 +1284,15 @@ mod tests {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         fs::write(&temp_path, b"keep me").map_err(|error| error.to_string())?;
 
-        let error = match create_task_frame(&create_options(workspace.clone())) {
-            Ok(report) => return Err(format!("existing temp file should fail, got {report:?}")),
-            Err(error) => error,
-        };
+        let report = create_task_frame(&create_options(workspace.clone()))
+            .map_err(|error| error.message())?;
+        let frame = report.frame.as_ref().ok_or_else(|| {
+            "create task-frame report should include the created frame".to_owned()
+        })?;
 
-        assert_eq!(error.code(), "storage");
         assert!(
-            error.message().contains("already exists"),
-            "error should mention existing temp file"
+            frame.id.starts_with(TASK_FRAME_ID_PREFIX),
+            "frame should be created despite stale legacy temp file"
         );
         assert_eq!(
             fs::read_to_string(&temp_path).map_err(|error| error.to_string())?,
@@ -1268,8 +1300,18 @@ mod tests {
             "task-frame write must not truncate an existing temp file"
         );
         assert!(
-            !store_path.exists(),
-            "task-frame write must not publish final store after temp collision"
+            store_path.exists(),
+            "task-frame write should publish through a unique temp file"
+        );
+        let persisted = read_store(&store_path).map_err(|error| error.message())?;
+        assert_eq!(
+            persisted.frames.len(),
+            1,
+            "task-frame write should persist one frame"
+        );
+        assert_eq!(
+            persisted.frames[0].id, frame.id,
+            "persisted task frame should match the created report"
         );
         Ok(())
     }

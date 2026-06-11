@@ -5,12 +5,14 @@
 //! without deciding what the agent should do next.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -43,6 +45,7 @@ pub const FOCUS_STATE_RELATIVE_PATH: &str = ".ee/focus/state.json";
 const FOCUS_STATE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 const UNSET_FOCUS_TIMESTAMP: &str = "1970-01-01T00:00:00Z";
+static FOCUS_STATE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Cached focus state to avoid re-reading unchanged files on every context request.
 struct FocusCacheEntry {
@@ -933,7 +936,7 @@ fn write_focus_state(path: &Path, state: &FocusState) -> Result<(), DomainError>
             repair: Some("Report the focus serialization failure.".to_owned()),
         })?;
     body.push('\n');
-    let temp_path = path.with_extension("json.tmp");
+    let temp_path = unique_focus_state_temp_path(path)?;
     ensure_no_symlink_components(&temp_path, "write")?;
     ensure_focus_state_temp_path_for_write(&temp_path)?;
     write_focus_state_temp_file(&temp_path, &body)?;
@@ -952,6 +955,32 @@ fn write_focus_state(path: &Path, state: &FocusState) -> Result<(), DomainError>
     }
 
     Ok(())
+}
+
+fn unique_focus_state_temp_path(path: &Path) -> Result<PathBuf, DomainError> {
+    let file_name = path.file_name().ok_or_else(|| DomainError::Storage {
+        message: format!(
+            "Failed to build focus state temp path for {}: missing file name.",
+            path.display()
+        ),
+        repair: Some("Use a focus state path that names a JSON file.".to_owned()),
+    })?;
+    let counter = FOCUS_STATE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let mut temp_name = OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(OsString::from(format!(
+        ".{}.{}.{}.tmp",
+        std::process::id(),
+        now,
+        counter
+    )));
+    Ok(match path.parent() {
+        Some(parent) => parent.join(&temp_name),
+        None => PathBuf::from(temp_name),
+    })
 }
 
 fn publish_focus_state_temp_file(path: &Path, temp_path: &Path) -> Result<(), DomainError> {
@@ -993,14 +1022,14 @@ fn ensure_focus_state_temp_path_for_write(path: &Path) -> Result<(), DomainError
                 "Refusing to write focus state temp file {} because it already exists.",
                 path.display()
             ),
-            repair: Some("Remove stale .ee/focus/state.json.tmp and retry.".to_owned()),
+            repair: Some("Retry the focus command so a fresh temp file name is chosen.".to_owned()),
         }),
         Ok(_) => Err(DomainError::Storage {
             message: format!(
                 "Refusing to write focus state temp file {} because it is not a regular file.",
                 path.display()
             ),
-            repair: Some("Replace .ee/focus/state.json.tmp with a regular file.".to_owned()),
+            repair: Some("Inspect the focus state temp path before retrying.".to_owned()),
         }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(DomainError::Storage {
@@ -1021,7 +1050,7 @@ fn ensure_focus_state_temp_path_for_publish(path: &Path) -> Result<(), DomainErr
                 "Refusing to publish focus state temp file {} because it is not a regular file.",
                 path.display()
             ),
-            repair: Some("Replace .ee/focus/state.json.tmp with a regular file.".to_owned()),
+            repair: Some("Retry the focus command so the temp file is recreated.".to_owned()),
         }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(DomainError::Storage {
             message: format!(
@@ -1821,7 +1850,7 @@ mod tests {
     }
 
     #[test]
-    fn write_focus_state_rejects_existing_regular_temp_file_without_truncating() -> TestResult {
+    fn write_focus_state_ignores_stale_legacy_temp_file_without_truncating() -> TestResult {
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let state_path = focus_state_path(dir.path());
         let temp_path = state_path.with_extension("json.tmp");
@@ -1830,13 +1859,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
         std::fs::write(&temp_path, "stale focus temp").map_err(|error| error.to_string())?;
 
-        let result = write_focus_state(&state_path, &state);
-        let error = result.expect_err("existing regular temp state should reject focus write");
-        ensure(
-            error.message().contains("already exists"),
-            true,
-            "existing temp error message",
-        )?;
+        write_focus_state(&state_path, &state).map_err(|error| error.message())?;
         ensure(
             std::fs::read_to_string(&temp_path).map_err(|error| error.to_string())?,
             "stale focus temp".to_owned(),
@@ -1844,8 +1867,14 @@ mod tests {
         )?;
         ensure(
             state_path.exists(),
-            false,
-            "final focus state must not be published when temp exists",
+            true,
+            "final focus state should publish through a unique temp file",
+        )?;
+        let persisted = read_focus_state(&state_path).map_err(|error| error.message())?;
+        ensure(
+            persisted,
+            state,
+            "persisted focus state should match requested state",
         )
     }
 
