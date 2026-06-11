@@ -848,6 +848,559 @@ pub fn run_recall(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// CLI-facing surface helpers (bd-u875s.3)
+// ---------------------------------------------------------------------------
+
+/// Established degraded code for a failed read-only git shell-out
+/// (`--diff`/`--diff-staged`). Same vocabulary the swarm-brief and
+/// workspace-hygiene surfaces use; a git failure degrades the diff selector
+/// to an empty path set and never blocks recall (ADR 0064 §2).
+pub const RECALL_GIT_UNAVAILABLE_CODE: &str = "git_unavailable";
+
+/// Collect the changed-path set for `--diff <ref>` / `--diff-staged` by
+/// shelling out to git read-only (`git -C <workspace> diff --name-only`).
+/// Path extraction only; hunk ranges are reserved for future span-level
+/// matching (ADR 0064 §2). Errors are returned as plain strings so the CLI
+/// layer can degrade (`git_unavailable`) instead of failing the command.
+pub fn collect_diff_paths_via_git(
+    workspace_path: &std::path::Path,
+    reference: Option<&str>,
+    staged: bool,
+) -> Result<Vec<String>, String> {
+    if let Some(reference) = reference {
+        // Refs are positional git arguments; refuse option-shaped values so
+        // a hostile selector cannot smuggle flags into the invocation.
+        if reference.starts_with('-') || reference.is_empty() {
+            return Err(format!(
+                "invalid git ref {reference:?}: refs must not be empty or start with '-'"
+            ));
+        }
+    }
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(workspace_path)
+        .arg("diff")
+        .arg("--name-only");
+    if staged {
+        command.arg("--cached");
+    }
+    if let Some(reference) = reference {
+        command.arg(reference);
+    }
+    command.arg("--");
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to spawn git: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "git diff exited with {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    Ok(diff_changed_paths(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Outcome of resolving an optional `--cursor` flag against the live query
+/// and DB generation (budget-continuation lane, `ee.recall.cursor.v1`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecallCursorResolution {
+    /// No cursor supplied; start at rank offset zero.
+    Fresh,
+    /// Cursor validated; resume from this rank offset.
+    Resume(usize),
+    /// Cursor malformed, tampered, or bound to a different query
+    /// (`cursor_invalid`).
+    RejectedInvalid,
+    /// Cursor was issued at an older DB generation (`cursor_stale`); pages
+    /// cannot partition the result set honestly across writes.
+    RejectedStale {
+        cursor_generation: i64,
+        current_generation: i64,
+    },
+}
+
+/// Resolve an optional encoded cursor against the query's stable hash and
+/// the current DB generation. Rejections map to the ADR 0063 cursor
+/// vocabulary (`cursor_invalid` / `cursor_stale`); they degrade, never error.
+#[must_use]
+pub fn resolve_recall_cursor(
+    encoded: Option<&str>,
+    query: &RecallQuery,
+    current_db_generation: i64,
+) -> RecallCursorResolution {
+    let Some(encoded) = encoded else {
+        return RecallCursorResolution::Fresh;
+    };
+    match RecallCursor::decode(encoded) {
+        Err(_) => RecallCursorResolution::RejectedInvalid,
+        Ok(cursor) => match cursor.validate(&recall_query_hash(query), current_db_generation) {
+            Ok(()) => RecallCursorResolution::Resume(cursor.offset),
+            Err(RecallCursorError::StaleGeneration { cursor, current }) => {
+                RecallCursorResolution::RejectedStale {
+                    cursor_generation: cursor,
+                    current_generation: current,
+                }
+            }
+            Err(_) => RecallCursorResolution::RejectedInvalid,
+        },
+    }
+}
+
+/// One response-level degraded entry for the recall CLI surface: the three
+/// engine codes plus the CLI-only git/cursor/budget-truncation entries, with
+/// optional structured `details` for the envelope.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecallDegradedEntry {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    pub repair: Option<String>,
+    pub details: Option<serde_json::Value>,
+}
+
+impl RecallDegradedEntry {
+    /// Lift an engine degradation into the CLI view.
+    #[must_use]
+    pub fn from_engine(entry: &RecallDegradation) -> Self {
+        Self {
+            code: entry.code.to_owned(),
+            severity: entry.severity.to_owned(),
+            message: entry.message.clone(),
+            repair: entry.repair.map(str::to_owned),
+            details: None,
+        }
+    }
+
+    /// `git_unavailable` (warning): the `--diff` selector degraded to an
+    /// empty path set because the read-only git shell-out failed.
+    #[must_use]
+    pub fn git_unavailable(reason: &str) -> Self {
+        Self {
+            code: RECALL_GIT_UNAVAILABLE_CODE.to_owned(),
+            severity: "warning".to_owned(),
+            message: format!(
+                "--diff selector degraded to an empty path set because git was unavailable: {reason}"
+            ),
+            repair: Some(
+                "Re-run inside a git worktree with git on PATH, or use --path/--symbol selectors."
+                    .to_owned(),
+            ),
+            details: None,
+        }
+    }
+
+    /// `cursor_invalid` (low), mirroring the canonical ADR 0063 wording.
+    #[must_use]
+    pub fn cursor_invalid() -> Self {
+        Self {
+            code: "cursor_invalid".to_owned(),
+            severity: "low".to_owned(),
+            message: "Continuation cursor failed validation (MAC mismatch, parameter mismatch, \
+                      or legacy format)."
+                .to_owned(),
+            repair: Some(
+                "Re-run the command without --cursor to start a fresh page sequence.".to_owned(),
+            ),
+            details: None,
+        }
+    }
+
+    /// `cursor_stale` (low), mirroring the canonical ADR 0063 wording.
+    #[must_use]
+    pub fn cursor_stale(cursor_generation: i64, current_generation: i64) -> Self {
+        Self {
+            code: "cursor_stale".to_owned(),
+            severity: "low".to_owned(),
+            message: format!(
+                "Continuation cursor was issued at DB generation {cursor_generation} but the \
+                 workspace is now at generation {current_generation}; pages cannot partition the \
+                 result set honestly across writes."
+            ),
+            repair: Some(
+                "Re-run the command without --cursor to start a fresh page sequence.".to_owned(),
+            ),
+            details: None,
+        }
+    }
+
+    /// `output_truncated_budget` (info): trailing items dropped to satisfy
+    /// `--budget-tokens`. One truncation vocabulary across surfaces (ADR
+    /// 0064 §5 supersedes the early `recall_budget_truncated` name); the
+    /// recall budget lane reuses the governor code with recall-appropriate
+    /// repair text and carries the `ee.recall.cursor.v1` continuation cursor
+    /// in `details`.
+    #[must_use]
+    pub fn budget_truncated(
+        dropped_count: usize,
+        continuation_cursor: &str,
+        budget_tokens: u32,
+    ) -> Self {
+        Self {
+            code: crate::output::governor::OUTPUT_TRUNCATED_BUDGET_CODE.to_owned(),
+            severity: "info".to_owned(),
+            message: format!(
+                "Dropped {dropped_count} trailing item(s) at the declared truncation point to \
+                 satisfy the recall budget of {budget_tokens} tokens."
+            ),
+            repair: Some(
+                "Re-run with a larger --budget-tokens value, or resume from \
+                 details.continuationCursor with --cursor."
+                    .to_owned(),
+            ),
+            details: Some(serde_json::json!({
+                "droppedCount": dropped_count,
+                "continuationCursor": continuation_cursor,
+            })),
+        }
+    }
+
+    /// Envelope-shaped JSON (`code`, `severity`, `message`, `repair`,
+    /// optional `details`).
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut entry = serde_json::json!({
+            "code": self.code,
+            "severity": self.severity,
+            "message": self.message,
+            "repair": self.repair,
+        });
+        if let Some(details) = &self.details
+            && let Some(object) = entry.as_object_mut()
+        {
+            object.insert("details".to_owned(), details.clone());
+        }
+        entry
+    }
+}
+
+/// The normalized query echoed back under `data.recall.query` (ADR 0064
+/// appendix). Selector and filter fields only — offsets are cursor-internal.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RecallQueryEcho {
+    pub paths: Vec<String>,
+    pub symbols: Vec<String>,
+    pub diff_ref: Option<String>,
+    pub diff_staged: bool,
+    pub kinds: Vec<String>,
+    pub levels: Vec<String>,
+    pub stale_only: bool,
+    pub budget_tokens: Option<u32>,
+}
+
+/// Four-decimal score rounding for stable JSON output, mirroring the
+/// CLI-wide `score_json_value` discipline.
+fn score_json(value: f32) -> serde_json::Value {
+    let rounded = (f64::from(value) * 10_000.0).round() / 10_000.0;
+    serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
+}
+
+fn recall_item_json(item: &RecallItem) -> serde_json::Value {
+    serde_json::json!({
+        "memoryId": item.memory_id,
+        "anchor": {
+            "kind": item.anchor.kind,
+            "path": item.anchor.path,
+            "symbol": item.anchor.symbol,
+        },
+        "freshnessState": item.freshness_state,
+        "scoreComponents": {
+            "freshness": score_json(item.score_components.freshness),
+            "confidence": score_json(item.score_components.confidence),
+            "levelTilt": score_json(item.score_components.level_tilt),
+            "kindBonus": score_json(item.score_components.kind_bonus),
+        },
+        "score": score_json(item.score),
+        "level": item.level,
+        "kind": item.kind,
+        "contentPreview": item.content_preview,
+        "provenance": item.provenance.iter().map(|reference| serde_json::json!({
+            "uri": reference.uri,
+            "sourceType": reference.source_type,
+        })).collect::<Vec<_>>(),
+        "tags": item.tags,
+        "repair": item.repair,
+    })
+}
+
+/// Build the `data` payload for the `ee.response.v2` envelope:
+/// `{"command": "recall", "recall": {…ee.recall.v1…}}`. The declared
+/// governor truncation point is `data.recall.items[]`.
+#[must_use]
+pub fn recall_data_json(report: &RecallReport, query: &RecallQueryEcho) -> serde_json::Value {
+    serde_json::json!({
+        "command": "recall",
+        "recall": {
+            "schema": report.schema,
+            "query": {
+                "paths": query.paths,
+                "symbols": query.symbols,
+                "diffRef": query.diff_ref,
+                "diffStaged": query.diff_staged,
+                "kinds": query.kinds,
+                "levels": query.levels,
+                "staleOnly": query.stale_only,
+                "budgetTokens": query.budget_tokens,
+            },
+            "items": report.items.iter().map(recall_item_json).collect::<Vec<_>>(),
+            "indexGeneration": report.index_generation,
+            "dbGeneration": report.db_generation,
+            "totalMatched": report.total_matched,
+            "truncated": report.truncated,
+            "droppedCount": report.dropped_count,
+            "continuationCursor": report.continuation_cursor,
+        },
+    })
+}
+
+/// Render the token-tight markdown prepend block (pack markdown discipline:
+/// smallest output, provenance per item, repair hints on stale items).
+#[must_use]
+pub fn render_recall_markdown(report: &RecallReport, degraded: &[RecallDegradedEntry]) -> String {
+    let mut output = String::new();
+    if report.truncated {
+        output.push_str(&format!(
+            "## recall · {} of {} anchored memories ({} dropped by budget)\n",
+            report.items.len(),
+            report.total_matched,
+            report.dropped_count
+        ));
+    } else {
+        output.push_str(&format!(
+            "## recall · {} anchored memorie(s)\n",
+            report.items.len()
+        ));
+    }
+    for (rank, item) in report.items.iter().enumerate() {
+        let anchor_display = item
+            .anchor
+            .path
+            .as_deref()
+            .or(item.anchor.symbol.as_deref())
+            .unwrap_or("-");
+        output.push_str(&format!(
+            "\n{}. {} · {} · {}/{} · {}\n   {}\n",
+            rank + 1,
+            item.memory_id,
+            anchor_display,
+            item.level,
+            item.kind,
+            item.freshness_state,
+            item.content_preview
+        ));
+        if !item.provenance.is_empty() {
+            let uris: Vec<&str> = item
+                .provenance
+                .iter()
+                .map(|reference| reference.uri.as_str())
+                .collect();
+            output.push_str(&format!("   src: {}\n", uris.join(", ")));
+        }
+        if let Some(repair) = &item.repair {
+            output.push_str(&format!("   repair: {repair}\n"));
+        }
+    }
+    for entry in degraded {
+        match &entry.repair {
+            Some(repair) => {
+                output.push_str(&format!("\ndegraded: {} ({})\n", entry.code, repair));
+            }
+            None => output.push_str(&format!("\ndegraded: {}\n", entry.code)),
+        }
+    }
+    output
+}
+
+/// Build the empty page returned when a continuation cursor is rejected.
+/// Generations are reported honestly; items stay empty so a rejected cursor
+/// can never duplicate or skip elements of a prior page sequence.
+#[must_use]
+pub fn empty_recall_report_for_rejected_cursor(
+    index_generation: Option<i64>,
+    db_generation: i64,
+) -> RecallReport {
+    RecallReport {
+        schema: RECALL_SCHEMA_V1,
+        items: Vec::new(),
+        index_generation,
+        db_generation,
+        degraded: Vec::new(),
+        total_matched: 0,
+        truncated: false,
+        dropped_count: 0,
+        continuation_cursor: None,
+    }
+}
+
+#[cfg(test)]
+mod cli_surface_tests {
+    use super::*;
+
+    fn sample_item() -> RecallItem {
+        RecallItem {
+            memory_id: "mem_00000000000000000000000001".to_owned(),
+            anchor: RecallAnchor {
+                kind: "path".to_owned(),
+                path: Some("src/db/mod.rs".to_owned()),
+                symbol: None,
+            },
+            freshness_state: "current".to_owned(),
+            score_components: RecallScoreComponents {
+                freshness: 1.0,
+                confidence: 0.8,
+                level_tilt: 1.0,
+                kind_bonus: 1.0,
+            },
+            score: 0.8,
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content_preview: "Always run the verify script.".to_owned(),
+            provenance: vec![RecallProvenanceRef {
+                uri: "test://prov".to_owned(),
+                source_type: "memory_provenance".to_owned(),
+            }],
+            tags: vec!["ci".to_owned()],
+            repair: None,
+        }
+    }
+
+    fn sample_report(items: Vec<RecallItem>) -> RecallReport {
+        let total_matched = items.len();
+        RecallReport {
+            schema: RECALL_SCHEMA_V1,
+            items,
+            index_generation: Some(7),
+            db_generation: 7,
+            degraded: Vec::new(),
+            total_matched,
+            truncated: false,
+            dropped_count: 0,
+            continuation_cursor: None,
+        }
+    }
+
+    #[test]
+    fn cursor_resolution_fresh_resume_invalid_stale() {
+        let query = RecallQuery {
+            paths: vec!["src/db/mod.rs".to_owned()],
+            ..RecallQuery::default()
+        };
+        assert_eq!(
+            resolve_recall_cursor(None, &query, 7),
+            RecallCursorResolution::Fresh
+        );
+
+        let cursor = RecallCursor {
+            offset: 3,
+            query_hash: recall_query_hash(&query),
+            db_generation: 7,
+        };
+        assert_eq!(
+            resolve_recall_cursor(Some(&cursor.encode()), &query, 7),
+            RecallCursorResolution::Resume(3)
+        );
+        assert_eq!(
+            resolve_recall_cursor(Some("garbage"), &query, 7),
+            RecallCursorResolution::RejectedInvalid
+        );
+        assert_eq!(
+            resolve_recall_cursor(Some(&cursor.encode()), &query, 9),
+            RecallCursorResolution::RejectedStale {
+                cursor_generation: 7,
+                current_generation: 9,
+            }
+        );
+        // A cursor bound to a different query is invalid, not stale.
+        let other_query = RecallQuery {
+            paths: vec!["src/core/recall.rs".to_owned()],
+            ..RecallQuery::default()
+        };
+        assert_eq!(
+            resolve_recall_cursor(Some(&cursor.encode()), &other_query, 7),
+            RecallCursorResolution::RejectedInvalid
+        );
+    }
+
+    #[test]
+    fn data_json_shape_matches_adr_appendix() {
+        let report = sample_report(vec![sample_item()]);
+        let query = RecallQueryEcho {
+            paths: vec!["src/db/*.rs".to_owned()],
+            ..RecallQueryEcho::default()
+        };
+        let data = recall_data_json(&report, &query);
+        assert_eq!(data["command"], "recall");
+        let recall = &data["recall"];
+        assert_eq!(recall["schema"], RECALL_SCHEMA_V1);
+        assert_eq!(recall["query"]["paths"][0], "src/db/*.rs");
+        assert_eq!(recall["query"]["staleOnly"], false);
+        assert_eq!(recall["items"][0]["memoryId"], sample_item().memory_id);
+        assert_eq!(recall["items"][0]["anchor"]["path"], "src/db/mod.rs");
+        assert_eq!(recall["items"][0]["scoreComponents"]["confidence"], 0.8);
+        assert_eq!(recall["indexGeneration"], 7);
+        assert_eq!(recall["dbGeneration"], 7);
+        assert_eq!(recall["truncated"], false);
+        assert_eq!(recall["continuationCursor"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn markdown_block_is_token_tight_with_provenance_and_degraded() {
+        let mut stale = sample_item();
+        stale.memory_id = "mem_00000000000000000000000002".to_owned();
+        stale.freshness_state = "stale".to_owned();
+        stale.repair =
+            Some("ee why mem_00000000000000000000000002 --workspace . --json".to_owned());
+        let report = sample_report(vec![sample_item(), stale]);
+        let degraded = vec![RecallDegradedEntry::from_engine(&RecallDegradation {
+            code: ANCHOR_INDEX_STALE_CODE,
+            severity: "low",
+            message: "behind".to_owned(),
+            repair: Some(ANCHOR_INDEX_REPAIR),
+        })];
+        let markdown = render_recall_markdown(&report, &degraded);
+        assert!(markdown.starts_with("## recall · 2 anchored memorie(s)\n"));
+        assert!(markdown.contains("1. mem_00000000000000000000000001 · src/db/mod.rs"));
+        assert!(markdown.contains("src: test://prov"));
+        assert!(markdown.contains("repair: ee why mem_00000000000000000000000002"));
+        assert!(markdown.contains("degraded: anchor_index_stale (ee index rebuild"));
+    }
+
+    #[test]
+    fn markdown_block_reports_budget_truncation_counts() {
+        let mut report = sample_report(vec![sample_item()]);
+        report.total_matched = 5;
+        report.truncated = true;
+        report.dropped_count = 4;
+        let markdown = render_recall_markdown(&report, &[]);
+        assert!(markdown.starts_with("## recall · 1 of 5 anchored memories (4 dropped by budget)"));
+    }
+
+    #[test]
+    fn budget_truncated_entry_carries_cursor_details() {
+        let entry = RecallDegradedEntry::budget_truncated(4, "cursor-string", 400);
+        assert_eq!(
+            entry.code,
+            crate::output::governor::OUTPUT_TRUNCATED_BUDGET_CODE
+        );
+        assert_eq!(entry.severity, "info");
+        let json = entry.to_json();
+        assert_eq!(json["details"]["droppedCount"], 4);
+        assert_eq!(json["details"]["continuationCursor"], "cursor-string");
+    }
+
+    #[test]
+    fn git_ref_validation_rejects_option_shaped_refs() {
+        let workspace = std::path::Path::new(".");
+        let result = collect_diff_paths_via_git(workspace, Some("--output=/tmp/x"), false);
+        assert!(result.is_err());
+        let result = collect_diff_paths_via_git(workspace, Some(""), false);
+        assert!(result.is_err());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
