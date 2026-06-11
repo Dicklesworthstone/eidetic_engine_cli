@@ -265,6 +265,12 @@ fn parse_ee_memory(input: &str, body: &str) -> Result<ProvenanceUri, ProvenanceU
     Ok(ProvenanceUri::EeMemory(id))
 }
 
+fn contains_control_or_whitespace(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| character.is_ascii_control() || character.is_whitespace())
+}
+
 fn parse_web(input: &str, scheme: &str, body: &str) -> Result<ProvenanceUri, ProvenanceUriError> {
     if body.is_empty() {
         return Err(ProvenanceUriError::EmptyBody {
@@ -278,7 +284,7 @@ fn parse_web(input: &str, scheme: &str, body: &str) -> Result<ProvenanceUri, Pro
             scheme: if scheme == "https" { "https" } else { "http" },
         });
     }
-    if body.contains(|character: char| character.is_ascii_control() || character == ' ') {
+    if contains_control_or_whitespace(body) {
         return Err(ProvenanceUriError::InvalidWebBody {
             input: input.to_owned(),
         });
@@ -299,6 +305,11 @@ fn parse_agent_mail(input: &str, body: &str) -> Result<ProvenanceUri, Provenance
         return Err(ProvenanceUriError::EmptyBody {
             input: input.to_owned(),
             scheme: "agent-mail",
+        });
+    }
+    if contains_control_or_whitespace(body) {
+        return Err(ProvenanceUriError::InvalidAgentMail {
+            input: input.to_owned(),
         });
     }
     if let Some((thread, message)) = body.split_once('/') {
@@ -659,7 +670,11 @@ mod tests {
 
     #[test]
     fn web_rejects_whitespace_or_controls() {
-        for bad in ["https://exam ple.com", "http://example.com\u{0001}/x"] {
+        for bad in [
+            "https://exam ple.com",
+            "http://example.com\u{0001}/x",
+            "https://example.com\u{00a0}/x",
+        ] {
             let err = must_fail(bad);
             assert!(matches!(err, ProvenanceUriError::InvalidWebBody { .. }));
         }
@@ -707,6 +722,23 @@ mod tests {
         for bad in ["agent-mail:///msg", "agent-mail://thread/"] {
             let err = must_fail(bad);
             assert!(matches!(err, ProvenanceUriError::InvalidAgentMail { .. }));
+        }
+    }
+
+    #[test]
+    fn agent_mail_rejects_whitespace_or_controls() {
+        for bad in [
+            "agent-mail://thread name",
+            "agent-mail://thread/message id",
+            "agent-mail://thread\nname",
+            "agent-mail://thread/msg\u{00a0}id",
+            "agent-mail://thread\u{0001}/msg",
+        ] {
+            let err = must_fail(bad);
+            assert!(
+                matches!(err, ProvenanceUriError::InvalidAgentMail { .. }),
+                "expected InvalidAgentMail for `{bad}`, got {err:?}"
+            );
         }
     }
 
