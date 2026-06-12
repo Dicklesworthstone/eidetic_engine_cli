@@ -501,7 +501,7 @@ impl PackL2Cache {
         let mut candidates = Vec::new();
         let entries = match fs::read_dir(&self.root) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(candidates),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => {
                 return Err(PackL2CacheError::Io {
                     path: self.root.clone(),
