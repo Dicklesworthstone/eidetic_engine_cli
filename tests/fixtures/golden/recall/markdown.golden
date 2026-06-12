@@ -1,0 +1,9 @@
+## recall · 2 anchored memorie(s)
+
+1. mem_00000000000000000000000041 · src/db/mod.rs · procedural/rule · current
+   Always route Cargo verification through RCH for storage-layer changes. anchor:path:src/db/mod.rs
+   src: test://recall-golden
+
+2. mem_00000000000000000000000042 · src/db/mod.rs · episodic/failure · current
+   Linker OOM at default -j when rebuilding the DB layer. anchor:path:src/db/mod.rs anchor:symbol:DbConnection
+   src: test://recall-golden

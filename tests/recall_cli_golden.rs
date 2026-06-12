@@ -314,6 +314,68 @@ fn recall_kind_filter_narrows_before_ranking() -> TestResult {
 }
 
 #[test]
+fn recall_symbol_level_and_or_dedup_compose() -> TestResult {
+    let workspace = seed_recall_workspace()?;
+    let workspace_arg = workspace.path().to_str().unwrap().to_owned();
+    let symbol_only = parse_response(
+        &run_ee(&[
+            "recall",
+            "--symbol",
+            "DbConnection",
+            "--level",
+            "episodic",
+            "--workspace",
+            &workspace_arg,
+            "--json",
+        ])?,
+        "recall --symbol DbConnection --level episodic",
+    )?;
+    let ids = item_memory_ids(&symbol_only);
+    if ids != vec![MEM_FAILURE.to_owned()] {
+        return Err(format!(
+            "--symbol plus --level must keep only the anchored episodic failure: {ids:?}"
+        ));
+    }
+    if symbol_only
+        .pointer("/data/recall/items/0/anchor/kind")
+        .and_then(Value::as_str)
+        != Some("symbol")
+    {
+        return Err("symbol-only recall must report a symbol anchor".to_owned());
+    }
+
+    let path_and_symbol = parse_response(
+        &run_ee(&[
+            "recall",
+            "--path",
+            "src/db/*.rs",
+            "--symbol",
+            "DbConnection",
+            "--level",
+            "episodic",
+            "--workspace",
+            &workspace_arg,
+            "--json",
+        ])?,
+        "recall --path src/db/*.rs --symbol DbConnection --level episodic",
+    )?;
+    let ids = item_memory_ids(&path_and_symbol);
+    if ids != vec![MEM_FAILURE.to_owned()] {
+        return Err(format!(
+            "path+symbol OR composition must dedup the failure memory once: {ids:?}"
+        ));
+    }
+    if path_and_symbol
+        .pointer("/data/recall/totalMatched")
+        .and_then(Value::as_u64)
+        != Some(1)
+    {
+        return Err("path+symbol dedup must report one matched memory".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
 fn recall_distinct_empty_codes_for_filtered_vs_empty_index() -> TestResult {
     // Filters removed everything: the index HAS rows for the surface, so the
     // distinct recall_filtered_empty (not anchor_index_empty) must fire.
