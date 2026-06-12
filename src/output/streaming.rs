@@ -102,6 +102,7 @@ impl From<ContextResponseSeverity> for StreamSeverity {
             ContextResponseSeverity::Warning => Self::Warning,
             ContextResponseSeverity::Medium => Self::Medium,
             ContextResponseSeverity::High => Self::High,
+            ContextResponseSeverity::Critical => Self::Critical,
         }
     }
 }

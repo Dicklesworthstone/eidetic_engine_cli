@@ -3278,7 +3278,8 @@ fn context_severity_from_str(severity: &str) -> ContextResponseSeverity {
         "low" => ContextResponseSeverity::Low,
         "warning" => ContextResponseSeverity::Warning,
         "medium" => ContextResponseSeverity::Medium,
-        "high" | "critical" => ContextResponseSeverity::High,
+        "high" => ContextResponseSeverity::High,
+        "critical" => ContextResponseSeverity::Critical,
         _ => ContextResponseSeverity::Info,
     }
 }
@@ -19277,6 +19278,34 @@ mod tests {
             &severity,
             &Some(crate::pack::ContextResponseSeverity::Warning),
             "aggregated context degradation severity",
+        )
+    }
+
+    #[test]
+    fn context_degraded_aggregation_preserves_critical_severity() -> TestResult {
+        let mut response = context_response_fixture()?;
+        response.data.degraded.push(
+            crate::pack::ContextResponseDegradation::new(
+                "mesh_cursor_repair_required",
+                crate::pack::ContextResponseSeverity::Critical,
+                "Mesh cursor repair is required before continuing.",
+                Some("ee mesh repair-cursor --json".to_string()),
+            )
+            .map_err(|error| format!("degradation rejected: {error:?}"))?,
+        );
+
+        let aggregated = super::context_response_with_aggregated_degraded(&response);
+        let severity = aggregated
+            .data
+            .degraded
+            .iter()
+            .find(|entry| entry.code == "mesh_cursor_repair_required")
+            .map(|entry| entry.severity);
+
+        ensure_equal(
+            &severity,
+            &Some(crate::pack::ContextResponseSeverity::Critical),
+            "aggregated critical context degradation severity",
         )
     }
 

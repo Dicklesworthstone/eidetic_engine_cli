@@ -1481,6 +1481,7 @@ const fn context_severity_from_pack_dna(severity: &str) -> ContextResponseSeveri
         b"warning" => ContextResponseSeverity::Warning,
         b"medium" => ContextResponseSeverity::Medium,
         b"high" => ContextResponseSeverity::High,
+        b"critical" => ContextResponseSeverity::Critical,
         _ => ContextResponseSeverity::Low,
     }
 }
@@ -3298,9 +3299,10 @@ fn push_search_degradations(
     for entry in search_degraded {
         let severity = match entry.severity.as_str() {
             "info" => ContextResponseSeverity::Info,
-            "high" => ContextResponseSeverity::High,
             "warning" => ContextResponseSeverity::Warning,
             "medium" => ContextResponseSeverity::Medium,
+            "high" => ContextResponseSeverity::High,
+            "critical" => ContextResponseSeverity::Critical,
             _ => ContextResponseSeverity::Low,
         };
         push_degradation(
@@ -3385,7 +3387,8 @@ fn context_severity_for_memory_drift_hint(
     hint: &MemoryDriftSelectionHint,
 ) -> ContextResponseSeverity {
     match hint.severity.as_str() {
-        "high" | "critical" => ContextResponseSeverity::High,
+        "critical" => ContextResponseSeverity::Critical,
+        "high" => ContextResponseSeverity::High,
         "warning" => ContextResponseSeverity::Warning,
         "medium" => ContextResponseSeverity::Medium,
         "info" => ContextResponseSeverity::Info,
@@ -9496,14 +9499,16 @@ mod tests {
         ReadSnapshotTrace, candidate_selection_why, context_performance_json, focus_candidate_why,
         focus_relevance, open_pack_slot_lock_file, pack_assembly_slo_for_run,
         push_evidence_freshness_degradation, push_pack_budget_too_small_degradation,
-        try_acquire_pack_slot, unit_score,
+        push_search_degradations, try_acquire_pack_slot, unit_score,
     };
     use crate::config::{ReadPoolConfig, WorkspaceLocation};
     use crate::core::budget::RequestBudget;
     use crate::core::memory::{ReviseMemoryOptions, ReviseReason, revise_memory};
+    use crate::core::memory_drift::{MemoryDriftSelectionHint, MemoryDriftStatus};
     use crate::core::profile::{OperatingProfile, RuntimeProfileReport};
     use crate::core::search::{
-        PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchHit, SearchReport, SearchStatus,
+        PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchHit, SearchReport,
+        SearchStatus,
     };
     use crate::db::read_pool::{
         AcquireWaitStats, PoolConfig, PoolStats, READ_POOL_UNDERSIZED_P99_THRESHOLD,
@@ -9679,6 +9684,46 @@ mod tests {
             &degraded.len(),
             &1,
             "no_relevant_results suppresses budget degradation",
+        )
+    }
+
+    #[test]
+    fn imported_degradation_severities_preserve_critical() -> TestResult {
+        ensure_equal(
+            &super::context_severity_from_pack_dna("critical"),
+            &ContextResponseSeverity::Critical,
+            "pack DNA critical severity",
+        )?;
+
+        let mut degraded = Vec::new();
+        push_search_degradations(
+            &mut degraded,
+            &[SearchDegradation {
+                code: "mesh_cursor_repair_required".to_owned(),
+                severity: "critical".to_owned(),
+                message: "Mesh cursor repair is required before continuing.".to_owned(),
+                repair: Some("ee mesh repair-cursor --json".to_owned()),
+            }],
+        );
+
+        ensure_equal(&degraded.len(), &1, "search degradation count")?;
+        ensure_equal(
+            &degraded[0].severity,
+            &ContextResponseSeverity::Critical,
+            "search critical severity",
+        )?;
+
+        let mut hint = MemoryDriftSelectionHint::new(
+            "mem_critical",
+            MemoryDriftStatus::MissingSource,
+            "source_missing",
+            1,
+        );
+        hint.severity = "critical".to_owned();
+        ensure_equal(
+            &super::context_severity_for_memory_drift_hint(&hint),
+            &ContextResponseSeverity::Critical,
+            "memory drift critical severity",
         )
     }
 

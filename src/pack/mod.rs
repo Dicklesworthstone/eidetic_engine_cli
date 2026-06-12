@@ -4601,6 +4601,7 @@ pub enum ContextResponseSeverity {
     Warning,
     Medium,
     High,
+    Critical,
 }
 
 impl ContextResponseSeverity {
@@ -4612,6 +4613,7 @@ impl ContextResponseSeverity {
             Self::Warning => "warning",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::Critical => "critical",
         }
     }
 }
@@ -12751,6 +12753,23 @@ mod tests {
                 .and_then(|degraded| degraded.repair.as_deref()),
             &Some("ee index rebuild --workspace ."),
             "degradation repair",
+        )
+    }
+
+    #[test]
+    fn context_response_degradation_preserves_critical_severity() -> TestResult {
+        let degraded = ContextResponseDegradation::new(
+            "mesh_cursor_repair_required",
+            ContextResponseSeverity::Critical,
+            "Mesh cursor repair is required before continuing.",
+            Some("ee mesh repair-cursor --json".to_string()),
+        )
+        .map_err(|error| format!("degradation rejected: {error:?}"))?;
+
+        ensure_equal(
+            &degraded.severity.as_str(),
+            &"critical",
+            "critical severity wire name",
         )
     }
 

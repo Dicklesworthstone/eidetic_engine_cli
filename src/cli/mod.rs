@@ -34518,6 +34518,7 @@ fn context_delta_severity(severity: &str) -> ContextResponseSeverity {
         "warning" => ContextResponseSeverity::Warning,
         "medium" => ContextResponseSeverity::Medium,
         "high" => ContextResponseSeverity::High,
+        "critical" => ContextResponseSeverity::Critical,
         _ => ContextResponseSeverity::Info,
     }
 }
