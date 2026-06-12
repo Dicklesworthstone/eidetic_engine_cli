@@ -949,6 +949,7 @@ class ClaimGateConsumer(unittest.TestCase):
             "beads_tracker_stale",
             "beads_metadata_only_stale",
             "bv_recommendation_stale",
+            "memory_drift_lock_contention",
         ]
 
         decision = consumer.consume(envelope(gate))
@@ -959,6 +960,7 @@ class ClaimGateConsumer(unittest.TestCase):
             "claim_gate_degraded_authority:beads_tracker_stale",
             "claim_gate_degraded_authority:beads_metadata_only_stale",
             "claim_gate_degraded_authority:bv_recommendation_stale",
+            "claim_gate_degraded_authority:memory_drift_lock_contention",
         ]:
             self.assertIn(reason, decision["whyNotSafe"])
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
@@ -1452,7 +1454,10 @@ class WorkPacketConsumer(unittest.TestCase):
         packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
         source_provenance = packet["data"]["sourceProvenance"]
         source_provenance[0]["degradedCodes"] = ["beads_tracker_stale"]
-        source_provenance[1]["degradedCodes"] = ["bv_recommendation_stale"]
+        source_provenance[1]["degradedCodes"] = [
+            "bv_recommendation_stale",
+            "memory_drift_source_unverifiable",
+        ]
 
         decision = consumer.consume(packet)
 
@@ -1463,6 +1468,10 @@ class WorkPacketConsumer(unittest.TestCase):
         )
         self.assertIn(
             "packet_degraded_authority:bv_recommendation_stale",
+            decision["whyNotSafe"],
+        )
+        self.assertIn(
+            "packet_degraded_authority:memory_drift_source_unverifiable",
             decision["whyNotSafe"],
         )
         self.assertFalse(

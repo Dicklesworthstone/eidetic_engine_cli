@@ -157,6 +157,8 @@ AUTHORITY_DEGRADED_BLOCKER_CODES = {
     "bv_recommendation_stale",
     "bv_unavailable",
     "local_cargo_bypass_detected",
+    "memory_drift_lock_contention",
+    "memory_drift_source_unverifiable",
     "reservation_evidence_stale",
     "rch_remote_required_fallback_prevented",
     "rch_selector_admission_contradiction",

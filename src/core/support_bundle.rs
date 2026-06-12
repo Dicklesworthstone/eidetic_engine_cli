@@ -4790,12 +4790,24 @@ fn collect_memory_drift_support_summary(workspace: &Path, limit: u32) -> Value {
 
     match super::memory_drift::build_memory_drift_report_read_only(&options) {
         Ok(report) => super::memory_drift::memory_drift_support_summary_from_report(&report),
-        Err(_) => super::memory_drift::memory_drift_support_summary_unavailable(
-            "report_unavailable",
-            "memory_drift_source_unverifiable",
-            "Memory drift summary is unavailable because the read-only report could not be built.",
-        ),
+        Err(error) => memory_drift_support_summary_unavailable_from_report_error(&error),
     }
+}
+
+fn memory_drift_support_summary_unavailable_from_report_error(error: &DomainError) -> Value {
+    if super::memory_drift::memory_drift_error_is_lock_contention(error) {
+        return super::memory_drift::memory_drift_support_summary_unavailable(
+            "lock_contention",
+            super::memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_CODE,
+            &super::memory_drift::memory_drift_lock_contention_message("support_bundle"),
+        );
+    }
+
+    super::memory_drift::memory_drift_support_summary_unavailable(
+        "report_unavailable",
+        "memory_drift_source_unverifiable",
+        "Memory drift summary is unavailable because the read-only report could not be built.",
+    )
 }
 
 fn collect_verification_evidence_summary(workspace: &Path, limit: u32) -> Value {
@@ -8977,6 +8989,36 @@ mod tests {
         assert!(
             !encoded.contains(&workspace.to_string_lossy().to_string()),
             "summary must not include raw workspace paths: {encoded}"
+        );
+    }
+
+    #[test]
+    fn memory_drift_support_summary_preserves_lock_contention_code() {
+        let error = DomainError::Storage {
+            message: "Failed to open database read-only for memory drift report: could not acquire database write lock: busy".to_owned(),
+            repair: None,
+        };
+        let summary = memory_drift_support_summary_unavailable_from_report_error(&error);
+        let encoded = stable_json(&summary);
+
+        assert_eq!(summary.pointer("/status"), Some(&json!("lock_contention")));
+        assert_eq!(
+            summary.pointer("/degradedCodes/0"),
+            Some(&json!(
+                super::super::memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_CODE
+            ))
+        );
+        assert_eq!(
+            summary.pointer("/degraded/0/severity"),
+            Some(&json!("warning"))
+        );
+        assert!(
+            encoded.contains("NOT inspected"),
+            "support bundles must not imply evidence was inspected: {encoded}"
+        );
+        assert!(
+            !encoded.contains("/Users") && !encoded.contains("/private"),
+            "summary must not include host-private absolute paths: {encoded}"
         );
     }
 

@@ -932,6 +932,11 @@ pub fn memory_drift_support_summary_unavailable(
     degraded_code: &str,
     message: &str,
 ) -> serde_json::Value {
+    let severity = if degraded_code == MEMORY_DRIFT_LOCK_CONTENTION_CODE {
+        "warning"
+    } else {
+        "medium"
+    };
     serde_json::json!({
         "schema": MEMORY_DRIFT_SUPPORT_SUMMARY_SCHEMA_V1,
         "sourceSchema": MEMORY_DRIFT_REPORT_SCHEMA_V1,
@@ -955,7 +960,7 @@ pub fn memory_drift_support_summary_unavailable(
         "topAffected": [],
         "degraded": [{
             "code": memory_drift_support_label(degraded_code),
-            "severity": "medium",
+            "severity": severity,
             "message": memory_drift_support_message(message),
         }],
         "limits": {

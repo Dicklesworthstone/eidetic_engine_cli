@@ -2160,6 +2160,9 @@ fn work_packet_claim_gate_verdict(
     if let Some(verdict) = work_packet_actionable_queue_blocking_verdict(packet, candidate) {
         return verdict;
     }
+    if work_packet_has_coordination_degradation(packet) {
+        return "coordinate_first";
+    }
     if !work_packet_claim_gate_candidate_recommended_safe_to_claim(packet, candidate) {
         return "coordinate_first";
     }
@@ -2232,6 +2235,7 @@ fn work_packet_claim_gate_unsafe_reasons(
     if let Some(reason) = work_packet_rch_remote_verification_reason(&packet.rch_proof_posture) {
         reasons.push(reason.to_owned());
     }
+    reasons.extend(work_packet_coordination_degradation_codes(packet));
     let install_freshness = work_packet_claim_gate_install_freshness(packet);
     if install_freshness.blocks_claim {
         reasons.push(format!("install_freshness:{}", install_freshness.verdict));
@@ -3046,19 +3050,43 @@ fn work_packet_has_active_reservation_conflict(packet: &SwarmWorkPacket) -> bool
 }
 
 fn work_packet_has_coordination_degradation(packet: &SwarmWorkPacket) -> bool {
-    packet.degraded.iter().any(|degradation| {
-        matches!(
-            degradation.code.as_str(),
-            "agent_mail_unavailable"
-                | "agent_mail_semantic_readiness_failed"
-                | "agent_mail_probe_mismatch"
-                | "bv_command_timeout"
-                | "bv_no_output"
-                | "bv_unavailable"
-                | "bv_recommendation_stale"
-                | "memory_drift_source_unverifiable"
-        )
-    })
+    packet
+        .degraded
+        .iter()
+        .any(|degradation| is_coordination_degradation_code(&degradation.code))
+}
+
+fn work_packet_coordination_degradation_codes(packet: &SwarmWorkPacket) -> Vec<String> {
+    packet
+        .degraded
+        .iter()
+        .filter(|degradation| is_coordination_degradation_code(&degradation.code))
+        .map(|degradation| degradation.code.clone())
+        .collect()
+}
+
+fn snapshot_coordination_degradation_codes(snapshot: &SwarmNextActionSnapshot) -> Vec<String> {
+    snapshot
+        .degraded
+        .iter()
+        .filter(|degradation| is_coordination_degradation_code(&degradation.code))
+        .map(|degradation| degradation.code.clone())
+        .collect()
+}
+
+fn is_coordination_degradation_code(code: &str) -> bool {
+    matches!(
+        code,
+        "agent_mail_unavailable"
+            | "agent_mail_semantic_readiness_failed"
+            | "agent_mail_probe_mismatch"
+            | "bv_command_timeout"
+            | "bv_no_output"
+            | "bv_unavailable"
+            | "bv_recommendation_stale"
+            | "memory_drift_lock_contention"
+            | "memory_drift_source_unverifiable"
+    )
 }
 
 fn work_packet_candidates(
@@ -4559,6 +4587,8 @@ fn work_packet_recommended_action(
         .and_then(|card| card.candidate_id.as_deref())
         .and_then(|id| candidates.iter().find(|candidate| candidate.id == id))
         .or_else(|| candidates.first());
+    let coordination_degradation_codes = snapshot_coordination_degradation_codes(snapshot);
+    let coordination_degraded = !coordination_degradation_codes.is_empty();
     let mut reasons = selected_card.map_or_else(Vec::new, |card| card.do_not_take_because.clone());
     if reasons.is_empty() {
         reasons.extend(
@@ -4575,6 +4605,7 @@ fn work_packet_recommended_action(
     if let Some(rch_reason) = work_packet_rch_remote_verification_reason(rch) {
         reasons.push(rch_reason.to_owned());
     }
+    reasons.extend(coordination_degradation_codes.iter().cloned());
     if agent_mail_blocks_claim(agent_mail) {
         reasons.push(agent_mail_claim_blocker_reason(agent_mail).to_owned());
         if agent_mail.status == "semantic_readiness_failed" {
@@ -4631,6 +4662,9 @@ fn work_packet_recommended_action(
     if !tracker_integrity.br_reads_authoritative {
         proof_obligations.push("repair_beads_tracker_before_claim".to_owned());
     }
+    if coordination_degraded {
+        proof_obligations.push("repair_degraded_sources_before_claim".to_owned());
+    }
     if selected_candidate.is_some_and(|candidate| candidate.decision == "safe_to_claim") {
         proof_obligations.push("run_claim_gate_before_claim".to_owned());
     }
@@ -4654,6 +4688,7 @@ fn work_packet_recommended_action(
             agent_mail,
             rch,
             tracker_integrity,
+            coordination_degraded,
         ),
         confidence: selected_card.map_or("low", |card| card.confidence),
         safe_to_claim: selected_candidate.map(|candidate| {
@@ -4661,6 +4696,7 @@ fn work_packet_recommended_action(
                 && !agent_mail_blocks_claim(agent_mail)
                 && work_packet_rch_allows_claim(rch)
                 && tracker_integrity.br_reads_authoritative
+                && !coordination_degraded
         }),
         suggested_commands,
         suggested_command_actions,
@@ -4676,6 +4712,7 @@ fn work_packet_action(
     agent_mail: &SwarmWorkPacketAgentMail,
     rch: &SwarmWorkPacketRchProofPosture,
     tracker_integrity: &BeadsIntegrityReport,
+    coordination_degraded: bool,
 ) -> &'static str {
     if agent_mail.status == "semantic_readiness_failed"
         || agent_mail_recovery_is_corrupt(agent_mail)
@@ -4694,6 +4731,9 @@ fn work_packet_action(
     }
     if work_packet_rch_remote_verification_reason(rch).is_some() {
         return "prefer_static_docs_work";
+    }
+    if coordination_degraded {
+        return "coordinate_before_claim";
     }
     match candidate_decision {
         Some("safe_to_claim") => "inspect_and_claim",
@@ -9706,6 +9746,86 @@ mod tests {
             action.command_id == "swarm_work_packet_retry_with_agent_mail_snapshot"
                 && !action.mutates_state
         }));
+    }
+
+    #[test]
+    fn work_packet_claim_gate_blocks_when_memory_drift_lock_contention_is_present() {
+        let lock_degradation = degradation(
+            SwarmBriefSourceKind::MemoryDrift,
+            crate::core::memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_CODE,
+            &crate::core::memory_drift::memory_drift_lock_contention_message("swarm_brief"),
+            Some(crate::core::memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_REPAIR.to_owned()),
+        );
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.sources.push(SwarmBriefSourceSnapshot {
+            source: SwarmBriefSourceKind::MemoryDrift,
+            status: SwarmBriefSourceStatus::Unavailable,
+            freshness: SwarmBriefSourceFreshness::unknown(),
+            provenance: SwarmBriefSourceProvenance::local_probe(),
+            item_count: 0,
+            degraded: vec![lock_degradation.clone()],
+        });
+        brief.degraded = vec![lock_degradation];
+        brief.beads.ready = vec![bead("bd-lock", "Handle memory-drift lock contention", 2)];
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let gate = packet.claim_gate(Some("bd-lock"));
+
+        assert!(packet.degraded.iter().any(|degradation| {
+            degradation.code == crate::core::memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_CODE
+        }));
+        assert_eq!(
+            packet.recommended_action.safe_to_claim,
+            Some(false),
+            "lock contention means memory-drift evidence was not inspected"
+        );
+        assert_eq!(packet.recommended_action.action, "coordinate_before_claim");
+        assert!(
+            packet
+                .recommended_action
+                .reasons
+                .contains(&crate::core::memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_CODE.to_owned())
+        );
+        assert!(
+            packet
+                .recommended_action
+                .proof_obligations
+                .contains(&"repair_degraded_sources_before_claim".to_owned())
+        );
+        assert_eq!(packet.candidates[0].decision, "safe_to_claim");
+        assert!(
+            packet.candidates[0].unsafe_reasons.is_empty(),
+            "the candidate is claimable only after packet-level evidence recovers"
+        );
+        assert!(
+            packet
+                .resource_admission
+                .source_posture
+                .redaction_posture_verified
+        );
+        assert_eq!(
+            gate.source_authority.environment_verdict,
+            "coordinate_before_claim"
+        );
+        assert!(
+            !gate
+                .source_authority
+                .remote_verification_admitted
+                .unwrap_or(false),
+            "memory-drift recovery must not imply remote verification authority"
+        );
+        assert!(!gate.safe_to_claim);
+        assert_eq!(gate.verdict, "coordinate_first");
+        assert!(gate.claim_command_action.is_none());
+        assert!(
+            gate.degraded_codes
+                .contains(&crate::core::memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_CODE.to_owned())
+        );
+        assert!(
+            gate.unsafe_reasons
+                .contains(&crate::core::memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_CODE.to_owned())
+        );
     }
 
     #[test]
