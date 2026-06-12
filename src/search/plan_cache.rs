@@ -271,29 +271,11 @@ impl PlanCache {
     /// the bd-2lin9 / bd-1nan9 refactor; see `PprPrefetchCache::get`
     /// and `load_in_memory_algorithm_result` for the sibling shape.
     pub fn get(&self, key: &PlanCacheKey) -> Option<PlanCacheHit> {
-        if self.capacity == 0 {
-            self.misses.fetch_add(1, Ordering::Relaxed);
-            return None;
+        if let Some(hit) = self.get_without_miss_count(key) {
+            return Some(hit);
         }
-        if !self.entry_hash_is_valid(key) {
-            // Safety-critical contract: corrupted hits never leak;
-            // we report a miss. Eviction is deferred — the next
-            // mutating call path (`insert`, `invalidate_other_
-            // generations`, `clear`) reclaims the slot. The
-            // `invalidations` counter is bumped there instead of
-            // here so it tracks actual removals rather than
-            // observed-stale reads (which may double-count under
-            // concurrent loads).
-            self.misses.fetch_add(1, Ordering::Relaxed);
-            return None;
-        }
-        let entry = self.entries.get(key)?;
-        entry.touch(self.next_access_sequence());
-        self.hits.fetch_add(1, Ordering::Relaxed);
-        Some(PlanCacheHit {
-            plan: entry.plan.clone(),
-            plan_tree_hash: entry.plan_tree_hash.clone(),
-        })
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        None
     }
 
     /// Insert (or overwrite) the resolved plan for `key`. Returns the freshly
@@ -453,6 +435,27 @@ impl PlanCache {
         };
         compute_plan_tree_hash(key, &entry.plan) == entry.plan_tree_hash
     }
+
+    fn get_without_miss_count(&self, key: &PlanCacheKey) -> Option<PlanCacheHit> {
+        if self.capacity == 0 {
+            return None;
+        }
+        if !self.entry_hash_is_valid(key) {
+            // Safety-critical contract: corrupted hits never leak.
+            // Eviction is deferred — the next mutating call path
+            // (`insert`, `invalidate_other_generations`, `clear`)
+            // reclaims the slot and bumps `invalidations` so actual
+            // removals, not observed-stale reads, are counted.
+            return None;
+        }
+        let entry = self.entries.get(key)?;
+        entry.touch(self.next_access_sequence());
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        Some(PlanCacheHit {
+            plan: entry.plan.clone(),
+            plan_tree_hash: entry.plan_tree_hash.clone(),
+        })
+    }
 }
 
 /// Look up a compiled plan in the process-wide cache, compiling and inserting
@@ -497,11 +500,11 @@ where
     }
 
     // Re-check after acquiring the write lock: another writer may
-    // have inserted the same key while we were waiting. The recompute
-    // is idempotent for the same key, so we still call insert below
-    // even on the rare read-saw-miss-but-write-saw-hit race; the
-    // hit-counter bookkeeping in insert is unaffected.
-    if let Some(hit) = guard.get(&key) {
+    // have inserted the same key while we were waiting. Do not call
+    // the public `get` here: the shared-lock lookup already charged
+    // the miss for this logical request, and an absent write-lock
+    // recheck must not double-count it.
+    if let Some(hit) = guard.get_without_miss_count(&key) {
         return PlanCacheLookup {
             decision: PlanCacheDecision::Hit,
             plan: hit.plan,
