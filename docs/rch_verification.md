@@ -150,9 +150,10 @@ future replay ledgers. Its standalone contract fixture is
   `active_project_exclusion` with retry guidance to wait for the active build or
   coordinate with its owner. When `rch queue --json` is available at the moment
   the wrapper observes the exclusion, the blocker also carries bounded
-  operator-facing fields such as `active_build_id`, `active_command_preview`,
-  `active_command_hash`, `worker_id`, heartbeat/progress ages, `worker_posture`,
-  `retry_after_hint`, `next_action`, and `owner_escalation`. If the transcript
+  operator-facing fields such as `active_project_exclusion_count`,
+  `active_build_id`, `active_command_preview`, `active_command_hash`, `worker_id`,
+  heartbeat/progress ages, `worker_posture`, `retry_after_hint`, `next_action`,
+  and `owner_escalation`. If the transcript
   names an `active_build` id, queue enrichment prefers that matching build over
   unrelated active queue entries. The raw queue snapshot is not embedded in the
   proof.
@@ -485,7 +486,7 @@ known-blocker path applies:
 - `known_blocker.blocker_kind`: coarse blocker family, such as
   `cargo_workspace_inheritance`, `cargo_path_dependency_version`,
   `client_daemon_version_skew`, `remote_checkout_incomplete`, `worker_disk_full`,
-  or `capacity_or_timeout`.
+  `active_project_exclusion`, or `capacity_or_timeout`.
 - `known_blocker.degraded_codes`: the normalized degraded-code family that made
   the earlier run an environmental blocker.
 - `known_blocker.source_state_hash`: the dirty-state hash, committed-tree
@@ -499,6 +500,13 @@ known-blocker path applies:
 - `known_blocker.dependency` and `known_blocker.manifest_path`: optional
   dependency or manifest identity, redacted to stable path components, that made
   the topology blocker specific.
+- `known_blocker.active_project_exclusion`: optional bounded selector-admission
+  details copied from `selector_admission_probe.admission_blocker` when the
+  blocker kind is `active_project_exclusion`. This may include
+  `active_project_exclusion_count`, `active_build_id`, `active_command_hash`,
+  bounded `active_command_preview`, worker posture, and owner-coordination
+  guidance. Volatile age fields may be present for operator context but are not
+  required for matching future refusals.
 - `known_blocker.first_seen`, `known_blocker.last_seen`, `known_blocker.expires_at`,
   and `known_blocker.retry_after`: RFC 3339 timestamps that bound the refusal.
 - `known_blocker.remediation_bead`: Bead ID that owns the root remediation, for

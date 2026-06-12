@@ -3357,6 +3357,10 @@ fn selector_admission_probe_classifies_active_project_exclusion() -> TestResult 
         return Err(format!("active blocker evidence was not bounded: {probe}"));
     }
     if blocker.get("active_build_id").and_then(Value::as_u64) != Some(29879340221071365)
+        || blocker
+            .get("active_project_exclusion_count")
+            .and_then(Value::as_u64)
+            != Some(1)
         || blocker.get("worker_id").and_then(Value::as_str) != Some("trj")
         || blocker.get("worker_posture").and_then(Value::as_str) != Some("progress_stale")
         || blocker.get("heartbeat_age_secs").and_then(Value::as_u64) != Some(3)
@@ -3389,6 +3393,44 @@ fn selector_admission_probe_classifies_active_project_exclusion() -> TestResult 
             "active blocker did not preserve operator guidance: {probe}"
         ));
     }
+    let known_blocker = report["known_blocker"]
+        .as_object()
+        .ok_or_else(|| format!("active-project exclusion known blocker missing: {report}"))?;
+    if known_blocker.get("blocker_kind").and_then(Value::as_str) != Some("active_project_exclusion")
+        || known_blocker
+            .get("remediation_bead")
+            .and_then(Value::as_str)
+            != Some("bd-1n3x1.13")
+    {
+        return Err(format!(
+            "active-project exclusion should be a first-class known blocker: {report}"
+        ));
+    }
+    let known_active = known_blocker
+        .get("active_project_exclusion")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("known blocker missing active-project details: {report}"))?;
+    if known_active
+        .get("active_project_exclusion_count")
+        .and_then(Value::as_u64)
+        != Some(1)
+        || known_active.get("active_build_id").and_then(Value::as_u64) != Some(29879340221071365)
+        || known_active.get("worker_id").and_then(Value::as_str) != Some("trj")
+        || known_active.get("worker_posture").and_then(Value::as_str) != Some("progress_stale")
+        || known_active
+            .get("progress_age_secs")
+            .and_then(Value::as_u64)
+            != Some(7)
+        || known_active
+            .get("active_command_preview")
+            .and_then(Value::as_str)
+            .map(|value| value.len() <= 180)
+            != Some(true)
+    {
+        return Err(format!(
+            "known blocker did not preserve bounded active-project details: {report}"
+        ));
+    }
     let summary = report["summary_markdown"]
         .as_str()
         .ok_or_else(|| "summary missing".to_owned())?;
@@ -3396,14 +3438,119 @@ fn selector_admission_probe_classifies_active_project_exclusion() -> TestResult 
         "failure_reason=`active_project_exclusion`",
         "selector_blocker: `active_project_exclusion`",
         "retry_guidance=`wait_for_active_build_or_coordinate_with_owner`",
+        "active_project_exclusion_count=`1`",
         "active_build_id=`29879340221071365`",
         "worker_id=`trj`",
         "worker_posture=`progress_stale`",
         "progress_age_secs=`7`",
         "next_action=`wait_for_active_build_or_contact_owner_before_retry`",
+        "remediation_bead: `bd-1n3x1.13`",
+        "known_blocker_selector: `active_project_exclusion`",
     ] {
         if !summary.contains(expected) {
             return Err(format!("summary missing {expected}: {summary}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn active_project_known_blocker_refusal_keeps_selector_evidence() -> TestResult {
+    let store =
+        unique_tmp_path("rch-active-project-known-blocker-store").join("known_blockers.jsonl");
+    let store_arg = store
+        .to_str()
+        .ok_or_else(|| "known-blocker store path is not utf-8".to_owned())?;
+    let fake_output = "[RCH] local (no admissible workers: insufficient_slots=2,active_project_exclusion=2)\n\
+[RCH] remote required; refusing local fallback (no worker assigned)\n";
+    let fake_queue = r#"{
+  "data": {
+    "active_builds": [
+      {
+        "id": 29882951164493986,
+        "command": "cargo test --lib root_readme_license_and_notice_markdown_use_specific_doc_reasons",
+        "detector_build_age_secs": 410,
+        "detector_heartbeat_stale": false,
+        "detector_hook_alive": true,
+        "detector_progress_stale": true,
+        "detector_slots_owned": 2,
+        "heartbeat_age_secs": 2,
+        "progress_age_secs": 391,
+        "worker_id": "vmi1152480"
+      }
+    ],
+    "slots_available": 0,
+    "slots_total": 4,
+    "workers_healthy": 2,
+    "workers_total": 2
+  }
+}"#;
+    let args = [
+        "--known-blocker-store",
+        store_arg,
+        "--summary",
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "active_project_cache_smoke",
+    ];
+    let envs = [
+        ("RCH_VERIFY_FAKE_OUTPUT", fake_output),
+        ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+        ("RCH_VERIFY_FAKE_ELAPSED_MS", "17"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1156319,vmi1152480"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1156319,vmi1152480"),
+        ("RCH_VERIFY_FAKE_QUEUE_JSON", fake_queue),
+    ];
+
+    let (first_status, first_stdout, _first_stderr) = run_script_with_env(&args, &envs)?;
+    if first_status.success() {
+        return Err("first active-project blocker should preserve non-zero exit".to_owned());
+    }
+    let first: Value = serde_json::from_str(&first_stdout)
+        .map_err(|error| format!("parse first active known-blocker run: {error}"))?;
+    if first["known_blocker"]["blocker_kind"] != "active_project_exclusion"
+        || first["known_blocker"]["active_project_exclusion"]["active_project_exclusion_count"] != 2
+        || first["known_blocker"]["active_project_exclusion"]["active_build_id"]
+            != 29882951164493986u64
+        || first["known_blocker"]["active_project_exclusion"]["worker_posture"] != "progress_stale"
+    {
+        return Err(format!(
+            "first run did not record active-project known-blocker evidence: {first}"
+        ));
+    }
+
+    let (second_status, second_stdout, _second_stderr) = run_script_with_env(&args, &envs)?;
+    if second_status.success() {
+        return Err("second active-project known blocker should refuse before RCH".to_owned());
+    }
+    let second: Value = serde_json::from_str(&second_stdout)
+        .map_err(|error| format!("parse second active known-blocker run: {error}"))?;
+    if second["status"] != "known_blocker_refused"
+        || second["verification_attribution"] != "not_run_known_blocker"
+        || second["known_blocker"]["blocker_kind"] != "active_project_exclusion"
+        || second["known_blocker"]["remediation_bead"] != "bd-1n3x1.13"
+        || second["rch_invocation"] != serde_json::json!([])
+        || second["elapsed_ms"] != 0
+    {
+        return Err(format!(
+            "second run did not fail fast with active-project blocker evidence: {second}"
+        ));
+    }
+    let summary = second["summary_markdown"]
+        .as_str()
+        .ok_or_else(|| "second active known-blocker summary missing".to_owned())?;
+    for expected in [
+        "known_blocker_selector: `active_project_exclusion`",
+        "active_project_exclusion_count=`2`",
+        "active_build_id=`29882951164493986`",
+        "worker_id=`vmi1152480`",
+        "worker_posture=`progress_stale`",
+        "next_action=`wait_for_active_build_or_contact_owner_before_retry`",
+    ] {
+        if !summary.contains(expected) {
+            return Err(format!("second summary missing {expected}: {summary}"));
         }
     }
     Ok(())

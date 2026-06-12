@@ -143,6 +143,11 @@
               "minimum": 0,
               "description": "RCH queue build id for the active same-project build that blocked selector admission, when queue evidence was available."
             },
+            "active_project_exclusion_count": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Count reported by the selector admission failure when RCH reports active_project_exclusion=N in a compact no-admissible-workers reason."
+            },
             "active_command_preview": {
               "type": "string",
               "minLength": 1,

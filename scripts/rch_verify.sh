@@ -2676,6 +2676,17 @@ def csv_fingerprint(values):
     return [str(item) for item in values or []]
 
 def blocker_kind_for(degraded_codes):
+    selector_probe = proof.get("selector_admission_probe") if isinstance(proof, dict) else {}
+    admission_blocker = (
+        selector_probe.get("admission_blocker")
+        if isinstance(selector_probe, dict)
+        else None
+    )
+    if (
+        isinstance(admission_blocker, dict)
+        and admission_blocker.get("kind") == "active_project_exclusion"
+    ):
+        return "active_project_exclusion"
     if "rch_verify_cargo_workspace_inheritance_blocked" in degraded_codes:
         return "cargo_workspace_inheritance"
     if "rch_verify_cargo_path_dependency_version_blocked" in degraded_codes:
@@ -2739,12 +2750,25 @@ def active_project_build_ids_from_tail(combined_tail):
                 ordered_ids.append(parsed)
     return ordered_ids
 
+def active_project_exclusion_count_from_tail(combined_tail):
+    for pattern in (
+        r"\bactive_project_exclusion\s*[=:]\s*(\d+)\b",
+        r"\bactive project exclusion\s*[=:]\s*(\d+)\b",
+    ):
+        match = re.search(pattern, combined_tail, flags=re.IGNORECASE)
+        if match:
+            return int_or_none(match.group(1))
+    return None
+
 def active_project_queue_details(combined_tail):
     tail_build_ids = active_project_build_ids_from_tail(combined_tail)
     queue_data = parse_queue_snapshot()
     details = {}
     if tail_build_ids:
         details["active_build_id"] = tail_build_ids[0]
+    exclusion_count = active_project_exclusion_count_from_tail(combined_tail)
+    if exclusion_count is not None:
+        details["active_project_exclusion_count"] = exclusion_count
 
     global_numeric_fields = {
         "workers_healthy": queue_data.get("workers_healthy") if isinstance(queue_data, dict) else None,
@@ -2926,6 +2950,7 @@ def remediation_bead_for(blocker_kind):
         "all_workers_preflight_failed": "bd-17c65.10.19",
         "worker_health_threshold": "bd-37ugy",
         "remote_transport_timeout": "bd-37ugy",
+        "active_project_exclusion": "bd-1n3x1.13",
         "capacity_or_timeout": "bd-17c65.10.17",
         "topology_blocked": "bd-17c65.10.17.1.2",
         "local_fallback_refused": "bd-17c65.10.17.1",
@@ -2936,6 +2961,46 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
     source_state_hash = proof.get("source_manifest_hash") or proof.get("dirty_status_hash")
     runtime = proof.get("rch_runtime") or {}
     details = proof.get("cargo_workspace_inheritance") or proof.get("cargo_path_dependency_version") or {}
+    selector_probe = proof.get("selector_admission_probe") if isinstance(proof, dict) else {}
+    admission_blocker = (
+        selector_probe.get("admission_blocker")
+        if isinstance(selector_probe, dict)
+        else None
+    )
+    active_project_details = {}
+    if blocker_kind == "active_project_exclusion" and isinstance(admission_blocker, dict):
+        for key in (
+            "active_project_exclusion_count",
+            "active_build_id",
+            "active_command_preview",
+            "active_command_hash",
+            "worker_id",
+            "worker_posture",
+            "heartbeat_age_secs",
+            "progress_age_secs",
+            "build_age_secs",
+            "slots_owned",
+            "workers_healthy",
+            "workers_total",
+            "slots_available",
+            "slots_total",
+            "retry_after_hint",
+            "next_action",
+            "owner_escalation",
+        ):
+            value = admission_blocker.get(key)
+            if value is not None:
+                active_project_details[key] = value
+    active_project_fingerprint = {}
+    for key in (
+        "active_build_id",
+        "active_command_hash",
+        "worker_id",
+        "worker_posture",
+    ):
+        value = active_project_details.get(key)
+        if value is not None:
+            active_project_fingerprint[key] = value
     remote_timeout_fingerprint = (
         os.environ.get("REMOTE_TIMEOUT_FINGERPRINT_VALUE")
         or "build:unset,test:unset"
@@ -2967,6 +3032,7 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
         "runtime_fingerprint": runtime_fingerprint,
         "dependency": details.get("dependency") or details.get("crate"),
         "manifest_path": details.get("manifest_path") or details.get("location_searched"),
+        "active_project_exclusion": active_project_fingerprint or None,
     }
     fingerprint_payload = json.dumps(fingerprint_inputs, sort_keys=True, separators=(",", ":"))
     now = parse_time(proof.get("generated_at")) or dt.datetime.now(dt.timezone.utc)
@@ -2977,7 +3043,7 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
     if ttl_seconds < 60:
         ttl_seconds = 60
     expires_at = now + dt.timedelta(seconds=ttl_seconds)
-    return {
+    entry = {
         "schema": "ee.rch.known_blocker.v1",
         "blocker_fingerprint": "sha256:" + hashlib.sha256(fingerprint_payload.encode("utf-8")).hexdigest(),
         "blocker_kind": blocker_kind,
@@ -3001,6 +3067,9 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
         "remediation_bead": remediation_bead_for(blocker_kind),
         "override_used": False,
     }
+    if active_project_details:
+        entry["active_project_exclusion"] = active_project_details
+    return entry
 
 def persist_known_blocker(entry):
     if os.environ.get("KNOWN_BLOCKER_ENABLED") != "1":
@@ -3382,6 +3451,7 @@ if selector_probe.get("status") not in (None, "not_applicable"):
             f"retry_guidance=`{admission_blocker.get('retry_guidance') or 'unknown'}`",
         ]
         for field in (
+            "active_project_exclusion_count",
             "active_build_id",
             "worker_id",
             "worker_posture",
@@ -3420,6 +3490,27 @@ if isinstance(known_blocker, dict) and known_blocker.get("blocker_fingerprint"):
     summary_lines.append(f"- remediation_bead: `{known_blocker.get('remediation_bead') or 'unknown'}`")
     summary_lines.append(f"- retry_after: `{known_blocker.get('retry_after') or 'unknown'}`")
     summary_lines.append(f"- known_blocker_override_used: `{str(bool(known_blocker.get('override_used'))).lower()}`")
+    active_project = known_blocker.get("active_project_exclusion") or {}
+    if (
+        known_blocker.get("blocker_kind") == "active_project_exclusion"
+        and isinstance(active_project, dict)
+    ):
+        detail_parts = []
+        for field in (
+            "active_project_exclusion_count",
+            "active_build_id",
+            "worker_id",
+            "worker_posture",
+            "progress_age_secs",
+            "next_action",
+        ):
+            value = active_project.get(field)
+            if value is not None:
+                detail_parts.append(f"{field}=`{value}`")
+        summary_lines.append(
+            "- known_blocker_selector: `active_project_exclusion`"
+            + (" " + " ".join(detail_parts) if detail_parts else "")
+        )
 summary = "\n".join(summary_lines)
 
 if include_summary:
