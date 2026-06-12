@@ -805,6 +805,547 @@ pub fn suggest_unsafe_claim_decomposition(
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// bd-1n3x1.16.4 — non-mutating alternate-candidate recommender.
+//
+// This slice consumes already-collected actionable-queue/BV/gate facts and
+// ranks plausible alternates. It never shells out, never executes BV/Beads
+// claim commands, and never turns an unsafe candidate into a safe one.
+// ───────────────────────────────────────────────────────────────────────────
+
+const MAX_ALTERNATE_RECOMMENDATIONS: usize = 8;
+const MAX_CANDIDATE_DELTAS: usize = 12;
+
+/// Candidate states from `ee.swarm.unsafe_claim_plan.v1`.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnsafeClaimAlternateCandidateState {
+    FreshSafeToClaim,
+    PlausibleButRequiresGate,
+    ScannedAndUnsafe,
+    NotFound,
+    BlockedOrOwned,
+    Unknown,
+}
+
+impl UnsafeClaimAlternateCandidateState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FreshSafeToClaim => "fresh_safe_to_claim",
+            Self::PlausibleButRequiresGate => "plausible_but_requires_gate",
+            Self::ScannedAndUnsafe => "scanned_and_unsafe",
+            Self::NotFound => "not_found",
+            Self::BlockedOrOwned => "blocked_or_owned",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub const fn rank(self) -> usize {
+        match self {
+            Self::FreshSafeToClaim => 0,
+            Self::PlausibleButRequiresGate => 1,
+            Self::ScannedAndUnsafe => 2,
+            Self::BlockedOrOwned => 3,
+            Self::NotFound => 4,
+            Self::Unknown => 5,
+        }
+    }
+}
+
+/// Coarse work class used only for advisory ordering when source authority
+/// is degraded.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnsafeClaimAlternateWorkClass {
+    TrackerOnly,
+    DocsOnly,
+    ContractDesign,
+    FixtureOnly,
+    ShellOnlyNoCargo,
+    RustSource,
+    Unknown,
+}
+
+impl UnsafeClaimAlternateWorkClass {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TrackerOnly => "tracker_only",
+            Self::DocsOnly => "docs_only",
+            Self::ContractDesign => "contract_design",
+            Self::FixtureOnly => "fixture_only",
+            Self::ShellOnlyNoCargo => "shell_only_no_cargo",
+            Self::RustSource => "rust_source",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub const fn degraded_authority_rank(self) -> usize {
+        match self {
+            Self::TrackerOnly => 0,
+            Self::DocsOnly => 1,
+            Self::ContractDesign => 2,
+            Self::FixtureOnly => 3,
+            Self::ShellOnlyNoCargo => 4,
+            Self::Unknown => 5,
+            Self::RustSource => 6,
+        }
+    }
+}
+
+/// Pure input context for alternate recommendation. These fields are copied
+/// from sources the caller already gathered.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UnsafeClaimAlternatePlannerInput {
+    pub requested_candidate_id: Option<String>,
+    pub source_authority_degraded: bool,
+    pub tracker_health: String,
+    pub agent_mail_status: String,
+    pub source_freshness: String,
+    pub unsafe_path_families: Vec<String>,
+    pub candidates: Vec<UnsafeClaimAlternateCandidateFacts>,
+}
+
+/// Non-secret candidate facts from the actionable queue, BV summary, or a
+/// previously scanned claim gate.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UnsafeClaimAlternateCandidateFacts {
+    pub candidate_id: String,
+    pub title: String,
+    pub issue_type: String,
+    pub status: String,
+    pub assignee: Option<String>,
+    pub priority: Option<i64>,
+    /// Higher is better. Callers may pass BV score scaled to an integer.
+    pub score: i64,
+    pub labels: Vec<String>,
+    pub path_families: Vec<String>,
+    pub gate_verdict: Option<String>,
+    pub gate_safe_to_claim: Option<bool>,
+    pub gate_claim_command_action_present: bool,
+    pub evidence_freshness: String,
+    pub reason_group_refs: Vec<String>,
+    pub candidate_specific_deltas: Vec<String>,
+}
+
+/// Read-only command action shape aligned with the unsafe-plan schema.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsafeClaimReadOnlyCommandAction {
+    pub command_id: String,
+    pub display_command: String,
+    pub argv: Vec<String>,
+    pub shell_required: bool,
+    pub copy_safety: &'static str,
+    pub mutates_state: bool,
+    pub required_substrate: &'static str,
+    pub when: String,
+    pub rationale: String,
+}
+
+/// One ranked alternate candidate recommendation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsafeClaimAlternateRecommendation {
+    pub rank: usize,
+    pub candidate_id: String,
+    pub candidate_state: UnsafeClaimAlternateCandidateState,
+    pub work_class: UnsafeClaimAlternateWorkClass,
+    pub gate_verdict: String,
+    pub safe_to_claim: bool,
+    pub priority: i64,
+    pub score: i64,
+    pub reason_group_refs: Vec<String>,
+    pub candidate_specific_deltas: Vec<String>,
+    pub needs_fresh_claim_gate: bool,
+    /// Always false in this unsafe-plan projection. If a fresh gate already
+    /// carries a claim command, consumers should use that gate directly.
+    pub may_emit_claim_command: bool,
+    pub advisory_notes: Vec<String>,
+    pub next_command_actions: Vec<UnsafeClaimReadOnlyCommandAction>,
+}
+
+/// Bounded alternate recommendation output.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsafeClaimAlternateRecommendationPlan {
+    pub recommended_action: String,
+    pub source_authority_degraded: bool,
+    pub candidates: Vec<UnsafeClaimAlternateRecommendation>,
+    pub next_command_actions: Vec<UnsafeClaimReadOnlyCommandAction>,
+}
+
+fn normalized_path_family(path: &str) -> String {
+    path.trim()
+        .trim_start_matches("./")
+        .trim_matches('/')
+        .to_owned()
+}
+
+fn path_family_overlaps(left: &str, right: &str) -> bool {
+    let left = normalized_path_family(left);
+    let right = normalized_path_family(right);
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    left == right
+        || left.starts_with(&format!("{right}/"))
+        || right.starts_with(&format!("{left}/"))
+}
+
+fn candidate_overlaps_unsafe_surface(
+    candidate: &UnsafeClaimAlternateCandidateFacts,
+    unsafe_path_families: &[String],
+) -> Option<String> {
+    for candidate_path in &candidate.path_families {
+        for unsafe_path in unsafe_path_families {
+            if path_family_overlaps(candidate_path, unsafe_path) {
+                return Some(normalized_path_family(candidate_path));
+            }
+        }
+    }
+    None
+}
+
+fn has_label_or_title(candidate: &UnsafeClaimAlternateCandidateFacts, needle: &str) -> bool {
+    candidate
+        .labels
+        .iter()
+        .any(|label| label.to_ascii_lowercase().contains(needle))
+        || candidate.title.to_ascii_lowercase().contains(needle)
+}
+
+fn all_paths_match(
+    candidate: &UnsafeClaimAlternateCandidateFacts,
+    predicate: impl Fn(&str) -> bool,
+) -> bool {
+    !candidate.path_families.is_empty()
+        && candidate
+            .path_families
+            .iter()
+            .map(|path| normalized_path_family(path))
+            .all(|path| predicate(&path))
+}
+
+fn classify_alternate_work(
+    candidate: &UnsafeClaimAlternateCandidateFacts,
+) -> UnsafeClaimAlternateWorkClass {
+    if has_label_or_title(candidate, "tracker-only")
+        || has_label_or_title(candidate, "beads")
+        || has_label_or_title(candidate, "tracker")
+    {
+        return UnsafeClaimAlternateWorkClass::TrackerOnly;
+    }
+    if all_paths_match(candidate, |path| path.starts_with("docs")) {
+        return UnsafeClaimAlternateWorkClass::DocsOnly;
+    }
+    if has_label_or_title(candidate, "contract")
+        || has_label_or_title(candidate, "schema")
+        || has_label_or_title(candidate, "design")
+        || has_label_or_title(candidate, "adr")
+    {
+        return UnsafeClaimAlternateWorkClass::ContractDesign;
+    }
+    if has_label_or_title(candidate, "fixture")
+        || has_label_or_title(candidate, "golden")
+        || all_paths_match(candidate, |path| path.starts_with("tests/fixtures"))
+    {
+        return UnsafeClaimAlternateWorkClass::FixtureOnly;
+    }
+    if has_label_or_title(candidate, "shell-only")
+        || has_label_or_title(candidate, "no-cargo")
+        || all_paths_match(candidate, |path| path.starts_with("scripts"))
+    {
+        return UnsafeClaimAlternateWorkClass::ShellOnlyNoCargo;
+    }
+    if candidate
+        .path_families
+        .iter()
+        .map(|path| normalized_path_family(path))
+        .any(|path| path.starts_with("src") || path.starts_with("tests"))
+    {
+        return UnsafeClaimAlternateWorkClass::RustSource;
+    }
+    UnsafeClaimAlternateWorkClass::Unknown
+}
+
+fn freshness_rank(freshness: &str) -> usize {
+    match freshness {
+        "fresh" => 0,
+        "stale" => 2,
+        "unknown" => 3,
+        _ => 1,
+    }
+}
+
+fn alternate_state(
+    candidate: &UnsafeClaimAlternateCandidateFacts,
+    unsafe_path_families: &[String],
+) -> (UnsafeClaimAlternateCandidateState, Option<String>) {
+    if candidate.candidate_id.trim().is_empty() {
+        return (UnsafeClaimAlternateCandidateState::NotFound, None);
+    }
+    if candidate.status != "open"
+        || candidate
+            .assignee
+            .as_ref()
+            .is_some_and(|assignee| !assignee.trim().is_empty())
+        || candidate.issue_type == "epic"
+    {
+        return (UnsafeClaimAlternateCandidateState::BlockedOrOwned, None);
+    }
+    if let Some(overlap) = candidate_overlaps_unsafe_surface(candidate, unsafe_path_families) {
+        return (
+            UnsafeClaimAlternateCandidateState::BlockedOrOwned,
+            Some(overlap),
+        );
+    }
+    if candidate.gate_safe_to_claim == Some(true) && candidate.gate_claim_command_action_present {
+        return (UnsafeClaimAlternateCandidateState::FreshSafeToClaim, None);
+    }
+    if candidate.gate_safe_to_claim == Some(false) {
+        return (UnsafeClaimAlternateCandidateState::ScannedAndUnsafe, None);
+    }
+    (
+        UnsafeClaimAlternateCandidateState::PlausibleButRequiresGate,
+        None,
+    )
+}
+
+fn push_delta(deltas: &mut Vec<String>, value: impl Into<String>) {
+    if deltas.len() >= MAX_CANDIDATE_DELTAS {
+        return;
+    }
+    let value = value.into();
+    if !value.trim().is_empty() && !deltas.contains(&value) {
+        deltas.push(value);
+    }
+}
+
+fn bead_show_action(candidate_id: &str) -> UnsafeClaimReadOnlyCommandAction {
+    UnsafeClaimReadOnlyCommandAction {
+        command_id: format!("bead_show_candidate:{candidate_id}"),
+        display_command: format!("br show {candidate_id} --json"),
+        argv: vec![
+            "br".to_owned(),
+            "show".to_owned(),
+            candidate_id.to_owned(),
+            "--json".to_owned(),
+        ],
+        shell_required: false,
+        copy_safety: "safe_structured_argv",
+        mutates_state: false,
+        required_substrate: "beads",
+        when: "inspect_alternate_before_claim_gate".to_owned(),
+        rationale: "Inspect the alternate Bead without claiming it.".to_owned(),
+    }
+}
+
+fn claim_gate_retry_action(candidate_id: &str) -> UnsafeClaimReadOnlyCommandAction {
+    UnsafeClaimReadOnlyCommandAction {
+        command_id: format!("claim_gate_retry:{candidate_id}"),
+        display_command: format!(
+            "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate {candidate_id} --json"
+        ),
+        argv: vec![
+            "ee".to_owned(),
+            "swarm".to_owned(),
+            "work-packet".to_owned(),
+            "--workspace".to_owned(),
+            ".".to_owned(),
+            "--include-rch".to_owned(),
+            "--claim-gate".to_owned(),
+            "--candidate".to_owned(),
+            candidate_id.to_owned(),
+            "--json".to_owned(),
+        ],
+        shell_required: false,
+        copy_safety: "safe_structured_argv",
+        mutates_state: false,
+        required_substrate: "ee",
+        when: "after_inspection_before_any_claim".to_owned(),
+        rationale: "Generate a fresh read-only claim-gate verdict for this alternate.".to_owned(),
+    }
+}
+
+fn recommended_action_for(candidates: &[UnsafeClaimAlternateRecommendation]) -> &'static str {
+    if candidates.iter().any(|candidate| {
+        candidate.candidate_state == UnsafeClaimAlternateCandidateState::FreshSafeToClaim
+    }) {
+        "inspect_fresh_safe_candidate"
+    } else if candidates.iter().any(|candidate| {
+        candidate.candidate_state == UnsafeClaimAlternateCandidateState::PlausibleButRequiresGate
+    }) {
+        "gate_plausible_alternate"
+    } else {
+        "stop_or_coordinate"
+    }
+}
+
+/// Recommend alternate candidates from already-collected facts. The output is
+/// bounded, deterministic, and advisory-only; every recommended candidate
+/// either needs its own fresh claim gate or points back to an already-fresh
+/// safe gate owned by the source gate, never to a newly invented claim command.
+#[must_use]
+pub fn recommend_unsafe_claim_alternates(
+    input: &UnsafeClaimAlternatePlannerInput,
+) -> UnsafeClaimAlternateRecommendationPlan {
+    let mut candidates = Vec::new();
+    for candidate in &input.candidates {
+        let (state, overlap) = alternate_state(candidate, &input.unsafe_path_families);
+        let work_class = classify_alternate_work(candidate);
+        let priority = candidate.priority.unwrap_or(2);
+        let mut reason_group_refs = candidate.reason_group_refs.clone();
+        let mut deltas = candidate.candidate_specific_deltas.clone();
+        let needs_fresh_claim_gate = state
+            == UnsafeClaimAlternateCandidateState::PlausibleButRequiresGate
+            || state == UnsafeClaimAlternateCandidateState::ScannedAndUnsafe;
+
+        if reason_group_refs.is_empty() {
+            match state {
+                UnsafeClaimAlternateCandidateState::BlockedOrOwned => {
+                    reason_group_refs.push("rg-reservation-conflict".to_owned());
+                }
+                UnsafeClaimAlternateCandidateState::ScannedAndUnsafe => {
+                    reason_group_refs.push("rg-recommendation-mismatch".to_owned());
+                }
+                UnsafeClaimAlternateCandidateState::Unknown => {
+                    reason_group_refs.push("rg-unknown".to_owned());
+                }
+                _ => {}
+            }
+        }
+
+        push_delta(&mut deltas, format!("state:{}", state.as_str()));
+        push_delta(&mut deltas, format!("work_class:{}", work_class.as_str()));
+        push_delta(
+            &mut deltas,
+            format!("tracker_health:{}", input.tracker_health),
+        );
+        push_delta(
+            &mut deltas,
+            format!("agent_mail_status:{}", input.agent_mail_status),
+        );
+        push_delta(
+            &mut deltas,
+            format!("source_freshness:{}", input.source_freshness),
+        );
+        push_delta(
+            &mut deltas,
+            format!("evidence_freshness:{}", candidate.evidence_freshness),
+        );
+        if needs_fresh_claim_gate {
+            push_delta(&mut deltas, "needs_fresh_claim_gate");
+        }
+        if let Some(overlap) = overlap {
+            push_delta(&mut deltas, format!("overlaps_unsafe_surface:{overlap}"));
+        }
+
+        let mut advisory_notes = Vec::new();
+        advisory_notes.push("alternate_recommendation_is_advisory_only".to_owned());
+        advisory_notes.push(format!(
+            "source_freshness={}, tracker_health={}, agent_mail_status={}",
+            input.source_freshness, input.tracker_health, input.agent_mail_status
+        ));
+        if state == UnsafeClaimAlternateCandidateState::FreshSafeToClaim {
+            advisory_notes.push(
+                "fresh gate exists; use the source gate directly for any claim command".to_owned(),
+            );
+        } else if needs_fresh_claim_gate {
+            advisory_notes.push(
+                "run a fresh claim gate for this alternate before any Beads mutation".to_owned(),
+            );
+        }
+
+        let mut next_command_actions = vec![bead_show_action(&candidate.candidate_id)];
+        if state != UnsafeClaimAlternateCandidateState::BlockedOrOwned
+            && state != UnsafeClaimAlternateCandidateState::NotFound
+        {
+            next_command_actions.push(claim_gate_retry_action(&candidate.candidate_id));
+        }
+
+        candidates.push(UnsafeClaimAlternateRecommendation {
+            rank: 0,
+            candidate_id: candidate.candidate_id.clone(),
+            candidate_state: state,
+            work_class,
+            gate_verdict: candidate
+                .gate_verdict
+                .clone()
+                .unwrap_or_else(|| "not_scanned".to_owned()),
+            safe_to_claim: candidate.gate_safe_to_claim.unwrap_or(false),
+            priority,
+            score: candidate.score,
+            reason_group_refs,
+            candidate_specific_deltas: deltas,
+            needs_fresh_claim_gate,
+            may_emit_claim_command: false,
+            advisory_notes,
+            next_command_actions,
+        });
+    }
+
+    candidates.sort_by(|left, right| {
+        let left_key = (
+            left.candidate_state.rank(),
+            if input.source_authority_degraded {
+                left.work_class.degraded_authority_rank()
+            } else {
+                0
+            },
+            left.priority,
+            std::cmp::Reverse(left.score),
+            freshness_rank(
+                left.candidate_specific_deltas
+                    .iter()
+                    .find_map(|delta| delta.strip_prefix("evidence_freshness:"))
+                    .unwrap_or("unknown"),
+            ),
+            left.candidate_id.as_str(),
+        );
+        let right_key = (
+            right.candidate_state.rank(),
+            if input.source_authority_degraded {
+                right.work_class.degraded_authority_rank()
+            } else {
+                0
+            },
+            right.priority,
+            std::cmp::Reverse(right.score),
+            freshness_rank(
+                right
+                    .candidate_specific_deltas
+                    .iter()
+                    .find_map(|delta| delta.strip_prefix("evidence_freshness:"))
+                    .unwrap_or("unknown"),
+            ),
+            right.candidate_id.as_str(),
+        );
+        left_key.cmp(&right_key)
+    });
+
+    candidates.truncate(MAX_ALTERNATE_RECOMMENDATIONS);
+    for (index, candidate) in candidates.iter_mut().enumerate() {
+        candidate.rank = index + 1;
+    }
+
+    let next_command_actions = candidates
+        .first()
+        .map(|candidate| candidate.next_command_actions.clone())
+        .unwrap_or_default();
+    let recommended_action = recommended_action_for(&candidates).to_owned();
+
+    UnsafeClaimAlternateRecommendationPlan {
+        recommended_action,
+        source_authority_degraded: input.source_authority_degraded,
+        candidates,
+        next_command_actions,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1602,6 +2143,225 @@ mod tests {
         ensure(
             plan.suggested_beads.iter().all(|bead| bead.priority == 1),
             "leaves inherit the parent priority",
+        )
+    }
+
+    fn alternate_candidate(
+        id: &str,
+        title: &str,
+        priority: i64,
+        score: i64,
+        labels: &[&str],
+        paths: &[&str],
+    ) -> UnsafeClaimAlternateCandidateFacts {
+        UnsafeClaimAlternateCandidateFacts {
+            candidate_id: id.to_owned(),
+            title: title.to_owned(),
+            issue_type: "task".to_owned(),
+            status: "open".to_owned(),
+            assignee: None,
+            priority: Some(priority),
+            score,
+            labels: strings(labels),
+            path_families: strings(paths),
+            gate_verdict: None,
+            gate_safe_to_claim: None,
+            gate_claim_command_action_present: false,
+            evidence_freshness: "fresh".to_owned(),
+            reason_group_refs: Vec::new(),
+            candidate_specific_deltas: Vec::new(),
+        }
+    }
+
+    /// bd-1n3x1.16.4: when source authority is degraded, low-blast
+    /// tracker/docs/design/fixture/shell work ranks ahead of Rust source
+    /// work, and every unscanned alternate still needs its own claim gate.
+    #[test]
+    fn alternate_candidates_prefer_low_blast_radius_when_authority_degraded() -> TestResult {
+        let input = UnsafeClaimAlternatePlannerInput {
+            requested_candidate_id: Some("bd-source".to_owned()),
+            source_authority_degraded: true,
+            tracker_health: "external_changes_pending_import".to_owned(),
+            agent_mail_status: "degraded_read_only".to_owned(),
+            source_freshness: "stale".to_owned(),
+            unsafe_path_families: strings(&["src/core"]),
+            candidates: vec![
+                alternate_candidate(
+                    "bd-source",
+                    "unsafe source implementation leaf",
+                    1,
+                    90,
+                    &["rust"],
+                    &["src/core"],
+                ),
+                alternate_candidate(
+                    "bd-docs",
+                    "docs-only unsafe plan notes",
+                    1,
+                    80,
+                    &["docs"],
+                    &["docs/swarm"],
+                ),
+                alternate_candidate(
+                    "bd-tracker",
+                    "tracker-only closeout hygiene",
+                    2,
+                    10,
+                    &["tracker-only"],
+                    &[],
+                ),
+                alternate_candidate(
+                    "bd-fixture",
+                    "fixture-only unsafe plan coverage",
+                    1,
+                    100,
+                    &["fixture-only"],
+                    &["tests/fixtures/swarm"],
+                ),
+            ],
+        };
+
+        let plan = recommend_unsafe_claim_alternates(&input);
+        ensure(
+            plan.recommended_action == "gate_plausible_alternate",
+            format!("unexpected recommended action {}", plan.recommended_action),
+        )?;
+        let ids: Vec<&str> = plan
+            .candidates
+            .iter()
+            .map(|candidate| candidate.candidate_id.as_str())
+            .collect();
+        ensure(
+            ids == vec!["bd-tracker", "bd-docs", "bd-fixture", "bd-source"],
+            format!("degraded-authority alternate order drifted: {ids:?}"),
+        )?;
+        ensure(
+            plan.candidates
+                .iter()
+                .filter(|candidate| {
+                    candidate.candidate_state
+                        == UnsafeClaimAlternateCandidateState::PlausibleButRequiresGate
+                })
+                .all(|candidate| {
+                    candidate.needs_fresh_claim_gate && !candidate.may_emit_claim_command
+                }),
+            "plausible alternates must require a fresh gate and emit no claim command",
+        )?;
+        let top = plan.candidates.first().ok_or("missing top alternate")?;
+        ensure(
+            top.next_command_actions.iter().any(|action| {
+                action.argv == strings(&["br", "show", "bd-tracker", "--json"])
+                    && !action.mutates_state
+            }),
+            "top alternate must include a read-only br show action",
+        )?;
+        ensure(
+            top.next_command_actions.iter().any(|action| {
+                action.argv
+                    == strings(&[
+                        "ee",
+                        "swarm",
+                        "work-packet",
+                        "--workspace",
+                        ".",
+                        "--include-rch",
+                        "--claim-gate",
+                        "--candidate",
+                        "bd-tracker",
+                        "--json",
+                    ])
+                    && !action.mutates_state
+            }),
+            "top alternate must include a read-only claim-gate retry action",
+        )
+    }
+
+    /// bd-1n3x1.16.4: if every alternate is owned, blocked, epic, or
+    /// already scanned unsafe, the planner stops instead of inventing work.
+    #[test]
+    fn alternate_candidate_plan_stops_when_no_plausible_alternate_exists() -> TestResult {
+        let mut owned = alternate_candidate("bd-owned", "owned leaf", 1, 50, &[], &["docs"]);
+        owned.assignee = Some("OtherAgent".to_owned());
+        let mut epic = alternate_candidate("bd-epic", "rollup", 1, 90, &[], &[]);
+        epic.issue_type = "epic".to_owned();
+        let mut scanned = alternate_candidate("bd-scanned", "scanned unsafe", 1, 70, &[], &[]);
+        scanned.gate_verdict = Some("unsafe_due_to_conflict".to_owned());
+        scanned.gate_safe_to_claim = Some(false);
+        scanned.reason_group_refs = vec!["rg-tracker-authority".to_owned()];
+
+        let plan = recommend_unsafe_claim_alternates(&UnsafeClaimAlternatePlannerInput {
+            requested_candidate_id: Some("bd-requested".to_owned()),
+            source_authority_degraded: true,
+            tracker_health: "stale".to_owned(),
+            agent_mail_status: "unavailable".to_owned(),
+            source_freshness: "unknown".to_owned(),
+            unsafe_path_families: strings(&[]),
+            candidates: vec![owned, epic, scanned],
+        });
+
+        ensure(
+            plan.recommended_action == "stop_or_coordinate",
+            format!(
+                "expected stop_or_coordinate, got {}",
+                plan.recommended_action
+            ),
+        )?;
+        ensure(
+            !plan.candidates.iter().any(|candidate| {
+                candidate.candidate_state
+                    == UnsafeClaimAlternateCandidateState::PlausibleButRequiresGate
+                    || candidate.candidate_state
+                        == UnsafeClaimAlternateCandidateState::FreshSafeToClaim
+            }),
+            "no plausible or fresh-safe candidates should be invented",
+        )?;
+        ensure(
+            plan.candidates
+                .iter()
+                .all(|candidate| !candidate.may_emit_claim_command),
+            "unsafe-plan alternates never emit claim commands",
+        )
+    }
+
+    /// bd-1n3x1.16.4: deterministic ordering within a class is priority,
+    /// then score, evidence freshness, and candidate id.
+    #[test]
+    fn alternate_candidate_tie_breaks_are_deterministic() -> TestResult {
+        let mut stale = alternate_candidate("bd-stale", "docs leaf", 1, 90, &["docs"], &["docs"]);
+        stale.evidence_freshness = "stale".to_owned();
+        let mut fresh_b = alternate_candidate("bd-b", "docs leaf", 1, 90, &["docs"], &["docs"]);
+        fresh_b.evidence_freshness = "fresh".to_owned();
+        let mut fresh_a = alternate_candidate("bd-a", "docs leaf", 1, 90, &["docs"], &["docs"]);
+        fresh_a.evidence_freshness = "fresh".to_owned();
+        let lower_priority =
+            alternate_candidate("bd-priority2", "docs leaf", 2, 500, &["docs"], &["docs"]);
+        let lower_score =
+            alternate_candidate("bd-low-score", "docs leaf", 1, 50, &["docs"], &["docs"]);
+
+        let plan = recommend_unsafe_claim_alternates(&UnsafeClaimAlternatePlannerInput {
+            requested_candidate_id: None,
+            source_authority_degraded: false,
+            tracker_health: "fresh".to_owned(),
+            agent_mail_status: "fresh".to_owned(),
+            source_freshness: "fresh".to_owned(),
+            unsafe_path_families: Vec::new(),
+            candidates: vec![stale, fresh_b, lower_priority, lower_score, fresh_a],
+        });
+        let ids: Vec<&str> = plan
+            .candidates
+            .iter()
+            .map(|candidate| candidate.candidate_id.as_str())
+            .collect();
+        ensure(
+            ids == vec!["bd-a", "bd-b", "bd-stale", "bd-low-score", "bd-priority2"],
+            format!("tie-break order drifted: {ids:?}"),
+        )?;
+        ensure(
+            plan.candidates
+                .iter()
+                .enumerate()
+                .all(|(index, candidate)| candidate.rank == index + 1),
+            "rank fields must match emitted order",
         )
     }
 }
