@@ -15,7 +15,6 @@
 //! describes the evidence files, their checksums, and verification status.
 
 use std::fmt;
-use std::path::{Component, Path};
 
 use super::{ClaimId, DemoId, EvidenceId, PolicyId, TraceId};
 
@@ -583,12 +582,15 @@ pub fn is_valid_artifact_path(path: &str) -> bool {
         return false;
     }
 
+    // Walk raw `/` segments instead of Path::components(): components()
+    // normalizes interior `./` away, silently accepting non-normalized
+    // paths the portable-manifest contract requires us to reject.
     let mut saw_component = false;
-    for component in Path::new(path).components() {
-        match component {
-            Component::Normal(_) => saw_component = true,
-            _ => return false,
+    for segment in path.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return false;
         }
+        saw_component = true;
     }
 
     saw_component

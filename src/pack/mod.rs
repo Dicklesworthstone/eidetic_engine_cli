@@ -6762,6 +6762,12 @@ fn select_facility_lod_candidate_index(
         let Some(candidate) = profile.candidate.as_ref() else {
             continue;
         };
+        // Mirror facility_queue_entry's guard: a zero-token ORIGINAL is a
+        // degenerate estimate and must not be resurrected by a >=1-token
+        // truncated-preview/link-only plan into an infinite-gain pick.
+        if candidate.estimated_tokens == 0 {
+            continue;
+        }
         let Some(plan) = pack_lod_candidate_plan(
             candidate,
             used_tokens,

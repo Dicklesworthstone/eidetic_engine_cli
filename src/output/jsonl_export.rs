@@ -239,33 +239,44 @@ pub fn redact_content(content: &str, level: RedactionLevel) -> String {
 
 /// Redact file paths in content.
 fn redact_paths_in_content(content: &str) -> String {
-    let mut result = content.to_owned();
-    for prefix in SENSITIVE_PATH_PREFIXES {
-        if result.contains(prefix) {
-            let mut redacted = String::with_capacity(result.len());
-            for segment in result.split_inclusive('\n') {
-                let (line, terminator) = segment
-                    .strip_suffix('\n')
-                    .map_or((segment, ""), |line| (line, "\n"));
-                if line.contains(prefix) {
-                    redacted.push_str(&redact_paths_in_line(line, prefix));
-                    redacted.push_str(terminator);
-                } else {
-                    redacted.push_str(segment);
-                }
-            }
-            result = redacted;
+    if !SENSITIVE_PATH_PREFIXES
+        .iter()
+        .any(|prefix| content.contains(prefix))
+    {
+        return content.to_owned();
+    }
+    // One pass per line matching ALL prefixes positionally: sequential
+    // per-prefix passes half-redact nested paths (`/tmp/private/file`
+    // loses its tail to the `/private/` pass, stranding a bare `/tmp`
+    // the `/tmp/` pass can no longer match).
+    let mut redacted = String::with_capacity(content.len());
+    for segment in content.split_inclusive('\n') {
+        let (line, terminator) = segment
+            .strip_suffix('\n')
+            .map_or((segment, ""), |line| (line, "\n"));
+        if SENSITIVE_PATH_PREFIXES
+            .iter()
+            .any(|prefix| line.contains(prefix))
+        {
+            redacted.push_str(&redact_paths_in_line(line));
+            redacted.push_str(terminator);
+        } else {
+            redacted.push_str(segment);
         }
     }
-    result
+    redacted
 }
 
-fn redact_paths_in_line(line: &str, prefix: &str) -> String {
+fn redact_paths_in_line(line: &str) -> String {
     let mut output = String::new();
     let mut cursor = 0;
     while cursor < line.len() {
         let remaining = &line[cursor..];
-        if remaining.starts_with(prefix) {
+        let matched_prefix = SENSITIVE_PATH_PREFIXES
+            .iter()
+            .filter(|prefix| remaining.starts_with(*prefix))
+            .max_by_key(|prefix| prefix.len());
+        if let Some(prefix) = matched_prefix {
             output.push_str(REDACTED_PATH_PLACEHOLDER);
             cursor += prefix.len();
             let mut saw_separator_after_prefix = false;
