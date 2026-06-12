@@ -666,6 +666,42 @@ The implementation must not: fall back to local Cargo, mutate workers, restart
 daemons, perform destructive cleanup, or create worktrees, stashes, resets, or
 checkouts. Evidence is read-only; remediation is routed to owners.
 
+## Mac Lane Doctor: USB-Detached Dual Blocker (bd-2qpgn)
+
+On the Mac checkout, the external build drive being detached produces a
+host-environment state where the verifier refuses before Cargo for **every**
+command, in two different ways depending on the Cargo.toml path form:
+
+- an absolute `/data/projects/<dep>` patch path passes the dependency
+  planner's textual allowed-root check but dies in sibling rsync (`/data`
+  dangles, ENOENT);
+- a relative `../<dep>` path whose `projects/<dep>` entry is a symlink into
+  the user dp dir canonicalizes outside the default canonical root and the
+  planner refuses with `RCH-E327`.
+
+`scripts/rch_lane_doctor.sh` is the read-only detector for this state. It
+classifies the lane (`healthy` / `usb_detached_dual_blocker` /
+`indeterminate`), reports every `[patch.crates-io]` sibling root with its
+canonical path, and recommends the dispatch-local env override that was
+empirically verified on 2026-06-12 (bd-2qpgn): broaden the topology roots so
+both subtrees sit under one canonical root.
+
+```bash
+scripts/rch_lane_doctor.sh --json
+eval "$(scripts/rch_lane_doctor.sh --emit-env)" && \
+  TMPDIR=/private/tmp RCH_VISIBILITY=summary RCH_TEST_TIMEOUT_SEC=3600 \
+  scripts/rch_verify.sh --summary -- cargo test --lib
+```
+
+`--emit-env` prints export lines only when the dual blocker is active (exit
+2); a healthy lane emits nothing (exit 0). The override changes the RCH
+project hash (fresh lane, cold first build — keep `RCH_TEST_TIMEOUT_SEC=3600`
+on first dispatches or the remote 1800s test budget times out mid-compile
+with `RCH-E104`) and applies to the dispatch environment only — Cargo.toml
+keeps the bd-12ps0 sibling-relative convention, and nothing on the workers or
+in the repo changes. Reattaching the drive restores the default lane and the
+override becomes unnecessary.
+
 ## Beads and Agent Mail Templates
 
 For Beads comments, paste the summary plus the fields that make attribution
