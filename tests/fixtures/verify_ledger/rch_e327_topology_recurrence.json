@@ -1,0 +1,42 @@
+{
+  "schema": "ee.rch.verify.v1",
+  "command_text": "cargo test --lib",
+  "command_kind": "cargo_test_lib",
+  "bead_id": "bd-239z6",
+  "success": false,
+  "exit_code": null,
+  "remote_required": true,
+  "worker_id": null,
+  "error_codes": [
+    "RCH-E327"
+  ],
+  "source_state": {
+    "git_head": "4f2c9d1e8a7b65430f1e2d3c4b5a69788796a5b4",
+    "git_tree": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+    "dirty_status_hash": "sha256:9c4f1e2d3b5a6978879695a4b3c2d1e0f1a2b3c4d5e6f708192a3b4c5d6e7f80",
+    "verification_attribution": "cc-graph",
+    "remote_source_materialized": false,
+    "source_materialization": "none"
+  },
+  "degraded_codes": [
+    "rch_verify_topology_blocked",
+    "rch_verify_local_fallback_refused"
+  ],
+  "stdout_tail": "",
+  "stderr_tail": "RCH-E327: Path dependency topology policy failed; move dependencies under /data/projects (or /dp) and retry.\nremote required; refusing local fallback\n",
+  "selector_admission_probe": {
+    "schema": "ee.rch.selector_admission_probe.v1",
+    "status": "selection_failed",
+    "required_runtime": "Rust",
+    "selected_worker": null,
+    "selection_failure_reason": "topology_blocked",
+    "remote_required": true,
+    "local_fallback_refused": true,
+    "admission_blocker": null
+  },
+  "known_blocker": {
+    "blocker_fingerprint": "sha256:2d65a1881c41fb5e52c8b3e7ed7ac95085c25dfab7ab1a302471938fed165fc4",
+    "remediation_bead": "bd-17c65.10.17.1.2",
+    "retry_after": "2026-06-09T20:24:29.320084Z"
+  }
+}

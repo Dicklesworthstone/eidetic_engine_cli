@@ -24,6 +24,7 @@ pub const RCH_VERIFY_LEDGER_INGEST_REPORT_SCHEMA_V1: &str = "ee.rch.verify.inges
 pub const RCH_VERIFY_LEDGER_RUNS_REPORT_SCHEMA_V1: &str = "ee.rch.verify.runs.v1";
 pub const RCH_VERIFY_LEDGER_BLOCKERS_REPORT_SCHEMA_V1: &str = "ee.rch.verify.blockers.v1";
 pub const RCH_VERIFY_LEDGER_STATUS_SCHEMA_V1: &str = "ee.rch.verify.ledger_status.v1";
+pub const RCH_VERIFY_LEDGER_RECURRENCE_REPORT_SCHEMA_V1: &str = "ee.rch.verify.recurrence.v1";
 pub const RCH_VERIFY_LEDGER_TAIL_MAX_BYTES: usize = 8192;
 pub const RCH_VERIFY_LEDGER_COMMAND_TEXT_MAX_BYTES: usize = 4096;
 pub const RCH_VERIFY_LEDGER_DEGRADED_JSON_MAX_BYTES: usize = 4096;
@@ -121,6 +122,33 @@ pub struct RchVerifyBlockersReport {
     pub schema: &'static str,
     pub blockers: Vec<RchVerifyRunView>,
     pub blocker_count: usize,
+}
+
+/// Read-only recurrence diagnostic for one `ee.rch.verify.v1` proof
+/// (bd-b1e4v.1). Classifies whether the run was blocked by the verification
+/// environment before Cargo ran on materialized remote source, and whether
+/// the active blocker recurs under a remediation bead the tracker already
+/// closed. An environment blocker is never evidence about the source bead:
+/// `source_closeable` stays false for every status except `passed`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RchVerifyRecurrenceReport {
+    pub schema: &'static str,
+    pub classification: &'static str,
+    pub status: String,
+    pub recurs_closed_remediation: bool,
+    pub closed_remediation_refs: Vec<String>,
+    pub active_blocker_fingerprint: Option<String>,
+    pub remediation_bead: Option<String>,
+    pub retry_after: Option<String>,
+    pub source_materialization: Option<String>,
+    pub remote_source_materialized: Option<bool>,
+    pub selected_worker: Option<String>,
+    pub local_fallback_refused: bool,
+    pub source_closeable: bool,
+    pub blocker_string: Option<String>,
+    pub error_codes: Vec<String>,
+    pub degraded_codes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -402,6 +430,120 @@ pub fn parse_rch_verify_v1(
         remediation_bead,
         retry_after,
     })
+}
+
+/// Classify recurrence evidence for one `ee.rch.verify.v1` proof JSON value.
+///
+/// `closed_remediation_beads` is caller-supplied tracker knowledge: the set
+/// of remediation bead ids known to be closed. The detector itself never
+/// reads the tracker — bd-b1e4v.1 keeps this surface pure and read-only;
+/// joining live tracker/proof-broker state belongs to bd-b1e4v.4. A blocked
+/// run whose `known_blocker.remediation_bead` appears in that set is a
+/// recurrence of a supposedly remediated blocker, regardless of which error
+/// code produced it (RCH-E327 topology and capacity/queue-timeout blockers
+/// both recur this way with distinct root causes).
+pub fn classify_rch_verify_recurrence(
+    value: &JsonValue,
+    closed_remediation_beads: &[String],
+) -> Result<RchVerifyRecurrenceReport, RchVerifyLedgerParseError> {
+    let row = parse_rch_verify_v1(value)?;
+    let source_state = value.get("source_state").and_then(JsonValue::as_object);
+    let remote_source_materialized = source_state
+        .and_then(|obj| obj.get("remote_source_materialized"))
+        .and_then(JsonValue::as_bool);
+    let source_materialization = source_state
+        .and_then(|obj| obj.get("source_materialization"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .map(str::to_owned);
+
+    let probe = value
+        .get("selector_admission_probe")
+        .and_then(JsonValue::as_object);
+    let selected_worker = probe
+        .and_then(|obj| obj.get("selected_worker"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .map(str::to_owned)
+        .or_else(|| row.worker_id.clone());
+    let local_fallback_refused = probe
+        .and_then(|obj| obj.get("local_fallback_refused"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false)
+        || row
+            .degraded_codes
+            .iter()
+            .any(|code| code == "rch_verify_local_fallback_refused");
+
+    let error_codes: Vec<String> = value
+        .get("error_codes")
+        .and_then(JsonValue::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .map(str::trim)
+                .filter(|raw| !raw.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let blocker_string = first_line_with_any_code(row.stderr_tail.as_deref(), &error_codes)
+        .or_else(|| first_line_with_any_code(row.stdout_tail.as_deref(), &error_codes));
+
+    let classification = match row.status.as_str() {
+        "blocked" => {
+            if remote_source_materialized == Some(true) {
+                "environment_blocked_after_materialization"
+            } else {
+                "environment_blocked_before_cargo"
+            }
+        }
+        "fallback_detected" => "local_fallback_detected",
+        "passed" | "failed" => "source_outcome",
+        _ => "indeterminate",
+    };
+    let closed_remediation_refs = row
+        .remediation_bead
+        .as_deref()
+        .filter(|bead| closed_remediation_beads.iter().any(|closed| closed == bead))
+        .map(|bead| vec![bead.to_owned()])
+        .unwrap_or_default();
+    let recurs_closed_remediation = row.status == "blocked" && !closed_remediation_refs.is_empty();
+
+    Ok(RchVerifyRecurrenceReport {
+        schema: RCH_VERIFY_LEDGER_RECURRENCE_REPORT_SCHEMA_V1,
+        classification,
+        status: row.status.clone(),
+        recurs_closed_remediation,
+        closed_remediation_refs,
+        active_blocker_fingerprint: row.blocker_fingerprint.clone(),
+        remediation_bead: row.remediation_bead.clone(),
+        retry_after: row.retry_after.clone(),
+        source_materialization,
+        remote_source_materialized,
+        selected_worker,
+        local_fallback_refused,
+        source_closeable: row.status == "passed",
+        blocker_string,
+        error_codes,
+        degraded_codes: row.degraded_codes,
+    })
+}
+
+/// Return the first tail line that carries one of the proof's extracted
+/// error codes, preserving the line exactly (only the trailing newline is
+/// trimmed) so downstream consumers can match the blocker verbatim.
+fn first_line_with_any_code(tail: Option<&str>, error_codes: &[String]) -> Option<String> {
+    let tail = tail?;
+    if error_codes.is_empty() {
+        return None;
+    }
+    tail.lines()
+        .find(|line| error_codes.iter().any(|code| line.contains(code.as_str())))
+        .map(|line| line.trim_end().to_owned())
 }
 
 /// Parse and ingest one RCH verifier proof into the durable ledger.
@@ -1016,6 +1158,115 @@ mod tests {
         ]);
         let row = parse_rch_verify_v1(&proof).expect("parse");
         assert_eq!(row.status, "blocked");
+    }
+
+    fn blocked_topology_recurrence_proof() -> JsonValue {
+        let mut proof = baseline_success();
+        proof["success"] = json!(false);
+        proof["exit_code"] = JsonValue::Null;
+        proof["worker_id"] = JsonValue::Null;
+        proof["error_codes"] = json!(["RCH-E327"]);
+        proof["degraded_codes"] = json!([
+            "rch_verify_topology_blocked",
+            "rch_verify_local_fallback_refused"
+        ]);
+        proof["stderr_tail"] = json!(
+            "RCH-E327: Path dependency topology policy failed; move dependencies under /data/projects (or /dp) and retry.\nremote required; refusing local fallback\n"
+        );
+        proof["source_state"]["remote_source_materialized"] = json!(false);
+        proof["source_state"]["source_materialization"] = json!("none");
+        proof["selector_admission_probe"] = json!({
+            "schema": "ee.rch.selector_admission_probe.v1",
+            "status": "selection_failed",
+            "selected_worker": null,
+            "selection_failure_reason": "topology_blocked",
+            "remote_required": true,
+            "local_fallback_refused": true
+        });
+        proof["known_blocker"] = json!({
+            "blocker_fingerprint": "sha256:2d65a1881c41fb5e52c8b3e7ed7ac95085c25dfab7ab1a302471938fed165fc4",
+            "remediation_bead": "bd-17c65.10.17.1.2",
+            "retry_after": "2026-06-09T20:24:29.320084Z"
+        });
+        proof
+    }
+
+    #[test]
+    fn recurrence_flags_blocked_run_against_closed_remediation() {
+        let proof = blocked_topology_recurrence_proof();
+        let closed = vec!["bd-17c65.10.17.1.2".to_owned()];
+        let report = classify_rch_verify_recurrence(&proof, &closed).expect("classify");
+        assert_eq!(report.schema, RCH_VERIFY_LEDGER_RECURRENCE_REPORT_SCHEMA_V1);
+        assert_eq!(report.classification, "environment_blocked_before_cargo");
+        assert!(report.recurs_closed_remediation);
+        assert_eq!(report.closed_remediation_refs, closed);
+        assert_eq!(
+            report.active_blocker_fingerprint.as_deref(),
+            Some("sha256:2d65a1881c41fb5e52c8b3e7ed7ac95085c25dfab7ab1a302471938fed165fc4")
+        );
+        assert_eq!(
+            report.retry_after.as_deref(),
+            Some("2026-06-09T20:24:29.320084Z")
+        );
+        assert_eq!(report.source_materialization.as_deref(), Some("none"));
+        assert_eq!(report.remote_source_materialized, Some(false));
+        assert_eq!(report.selected_worker, None);
+        assert!(report.local_fallback_refused);
+        assert!(!report.source_closeable);
+        assert_eq!(
+            report.blocker_string.as_deref(),
+            Some(
+                "RCH-E327: Path dependency topology policy failed; move dependencies under /data/projects (or /dp) and retry."
+            )
+        );
+    }
+
+    #[test]
+    fn recurrence_without_tracker_knowledge_still_refuses_closeout() {
+        let proof = blocked_topology_recurrence_proof();
+        let report = classify_rch_verify_recurrence(&proof, &[]).expect("classify");
+        assert!(!report.recurs_closed_remediation);
+        assert!(report.closed_remediation_refs.is_empty());
+        assert_eq!(report.classification, "environment_blocked_before_cargo");
+        assert!(!report.source_closeable);
+    }
+
+    #[test]
+    fn recurrence_passed_run_is_source_closeable_and_not_recurrence() {
+        let report =
+            classify_rch_verify_recurrence(&baseline_success(), &["bd-17c65.10.17.1.2".to_owned()])
+                .expect("classify");
+        assert_eq!(report.classification, "source_outcome");
+        assert!(!report.recurs_closed_remediation);
+        assert!(report.source_closeable);
+        assert_eq!(report.selected_worker.as_deref(), Some("worker-01"));
+        assert!(!report.local_fallback_refused);
+        assert!(report.blocker_string.is_none());
+    }
+
+    #[test]
+    fn recurrence_report_serializes_bead_contract_field_names() {
+        let proof = blocked_topology_recurrence_proof();
+        let closed = vec!["bd-17c65.10.17.1.2".to_owned()];
+        let report = classify_rch_verify_recurrence(&proof, &closed).expect("classify");
+        let value = serde_json::to_value(&report).expect("serialize");
+        for key in [
+            "recursClosedRemediation",
+            "closedRemediationRefs",
+            "activeBlockerFingerprint",
+            "retryAfter",
+            "sourceMaterialization",
+            "remoteSourceMaterialized",
+            "selectedWorker",
+            "localFallbackRefused",
+            "sourceCloseable",
+            "blockerString",
+        ] {
+            assert!(
+                value.get(key).is_some(),
+                "recurrence report must serialize stable field {key}"
+            );
+        }
     }
 
     #[test]

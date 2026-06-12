@@ -1,0 +1,40 @@
+{
+  "schema": "ee.rch.verify.v1",
+  "command_text": "cargo test --lib",
+  "command_kind": "cargo_test_lib",
+  "bead_id": null,
+  "success": false,
+  "exit_code": null,
+  "remote_required": true,
+  "worker_id": null,
+  "error_codes": [],
+  "source_state": {
+    "git_head": "7e6d5c4b3a29180f7e6d5c4b3a29180f7e6d5c4b",
+    "git_tree": "0192a3b4c5d6e7f80192a3b4c5d6e7f80192a3b4",
+    "dirty_status_hash": "sha256:5a6978879695a4b3c2d1e0f1a2b3c4d5e6f708192a3b4c5d6e7f809c4f1e2d3",
+    "verification_attribution": "cc-graph",
+    "remote_source_materialized": false,
+    "source_materialization": "none"
+  },
+  "degraded_codes": [
+    "rch_verify_capacity_or_timeout",
+    "rch_verify_local_fallback_refused"
+  ],
+  "stdout_tail": "",
+  "stderr_tail": "selector: queue_timeout after 300s waiting for a build slot (0/4 slots free, queue empty)\nremote required; refusing local fallback\n",
+  "selector_admission_probe": {
+    "schema": "ee.rch.selector_admission_probe.v1",
+    "status": "selection_failed",
+    "required_runtime": "Rust",
+    "selected_worker": null,
+    "selection_failure_reason": "capacity_or_timeout",
+    "remote_required": true,
+    "local_fallback_refused": true,
+    "admission_blocker": null
+  },
+  "known_blocker": {
+    "blocker_fingerprint": "sha256:5def3292cd0e9ca40a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071",
+    "remediation_bead": "bd-17c65.10.17",
+    "retry_after": "2026-06-10T15:31:00.000000Z"
+  }
+}

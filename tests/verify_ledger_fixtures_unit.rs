@@ -11,6 +11,11 @@
 //!   * malformed verifier JSON (wrong schema id)
 //!   * duplicate ingest
 //!
+//! bd-b1e4v.1 adds two recurrence fixtures (RCH-E327 topology from the
+//! bd-239z6 wrapper evidence and a capacity/queue-timeout blocker whose
+//! closed remediation recurred with a different root cause) exercised
+//! through `classify_rch_verify_recurrence`.
+//!
 //! Each fixture lives under `tests/fixtures/verify_ledger/` and is
 //! exercised here through `ee::core::verify_ledger::{parse_rch_verify_v1,
 //! ingest_rch_verify_v1, list_rch_verify_runs, list_rch_verify_blockers}`.
@@ -25,7 +30,8 @@ use std::path::{Path, PathBuf};
 
 use ee::core::verify_ledger::{
     RCH_VERIFY_LEDGER_BLOCKERS_REPORT_SCHEMA_V1, RCH_VERIFY_LEDGER_INGEST_REPORT_SCHEMA_V1,
-    RCH_VERIFY_LEDGER_RUNS_REPORT_SCHEMA_V1, RchVerifyLedgerError, RchVerifyLedgerParseError,
+    RCH_VERIFY_LEDGER_RECURRENCE_REPORT_SCHEMA_V1, RCH_VERIFY_LEDGER_RUNS_REPORT_SCHEMA_V1,
+    RchVerifyLedgerError, RchVerifyLedgerParseError, classify_rch_verify_recurrence,
     ingest_rch_verify_v1, list_rch_verify_blockers, list_rch_verify_runs, parse_rch_verify_v1,
 };
 use ee::db::{CreateWorkspaceInput, DbConnection};
@@ -45,6 +51,10 @@ const FIXTURE_WRONG_SCHEMA: &str =
     include_str!("fixtures/verify_ledger/malformed_envelope_wrong_schema.json");
 const FIXTURE_DUPLICATE_SOURCE: &str =
     include_str!("fixtures/verify_ledger/duplicate_ingest_source.json");
+const FIXTURE_TOPOLOGY_RECURRENCE: &str =
+    include_str!("fixtures/verify_ledger/rch_e327_topology_recurrence.json");
+const FIXTURE_CAPACITY_RECURRENCE: &str =
+    include_str!("fixtures/verify_ledger/rch_capacity_timeout_recurrence.json");
 
 const TEST_WORKSPACE_ID: &str = "wsp_verify_ledger_fixtures_30c";
 const T_SUCCESS: &str = "2026-05-23T05:00:00Z";
@@ -108,6 +118,8 @@ fn fixture_files_are_under_versioned_directory() -> TestResult {
         "local_fallback_detected.json",
         "malformed_envelope_wrong_schema.json",
         "duplicate_ingest_source.json",
+        "rch_e327_topology_recurrence.json",
+        "rch_capacity_timeout_recurrence.json",
     ] {
         let path = dir.join(fixture);
         if !path.is_file() {
@@ -285,6 +297,178 @@ fn malformed_envelope_fixture_returns_unexpected_schema_error() -> TestResult {
 }
 
 #[test]
+fn topology_recurrence_fixture_classifies_as_recurrence_blocked_before_cargo() -> TestResult {
+    let value = parse_fixture(FIXTURE_TOPOLOGY_RECURRENCE)?;
+    let closed = vec!["bd-17c65.10.17.1.2".to_owned()];
+    let report = classify_rch_verify_recurrence(&value, &closed)
+        .map_err(|error| format!("classify topology recurrence: {error}"))?;
+    if report.schema != RCH_VERIFY_LEDGER_RECURRENCE_REPORT_SCHEMA_V1 {
+        return Err(format!("recurrence schema drifted: {}", report.schema));
+    }
+    if report.classification != "environment_blocked_before_cargo" {
+        return Err(format!(
+            "bd-239z6 evidence must classify as environment_blocked_before_cargo, got {}",
+            report.classification
+        ));
+    }
+    if !report.recurs_closed_remediation {
+        return Err("blocked run against closed bd-17c65.10.17.1.2 must recur".into());
+    }
+    if report.closed_remediation_refs != ["bd-17c65.10.17.1.2"] {
+        return Err(format!(
+            "closedRemediationRefs must name the closed remediation bead, got {:?}",
+            report.closed_remediation_refs
+        ));
+    }
+    if report.active_blocker_fingerprint.as_deref()
+        != Some("sha256:2d65a1881c41fb5e52c8b3e7ed7ac95085c25dfab7ab1a302471938fed165fc4")
+    {
+        return Err(format!(
+            "activeBlockerFingerprint must be preserved exactly, got {:?}",
+            report.active_blocker_fingerprint
+        ));
+    }
+    if report.retry_after.as_deref() != Some("2026-06-09T20:24:29.320084Z") {
+        return Err(format!(
+            "retryAfter must be preserved, got {:?}",
+            report.retry_after
+        ));
+    }
+    if report.remote_source_materialized != Some(false) {
+        return Err(format!(
+            "remoteSourceMaterialized must be false, got {:?}",
+            report.remote_source_materialized
+        ));
+    }
+    if report.source_materialization.as_deref() != Some("none") {
+        return Err(format!(
+            "sourceMaterialization must be preserved, got {:?}",
+            report.source_materialization
+        ));
+    }
+    if report.selected_worker.is_some() {
+        return Err(format!(
+            "no worker was selected; got {:?}",
+            report.selected_worker
+        ));
+    }
+    if !report.local_fallback_refused {
+        return Err("localFallbackRefused must be true".into());
+    }
+    if report.source_closeable {
+        return Err("an environment blocker must refuse source closeout".into());
+    }
+    let blocker = report
+        .blocker_string
+        .as_deref()
+        .ok_or("recurrence report must preserve the exact blocker string")?;
+    if blocker
+        != "RCH-E327: Path dependency topology policy failed; move dependencies under /data/projects (or /dp) and retry."
+    {
+        return Err(format!("blocker string drifted: {blocker:?}"));
+    }
+    if !report.error_codes.iter().any(|code| code == "RCH-E327") {
+        return Err(format!(
+            "error_codes must include RCH-E327, got {:?}",
+            report.error_codes
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn topology_recurrence_without_closed_refs_is_not_recurrence_but_still_blocked() -> TestResult {
+    let value = parse_fixture(FIXTURE_TOPOLOGY_RECURRENCE)?;
+    let report = classify_rch_verify_recurrence(&value, &[])
+        .map_err(|error| format!("classify without tracker knowledge: {error}"))?;
+    if report.recurs_closed_remediation {
+        return Err("without closed-remediation knowledge the run must not recur".into());
+    }
+    if !report.closed_remediation_refs.is_empty() {
+        return Err(format!(
+            "closedRemediationRefs must be empty, got {:?}",
+            report.closed_remediation_refs
+        ));
+    }
+    if report.classification != "environment_blocked_before_cargo" {
+        return Err(format!(
+            "classification must stay environment_blocked_before_cargo, got {}",
+            report.classification
+        ));
+    }
+    if report.source_closeable {
+        return Err("source closeout must stay refused for blocked runs".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn capacity_recurrence_fixture_recurs_without_rch_error_codes() -> TestResult {
+    let value = parse_fixture(FIXTURE_CAPACITY_RECURRENCE)?;
+    let closed = vec!["bd-17c65.10.17".to_owned()];
+    let report = classify_rch_verify_recurrence(&value, &closed)
+        .map_err(|error| format!("classify capacity recurrence: {error}"))?;
+    if !report.recurs_closed_remediation {
+        return Err(
+            "capacity blocker against closed bd-17c65.10.17 must recur (TealElk 2026-06-10: \
+             same fingerprint class, stale remediation pointer, new root cause)"
+                .into(),
+        );
+    }
+    if report.classification != "environment_blocked_before_cargo" {
+        return Err(format!(
+            "capacity blocker must classify as environment_blocked_before_cargo, got {}",
+            report.classification
+        ));
+    }
+    if !report.error_codes.is_empty() {
+        return Err(format!(
+            "capacity recurrence carries no RCH-E codes, got {:?}",
+            report.error_codes
+        ));
+    }
+    if report.blocker_string.is_some() {
+        return Err(format!(
+            "no error-code line exists to preserve, got {:?}",
+            report.blocker_string
+        ));
+    }
+    if report.active_blocker_fingerprint.as_deref()
+        != Some("sha256:5def3292cd0e9ca40a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071")
+    {
+        return Err(format!(
+            "capacity fingerprint must be preserved, got {:?}",
+            report.active_blocker_fingerprint
+        ));
+    }
+    if report.source_closeable {
+        return Err("capacity blocker must refuse source closeout".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn remote_success_fixture_is_source_closeable_and_never_recurrence() -> TestResult {
+    let value = parse_fixture(FIXTURE_REMOTE_SUCCESS)?;
+    let closed = vec!["bd-17c65.10.17.1.2".to_owned(), "bd-17c65.10.17".to_owned()];
+    let report = classify_rch_verify_recurrence(&value, &closed)
+        .map_err(|error| format!("classify remote success: {error}"))?;
+    if report.classification != "source_outcome" {
+        return Err(format!(
+            "passed run must classify as source_outcome, got {}",
+            report.classification
+        ));
+    }
+    if report.recurs_closed_remediation {
+        return Err("a passed run must never report recurrence".into());
+    }
+    if !report.source_closeable {
+        return Err("a passed run is the only source-closeable outcome".into());
+    }
+    Ok(())
+}
+
+#[test]
 fn fixtures_do_not_leak_pids_paths_or_secrets() -> TestResult {
     for (label, raw) in [
         ("remote_success", FIXTURE_REMOTE_SUCCESS),
@@ -293,6 +477,8 @@ fn fixtures_do_not_leak_pids_paths_or_secrets() -> TestResult {
         ("fallback", FIXTURE_LOCAL_FALLBACK),
         ("malformed", FIXTURE_WRONG_SCHEMA),
         ("duplicate_source", FIXTURE_DUPLICATE_SOURCE),
+        ("topology_recurrence", FIXTURE_TOPOLOGY_RECURRENCE),
+        ("capacity_recurrence", FIXTURE_CAPACITY_RECURRENCE),
     ] {
         let lowered = raw.to_ascii_lowercase();
         for forbidden in [
