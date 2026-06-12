@@ -8209,7 +8209,7 @@ mod tests {
         TokenBudget, TokenEstimationStrategy, WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR,
         WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR, assemble_draft,
         assemble_draft_with_cache_governor, assemble_draft_with_profile,
-        assemble_draft_with_profile_and_options_seeded,
+        assemble_draft_with_profile_and_options, assemble_draft_with_profile_and_options_seeded,
         assemble_draft_with_profile_and_options_seeded_in_workspace, candidate_similarity,
         escape_markdown_text, estimate_character_heuristic_tokens, estimate_tokens,
         estimate_tokens_default, estimate_word_heuristic_tokens, facility_similarity,
@@ -8475,6 +8475,32 @@ mod tests {
         .map_err(|error| format!("test candidate rejected: {error:?}"))
     }
 
+    /// Classic-selector options: LOD compressed tiers default ON
+    /// (lod_budget_shares 70/20/10), which changes quota, omission, and
+    /// evaluation semantics. Tests that pin the CLASSIC selector contract
+    /// must opt out explicitly instead of inheriting the LOD default.
+    fn classic_pack_options() -> PackAssemblyOptions {
+        PackAssemblyOptions {
+            lod_budget_shares: None,
+            ..PackAssemblyOptions::default()
+        }
+    }
+
+    fn assemble_classic_draft_with_profile(
+        profile: ContextPackProfile,
+        query: impl Into<String>,
+        budget: TokenBudget,
+        candidates: impl IntoIterator<Item = PackCandidate>,
+    ) -> Result<PackDraft, PackValidationError> {
+        assemble_draft_with_profile_and_options(
+            profile,
+            query,
+            budget,
+            candidates,
+            classic_pack_options(),
+        )
+    }
+
     fn candidate_in_section(
         seed: u128,
         section: PackSection,
@@ -8533,7 +8559,7 @@ mod tests {
             )?,
             candidate_with_content(3, 0.7, 0.5, 10, "keep release notes concise")?,
         ];
-        let mut draft = assemble_draft_with_profile(
+        let mut draft = assemble_classic_draft_with_profile(
             ContextPackProfile::Balanced,
             "network retry policy",
             TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?,
@@ -10061,14 +10087,14 @@ mod tests {
             "Run release verification commands through rch.",
         )?;
 
-        let compact = assemble_draft_with_profile(
+        let compact = assemble_classic_draft_with_profile(
             ContextPackProfile::Compact,
             "prepare release",
             budget,
             vec![procedural_rule.clone()],
         )
         .map_err(|error| format!("compact draft rejected: {error:?}"))?;
-        let balanced = assemble_draft_with_profile(
+        let balanced = assemble_classic_draft_with_profile(
             ContextPackProfile::Balanced,
             "prepare release",
             budget,
@@ -10106,14 +10132,14 @@ mod tests {
             "Release artifacts were signed and checksums matched.",
         )?;
 
-        let thorough = assemble_draft_with_profile(
+        let thorough = assemble_classic_draft_with_profile(
             ContextPackProfile::Thorough,
             "prepare release",
             budget,
             vec![evidence.clone()],
         )
         .map_err(|error| format!("thorough draft rejected: {error:?}"))?;
-        let balanced = assemble_draft_with_profile(
+        let balanced = assemble_classic_draft_with_profile(
             ContextPackProfile::Balanced,
             "prepare release",
             budget,
@@ -10611,7 +10637,7 @@ mod tests {
             "A prior release failed after skipping formatter checks.",
         )?;
 
-        let draft = assemble_draft_with_profile(
+        let draft = assemble_classic_draft_with_profile(
             ContextPackProfile::Balanced,
             "prepare release",
             budget,
@@ -12416,7 +12442,7 @@ mod tests {
             TokenBudget::new(10_000).map_err(|error| format!("budget rejected: {error:?}"))?;
         super::reset_facility_marginal_gain_evaluation_count();
 
-        let draft = assemble_draft_with_profile(
+        let draft = assemble_classic_draft_with_profile(
             ContextPackProfile::Submodular,
             "prepare release",
             budget,
