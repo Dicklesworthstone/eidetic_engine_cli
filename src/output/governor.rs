@@ -172,7 +172,10 @@ pub struct CursorPayload {
     pub target_schema: String,
     /// Workspace DB generation the page sequence was issued at.
     pub db_generation: u64,
-    /// Stable ordered-position key of the last emitted element.
+    /// Stable ordered-position key used to validate the page boundary. Flat
+    /// arrays name the last emitted element; per-section arrays name the
+    /// last dropped element because that key is stable across page-local and
+    /// full-set coordinates.
     pub position_key: String,
     /// Count of elements still unemitted when the cursor was issued. This —
     /// not `position_key` — is what reconstructs the emitted set on resume:
@@ -628,7 +631,11 @@ fn set_meta_tokens_estimated(value: &mut JsonValue, estimate: u64) {
         Some(JsonValue::Object(meta)) => {
             meta.insert("tokensEstimated".to_string(), JsonValue::from(estimate));
         }
-        Some(_) => {}
+        Some(meta) => {
+            let mut replacement = JsonMap::new();
+            replacement.insert("tokensEstimated".to_string(), JsonValue::from(estimate));
+            *meta = JsonValue::Object(replacement);
+        }
         None => {
             let mut meta = JsonMap::new();
             meta.insert("tokensEstimated".to_string(), JsonValue::from(estimate));
@@ -1281,6 +1288,41 @@ mod tests {
             .all(|entry| entry.get("code").and_then(JsonValue::as_str).is_none())
         {
             return Err("fitting responses must not gain degraded entries".to_string());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn governed_response_replaces_non_object_meta_with_tokens_estimated() -> TestResult {
+        let json = json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "meta": "legacy scalar meta",
+            "data": {
+                "command": "test list",
+                "schema": "ee.test.list.v1",
+                "items": [
+                    {
+                        "id": "item_0000",
+                        "content": "small response body",
+                    },
+                ],
+            },
+            "degraded": [],
+        })
+        .to_string();
+        let generation = || 3u64;
+        let ctx = test_context(100_000, &generation);
+        let governed = govern_response_json(&json, &ctx, TEST_REGISTRY)
+            .map_err(|error| format!("govern: {error:?}"))?;
+        let value = parse(&governed)?;
+        let stamped = value
+            .pointer("/meta/tokensEstimated")
+            .and_then(JsonValue::as_u64)
+            .ok_or("governed output must replace non-object meta with tokensEstimated")?;
+        let mut estimator = TokenEstimator::new();
+        if stamped != estimator.estimate(&governed) {
+            return Err("replacement meta stamp must reflect the final payload".to_string());
         }
         Ok(())
     }

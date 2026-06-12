@@ -185,7 +185,11 @@ impl ProgressEventBuilder {
 
     #[must_use]
     pub fn progress(mut self, progress: f64) -> Self {
-        self.progress = Some(progress);
+        self.progress = if progress.is_finite() {
+            Some(progress.clamp(0.0, 1.0))
+        } else {
+            None
+        };
         self
     }
 
@@ -279,21 +283,16 @@ pub fn progress_running(
     processed: u64,
     total: u64,
 ) -> ProgressEvent {
-    let progress = if total > 0 {
-        Some(processed as f64 / total as f64)
-    } else {
-        None
-    };
-
-    ProgressEvent::builder()
+    let mut builder = ProgressEvent::builder()
         .event_type(ProgressEventType::Running)
         .operation(operation)
         .message(message)
         .processed_items(processed)
-        .total_items(total)
-        .progress(progress.unwrap_or(0.0))
-        .timestamp(chrono::Utc::now().to_rfc3339())
-        .build()
+        .total_items(total);
+    if total > 0 {
+        builder = builder.progress(processed as f64 / total as f64);
+    }
+    builder.timestamp(chrono::Utc::now().to_rfc3339()).build()
 }
 
 #[cfg(test)]
@@ -332,15 +331,18 @@ mod tests {
     }
 
     #[test]
-    fn progress_event_type_accepts_operator_spelling_variants() {
-        assert_eq!(
-            ProgressEventType::from_str(" Started ").expect("trimmed event type parses"),
-            ProgressEventType::Started
-        );
-        assert_eq!(
-            ProgressEventType::from_str("WARNING").expect("uppercase event type parses"),
-            ProgressEventType::Warning
-        );
+    fn progress_event_type_accepts_operator_spelling_variants() -> TestResult {
+        let trimmed = ProgressEventType::from_str(" Started ")
+            .map_err(|error: ParseProgressEventTypeError| error.to_string())?;
+        let uppercase = ProgressEventType::from_str("WARNING")
+            .map_err(|error: ParseProgressEventTypeError| error.to_string())?;
+
+        ensure(trimmed, ProgressEventType::Started, "trimmed event type")?;
+        ensure(
+            uppercase,
+            ProgressEventType::Warning,
+            "uppercase event type",
+        )
     }
 
     #[test]
@@ -386,6 +388,30 @@ mod tests {
     }
 
     #[test]
+    fn progress_event_builder_bounds_progress_percentage() {
+        let below = ProgressEvent::builder().progress(-0.25).build();
+        let above = ProgressEvent::builder().progress(1.25).build();
+        let nan = ProgressEvent::builder().progress(f64::NAN).build();
+        let infinite = ProgressEvent::builder().progress(f64::INFINITY).build();
+
+        assert_eq!(below.progress, Some(0.0));
+        assert_eq!(above.progress, Some(1.0));
+        assert_eq!(nan.progress, None);
+        assert_eq!(infinite.progress, None);
+    }
+
+    #[test]
+    fn progress_running_omits_unknown_percentage_and_clamps_overruns() {
+        let unknown_total = progress_running("import", "Counting records", 5, 0);
+        let overrun = progress_running("import", "Processing records", 12, 10);
+
+        assert_eq!(unknown_total.progress, None);
+        assert_eq!(unknown_total.processed_items, Some(5));
+        assert_eq!(unknown_total.total_items, Some(0));
+        assert_eq!(overrun.progress, Some(1.0));
+    }
+
+    #[test]
     fn progress_event_to_jsonl() {
         let event = ProgressEvent::builder()
             .event_type(ProgressEventType::Started)
@@ -401,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_event_serializes_without_optional_fields() {
+    fn progress_event_serializes_without_optional_fields() -> TestResult {
         let event = ProgressEvent::builder()
             .event_type(ProgressEventType::Info)
             .operation("info")
@@ -409,19 +435,30 @@ mod tests {
             .timestamp("2026-04-30T12:00:00Z")
             .build();
 
-        let json = serde_json::to_string(&event).expect("serialize");
-        let value: serde_json::Value = serde_json::from_str(&json).expect("parse event json");
-        let object = value.as_object().expect("event json object");
+        let json = serde_json::to_string(&event).map_err(|error| error.to_string())?;
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("event json should be an object: {value}"))?;
         assert!(!object.contains_key("progress"));
         assert!(!object.contains_key("current_item"));
         assert!(!object.contains_key("total_items"));
+        Ok(())
     }
 
     #[test]
-    fn parse_invalid_progress_event_type() {
+    fn parse_invalid_progress_event_type() -> TestResult {
         let result: Result<ProgressEventType, _> = "invalid".parse();
         assert!(result.is_err());
-        let err = result.expect_err("avoid unwrap_err in production code");
-        assert!(err.to_string().contains("invalid progress event type"));
+        let err = match result {
+            Ok(parsed) => return Err(format!("invalid event type parsed as {parsed:?}")),
+            Err(error) => error,
+        };
+        if err.to_string().contains("invalid progress event type") {
+            Ok(())
+        } else {
+            Err(format!("unexpected parse error: {err}"))
+        }
     }
 }

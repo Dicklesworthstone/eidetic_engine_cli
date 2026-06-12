@@ -59,6 +59,12 @@ fn normalized_perf_token(value: &str) -> String {
                 }
                 previous_was_lowercase_or_digit = false;
             }
+            ch if ch.is_ascii_whitespace() => {
+                if !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                previous_was_lowercase_or_digit = false;
+            }
             ch if ch.is_ascii_uppercase() => {
                 if previous_was_lowercase_or_digit && !normalized.ends_with('_') {
                     normalized.push('_');
@@ -2936,6 +2942,10 @@ mod tests {
             Some(ArtifactKind::SupportBundleManifest)
         );
         assert_eq!(
+            ArtifactKind::parse("support bundle manifest"),
+            Some(ArtifactKind::SupportBundleManifest)
+        );
+        assert_eq!(
             ArtifactKind::parse("ExplainPerformanceReport"),
             Some(ArtifactKind::ExplainPerformanceReport)
         );
@@ -2951,6 +2961,11 @@ mod tests {
         assert_eq!(
             PerfLatencySurface::parse(" Search "),
             Some(PerfLatencySurface::Search)
+        );
+        assert_eq!(
+            PerfLatencySurface::parse("search results"),
+            None,
+            "multi-word unknown surfaces must remain unknown"
         );
         assert_eq!(
             PerfLatencySurface::parse("CONTEXT"),

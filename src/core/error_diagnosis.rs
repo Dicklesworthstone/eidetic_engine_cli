@@ -261,6 +261,10 @@ impl ErrorRecallReport {
             seed.push_str(" proof:");
             seed.push_str(proof);
         }
+        for warning in &self.stale_version_warnings {
+            seed.push_str(" stale_version_warning:");
+            seed.push_str(warning);
+        }
         seed
     }
 }
@@ -487,5 +491,10 @@ mod tests {
         );
         assert!(report.query_seed().contains("helpful_repair:mem_helpful"));
         assert!(report.query_seed().contains("proof:rch_pass_1"));
+        assert!(
+            report
+                .query_seed()
+                .contains("stale_version_warning:rustc 1.95 repair may be stale")
+        );
     }
 }

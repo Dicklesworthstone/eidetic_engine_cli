@@ -68,11 +68,18 @@ pub struct AgentIdentity {
 impl AgentIdentity {
     #[must_use]
     pub fn known(agent_name: Option<&str>, harness: Option<&str>, model: Option<&str>) -> Self {
+        let agent_name = normalized_non_empty(agent_name);
+        let harness = normalized_non_empty(harness);
+        let model = normalized_non_empty(model);
+        if agent_name.is_none() && harness.is_none() && model.is_none() {
+            return Self::unknown();
+        }
+
         Self {
             status: ProducerIdentityStatus::Known,
-            agent_name: normalized_non_empty(agent_name),
-            harness: normalized_non_empty(harness),
-            model: normalized_non_empty(model),
+            agent_name,
+            harness,
+            model,
         }
     }
 
@@ -221,10 +228,7 @@ impl ProducerMetadata {
         workspace_fingerprint: Option<&str>,
         observed_at: Option<&str>,
     ) -> Self {
-        if source_type.eq_ignore_ascii_case("cass")
-            || source_id
-                .is_some_and(|id| id.starts_with("cass:") || id.starts_with("cass-session://"))
-        {
+        if source_type.eq_ignore_ascii_case("cass") || source_id.is_some_and(cass_source_id_like) {
             return Self::cass_evidence(source_id, workspace_fingerprint, observed_at);
         }
 
@@ -418,19 +422,39 @@ fn normalized_non_empty(value: Option<&str>) -> Option<String> {
 
 fn cass_session_id(source_id: Option<&str>) -> Option<String> {
     let raw = normalized_non_empty(source_id)?;
-    if let Some(rest) = raw.strip_prefix("cass-session://") {
+    if let Some(rest) = strip_prefix_ignore_ascii_case(&raw, "cass-session://") {
         return rest
             .split(['#', '?'])
             .next()
             .and_then(|value| normalized_non_empty(Some(value)));
     }
-    if let Some(rest) = raw.strip_prefix("cass:") {
+    if let Some(rest) = strip_prefix_ignore_ascii_case(&raw, "cass:") {
         return rest
             .split(':')
             .next()
             .and_then(|value| normalized_non_empty(Some(value)));
     }
     None
+}
+
+fn cass_source_id_like(source_id: &str) -> bool {
+    let value = source_id.trim();
+    starts_with_ignore_ascii_case(value, "cass:")
+        || starts_with_ignore_ascii_case(value, "cass-session://")
+}
+
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    if starts_with_ignore_ascii_case(value, prefix) {
+        value.get(prefix.len()..)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -482,6 +506,30 @@ mod tests {
     }
 
     #[test]
+    fn known_agent_without_identity_fields_is_unknown() {
+        let metadata = ProducerMetadata::known_agent(
+            ProducerSourceSystem::Verification,
+            Some("  "),
+            None,
+            Some(""),
+            Some("run-123"),
+            None,
+            Some("repo:abc"),
+            None,
+        );
+
+        assert_eq!(metadata.identity.status, ProducerIdentityStatus::Unknown);
+        assert_eq!(metadata.identity.agent_name, None);
+        assert_eq!(metadata.identity.harness, None);
+        assert_eq!(metadata.identity.model, None);
+        assert_eq!(metadata.run.run_id.as_deref(), Some("run-123"));
+        assert_eq!(
+            metadata.run.workspace_fingerprint.as_deref(),
+            Some("repo:abc")
+        );
+    }
+
+    #[test]
     fn cass_evidence_extracts_session_without_inventing_identity() {
         let metadata = ProducerMetadata::cass_evidence(
             Some("cass-session://session-abc#L20-L30"),
@@ -492,6 +540,24 @@ mod tests {
         assert_eq!(metadata.source_system, ProducerSourceSystem::Cass);
         assert_eq!(metadata.identity.status, ProducerIdentityStatus::Unknown);
         assert_eq!(metadata.run.session_id.as_deref(), Some("session-abc"));
+        assert_eq!(
+            metadata.run.workspace_fingerprint.as_deref(),
+            Some("repo:abc")
+        );
+    }
+
+    #[test]
+    fn cass_evidence_accepts_case_insensitive_source_scheme() {
+        let metadata = ProducerMetadata::curation_candidate(
+            "memory_cluster",
+            Some(" CASS-SESSION://Session-ABC?view=compact "),
+            Some("repo:abc"),
+            None,
+        );
+
+        assert_eq!(metadata.source_system, ProducerSourceSystem::Cass);
+        assert_eq!(metadata.identity.status, ProducerIdentityStatus::Unknown);
+        assert_eq!(metadata.run.session_id.as_deref(), Some("Session-ABC"));
         assert_eq!(
             metadata.run.workspace_fingerprint.as_deref(),
             Some("repo:abc")

@@ -26,6 +26,12 @@ fn normalized_artifact_kind_token(input: &str) -> String {
                 }
                 previous_was_lowercase_or_digit = false;
             }
+            ch if ch.is_ascii_whitespace() => {
+                if !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                previous_was_lowercase_or_digit = false;
+            }
             ch if ch.is_ascii_uppercase() => {
                 if previous_was_lowercase_or_digit && !normalized.ends_with('_') {
                     normalized.push('_');
@@ -712,7 +718,15 @@ mod tests {
             ArtifactKind::BenchmarkReport
         );
         assert_eq!(
+            ArtifactKind::from_str("benchmark report").map_err(|error| error.to_string())?,
+            ArtifactKind::BenchmarkReport
+        );
+        assert_eq!(
             ArtifactKind::from_str("SUPPORT_BUNDLE_MANIFEST").map_err(|error| error.to_string())?,
+            ArtifactKind::SupportBundleManifest
+        );
+        assert_eq!(
+            ArtifactKind::from_str("support bundle manifest").map_err(|error| error.to_string())?,
             ArtifactKind::SupportBundleManifest
         );
         assert_eq!(

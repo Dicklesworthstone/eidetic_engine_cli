@@ -242,56 +242,58 @@ fn redact_paths_in_content(content: &str) -> String {
     let mut result = content.to_owned();
     for prefix in SENSITIVE_PATH_PREFIXES {
         if result.contains(prefix) {
-            let lines: Vec<&str> = result.lines().collect();
-            let redacted_lines: Vec<String> = lines
-                .iter()
-                .map(|line| {
-                    if line.contains(prefix) {
-                        let mut output = String::new();
-                        let mut cursor = 0;
-                        while cursor < line.len() {
-                            let remaining = &line[cursor..];
-                            if remaining.starts_with(prefix) {
-                                output.push_str(REDACTED_PATH_PLACEHOLDER);
-                                cursor += prefix.len();
-                                let mut saw_separator_after_prefix = false;
-                                while cursor < line.len() {
-                                    let next = line[cursor..].chars().next().unwrap_or('\0');
-                                    if is_horizontal_path_space(next) {
-                                        if whitespace_starts_path_continuation(
-                                            line,
-                                            cursor,
-                                            saw_separator_after_prefix,
-                                        ) {
-                                            cursor += next.len_utf8();
-                                            continue;
-                                        }
-                                        break;
-                                    }
-                                    if next.is_whitespace() || path_redaction_hard_boundary(next) {
-                                        break;
-                                    }
-                                    if next == '/' || next == '\\' {
-                                        saw_separator_after_prefix = true;
-                                    }
-                                    cursor += next.len_utf8();
-                                }
-                            } else {
-                                let c = remaining.chars().next().unwrap_or('\0');
-                                output.push(c);
-                                cursor += c.len_utf8();
-                            }
-                        }
-                        output
-                    } else {
-                        (*line).to_owned()
-                    }
-                })
-                .collect();
-            result = redacted_lines.join("\n");
+            let mut redacted = String::with_capacity(result.len());
+            for segment in result.split_inclusive('\n') {
+                let (line, terminator) = segment
+                    .strip_suffix('\n')
+                    .map_or((segment, ""), |line| (line, "\n"));
+                if line.contains(prefix) {
+                    redacted.push_str(&redact_paths_in_line(line, prefix));
+                    redacted.push_str(terminator);
+                } else {
+                    redacted.push_str(segment);
+                }
+            }
+            result = redacted;
         }
     }
     result
+}
+
+fn redact_paths_in_line(line: &str, prefix: &str) -> String {
+    let mut output = String::new();
+    let mut cursor = 0;
+    while cursor < line.len() {
+        let remaining = &line[cursor..];
+        if remaining.starts_with(prefix) {
+            output.push_str(REDACTED_PATH_PLACEHOLDER);
+            cursor += prefix.len();
+            let mut saw_separator_after_prefix = false;
+            while cursor < line.len() {
+                let next = line[cursor..].chars().next().unwrap_or('\0');
+                if is_horizontal_path_space(next) {
+                    if whitespace_starts_path_continuation(line, cursor, saw_separator_after_prefix)
+                    {
+                        cursor += next.len_utf8();
+                        continue;
+                    }
+                    break;
+                }
+                if next.is_whitespace() || path_redaction_hard_boundary(next) {
+                    break;
+                }
+                if next == '/' || next == '\\' {
+                    saw_separator_after_prefix = true;
+                }
+                cursor += next.len_utf8();
+            }
+        } else {
+            let c = remaining.chars().next().unwrap_or('\0');
+            output.push(c);
+            cursor += c.len_utf8();
+        }
+    }
+    output
 }
 
 fn redact_high_entropy_tokens(content: &str, threshold_bits_per_byte: f64) -> String {
@@ -1375,6 +1377,23 @@ mod tests {
             ),
             format!("source={REDACTED_PATH_PLACEHOLDER}\nAgent: cod-search"),
             "standard redacts terminal component but keeps the next line",
+        )
+    }
+
+    #[test]
+    fn redact_content_standard_preserves_line_terminators_after_path_redaction() -> TestResult {
+        ensure(
+            redact_content("source=/Users/alice/My Project\n", RedactionLevel::Standard),
+            format!("source={REDACTED_PATH_PLACEHOLDER}\n"),
+            "standard redaction preserves trailing newline",
+        )?;
+        ensure(
+            redact_content(
+                "source=/Users/alice/My Project\r\nnext=/tmp/private/file\r\n",
+                RedactionLevel::Standard,
+            ),
+            format!("source={REDACTED_PATH_PLACEHOLDER}\r\nnext={REDACTED_PATH_PLACEHOLDER}\r\n"),
+            "standard redaction preserves CRLF line endings",
         )
     }
 
