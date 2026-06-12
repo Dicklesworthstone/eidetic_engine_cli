@@ -371,7 +371,10 @@ fn strict_memory_redaction_truncates_content_and_adds_hash() -> TestResult {
     // (trim), so the stored body — and therefore the attached digest —
     // covers the trimmed content, not the raw builder input.
     let canonical_body = content.trim();
-    let expected_hash = format!("blake3:{}", blake3::hash(canonical_body.as_bytes()).to_hex());
+    let expected_hash = format!(
+        "blake3:{}",
+        blake3::hash(canonical_body.as_bytes()).to_hex()
+    );
     let memory = ExportMemoryRecord::builder()
         .memory_id("mem-strict-001234567890")
         .workspace_id("ws-test")
