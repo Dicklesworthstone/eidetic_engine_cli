@@ -3187,16 +3187,18 @@ mod tests {
             .map_err(|error| error.to_string())?;
         let connection = provenance_fixture_connection(temp.path())?;
         let workspace_id = "wsp_verify_provenance_fixture0";
-        insert_provenance_fixture_memory(
+        insert_provenance_fixture_memory_with_content(
             &connection,
             workspace_id,
             "mem_00000000000000000000009101",
+            "due",
             "file://due.md#L1",
         )?;
-        insert_provenance_fixture_memory(
+        insert_provenance_fixture_memory_with_content(
             &connection,
             workspace_id,
             "mem_00000000000000000000009102",
+            "recent",
             "file://recent.md#L1",
         )?;
         connection
@@ -3248,10 +3250,11 @@ mod tests {
         let connection = provenance_fixture_connection(temp.path())?;
         let workspace_id = "wsp_verify_provenance_fixture0";
         let memory_id = "mem_00000000000000000000009103";
-        insert_provenance_fixture_memory(
+        insert_provenance_fixture_memory_with_content(
             &connection,
             workspace_id,
             memory_id,
+            "recent",
             "file://recent.md#L1",
         )?;
         connection
@@ -3296,10 +3299,11 @@ mod tests {
         let connection = provenance_fixture_connection(temp.path())?;
         let workspace_id = "wsp_verify_provenance_fixture0";
         let memory_id = "mem_00000000000000000000009108";
-        insert_provenance_fixture_memory(
+        insert_provenance_fixture_memory_with_content(
             &connection,
             workspace_id,
             memory_id,
+            "fresh",
             "file://fresh.md#L1",
         )?;
         let now = DateTime::parse_from_rfc3339("2026-06-07T12:00:00Z")
@@ -3800,21 +3804,6 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         Ok(connection)
-    }
-
-    fn insert_provenance_fixture_memory(
-        connection: &DbConnection,
-        workspace_id: &str,
-        memory_id: &str,
-        provenance_uri: &str,
-    ) -> Result<(), String> {
-        insert_provenance_fixture_memory_with_content(
-            connection,
-            workspace_id,
-            memory_id,
-            &format!("fixture memory {memory_id}"),
-            provenance_uri,
-        )
     }
 
     fn insert_provenance_fixture_memory_with_content(
