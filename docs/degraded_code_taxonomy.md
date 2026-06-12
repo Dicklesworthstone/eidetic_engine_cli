@@ -733,11 +733,11 @@ macOS platform fallback emitted by the `NumaPinningAdapter` trait
 | `numa_pin_unsupported_platform` | info | bd-ldstd (swarmx.4 scaffold) |
 | `numa_unavailable_on_macos` | info | bd-1prrl.3 (macOS platform fallback) |
 
-#### Lexical RAM-tier pinning (4 — response_time)
+#### Lexical RAM-tier warmload (4 — response_time)
 
 Surfaced under `data.search.lexicalRamTier`
-(`ee.status.search.lexical_ram_tier.v1`). The live codes are consumed
-by the wiring slices under bd-21xbi; see
+(`ee.status.search.lexical_ram_tier.v1`). The live V1 contract is
+process-local heap warmload rather than OS-level pinning; see
 `docs/architecture/lexical-ram-tier.md`.
 
 | Code | Severity | Bead |

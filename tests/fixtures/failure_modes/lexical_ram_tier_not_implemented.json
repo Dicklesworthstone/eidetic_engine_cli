@@ -14,10 +14,10 @@
   "retired": true,
   "retired_by": {
     "bead": "closure-lint-source-side",
-    "reason": "Replaced by lexical_ram_tier_heap_warmload after the safe process-local heap warmload path landed without claiming OS-level mmap/mlock pinning."
+    "reason": "Replaced by lexical_ram_tier_heap_warmload after the safe process-local heap warmload path became the V1 contract without claiming OS-level mmap/mlock pinning."
   },
   "trigger": {
-    "description": "Running `ee status --json` or `ee doctor --json` on any platform while the bd-21xbi scaffold ships without the real `mmap` + `MAP_POPULATE` + `mlock` syscall path. The scaffold reports the lexical index was not actually pinned and surfaces this code so an operator knows the optimization is announced but not yet wired. The wiring slice under bd-21xbi retires this code and replaces it with a true success path; until then this is the honest signal.",
+    "description": "Historical: `ee status --json` or `ee doctor --json` used this code while bd-21xbi exposed a lexical RAM-tier scaffold with no live loader. The code is retired because the live V1 contract now reports the safe heap-warmload path as `lexical_ram_tier_heap_warmload` instead of promising an OS-level mmap/mlock adapter.",
     "setup_commands": [
       "ee init --workspace ."
     ],
@@ -30,7 +30,7 @@
       "lexical",
       "not implemented"
     ],
-    "repair_contains": "bd-21xbi",
-    "repair_string": "Track the mmap + MAP_POPULATE + mlock syscall slice under bd-21xbi follow-ups; until that ships the scaffold reports the lexical index as not pinned and the loader falls back to plain page-cache deserialization with no functional regression."
+    "repair_contains": "No current production path",
+    "repair_string": "No current production path should emit this code. Treat it as a retired tombstone and expect live V1 status to report lexical_ram_tier_heap_warmload for the safe heap-warmload path."
   }
 }

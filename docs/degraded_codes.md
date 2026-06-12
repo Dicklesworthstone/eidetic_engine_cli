@@ -7496,7 +7496,7 @@ ee status --workspace . --json
 
 **Introduced by:** bd-21xbi.2 (epic bd-21xbi)
 
-**Trigger.** Operator enabled lexical RAM-tier pinning on a host where ee can safely retain lexical index bytes in process heap memory but must not claim OS-level mmap/mlock pinning under the crate-level unsafe-code ban.
+**Trigger.** Operator enabled lexical RAM-tier warmload on a host where ee can safely retain lexical index bytes in process heap memory. This is the supported V1 RAM-tier posture and deliberately does not claim OS-level mmap/mlock pinning under the crate-level unsafe-code ban.
 
 **Setup.**
 
@@ -7529,9 +7529,9 @@ ee status --workspace . --json
 
 **Status:** retired by closure-lint-source-side. No current production path emits this code.
 
-**Retirement reason.** Replaced by lexical_ram_tier_heap_warmload after the safe process-local heap warmload path landed without claiming OS-level mmap/mlock pinning.
+**Retirement reason.** Replaced by lexical_ram_tier_heap_warmload after the safe process-local heap warmload path became the V1 contract without claiming OS-level mmap/mlock pinning.
 
-**Historical trigger.** Running `ee status --json` or `ee doctor --json` on any platform while the bd-21xbi scaffold ships without the real `mmap` + `MAP_POPULATE` + `mlock` syscall path. The scaffold reports the lexical index was not actually pinned and surfaces this code so an operator knows the optimization is announced but not yet wired. The wiring slice under bd-21xbi retires this code and replaces it with a true success path; until then this is the honest signal.
+**Historical trigger.** Historical: `ee status --json` or `ee doctor --json` used this code while bd-21xbi exposed a lexical RAM-tier scaffold with no live loader. The code is retired because the live V1 contract now reports the safe heap-warmload path as `lexical_ram_tier_heap_warmload` instead of promising an OS-level mmap/mlock adapter.
 
 **Setup.**
 
@@ -7547,7 +7547,7 @@ ee status --workspace . --json
 
 **Expected emission.** Message contains: `lexical ... not implemented`
 
-**Repair hint.** `bd-21xbi`
+**Repair hint.** `No current production path`
 
 **Fixture.** [`tests/fixtures/failure_modes/lexical_ram_tier_not_implemented.json`](../tests/fixtures/failure_modes/lexical_ram_tier_not_implemented.json)
 

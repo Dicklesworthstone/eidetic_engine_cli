@@ -1,27 +1,25 @@
-//! Lexical posting-list RAM-tier pinning — scaffold (bd-1hvzh, sub-bead of
-//! bd-21xbi).
+//! Lexical posting-list RAM-tier warmload (bd-1hvzh / bd-21xbi).
 //!
 //! On 256GB+ Linux hosts the Frankensearch lexical index files under
-//! `indexes/combined/` are not RAM-tier pinned. The first cold search pays
-//! disk page-fault cost on each access, and subsequent searches still
-//! compete for page-cache slots with everything else on the host. bd-21xbi
-//! adds an opt-in `mmap(MAP_POPULATE) + mlock` (optionally
-//! `MADV_HUGEPAGE`) loader that pre-faults the lexical index into RAM and
-//! holds it there. This is distinct from bd-1prrl.3 / swarmx.4 (graph
-//! snapshot mmap), bd-ndzfg (L2 pack result cache), and bd-168gm (embedding
-//! LRU) — each pins a different dataset.
+//! `indexes/combined/` can pay disk page-fault cost on first touch. Under
+//! this crate's `forbid(unsafe_code)` policy the supported V1 posture is a
+//! process-local heap warmload: retain the lexical index bytes in memory,
+//! report `lexical_ram_tier_heap_warmload`, and never claim OS-level
+//! `mmap`/`mlock` pinning happened. This is distinct from bd-1prrl.3 /
+//! swarmx.4 (graph snapshot mmap), bd-ndzfg (L2 pack result cache), and
+//! bd-168gm (embedding LRU) — each warms or pins a different dataset.
 //!
 //! This module owns the platform-agnostic public surface: configuration
 //! types, the result envelope surfaced under `ee status --json` →
 //! `data.search.lexicalRamTier`, the degraded-code vocabulary, and the
-//! entry point the index loader calls. The real Linux `mmap` +
-//! `MAP_POPULATE` + `mlock` + `MADV_HUGEPAGE` syscall path still needs a
-//! safe adapter slice; until then the loader reports the attempted posture
-//! without claiming pinning succeeded.
+//! entry point the index loader calls. The historical
+//! `lexical_ram_tier_not_implemented` honesty code is retired; live Linux
+//! behavior is heap warmload with `succeeded=false`, `bytesMmapped=0`, and
+//! `bytesWarmloaded>0`.
 //!
 //! Determinism contract: the optimization only changes wall-clock and
 //! page-cache residency; lexical search results MUST be byte-identical
-//! whether the index is RAM-pinned or read from disk. The wiring slice
+//! whether the index is heap-warmloaded or read from disk. The wiring slice
 //! extends `tests/determinism_unit.rs` with the `pin_ram` × `request_hugepages`
 //! dimensions.
 
@@ -39,10 +37,9 @@ use crate::models::CorpusRevision;
 
 /// `degraded[]` code emitted when an operator requested transparent
 /// hugepages but the current platform arm cannot even attempt
-/// `MADV_HUGEPAGE` (every non-Linux host in the scaffold). The future
-/// Linux syscall adapter may also emit this when the kernel rejects the
-/// hint; the current heap-warmload scaffold does not probe Linux THP
-/// state.
+/// `MADV_HUGEPAGE` (every non-Linux host, plus any live heap-warmload path
+/// that cannot make a syscall-level hugepage request). The V1 contract does
+/// not probe Linux THP state.
 pub const LEXICAL_HUGEPAGES_UNAVAILABLE_CODE: &str = "lexical_hugepages_unavailable";
 
 /// `degraded[]` code emitted when an operator has disabled the
@@ -93,8 +90,8 @@ pub const LEXICAL_RAM_TIER_PIN_RAM_ENV: &str = "EE_LEXICAL_INDEX_PIN_RAM";
 /// Companion env-var name for the transparent-hugepages opt-in.
 /// Only effective when `EE_LEXICAL_INDEX_PIN_RAM=1` and the platform arm can
 /// attempt transparent-hugepage advice; otherwise the loader emits
-/// [`LEXICAL_HUGEPAGES_UNAVAILABLE_CODE`]. The current scaffold does not
-/// probe Linux THP state.
+/// [`LEXICAL_HUGEPAGES_UNAVAILABLE_CODE`]. The current heap-warmload contract
+/// does not probe Linux THP state.
 pub const LEXICAL_RAM_TIER_HUGEPAGES_ENV: &str = "EE_LEXICAL_INDEX_HUGEPAGES";
 
 /// Coarse host classification for the lexical RAM-tier optimization.
@@ -126,23 +123,25 @@ impl LexicalRamTierPlatform {
         }
     }
 
-    /// True iff the platform can fully back the optimization (mmap with
-    /// `MAP_POPULATE`, `mlock`, AND `MADV_HUGEPAGE`). Linux only.
+    /// True iff the platform exposes primitives that could fully back an
+    /// OS-pinning adapter (`MAP_POPULATE`, `mlock`, and `MADV_HUGEPAGE`).
+    /// The live V1 implementation still reports heap warmload rather than
+    /// claiming those syscalls were attempted.
     #[must_use]
     pub fn supports_full_pinning(self) -> bool {
         matches!(self, Self::Linux)
     }
 
     /// True iff the platform exposes at least `madvise(MADV_WILLNEED)` and
-    /// `mlock` (Linux + macOS). The bd-21xbi wiring slice can offer a
-    /// degraded pinning path on these hosts even without hugepages.
+    /// `mlock` (Linux + macOS). The live V1 implementation keeps this as a
+    /// host-class signal while still using the safe heap warmload path.
     #[must_use]
     pub fn supports_basic_pinning(self) -> bool {
         matches!(self, Self::Linux | Self::MacosLimited)
     }
 }
 
-/// Operator-facing configuration. Defaults are conservative: pinning is
+/// Operator-facing configuration. Defaults are conservative: RAM-tier warmload is
 /// opt-in (`enabled=false`) and `request_hugepages` defaults to `false`
 /// because the THP configuration is host-specific and the kernel can
 /// return EINVAL for `MADV_HUGEPAGE` on file-backed mmaps depending on
@@ -347,8 +346,8 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LexicalRamTierFallbackPath {
-    /// No fallback was taken — the index is fully RAM-pinned with the
-    /// requested hugepage and populate posture.
+    /// No fallback was taken. Reserved for a future explicitly-scoped
+    /// OS-pinning adapter; the V1 heap-warmload path does not produce it.
     None,
     /// Safe process-local heap mirror used when the crate-level
     /// `forbid(unsafe_code)` policy prevents direct `mmap`/`mlock`
@@ -356,9 +355,9 @@ pub enum LexicalRamTierFallbackPath {
     /// OS pin.
     HeapWarmload,
     /// macOS / other supports-basic-pinning hosts use
-    /// `madvise(MADV_WILLNEED)` + optional `mlock`. The scaffold records
-    /// the intended fallback path so the wiring slice can adopt it
-    /// without renaming the JSON enum.
+    /// `madvise(MADV_WILLNEED)` + optional `mlock`. The historical enum
+    /// name is preserved so existing status consumers do not need a schema
+    /// migration; the macOS arm does not attempt a syscall adapter.
     MadviseWillneed,
     /// Windows / other unsupported platforms fall through to plain
     /// page-cache deserialization with no advice.
@@ -537,13 +536,13 @@ pub fn platform_support() -> LexicalRamTierPlatform {
     LexicalRamTierPlatform::detect()
 }
 
-/// Attempt to pin the lexical index files under `index_dir` into the
-/// page-tier of RAM indicated by `config`. The scaffold never panics,
-/// never mutates the filesystem, never claims pinning succeeded that
-/// did not, and never issues a real `mmap` / `mlock` / `madvise`
-/// syscall — every non-success path populates `degraded_codes` with a
-/// code documented in `tests/fixtures/failure_modes/`. The Linux
-/// syscall implementation lives in a follow-up slice of bd-21xbi.
+/// Attempt the lexical RAM-tier optimization for the index files under
+/// `index_dir`. The live V1 contract is a safe heap warmload, not
+/// OS-level pinning: this function never panics, never mutates the
+/// filesystem, never claims pinning succeeded when it did not, and never
+/// issues a real `mmap` / `mlock` / `madvise` syscall. Every non-success
+/// path populates `degraded_codes` with a code documented in
+/// `tests/fixtures/failure_modes/`.
 pub fn pin_lexical_index_files(
     index_dir: &Path,
     config: &LexicalRamTierConfig,
@@ -581,9 +580,8 @@ pub fn pin_lexical_index_files(
             // operators can distinguish "wrong host class for this
             // optimization" from the Linux heap-warmload path. The
             // MadviseWillneed fallback name is preserved because
-            // madvise(MADV_WILLNEED) IS what the Mac path would attempt
-            // if the adapter were wired; the code simply makes the
-            // not-attempted reality explicit.
+            // The historical fallback name remains in the public enum;
+            // this arm makes the not-attempted reality explicit.
             result.fallback_path = LexicalRamTierFallbackPath::MadviseWillneed;
             result.push_unique_code(LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE);
             result
