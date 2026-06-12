@@ -4,9 +4,9 @@
 #
 # The generated file is the canonical agent-facing reference for every
 # `degraded[]` code that can appear in an `ee` response. One section
-# per code with: severity, surfaces, introduced-by bead, trigger
-# description + setup + invocation, expected emission snippet, repair
-# hint, related taxonomy classification when known.
+# per code with: severity, surfaces, introduced-by bead, retirement status
+# when applicable, trigger description + setup + invocation, expected
+# emission snippet, repair hint, related taxonomy classification when known.
 #
 # This script is idempotent — running it twice against the same
 # fixture set produces a byte-identical doc (sections sorted
@@ -149,6 +149,9 @@ HEADER
         repair_present="$(jq -r '.repair_present // false' "$fixture")"
         repair_contains="$(jq -r '.expected_emission.repair_contains // ""' "$fixture")"
         message_contains="$(jq -r '(.expected_emission.message_contains // []) | join(" ... ")' "$fixture")"
+        retired="$(jq -r '.retired // false' "$fixture")"
+        retired_bead="$(jq -r '.retired_by.bead // ""' "$fixture")"
+        retired_reason="$(jq -r '.retired_by.reason // ""' "$fixture")"
 
         echo "## \`$code\`"
         echo ""
@@ -167,7 +170,17 @@ HEADER
             fi
         fi
         echo ""
-        echo "**Trigger.** $trigger_desc"
+        if [ "$retired" = "true" ]; then
+            echo "**Status:** retired by ${retired_bead:-unknown}. No current production path emits this code."
+            if [ -n "$retired_reason" ] && [ "$retired_reason" != "null" ]; then
+                echo ""
+                echo "**Retirement reason.** $retired_reason"
+            fi
+            echo ""
+            echo "**Historical trigger.** $trigger_desc"
+        else
+            echo "**Trigger.** $trigger_desc"
+        fi
 
         # Setup commands (optional)
         setup_count="$(jq '(.trigger.setup_commands // []) | length' "$fixture")"
@@ -182,7 +195,11 @@ HEADER
 
         if [ -n "$invocation" ] && [ "$invocation" != "null" ]; then
             echo ""
-            echo "**Invocation.**"
+            if [ "$retired" = "true" ]; then
+                echo "**Historical invocation.**"
+            else
+                echo "**Invocation.**"
+            fi
             echo ""
             echo '```bash'
             echo "$invocation"

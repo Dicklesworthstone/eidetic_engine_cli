@@ -229,10 +229,12 @@ where
     // dropped codes in `sources` so an operator can still see what
     // got hidden without rerunning.
     let kept = DEGRADED_AGGREGATION_MAX_ENTRIES - 1;
-    let dropped: Vec<String> = aggregates[kept..]
+    let mut dropped: Vec<String> = aggregates[kept..]
         .iter()
         .map(|entry| entry.code.clone())
         .collect();
+    dropped.sort_unstable();
+    dropped.dedup();
     let dropped_count = dropped.len();
     aggregates.truncate(kept);
     aggregates.push(AggregatedDegradation {
@@ -428,6 +430,54 @@ mod tests {
         for source in &trailer.sources {
             assert!(codes.contains(&source.as_str()));
         }
+    }
+
+    #[test]
+    fn truncation_trailer_dropped_codes_are_sorted_by_code() {
+        let mut entries = Vec::new();
+        for index in 0..(DEGRADED_AGGREGATION_MAX_ENTRIES - 1) {
+            let code = format!("kept_{index:02}");
+            entries.push(DegradationAggregationInput::new(
+                "kept",
+                code,
+                "critical",
+                "kept msg",
+                "kept repair",
+            ));
+        }
+        entries.extend([
+            DegradationAggregationInput::new(
+                "drop_high",
+                "z_drop_high",
+                "high",
+                "high msg",
+                "high repair",
+            ),
+            DegradationAggregationInput::new(
+                "drop_medium",
+                "a_drop_medium",
+                "medium",
+                "medium msg",
+                "medium repair",
+            ),
+            DegradationAggregationInput::new(
+                "drop_low",
+                "m_drop_low",
+                "low",
+                "low msg",
+                "low repair",
+            ),
+        ]);
+
+        let aggregates = aggregate_degraded_entries(entries);
+        let trailer = aggregates.last().expect("trailer present");
+
+        assert_eq!(trailer.code, DEGRADED_AGGREGATION_TRUNCATED_CODE);
+        assert_eq!(
+            trailer.sources,
+            vec!["a_drop_medium", "m_drop_low", "z_drop_high"],
+            "trailer sources carry dropped codes sorted lexically, not severity-first"
+        );
     }
 
     /// Worst-case integration: 8 distinct degradation streams (PPR +

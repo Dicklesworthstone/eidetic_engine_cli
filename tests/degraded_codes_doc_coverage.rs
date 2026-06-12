@@ -7,7 +7,7 @@
 //! after a regen is forgotten OR a fixture is added without
 //! re-running the generator.
 //!
-//! Three named tests:
+//! Coverage includes:
 //!
 //!   1. `every_fixture_has_a_doc_section` — for each
 //!      `tests/fixtures/failure_modes/*.json`, parse `.code` and
@@ -25,12 +25,20 @@
 //!      reading the file immediately understands why edits get
 //!      overwritten on the next regen. Pure file I/O gate.
 //!
+//!   4. `fixture_codes_and_doc_codes_are_disjoint_sets_size_match` —
+//!      belt-and-suspenders set equality for fixture codes and doc
+//!      sections.
+//!
+//!   5. `retired_fixture_sections_are_marked_retired` — retired
+//!      tombstone fixtures must render as historical, non-emitting
+//!      sections rather than live degraded codes.
+//!
 //! No `use ee::*` imports — the test runs purely off file contents
 //! and is independent of any lib state.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -51,6 +59,11 @@ fn doc_path() -> PathBuf {
     repo_root().join("docs").join("degraded_codes.md")
 }
 
+fn read_fixture_json(path: &std::path::Path) -> Result<serde_json::Value, String> {
+    let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("parse {} as JSON: {e}", path.display()))
+}
+
 /// Extract every `.code` field from the fixture JSON files in
 /// `tests/fixtures/failure_modes/`. Returns codes sorted (the doc
 /// generator emits sections in sort order, so this list is the
@@ -65,9 +78,7 @@ fn collect_fixture_codes() -> Result<BTreeSet<String>, String> {
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("parse {} as JSON: {e}", path.display()))?;
+        let value = read_fixture_json(&path)?;
         let code = value
             .get("code")
             .and_then(serde_json::Value::as_str)
@@ -81,6 +92,41 @@ fn collect_fixture_codes() -> Result<BTreeSet<String>, String> {
         ));
     }
     Ok(codes)
+}
+
+fn collect_retired_fixture_beads() -> Result<BTreeMap<String, String>, String> {
+    let dir = fixtures_dir();
+    let entries = fs::read_dir(&dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
+    let mut retired = BTreeMap::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read entry under {}: {e}", dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let value = read_fixture_json(&path)?;
+        if value
+            .get("retired")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            let code = value
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| format!("fixture {} missing `.code` field", path.display()))?;
+            let bead = value
+                .pointer("/retired_by/bead")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    format!(
+                        "retired fixture {} missing `.retired_by.bead`",
+                        path.display()
+                    )
+                })?;
+            retired.insert(code.to_string(), bead.to_string());
+        }
+    }
+    Ok(retired)
 }
 
 /// Extract every code that appears as a `## \`<code>\`` H2 heading
@@ -110,6 +156,16 @@ fn collect_doc_section_codes(doc_text: &str) -> BTreeSet<String> {
         }
     }
     out
+}
+
+fn doc_section<'a>(doc_text: &'a str, code: &str) -> Option<&'a str> {
+    let heading = format!("## `{code}`");
+    let start = doc_text.find(&heading)?;
+    let tail = &doc_text[start..];
+    let end = tail
+        .find("\n---\n")
+        .map_or(tail.len(), |separator| separator);
+    Some(&tail[..end])
 }
 
 #[test]
@@ -198,4 +254,46 @@ fn fixture_codes_and_doc_codes_are_disjoint_sets_size_match() -> TestResult {
         ));
     }
     Ok(())
+}
+
+#[test]
+fn retired_fixture_sections_are_marked_retired() -> TestResult {
+    let retired = collect_retired_fixture_beads()?;
+    let doc_text = fs::read_to_string(doc_path())
+        .map_err(|e| format!("read {}: {e}", doc_path().display()))?;
+    let mut errors = Vec::new();
+
+    for (code, bead) in retired {
+        let Some(section) = doc_section(&doc_text, &code) else {
+            errors.push(format!("retired fixture `{code}` has no doc section"));
+            continue;
+        };
+        let status =
+            format!("**Status:** retired by {bead}. No current production path emits this code.");
+        if !section.contains(&status) {
+            errors.push(format!(
+                "retired fixture `{code}` section is missing exact retired status `{status}`",
+            ));
+        }
+        if !section.contains("**Historical trigger.**") {
+            errors.push(format!(
+                "retired fixture `{code}` section must label the trigger as historical",
+            ));
+        }
+        if !section.contains("**Historical invocation.**") {
+            errors.push(format!(
+                "retired fixture `{code}` section must label the invocation as historical",
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} retired fixture doc section(s) failed validation:\n  - {}",
+            errors.len(),
+            errors.join("\n  - "),
+        ))
+    }
 }

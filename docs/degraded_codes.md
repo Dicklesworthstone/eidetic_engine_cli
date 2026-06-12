@@ -4016,7 +4016,11 @@ ee job run decay_sweep --database ./decay-workspace-unresolved.db --dry-run --js
 
 **Introduced by:** bd-17c65.10.6 (epic J)
 
-**Trigger.** Retired legacy meta-code. Context now emits concrete degraded[] entries instead of a degraded_context summary banner.
+**Status:** retired by bd-17c65.5.2. No current production path emits this code.
+
+**Retirement reason.** The meta degraded_context banner duplicated concrete degraded[] entries and trained agents to ignore degraded output.
+
+**Historical trigger.** Retired legacy meta-code. Context now emits concrete degraded[] entries instead of a degraded_context summary banner.
 
 **Setup.**
 
@@ -4025,7 +4029,7 @@ ee init --workspace .
 # confirm src/ has no production degraded_context emission pattern
 ```
 
-**Invocation.**
+**Historical invocation.**
 
 ```bash
 scripts/e2e_overhaul/failure_modes.sh with EE_FAILURE_MODE_FILTER=degraded_context
@@ -5075,9 +5079,13 @@ ee status --workspace . --json
 
 **Introduced by:** bd-sg5si (epic G)
 
-**Trigger.** `ee focus suggest` was in Phase 1: the CLI surface and `ee.focus.suggest.v1` data schema were pinned, but the recent-CASS scoring and graph-centrality ranking were not yet wired. The command emitted an empty `recommendations` array and this informational degraded entry until the follow-up `implements-surface:focus_suggest` bead (bd-1idcb) landed the actual computation.
+**Status:** retired by bd-1idcb. No current production path emits this code.
 
-**Invocation.**
+**Retirement reason.** Phase 2 ranking pipeline landed: the `ee focus suggest` surface now populates `recommendations[]` from a real CASS-span + graph-centrality scoring path, so the honesty-only sentinel was removed from src/cli/mod.rs. The fixture remains as a tombstone per the SCHEMA.md retired-fixture pattern so tooling can still recognize the historical code, but the e2e driver asserts the production emission is absent.
+
+**Historical trigger.** `ee focus suggest` was in Phase 1: the CLI surface and `ee.focus.suggest.v1` data schema were pinned, but the recent-CASS scoring and graph-centrality ranking were not yet wired. The command emitted an empty `recommendations` array and this informational degraded entry until the follow-up `implements-surface:focus_suggest` bead (bd-1idcb) landed the actual computation.
+
+**Historical invocation.**
 
 ```bash
 ee focus suggest --json
@@ -6716,7 +6724,9 @@ ee index status --workspace . --index-dir stale-index --json
 
 **Status:** retired by bd-2pos6.4. No current production path emits this code.
 
-**Trigger.** Historical: a registered ee insights section was selected while its evidence builder was still metadata-only.
+**Retirement reason.** kTruss now has a DB-backed structural evidence builder, so no registered insights section is metadata-only.
+
+**Historical trigger.** Historical: a registered ee insights section was selected while its evidence builder was still metadata-only.
 
 **Setup.**
 
@@ -7517,7 +7527,11 @@ ee status --workspace . --json
 
 **Introduced by:** bd-1hvzh (epic bd-21xbi)
 
-**Trigger.** Running `ee status --json` or `ee doctor --json` on any platform while the bd-21xbi scaffold ships without the real `mmap` + `MAP_POPULATE` + `mlock` syscall path. The scaffold reports the lexical index was not actually pinned and surfaces this code so an operator knows the optimization is announced but not yet wired. The wiring slice under bd-21xbi retires this code and replaces it with a true success path; until then this is the honest signal.
+**Status:** retired by closure-lint-source-side. No current production path emits this code.
+
+**Retirement reason.** Replaced by lexical_ram_tier_heap_warmload after the safe process-local heap warmload path landed without claiming OS-level mmap/mlock pinning.
+
+**Historical trigger.** Running `ee status --json` or `ee doctor --json` on any platform while the bd-21xbi scaffold ships without the real `mmap` + `MAP_POPULATE` + `mlock` syscall path. The scaffold reports the lexical index was not actually pinned and surfaces this code so an operator knows the optimization is announced but not yet wired. The wiring slice under bd-21xbi retires this code and replaces it with a true success path; until then this is the honest signal.
 
 **Setup.**
 
@@ -7525,7 +7539,7 @@ ee status --workspace . --json
 ee init --workspace .
 ```
 
-**Invocation.**
+**Historical invocation.**
 
 ```bash
 ee status --workspace . --json
@@ -11758,7 +11772,11 @@ ee model status --workspace . --json
 
 **Introduced by:** bd-3usjw.4 (epic S)
 
-**Trigger.** The v1 binary exposes `ee serve --foreground` as an honest defer-to-v2 surface instead of starting a localhost HTTP/SSE adapter.
+**Status:** retired by bd-knu7t. No current production path emits this code.
+
+**Retirement reason.** The foreground localhost adapter now binds and serves one real request; missing foreground mode is a usage error rather than a v1 defer-to-v2 degraded code.
+
+**Historical trigger.** The v1 binary exposes `ee serve --foreground` as an honest defer-to-v2 surface instead of starting a localhost HTTP/SSE adapter.
 
 **Setup.**
 
@@ -11766,7 +11784,7 @@ ee model status --workspace . --json
 ee init --workspace .
 ```
 
-**Invocation.**
+**Historical invocation.**
 
 ```bash
 ee serve --foreground --json
@@ -12129,7 +12147,11 @@ ee graph feature-enrichment --workspace . --json
 
 **Introduced by:** bd-14tio (epic J)
 
-**Trigger.** Retired legacy code. Situation show/explain used to return an explicit unavailable error while persisted situation storage was not implemented. V079 persisted situation storage now backs these read surfaces.
+**Status:** retired by bd-1tp6p.2. No current production path emits this code.
+
+**Retirement reason.** Persisted situation storage landed in V079 and `ee situation show` / `ee situation explain` now read stored situation_records rows. Missing records surface as `not_found` or storage initialization errors instead of the old honesty-only unavailable code.
+
+**Historical trigger.** Retired legacy code. Situation show/explain used to return an explicit unavailable error while persisted situation storage was not implemented. V079 persisted situation storage now backs these read surfaces.
 
 **Setup.**
 
@@ -12138,7 +12160,7 @@ ee init --workspace .
 ee situation adopt 'fix the failing release workflow' --workspace . --json
 ```
 
-**Invocation.**
+**Historical invocation.**
 
 ```bash
 ee situation explain sit.release_bug --workspace . --json
@@ -13422,7 +13444,11 @@ ee diag quarantine list --workspace . --json
 
 **Introduced by:** ownership-posture-e2e (epic OP)
 
-**Trigger.** A Rust compiler diagnostic (error with --> location) is attributed via OwnershipSnapshot, but no active (non-expired) Agent Mail reservation or Beads assignee matches the diagnostic path after glob normalization.
+**Status:** retired by ownership-posture-fresh-eyes-review. No current production path emits this code.
+
+**Retirement reason.** fallback_code in specialized attribution report, not a top-level degraded code
+
+**Historical trigger.** A Rust compiler diagnostic (error with --> location) is attributed via OwnershipSnapshot, but no active (non-expired) Agent Mail reservation or Beads assignee matches the diagnostic path after glob normalization.
 
 **Setup.**
 
@@ -13432,7 +13458,7 @@ ee init --workspace .
 # or all matching claims are expired
 ```
 
-**Invocation.**
+**Historical invocation.**
 
 ```bash
 ee swarm brief --workspace . --json (or handoff preview/create that includes compile attribution)
