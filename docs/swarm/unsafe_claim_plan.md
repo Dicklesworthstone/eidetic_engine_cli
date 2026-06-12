@@ -79,6 +79,54 @@ claim work, reserve files, stage git changes, run Cargo, launch RCH proof, or
 delete files. Separate human or agent commands perform any mutation only after
 fresh authority says it is safe.
 
+## Handoff Templates (bd-1n3x1.16.5)
+
+Unsafe-claim templates are display-only text for a human or agent to paste after
+review. They must name the candidate, gate verdict, grouped reason categories,
+bounded unsafe-reason previews, degraded codes, and read-only inspect commands.
+They must not include raw mail bodies, raw diffs, raw stdout/stderr, private
+absolute paths, or unbounded command output.
+
+Every template carries two invariant sentences:
+
+```text
+No source verdict exists unless RCH reached Cargo. Do not claim or close this
+work unless a fresh claim gate returns safeToClaim=true.
+```
+
+Use these Beads comment forms for the common unsafe outcomes:
+
+| Outcome | Comment template |
+| --- | --- |
+| Tracker stale | `Unsafe claim gate for <candidate-bead>: verdict=<verdict>, tracker authority is not current (<unsafe-reason-preview>; degraded=<codes>). Inspect with CI=1 br show <candidate-bead> --json and rerun the fresh claim gate before claiming. No source verdict exists unless RCH reached Cargo. Do not claim or close this work unless a fresh claim gate returns safeToClaim=true.` |
+| Agent Mail degraded | `Unsafe claim gate for <candidate-bead>: Agent Mail evidence is not authoritative (<unsafe-reason-preview>; degraded=<codes>). Coordinate through Beads or a fresh Agent Mail snapshot before editing. No source verdict exists unless RCH reached Cargo. Do not claim or close this work unless a fresh claim gate returns safeToClaim=true.` |
+| Dirty source overlap | `Unsafe claim gate for <candidate-bead>: dirty source overlap requires coordination (<relative-paths>; related=<related-beads>). Inspect CI=1 br show <related-bead> --json and coordinate before stacking edits. No source verdict exists unless RCH reached Cargo. Do not claim or close this work unless a fresh claim gate returns safeToClaim=true.` |
+| Same-file proof debt | `Unsafe claim gate for <candidate-bead>: unproved_same_file_source_debt on <relative-path> against <related-bead> (<bounded-blocker-codes>). Wait for proof/owner handoff before editing the same file. No source verdict exists unless RCH reached Cargo. Do not claim or close this work unless a fresh claim gate returns safeToClaim=true.` |
+| RCH unavailable | `Unsafe claim gate for <candidate-bead>: RCH proof authority is unavailable (<degraded-codes>; retry=<retry-after-or-none>). Use the required RCH wrapper once admission is available, or record exact proof debt if it fails before Cargo. No source verdict exists unless RCH reached Cargo. Do not claim or close this work unless a fresh claim gate returns safeToClaim=true.` |
+| Stale installed `ee` | `Unsafe claim gate for <candidate-bead>: installed ee is stale or shadowed (<source-version>/<installed-version>; <unsafe-reason-preview>). Do not use BV copy-paste claims; coordinate an approved rebuild or rerun from a fresh binary. No source verdict exists unless RCH reached Cargo. Do not claim or close this work unless a fresh claim gate returns safeToClaim=true.` |
+| Reservation conflict | `Unsafe claim gate for <candidate-bead>: file reservation conflict on <relative-paths> held by <owner-or-unknown> until <expiry-or-unknown>. Ask the owner or wait for release before editing. No source verdict exists unless RCH reached Cargo. Do not claim or close this work unless a fresh claim gate returns safeToClaim=true.` |
+| No safe alternate | `Unsafe claim gate for <candidate-bead>: no safe alternate candidate was found (<reason-categories>; degraded=<codes>). Stop or ask for operator direction rather than claiming through the failed gate. No source verdict exists unless RCH reached Cargo. Do not claim or close this work unless a fresh claim gate returns safeToClaim=true.` |
+
+Use these Agent Mail message forms when coordination is available:
+
+```text
+Mail title: [<candidate-bead>] unsafe claim gate: <reason-category>
+
+I am evaluating <candidate-bead>. The unsafe-claim plan reports
+verdict=<verdict>, safeToClaim=false, category=<reason-category>, and
+preview=<bounded-unsafe-reason-preview>. Relevant paths/beads:
+<relative-paths-or-bead-ids>. Next read-only inspect command:
+<display-command>.
+
+No source verdict exists unless RCH reached Cargo. I will not claim, close, or
+edit this lane unless a fresh claim gate returns safeToClaim=true or the owner
+explicitly coordinates a handoff.
+```
+
+When Agent Mail itself is degraded, use Beads as the durable coordination
+channel and say so in the comment. Do not let the planner become the mail sender
+or Beads mutator; generated text is a copy-paste aid, not an action.
+
 ## Redaction
 
 `redactionStatus` is pinned to
