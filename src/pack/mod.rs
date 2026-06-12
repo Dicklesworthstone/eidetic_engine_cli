@@ -8571,14 +8571,16 @@ mod tests {
             )?,
             candidate_with_content(3, 0.7, 0.5, 10, "keep release notes concise")?,
         ];
-        // Deliberately the LOD-default path: this fixture's "all three
-        // selected" baseline was calibrated under LOD tier budgets
-        // (test refreshed in a55ae417, after the 10499e2c LOD default),
-        // and the guard accounting under test is selector-agnostic.
+        // Budget 300 so Balanced's 30% ProceduralRules quota (90 tokens)
+        // admits the full 60-token fixture under BOTH the LOD default and
+        // the classic selector: at budget 100 the quota is 30 and only one
+        // candidate fits, which starves the guard accounting under test.
+        // (The earlier "expected 3 at budget 100" baseline was refreshed in
+        // a55ae417 during the broken-proof-lane window and never verified.)
         let mut draft = assemble_draft_with_profile(
             ContextPackProfile::Balanced,
             "network retry policy",
-            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?,
+            TokenBudget::new(300).map_err(|error| format!("budget rejected: {error:?}"))?,
             candidates,
         )
         .map_err(|error| format!("draft assembly failed: {error:?}"))?;
