@@ -77,6 +77,54 @@ Fixture scenarios:
 - `rollup_only_no_claimable_child`: an open epic or parent has no claimable
   child and must remain inspection-only.
 
+## Same-file proof debt handoff (bd-1n3x1.15.4)
+
+`unproved_same_file_source_debt` is coordination evidence emitted when a
+candidate likely touches a relative path already changed by a related bead whose
+source work is complete but whose Cargo proof has not reached a Rust verdict.
+It is not a dirty-checkout count, reservation conflict, tracker-authority
+failure, install-freshness failure, active-build admission blocker, pressure
+telemetry blocker, or RCH topology blocker. Those reasons remain present when
+they apply; same-file proof debt only explains the same-path proof risk.
+
+The first shipped surface from `bd-1n3x1.15.3` is the internal work-packet and
+claim-gate unsafe-reason name. Agents should look for
+`unproved_same_file_source_debt` in candidate unsafe reasons and treat the
+recommended action as `coordinate_before_claim`. The reason can make
+`safeToClaim` false or keep it false, but it never authorizes a claim command
+and never converts an environment proof blocker into a Rust source failure.
+
+Use this Beads comment template when a candidate is unsafe because of the
+signal:
+
+```text
+Same-file proof debt: candidate <candidate-bead> likely touches
+<relative-path>, while related bead <related-bead> has source-complete work
+whose Cargo proof is blocked before a Rust verdict (<bounded-blocker-codes>).
+Coordinate before stacking edits. This is coordination evidence only; do not
+close either bead or claim a Rust source failure from this signal.
+```
+
+Use this Agent Mail template for the common handoff:
+
+```text
+I am evaluating <candidate-bead>. The work packet reports
+unproved_same_file_source_debt for <relative-path> against <related-bead>, with
+proof blocker codes <bounded-blocker-codes>. Are you still actively owning that
+path, or should I wait for proof/closure before editing? I will not stack source
+edits without coordination.
+```
+
+Operator override is explicit coordination, not automatic permission. A human
+or current file owner can decide that a candidate may proceed, but ordinary
+claim-gate blockers still matter: live reservations, tracker corruption,
+install freshness, Agent Mail authority, active-build admission, pressure
+telemetry, and topology blockers must be handled according to their own
+contracts. Keep handoffs bounded to bead ids, relative paths, short blocker
+codes, and next commands such as `CI=1 br show <id> --json` or the required RCH
+proof wrapper; do not paste mail bodies, raw logs, full diffs, private absolute
+paths, or secrets.
+
 Shell smoke coverage lives in `scripts/e2e_swarm_work_packet_no_mutation.sh`.
 The harness snapshots `.beads/`, a synthetic Agent Mail store, and the Git
 index around packet generation, logs `ee.test_event.v1` phases, refuses mutating
