@@ -40,6 +40,13 @@ assert_fixture \
       and .summary.verdict == "wait_for_active_run"
       and .summary.activeRunCount == 1
       and .activeRecommendation.nextAction == "wait"
+      and ((.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[] | select(.runId == "27228688656") | .jobEvidence[0].labels) == ["macos-14"])
+      and ((.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[] | select(.runId == "27228688656") | .jobEvidence[0].runnerAssignment) == "unassigned")
+      and ((.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[] | select(.runId == "27228688656") | .jobEvidence[0].startedAt) == "2026-06-09T18:55:22Z")
+      and ((.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[] | select(.runId == "27228688656") | .jobEvidence[0].queueAgeSeconds) == 2681)
+      and ((.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[] | select(.runId == "27228688656") | .queueDiagnosis.status) == "github_hosted_runner_capacity")
+      and ((.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[] | select(.runId == "27228688656") | .queueDiagnosis.comparablePriorRunId) == "27164008356")
+      and ((.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[] | select(.runId == "27228688656") | .queueDiagnosis.nextAction) == "inspect_github_runner_capacity_or_labels")
       and (.degraded[] | select(.code == "ci_proof_lane_active_run_stale"))'
 
 assert_fixture \

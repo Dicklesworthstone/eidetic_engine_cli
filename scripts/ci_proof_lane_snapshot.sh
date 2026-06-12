@@ -247,6 +247,10 @@ def normalize_time(value)
   value.nil? || value.to_s.empty? ? now_iso : value.to_s
 end
 
+def normalize_nullable_time(value)
+  value.nil? || value.to_s.empty? ? nil : value.to_s
+end
+
 def parse_time_or_nil(value)
   Time.parse(value.to_s)
 rescue ArgumentError
@@ -329,10 +333,150 @@ def run_artifacts(raw_run, repository, artifact_index)
   artifacts
 end
 
-def normalize_run(raw_run, repository, artifact_index)
+def string_field(raw, *keys)
+  keys.each do |key|
+    value = raw[key]
+    next if value.nil?
+
+    text = value.to_s
+    return text unless text.empty?
+  end
+
+  nil
+end
+
+def normalized_job_labels(raw_job)
+  raw_labels = raw_job["labels"] || raw_job["runnerLabels"] || raw_job["runner_labels"] || []
+  raw_labels = [raw_labels] unless raw_labels.is_a?(Array)
+  raw_labels.map { |label| label.to_s.strip }.reject(&:empty?).uniq.sort.first(16)
+end
+
+def runner_assignment(status, runner_name, runner_group_name)
+  return "assigned" if runner_name || runner_group_name
+  return "unassigned" if status == "queued"
+  return "not_applicable" if status == "completed"
+
+  "unknown"
+end
+
+def normalize_job(raw_job, raw_run, generated_at)
+  job_id = (raw_job["databaseId"] || raw_job["id"]).to_s
+  return nil if job_id.empty?
+
+  status = normalize_status(raw_job["status"] || raw_run["status"])
+  started_at = normalize_nullable_time(raw_job["startedAt"] || raw_job["started_at"])
+  runner_name = string_field(raw_job, "runnerName", "runner_name")
+  runner_group_name = string_field(raw_job, "runnerGroupName", "runner_group_name")
+  assignment = runner_assignment(status, runner_name, runner_group_name)
+  queue_age_seconds =
+    if status == "queued" && assignment == "unassigned"
+      active_run_age_seconds(raw_run, generated_at)
+    else
+      nil
+    end
+
+  {
+    "jobId" => job_id,
+    "name" => string_field(raw_job, "name") || "unknown",
+    "status" => status,
+    "conclusion" => normalize_conclusion(raw_job["conclusion"]),
+    "labels" => normalized_job_labels(raw_job),
+    "runnerName" => runner_name,
+    "runnerGroupName" => runner_group_name,
+    "startedAt" => started_at,
+    "completedAt" => normalize_nullable_time(raw_job["completedAt"] || raw_job["completed_at"]),
+    "queueAgeSeconds" => queue_age_seconds,
+    "runnerAssignment" => assignment
+  }
+end
+
+def normalize_jobs(raw_run, generated_at)
+  jobs = raw_run["jobs"].is_a?(Array) ? raw_run["jobs"] : []
+  jobs.map { |job| normalize_job(job, raw_run, generated_at) }.compact.first(16)
+end
+
+def run_workflow_name(raw_runs, run_id)
+  raw_runs.find { |run| (run["databaseId"] || run["runId"]).to_s == run_id }.to_h["workflowName"].to_s
+end
+
+def run_job_labels(run)
+  run.fetch("jobEvidence", []).flat_map { |job| job.fetch("labels", []) }.uniq.sort
+end
+
+def runner_detail(run, key)
+  run.fetch("jobEvidence", []).map { |job| job[key] }.find { |value| !value.nil? && !value.to_s.empty? }
+end
+
+def comparable_prior_success(run, normalized_runs, raw_runs)
+  labels = run_job_labels(run)
+  workflow_name = run_workflow_name(raw_runs, run["runId"])
+  return nil if labels.empty? || workflow_name.empty?
+
+  normalized_runs.find do |candidate|
+    next false if candidate["runId"] == run["runId"]
+    next false unless run_workflow_name(raw_runs, candidate["runId"]) == workflow_name
+    next false unless candidate["status"] == "completed" && candidate["conclusion"] == "success"
+    next false if runner_detail(candidate, "runnerName").nil? && runner_detail(candidate, "runnerGroupName").nil?
+
+    !(run_job_labels(candidate) & labels).empty?
+  end
+end
+
+def queue_diagnosis(run, normalized_runs, raw_runs, generated_at)
+  return nil unless run["status"] == "queued" || run["status"] == "in_progress"
+
+  age_seconds = active_run_age_seconds(run, generated_at)
+  stale = age_seconds && age_seconds >= ACTIVE_RUN_STALE_SECONDS
+  jobs = run.fetch("jobEvidence", [])
+  unassigned = jobs.empty? || jobs.any? { |job| job["runnerAssignment"] == "unassigned" }
+  assigned = jobs.any? { |job| job["runnerAssignment"] == "assigned" }
+  comparable = comparable_prior_success(run, normalized_runs, raw_runs)
+
+  status =
+    if run["status"] == "queued" && stale && unassigned && comparable
+      "github_hosted_runner_capacity"
+    elsif run["status"] == "queued" && stale && unassigned
+      "runner_label_or_settings_unverified"
+    elsif run["status"] == "queued" && stale && assigned
+      "runner_assigned_but_not_started"
+    elsif run["status"] == "in_progress" && stale
+      "workflow_execution_stale"
+    else
+      "ordinary_wait"
+    end
+
+  next_action =
+    case status
+    when "github_hosted_runner_capacity", "runner_label_or_settings_unverified"
+      "inspect_github_runner_capacity_or_labels"
+    when "runner_assigned_but_not_started", "workflow_execution_stale"
+      "inspect_workflow_or_runner_if_authorized"
+    else
+      "handoff_run_id_and_keep_polling"
+    end
+
+  {
+    "status" => status,
+    "queueAgeSeconds" => age_seconds,
+    "staleAfterSeconds" => ACTIVE_RUN_STALE_SECONDS,
+    "comparablePriorRunId" => comparable&.fetch("runId"),
+    "comparablePriorRunnerName" => comparable ? runner_detail(comparable, "runnerName") : nil,
+    "comparablePriorRunnerGroupName" => comparable ? runner_detail(comparable, "runnerGroupName") : nil,
+    "nextAction" => next_action
+  }
+end
+
+def attach_queue_diagnostics!(normalized_runs, raw_runs, generated_at)
+  normalized_runs.each do |run|
+    diagnosis = queue_diagnosis(run, normalized_runs, raw_runs, generated_at)
+    run["queueDiagnosis"] = diagnosis if diagnosis
+  end
+end
+
+def normalize_run(raw_run, repository, artifact_index, generated_at)
   run_id = (raw_run["databaseId"] || raw_run["runId"]).to_s
-  jobs = raw_run["jobs"] || []
-  job_ids = jobs.map { |job| (job["databaseId"] || job["id"]).to_s }.reject(&:empty?).uniq
+  jobs = normalize_jobs(raw_run, generated_at)
+  job_ids = jobs.map { |job| job["jobId"] }.reject(&:empty?).uniq
   status = normalize_status(raw_run["status"])
   conclusion = normalize_conclusion(raw_run["conclusion"])
   artifacts = run_artifacts(raw_run, repository, artifact_index)
@@ -382,6 +526,7 @@ def normalize_run(raw_run, repository, artifact_index)
     "completedAt" => status == "completed" ? normalize_time(raw_run["completedAt"] || raw_run["updatedAt"]) : nil,
     "sourceFreshness" => freshness,
     "artifactFreshness" => artifact_freshness,
+    "jobEvidence" => jobs,
     "artifacts" => artifacts,
     "firstFailureDiagnosis" => first_failure
   }
@@ -549,7 +694,8 @@ def build_snapshot(repository:, generated_at:, raw_runs:, artifact_index: {}, gh
     verdict_run_id = nil
     normalized_runs = []
   else
-    normalized_runs = raw_runs.map { |run| normalize_run(run, repository, artifact_index) }
+    normalized_runs = raw_runs.map { |run| normalize_run(run, repository, artifact_index, generated_at) }
+    attach_queue_diagnostics!(normalized_runs, raw_runs, generated_at)
     verdict, verdict_run_id = choose_verdict(raw_runs, normalized_runs, repository)
   end
 

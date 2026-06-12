@@ -42,8 +42,10 @@ The snapshot records:
 - whether the requested head SHA is reachable from GitHub Actions metadata
 - workflow name/path/proof-lane kind/concurrency group/dispatch policy
 - run ids, job ids, event, ref, head SHA, run status, conclusion, and timestamps
+- bounded job labels, runner assignment state, runner name/group when GitHub exposes them, and queue age
 - artifact names, source SHA, retention/freshness, checksum status, architecture, and surface probes
 - a single `activeRecommendation` telling the agent to reuse, wait, download and verify, dispatch, abstain, or file a bead
+- per-run `queueDiagnosis` for active runs, which explains ordinary waits versus stale unassigned runner capacity without changing the top-level safe action
 - degraded codes for unavailable GitHub state, duplicate dispatch, cancelled-before-artifact runs, missing/stale artifacts, checksum mismatch, and surface probe failures
 
 The contract deliberately separates artifact authority from source compile/test evidence. A fresh artifact with a verified checksum can prove that a binary came from a particular workflow run and head SHA. It does not prove the source passed tests unless another evidence source says so.
@@ -58,7 +60,10 @@ If the active run has been queued or in progress beyond the conservative
 handoff window, the verdict remains `wait_for_active_run`, but `degraded[]`
 includes `ci_proof_lane_active_run_stale`. That code means the named run is
 still authoritative; agents should hand off or keep polling rather than
-dispatching a duplicate or cancelling without explicit human approval.
+dispatching a duplicate or cancelling without explicit human approval. Inspect
+the run's `queueDiagnosis` and `jobEvidence[]` to distinguish an ordinary wait
+from stale unassigned runner capacity or a runner/workflow state that needs
+human-authorized inspection.
 
 `duplicate_dispatch_detected`: multiple active workflow_dispatch runs target the same proof lane and head SHA. Agents should coordinate through Agent Mail and wait for one authoritative run.
 
@@ -108,7 +113,10 @@ or treating a CI-built binary as source-authority evidence.
    harness because a mail thread or old support bundle said a lane was usable.
 5. When you need first-failure detail, use `degraded[]` and the matching
    `workflows[].runs[].firstFailureDiagnosis` row.
-6. Record the snapshot verdict in Agent Mail before mutating Beads or invoking a
+6. For `wait_for_active_run`, read `workflows[].runs[].queueDiagnosis` before
+   escalating the blocker. A stale unassigned run with a comparable prior
+   success on the same labels is runner-capacity evidence, not source failure.
+7. Record the snapshot verdict in Agent Mail before mutating Beads or invoking a
    no-mock harness.
 
 | Recommendation | Agent action |
@@ -158,6 +166,26 @@ Required evidence:
 
 Agent action: announce one authoritative run in Agent Mail and wait. Do not
 cancel any workflow unless the human explicitly authorizes that exact action.
+
+### Stale queued macOS artifact runner
+
+Use when a dedicated artifact run remains queued beyond the handoff window.
+
+Required evidence:
+
+- authoritative active run id and job id
+- job labels, especially hosted runner labels such as `macos-14`
+- runner assignment state for the active job
+- `queueDiagnosis.status`
+- comparable prior successful run id using the same labels, when available
+- comparable prior runner name/group, when GitHub exposes them
+- `degraded[].code=ci_proof_lane_active_run_stale`
+
+Agent action: keep the run authoritative and preserve the queue diagnosis in
+Agent Mail. Do not dispatch a duplicate run or cancel the queued run. If
+`queueDiagnosis.nextAction=inspect_github_runner_capacity_or_labels`, inspect
+GitHub-hosted runner capacity or workflow label configuration only through a
+read-only path unless the human authorizes a mutating operation.
 
 ### Stale artifact or missing surface
 
@@ -209,6 +237,7 @@ source/test proof.
 - artifact: <artifact name or none>
 - checksum: <verified | mismatch | missing | not_checked>
 - surface_probe: <command> => <passed | failed | not_run>
+- queue_diagnosis: <status or none> next=<nextAction or none> comparable_prior_run=<run id or none>
 - local_cargo_tripwire: <ok count=0 | bypass_detected count=N | not_checked>
 - snapshot_verdict: <summary.verdict>
 - degraded_codes: <codes or none>

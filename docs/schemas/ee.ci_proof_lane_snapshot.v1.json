@@ -220,6 +220,11 @@
           "items": {"type": "string", "pattern": "^[0-9]+$"},
           "uniqueItems": true
         },
+        "jobEvidence": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/jobEvidence"},
+          "maxItems": 16
+        },
         "event": {"$ref": "#/$defs/safeString"},
         "headSha": {"$ref": "#/$defs/sha"},
         "ref": {"$ref": "#/$defs/safeString"},
@@ -250,10 +255,127 @@
           "items": {"$ref": "#/$defs/artifact"},
           "maxItems": 16
         },
+        "queueDiagnosis": {"$ref": "#/$defs/queueDiagnosis"},
         "firstFailureDiagnosis": {
           "oneOf": [
             {"type": "null"},
             {"$ref": "#/$defs/safeString"}
+          ]
+        }
+      }
+    },
+    "jobEvidence": {
+      "type": "object",
+      "required": [
+        "jobId",
+        "name",
+        "status",
+        "conclusion",
+        "labels",
+        "runnerName",
+        "runnerGroupName",
+        "startedAt",
+        "completedAt",
+        "queueAgeSeconds",
+        "runnerAssignment"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "jobId": {"type": "string", "pattern": "^[0-9]+$"},
+        "name": {"$ref": "#/$defs/safeString"},
+        "status": {
+          "type": "string",
+          "enum": ["queued", "in_progress", "completed", "unknown"]
+        },
+        "conclusion": {
+          "type": ["string", "null"],
+          "enum": [
+            "success",
+            "failure",
+            "cancelled",
+            "skipped",
+            "timed_out",
+            "action_required",
+            "neutral",
+            null
+          ]
+        },
+        "labels": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/safeString"},
+          "uniqueItems": true,
+          "maxItems": 16
+        },
+        "runnerName": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/safeString"}
+          ]
+        },
+        "runnerGroupName": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/safeString"}
+          ]
+        },
+        "startedAt": {"type": ["string", "null"], "format": "date-time"},
+        "completedAt": {"type": ["string", "null"], "format": "date-time"},
+        "queueAgeSeconds": {"type": ["integer", "null"], "minimum": 0},
+        "runnerAssignment": {
+          "type": "string",
+          "enum": ["assigned", "unassigned", "unknown", "not_applicable"]
+        }
+      }
+    },
+    "queueDiagnosis": {
+      "type": "object",
+      "required": [
+        "status",
+        "queueAgeSeconds",
+        "staleAfterSeconds",
+        "comparablePriorRunId",
+        "comparablePriorRunnerName",
+        "comparablePriorRunnerGroupName",
+        "nextAction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "ordinary_wait",
+            "github_hosted_runner_capacity",
+            "runner_label_or_settings_unverified",
+            "runner_assigned_but_not_started",
+            "workflow_execution_stale"
+          ]
+        },
+        "queueAgeSeconds": {"type": ["integer", "null"], "minimum": 0},
+        "staleAfterSeconds": {"type": "integer", "minimum": 1},
+        "comparablePriorRunId": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^[0-9]+$"}
+          ]
+        },
+        "comparablePriorRunnerName": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/safeString"}
+          ]
+        },
+        "comparablePriorRunnerGroupName": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/safeString"}
+          ]
+        },
+        "nextAction": {
+          "type": "string",
+          "enum": [
+            "handoff_run_id_and_keep_polling",
+            "inspect_github_runner_capacity_or_labels",
+            "inspect_workflow_or_runner_if_authorized"
           ]
         }
       }

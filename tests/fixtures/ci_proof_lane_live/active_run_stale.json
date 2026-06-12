@@ -22,7 +22,13 @@
       "jobs": [
         {
           "databaseId": "80773244144",
-          "name": "build aarch64-apple-darwin debug ee"
+          "name": "build aarch64-apple-darwin debug ee",
+          "status": "queued",
+          "labels": ["macos-14"],
+          "runnerName": null,
+          "runnerGroupName": null,
+          "startedAt": "2026-06-09T18:55:22Z",
+          "completedAt": null
         }
       ],
       "artifacts": []
@@ -41,7 +47,14 @@
       "jobs": [
         {
           "databaseId": "80643111225",
-          "name": "build aarch64-apple-darwin debug ee"
+          "name": "build aarch64-apple-darwin debug ee",
+          "status": "completed",
+          "conclusion": "success",
+          "labels": ["macos-14"],
+          "runnerName": "GitHub Actions 1000671062",
+          "runnerGroupName": "GitHub Actions",
+          "startedAt": "2026-06-08T20:17:52Z",
+          "completedAt": "2026-06-08T21:11:28Z"
         }
       ],
       "artifacts": [
