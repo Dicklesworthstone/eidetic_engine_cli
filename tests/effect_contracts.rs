@@ -11,7 +11,7 @@ use std::process::Command;
 
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
 const EFFECT_SOURCE: &str = include_str!("../src/core/effect.rs");
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 370;
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 373;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",
@@ -600,6 +600,9 @@ fn effect_manifest_tracks_implemented_surfaces() -> TestResult {
         "economy score",
         "economy simulate",
         "economy prune-plan",
+        "hook claude-code",
+        "hook codex",
+        "hook gemini",
     ] {
         let effect = manifest
             .get(command)

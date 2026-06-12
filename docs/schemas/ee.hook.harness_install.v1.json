@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.hook.harness_install.v1.json",
+  "title": "ee.hook.harness_install.v1",
+  "description": "Agent-harness hook generation/install report for recall injection and failure capture.",
+  "type": "object",
+  "required": [
+    "schema",
+    "harness",
+    "harnessDisplayName",
+    "mode",
+    "supported",
+    "readOnly",
+    "workspace",
+    "settingsPath",
+    "backupPath",
+    "writtenPaths",
+    "markers",
+    "snippets",
+    "plan",
+    "capabilityGaps",
+    "generatedAt"
+  ],
+  "properties": {
+    "schema": { "const": "ee.hook.harness_install.v1" },
+    "harness": { "enum": ["claude-code", "codex", "gemini"] },
+    "harnessDisplayName": { "type": "string", "minLength": 1 },
+    "mode": { "enum": ["print", "install", "undo"] },
+    "supported": { "type": "boolean" },
+    "readOnly": { "type": "boolean" },
+    "workspace": { "type": "string", "minLength": 1 },
+    "settingsPath": { "type": ["string", "null"] },
+    "backupPath": { "type": ["string", "null"] },
+    "writtenPaths": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "markers": {
+      "type": "object",
+      "required": ["entryMarker", "managedBy"],
+      "properties": {
+        "entryMarker": { "type": "string", "minLength": 1 },
+        "managedBy": { "const": "ee" }
+      },
+      "additionalProperties": false
+    },
+    "snippets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "matcher",
+          "command",
+          "timeoutSeconds",
+          "async",
+          "installable",
+          "purpose"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "event": {
+            "enum": ["PreToolUse", "PostToolUse", "SessionStart"]
+          },
+          "matcher": { "type": ["string", "null"] },
+          "command": { "type": "string", "minLength": 1 },
+          "timeoutSeconds": { "type": "integer", "minimum": 0 },
+          "async": { "type": "boolean" },
+          "installable": { "type": "boolean" },
+          "purpose": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "plan": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["action", "event", "matcher", "targetPath", "reason"],
+        "properties": {
+          "action": {
+            "enum": [
+              "print",
+              "install",
+              "undo",
+              "print_only",
+              "no_change",
+              "backup_available",
+              "restore_backup",
+              "capability_gap"
+            ]
+          },
+          "event": { "type": ["string", "null"] },
+          "matcher": { "type": ["string", "null"] },
+          "targetPath": { "type": ["string", "null"] },
+          "reason": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "capabilityGaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message", "repair"],
+        "properties": {
+          "code": {
+            "enum": [
+              "harness_hooks_unsupported",
+              "harness_config_path_unavailable",
+              "harness_backup_missing"
+            ]
+          },
+          "message": { "type": "string", "minLength": 1 },
+          "repair": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false
+}

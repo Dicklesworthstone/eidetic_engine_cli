@@ -452,6 +452,11 @@ pub const DOCTOR_SCHEMAS: &[SchemaEntry] = &[
 pub const HOOKS_SCHEMAS: &[SchemaEntry] = &[
     SchemaEntry::new("hook_install", "ee.hooks.install.v1", SchemaCategory::Hooks),
     SchemaEntry::new("hook_status", "ee.hooks.status.v1", SchemaCategory::Hooks),
+    SchemaEntry::new(
+        "hook_harness_install",
+        "ee.hook.harness_install.v1",
+        SchemaCategory::Hooks,
+    ),
 ];
 
 /// Learn schemas.
@@ -3284,6 +3289,10 @@ mod tests {
         ensure(
             versions.contains(&"ee.hooks.status.v1"),
             "hooks schemas must include status (EE-321)",
+        )?;
+        ensure(
+            versions.contains(&"ee.hook.harness_install.v1"),
+            "hooks schemas must include harness install (bd-u875s.4)",
         )
     }
 

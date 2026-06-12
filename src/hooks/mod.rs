@@ -4,10 +4,12 @@ pub use installer::{
     GIT_HOOK_AHEAD_RISK_SCHEMA_V1, GIT_HOOK_READINESS_SCHEMA_V1, GitHookAheadRiskSummary,
     GitHookReadinessFinding, GitHookReadinessHook, GitHookReadinessOptions,
     GitHookReadinessRecommendation, GitHookReadinessReport, GitHookReadinessSummary,
-    HookInstallOptions, HookInstallReport, HookStatusOptions, HookStatusReport, HookType,
-    PREFLIGHT_HOOK_SHELL_SCHEMA_V1, PreflightHookShell, PreflightHookShellOptions,
+    HARNESS_HOOK_INSTALL_SCHEMA_V1, HarnessHookCapabilityGap, HarnessHookInstallOptions,
+    HarnessHookInstallReport, HarnessHookMarkers, HarnessHookPlanItem, HarnessHookSnippet,
+    HarnessHookTarget, HookInstallOptions, HookInstallReport, HookStatusOptions, HookStatusReport,
+    HookType, PREFLIGHT_HOOK_SHELL_SCHEMA_V1, PreflightHookShell, PreflightHookShellOptions,
     PreflightHookShellReport, check_git_hook_readiness, check_hook_status,
-    generate_preflight_shell_snippet, install_hooks,
+    generate_harness_hook_install, generate_preflight_shell_snippet, install_hooks,
 };
 
 pub const SUBSYSTEM: &str = "hooks";

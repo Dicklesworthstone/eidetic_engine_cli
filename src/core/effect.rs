@@ -1355,6 +1355,18 @@ impl EffectManifest {
                 "hook git-readiness",
                 "Inspect local Git hook-chain readiness without mutation",
             ),
+            CommandEffect::read_only(
+                "hook claude-code",
+                "Print Claude Code recall/journal harness hook plan by default",
+            ),
+            CommandEffect::read_only(
+                "hook codex",
+                "Print Codex recall/journal harness hook plan by default",
+            ),
+            CommandEffect::read_only(
+                "hook gemini",
+                "Report Gemini harness hook support posture without guessing",
+            ),
             CommandEffect::read_only_db(
                 "impact",
                 "Estimate impact from persisted graph and memory state",

@@ -3,6 +3,7 @@
 //! Provides safe installation of ee hooks into agent harness hook directories.
 //! Supports dry-run mode, idempotent re-installation, and preservation of existing hooks.
 
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,7 +30,12 @@ pub const GIT_HOOK_READINESS_SCHEMA_V1: &str = "ee.hooks.git_readiness.v1";
 /// Schema for the push-safety summary embedded in hook readiness diagnostics.
 pub const GIT_HOOK_AHEAD_RISK_SCHEMA_V1: &str = "ee.hooks.git_readiness.ahead_risk.v1";
 
+/// Schema for agent-harness hook generation/install reports.
+pub const HARNESS_HOOK_INSTALL_SCHEMA_V1: &str = "ee.hook.harness_install.v1";
+
 const TRAUMA_GUARD_HOOK_HELPER_SURFACE: &str = "trauma_guard_hook_helper";
+const HARNESS_HOOK_MARKER: &str = "ee-managed-harness-hook:bd-u875s.4";
+const HARNESS_BACKUP_SUFFIX: &str = ".ee-backup";
 
 fn elapsed_ms_since(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -426,7 +432,10 @@ fn generate_hook_content(hook_type: HookType, ee_binary_path: &Path) -> String {
 /// Shell-quote a path for safe embedding in sh scripts.
 /// Uses single quotes with escaped single quotes for safety.
 fn shell_quote(path: &Path) -> String {
-    let s = path.display().to_string();
+    shell_quote_str(&path.display().to_string())
+}
+
+fn shell_quote_str(s: &str) -> String {
     // If path contains no special characters, just quote it simply
     if s.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '/' || c == '_' || c == '-' || c == '.')
@@ -1056,6 +1065,641 @@ pub fn check_hook_status(options: &HookStatusOptions) -> Result<HookStatusReport
         missing_count,
         generated_at: now,
     })
+}
+
+// ============================================================================
+// Agent Harness Hook Generators (bd-u875s.4)
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessHookTarget {
+    ClaudeCode,
+    Codex,
+    Gemini,
+}
+
+impl HarnessHookTarget {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+        }
+    }
+
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex CLI",
+            Self::Gemini => "Gemini CLI",
+        }
+    }
+
+    #[must_use]
+    pub const fn supported(self) -> bool {
+        matches!(self, Self::ClaudeCode | Self::Codex)
+    }
+
+    #[must_use]
+    pub const fn installed_pre_edit_matcher(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudeCode => Some("Edit|Write|MultiEdit|NotebookEdit"),
+            Self::Codex => Some("Edit|Write|apply_patch"),
+            Self::Gemini => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HarnessHookInstallOptions {
+    pub target: HarnessHookTarget,
+    pub workspace: PathBuf,
+    pub settings_path: Option<PathBuf>,
+    pub install: bool,
+    pub undo: bool,
+    pub ee_binary_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessHookMarkers {
+    pub entry_marker: String,
+    pub managed_by: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessHookSnippet {
+    pub id: String,
+    pub event: String,
+    pub matcher: Option<String>,
+    pub command: String,
+    pub timeout_seconds: u32,
+    #[serde(rename = "async")]
+    pub async_hook: bool,
+    pub installable: bool,
+    pub purpose: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessHookPlanItem {
+    pub action: String,
+    pub event: Option<String>,
+    pub matcher: Option<String>,
+    pub target_path: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessHookCapabilityGap {
+    pub code: String,
+    pub message: String,
+    pub repair: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessHookInstallReport {
+    pub schema: String,
+    pub harness: String,
+    pub harness_display_name: String,
+    pub mode: String,
+    pub supported: bool,
+    pub read_only: bool,
+    pub workspace: String,
+    pub settings_path: Option<String>,
+    pub backup_path: Option<String>,
+    pub written_paths: Vec<String>,
+    pub markers: HarnessHookMarkers,
+    pub snippets: Vec<HarnessHookSnippet>,
+    pub plan: Vec<HarnessHookPlanItem>,
+    pub capability_gaps: Vec<HarnessHookCapabilityGap>,
+    pub generated_at: String,
+}
+
+impl HarnessHookInstallReport {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        serialize_hook_report(self, "HarnessHookInstallReport")
+    }
+}
+
+pub fn generate_harness_hook_install(
+    options: &HarnessHookInstallOptions,
+) -> Result<HarnessHookInstallReport, DomainError> {
+    if options.install && options.undo {
+        return Err(DomainError::Usage {
+            message: "ee hook harness install modes are mutually exclusive".to_owned(),
+            repair: Some("Use only one of --install, --undo, or --print.".to_owned()),
+        });
+    }
+
+    let mode = if options.undo {
+        "undo"
+    } else if options.install {
+        "install"
+    } else {
+        "print"
+    };
+    let settings_path = options
+        .settings_path
+        .clone()
+        .or_else(|| default_harness_settings_path(options.target, &options.workspace));
+    let backup_path = settings_path.as_deref().map(harness_backup_path);
+    let ee_binary = match options.ee_binary_path.clone() {
+        Some(path) => path,
+        None => get_ee_binary_path()?,
+    };
+
+    let mut capability_gaps = Vec::new();
+    let snippets = harness_hook_snippets(options.target, &ee_binary);
+    let mut plan = harness_hook_plan(options.target, &settings_path, &snippets, mode);
+    let mut written_paths = Vec::new();
+
+    if !options.target.supported() {
+        capability_gaps.push(HarnessHookCapabilityGap {
+            code: "harness_hooks_unsupported".to_owned(),
+            message: format!(
+                "{} hook installation is not supported by this generator.",
+                options.target.display_name()
+            ),
+            repair: "Use --print to inspect the Claude Code/Codex snippets, or add a Gemini hook-surface adapter once Gemini exposes a compatible hook contract.".to_owned(),
+        });
+    } else if settings_path.is_none() {
+        capability_gaps.push(HarnessHookCapabilityGap {
+            code: "harness_config_path_unavailable".to_owned(),
+            message: "Could not resolve a harness settings path.".to_owned(),
+            repair: "Set HOME or pass --settings-path explicitly.".to_owned(),
+        });
+    } else if options.undo {
+        let settings_path = settings_path
+            .as_deref()
+            .expect("checked settings path before undo");
+        let backup_path = backup_path
+            .as_deref()
+            .expect("backup path exists when settings path exists");
+        if backup_path.is_file() {
+            restore_harness_settings_backup(settings_path, backup_path)?;
+            written_paths.push(settings_path.display().to_string());
+            plan.push(HarnessHookPlanItem {
+                action: "restore_backup".to_owned(),
+                event: None,
+                matcher: None,
+                target_path: Some(settings_path.display().to_string()),
+                reason: format!("Restored {}", backup_path.display()),
+            });
+        } else {
+            capability_gaps.push(HarnessHookCapabilityGap {
+                code: "harness_backup_missing".to_owned(),
+                message: format!(
+                    "No harness settings backup exists at {}.",
+                    backup_path.display()
+                ),
+                repair: "Run --install first, or restore the harness settings file manually."
+                    .to_owned(),
+            });
+        }
+    } else if options.install {
+        let settings_path = settings_path
+            .as_deref()
+            .expect("checked settings path before install");
+        let backup_path = backup_path
+            .as_deref()
+            .expect("backup path exists when settings path exists");
+        if install_harness_settings_document(options.target, settings_path, backup_path, &snippets)?
+        {
+            written_paths.push(settings_path.display().to_string());
+            if backup_path.is_file() {
+                plan.push(HarnessHookPlanItem {
+                    action: "backup_available".to_owned(),
+                    event: None,
+                    matcher: None,
+                    target_path: Some(backup_path.display().to_string()),
+                    reason: "Backup path is available for --undo.".to_owned(),
+                });
+            }
+        } else {
+            plan.push(HarnessHookPlanItem {
+                action: "no_change".to_owned(),
+                event: None,
+                matcher: None,
+                target_path: Some(settings_path.display().to_string()),
+                reason: "Managed harness hook entries were already up to date.".to_owned(),
+            });
+        }
+    }
+
+    Ok(HarnessHookInstallReport {
+        schema: HARNESS_HOOK_INSTALL_SCHEMA_V1.to_owned(),
+        harness: options.target.as_str().to_owned(),
+        harness_display_name: options.target.display_name().to_owned(),
+        mode: mode.to_owned(),
+        supported: options.target.supported(),
+        read_only: !options.install && !options.undo,
+        workspace: options.workspace.display().to_string(),
+        settings_path: settings_path
+            .as_deref()
+            .map(|path| path.display().to_string()),
+        backup_path: backup_path
+            .as_deref()
+            .map(|path| path.display().to_string()),
+        written_paths,
+        markers: HarnessHookMarkers {
+            entry_marker: HARNESS_HOOK_MARKER.to_owned(),
+            managed_by: "ee".to_owned(),
+        },
+        snippets,
+        plan,
+        capability_gaps,
+        generated_at: Utc::now().to_rfc3339(),
+    })
+}
+
+fn default_harness_settings_path(target: HarnessHookTarget, workspace: &Path) -> Option<PathBuf> {
+    match target {
+        HarnessHookTarget::ClaudeCode => home_dir().map(|home| home.join(".claude/settings.json")),
+        HarnessHookTarget::Codex => Some(workspace.join(".codex/hooks.json")),
+        HarnessHookTarget::Gemini => home_dir().map(|home| home.join(".gemini/settings.json")),
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn harness_backup_path(settings_path: &Path) -> PathBuf {
+    let mut backup = settings_path.as_os_str().to_os_string();
+    backup.push(HARNESS_BACKUP_SUFFIX);
+    PathBuf::from(backup)
+}
+
+fn harness_hook_plan(
+    target: HarnessHookTarget,
+    settings_path: &Option<PathBuf>,
+    snippets: &[HarnessHookSnippet],
+    mode: &str,
+) -> Vec<HarnessHookPlanItem> {
+    if !target.supported() {
+        return vec![HarnessHookPlanItem {
+            action: "capability_gap".to_owned(),
+            event: None,
+            matcher: None,
+            target_path: settings_path
+                .as_deref()
+                .map(|path| path.display().to_string()),
+            reason: "Gemini hook support is reported explicitly instead of guessed.".to_owned(),
+        }];
+    }
+
+    snippets
+        .iter()
+        .map(|snippet| HarnessHookPlanItem {
+            action: if snippet.installable {
+                mode.to_owned()
+            } else {
+                "print_only".to_owned()
+            },
+            event: Some(snippet.event.clone()),
+            matcher: snippet.matcher.clone(),
+            target_path: if snippet.installable {
+                settings_path
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+            } else {
+                None
+            },
+            reason: snippet.purpose.clone(),
+        })
+        .collect()
+}
+
+fn harness_hook_snippets(target: HarnessHookTarget, ee_binary: &Path) -> Vec<HarnessHookSnippet> {
+    if !target.supported() {
+        return Vec::new();
+    }
+
+    let pre_edit_matcher = target
+        .installed_pre_edit_matcher()
+        .expect("supported harness must have a pre-edit matcher")
+        .to_owned();
+    vec![
+        HarnessHookSnippet {
+            id: "ee-recall-pre-edit".to_owned(),
+            event: "PreToolUse".to_owned(),
+            matcher: Some(pre_edit_matcher),
+            command: python_hook_command(pre_edit_python(), ee_binary),
+            timeout_seconds: 10,
+            async_hook: false,
+            installable: true,
+            purpose: "Inject bounded `ee recall --path ... --budget-tokens 400 --format markdown` context for edited files; fail open on every recall error.".to_owned(),
+        },
+        HarnessHookSnippet {
+            id: "ee-journal-bash-failure".to_owned(),
+            event: "PostToolUse".to_owned(),
+            matcher: Some("Bash".to_owned()),
+            command: python_hook_command(post_bash_failure_python(), ee_binary),
+            timeout_seconds: 10,
+            async_hook: false,
+            installable: true,
+            purpose: "Capture non-zero Bash command outcomes through `ee journal append --source hook` without blocking the harness.".to_owned(),
+        },
+        HarnessHookSnippet {
+            id: "ee-session-orientation-suggestion".to_owned(),
+            event: "SessionStart".to_owned(),
+            matcher: None,
+            command: "ee primer --workspace . --json  # or: ee orient --workspace . --json".to_owned(),
+            timeout_seconds: 0,
+            async_hook: false,
+            installable: false,
+            purpose: "Print-only startup suggestion; not auto-installed.".to_owned(),
+        },
+    ]
+}
+
+fn python_hook_command(script: &str, ee_binary: &Path) -> String {
+    format!(
+        "python3 -c {} {}",
+        shell_quote_str(script),
+        shell_quote(ee_binary)
+    )
+}
+
+fn pre_edit_python() -> &'static str {
+    r#"import json, subprocess, sys
+ee = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+tool_input = data.get("tool_input") or {}
+paths = []
+for key in ("file_path", "path", "notebook_path"):
+    value = tool_input.get(key)
+    if isinstance(value, str) and value:
+        paths.append(value)
+for edit in tool_input.get("edits") or []:
+    if isinstance(edit, dict):
+        value = edit.get("file_path") or edit.get("path")
+        if isinstance(value, str) and value:
+            paths.append(value)
+seen = []
+for path in paths:
+    if path not in seen:
+        seen.append(path)
+if not seen:
+    sys.exit(0)
+cmd = [ee, "recall"]
+for path in seen[:8]:
+    cmd.extend(["--path", path])
+cmd.extend(["--budget-tokens", "400", "--format", "markdown"])
+try:
+    result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=10)
+except Exception:
+    sys.exit(0)
+text = result.stdout.strip()
+if result.returncode != 0 or not text:
+    sys.exit(0)
+payload = {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name") or "PreToolUse", "additionalContext": text}}
+print(json.dumps(payload, separators=(",", ":")))
+"#
+}
+
+fn post_bash_failure_python() -> &'static str {
+    r#"import json, subprocess, sys
+ee = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if (data.get("tool_name") or "") != "Bash":
+    sys.exit(0)
+tool_input = data.get("tool_input") or {}
+response = data.get("tool_response") or {}
+exit_code = response.get("exit_code", response.get("exitCode", response.get("status")))
+try:
+    exit_code = int(exit_code)
+except Exception:
+    sys.exit(0)
+if exit_code == 0:
+    sys.exit(0)
+command = str(tool_input.get("command") or "")[:4000]
+stderr_tail = str(response.get("stderr") or response.get("stderr_tail") or response.get("output") or "")[-4000:]
+cwd = str(data.get("cwd") or "")
+body = "Harness observed a non-zero Bash exit code."
+cmd = [ee, "journal", "append", body, "--source", "hook", "--kind", "command_failure", "--exit-code", str(exit_code), "--json"]
+if command:
+    cmd.extend(["--cmd", command])
+if cwd:
+    cmd.extend(["--cwd", cwd])
+if stderr_tail:
+    cmd.extend(["--stderr-tail", stderr_tail])
+try:
+    subprocess.run(cmd, cwd=cwd or None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+except Exception:
+    pass
+"#
+}
+
+fn install_harness_settings_document(
+    target: HarnessHookTarget,
+    settings_path: &Path,
+    backup_path: &Path,
+    snippets: &[HarnessHookSnippet],
+) -> Result<bool, DomainError> {
+    let existing_text = match fs::read_to_string(settings_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "{}".to_owned(),
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Failed to read harness settings '{}': {error}",
+                    settings_path.display()
+                ),
+                repair: Some("Check harness settings permissions and retry.".to_owned()),
+            });
+        }
+    };
+    let mut document: serde_json::Value =
+        serde_json::from_str(&existing_text).map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Harness settings '{}' are not valid JSON: {error}",
+                settings_path.display()
+            ),
+            repair: Some("Fix the settings JSON before running --install.".to_owned()),
+        })?;
+    if !document.is_object() {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Harness settings '{}' must be a JSON object.",
+                settings_path.display()
+            ),
+            repair: Some("Replace the settings file with a JSON object.".to_owned()),
+        });
+    }
+
+    merge_harness_hooks(target, &mut document, snippets)?;
+    let new_text =
+        serde_json::to_string_pretty(&document).map_err(|error| DomainError::Storage {
+            message: format!("Failed to serialize harness settings: {error}"),
+            repair: Some("Retry after reducing unsupported JSON values.".to_owned()),
+        })? + "\n";
+    if existing_text == new_text {
+        return Ok(false);
+    }
+
+    if settings_path.exists() && !backup_path.exists() {
+        if let Some(parent) = backup_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to create harness backup directory '{}': {error}",
+                    parent.display()
+                ),
+                repair: Some("Check harness config directory permissions and retry.".to_owned()),
+            })?;
+        }
+        fs::copy(settings_path, backup_path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to write harness settings backup '{}': {error}",
+                backup_path.display()
+            ),
+            repair: Some("Check harness config directory permissions and retry.".to_owned()),
+        })?;
+    }
+    if let Some(parent) = settings_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to create harness settings directory '{}': {error}",
+                parent.display()
+            ),
+            repair: Some("Check harness config directory permissions and retry.".to_owned()),
+        })?;
+    }
+    fs::write(settings_path, new_text).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to write harness settings '{}': {error}",
+            settings_path.display()
+        ),
+        repair: Some("Check harness settings permissions and retry.".to_owned()),
+    })?;
+    Ok(true)
+}
+
+fn restore_harness_settings_backup(
+    settings_path: &Path,
+    backup_path: &Path,
+) -> Result<(), DomainError> {
+    if let Some(parent) = settings_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to create harness settings directory '{}': {error}",
+                parent.display()
+            ),
+            repair: Some("Check harness config directory permissions and retry.".to_owned()),
+        })?;
+    }
+    fs::copy(backup_path, settings_path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to restore harness settings backup '{}': {error}",
+            backup_path.display()
+        ),
+        repair: Some("Restore the backup manually after checking permissions.".to_owned()),
+    })?;
+    Ok(())
+}
+
+fn merge_harness_hooks(
+    target: HarnessHookTarget,
+    document: &mut serde_json::Value,
+    snippets: &[HarnessHookSnippet],
+) -> Result<(), DomainError> {
+    let Some(root) = document.as_object_mut() else {
+        return Err(DomainError::Configuration {
+            message: "Harness settings root must be an object.".to_owned(),
+            repair: Some("Replace the settings file with a JSON object.".to_owned()),
+        });
+    };
+    let hooks_value = root
+        .entry("hooks".to_owned())
+        .or_insert_with(|| serde_json::json!({}));
+    if !hooks_value.is_object() {
+        return Err(DomainError::Configuration {
+            message: "Harness settings `hooks` must be an object.".to_owned(),
+            repair: Some("Move non-hook settings out of the `hooks` key and retry.".to_owned()),
+        });
+    }
+    let hooks = hooks_value
+        .as_object_mut()
+        .expect("checked hooks object above");
+
+    for snippet in snippets.iter().filter(|snippet| snippet.installable) {
+        let entry = harness_hook_entry(target, snippet);
+        let event_entries = hooks
+            .entry(snippet.event.clone())
+            .or_insert_with(|| serde_json::json!([]));
+        if !event_entries.is_array() {
+            return Err(DomainError::Configuration {
+                message: format!("Harness hook event `{}` must be an array.", snippet.event),
+                repair: Some("Fix the harness hooks JSON shape and retry.".to_owned()),
+            });
+        }
+        let array = event_entries
+            .as_array_mut()
+            .expect("checked hook event array above");
+        array.retain(|value| !json_contains_marker(value, HARNESS_HOOK_MARKER));
+        array.push(entry);
+    }
+    Ok(())
+}
+
+fn harness_hook_entry(
+    target: HarnessHookTarget,
+    snippet: &HarnessHookSnippet,
+) -> serde_json::Value {
+    let hook = match target {
+        HarnessHookTarget::ClaudeCode => serde_json::json!({
+            "type": "command",
+            "command": snippet.command.clone(),
+            "timeout": snippet.timeout_seconds
+        }),
+        HarnessHookTarget::Codex => serde_json::json!({
+            "type": "command",
+            "command": snippet.command.clone(),
+            "timeout": snippet.timeout_seconds,
+            "statusMessage": snippet.purpose.clone()
+        }),
+        HarnessHookTarget::Gemini => serde_json::json!({}),
+    };
+
+    let mut entry = serde_json::json!({
+        "hooks": [hook],
+        "eeManaged": HARNESS_HOOK_MARKER
+    });
+    if let Some(matcher) = &snippet.matcher {
+        entry["matcher"] = serde_json::Value::String(matcher.clone());
+    }
+    entry
+}
+
+fn json_contains_marker(value: &serde_json::Value, marker: &str) -> bool {
+    match value {
+        serde_json::Value::String(text) => text.contains(marker),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_marker(value, marker)),
+        serde_json::Value::Object(values) => values
+            .values()
+            .any(|value| json_contains_marker(value, marker)),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
 }
 
 // ============================================================================
@@ -2110,6 +2754,7 @@ fi
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::Path;
     use tempfile::TempDir;
 
     type TestResult = Result<(), String>;
@@ -2131,6 +2776,163 @@ mod tests {
         options: &HookInstallOptions,
     ) -> Result<HookInstallReport, DomainError> {
         install_hooks_with_binary_path(options, std::path::Path::new("/usr/local/bin/ee"))
+    }
+
+    fn harness_options(
+        target: HarnessHookTarget,
+        settings_path: PathBuf,
+        install: bool,
+        undo: bool,
+    ) -> HarnessHookInstallOptions {
+        HarnessHookInstallOptions {
+            target,
+            workspace: settings_path
+                .parent()
+                .unwrap_or_else(|| Path::new("/tmp"))
+                .to_path_buf(),
+            settings_path: Some(settings_path),
+            install,
+            undo,
+            ee_binary_path: Some(PathBuf::from("/usr/local/bin/ee")),
+        }
+    }
+
+    #[test]
+    fn harness_print_is_read_only_and_includes_recall_and_journal_snippets() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+        let report = generate_harness_hook_install(&harness_options(
+            HarnessHookTarget::ClaudeCode,
+            settings_path.clone(),
+            false,
+            false,
+        ))
+        .map_err(|e| e.message())?;
+
+        assert!(report.read_only);
+        assert!(report.written_paths.is_empty());
+        assert!(
+            !settings_path.exists(),
+            "--print must not materialize harness settings"
+        );
+        assert!(
+            report
+                .snippets
+                .iter()
+                .any(|snippet| snippet.command.contains("recall")
+                    && snippet.command.contains("--budget-tokens")
+                    && snippet.command.contains("400")),
+            "pre-edit snippet should route through bounded recall"
+        );
+        assert!(
+            report
+                .snippets
+                .iter()
+                .any(|snippet| snippet.command.contains("journal")
+                    && snippet.command.contains("append")
+                    && snippet.command.contains("--source")),
+            "post-bash snippet should route through journal append"
+        );
+        assert!(
+            report
+                .plan
+                .iter()
+                .any(|item| item.action == "print_only"
+                    && item.event.as_deref() == Some("SessionStart")),
+            "SessionStart orientation snippet must be print-only"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn harness_install_is_idempotent_preserves_external_and_undo_restores_backup() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+        let original = r#"{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo external"
+          }
+        ]
+      }
+    ]
+  }
+}
+"#;
+        fs::write(&settings_path, original).map_err(|e| e.to_string())?;
+
+        let install = harness_options(
+            HarnessHookTarget::ClaudeCode,
+            settings_path.clone(),
+            true,
+            false,
+        );
+        let first = generate_harness_hook_install(&install).map_err(|e| e.message())?;
+        let first_content = fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
+        assert_eq!(first.written_paths.len(), 1);
+        assert!(
+            first_content.contains("echo external"),
+            "install must preserve external hook entries"
+        );
+        assert!(
+            first_content.contains(HARNESS_HOOK_MARKER),
+            "install must add a managed marker"
+        );
+        let backup_path = harness_backup_path(&settings_path);
+        assert!(
+            backup_path.is_file(),
+            "install over an existing settings file must write a backup"
+        );
+
+        let second = generate_harness_hook_install(&install).map_err(|e| e.message())?;
+        let second_content = fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
+        assert!(second.written_paths.is_empty());
+        assert_eq!(
+            second_content, first_content,
+            "install twice must be byte-identical"
+        );
+
+        let undo = harness_options(
+            HarnessHookTarget::ClaudeCode,
+            settings_path.clone(),
+            false,
+            true,
+        );
+        let undo_report = generate_harness_hook_install(&undo).map_err(|e| e.message())?;
+        let restored = fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
+        assert_eq!(undo_report.written_paths.len(), 1);
+        assert_eq!(restored, original);
+        Ok(())
+    }
+
+    #[test]
+    fn gemini_reports_capability_gap_without_writing() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let settings_path = temp.path().join("gemini-settings.json");
+        let report = generate_harness_hook_install(&harness_options(
+            HarnessHookTarget::Gemini,
+            settings_path.clone(),
+            true,
+            false,
+        ))
+        .map_err(|e| e.message())?;
+
+        assert!(!report.supported);
+        assert!(report.written_paths.is_empty());
+        assert!(!settings_path.exists());
+        assert!(
+            report
+                .capability_gaps
+                .iter()
+                .any(|gap| gap.code == "harness_hooks_unsupported"),
+            "Gemini must report an explicit capability gap"
+        );
+        Ok(())
     }
 
     /// Drop-cleanup of the temp-hook orphan after a mid-write failure.

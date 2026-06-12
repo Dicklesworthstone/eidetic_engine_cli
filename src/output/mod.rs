@@ -9294,6 +9294,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: hooks_git_readiness_schema_definition,
         },
         SchemaEntry {
+            id: "ee.hook.harness_install.v1",
+            version: "1",
+            description: "Agent-harness hook generation/install plan for recall injection and failure capture.",
+            category: "ops",
+            definition: hook_harness_install_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.host_calibration.host_class.v1",
             version: "1",
             description: "Pure host-class classification derived from a caller-provided host profile probe.",
@@ -10557,6 +10564,10 @@ fn health_structural_schema_definition() -> String {
 
 fn hooks_git_readiness_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.hooks.git_readiness.v1.json").to_string()
+}
+
+fn hook_harness_install_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.hook.harness_install.v1.json").to_string()
 }
 
 fn host_calibration_host_class_schema_definition() -> String {
@@ -11961,6 +11972,18 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         description: "Generate agent-harness hook helpers (preflight shell snippets, etc.)",
         available: true,
         subcommands: &[
+            SubcommandEntry {
+                name: "claude-code",
+                description: "Generate or install Claude Code recall and journal hooks",
+            },
+            SubcommandEntry {
+                name: "codex",
+                description: "Generate or install Codex recall and journal hooks",
+            },
+            SubcommandEntry {
+                name: "gemini",
+                description: "Report Gemini hook support posture",
+            },
             SubcommandEntry {
                 name: "preflight-shell",
                 description: "Emit a shell snippet that wires `ee preflight check` into bash or zsh",

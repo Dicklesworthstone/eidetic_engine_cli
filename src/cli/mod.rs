@@ -10617,6 +10617,14 @@ pub struct McpValidateArgs {
 /// Subcommands for `ee hook` (bd-3usjw.7 — trauma_guard_hook_helper).
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum HookCommand {
+    /// Generate or install Claude Code recall/journal harness hooks.
+    #[command(name = "claude-code")]
+    ClaudeCode(HarnessHookArgs),
+    /// Generate or install Codex recall/journal harness hooks.
+    #[command(name = "codex")]
+    Codex(HarnessHookArgs),
+    /// Report Gemini hook support posture.
+    Gemini(HarnessHookArgs),
     /// Emit a shell snippet that wires `ee preflight check` into bash or zsh
     /// as a pre-execution hook.
     #[command(name = "preflight-shell")]
@@ -10624,6 +10632,30 @@ pub enum HookCommand {
     /// Inspect local Git hooks for Agent Mail identity and preflight readiness.
     #[command(name = "git-readiness")]
     GitReadiness(GitHookReadinessArgs),
+}
+
+/// Arguments for `ee hook <harness>`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct HarnessHookArgs {
+    /// Merge ee-managed hooks into the harness settings file.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["print", "undo"])]
+    pub install: bool,
+
+    /// Print the hook plan and snippets without writing anything (default).
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["install", "undo"])]
+    pub print: bool,
+
+    /// Restore the deterministic backup written by --install.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["install", "print"])]
+    pub undo: bool,
+
+    /// Override the harness settings path.
+    #[arg(long = "settings-path", value_name = "PATH")]
+    pub settings_path: Option<PathBuf>,
+
+    /// Override the absolute path of the ee binary embedded in hook commands.
+    #[arg(long = "ee-binary", value_name = "PATH")]
+    pub ee_binary: Option<PathBuf>,
 }
 
 /// Shell flavor selector for `ee hook preflight-shell`.
@@ -12999,6 +13031,27 @@ where
         Some(Command::Mcp(McpCommand::Validate(ref args))) => {
             handle_mcp_validate(&cli, args, stdout)
         }
+        Some(Command::Hook(HookCommand::ClaudeCode(ref args))) => handle_hook_harness(
+            &cli,
+            crate::hooks::HarnessHookTarget::ClaudeCode,
+            args,
+            stdout,
+            stderr,
+        ),
+        Some(Command::Hook(HookCommand::Codex(ref args))) => handle_hook_harness(
+            &cli,
+            crate::hooks::HarnessHookTarget::Codex,
+            args,
+            stdout,
+            stderr,
+        ),
+        Some(Command::Hook(HookCommand::Gemini(ref args))) => handle_hook_harness(
+            &cli,
+            crate::hooks::HarnessHookTarget::Gemini,
+            args,
+            stdout,
+            stderr,
+        ),
         Some(Command::Hook(HookCommand::PreflightShell(ref args))) => {
             handle_hook_preflight_shell(&cli, args, stdout, stderr)
         }
@@ -13432,6 +13485,108 @@ fn args_contain_fields_flag(args: &[OsString]) -> bool {
         }
     }
     false
+}
+
+fn handle_hook_harness<W, E>(
+    cli: &Cli,
+    target: crate::hooks::HarnessHookTarget,
+    args: &HarnessHookArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = crate::hooks::HarnessHookInstallOptions {
+        target,
+        workspace: cli.resolve_workspace(),
+        settings_path: args.settings_path.clone(),
+        install: args.install,
+        undo: args.undo,
+        ee_binary_path: args.ee_binary.clone(),
+    };
+    let report = match crate::hooks::generate_harness_hook_install(&options) {
+        Ok(report) => report,
+        Err(error) => {
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_hook_harness_human(&report))
+        }
+        output::Renderer::Toon => {
+            let json = hook_harness_response_json(&report);
+            write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&json.to_string()) + "\n"),
+            )
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = hook_harness_response_json(&report);
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn hook_harness_response_json(
+    report: &crate::hooks::HarnessHookInstallReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": {
+            "command": format!("hook {}", report.harness),
+            "harnessInstall": report,
+        },
+        "degraded": [],
+    })
+}
+
+fn render_hook_harness_human(report: &crate::hooks::HarnessHookInstallReport) -> String {
+    let mut out = format!(
+        "{} harness hooks: {} (mode {}, read-only {})\n",
+        report.harness_display_name, report.schema, report.mode, report.read_only
+    );
+    if let Some(path) = &report.settings_path {
+        out.push_str(&format!("  settings: {path}\n"));
+    }
+    if let Some(path) = &report.backup_path {
+        out.push_str(&format!("  backup: {path}\n"));
+    }
+    if !report.written_paths.is_empty() {
+        out.push_str("  written:\n");
+        for path in &report.written_paths {
+            out.push_str(&format!("    - {path}\n"));
+        }
+    }
+    for gap in &report.capability_gaps {
+        out.push_str(&format!(
+            "  gap [{}]: {} Repair: {}\n",
+            gap.code, gap.message, gap.repair
+        ));
+    }
+    for item in &report.plan {
+        out.push_str(&format!("  plan {}: {}\n", item.action, item.reason));
+    }
+    for snippet in &report.snippets {
+        out.push_str(&format!(
+            "\n[{}] {}{}\n{}\n",
+            snippet.id,
+            snippet.event,
+            snippet
+                .matcher
+                .as_deref()
+                .map(|matcher| format!(" ({matcher})"))
+                .unwrap_or_default(),
+            snippet.command
+        ));
+    }
+    out
 }
 
 fn handle_hook_preflight_shell<W, E>(
@@ -56214,6 +56369,9 @@ impl NormalizedInvocation {
                     McpCommand::Validate(_) => "mcp validate".to_string(),
                 },
                 Command::Hook(hook) => match hook {
+                    HookCommand::ClaudeCode(_) => "hook claude-code".to_string(),
+                    HookCommand::Codex(_) => "hook codex".to_string(),
+                    HookCommand::Gemini(_) => "hook gemini".to_string(),
                     HookCommand::PreflightShell(_) => "hook preflight-shell".to_string(),
                     HookCommand::GitReadiness(_) => "hook git-readiness".to_string(),
                 },
