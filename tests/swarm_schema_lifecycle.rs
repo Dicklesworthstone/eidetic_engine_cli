@@ -815,7 +815,10 @@ fn source_authority_snapshot_contract_covers_source_state_taxonomy() -> TestResu
         "rch",
         "support_bundle",
         "workspace_hygiene",
-    ];
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
     if source_kinds != expected_kinds {
         return Err(format!(
             "{} source-kind catalog drifted\nactual: {source_kinds:?}\nexpected: {expected_kinds:?}",
@@ -902,6 +905,37 @@ fn source_authority_fixtures_cover_taxonomy_and_redaction() -> TestResult {
         return Err(format!(
             "all_source_states sources must be sorted by sourceKind\nactual: {kinds_in_order:?}"
         ));
+    }
+    let expected_kinds = [
+        "actionable_queue",
+        "agent_mail",
+        "beads",
+        "bv",
+        "git",
+        "host_profile",
+        "installed_binary",
+        "memory_drift",
+        "rch",
+        "support_bundle",
+        "workspace_hygiene",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    if kinds_in_order != expected_kinds {
+        return Err(format!(
+            "all_source_states fixture must cover every source kind\nactual: {kinds_in_order:?}\nexpected: {expected_kinds:?}"
+        ));
+    }
+    let actionable_queue = sources
+        .iter()
+        .find(|source| {
+            string_field(source, "/sourceKind", "all_source_states source").ok()
+                == Some("actionable_queue")
+        })
+        .ok_or("all_source_states fixture missing actionable_queue source")?;
+    if actionable_queue.pointer("/actionableQueue").is_none() {
+        return Err("actionable_queue source must carry actionableQueue extension".into());
     }
 
     // 3. The candidate fixture pins timeout-vs-absence: present in stale-safe

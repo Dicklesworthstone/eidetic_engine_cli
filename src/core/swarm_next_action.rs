@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::Path;
 
-use chrono::Utc;
+use chrono::{SecondsFormat, Utc};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
@@ -29,9 +29,10 @@ use crate::core::install::{
 };
 use crate::core::preflight_guard::classify_repair_command_for_preflight;
 use crate::core::swarm_brief::{
-    SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandError, SwarmBriefCommandOutput,
-    SwarmBriefCommandRunner, SwarmBriefCommit, SwarmBriefDegradation, SwarmBriefFileReservation,
-    SwarmBriefFileSurfaceRisk, SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus,
+    DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, SwarmBriefBead, SwarmBriefCollectOptions,
+    SwarmBriefCommandError, SwarmBriefCommandOutput, SwarmBriefCommandRunner, SwarmBriefCommit,
+    SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefFileSurfaceRisk, SwarmBriefReport,
+    SwarmBriefSourceKind, SwarmBriefSourceSnapshot, SwarmBriefSourceStatus,
     SwarmBriefThreadSummary, agent_mail_snapshot_brief_retry_command_template,
     agent_mail_snapshot_producer_command_template, collect_swarm_brief,
 };
@@ -50,6 +51,8 @@ pub const SWARM_NEXT_ACTION_REDACTION_STATUS: &str =
     "counts_ids_statuses_paths_redacted_no_mail_body_no_file_content";
 pub const SWARM_WORK_PACKET_SCHEMA_V1: &str = "ee.swarm.work_packet.v1";
 pub const SWARM_WORK_PACKET_CLAIM_GATE_SCHEMA_V1: &str = "ee.swarm.work_packet.claim_gate.v1";
+pub const SOURCE_AUTHORITY_SNAPSHOT_SCHEMA_V1: &str = "ee.source_authority.snapshot.v1";
+pub const SOURCE_AUTHORITY_REDACTION_STATUS: &str = "paths_counts_subjects_only_no_content";
 pub const SWARM_WORK_PACKET_REDACTION_STATUS: &str =
     "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content";
 const SAME_FILE_PROOF_DEBT_REASON: &str = "unproved_same_file_source_debt";
@@ -693,6 +696,8 @@ pub struct SwarmWorkPacket {
     claim_gate_install_freshness: SwarmWorkPacketClaimGateInstallFreshness,
     #[serde(skip)]
     claim_gate_actionable_queue: SwarmWorkPacketActionableQueueEvidence,
+    #[serde(skip)]
+    source_authority_command_timeout_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -845,6 +850,178 @@ pub struct SwarmWorkPacketClaimGateRecoveryAction {
     pub mutates_state: bool,
     pub required_substrate: &'static str,
     pub rationale: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthoritySnapshot {
+    pub schema: &'static str,
+    pub snapshot_id: String,
+    pub generated_at: String,
+    pub workspace: SwarmSourceAuthorityWorkspace,
+    pub redaction_status: &'static str,
+    pub ordering: SwarmSourceAuthorityOrdering,
+    pub sources: Vec<SwarmSourceAuthorityRecord>,
+    pub candidate_evidence: Option<SwarmSourceAuthorityCandidateEvidence>,
+    pub contradictions: Vec<SwarmSourceAuthorityContradiction>,
+    pub overall: SwarmSourceAuthorityOverall,
+    pub degraded: Vec<SwarmSourceAuthorityDegradation>,
+    pub provenance_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityWorkspace {
+    pub workspace_label: String,
+    pub workspace_id_hash: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityOrdering {
+    pub sources: &'static str,
+    pub evidence: &'static str,
+    pub contradictions: &'static str,
+}
+
+impl SwarmSourceAuthorityOrdering {
+    const fn stable() -> Self {
+        Self {
+            sources: "sourceKind ascending byte order",
+            evidence: "evidenceId ascending byte order",
+            contradictions: "contradictionId ascending byte order",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityRecord {
+    pub source_kind: &'static str,
+    pub state: &'static str,
+    pub authoritative: bool,
+    pub freshness: SwarmSourceAuthorityFreshness,
+    pub budget: SwarmSourceAuthorityBudget,
+    pub exit: SwarmSourceAuthorityExit,
+    pub partial_data: SwarmSourceAuthorityPartialData,
+    pub fallback: SwarmSourceAuthorityFallback,
+    pub repair: SwarmSourceAuthorityRepair,
+    pub evidence_id: String,
+    pub status_detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actionable_queue: Option<SwarmSourceAuthorityActionableQueue>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityFreshness {
+    pub captured_at: Option<String>,
+    pub age_ms: Option<u64>,
+    pub stale_after_ms: Option<u64>,
+    pub freshness_state: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityBudget {
+    pub command_budget_ms: Option<u64>,
+    pub elapsed_ms: Option<u64>,
+    pub timed_out: bool,
+    pub retries_used: u64,
+    pub retry_budget: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityExit {
+    pub exit_class: &'static str,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityPartialData {
+    pub available: bool,
+    pub dropped_sections: Vec<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityFallback {
+    pub active: bool,
+    pub fallback_kind: Option<&'static str>,
+    pub fallback_age_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityRepair {
+    pub guidance: Option<String>,
+    pub command: Option<String>,
+    pub safety: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityActionableQueue {
+    pub command_id: &'static str,
+    pub command_template: &'static str,
+    pub row_count: Option<u64>,
+    pub candidate_ids: Vec<String>,
+    pub truncated_candidate_count: u64,
+    pub filter_contract: SwarmWorkPacketActionableQueueFilterContract,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityCandidateEvidence {
+    pub candidate_id: String,
+    pub lookup_outcome: &'static str,
+    pub present_in: Vec<String>,
+    pub absent_from: Vec<String>,
+    pub unavailable_in: Vec<String>,
+    pub stale_fallback_presence: SwarmSourceAuthorityStaleFallbackPresence,
+    pub explanation: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityStaleFallbackPresence {
+    pub present: Option<bool>,
+    pub source_kind: Option<&'static str>,
+    pub fallback_age_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityContradiction {
+    pub contradiction_id: String,
+    pub source_a: &'static str,
+    pub source_b: &'static str,
+    pub field: &'static str,
+    pub classification: &'static str,
+    pub resolution: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityOverall {
+    pub verdict: &'static str,
+    pub fail_closed: bool,
+    pub authoritative_source_count: u64,
+    pub degraded_source_count: u64,
+    pub unavailable_source_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmSourceAuthorityDegradation {
+    pub code: String,
+    pub severity: &'static str,
+    pub message: String,
+    pub repair: Option<String>,
+    pub source_kind: Option<String>,
 }
 
 /// Raw actionable-queue evidence collected once per work packet
@@ -1281,9 +1458,22 @@ pub fn collect_swarm_work_packet_with_verifier_evidence(
         &verifier_evidence,
         tracker_integrity,
     );
+    packet.source_authority_command_timeout_ms = options.command_timeout_ms;
     packet.apply_claim_gate_install_freshness(collect_work_packet_claim_gate_install_freshness());
     packet.apply_claim_gate_actionable_queue(actionable_queue);
     packet
+}
+
+#[must_use]
+pub fn collect_source_authority_snapshot_for_work_packet(
+    options: &SwarmBriefCollectOptions,
+    runner: &impl SwarmBriefCommandRunner,
+    verifier_evidence: &[SwarmNextActionRecentFirstError],
+    requested_candidate_id: Option<&str>,
+) -> SwarmSourceAuthoritySnapshot {
+    let packet =
+        collect_swarm_work_packet_with_verifier_evidence(options, runner, verifier_evidence);
+    packet.source_authority_snapshot(requested_candidate_id)
 }
 
 fn collect_work_packet_claim_gate_install_freshness() -> SwarmWorkPacketClaimGateInstallFreshness {
@@ -1625,6 +1815,813 @@ fn actionable_queue_exclusion_accounting(
     accounting
 }
 
+fn work_packet_source_authority_snapshot(
+    packet: &SwarmWorkPacket,
+    requested_candidate_id: Option<&str>,
+) -> SwarmSourceAuthoritySnapshot {
+    let candidate = work_packet_claim_gate_candidate(packet, requested_candidate_id);
+    let actionable_queue =
+        work_packet_claim_gate_actionable_queue(packet, candidate, requested_candidate_id);
+    let candidate_id = candidate
+        .map(|candidate| candidate.id.as_str())
+        .or(requested_candidate_id);
+
+    let mut sources = source_authority_source_kinds()
+        .iter()
+        .map(|kind| source_authority_record(packet, kind, &actionable_queue))
+        .collect::<Vec<_>>();
+    sources.sort_by(|left, right| left.source_kind.cmp(right.source_kind));
+
+    let candidate_evidence =
+        candidate_id.map(|id| source_authority_candidate_evidence(packet, &actionable_queue, id));
+    let mut contradictions = source_authority_contradictions(&actionable_queue);
+    contradictions.sort_by(|left, right| left.contradiction_id.cmp(&right.contradiction_id));
+    let mut degraded = source_authority_degraded(packet, &sources);
+    degraded.sort();
+    degraded.dedup();
+    let overall = source_authority_overall(&sources, candidate_evidence.as_ref(), &contradictions);
+    let hash_input = serde_json::to_vec(&(
+        packet.workspace.as_str(),
+        &sources,
+        &candidate_evidence,
+        &contradictions,
+        &overall,
+        &degraded,
+    ))
+    .unwrap_or_default();
+    let hash = blake3::hash(&hash_input).to_hex().to_string();
+    let workspace_hash = blake3::hash(packet.workspace.as_bytes())
+        .to_hex()
+        .to_string();
+
+    SwarmSourceAuthoritySnapshot {
+        schema: SOURCE_AUTHORITY_SNAPSHOT_SCHEMA_V1,
+        snapshot_id: format!("sas-{}", &hash[..16]),
+        generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        workspace: SwarmSourceAuthorityWorkspace {
+            workspace_label: packet.workspace.clone(),
+            workspace_id_hash: format!("blake3:{}", &workspace_hash[..16]),
+        },
+        redaction_status: SOURCE_AUTHORITY_REDACTION_STATUS,
+        ordering: SwarmSourceAuthorityOrdering::stable(),
+        sources,
+        candidate_evidence,
+        contradictions,
+        overall,
+        degraded,
+        provenance_hash: format!("blake3:{hash}"),
+    }
+}
+
+fn source_authority_source_kinds() -> [&'static str; 11] {
+    [
+        "actionable_queue",
+        "agent_mail",
+        "beads",
+        "bv",
+        "git",
+        "host_profile",
+        "installed_binary",
+        "memory_drift",
+        "rch",
+        "support_bundle",
+        "workspace_hygiene",
+    ]
+}
+
+fn source_authority_record(
+    packet: &SwarmWorkPacket,
+    source_kind: &'static str,
+    actionable_queue: &SwarmWorkPacketClaimGateActionableQueue,
+) -> SwarmSourceAuthorityRecord {
+    match source_kind {
+        "actionable_queue" => {
+            return source_authority_actionable_queue_record(packet, actionable_queue);
+        }
+        "installed_binary" => return source_authority_install_record(packet),
+        "workspace_hygiene" => return source_authority_workspace_hygiene_record(packet),
+        "support_bundle" => {
+            return source_authority_unavailable_record(
+                packet,
+                source_kind,
+                "support bundle evidence was not supplied for this decision",
+                None,
+            );
+        }
+        _ => {}
+    }
+
+    let provenance = packet
+        .source_provenance
+        .iter()
+        .find(|source| source_authority_normalize_source(&source.source) == source_kind);
+    let Some(provenance) = provenance else {
+        return source_authority_unavailable_record(
+            packet,
+            source_kind,
+            "source was not consulted by the work-packet collector",
+            None,
+        );
+    };
+
+    let degraded = source_authority_degradations_for(packet, source_kind);
+    let mut state = source_authority_state_from_provenance(source_kind, provenance, &degraded);
+    if source_kind == "agent_mail" && agent_mail_blocks_claim(&packet.coordination.agent_mail) {
+        state = if agent_mail_recovery_is_corrupt(&packet.coordination.agent_mail) {
+            "corrupt_recovery"
+        } else {
+            "degraded_read_only"
+        };
+    }
+    if source_kind == "rch"
+        && packet.rch_proof_posture.remote_only_required
+        && packet.rch_proof_posture.safe_to_launch_cargo_verification != Some(true)
+        && state == "ready"
+    {
+        state = "degraded_read_only";
+    }
+    let authoritative = state == "ready"
+        && source_kind != "bv"
+        && !(source_kind == "agent_mail"
+            && agent_mail_blocks_claim(&packet.coordination.agent_mail));
+    let freshness = source_authority_freshness_from_provenance(provenance);
+    let timed_out = state == "timed_out";
+    let repair = source_authority_repair_for(source_kind, state, degraded.first());
+    let status_detail = source_authority_status_detail(source_kind, state, provenance.status);
+    source_authority_record_with(
+        packet,
+        source_kind,
+        state,
+        authoritative,
+        freshness,
+        source_authority_budget(packet, source_kind, timed_out),
+        SwarmSourceAuthorityExit {
+            exit_class: if timed_out { "timeout" } else { "ok" },
+            exit_code: None,
+        },
+        source_authority_partial_data(source_kind, state),
+        source_authority_fallback(state, provenance.freshness.as_deref()),
+        repair,
+        status_detail,
+        None,
+    )
+}
+
+fn source_authority_actionable_queue_record(
+    packet: &SwarmWorkPacket,
+    actionable_queue: &SwarmWorkPacketClaimGateActionableQueue,
+) -> SwarmSourceAuthorityRecord {
+    let state = match actionable_queue.queue_state {
+        ACTIONABLE_QUEUE_STATE_READY => "ready",
+        ACTIONABLE_QUEUE_STATE_TIMED_OUT => "timed_out",
+        ACTIONABLE_QUEUE_STATE_STALE_FALLBACK => "stale_fallback",
+        ACTIONABLE_QUEUE_STATE_UNAVAILABLE | ACTIONABLE_QUEUE_STATE_NOT_EVALUATED => "unavailable",
+        _ => "unavailable",
+    };
+    let mut candidate_ids = actionable_queue.candidate_ids.clone();
+    let truncated_candidate_count = candidate_ids
+        .len()
+        .saturating_sub(ACTIONABLE_QUEUE_MAX_CANDIDATE_IDS)
+        as u64;
+    candidate_ids.truncate(ACTIONABLE_QUEUE_MAX_CANDIDATE_IDS);
+    let timed_out = state == "timed_out";
+    let partial_data = SwarmSourceAuthorityPartialData {
+        available: actionable_queue.row_count.is_some(),
+        dropped_sections: if timed_out {
+            vec!["actionable_rows".to_owned()]
+        } else {
+            Vec::new()
+        },
+        reason: timed_out.then(|| {
+            "actionable queue exhausted its budget; candidate absence is not confirmed".to_owned()
+        }),
+    };
+    let repair = SwarmSourceAuthorityRepair {
+        guidance: (state != "ready").then(|| {
+            "Retry the safe claimable-leaf queue; timeout or stale fallback is not absence."
+                .to_owned()
+        }),
+        command: Some(ACTIONABLE_QUEUE_COMMAND_TEMPLATE.to_owned()),
+        safety: "read_only_probe",
+    };
+    source_authority_record_with(
+        packet,
+        "actionable_queue",
+        state,
+        actionable_queue.authoritative && state == "ready",
+        SwarmSourceAuthorityFreshness {
+            captured_at: None,
+            age_ms: if state == "ready" { Some(0) } else { None },
+            stale_after_ms: Some(300_000),
+            freshness_state: if state == "ready" { "fresh" } else { "unknown" },
+        },
+        SwarmSourceAuthorityBudget {
+            command_budget_ms: Some(packet.source_authority_command_timeout_ms),
+            elapsed_ms: timed_out.then_some(packet.source_authority_command_timeout_ms),
+            timed_out,
+            retries_used: 0,
+            retry_budget: if actionable_queue.collection_mode
+                == ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT
+            {
+                3
+            } else {
+                0
+            },
+        },
+        SwarmSourceAuthorityExit {
+            exit_class: actionable_queue.exit_class,
+            exit_code: timed_out.then_some(124),
+        },
+        partial_data,
+        SwarmSourceAuthorityFallback {
+            active: state == "stale_fallback",
+            fallback_kind: (state == "stale_fallback").then_some("stale_safe_snapshot"),
+            fallback_age_ms: None,
+        },
+        repair,
+        match state {
+            "ready" => "actionable queue answered with bounded candidate ids".to_owned(),
+            "timed_out" => {
+                "actionable queue timed out before answering; absence is not confirmed".to_owned()
+            }
+            "stale_fallback" => {
+                "actionable queue fell back to stale-safe Beads evidence".to_owned()
+            }
+            _ => "actionable queue was unavailable or skipped".to_owned(),
+        },
+        Some(SwarmSourceAuthorityActionableQueue {
+            command_id: ACTIONABLE_QUEUE_COMMAND_ID,
+            command_template: ACTIONABLE_QUEUE_COMMAND_TEMPLATE,
+            row_count: actionable_queue.row_count,
+            candidate_ids,
+            truncated_candidate_count,
+            filter_contract: SwarmWorkPacketActionableQueueFilterContract::actionable(),
+        }),
+    )
+}
+
+fn source_authority_install_record(packet: &SwarmWorkPacket) -> SwarmSourceAuthorityRecord {
+    let install = packet.claim_gate_install_freshness;
+    let (state, authoritative) = match (install.verdict, install.authoritative) {
+        ("fresh", Some(true)) => ("ready", true),
+        ("not_evaluated", _) => ("unavailable", false),
+        (_, Some(false)) => ("stale_fallback", false),
+        _ => ("degraded_read_only", false),
+    };
+    source_authority_record_with(
+        packet,
+        "installed_binary",
+        state,
+        authoritative,
+        SwarmSourceAuthorityFreshness {
+            captured_at: None,
+            age_ms: None,
+            stale_after_ms: Some(900_000),
+            freshness_state: if state == "ready" { "fresh" } else { "unknown" },
+        },
+        source_authority_budget(packet, "installed_binary", false),
+        SwarmSourceAuthorityExit {
+            exit_class: "ok",
+            exit_code: None,
+        },
+        source_authority_partial_data("installed_binary", state),
+        SwarmSourceAuthorityFallback {
+            active: state == "stale_fallback",
+            fallback_kind: (state == "stale_fallback").then_some("cached_read_only"),
+            fallback_age_ms: None,
+        },
+        SwarmSourceAuthorityRepair {
+            guidance: install.blocks_claim.then(|| {
+                "Installed ee is not authoritative for the claim-gate contract.".to_owned()
+            }),
+            command: install
+                .repair
+                .map(str::to_owned)
+                .or_else(|| Some("ee install check --json --offline".to_owned())),
+            safety: "read_only_probe",
+        },
+        format!("installed binary freshness verdict {}", install.verdict),
+        None,
+    )
+}
+
+fn source_authority_workspace_hygiene_record(
+    packet: &SwarmWorkPacket,
+) -> SwarmSourceAuthorityRecord {
+    let clean = packet.observed_state_class == "clean";
+    let state = if clean { "ready" } else { "degraded_read_only" };
+    source_authority_record_with(
+        packet,
+        "workspace_hygiene",
+        state,
+        clean,
+        SwarmSourceAuthorityFreshness {
+            captured_at: None,
+            age_ms: Some(0),
+            stale_after_ms: Some(120_000),
+            freshness_state: "fresh",
+        },
+        source_authority_budget(packet, "workspace_hygiene", false),
+        SwarmSourceAuthorityExit {
+            exit_class: "ok",
+            exit_code: None,
+        },
+        source_authority_partial_data("workspace_hygiene", state),
+        SwarmSourceAuthorityFallback {
+            active: false,
+            fallback_kind: None,
+            fallback_age_ms: None,
+        },
+        SwarmSourceAuthorityRepair {
+            guidance: (!clean).then(|| {
+                "Review dirty checkout, reservations, and proof-debt evidence before claiming."
+                    .to_owned()
+            }),
+            command: Some("git status --short --branch".to_owned()),
+            safety: "read_only_probe",
+        },
+        format!(
+            "workspace hygiene observed state {}",
+            packet.observed_state_class
+        ),
+        None,
+    )
+}
+
+fn source_authority_unavailable_record(
+    packet: &SwarmWorkPacket,
+    source_kind: &'static str,
+    status_detail: impl Into<String>,
+    command: Option<String>,
+) -> SwarmSourceAuthorityRecord {
+    source_authority_record_with(
+        packet,
+        source_kind,
+        "unavailable",
+        false,
+        SwarmSourceAuthorityFreshness {
+            captured_at: None,
+            age_ms: None,
+            stale_after_ms: None,
+            freshness_state: "unknown",
+        },
+        source_authority_budget(packet, source_kind, false),
+        SwarmSourceAuthorityExit {
+            exit_class: "unknown",
+            exit_code: None,
+        },
+        source_authority_partial_data(source_kind, "unavailable"),
+        SwarmSourceAuthorityFallback {
+            active: false,
+            fallback_kind: None,
+            fallback_age_ms: None,
+        },
+        SwarmSourceAuthorityRepair {
+            guidance: None,
+            command,
+            safety: "unavailable_or_manual_only",
+        },
+        status_detail.into(),
+        None,
+    )
+}
+
+fn source_authority_record_with(
+    packet: &SwarmWorkPacket,
+    source_kind: &'static str,
+    state: &'static str,
+    authoritative: bool,
+    freshness: SwarmSourceAuthorityFreshness,
+    budget: SwarmSourceAuthorityBudget,
+    exit: SwarmSourceAuthorityExit,
+    partial_data: SwarmSourceAuthorityPartialData,
+    fallback: SwarmSourceAuthorityFallback,
+    repair: SwarmSourceAuthorityRepair,
+    status_detail: String,
+    actionable_queue: Option<SwarmSourceAuthorityActionableQueue>,
+) -> SwarmSourceAuthorityRecord {
+    let evidence_hash = blake3::hash(
+        format!(
+            "{}:{}:{}:{}:{}",
+            packet.packet_id, source_kind, state, authoritative, status_detail
+        )
+        .as_bytes(),
+    )
+    .to_hex()
+    .to_string();
+    SwarmSourceAuthorityRecord {
+        source_kind,
+        state,
+        authoritative,
+        freshness,
+        budget,
+        exit,
+        partial_data,
+        fallback,
+        repair,
+        evidence_id: format!("sre-{source_kind}-{}", &evidence_hash[..8]),
+        status_detail: source_authority_bound_text(status_detail, 240),
+        actionable_queue,
+    }
+}
+
+fn source_authority_state_from_provenance(
+    source_kind: &str,
+    provenance: &SwarmWorkPacketSourceProvenance,
+    degraded: &[&SwarmWorkPacketDegradation],
+) -> &'static str {
+    if degraded.iter().any(|entry| {
+        entry.code.contains("timeout") || entry.message.to_ascii_lowercase().contains("timed out")
+    }) {
+        return "timed_out";
+    }
+    if source_kind == "agent_mail" && degraded.iter().any(|entry| entry.code.contains("corrupt")) {
+        return "corrupt_recovery";
+    }
+    if source_kind == "bv" && provenance.status == "fresh" {
+        return "degraded_read_only";
+    }
+    match provenance.status {
+        "fresh" => "ready",
+        "stale" => "stale_fallback",
+        "degraded" => "degraded_read_only",
+        "unavailable" | "skipped" => "unavailable",
+        _ => "degraded_read_only",
+    }
+}
+
+fn source_authority_freshness_from_provenance(
+    provenance: &SwarmWorkPacketSourceProvenance,
+) -> SwarmSourceAuthorityFreshness {
+    let state = match provenance.freshness.as_deref() {
+        Some("current" | "fresh") => "fresh",
+        Some("stale") => "stale",
+        _ => "unknown",
+    };
+    SwarmSourceAuthorityFreshness {
+        captured_at: None,
+        age_ms: (state == "fresh").then_some(0),
+        stale_after_ms: None,
+        freshness_state: state,
+    }
+}
+
+fn source_authority_budget(
+    packet: &SwarmWorkPacket,
+    source_kind: &str,
+    timed_out: bool,
+) -> SwarmSourceAuthorityBudget {
+    let retry_budget = match source_kind {
+        "actionable_queue" => 3,
+        "agent_mail" | "memory_drift" | "rch" => 1,
+        _ => 0,
+    };
+    SwarmSourceAuthorityBudget {
+        command_budget_ms: Some(packet.source_authority_command_timeout_ms),
+        elapsed_ms: timed_out.then_some(packet.source_authority_command_timeout_ms),
+        timed_out,
+        retries_used: 0,
+        retry_budget,
+    }
+}
+
+fn source_authority_partial_data(
+    source_kind: &str,
+    state: &str,
+) -> SwarmSourceAuthorityPartialData {
+    let available = matches!(
+        state,
+        "ready" | "degraded_read_only" | "stale_fallback" | "corrupt_recovery" | "contradicted"
+    );
+    let dropped_sections = if available {
+        Vec::new()
+    } else {
+        vec![format!("{source_kind}_evidence")]
+    };
+    let reason = match state {
+        "timed_out" => Some("source budget exhausted before an authoritative answer".to_owned()),
+        "unavailable" => Some("source unavailable, skipped, or not configured".to_owned()),
+        "stale_fallback" => {
+            Some("live evidence unavailable; stale-safe fallback is advisory".to_owned())
+        }
+        _ => None,
+    };
+    SwarmSourceAuthorityPartialData {
+        available,
+        dropped_sections,
+        reason,
+    }
+}
+
+fn source_authority_fallback(state: &str, freshness: Option<&str>) -> SwarmSourceAuthorityFallback {
+    let active = state == "stale_fallback";
+    SwarmSourceAuthorityFallback {
+        active,
+        fallback_kind: active.then_some("stale_safe_snapshot"),
+        fallback_age_ms: freshness.filter(|value| *value == "stale").map(|_| 0),
+    }
+}
+
+fn source_authority_repair_for(
+    source_kind: &str,
+    state: &str,
+    degraded: Option<&&SwarmWorkPacketDegradation>,
+) -> SwarmSourceAuthorityRepair {
+    let command = degraded
+        .and_then(|entry| entry.repair.clone())
+        .or_else(|| source_authority_default_repair(source_kind, state));
+    SwarmSourceAuthorityRepair {
+        guidance: (state != "ready").then(|| source_authority_repair_guidance(source_kind, state)),
+        command,
+        safety: match state {
+            "ready" => "read_only_probe",
+            "unavailable" => "unavailable_or_manual_only",
+            _ => "read_only_probe",
+        },
+    }
+}
+
+fn source_authority_default_repair(source_kind: &str, state: &str) -> Option<String> {
+    match (source_kind, state) {
+        ("beads", "timed_out" | "stale_fallback" | "unavailable") => {
+            Some("scripts/br_retry.sh actionable --json".to_owned())
+        }
+        ("bv", "unavailable" | "timed_out") => Some("bv --robot-triage".to_owned()),
+        ("git", "unavailable" | "timed_out") => Some("git status --short --branch".to_owned()),
+        ("rch", "unavailable" | "timed_out" | "degraded_read_only") => {
+            Some("rch status --json".to_owned())
+        }
+        ("memory_drift", "unavailable" | "timed_out" | "degraded_read_only") => {
+            Some("ee doctor --json".to_owned())
+        }
+        ("agent_mail", "unavailable" | "corrupt_recovery" | "degraded_read_only") => {
+            Some(agent_mail_snapshot_producer_command_template().to_owned())
+        }
+        _ => None,
+    }
+}
+
+fn source_authority_repair_guidance(source_kind: &str, state: &str) -> String {
+    match state {
+        "timed_out" => format!(
+            "{source_kind} timed out; retry the read-only probe and do not treat missing rows as absence."
+        ),
+        "stale_fallback" => {
+            format!("{source_kind} is using stale-safe fallback evidence; treat it as advisory.")
+        }
+        "corrupt_recovery" => format!(
+            "{source_kind} is in recovery or corrupt posture; do not authorize mutation from it."
+        ),
+        "unavailable" => format!("{source_kind} did not provide evidence for this decision."),
+        _ => format!("{source_kind} answered but is not authoritative for claims."),
+    }
+}
+
+fn source_authority_status_detail(
+    source_kind: &str,
+    state: &str,
+    provenance_status: &str,
+) -> String {
+    match state {
+        "ready" => format!("{source_kind} source answered with status {provenance_status}"),
+        "timed_out" => format!("{source_kind} source timed out; absence is not confirmed"),
+        "stale_fallback" => format!("{source_kind} source is stale-safe fallback only"),
+        "corrupt_recovery" => format!("{source_kind} source is in corrupt recovery posture"),
+        "unavailable" => format!("{source_kind} source is unavailable or skipped"),
+        _ => format!("{source_kind} source status {provenance_status} is read-only advisory"),
+    }
+}
+
+fn source_authority_candidate_evidence(
+    packet: &SwarmWorkPacket,
+    actionable_queue: &SwarmWorkPacketClaimGateActionableQueue,
+    candidate_id: &str,
+) -> SwarmSourceAuthorityCandidateEvidence {
+    let fallback_present = packet
+        .candidates
+        .iter()
+        .any(|candidate| candidate.id == candidate_id && candidate.source == "beads_ready");
+    let candidate_present_in_queue = actionable_queue
+        .candidate_ids
+        .iter()
+        .any(|id| id == candidate_id);
+    let mut present_in = Vec::new();
+    let mut absent_from = Vec::new();
+    let mut unavailable_in = Vec::new();
+    let lookup_outcome = match actionable_queue.candidate_state {
+        "candidate_present_actionable" if actionable_queue.authoritative => {
+            present_in.push("actionable_queue".to_owned());
+            "candidate_present"
+        }
+        "candidate_present_actionable" => "candidate_stale_fallback_only",
+        "candidate_absent_from_actionable" => {
+            absent_from.push("actionable_queue".to_owned());
+            "candidate_absent_confirmed"
+        }
+        "actionable_queue_timed_out" => {
+            unavailable_in.push("actionable_queue".to_owned());
+            "candidate_lookup_timed_out"
+        }
+        "actionable_queue_stale_fallback" => {
+            if candidate_present_in_queue || fallback_present {
+                "candidate_stale_fallback_only"
+            } else {
+                unavailable_in.push("actionable_queue".to_owned());
+                "candidate_lookup_unavailable"
+            }
+        }
+        "actionable_queue_unavailable" => {
+            unavailable_in.push("actionable_queue".to_owned());
+            "candidate_lookup_unavailable"
+        }
+        _ if actionable_queue.bv_advisory_contradiction => "candidate_contradicted",
+        _ => "candidate_lookup_unavailable",
+    };
+    let stale_present = matches!(
+        lookup_outcome,
+        "candidate_lookup_timed_out" | "candidate_stale_fallback_only"
+    ) && fallback_present;
+    SwarmSourceAuthorityCandidateEvidence {
+        candidate_id: candidate_id.to_owned(),
+        lookup_outcome,
+        present_in,
+        absent_from,
+        unavailable_in,
+        stale_fallback_presence: SwarmSourceAuthorityStaleFallbackPresence {
+            present: Some(stale_present),
+            source_kind: stale_present.then_some("beads"),
+            fallback_age_ms: None,
+        },
+        explanation: source_authority_candidate_explanation(lookup_outcome, candidate_id),
+    }
+}
+
+fn source_authority_candidate_explanation(outcome: &str, candidate_id: &str) -> String {
+    match outcome {
+        "candidate_present" => {
+            format!("{candidate_id} is present in authoritative actionable-queue evidence.")
+        }
+        "candidate_absent_confirmed" => format!(
+            "{candidate_id} is absent from the authoritative actionable queue; absence is confirmed."
+        ),
+        "candidate_lookup_timed_out" => format!(
+            "{candidate_id} lookup timed out; absence is not confirmed and claims must fail closed."
+        ),
+        "candidate_stale_fallback_only" => format!(
+            "{candidate_id} appears only in stale-safe fallback evidence; claims must fail closed."
+        ),
+        "candidate_contradicted" => format!(
+            "{candidate_id} has contradictory source evidence; prefer fail-closed coordination."
+        ),
+        _ => format!("{candidate_id} could not be looked up in authoritative source evidence."),
+    }
+}
+
+fn source_authority_contradictions(
+    actionable_queue: &SwarmWorkPacketClaimGateActionableQueue,
+) -> Vec<SwarmSourceAuthorityContradiction> {
+    if !actionable_queue.bv_advisory_contradiction
+        && actionable_queue.contradiction_evidence.is_empty()
+    {
+        return Vec::new();
+    }
+    let digest = blake3::hash(actionable_queue.contradiction_evidence.join("|").as_bytes())
+        .to_hex()
+        .to_string();
+    vec![SwarmSourceAuthorityContradiction {
+        contradiction_id: format!("ctr-{}", &digest[..8]),
+        source_a: "bv",
+        source_b: "actionable_queue",
+        field: "candidate_presence",
+        classification: "candidate_presence_conflict",
+        resolution: "prefer_fail_closed",
+    }]
+}
+
+fn source_authority_overall(
+    sources: &[SwarmSourceAuthorityRecord],
+    candidate_evidence: Option<&SwarmSourceAuthorityCandidateEvidence>,
+    contradictions: &[SwarmSourceAuthorityContradiction],
+) -> SwarmSourceAuthorityOverall {
+    let authoritative_source_count =
+        sources.iter().filter(|source| source.authoritative).count() as u64;
+    let degraded_source_count = sources
+        .iter()
+        .filter(|source| {
+            matches!(
+                source.state,
+                "degraded_read_only" | "stale_fallback" | "corrupt_recovery" | "contradicted"
+            )
+        })
+        .count() as u64;
+    let unavailable_source_count = sources
+        .iter()
+        .filter(|source| matches!(source.state, "unavailable" | "timed_out"))
+        .count() as u64;
+    let required_unavailable = sources.iter().any(|source| {
+        matches!(
+            source.source_kind,
+            "actionable_queue" | "agent_mail" | "beads" | "git" | "installed_binary" | "rch"
+        ) && matches!(source.state, "unavailable")
+    });
+    let any_timeout = sources.iter().any(|source| source.state == "timed_out");
+    let candidate_blocks = candidate_evidence.is_some_and(|evidence| {
+        matches!(
+            evidence.lookup_outcome,
+            "candidate_lookup_unavailable"
+                | "candidate_lookup_timed_out"
+                | "candidate_stale_fallback_only"
+                | "candidate_contradicted"
+        )
+    });
+    let verdict = if !contradictions.is_empty() {
+        "fail_closed_contradiction"
+    } else if any_timeout {
+        "fail_closed_timeout"
+    } else if required_unavailable || candidate_blocks {
+        "fail_closed_insufficient_authority"
+    } else if degraded_source_count > 0 || unavailable_source_count > 0 {
+        "degraded_but_decidable"
+    } else {
+        "all_sources_authoritative"
+    };
+    SwarmSourceAuthorityOverall {
+        verdict,
+        fail_closed: verdict.starts_with("fail_closed"),
+        authoritative_source_count,
+        degraded_source_count,
+        unavailable_source_count,
+    }
+}
+
+fn source_authority_degraded(
+    packet: &SwarmWorkPacket,
+    sources: &[SwarmSourceAuthorityRecord],
+) -> Vec<SwarmSourceAuthorityDegradation> {
+    let mut degraded = packet
+        .degraded
+        .iter()
+        .map(|entry| SwarmSourceAuthorityDegradation {
+            code: entry.code.clone(),
+            severity: entry.severity,
+            message: source_authority_bound_text(entry.message.clone(), 240),
+            repair: entry.repair.clone(),
+            source_kind: source_authority_degraded_source_kind(&entry.source),
+        })
+        .collect::<Vec<_>>();
+    degraded.extend(sources.iter().filter_map(|source| {
+        if source.state == "ready" {
+            return None;
+        }
+        Some(SwarmSourceAuthorityDegradation {
+            code: format!("source_authority_{}_{}", source.source_kind, source.state),
+            severity: match source.state {
+                "timed_out" => "medium",
+                "corrupt_recovery" | "contradicted" => "high",
+                _ => "warning",
+            },
+            message: source.status_detail.clone(),
+            repair: source.repair.command.clone(),
+            source_kind: Some(source.source_kind.to_owned()),
+        })
+    }));
+    degraded
+}
+
+fn source_authority_degradations_for<'a>(
+    packet: &'a SwarmWorkPacket,
+    source_kind: &str,
+) -> Vec<&'a SwarmWorkPacketDegradation> {
+    packet
+        .degraded
+        .iter()
+        .filter(|entry| {
+            source_authority_degraded_source_kind(&entry.source).as_deref() == Some(source_kind)
+        })
+        .collect()
+}
+
+fn source_authority_degraded_source_kind(source: &str) -> Option<String> {
+    let normalized = source_authority_normalize_source(source);
+    source_authority_source_kinds()
+        .iter()
+        .any(|kind| *kind == normalized)
+        .then_some(normalized)
+}
+
+fn source_authority_normalize_source(source: &str) -> String {
+    source.replace('-', "_")
+}
+
+fn source_authority_bound_text(mut text: String, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+    text = text.chars().take(max_chars.saturating_sub(3)).collect();
+    text.push_str("...");
+    text
+}
+
 impl SwarmNextActionSnapshot {
     #[must_use]
     pub fn from_swarm_brief(brief: &SwarmBriefReport) -> Self {
@@ -1808,6 +2805,7 @@ impl SwarmWorkPacket {
             degraded,
             claim_gate_install_freshness: SwarmWorkPacketClaimGateInstallFreshness::not_evaluated(),
             claim_gate_actionable_queue: SwarmWorkPacketActionableQueueEvidence::not_evaluated(),
+            source_authority_command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         };
         packet.packet_id = work_packet_id(&packet);
         packet
@@ -1823,6 +2821,18 @@ impl SwarmWorkPacket {
         evidence: SwarmWorkPacketActionableQueueEvidence,
     ) {
         self.claim_gate_actionable_queue = evidence;
+    }
+
+    /// Build the read-only source-authority snapshot consumed by later
+    /// claim-gate integration slices. This is a projection over already
+    /// collected work-packet evidence; it never runs Beads, BV, Agent Mail,
+    /// RCH, Cargo, git, or memory commands itself.
+    #[must_use]
+    pub fn source_authority_snapshot(
+        &self,
+        requested_candidate_id: Option<&str>,
+    ) -> SwarmSourceAuthoritySnapshot {
+        work_packet_source_authority_snapshot(self, requested_candidate_id)
     }
 
     fn apply_claim_gate_install_freshness(
@@ -9402,6 +10412,210 @@ mod tests {
             gate.source_authority.local_cargo_fallback_observed,
             Some(summary.local_cargo_fallback_observed)
         );
+    }
+
+    #[test]
+    fn source_authority_snapshot_projects_all_read_only_sources() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.sources = vec![
+            SwarmBriefSourceSnapshot::ready(
+                SwarmBriefSourceKind::AgentMail,
+                crate::core::swarm_brief::SwarmBriefSourceProvenance::local_probe(),
+                2,
+            ),
+            SwarmBriefSourceSnapshot::ready(
+                SwarmBriefSourceKind::Beads,
+                crate::core::swarm_brief::SwarmBriefSourceProvenance::command(
+                    "br",
+                    &["ready", "--json"],
+                ),
+                1,
+            ),
+            SwarmBriefSourceSnapshot::ready(
+                SwarmBriefSourceKind::Bv,
+                crate::core::swarm_brief::SwarmBriefSourceProvenance::command(
+                    "bv",
+                    &["--robot-triage"],
+                ),
+                1,
+            ),
+            SwarmBriefSourceSnapshot::ready(
+                SwarmBriefSourceKind::Git,
+                crate::core::swarm_brief::SwarmBriefSourceProvenance::command(
+                    "git",
+                    &["status", "--short"],
+                ),
+                0,
+            ),
+            SwarmBriefSourceSnapshot::ready(
+                SwarmBriefSourceKind::HostProfile,
+                crate::core::swarm_brief::SwarmBriefSourceProvenance::local_probe(),
+                1,
+            ),
+            SwarmBriefSourceSnapshot::ready(
+                SwarmBriefSourceKind::MemoryDrift,
+                crate::core::swarm_brief::SwarmBriefSourceProvenance::local_probe(),
+                1,
+            ),
+            SwarmBriefSourceSnapshot::ready(
+                SwarmBriefSourceKind::Rch,
+                crate::core::swarm_brief::SwarmBriefSourceProvenance::command(
+                    "rch",
+                    &["status", "--json"],
+                ),
+                1,
+            ),
+        ];
+        brief.beads.ready = vec![SwarmBriefBead {
+            id: "bd-safe".to_owned(),
+            title: "Safe source-authority collector test".to_owned(),
+            status: "open".to_owned(),
+            priority: Some(2),
+            assignee: None,
+            issue_type: Some("task".to_owned()),
+            created_at: None,
+            updated_at: None,
+            latest_comment_at: None,
+            comment_count: 0,
+            source_bucket: "ready".to_owned(),
+        }];
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+        let mut packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        packet.source_authority_command_timeout_ms = 1_234;
+        packet
+            .apply_claim_gate_install_freshness(SwarmWorkPacketClaimGateInstallFreshness::fresh());
+        packet.apply_claim_gate_actionable_queue(SwarmWorkPacketActionableQueueEvidence {
+            collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+            queue_state: ACTIONABLE_QUEUE_STATE_READY,
+            exit_class: "ok",
+            row_count: Some(1),
+            candidate_ids: vec!["bd-safe".to_owned()],
+            exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+        });
+
+        let authority = packet.source_authority_snapshot(Some("bd-safe"));
+
+        assert_eq!(authority.schema, SOURCE_AUTHORITY_SNAPSHOT_SCHEMA_V1);
+        assert_eq!(
+            authority.redaction_status,
+            SOURCE_AUTHORITY_REDACTION_STATUS
+        );
+        let source_kinds = authority
+            .sources
+            .iter()
+            .map(|source| source.source_kind)
+            .collect::<Vec<_>>();
+        assert_eq!(source_kinds, source_authority_source_kinds().to_vec());
+
+        let actionable = authority
+            .sources
+            .iter()
+            .find(|source| source.source_kind == "actionable_queue")
+            .expect("actionable queue source");
+        assert_eq!(actionable.state, "ready");
+        assert!(actionable.authoritative);
+        assert_eq!(actionable.budget.command_budget_ms, Some(1_234));
+        assert_eq!(actionable.budget.retry_budget, 3);
+        assert_eq!(
+            actionable
+                .actionable_queue
+                .as_ref()
+                .expect("actionable extension")
+                .command_template,
+            ACTIONABLE_QUEUE_COMMAND_TEMPLATE
+        );
+
+        let bv = authority
+            .sources
+            .iter()
+            .find(|source| source.source_kind == "bv")
+            .expect("bv source");
+        assert_eq!(bv.state, "degraded_read_only");
+        assert!(!bv.authoritative, "BV ranking remains advisory");
+
+        let candidate = authority
+            .candidate_evidence
+            .as_ref()
+            .expect("candidate evidence");
+        assert_eq!(candidate.lookup_outcome, "candidate_present");
+        assert_eq!(candidate.present_in, vec!["actionable_queue".to_owned()]);
+        assert!(!authority.overall.fail_closed);
+
+        let rendered = serde_json::to_string(&authority).expect("serialize source authority");
+        for forbidden in [
+            "br update",
+            "file_reservation",
+            "send_message",
+            "cargo test",
+            "/Users/",
+            "body_md",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "source-authority snapshot leaked forbidden marker {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_authority_timeout_preserves_stale_candidate_without_absence() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Safe source-authority timeout candidate",
+            "beads_ready",
+            Some(2),
+        )]);
+        let mut packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        packet.apply_claim_gate_actionable_queue(SwarmWorkPacketActionableQueueEvidence {
+            collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+            queue_state: ACTIONABLE_QUEUE_STATE_TIMED_OUT,
+            exit_class: "timeout",
+            row_count: None,
+            candidate_ids: Vec::new(),
+            exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+        });
+
+        let authority = packet.source_authority_snapshot(Some("bd-safe"));
+        let actionable = authority
+            .sources
+            .iter()
+            .find(|source| source.source_kind == "actionable_queue")
+            .expect("actionable queue source");
+        assert_eq!(actionable.state, "timed_out");
+        assert!(!actionable.authoritative);
+        assert_eq!(actionable.exit.exit_class, "timeout");
+        assert_eq!(actionable.exit.exit_code, Some(124));
+        assert_eq!(
+            actionable.partial_data.dropped_sections,
+            vec!["actionable_rows".to_owned()]
+        );
+
+        let candidate = authority
+            .candidate_evidence
+            .as_ref()
+            .expect("candidate evidence");
+        assert_eq!(candidate.lookup_outcome, "candidate_lookup_timed_out");
+        assert_eq!(
+            candidate.unavailable_in,
+            vec!["actionable_queue".to_owned()]
+        );
+        assert_eq!(candidate.absent_from, Vec::<String>::new());
+        assert_eq!(
+            candidate.stale_fallback_presence,
+            SwarmSourceAuthorityStaleFallbackPresence {
+                present: Some(true),
+                source_kind: Some("beads"),
+                fallback_age_ms: None,
+            }
+        );
+        assert_eq!(authority.overall.verdict, "fail_closed_timeout");
+        assert!(authority.overall.fail_closed);
+        assert!(authority.degraded.iter().any(|entry| {
+            entry.code == "source_authority_actionable_queue_timed_out"
+                && entry.source_kind.as_deref() == Some("actionable_queue")
+        }));
     }
 
     #[test]

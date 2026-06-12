@@ -1,8 +1,8 @@
 # Source-Authority Snapshot (`ee.source_authority.snapshot.v1`)
 
-Tracking bead: `bd-3w4pv.1` (contract) / `bd-3w4pv.2` (collectors, ships the
-surface). Status: contract-first; `x-ee-status.shipped=false` until the
-read-only collectors land.
+Tracking bead: `bd-3w4pv.1` (contract) / `bd-3w4pv.2` (read-only
+collectors). Status: collector-shipped; claim-gate and unsafe-plan integration
+lands under `bd-3w4pv.4`.
 
 The source-authority snapshot is the deterministic, redaction-safe record of
 **what each coordination source actually said** when a claim gate or
@@ -33,6 +33,25 @@ byte order:
 
 A source that was not consulted still appears with `state=unavailable` and a
 `statusDetail` explaining why. Absence of a record is never meaningful.
+
+## Collector projection
+
+The shipped collector is the work-packet projection in
+`src/core/swarm_next_action.rs`:
+`collect_source_authority_snapshot_for_work_packet` runs the existing
+read-only work-packet collectors, and
+`SwarmWorkPacket::source_authority_snapshot(<candidate>)` projects the already
+collected evidence into `ee.source_authority.snapshot.v1` without spawning any
+additional Beads, BV, Agent Mail, RCH, Cargo, git, or memory commands.
+
+The projection always emits the full source vector above. Existing
+`swarm brief` evidence supplies Beads, BV, Agent Mail, RCH, git, memory drift,
+host profile, and workspace hygiene posture; the work-packet actionable-queue
+probe supplies `sourceKind=actionable_queue`; the offline install-freshness
+check supplies `sourceKind=installed_binary`; optional support-bundle evidence
+is represented as unavailable when not supplied. Per-source command budget,
+timeout, fallback, and repair fields are data in the snapshot, not reasons to
+drop the source record.
 
 ## Actionable queue (`scripts/br_retry.sh actionable --json`)
 

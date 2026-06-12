@@ -6,10 +6,10 @@
   "type": "object",
   "additionalProperties": false,
   "x-ee-status": {
-    "shipped": false,
-    "available_in_build": false,
+    "shipped": true,
+    "available_in_build": true,
     "tracking_bead": "bd-3w4pv.2",
-    "notes": "Contract-first schema from bd-3w4pv.1. The read-only collectors that emit this snapshot land under bd-3w4pv.2; claim-gate and unsafe-plan integration lands under bd-3w4pv.4."
+    "notes": "Contract schema from bd-3w4pv.1. The read-only work-packet collector projection that emits this snapshot lands under bd-3w4pv.2; claim-gate and unsafe-plan integration lands under bd-3w4pv.4."
   },
   "x-ee-doc": "docs/swarm/source_authority_snapshot.md",
   "required": [

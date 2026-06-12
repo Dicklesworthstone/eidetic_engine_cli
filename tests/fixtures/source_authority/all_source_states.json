@@ -14,6 +14,52 @@
   },
   "sources": [
     {
+      "sourceKind": "actionable_queue",
+      "state": "ready",
+      "authoritative": true,
+      "freshness": {
+        "capturedAt": "2026-06-10T14:59:59Z",
+        "ageMs": 1000,
+        "staleAfterMs": 300000,
+        "freshnessState": "fresh"
+      },
+      "budget": {
+        "commandBudgetMs": 12000,
+        "elapsedMs": 220,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 3
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": {
+        "available": true,
+        "droppedSections": [],
+        "reason": null
+      },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": {
+        "guidance": null,
+        "command": "scripts/br_retry.sh actionable --json",
+        "safety": "read_only_probe"
+      },
+      "evidenceId": "sre-actionable-queue-0000",
+      "statusDetail": "actionable queue answered with bounded candidate ids",
+      "actionableQueue": {
+        "commandId": "beads_actionable_queue",
+        "commandTemplate": "scripts/br_retry.sh actionable --json",
+        "rowCount": 2,
+        "candidateIds": ["bd-example.1", "bd-example.2"],
+        "truncatedCandidateCount": 0,
+        "filterContract": {
+          "excludesEpics": true,
+          "excludesAssigned": true,
+          "excludesBlocked": true,
+          "excludesDeferred": true,
+          "excludesInProgress": true
+        }
+      }
+    },
+    {
       "sourceKind": "agent_mail",
       "state": "corrupt_recovery",
       "authoritative": false,
@@ -328,7 +374,7 @@
   "overall": {
     "verdict": "fail_closed_insufficient_authority",
     "failClosed": true,
-    "authoritativeSourceCount": 3,
+    "authoritativeSourceCount": 4,
     "degradedSourceCount": 4,
     "unavailableSourceCount": 3
   },
@@ -355,5 +401,5 @@
       "sourceKind": "rch"
     }
   ],
-  "provenanceHash": "blake3:1f2e3d4c5b6a79880716253449586a7b"
+  "provenanceHash": "blake3:2f3e4d5c6b7a8099182736455a6b7c8d"
 }
