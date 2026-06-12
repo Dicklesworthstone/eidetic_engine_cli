@@ -9486,6 +9486,8 @@ fn push_consensus_conflict_degradations(
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), String>;
+
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
