@@ -323,7 +323,7 @@ name = "witness_retention_e2e"
 path = "tests/contracts/witness_retention_e2e.rs"
 
 [patch.crates-io]
-asupersync = { path = "/data/projects/asupersync" }
+asupersync = { path = "../asupersync" }
 fsqlite = { path = "../frankensqlite/crates/fsqlite" }
 fsqlite-core = { path = "../frankensqlite/crates/fsqlite-core" }
 fsqlite-error = { path = "../frankensqlite/crates/fsqlite-error" }
