@@ -554,6 +554,118 @@ Decision table:
 | Known-blocker refusal | Default known-blocker check when an active matching blocker exists and the wrapper reports `known_blocker_refused`. | "Remote Cargo did not run because a matching RCH environmental blocker is active; cite fingerprint, remediation bead, and retry_after." |
 | Explicit override | `--known-blocker-override` only after topology remediation, changed source state, expired or suspect TTL, changed command/dependency scope, or direct owner instruction. | "Override launched a fresh RCH attempt despite blocker `<fingerprint>`; do not claim success unless the new run passed remotely." |
 
+## Pressure-Telemetry Gap Blocker Contract (bd-1n3x1.14)
+
+This section is the conformance contract for bd-1n3x1.14: making RCH pressure
+telemetry gaps and capabilities-refresh timeouts first-class proof-broker
+evidence. It is a specification; fixtures land under bd-1n3x1.14.2 and the
+implementation must not ship until every MUST row below has fixture and test
+coverage.
+
+The live failure mode this contract captures is **not** a selection failure and
+**not** a source verdict. RCH can simultaneously report `posture=remote_ready`,
+`active_build_count=0`, `queued_build_count=0`, and a healthy worker probe while
+the worker carries `pressure_state=telemetry_gap`,
+`pressure_reason_code=telemetry_unavailable`, `pressure_telemetry_fresh=false`,
+and recent stuck-detector cancellations. A capabilities refresh can also hang
+long enough to require bounded operator termination. Two recorded instances:
+the 2026-06-09 trj capabilities-refresh hang (~2 minutes) and the 2026-06-10
+daemon slot-accounting leak (`slots_available=0` with an empty queue;
+selector `queue_timeout` after 300s; cleared by an owner daemon restart).
+
+### Carrying surfaces
+
+- The `ee.rch.verify.v1` proof emitted by `scripts/rch_verify.sh` is the
+  **canonical carrier**. Pressure evidence rides in
+  `worker_state_degraded_codes[]` plus a bounded `pressure_telemetry` detail
+  object mirroring the matrix fields below.
+- The proof broker and the work-packet claim gate (`sourceAuthority`) are
+  **consumers**: they must surface the blocker reason without re-deriving it
+  from raw `rch status` output.
+- The support bundle may embed the same bounded object; it must never embed raw
+  worker logs or unredacted host paths.
+
+### Stable reason codes
+
+- `rch_pressure_telemetry_unavailable` — primary bounded code: worker pressure
+  telemetry is absent, stale, or self-contradictory while selection is
+  otherwise possible.
+- `capabilities_refresh_timeout` — a capabilities refresh exceeded its bounded
+  budget and was terminated by the wrapper or a supervising operator. Use
+  `refresh_exit_class=operator_terminated_refresh` to distinguish manual
+  termination from a budget timeout (`refresh_exit_class=budget_timeout`).
+- Detail reason (inside the bounded detail object, never a top-level code):
+  `slot_accounting_inconsistent` — daemon/worker slot accounting contradicts
+  build counts (for example `slots_available=0` while
+  `active_build_count=0` and the queue is empty).
+- Known-blocker family: entries persisted for this class use
+  `known_blocker.blocker_kind=pressure_telemetry_gap`.
+
+### Conformance matrix
+
+An implementation is **not conformant** if any MUST field is absent — in
+particular, output that omits the `source_verdict` or the redaction fields
+must score as non-conformant even when every telemetry field is present.
+
+| Field | Req | Allowed values / shape | Fixture must pin | Test surface |
+| --- | --- | --- | --- | --- |
+| `posture` | MUST | rch posture string, e.g. `remote_ready` | `remote_ready` with gap active | contract test on proof JSON |
+| `worker_id` | MUST | bounded worker id or null | named worker | same |
+| `active_build_count` | MUST | integer >= 0 | `0` | same |
+| `queued_build_count` | MUST | integer >= 0 | `0` | same |
+| `worker_probe_status` | MUST | `ok` \| `failed` \| `skipped` | `ok` | same |
+| `pressure_state` | MUST | `ok` \| `telemetry_gap` \| `overloaded` | `telemetry_gap` | same |
+| `pressure_reason_code` | MUST | bounded code, e.g. `telemetry_unavailable` | `telemetry_unavailable` | same |
+| `pressure_policy_rule` | MUST | bounded rule id, e.g. `fail_open_telemetry_gap` | `fail_open_telemetry_gap` | same |
+| `telemetry_fresh` | MUST | boolean | `false` | same |
+| `telemetry_age_secs` | SHOULD | integer or null when unknown | non-null stale age | same |
+| `refresh_elapsed_ms` | MUST when refresh attempted | integer | hung-refresh elapsed | refresh-timeout fixture |
+| `refresh_exit_class` | MUST when refresh attempted | `completed` \| `budget_timeout` \| `operator_terminated_refresh` | `budget_timeout` and `operator_terminated_refresh` variants | refresh-timeout fixture |
+| `retry_after` | MUST | RFC 3339 timestamp | bounded retry hold | contract test |
+| `next_action` | MUST | bounded enum: `refresh_telemetry` \| `probe_worker` \| `coordinate_with_owner` | `coordinate_with_owner` | contract test |
+| `owner_routing` | MUST | bounded owner/escalation hint; never a raw host path | owner hint present | contract test |
+| `source_verdict` | MUST | `no_rust_verdict` (or equivalent constant): a telemetry gap is never a source outcome | `no_rust_verdict` | contract test + non-conformance test when absent |
+| redaction status | MUST | explicit flag(s) proving no host-private paths or raw worker logs are embedded | redaction flags true | leak test mirroring `fixtures_do_not_leak_pids_paths_or_secrets` |
+
+Slot-accounting inconsistency row (required input shape, from live
+2026-06-09/10 evidence): `posture=remote_ready`, `daemon.slots_total=4`,
+`daemon.slots_available=0`, worker `used_slots=4`, `total_slots=4`,
+`active_build_count=0`, `queued_build_count=0`, `worker.status=healthy`,
+`circuit_state=closed`, `pressure_state=telemetry_gap`,
+`pressure_reason_code=telemetry_unavailable`, `pressure_telemetry_fresh=false`,
+`pressure_policy_rule=fail_open_telemetry_gap`. Expected contract output:
+`rch_pressure_telemetry_unavailable` with detail
+`slot_accounting_inconsistent`, `source_verdict=no_rust_verdict`, and
+`next_action`/`owner_routing` that say refresh, probe, or coordinate with the
+RCH owner — never "cancel the active build" (there is none) and never local
+Cargo. Daemon restarts are an owner action, not an agent remediation; the
+contract output must route, not instruct agents to restart.
+
+### Precedence
+
+Pressure-telemetry blockers, active-build admission blockers (bd-1n3x1.13,
+`active_project_exclusion`), and topology recurrence evidence (bd-b1e4v,
+RCH-E327 / `classify_rch_verify_recurrence`) are **distinct environment-proof
+families that must never overwrite each other**:
+
+- If selection already failed (`selector_admission_probe.status=selection_failed`
+  with `active_project_exclusion` or `topology_blocked`), that admission or
+  topology blocker is the primary reason; a concurrent telemetry gap is
+  reported alongside it, not instead of it.
+- A pressure-telemetry blocker is reportable even when selection succeeds or
+  posture is `remote_ready` — that asymmetry is the whole point of this
+  contract.
+- Each family keeps its own `blocker_fingerprint` inputs; fingerprints must not
+  mix families, or recurrence detection
+  (`recursClosedRemediation` keyed on closed remediation beads) produces false
+  joins across unrelated causes.
+
+### Non-goals
+
+The implementation must not: fall back to local Cargo, mutate workers, restart
+daemons, perform destructive cleanup, or create worktrees, stashes, resets, or
+checkouts. Evidence is read-only; remediation is routed to owners.
+
 ## Beads and Agent Mail Templates
 
 For Beads comments, paste the summary plus the fields that make attribution
