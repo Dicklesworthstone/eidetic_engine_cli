@@ -1186,8 +1186,8 @@
         "confidence": "high",
         "safeToClaim": true,
         "reasons": ["bead_ready", "no_dirty_path_overlap", "coordination_sources_fresh"],
-        "proofObligations": ["claim_bead_before_editing", "reserve_files_before_editing", "record_verification_evidence"],
-        "suggestedCommands": ["br show bd-example.1 --json", "br update bd-example.1 --status in_progress --json"]
+        "proofObligations": ["record_overlap_decision_in_closeout", "reserve_files_before_editing", "run_claim_gate_before_claim", "use_rch_for_cargo_verification"],
+        "suggestedCommands": ["br show bd-example.1 --json"]
       },
       "candidates": [
         {

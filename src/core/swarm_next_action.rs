@@ -1874,6 +1874,7 @@ impl SwarmWorkPacket {
             &self.coordination.agent_mail,
             &self.rch_proof_posture,
             &self.tracker_integrity,
+            true,
         );
         let mut next_command_actions = actions
             .iter()
@@ -4630,6 +4631,9 @@ fn work_packet_recommended_action(
     if !tracker_integrity.br_reads_authoritative {
         proof_obligations.push("repair_beads_tracker_before_claim".to_owned());
     }
+    if selected_candidate.is_some_and(|candidate| candidate.decision == "safe_to_claim") {
+        proof_obligations.push("run_claim_gate_before_claim".to_owned());
+    }
     proof_obligations.sort();
     proof_obligations.dedup();
 
@@ -4640,6 +4644,7 @@ fn work_packet_recommended_action(
         agent_mail,
         rch,
         tracker_integrity,
+        false,
     );
     let suggested_commands = work_packet_display_commands(&suggested_command_actions);
     SwarmWorkPacketRecommendedAction {
@@ -4782,6 +4787,7 @@ fn work_packet_suggested_command_actions(
     agent_mail: &SwarmWorkPacketAgentMail,
     rch: &SwarmWorkPacketRchProofPosture,
     tracker_integrity: &BeadsIntegrityReport,
+    include_mutating_actions: bool,
 ) -> Vec<SwarmWorkPacketCommandAction> {
     let mut actions = Vec::new();
     if let Some(candidate_id) = candidate_id {
@@ -4817,6 +4823,7 @@ fn work_packet_suggested_command_actions(
             && work_packet_rch_allows_claim(rch)
             && !agent_mail_blocks_claim(agent_mail)
             && candidate_decision == Some("safe_to_claim")
+            && include_mutating_actions
         {
             actions.push(work_packet_command_action(
                 "bead_claim_candidate",
@@ -4835,7 +4842,7 @@ fn work_packet_suggested_command_actions(
                 "Claim the selected bead after safety checks pass.",
             ));
         }
-        if agent_mail.status == "semantic_readiness_failed" {
+        if include_mutating_actions && agent_mail.status == "semantic_readiness_failed" {
             actions.push(work_packet_command_action(
                 "bead_comment_agent_mail_semantic_readiness",
                 format!(
@@ -4855,7 +4862,7 @@ fn work_packet_suggested_command_actions(
                 "Record that Beads is the coordination fallback while Agent Mail is not authoritative.",
             ));
         }
-        if agent_mail_recovery_is_corrupt(agent_mail) {
+        if include_mutating_actions && agent_mail_recovery_is_corrupt(agent_mail) {
             actions.push(work_packet_command_action(
                 "bead_comment_agent_mail_recovery_corrupt",
                 format!(
@@ -8254,7 +8261,14 @@ mod tests {
                 .recommended_action
                 .suggested_commands
                 .iter()
-                .any(|command| command.starts_with("br comments add bd-docs.1"))
+                .all(|command| !command.starts_with("br comments add bd-docs.1"))
+        );
+        assert!(
+            packet
+                .recommended_action
+                .suggested_command_actions
+                .iter()
+                .all(|action| !action.mutates_state)
         );
         assert!(
             !packet
@@ -8431,7 +8445,14 @@ mod tests {
                 .recommended_action
                 .suggested_commands
                 .iter()
-                .any(|command| command.contains("agent_mail recovery_corrupt archive_corruption"))
+                .all(|command| !command.contains("agent_mail recovery_corrupt archive_corruption"))
+        );
+        assert!(
+            packet
+                .recommended_action
+                .suggested_command_actions
+                .iter()
+                .all(|action| !action.mutates_state)
         );
         assert!(
             packet
@@ -9013,6 +9034,20 @@ mod tests {
             packet.recommended_action.suggested_commands,
             display_commands
         );
+        assert!(
+            packet
+                .recommended_action
+                .proof_obligations
+                .contains(&"run_claim_gate_before_claim".to_owned())
+        );
+        assert!(
+            packet
+                .recommended_action
+                .suggested_command_actions
+                .iter()
+                .all(|action| !action.mutates_state),
+            "packet-level command advice must be read-only"
+        );
 
         let show_candidate = packet
             .recommended_action
@@ -9028,12 +9063,21 @@ mod tests {
         assert!(!show_candidate.shell_required);
         assert!(!show_candidate.mutates_state);
 
-        let claim_candidate = packet
-            .recommended_action
-            .suggested_command_actions
-            .iter()
-            .find(|action| action.command_id == "bead_claim_candidate")
-            .expect("claim candidate action emitted");
+        assert!(
+            packet
+                .recommended_action
+                .suggested_command_actions
+                .iter()
+                .all(|action| action.command_id != "bead_claim_candidate"),
+            "packet-level command advice must leave claims to the claim gate"
+        );
+
+        let gate = packet.claim_gate(Some("bd-safe"));
+        let claim_candidate = gate
+            .claim_command_action
+            .as_ref()
+            .expect("claim gate emits claim candidate action when safe");
+        assert_eq!(claim_candidate.command_id, "bead_claim_candidate");
         assert_eq!(
             claim_candidate.argv,
             argv(&[
@@ -9046,6 +9090,23 @@ mod tests {
             ])
         );
         assert!(claim_candidate.mutates_state);
+        assert!(
+            gate.next_command_actions
+                .iter()
+                .all(|action| !action.mutates_state)
+        );
+        assert!(
+            gate.next_command_actions
+                .iter()
+                .all(|action| action.command_id != "bead_claim_candidate")
+        );
+
+        let claim_candidate_in_packet = packet
+            .recommended_action
+            .suggested_command_actions
+            .iter()
+            .find(|action| action.command_id == "bead_claim_candidate");
+        assert!(claim_candidate_in_packet.is_none());
 
         let rch_command = packet
             .verification

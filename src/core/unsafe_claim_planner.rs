@@ -206,9 +206,14 @@ pub fn categorize_unsafe_claim_reason(reason: &str) -> UnsafeClaimReasonCategory
         | "beads_requires_candidate_downgrade"
         | "beads_db_jsonl_count_mismatch"
         | "beads_unavailable"
+        | "beads_command_timeout"
+        | "beads_no_output"
+        | "beads_metadata_only_stale"
+        | "beads_tracker_metadata_drift"
         | "ready_unclaimed_visible_but_not_authoritative"
         | "beads_ready_source_stale"
         | "candidate_unresolved_due_to_tracker_state"
+        | "tracker_authority_degraded"
         | "actionable_queue_unavailable"
         | "actionable_queue_timed_out"
         | "actionable_queue_stale_fallback" => UnsafeClaimReasonCategory::TrackerAuthority,
@@ -218,34 +223,71 @@ pub fn categorize_unsafe_claim_reason(reason: &str) -> UnsafeClaimReasonCategory
         }
         // Reservations: someone may actively own the surface.
         "reservation_evidence_not_authoritative"
+        | "reservation_evidence_stale"
         | "reservation_collision"
         | "active_claim"
         | "fallback_row_already_owned"
+        | "candidate_assigned_to"
+        | "active_owner_or_compile_health_blocker_present"
         | "reserved_file_overlap" => UnsafeClaimReasonCategory::ReservationConflict,
         // BV ranking staleness or contradiction.
         "bv_advisory_contradiction"
         | "bv_command_timeout"
         | "bv_no_output"
+        | "bv_unavailable"
+        | "bv_recommendation_stale"
         | "bv_recommends_blocked_id"
+        | "bv_recommends_id_absent_from_actionable_queue"
         | "graph_triage_unavailable" => UnsafeClaimReasonCategory::BvStaleness,
         // The gate could not line the candidate up with its own
         // recommendation — pick differently rather than force it.
         "candidate_not_found"
         | "candidate_decision"
+        | "candidate_already_appears_in_multiple_sources"
+        | "candidate_status"
         | "candidate_is_rollup_not_leaf"
+        | "candidate_issue_type"
+        | "rollup_candidate_not_claimable"
+        | "claim_concrete_child_bead_instead"
         | "rollup_has_no_claimable_child"
+        | "blocked_by"
         | "no_candidate_available"
         | "actionable_queue_candidate_absent"
         | "packet_recommendation_not_claim_safe"
         | "packet_recommendation_candidate_mismatch"
         | "packet_recommendation_candidate_missing"
         | "gate_verdict" => UnsafeClaimReasonCategory::RecommendationMismatch,
-        "install_freshness" | "claim_gate_install_freshness_not_authoritative" => {
-            UnsafeClaimReasonCategory::InstalledBinaryFreshness
-        }
+        "install_freshness"
+        | "claim_gate_install_freshness_not_authoritative"
+        | "stale_binary_suspected"
+        | "stale_claim_gate_binary"
+        | "unsupported_claim_gate_binary"
+        | "missing_required_surface" => UnsafeClaimReasonCategory::InstalledBinaryFreshness,
         // bd-1xpq9: lock contention blocked collection BEFORE evidence
         // inspection — a contended local resource, not drift evidence.
         "memory_drift_lock_contention" => UnsafeClaimReasonCategory::ResourceAdmission,
+        "dirty_compile_health_blocks_rch"
+        | "active_project_exclusion"
+        | "all_workers_preflight_failed"
+        | "build_admission_blocked"
+        | "capacity_or_timeout"
+        | "command_not_offloaded"
+        | "insufficient_slots"
+        | "no_admissible_workers"
+        | "no_worker_selected"
+        | "no_workers_passed_health"
+        | "no_workers_with_rust_installed"
+        | "remote_marker_missing"
+        | "recent_verifier_evidence_available"
+        | "recent_verifier_path"
+        | "recent_verifier_reason"
+        | "recent_verifier_status"
+        | "recent_verifier_command_hash"
+        | "recent_verifier_command_kind"
+        | "recent_verifier_command_target"
+        | "selector_admission_failed"
+        | "topology_blocked"
+        | "worker_health_threshold" => UnsafeClaimReasonCategory::RchProofAdmission,
         _ => {
             if head.starts_with("agent_mail") {
                 UnsafeClaimReasonCategory::AgentMailReadiness
@@ -255,15 +297,24 @@ pub fn categorize_unsafe_claim_reason(reason: &str) -> UnsafeClaimReasonCategory
                 UnsafeClaimReasonCategory::MemorySourceDrift
             } else if head.starts_with("source_overlap")
                 || head.starts_with("file_surface")
+                || head.starts_with("file_collision")
                 || head.starts_with("related_bead_collision")
                 || head.starts_with("high_risk_dirty_surface")
             {
                 UnsafeClaimReasonCategory::SourceOverlap
             } else if head.starts_with("dirty") || head.starts_with("workspace_hygiene") {
                 UnsafeClaimReasonCategory::DirtyCheckout
-            } else if head.starts_with("resource_") || head.starts_with("admission") {
+            } else if head.starts_with("resource_")
+                || head.starts_with("admission")
+                || head.starts_with("disk_pressure")
+                || head == "cache_pressure"
+            {
                 UnsafeClaimReasonCategory::ResourceAdmission
-            } else if head.starts_with("action_suppress") || head.starts_with("suppressed_") {
+            } else if head.starts_with("action_suppress")
+                || head.starts_with("suppressed_")
+                || head.starts_with("release_operator_required")
+                || head == "local_cargo_bypass_detected"
+            {
                 UnsafeClaimReasonCategory::ActionSuppression
             } else {
                 UnsafeClaimReasonCategory::Unknown
@@ -772,6 +823,17 @@ mod tests {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
 
+    fn has_action(
+        classification: &UnsafeClaimClassification,
+        kind: UnsafeClaimActionKind,
+        reason_ref: &str,
+    ) -> bool {
+        classification
+            .planner_actions
+            .iter()
+            .any(|action| action.kind == kind && action.reason_group_refs.contains(&reason_ref))
+    }
+
     #[test]
     fn enum_string_orders_match_unsafe_claim_plan_schema() -> TestResult {
         let reason_categories: Vec<_> = UnsafeClaimReasonCategory::ALL
@@ -1057,6 +1119,38 @@ mod tests {
                 UnsafeClaimReasonCategory::TrackerAuthority,
             ),
             (
+                "beads_command_timeout",
+                UnsafeClaimReasonCategory::TrackerAuthority,
+            ),
+            (
+                "beads_no_output",
+                UnsafeClaimReasonCategory::TrackerAuthority,
+            ),
+            (
+                "beads_metadata_only_stale",
+                UnsafeClaimReasonCategory::TrackerAuthority,
+            ),
+            (
+                "beads_tracker_metadata_drift",
+                UnsafeClaimReasonCategory::TrackerAuthority,
+            ),
+            (
+                "tracker_authority_degraded",
+                UnsafeClaimReasonCategory::TrackerAuthority,
+            ),
+            (
+                "actionable_queue_unavailable",
+                UnsafeClaimReasonCategory::TrackerAuthority,
+            ),
+            (
+                "actionable_queue_timed_out",
+                UnsafeClaimReasonCategory::TrackerAuthority,
+            ),
+            (
+                "actionable_queue_stale_fallback",
+                UnsafeClaimReasonCategory::TrackerAuthority,
+            ),
+            (
                 "agent_mail_recovery_corrupt",
                 UnsafeClaimReasonCategory::AgentMailReadiness,
             ),
@@ -1073,11 +1167,35 @@ mod tests {
                 UnsafeClaimReasonCategory::ReservationConflict,
             ),
             (
+                "reservation_evidence_stale",
+                UnsafeClaimReasonCategory::ReservationConflict,
+            ),
+            (
+                "candidate_assigned_to:OtherAgent",
+                UnsafeClaimReasonCategory::ReservationConflict,
+            ),
+            (
+                "active_owner_or_compile_health_blocker_present",
+                UnsafeClaimReasonCategory::ReservationConflict,
+            ),
+            (
                 "reservation_collision:src/core/*.rs",
                 UnsafeClaimReasonCategory::ReservationConflict,
             ),
             (
                 "related_bead_collision:docs/schemas/swarm",
+                UnsafeClaimReasonCategory::SourceOverlap,
+            ),
+            (
+                "file_collision:high:src/core/*.rs",
+                UnsafeClaimReasonCategory::SourceOverlap,
+            ),
+            (
+                "file_collision_owner:GrayJaguar:src/core/*.rs",
+                UnsafeClaimReasonCategory::SourceOverlap,
+            ),
+            (
+                "file_collision_related_bead:bd-owned",
                 UnsafeClaimReasonCategory::SourceOverlap,
             ),
             (
@@ -1089,16 +1207,133 @@ mod tests {
                 UnsafeClaimReasonCategory::RchProofAdmission,
             ),
             (
+                "dirty_compile_health_blocks_rch",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "active_project_exclusion",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "all_workers_preflight_failed",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "build_admission_blocked",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "capacity_or_timeout",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "command_not_offloaded",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "insufficient_slots",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "no_admissible_workers",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "no_worker_selected",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "no_workers_passed_health",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "no_workers_with_rust_installed",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "remote_marker_missing",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "recent_verifier_status:failed",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "selector_admission_failed",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "topology_blocked",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "worker_health_threshold",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
                 "install_freshness:stale",
+                UnsafeClaimReasonCategory::InstalledBinaryFreshness,
+            ),
+            (
+                "stale_binary_suspected",
+                UnsafeClaimReasonCategory::InstalledBinaryFreshness,
+            ),
+            (
+                "stale_claim_gate_binary",
+                UnsafeClaimReasonCategory::InstalledBinaryFreshness,
+            ),
+            (
+                "unsupported_claim_gate_binary",
+                UnsafeClaimReasonCategory::InstalledBinaryFreshness,
+            ),
+            (
+                "missing_required_surface",
                 UnsafeClaimReasonCategory::InstalledBinaryFreshness,
             ),
             (
                 "bv_advisory_contradiction:bd-1",
                 UnsafeClaimReasonCategory::BvStaleness,
             ),
+            ("bv_unavailable", UnsafeClaimReasonCategory::BvStaleness),
+            (
+                "bv_recommendation_stale",
+                UnsafeClaimReasonCategory::BvStaleness,
+            ),
+            (
+                "bv_recommends_id_absent_from_actionable_queue:bd-1",
+                UnsafeClaimReasonCategory::BvStaleness,
+            ),
             (
                 "graph_triage_unavailable",
                 UnsafeClaimReasonCategory::BvStaleness,
+            ),
+            (
+                "actionable_queue_candidate_absent:bd-1",
+                UnsafeClaimReasonCategory::RecommendationMismatch,
+            ),
+            (
+                "candidate_already_appears_in_multiple_sources",
+                UnsafeClaimReasonCategory::RecommendationMismatch,
+            ),
+            (
+                "candidate_status:in_progress",
+                UnsafeClaimReasonCategory::RecommendationMismatch,
+            ),
+            (
+                "candidate_issue_type:epic",
+                UnsafeClaimReasonCategory::RecommendationMismatch,
+            ),
+            (
+                "rollup_candidate_not_claimable",
+                UnsafeClaimReasonCategory::RecommendationMismatch,
+            ),
+            (
+                "claim_concrete_child_bead_instead",
+                UnsafeClaimReasonCategory::RecommendationMismatch,
+            ),
+            (
+                "blocked_by:bd-parent",
+                UnsafeClaimReasonCategory::RecommendationMismatch,
             ),
             (
                 "packet_recommendation_candidate_mismatch:bd-1:bd-2",
@@ -1120,6 +1355,22 @@ mod tests {
                 "memory_drift_lock_contention",
                 UnsafeClaimReasonCategory::ResourceAdmission,
             ),
+            (
+                "disk_pressure_critical",
+                UnsafeClaimReasonCategory::ResourceAdmission,
+            ),
+            (
+                "cache_pressure",
+                UnsafeClaimReasonCategory::ResourceAdmission,
+            ),
+            (
+                "local_cargo_bypass_detected",
+                UnsafeClaimReasonCategory::ActionSuppression,
+            ),
+            (
+                "release_operator_required:crates_io_publish",
+                UnsafeClaimReasonCategory::ActionSuppression,
+            ),
             ("never_seen_before", UnsafeClaimReasonCategory::Unknown),
         ] {
             let got = categorize_unsafe_claim_reason(reason);
@@ -1130,6 +1381,85 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn known_gate_vocabulary_drives_expected_action_families() -> TestResult {
+        for (reason, category, action_kind) in [
+            (
+                "local_cargo_bypass_detected",
+                UnsafeClaimReasonCategory::ActionSuppression,
+                UnsafeClaimActionKind::Stop,
+            ),
+            (
+                "stale_binary_suspected",
+                UnsafeClaimReasonCategory::InstalledBinaryFreshness,
+                UnsafeClaimActionKind::Inspect,
+            ),
+            (
+                "missing_required_surface",
+                UnsafeClaimReasonCategory::InstalledBinaryFreshness,
+                UnsafeClaimActionKind::Inspect,
+            ),
+            (
+                "build_admission_blocked",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+                UnsafeClaimActionKind::WaitOrCoordinate,
+            ),
+            (
+                "active_project_exclusion",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+                UnsafeClaimActionKind::WaitOrCoordinate,
+            ),
+            (
+                "capacity_or_timeout",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+                UnsafeClaimActionKind::WaitOrCoordinate,
+            ),
+            (
+                "no_workers_passed_health",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+                UnsafeClaimActionKind::WaitOrCoordinate,
+            ),
+            (
+                "rch_remote_required_fallback_prevented",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+                UnsafeClaimActionKind::WaitOrCoordinate,
+            ),
+            (
+                "bv_recommendation_stale",
+                UnsafeClaimReasonCategory::BvStaleness,
+                UnsafeClaimActionKind::AlternateCandidate,
+            ),
+            (
+                "disk_pressure_critical",
+                UnsafeClaimReasonCategory::ResourceAdmission,
+                UnsafeClaimActionKind::WaitOrCoordinate,
+            ),
+            (
+                "cache_pressure",
+                UnsafeClaimReasonCategory::ResourceAdmission,
+                UnsafeClaimActionKind::WaitOrCoordinate,
+            ),
+        ] {
+            let classification = classify_unsafe_claim_evidence(&strings(&[reason]), &[]);
+            ensure(
+                classification
+                    .reason_groups
+                    .iter()
+                    .any(|group| group.category == category),
+                format!("{reason}: expected group {category:?}"),
+            )?;
+            ensure(
+                has_action(&classification, action_kind, category.as_str()),
+                format!(
+                    "{reason}: expected action {action_kind:?} for {}",
+                    category.as_str()
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
     /// bd-1n3x1.16.3: a broad feature with dirty source overlaps suggests
     /// per-surface leaves (repository/domain/CLI/proof style) without
     /// mutating anything.

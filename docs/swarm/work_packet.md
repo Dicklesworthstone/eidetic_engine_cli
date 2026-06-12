@@ -178,8 +178,10 @@ dirty surfaces still produce `unsafe_due_to_conflict`.
 
 `candidates[].decision` is a stable diagnostic vocabulary. It explains the
 candidate's safety posture; it is not the same field as
-`recommendedAction.action`. Harnesses may claim only when the selected candidate
-is `safe_to_claim` and `recommendedAction.safeToClaim` is `true`.
+`recommendedAction.action`. `recommendedAction.safeToClaim=true` is only
+preclaim advice; harnesses may mutate Beads only through the claim-gate
+projection when it emits `safeToClaim=true` and a non-null
+`claimCommandAction`.
 
 | Decision | Agent meaning | May drive recommended action? |
 | --- | --- | --- |

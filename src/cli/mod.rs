@@ -55006,15 +55006,97 @@ fn render_swarm_work_packet_claim_gate_json(
         message: format!("Failed to serialize swarm work-packet claim gate: {error}."),
         repair: Some("Fix the swarm work-packet claim-gate serializer.".to_string()),
     })?;
+    let degraded = swarm_work_packet_claim_gate_degraded_json(gate, packet);
     let response = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
-        "degraded": &packet.degraded,
+        "degraded": degraded,
     });
     serde_json::to_string_pretty(&response).map_err(|error| DomainError::Storage {
         message: format!("Failed to serialize swarm work-packet claim-gate response: {error}."),
         repair: Some("Fix the swarm work-packet claim-gate response serializer.".to_string()),
+    })
+}
+
+fn swarm_work_packet_claim_gate_degraded_json(
+    gate: &SwarmWorkPacketClaimGate,
+    packet: &SwarmWorkPacket,
+) -> Vec<serde_json::Value> {
+    let packet_codes = packet
+        .degraded
+        .iter()
+        .map(|degradation| degradation.code.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut degraded = packet
+        .degraded
+        .iter()
+        .map(|degradation| {
+            serde_json::json!({
+                "code": &degradation.code,
+                "source": &degradation.source,
+                "severity": degradation.severity,
+                "message": &degradation.message,
+                "repair": &degradation.repair,
+            })
+        })
+        .collect::<Vec<_>>();
+    degraded.extend(
+        gate.degraded_codes
+            .iter()
+            .filter(|code| !packet_codes.contains(code.as_str()))
+            .map(|code| claim_gate_only_degraded_code_json(code)),
+    );
+    degraded
+}
+
+fn claim_gate_only_degraded_code_json(code: &str) -> serde_json::Value {
+    let (source, severity, message, repair) = match code {
+        "actionable_queue_unavailable" => (
+            "beads",
+            "warning",
+            "Actionable queue was unavailable before it could confirm claimability.",
+            Some("Retry scripts/br_retry.sh actionable --json before claiming work."),
+        ),
+        "actionable_queue_timed_out" => (
+            "beads",
+            "warning",
+            "Actionable queue timed out before it could confirm claimability.",
+            Some("Retry scripts/br_retry.sh actionable --json before claiming work."),
+        ),
+        "actionable_queue_stale_fallback" => (
+            "beads",
+            "warning",
+            "Actionable queue used stale fallback evidence and cannot authorize a claim.",
+            Some("Refresh Beads authority before claiming work."),
+        ),
+        "bv_advisory_contradiction" => (
+            "bv",
+            "warning",
+            "BV recommendation contradicted the actionable Beads queue.",
+            Some("Treat BV as advisory and inspect the actionable queue before claiming work."),
+        ),
+        "tracker_authority_degraded" => (
+            "beads",
+            "warning",
+            "Tracker authority was degraded while claim-gate evidence was evaluated.",
+            Some(
+                "Run br doctor --json --no-db and refresh tracker authority before claiming work.",
+            ),
+        ),
+        _ => (
+            "claim_gate",
+            "warning",
+            "Claim gate reported a degraded code that is not present in the work-packet payload.",
+            Some("Inspect data.degradedCodes and claim-gate evidence before claiming work."),
+        ),
+    };
+    serde_json::json!({
+        "code": code,
+        "source": source,
+        "severity": severity,
+        "message": message,
+        "repair": repair,
     })
 }
 
@@ -58405,6 +58487,129 @@ mod tests {
             &value["degraded"],
             &value["data"]["degraded"],
             "top-level next-action degraded matches data degraded",
+        )
+    }
+
+    #[test]
+    fn swarm_work_packet_claim_gate_json_includes_gate_only_degraded_codes() -> TestResult {
+        let brief = crate::core::swarm_brief::SwarmBriefReport::empty(Path::new(
+            "/tmp/ee-swarm-claim-gate",
+        ));
+        let snapshot = crate::core::swarm_next_action::SwarmNextActionSnapshot {
+            schema: crate::core::swarm_next_action::SWARM_NEXT_ACTION_SCHEMA_V1,
+            workspace: "/tmp/ee-swarm-claim-gate".to_string(),
+            redaction_status: crate::core::swarm_next_action::SWARM_NEXT_ACTION_REDACTION_STATUS,
+            inputs: crate::core::swarm_next_action::SwarmNextActionInputSummary {
+                source_count: 1,
+                ready_bead_count: 1,
+                in_progress_bead_count: 0,
+                blocked_bead_count: 0,
+                bv_top_pick_count: 0,
+            },
+            candidates: vec![crate::core::swarm_next_action::SwarmNextActionCandidate {
+                id: "bd-actionable-timeout".to_string(),
+                title: "Candidate blocked by actionable queue timeout".to_string(),
+                source: "beads_ready",
+                score_milli: None,
+                status: "open".to_string(),
+                priority: Some(1),
+                issue_type: None,
+                assignee: None,
+                blocked_by: Vec::new(),
+                blocked_by_compile_health: false,
+                action_hint: "reserve_files_and_start_smallest_useful_slice".to_string(),
+            }],
+            stale_work_proposals: Vec::new(),
+            coordination: crate::core::swarm_next_action::SwarmNextActionCoordinationSummary {
+                active_reservation_count: 0,
+                reservation_holders: Vec::new(),
+                unread_inbox_count: 0,
+                ack_required_count: 0,
+            },
+            checkout: crate::core::swarm_next_action::SwarmNextActionCheckoutSummary {
+                dirty_path_count: 0,
+                dirty_paths: Vec::new(),
+            },
+            compile_health: crate::core::swarm_next_action::SwarmNextActionCompileHealthSummary {
+                safe_to_launch_rch: Some(true),
+                blocker_count: 0,
+                blockers: Vec::new(),
+                recommended_alternative_work: Vec::new(),
+            },
+            verification: crate::core::swarm_next_action::SwarmNextActionVerificationSummary {
+                rch_source_enabled: true,
+                remote_only_required: true,
+                remote_only_safe: Some(true),
+                healthy_worker_count: Some(1),
+                active_remote_build_count: Some(0),
+                queued_remote_build_count: Some(0),
+                slots_available: Some(1),
+                queue_head_slots_needed: None,
+                active_build_max_age_seconds: None,
+                queue_status: Some("ready".to_string()),
+                verifier_evidence: Vec::new(),
+            },
+            environment: crate::core::swarm_next_action::SwarmNextActionEnvironmentSummary {
+                cargo_target_externalized: true,
+                tmpdir_externalized: true,
+                external_agent_space_present: true,
+                disk_pressure_hint_count: 0,
+            },
+            degraded: Vec::new(),
+        };
+        let mut packet =
+            crate::core::swarm_next_action::SwarmWorkPacket::from_brief_and_next_action(
+                &brief, &snapshot,
+            );
+        packet.apply_claim_gate_actionable_queue(
+            crate::core::swarm_next_action::SwarmWorkPacketActionableQueueEvidence {
+                collection_mode: "br_retry_script",
+                queue_state: "timed_out",
+                exit_class: "timeout",
+                row_count: None,
+                candidate_ids: Vec::new(),
+                exclusion_accounting: crate::core::swarm_next_action::SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+            },
+        );
+        let gate = packet.claim_gate(Some("bd-actionable-timeout"));
+
+        ensure_equal(
+            &packet.degraded.len(),
+            &0usize,
+            "packet degraded starts empty",
+        )?;
+        ensure(
+            gate.degraded_codes
+                .contains(&"actionable_queue_timed_out".to_string()),
+            "gate carries actionable queue timeout degraded code",
+        )?;
+
+        let rendered = super::render_swarm_work_packet_claim_gate_json(&gate, &packet)
+            .map_err(|error| error.message())?;
+        let value: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["data"]["degradedCodes"],
+            &serde_json::json!(["actionable_queue_timed_out"]),
+            "claim-gate payload degraded codes",
+        )?;
+        let degraded = value["degraded"]
+            .as_array()
+            .ok_or_else(|| "claim-gate response degraded should be an array".to_string())?;
+        ensure_equal(
+            &degraded.len(),
+            &1usize,
+            "claim-gate top-level degraded count",
+        )?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("actionable_queue_timed_out"),
+            "claim-gate top-level degraded code",
+        )?;
+        ensure_equal(
+            &degraded[0]["source"],
+            &serde_json::json!("beads"),
+            "claim-gate top-level degraded source",
         )
     }
 
