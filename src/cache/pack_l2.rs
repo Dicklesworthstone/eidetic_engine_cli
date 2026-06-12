@@ -524,12 +524,18 @@ impl PackL2Cache {
             if file_name == cache_file_name(key)
                 || body_hashed_file_name_matches(file_name, &key_stem)
             {
-                candidates.push(path);
+                let preference_epoch =
+                    cache_entry_preference_epoch_seconds(&path, self.options.max_entry_bytes);
+                candidates.push((path, preference_epoch));
             }
         }
 
-        candidates.sort();
-        Ok(candidates)
+        candidates.sort_by(|(left_path, left_epoch), (right_path, right_epoch)| {
+            right_epoch
+                .cmp(left_epoch)
+                .then_with(|| left_path.cmp(right_path))
+        });
+        Ok(candidates.into_iter().map(|(path, _)| path).collect())
     }
 
     fn temp_path(
@@ -1104,6 +1110,17 @@ fn cache_entry_stored_at(path: &Path, max_entry_bytes: u64) -> Option<u64> {
         .map(|entry| entry.stored_at_epoch_seconds)
 }
 
+fn cache_entry_preference_epoch_seconds(path: &Path, max_entry_bytes: u64) -> u64 {
+    cache_entry_stored_at(path, max_entry_bytes)
+        .or_else(|| {
+            fs::symlink_metadata(path)
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| system_time_seconds(modified).ok())
+        })
+        .unwrap_or(0)
+}
+
 fn ensure_cache_dir(path: &Path) -> Result<(), PackL2CacheError> {
     ensure_no_symlink_components(path, "inspect_root")?;
     fs::create_dir_all(path).map_err(|source| PackL2CacheError::Io {
@@ -1434,6 +1451,39 @@ mod tests {
                 .map_err(|error| error.to_string())?,
         )?;
         assert_eq!(stored, pack, "cache hit should preserve pack JSON exactly");
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_writes_return_newest_stored_entry_not_lexical_first() -> TestResult {
+        let (_temp, cache) = cache(10_000, Duration::from_secs(10_000))?;
+        let key = "blake3:repeat-shadow";
+        let old_pack = json!({"payload": "old"});
+        let new_pack = json!({"payload": "new"});
+
+        let old_report = cache
+            .put_at(key, &old_pack, 100)
+            .map_err(|error| error.to_string())?;
+        let new_report = cache
+            .put_at(key, &new_pack, 200)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            old_report.path < new_report.path,
+            "fixture should cover the old filename-ordering bug"
+        );
+
+        let lookup = cache.get_at(key, 210).map_err(|error| error.to_string())?;
+
+        match lookup {
+            PackL2CacheLookup::Hit(hit) => {
+                assert_eq!(hit.path, new_report.path);
+                assert_eq!(hit.stored_at_epoch_seconds, 200);
+                assert_eq!(hit.pack_json, new_pack);
+            }
+            PackL2CacheLookup::Miss(miss) => {
+                return Err(format!("newest duplicate-key entry should hit: {miss:?}"));
+            }
+        }
         Ok(())
     }
 
