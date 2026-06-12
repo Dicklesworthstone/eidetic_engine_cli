@@ -6,7 +6,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::workspace::stable_workspace_id;
-use crate::db::{DbConnection, StoredMemory};
+use crate::db::{DbConnection, DbError, StoredMemory};
 use crate::models::memory_anchor::MemoryAnchorFreshnessTransition;
 use crate::models::{DomainError, MemoryAnchorFreshnessState, StoredMemoryAnchor};
 
@@ -986,6 +986,32 @@ pub struct MemoryDriftReportOptions<'a> {
     pub include_tombstoned: bool,
 }
 
+/// Current swarm memory-drift collector strategy until bd-3sh42 lands a
+/// genuinely read-only fsqlite/sqlmodel open path.
+pub const MEMORY_DRIFT_READ_ONLY_COLLECTOR_STRATEGY_NAME: &str = "bounded_write_lock_probe";
+pub const MEMORY_DRIFT_READ_ONLY_COLLECTOR_LOCK_CLASS: &str = "workspace_write_lock";
+pub const MEMORY_DRIFT_TRUE_READ_ONLY_DATABASE_OPEN_BEAD: &str = "bd-3sh42";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MemoryDriftReadOnlyCollectorStrategy {
+    pub name: &'static str,
+    pub lock_acquisition_class: &'static str,
+    pub true_read_only_database_open_available: bool,
+    pub memory_evidence_inspected_on_lock_contention: bool,
+    pub unblocks_true_read_only_bead: &'static str,
+}
+
+#[must_use]
+pub const fn memory_drift_read_only_collector_strategy() -> MemoryDriftReadOnlyCollectorStrategy {
+    MemoryDriftReadOnlyCollectorStrategy {
+        name: MEMORY_DRIFT_READ_ONLY_COLLECTOR_STRATEGY_NAME,
+        lock_acquisition_class: MEMORY_DRIFT_READ_ONLY_COLLECTOR_LOCK_CLASS,
+        true_read_only_database_open_available: false,
+        memory_evidence_inspected_on_lock_contention: false,
+        unblocks_true_read_only_bead: MEMORY_DRIFT_TRUE_READ_ONLY_DATABASE_OPEN_BEAD,
+    }
+}
+
 pub fn build_memory_drift_report(
     options: &MemoryDriftReportOptions<'_>,
 ) -> Result<MemoryDriftReport, DomainError> {
@@ -1009,9 +1035,13 @@ pub const MEMORY_DRIFT_LOCK_CONTENTION_SCHEMA: &str = "ee.memory_drift.lock_cont
 /// strings are part of the storage error contract.
 #[must_use]
 pub fn memory_drift_error_is_lock_contention(error: &DomainError) -> bool {
-    let text = error.message();
+    memory_drift_error_text_is_lock_contention(&error.message())
+}
+
+fn memory_drift_error_text_is_lock_contention(text: &str) -> bool {
     text.contains("could not acquire database write lock")
         || text.contains("could not open database write lock")
+        || text.contains("workspace write-lock contention")
 }
 
 /// Redaction-safe structured details for a lock-contention emission:
@@ -1047,12 +1077,38 @@ pub const MEMORY_DRIFT_LOCK_CONTENTION_REPAIR: &str = "Retry after the current l
 pub fn build_memory_drift_report_read_only(
     options: &MemoryDriftReportOptions<'_>,
 ) -> Result<MemoryDriftReport, DomainError> {
-    let connection =
-        DbConnection::open_file(options.database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open database read-only for memory drift report: {error}"),
-            repair: Some("ee doctor --json".to_owned()),
-        })?;
+    let connection = open_memory_drift_database_for_read_only_report(options.database_path)?;
     build_memory_drift_report_with_connection(&connection, options)
+}
+
+fn open_memory_drift_database_for_read_only_report(
+    database_path: &Path,
+) -> Result<DbConnection, DomainError> {
+    let strategy = memory_drift_read_only_collector_strategy();
+    debug_assert_eq!(
+        strategy.name,
+        MEMORY_DRIFT_READ_ONLY_COLLECTOR_STRATEGY_NAME
+    );
+    DbConnection::open_file(database_path).map_err(memory_drift_read_only_open_error)
+}
+
+fn memory_drift_read_only_open_error(error: DbError) -> DomainError {
+    let error_text = error.to_string();
+    if memory_drift_error_text_is_lock_contention(&error_text) {
+        return DomainError::Storage {
+            message: format!(
+                "Memory drift read-only collector strategy `{}` was blocked by workspace \
+                 write-lock contention before any evidence inspection.",
+                MEMORY_DRIFT_READ_ONLY_COLLECTOR_STRATEGY_NAME
+            ),
+            repair: Some(MEMORY_DRIFT_LOCK_CONTENTION_REPAIR.to_owned()),
+        };
+    }
+
+    DomainError::Storage {
+        message: format!("Failed to open database read-only for memory drift report: {error_text}"),
+        repair: Some("ee doctor --json".to_owned()),
+    }
 }
 
 fn build_memory_drift_report_with_connection(
@@ -2405,6 +2461,56 @@ mod tests {
     }
 
     #[test]
+    fn read_only_collector_strategy_is_explicit_until_true_read_only_open_lands() {
+        let strategy = memory_drift_read_only_collector_strategy();
+
+        assert_eq!(
+            strategy.name,
+            MEMORY_DRIFT_READ_ONLY_COLLECTOR_STRATEGY_NAME
+        );
+        assert_eq!(
+            strategy.lock_acquisition_class,
+            MEMORY_DRIFT_READ_ONLY_COLLECTOR_LOCK_CLASS
+        );
+        assert!(
+            !strategy.true_read_only_database_open_available,
+            "bd-3sh42 owns the future true read-only DB open path"
+        );
+        assert!(
+            !strategy.memory_evidence_inspected_on_lock_contention,
+            "lock contention must mean the collector never inspected memory evidence"
+        );
+        assert_eq!(
+            strategy.unblocks_true_read_only_bead,
+            MEMORY_DRIFT_TRUE_READ_ONLY_DATABASE_OPEN_BEAD
+        );
+    }
+
+    #[test]
+    fn read_only_collector_lock_contention_error_is_bounded_and_redaction_safe() {
+        let db_error = DbError::InvalidPath {
+            operation: crate::db::DbOperation::BeginTransaction,
+            path: std::path::PathBuf::from("/Users/example/private/.ee/ee.write.lock"),
+            message: "could not acquire database write lock: contention timeout".to_owned(),
+        };
+
+        let error = memory_drift_read_only_open_error(db_error);
+        let message = error.message();
+
+        assert!(memory_drift_error_is_lock_contention(&error));
+        assert!(message.contains(MEMORY_DRIFT_READ_ONLY_COLLECTOR_STRATEGY_NAME));
+        assert!(message.contains("before any evidence inspection"));
+        assert!(!message.contains("/Users"));
+        assert!(!message.contains("private"));
+        match &error {
+            DomainError::Storage { repair, .. } => {
+                assert_eq!(repair.as_deref(), Some(MEMORY_DRIFT_LOCK_CONTENTION_REPAIR))
+            }
+            other => panic!("expected storage error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn all_and_one_report_golden_fixtures_match() {
         let all_report = MemoryDriftReport::new(
             MemoryDriftReportMode::AllMemories,
@@ -2520,6 +2626,103 @@ mod tests {
             "memory drift report must not emit audit rows"
         );
         connection.close().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_report_builder_preserves_audit_rows_on_file_database() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let db_path = tempdir.path().join("ee.db");
+        let workspace_path = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace_path).map_err(|error| error.to_string())?;
+        let canonical_workspace = workspace_path
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(&canonical_workspace);
+
+        {
+            let connection =
+                DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    &workspace_id,
+                    &CreateWorkspaceInput {
+                        path: canonical_workspace.display().to_string(),
+                        name: Some("memory drift read only file".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .insert_memory(
+                    "mem_driftreadonlyfile00000001",
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: "Read-only swarm collectors must not append audit rows."
+                            .to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.7,
+                        importance: 0.8,
+                        provenance_uri: Some("file://AGENTS.md#L1".to_owned()),
+                        trust_class: "agent_assertion".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .execute_raw(
+                    "UPDATE memories SET provenance_verification_status = 'mismatch', \
+                     provenance_chain_hash = 'blake3:changed' \
+                     WHERE id = 'mem_driftreadonlyfile00000001'",
+                )
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+
+        let audit_before = {
+            let connection =
+                DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+            let count = connection
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?
+                .len();
+            connection.close().map_err(|error| error.to_string())?;
+            count
+        };
+        let options = MemoryDriftReportOptions {
+            database_path: &db_path,
+            workspace_path: &canonical_workspace,
+            mode: MemoryDriftReportMode::AllMemories,
+            memory_id: None,
+            limit: 10,
+            include_tombstoned: false,
+        };
+
+        let report =
+            build_memory_drift_report_read_only(&options).map_err(|error| error.to_string())?;
+
+        let audit_after = {
+            let connection =
+                DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+            let count = connection
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?
+                .len();
+            connection.close().map_err(|error| error.to_string())?;
+            count
+        };
+
+        assert_eq!(report.summary.changed, 1);
+        assert_eq!(
+            audit_after, audit_before,
+            "memory drift read-only collector must not emit audit rows"
+        );
         Ok(())
     }
 
