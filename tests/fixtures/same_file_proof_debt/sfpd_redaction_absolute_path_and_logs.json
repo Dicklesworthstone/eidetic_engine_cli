@@ -1,0 +1,57 @@
+{
+  "schema": "ee.sfpd_fixture.v1",
+  "name": "sfpd_redaction_absolute_path_and_logs",
+  "bead_id": "bd-1n3x1.15.2",
+  "contract": "docs/swarm/same_file_proof_debt.md",
+  "contract_case": "sfpd_redaction_bounds",
+  "matrix_requirements": ["SFPD-MUST-005"],
+  "contains_forbidden_input_tokens": true,
+  "case": "input deliberately contains a private absolute path, raw RCH stdout, and a mail body snippet; the emitted object must keep only the relative path, bead ids, bounded blocker codes, and hash/preview metadata. Leak scanners must check only the expected block of this fixture (input is intentionally dirty).",
+  "input": {
+    "candidate_bead": {
+      "id": "bd-2pos6.3",
+      "status": "open"
+    },
+    "related_bead": {
+      "id": "bd-2pos6.2",
+      "status": "blocked",
+      "comment_evidence": [
+        {"kind": "source_complete", "marker": "source-complete; RCH proof owed"},
+        {
+          "kind": "rch_proof_blocker",
+          "codes": ["telemetry_gap", "remote_marker_missing"],
+          "raw_stdout": "Compiling ee v0.9.1 (/Users/someuser/projects/eidetic_engine_cli) ... worker log line with host detail",
+          "mail_body_snippet": "body_md: hey, I left my WIP in /Users/someuser/projects/eidetic_engine_cli/src/cli/insights/mod.rs, pid=12345"
+        }
+      ]
+    },
+    "path_relation": {
+      "kind": "dirty_path",
+      "absolute_path_observed": "/Users/someuser/projects/eidetic_engine_cli/src/cli/insights/mod.rs",
+      "relative_path": "src/cli/insights/mod.rs",
+      "dirty_in_tree": true
+    },
+    "authoritative_resolution": null
+  },
+  "expected": {
+    "emitted": true,
+    "pathPreview": "src/cli/insights/mod.rs",
+    "proofBlockerCodes": ["remote_marker_missing", "telemetry_gap"],
+    "candidateBeadId": "bd-2pos6.3",
+    "relatedBeadId": "bd-2pos6.2",
+    "forbidden_in_output": [
+      "absolute home paths",
+      "raw RCH stdout lines",
+      "mail body snippets",
+      "process ids",
+      "full diffs"
+    ],
+    "allowed_metadata_kinds": [
+      "relative path preview",
+      "bead ids",
+      "bounded blocker code list",
+      "hash or preview metadata"
+    ],
+    "first_failure_message": "redaction leak: emitted same-file proof-debt object must reduce absolute private paths to relative previews and must drop raw logs, mail bodies, and pids"
+  }
+}

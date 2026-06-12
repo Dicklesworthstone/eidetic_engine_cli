@@ -1,0 +1,62 @@
+{
+  "schema": "ee.sfpd_fixture.v1",
+  "name": "sfpd_existing_authority_blockers_preserved",
+  "bead_id": "bd-1n3x1.15.2",
+  "contract": "docs/swarm/same_file_proof_debt.md",
+  "contract_case": "sfpd_existing_authority_blockers_preserved",
+  "alias": "sfpd_existing_conflicts_preserved",
+  "matrix_requirements": ["SFPD-MUST-003", "SFPD-MUST-006", "SFPD-SHOULD-001"],
+  "case": "source authority is non-current (stale installed ee, candidate ranked only by stale BV output) and generic unsafe reasons apply; SFPD evidence may add bounded context but must not mask or reorder away any existing reason, and must not produce a claimable verdict",
+  "input": {
+    "candidate_bead": {
+      "id": "bd-2pos6.3",
+      "status": "open",
+      "origin": "stale_bv_recommendation"
+    },
+    "related_bead": {
+      "id": "bd-2pos6.2",
+      "status": "blocked",
+      "comment_evidence": [
+        {"kind": "source_complete", "marker": "source-complete; RCH proof owed"},
+        {"kind": "rch_proof_blocker", "codes": ["telemetry_gap"]}
+      ]
+    },
+    "path_relation": {
+      "kind": "dirty_path",
+      "relative_path": "src/cli/insights/mod.rs",
+      "dirty_in_tree": true
+    },
+    "authoritative_resolution": null,
+    "existing_unsafe_reasons": [
+      "agent_mail_unavailable",
+      "beads_tracker_not_authoritative:external_changes_pending_import",
+      "bv_command_timeout",
+      "dirty_checkout_path_count:63",
+      "install_freshness:shadowed_binary",
+      "rch_remote_required_fallback_prevented",
+      "rch_unavailable"
+    ],
+    "installed_binary": {
+      "source_version": "0.8.1",
+      "installed_version": "0.5.0",
+      "fresh": false
+    }
+  },
+  "expected": {
+    "emitted": true,
+    "reason_added": "unproved_same_file_source_debt",
+    "existing_reasons_preserved": [
+      "agent_mail_unavailable",
+      "beads_tracker_not_authoritative:external_changes_pending_import",
+      "bv_command_timeout",
+      "dirty_checkout_path_count:63",
+      "install_freshness:shadowed_binary",
+      "rch_remote_required_fallback_prevented",
+      "rch_unavailable"
+    ],
+    "reasons_sorted_and_deduped": true,
+    "safeToClaim": false,
+    "claimable_verdict_possible": false,
+    "first_failure_message": "authority masking: SFPD evidence must compose with install_freshness/tracker/dirty reasons (all preserved, sorted, deduped) and must never flip the verdict toward claimable"
+  }
+}

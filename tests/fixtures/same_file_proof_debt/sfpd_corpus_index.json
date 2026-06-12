@@ -1,0 +1,67 @@
+{
+  "schema": "ee.sfpd_fixture_corpus_index.v1",
+  "bead_id": "bd-1n3x1.15.2",
+  "contract": "docs/swarm/same_file_proof_debt.md",
+  "harness_rules": [
+    "every fixture must parse as JSON and declare schema ee.sfpd_fixture.v1",
+    "every SFPD-MUST id from the contract matrix must be covered by at least one fixture",
+    "leak scans cover the full content of every fixture except the expected-only scan for fixtures flagged contains_forbidden_input_tokens",
+    "static checks (jq parse, leak scan, this index cross-check) are the harness until Rust wiring lands under bd-1n3x1.15.3; any Rust proof is RCH-only"
+  ],
+  "forbidden_substrings_source": "tests/fixtures/rch_pressure_telemetry/redaction_forbidden_substrings.json",
+  "fixtures": [
+    {
+      "name": "sfpd_positive_insights_same_file_rch_blocked",
+      "kind": "positive",
+      "matrix_requirements": ["SFPD-MUST-001", "SFPD-MUST-002", "SFPD-MUST-003", "SFPD-MUST-004", "SFPD-SHOULD-002"]
+    },
+    {
+      "name": "sfpd_positive_multiple_candidates_same_related_debt",
+      "kind": "positive",
+      "matrix_requirements": ["SFPD-MUST-001", "SFPD-MUST-002", "SFPD-MUST-005"]
+    },
+    {
+      "name": "sfpd_negative_dirty_docs_only",
+      "kind": "negative",
+      "matrix_requirements": ["SFPD-SHOULD-003"]
+    },
+    {
+      "name": "sfpd_negative_related_bead_closed_with_rch_verdict",
+      "kind": "negative",
+      "matrix_requirements": ["SFPD-MUST-004"]
+    },
+    {
+      "name": "sfpd_abstain_ambiguous_comment_path_only",
+      "kind": "abstain",
+      "matrix_requirements": ["SFPD-SHOULD-003"]
+    },
+    {
+      "name": "sfpd_redaction_absolute_path_and_logs",
+      "kind": "redaction",
+      "matrix_requirements": ["SFPD-MUST-005"],
+      "contains_forbidden_input_tokens": true
+    },
+    {
+      "name": "sfpd_existing_authority_blockers_preserved",
+      "kind": "composition",
+      "alias": "sfpd_existing_conflicts_preserved",
+      "matrix_requirements": ["SFPD-MUST-003", "SFPD-MUST-006", "SFPD-SHOULD-001"]
+    },
+    {
+      "name": "sfpd_schema_golden_compat",
+      "kind": "compatibility",
+      "matrix_requirements": ["SFPD-MUST-001"]
+    }
+  ],
+  "must_coverage": {
+    "SFPD-MUST-001": ["sfpd_positive_insights_same_file_rch_blocked", "sfpd_positive_multiple_candidates_same_related_debt", "sfpd_schema_golden_compat"],
+    "SFPD-MUST-002": ["sfpd_positive_insights_same_file_rch_blocked", "sfpd_positive_multiple_candidates_same_related_debt"],
+    "SFPD-MUST-003": ["sfpd_positive_insights_same_file_rch_blocked", "sfpd_existing_authority_blockers_preserved"],
+    "SFPD-MUST-004": ["sfpd_positive_insights_same_file_rch_blocked", "sfpd_negative_related_bead_closed_with_rch_verdict"],
+    "SFPD-MUST-005": ["sfpd_redaction_absolute_path_and_logs", "sfpd_positive_multiple_candidates_same_related_debt"],
+    "SFPD-MUST-006": ["sfpd_existing_authority_blockers_preserved"],
+    "SFPD-SHOULD-001": ["sfpd_existing_authority_blockers_preserved"],
+    "SFPD-SHOULD-002": ["sfpd_positive_insights_same_file_rch_blocked"],
+    "SFPD-SHOULD-003": ["sfpd_negative_dirty_docs_only", "sfpd_abstain_ambiguous_comment_path_only"]
+  }
+}

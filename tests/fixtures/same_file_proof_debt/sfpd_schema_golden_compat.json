@@ -1,0 +1,28 @@
+{
+  "schema": "ee.sfpd_fixture.v1",
+  "name": "sfpd_schema_golden_compat",
+  "bead_id": "bd-1n3x1.15.2",
+  "contract": "docs/swarm/same_file_proof_debt.md",
+  "contract_case": "sfpd_schema_golden_compat",
+  "matrix_requirements": ["SFPD-MUST-001"],
+  "case": "the first (internal-evidence) slice of bd-1n3x1.15.3 must leave every public schema and golden byte-identical; this fixture names the surfaces a compatibility check must diff against HEAD",
+  "input": {
+    "slice": "internal_claim_gate_work_packet_evidence_only"
+  },
+  "expected": {
+    "public_surfaces_byte_identical": [
+      "docs/schemas/",
+      "tests/golden/schema_list.snap surfaces",
+      "NORMALIZED_CLI_COMMAND_COUNT",
+      "ee.response.v2 envelope fields",
+      "ee.swarm.work_packet.claim_gate.v1 public fields"
+    ],
+    "promotion_requires_same_commit_updates": [
+      "docs/swarm/work_packet.md",
+      "docs/swarm/source_authority_snapshot.md",
+      "docs/schemas/ entry for the affected envelope",
+      "schema_list golden"
+    ],
+    "first_failure_message": "schema drift: the internal-evidence slice changed a public schema or golden; either revert the public change or execute the promotion checklist from docs/swarm/same_file_proof_debt.md in the same commit"
+  }
+}

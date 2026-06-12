@@ -1,0 +1,38 @@
+{
+  "schema": "ee.sfpd_fixture.v1",
+  "name": "sfpd_abstain_ambiguous_comment_path_only",
+  "bead_id": "bd-1n3x1.15.2",
+  "contract": "docs/swarm/same_file_proof_debt.md",
+  "contract_case": "sfpd_ambiguous_comments_abstain",
+  "matrix_requirements": ["SFPD-SHOULD-003"],
+  "case": "a comment mentions a path in prose but there is no current dirty path, reservation, or structured touched-file evidence; the detector must abstain",
+  "input": {
+    "candidate_bead": {
+      "id": "bd-2pos6.3",
+      "status": "open"
+    },
+    "related_bead": {
+      "id": "bd-2pos6.2",
+      "status": "blocked",
+      "comment_evidence": [
+        {
+          "kind": "prose_mention",
+          "marker": "we were thinking about touching the insights module at some point"
+        }
+      ]
+    },
+    "path_relation": {
+      "kind": "prose_only",
+      "relative_path": null,
+      "dirty_in_tree": false,
+      "reservation_state": null
+    },
+    "authoritative_resolution": null
+  },
+  "expected": {
+    "emitted": false,
+    "abstained": true,
+    "reason_absent": "unproved_same_file_source_debt",
+    "first_failure_message": "abstention violated: prose-only path relation without dirty path, reservation, or structured bead evidence must not emit same-file proof debt"
+  }
+}

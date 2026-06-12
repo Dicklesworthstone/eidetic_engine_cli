@@ -1,0 +1,36 @@
+{
+  "schema": "ee.sfpd_fixture.v1",
+  "name": "sfpd_negative_dirty_docs_only",
+  "bead_id": "bd-1n3x1.15.2",
+  "contract": "docs/swarm/same_file_proof_debt.md",
+  "contract_case": "sfpd_unrelated_dirty_path_negative",
+  "matrix_requirements": ["SFPD-SHOULD-003"],
+  "case": "docs/README dirty surfaces exist but candidate path evidence does not overlap the related bead's source proof debt; no same-file reason may be emitted",
+  "input": {
+    "candidate_bead": {
+      "id": "bd-2pos6.4",
+      "status": "open"
+    },
+    "related_bead": {
+      "id": "bd-2pos6.2",
+      "status": "blocked",
+      "comment_evidence": [
+        {"kind": "source_complete", "marker": "source-complete; RCH proof owed"},
+        {"kind": "rch_proof_blocker", "codes": ["telemetry_gap"]}
+      ]
+    },
+    "path_relation": {
+      "kind": "dirty_path",
+      "relative_path": "README.md",
+      "dirty_in_tree": true,
+      "overlaps_related_bead_surface": false
+    },
+    "authoritative_resolution": null
+  },
+  "expected": {
+    "emitted": false,
+    "reason_absent": "unproved_same_file_source_debt",
+    "generic_reasons_unchanged": true,
+    "first_failure_message": "false positive: docs-only dirty path must not produce a same-file proof-debt reason against src-surface debt"
+  }
+}

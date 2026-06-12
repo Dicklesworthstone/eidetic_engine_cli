@@ -1,0 +1,57 @@
+{
+  "schema": "ee.sfpd_fixture.v1",
+  "name": "sfpd_positive_insights_same_file_rch_blocked",
+  "bead_id": "bd-1n3x1.15.2",
+  "contract": "docs/swarm/same_file_proof_debt.md",
+  "contract_case": "sfpd_positive_same_file_debt",
+  "matrix_requirements": ["SFPD-MUST-001", "SFPD-MUST-002", "SFPD-MUST-003", "SFPD-MUST-004", "SFPD-SHOULD-002"],
+  "case": "motivating insights case: candidate likely edits the same relative path as a related bead whose source-complete work has its Cargo proof blocked by the environment",
+  "input": {
+    "candidate_bead": {
+      "id": "bd-2pos6.3",
+      "status": "open"
+    },
+    "related_bead": {
+      "id": "bd-2pos6.2",
+      "status": "blocked",
+      "comment_evidence": [
+        {
+          "kind": "source_complete",
+          "marker": "source-complete; RCH proof owed"
+        },
+        {
+          "kind": "rch_proof_blocker",
+          "codes": ["telemetry_gap", "remote_marker_missing"]
+        }
+      ]
+    },
+    "path_relation": {
+      "kind": "dirty_path_and_reservation",
+      "relative_path": "src/cli/insights/mod.rs",
+      "dirty_in_tree": true,
+      "reservation_holder": "peer",
+      "reservation_state": "active"
+    },
+    "authoritative_resolution": null
+  },
+  "expected": {
+    "emitted": true,
+    "reason": "unproved_same_file_source_debt",
+    "candidateBeadId": "bd-2pos6.3",
+    "relatedBeadId": "bd-2pos6.2",
+    "pathPreview": "src/cli/insights/mod.rs",
+    "proofStatus": "source_complete_proof_blocked",
+    "proofBlockerCodes": ["remote_marker_missing", "telemetry_gap"],
+    "evidenceSources": ["beads_comment", "dirty_path", "reservation"],
+    "confidence": "high",
+    "recommendedAction": "coordinate_before_claim",
+    "safeToClaim": false,
+    "source_verdict": "not_reached_cargo",
+    "nextCommandActions": [
+      {"kind": "stale_safe_bead_inspect", "command": "CI=1 br show bd-2pos6.2 --json"},
+      {"kind": "agent_mail_coordinate", "command": "send_message thread_id=bd-2pos6.2"},
+      {"kind": "rch_proof_inspect", "command": "ee verify rch blockers --workspace . --json"}
+    ],
+    "first_failure_message": "missing named same-file signal: expected reason unproved_same_file_source_debt with coordinate_before_claim, not only generic dirty/collision reasons"
+  }
+}

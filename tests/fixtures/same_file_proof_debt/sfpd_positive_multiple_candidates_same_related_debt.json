@@ -1,0 +1,41 @@
+{
+  "schema": "ee.sfpd_fixture.v1",
+  "name": "sfpd_positive_multiple_candidates_same_related_debt",
+  "bead_id": "bd-1n3x1.15.2",
+  "contract": "docs/swarm/same_file_proof_debt.md",
+  "contract_case": "sfpd_positive_same_file_debt",
+  "matrix_requirements": ["SFPD-MUST-001", "SFPD-MUST-002", "SFPD-MUST-005"],
+  "case": "several candidates point at the same related proof-debt bead; evidence stays bounded with one detail object per candidate and no duplicated unbounded payloads",
+  "input": {
+    "candidate_beads": [
+      {"id": "bd-2pos6.3", "status": "open"},
+      {"id": "bd-2pos6.4", "status": "open"},
+      {"id": "bd-2pos6.5", "status": "open"}
+    ],
+    "related_bead": {
+      "id": "bd-2pos6.2",
+      "status": "blocked",
+      "comment_evidence": [
+        {"kind": "source_complete", "marker": "source-complete; RCH proof owed"},
+        {"kind": "rch_proof_blocker", "codes": ["telemetry_gap"]}
+      ]
+    },
+    "path_relation": {
+      "kind": "dirty_path",
+      "relative_path": "src/cli/insights/mod.rs",
+      "dirty_in_tree": true
+    },
+    "authoritative_resolution": null
+  },
+  "expected": {
+    "emitted": true,
+    "detail_object_count": 3,
+    "shared_relatedBeadId": "bd-2pos6.2",
+    "per_candidate_fields_complete": true,
+    "duplicated_unbounded_evidence": false,
+    "evidence_payload_cap_respected": true,
+    "safeToClaim": false,
+    "recommendedAction": "coordinate_before_claim",
+    "first_failure_message": "bounded fan-out violated: expected exactly one bounded detail object per candidate sharing relatedBeadId bd-2pos6.2 without duplicated unbounded evidence"
+  }
+}

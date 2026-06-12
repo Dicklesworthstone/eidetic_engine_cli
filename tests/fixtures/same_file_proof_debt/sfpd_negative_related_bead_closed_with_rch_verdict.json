@@ -1,0 +1,34 @@
+{
+  "schema": "ee.sfpd_fixture.v1",
+  "name": "sfpd_negative_related_bead_closed_with_rch_verdict",
+  "bead_id": "bd-1n3x1.15.2",
+  "contract": "docs/swarm/same_file_proof_debt.md",
+  "contract_case": "sfpd_unrelated_dirty_path_negative",
+  "matrix_requirements": ["SFPD-MUST-004"],
+  "case": "same relative path, but the related bead's proof reached Cargo remotely (or the bead is closed with a verdict); the debt is settled and must not be reported as unproved",
+  "input": {
+    "candidate_bead": {
+      "id": "bd-2pos6.5",
+      "status": "open"
+    },
+    "related_bead": {
+      "id": "bd-2pos6.2",
+      "status": "closed",
+      "comment_evidence": [
+        {"kind": "source_complete", "marker": "source-complete"},
+        {"kind": "rch_proof_pass", "codes": [], "verdict": "remote_pass"}
+      ]
+    },
+    "path_relation": {
+      "kind": "dirty_path",
+      "relative_path": "src/cli/insights/mod.rs",
+      "dirty_in_tree": false
+    },
+    "authoritative_resolution": null
+  },
+  "expected": {
+    "emitted": false,
+    "reason_absent": "unproved_same_file_source_debt",
+    "first_failure_message": "incorrect source verdict handling: settled remote_pass debt (or closed related bead) must not be reported as unproved same-file debt"
+  }
+}
