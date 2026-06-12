@@ -911,13 +911,6 @@ fn source_test_docs_classification(
             (Kind::Docs, "docs"),
         ));
     }
-    if !path.contains('/') && lower.ends_with(".md") {
-        return Some((
-            vec![reason::DOCS_MARKDOWN_ROOT],
-            CONFIDENCE_MEDIUM_HIGH,
-            (Kind::Docs, "docs"),
-        ));
-    }
     if !path.contains('/') {
         let upper = path.to_ascii_uppercase();
         if upper.starts_with("README") {
@@ -934,6 +927,13 @@ fn source_test_docs_classification(
                 (Kind::Docs, "docs"),
             ));
         }
+    }
+    if !path.contains('/') && lower.ends_with(".md") {
+        return Some((
+            vec![reason::DOCS_MARKDOWN_ROOT],
+            CONFIDENCE_MEDIUM_HIGH,
+            (Kind::Docs, "docs"),
+        ));
     }
 
     // Source.
@@ -975,6 +975,25 @@ mod tests {
     use crate::core::swarm_brief::{
         WorkspaceGitOperationState, WorkspaceGitPathMetadata, WorkspaceGitStatusEntry,
     };
+
+    type TestResult = Result<(), String>;
+
+    fn ensure<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, ctx: &str) -> TestResult {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
+        }
+    }
+
+    fn row_for<'a>(
+        rows: &'a [ClassificationRow],
+        path: &str,
+    ) -> Result<&'a ClassificationRow, String> {
+        rows.iter()
+            .find(|row| row.path == path)
+            .ok_or_else(|| format!("missing {path} row: {rows:#?}"))
+    }
 
     fn entry(
         path: &str,
@@ -1038,27 +1057,86 @@ mod tests {
     }
 
     #[test]
-    fn docs_and_tests_paths_classify_as_stage_candidates_with_distinct_groups() {
+    fn docs_and_tests_paths_classify_as_stage_candidates_with_distinct_groups() -> TestResult {
         let snap = snapshot(vec![
             unstaged_modified("docs/foo.md"),
             staged_added("tests/contracts/bar.rs"),
         ]);
         let rows = classify_workspace(&snap, &no_secret_evidence());
         assert_eq!(rows.len(), 2);
-        let docs_row = rows
-            .iter()
-            .find(|r| r.path == "docs/foo.md")
-            .expect("docs row");
-        let test_row = rows
-            .iter()
-            .find(|r| r.path == "tests/contracts/bar.rs")
-            .expect("tests row");
+        let docs_row = row_for(&rows, "docs/foo.md")?;
+        let test_row = row_for(&rows, "tests/contracts/bar.rs")?;
         assert_eq!(docs_row.kind, Kind::Docs);
         assert_eq!(docs_row.bucket, Bucket::StageCandidate);
         assert_eq!(docs_row.suggested_group.as_deref(), Some("docs"));
         assert_eq!(test_row.kind, Kind::Test);
         assert_eq!(test_row.bucket, Bucket::StageCandidate);
         assert_eq!(test_row.suggested_group.as_deref(), Some("tests"));
+        Ok(())
+    }
+
+    #[test]
+    fn root_readme_license_and_notice_markdown_use_specific_doc_reasons() -> TestResult {
+        let snap = snapshot(vec![
+            unstaged_modified("README.md"),
+            unstaged_modified("LICENSE.md"),
+            unstaged_modified("NOTICE.md"),
+            unstaged_modified("AGENTS.md"),
+        ]);
+        let rows = classify_workspace(&snap, &no_secret_evidence());
+        ensure(rows.len(), 4, "row count")?;
+        let readme_row = rows
+            .iter()
+            .find(|row| row.path == "README.md")
+            .ok_or_else(|| format!("missing README.md row: {rows:#?}"))?;
+        let license_row = rows
+            .iter()
+            .find(|row| row.path == "LICENSE.md")
+            .ok_or_else(|| format!("missing LICENSE.md row: {rows:#?}"))?;
+        let notice_row = rows
+            .iter()
+            .find(|row| row.path == "NOTICE.md")
+            .ok_or_else(|| format!("missing NOTICE.md row: {rows:#?}"))?;
+        let agents_row = rows
+            .iter()
+            .find(|row| row.path == "AGENTS.md")
+            .ok_or_else(|| format!("missing AGENTS.md row: {rows:#?}"))?;
+
+        ensure(
+            readme_row.reasons.contains(&reason::DOCS_README),
+            true,
+            "README.md reason",
+        )?;
+        ensure(
+            readme_row.reasons.contains(&reason::DOCS_MARKDOWN_ROOT),
+            false,
+            "README.md generic markdown reason",
+        )?;
+        ensure(
+            license_row.reasons.contains(&reason::DOCS_LICENSE),
+            true,
+            "LICENSE.md reason",
+        )?;
+        ensure(
+            license_row.reasons.contains(&reason::DOCS_MARKDOWN_ROOT),
+            false,
+            "LICENSE.md generic markdown reason",
+        )?;
+        ensure(
+            notice_row.reasons.contains(&reason::DOCS_LICENSE),
+            true,
+            "NOTICE.md reason",
+        )?;
+        ensure(
+            notice_row.reasons.contains(&reason::DOCS_MARKDOWN_ROOT),
+            false,
+            "NOTICE.md generic markdown reason",
+        )?;
+        ensure(
+            agents_row.reasons.contains(&reason::DOCS_MARKDOWN_ROOT),
+            true,
+            "AGENTS.md generic markdown reason",
+        )
     }
 
     #[test]
@@ -1073,7 +1151,7 @@ mod tests {
     }
 
     #[test]
-    fn scratch_root_artifacts_classify_as_do_not_commit_scratch() {
+    fn scratch_root_artifacts_classify_as_do_not_commit_scratch() -> TestResult {
         // The literal `--help` file (which `ee --help > --help` would
         // create), an ad-hoc UBS report, and a drift report.
         let snap = snapshot(vec![
@@ -1103,44 +1181,39 @@ mod tests {
                 row.path
             );
         }
-        let help_row = rows.iter().find(|r| r.path == "--help").unwrap();
+        let help_row = row_for(&rows, "--help")?;
         assert!(help_row.reasons.contains(&reason::SCRATCH_ROOT_HELPER));
-        let probe_row = rows
-            .iter()
-            .find(|r| r.path == "line-length-probe-output.txt")
-            .unwrap();
+        let probe_row = row_for(&rows, "line-length-probe-output.txt")?;
         assert!(
             probe_row
                 .reasons
                 .contains(&reason::SCRATCH_LINE_LENGTH_PROBE)
         );
-        let ubs_json_row = rows.iter().find(|r| r.path == "ubs.json").unwrap();
+        let ubs_json_row = row_for(&rows, "ubs.json")?;
         assert!(ubs_json_row.reasons.contains(&reason::SCRATCH_ROOT_REPORT));
-        let plan_drift_row = rows
-            .iter()
-            .find(|r| r.path == ".plan-drift-report.json")
-            .unwrap();
+        let plan_drift_row = row_for(&rows, ".plan-drift-report.json")?;
         assert!(
             plan_drift_row
                 .reasons
                 .contains(&reason::SCRATCH_ROOT_REPORT)
         );
-        let tool_output_row = rows.iter().find(|r| r.path == "functions.txt").unwrap();
+        let tool_output_row = row_for(&rows, "functions.txt")?;
         assert!(
             tool_output_row
                 .reasons
                 .contains(&reason::SCRATCH_ROOT_TOOL_OUTPUT)
         );
-        let multibyte_row = rows.iter().find(|r| r.path == "test_multibyte.rs").unwrap();
+        let multibyte_row = row_for(&rows, "test_multibyte.rs")?;
         assert!(
             multibyte_row
                 .reasons
                 .contains(&reason::SCRATCH_LINE_LENGTH_PROBE)
         );
+        Ok(())
     }
 
     #[test]
-    fn generated_target_outputs_classify_as_do_not_commit_generated() {
+    fn generated_target_outputs_classify_as_do_not_commit_generated() -> TestResult {
         let snap = snapshot(vec![
             untracked("target/debug/ee"),
             untracked("target/release/deps/foo.rlib"),
@@ -1161,12 +1234,13 @@ mod tests {
                 row.path
             );
         }
-        let lock_row = rows.iter().find(|r| r.path == "Cargo.lock").unwrap();
+        let lock_row = row_for(&rows, "Cargo.lock")?;
         assert!(lock_row.reasons.contains(&reason::GEN_CARGO_LOCK));
+        Ok(())
     }
 
     #[test]
-    fn local_machine_artifacts_classify_as_do_not_commit_local_machine() {
+    fn local_machine_artifacts_classify_as_do_not_commit_local_machine() -> TestResult {
         let snap = snapshot(vec![
             untracked(".DS_Store"),
             untracked("src/core/._mod.rs"),
@@ -1189,12 +1263,13 @@ mod tests {
                 row.path
             );
         }
-        let ds = rows.iter().find(|r| r.path == ".DS_Store").unwrap();
+        let ds = row_for(&rows, ".DS_Store")?;
         assert!(ds.reasons.contains(&reason::LOCAL_DS_STORE));
-        let apple_double = rows.iter().find(|r| r.path == "src/core/._mod.rs").unwrap();
+        let apple_double = row_for(&rows, "src/core/._mod.rs")?;
         assert!(apple_double.reasons.contains(&reason::LOCAL_APPLE_DOUBLE));
-        let win = rows.iter().find(|r| r.path == "Thumbs.db").unwrap();
+        let win = row_for(&rows, "Thumbs.db")?;
         assert!(win.reasons.contains(&reason::LOCAL_WINDOWS_SHELL));
+        Ok(())
     }
 
     #[test]
@@ -1250,7 +1325,7 @@ mod tests {
     }
 
     #[test]
-    fn config_patterns_extend_generated_scratch_and_local_machine_classification() {
+    fn config_patterns_extend_generated_scratch_and_local_machine_classification() -> TestResult {
         let config = HygieneClassifierConfig {
             generated_patterns: vec![HygienePathPattern::prefix("fixtures/generated/")],
             scratch_patterns: vec![HygienePathPattern::suffix(".scratch.json")],
@@ -1264,10 +1339,7 @@ mod tests {
         ]);
         let rows = classify_workspace_with_config(&snap, &no_secret_evidence(), &config);
         assert_eq!(rows.len(), 3);
-        let generated = rows
-            .iter()
-            .find(|row| row.path == "fixtures/generated/report.json")
-            .unwrap();
+        let generated = row_for(&rows, "fixtures/generated/report.json")?;
         assert_eq!(generated.kind, Kind::Generated);
         assert_eq!(generated.bucket, Bucket::DoNotCommit);
         assert!(
@@ -1276,18 +1348,12 @@ mod tests {
                 .contains(&reason::CONFIG_GENERATED_PATTERN)
         );
 
-        let scratch = rows
-            .iter()
-            .find(|row| row.path == "notes.scratch.json")
-            .unwrap();
+        let scratch = row_for(&rows, "notes.scratch.json")?;
         assert_eq!(scratch.kind, Kind::Scratch);
         assert_eq!(scratch.bucket, Bucket::DoNotCommit);
         assert!(scratch.reasons.contains(&reason::CONFIG_SCRATCH_PATTERN));
 
-        let local = rows
-            .iter()
-            .find(|row| row.path == ".local-agent-state")
-            .unwrap();
+        let local = row_for(&rows, ".local-agent-state")?;
         assert_eq!(local.kind, Kind::LocalMachine);
         assert_eq!(local.bucket, Bucket::DoNotCommit);
         assert!(
@@ -1295,6 +1361,7 @@ mod tests {
                 .reasons
                 .contains(&reason::CONFIG_LOCAL_MACHINE_PATTERN)
         );
+        Ok(())
     }
 
     #[test]
@@ -1377,14 +1444,13 @@ mod tests {
     }
 
     #[test]
-    fn raw_pattern_values_parse_documented_env_syntax_and_deduplicate() {
+    fn raw_pattern_values_parse_documented_env_syntax_and_deduplicate() -> TestResult {
         let config = HygieneClassifierConfig::from_raw_pattern_values(
             Some("prefix:target/, suffix:.rlib, prefix:target/"),
             Some("exact:--help,contains:/tmp-probe/"),
             Some("suffix:.local.db"),
             Some("contains:/manual-review/"),
-        )
-        .expect("config parses");
+        )?;
         assert_eq!(
             config.generated_patterns,
             vec![
@@ -1407,23 +1473,27 @@ mod tests {
             config.always_review_patterns,
             vec![HygienePathPattern::Contains("/manual-review/".to_owned())]
         );
+        Ok(())
     }
 
     #[test]
-    fn raw_pattern_values_reject_unknown_matcher_kinds_and_empty_values() {
+    fn raw_pattern_values_reject_unknown_matcher_kinds_and_empty_values() -> TestResult {
         let bad_kind = HygieneClassifierConfig::from_raw_pattern_values(
             Some("glob:target/**"),
             None,
             None,
             None,
         )
-        .unwrap_err();
+        .err()
+        .ok_or_else(|| "glob matcher should be rejected".to_owned())?;
         assert!(bad_kind.contains("glob"));
 
         let empty_value =
             HygieneClassifierConfig::from_raw_pattern_values(None, Some("prefix:"), None, None)
-                .unwrap_err();
+                .err()
+                .ok_or_else(|| "empty prefix matcher should be rejected".to_owned())?;
         assert!(empty_value.contains("empty value"));
+        Ok(())
     }
 
     #[test]

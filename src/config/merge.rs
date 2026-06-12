@@ -2486,20 +2486,6 @@ fn optional_env_u64(
         .map_err(|_| EnvironmentConfigError::InvalidUnsignedInteger { variable, value })
 }
 
-fn optional_env_bool(
-    env: &BTreeMap<String, OsString>,
-    variable: &'static str,
-) -> Result<Option<bool>, EnvironmentConfigError> {
-    let Some(value) = optional_env_string(env, variable)? else {
-        return Ok(None);
-    };
-    match value.as_str() {
-        "true" => Ok(Some(true)),
-        "false" => Ok(Some(false)),
-        _ => Err(EnvironmentConfigError::InvalidBoolean { variable, value }),
-    }
-}
-
 fn optional_env_bool_flag(
     env: &BTreeMap<String, OsString>,
     variable: &'static str,

@@ -1240,7 +1240,7 @@ mod tests {
         ensure_equal(
             &report.requires_candidate_downgrade,
             &true,
-            "metadata-only pending import still downgrades candidates",
+            "dirty pending import downgrades candidates",
         )?;
         ensure_equal(
             &report.br_reads_authoritative,
