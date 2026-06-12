@@ -58,6 +58,7 @@ CLAIM_GATE_REQUIRED_FIELDS = [
     ("recommendedSafeToClaim", "missing_claim_gate_recommended_safe_to_claim"),
     ("sourceAuthority", "missing_claim_gate_source_authority"),
     ("actionableQueue", "missing_claim_gate_actionable_queue"),
+    ("resourceAdmission", "missing_claim_gate_resource_admission"),
     ("unsafeReasons", "missing_claim_gate_unsafe_reasons"),
     ("staleReasons", "missing_claim_gate_stale_reasons"),
     ("sourceRefs", "missing_claim_gate_source_refs"),
