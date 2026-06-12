@@ -107,7 +107,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::models::CorpusRevision;
 
@@ -500,18 +500,20 @@ impl CassPrefetchHistory {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let recent_first: Vec<CassPrefetchObservation> = recent_first_topics
-            .into_iter()
-            .map(CassPrefetchObservation::new)
-            .collect();
-        if recent_first.len() > MAX_PREFETCH_HISTORY {
-            return None;
-        }
-        if recent_first
-            .iter()
-            .any(|observation| observation.topic_id.as_str().len() > MAX_PREFETCH_TOPIC_ID_BYTES)
-        {
-            return None;
+        let mut recent_first = Vec::new();
+        for topic in recent_first_topics {
+            if recent_first.len() >= MAX_PREFETCH_HISTORY {
+                return None;
+            }
+            let raw_topic = topic.into();
+            if raw_topic.len() > MAX_PREFETCH_TOPIC_ID_BYTES {
+                return None;
+            }
+            let observation = CassPrefetchObservation::new(raw_topic);
+            if observation.topic_id.as_str().len() > MAX_PREFETCH_TOPIC_ID_BYTES {
+                return None;
+            }
+            recent_first.push(observation);
         }
         Some(Self {
             agent_scope: agent_scope.into(),
@@ -598,6 +600,10 @@ pub struct CassPrefetchCandidate {
     /// confident. Pinned to a finite, non-negative number by
     /// construction; predictors that compute non-finite intermediates
     /// must filter before emitting.
+    #[serde(
+        deserialize_with = "deserialize_candidate_score",
+        serialize_with = "serialize_candidate_score"
+    )]
     pub score: f64,
     /// Predictor identifier for audit / explain blobs. Defaults to
     /// the predictor's `name()`; tests can override.
@@ -614,10 +620,33 @@ impl CassPrefetchCandidate {
     ) -> Self {
         Self {
             topic_id: topic_id.into(),
-            score,
+            score: normalize_candidate_score(score),
             predictor: predictor.into(),
         }
     }
+}
+
+fn normalize_candidate_score(score: f64) -> f64 {
+    if score.is_finite() {
+        score.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn deserialize_candidate_score<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let score = f64::deserialize(deserializer)?;
+    Ok(normalize_candidate_score(score))
+}
+
+fn serialize_candidate_score<S>(score: &f64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_f64(normalize_candidate_score(*score))
 }
 
 fn deserialize_predictor_cow<'de, D>(deserializer: D) -> Result<Cow<'static, str>, D::Error>
@@ -1788,6 +1817,54 @@ mod tests {
         // Exactly at the byte cap -> Some.
         let at_cap = "z".repeat(MAX_PREFETCH_TOPIC_ID_BYTES);
         assert!(CassPrefetchHistory::try_from_topics(test_agent_scope(), [at_cap]).is_some());
+    }
+
+    #[test]
+    fn try_from_topics_checks_raw_topic_size_before_redaction_bd_1suaa() {
+        let oversized_secret = format!(
+            "postgres://user:{}@localhost/db",
+            "s".repeat(MAX_PREFETCH_TOPIC_ID_BYTES)
+        );
+        assert!(
+            TopicId::new(&oversized_secret).as_str().len() <= MAX_PREFETCH_TOPIC_ID_BYTES,
+            "test fixture must redact to a short placeholder"
+        );
+        assert!(
+            CassPrefetchHistory::try_from_topics(
+                test_agent_scope(),
+                ["current".to_owned(), oversized_secret],
+            )
+            .is_none(),
+            "raw oversized topic must be refused before redaction can shrink it"
+        );
+    }
+
+    #[test]
+    fn candidate_constructor_and_deserialize_normalize_score_bd_1suaa() -> Result<(), String> {
+        assert_eq!(CassPrefetchCandidate::new("low", -0.25, "test").score, 0.0);
+        assert_eq!(CassPrefetchCandidate::new("high", 1.25, "test").score, 1.0);
+        assert_eq!(
+            CassPrefetchCandidate::new("nan", f64::NAN, "test").score,
+            0.0
+        );
+
+        let decoded: CassPrefetchCandidate =
+            serde_json::from_str(r#"{"topicId":"refactor","score":2.5,"predictor":"external"}"#)
+                .map_err(|error| format!("deserialize candidate: {error}"))?;
+        assert_eq!(decoded.score, 1.0);
+
+        let literal = CassPrefetchCandidate {
+            topic_id: TopicId::new("refactor"),
+            score: f64::NAN,
+            predictor: Cow::Borrowed("external"),
+        };
+        let encoded = serde_json::to_string(&literal)
+            .map_err(|error| format!("serialize literal: {error}"))?;
+        assert!(
+            encoded.contains(r#""score":0.0"#),
+            "serialized candidate must normalize invalid score, got {encoded}"
+        );
+        Ok(())
     }
 
     #[test]
