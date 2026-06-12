@@ -31,8 +31,8 @@ use crate::core::preflight_guard::classify_repair_command_for_preflight;
 use crate::core::swarm_brief::{
     SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandError, SwarmBriefCommandOutput,
     SwarmBriefCommandRunner, SwarmBriefCommit, SwarmBriefDegradation, SwarmBriefFileReservation,
-    SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus, SwarmBriefThreadSummary,
-    agent_mail_snapshot_brief_retry_command_template,
+    SwarmBriefFileSurfaceRisk, SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus,
+    SwarmBriefThreadSummary, agent_mail_snapshot_brief_retry_command_template,
     agent_mail_snapshot_producer_command_template, collect_swarm_brief,
 };
 use crate::core::verify_ledger::{RchVerifyRunView, list_rch_verify_blockers};
@@ -52,6 +52,7 @@ pub const SWARM_WORK_PACKET_SCHEMA_V1: &str = "ee.swarm.work_packet.v1";
 pub const SWARM_WORK_PACKET_CLAIM_GATE_SCHEMA_V1: &str = "ee.swarm.work_packet.claim_gate.v1";
 pub const SWARM_WORK_PACKET_REDACTION_STATUS: &str =
     "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content";
+const SAME_FILE_PROOF_DEBT_REASON: &str = "unproved_same_file_source_debt";
 const EXTERNAL_AGENT_SPACE_ROOT: &str = "/Volumes/USBNVME16TB/temp_agent_space";
 const AGENT_MAIL_UNAVAILABLE_CODE: &str = "agent_mail_unavailable";
 const BEADS_TRACKER_METADATA_DRIFT_CODE: &str = "beads_tracker_metadata_drift";
@@ -3474,8 +3475,99 @@ fn work_packet_candidate_conflict_evidence(
         if !risk.related_bead_ids.is_empty() {
             evidence.insert(format!("related_bead_collision:{}", risk.path_pattern));
         }
+        evidence.extend(work_packet_same_file_proof_debt_evidence(
+            risk,
+            &likely_paths,
+            snapshot,
+        ));
     }
     evidence.into_iter().collect()
+}
+
+fn work_packet_same_file_proof_debt_evidence(
+    risk: &SwarmBriefFileSurfaceRisk,
+    likely_paths: &[String],
+    snapshot: &SwarmNextActionSnapshot,
+) -> Vec<String> {
+    if risk.related_bead_ids.is_empty()
+        || !same_file_proof_debt_has_path_evidence(risk, likely_paths, snapshot)
+        || same_file_proof_debt_is_settled(risk)
+        || !same_file_proof_debt_has_blocked_source_evidence(risk)
+    {
+        return Vec::new();
+    }
+
+    vec![SAME_FILE_PROOF_DEBT_REASON.to_owned()]
+}
+
+fn same_file_proof_debt_has_path_evidence(
+    risk: &SwarmBriefFileSurfaceRisk,
+    likely_paths: &[String],
+    snapshot: &SwarmNextActionSnapshot,
+) -> bool {
+    if !risk.reservation_holders.is_empty() {
+        return true;
+    }
+    if risk.risk_factors.iter().any(|factor| {
+        matches!(
+            factor.as_str(),
+            "ready_bead_likely_surface"
+                | "ready_bead_surface_overlap"
+                | "active_exclusive_reservation"
+                | "active_shared_reservation"
+        )
+    }) {
+        return true;
+    }
+
+    snapshot.checkout.dirty_paths.iter().any(|dirty_path| {
+        path_patterns_overlap(dirty_path, &risk.path_pattern)
+            && likely_paths
+                .iter()
+                .any(|path| path_patterns_overlap(path, dirty_path))
+    })
+}
+
+fn same_file_proof_debt_has_blocked_source_evidence(risk: &SwarmBriefFileSurfaceRisk) -> bool {
+    let evidence = same_file_proof_debt_evidence_text(risk);
+    let has_source_complete = evidence.iter().any(|entry| {
+        entry.contains("source-complete")
+            || entry.contains("source_complete")
+            || entry.contains("source complete")
+    });
+    let has_blocked_proof = evidence.iter().any(|entry| {
+        entry.contains("proof owed")
+            || entry.contains("proof_block")
+            || entry.contains("proof blocked")
+            || entry.contains("not_reached_cargo")
+            || entry.contains("remote_marker_missing")
+            || entry.contains("telemetry_gap")
+            || entry.contains("local_fallback_refused")
+            || entry.contains("environment_blocked")
+            || entry.contains("rch-e327")
+            || entry.contains("rch_verify_")
+    });
+
+    has_source_complete && has_blocked_proof
+}
+
+fn same_file_proof_debt_is_settled(risk: &SwarmBriefFileSurfaceRisk) -> bool {
+    same_file_proof_debt_evidence_text(risk)
+        .iter()
+        .any(|entry| {
+            entry.contains("remote_pass")
+                || entry.contains("source_passed")
+                || entry.contains("rch_proof_pass")
+                || entry.contains("cargo_passed")
+        })
+}
+
+fn same_file_proof_debt_evidence_text(risk: &SwarmBriefFileSurfaceRisk) -> Vec<String> {
+    risk.evidence
+        .iter()
+        .chain(risk.risk_factors.iter())
+        .map(|entry| entry.to_ascii_lowercase())
+        .collect()
 }
 
 fn work_packet_global_conflict_evidence(
@@ -6184,6 +6276,18 @@ fn suggested_reservations_for_candidate(
             "docs/schemas/ee.swarm_next_action.v1.json".to_owned(),
             "next_action_schema_surface",
         );
+    }
+    if title.contains("claim-gate")
+        || title.contains("work-packet")
+        || title.contains("work packet")
+    {
+        reservations.insert(
+            "src/core/swarm_next_action.rs".to_owned(),
+            "swarm_claim_gate_surface",
+        );
+    }
+    if title.contains("insights") {
+        reservations.insert("src/cli/insights/mod.rs".to_owned(), "insights_surface");
     }
     if title.contains("db") || title.contains("sqlmodel") {
         reservations.insert("src/db/**".to_owned(), "storage_schema_surface");
@@ -10709,6 +10813,159 @@ mod tests {
                 .iter()
                 .all(|action| action.command_id != "bead_claim_candidate")
         );
+    }
+
+    #[test]
+    fn work_packet_marks_same_file_proof_debt_as_coordination_blocker() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.file_surface_risks = vec![same_file_proof_debt_risk(
+            "src/cli/insights/mod.rs",
+            &["bd-2pos6.2"],
+            &["PeerAgent"],
+            &["active_exclusive_reservation"],
+            &[
+                "beads_comment:source-complete; RCH proof owed",
+                "rch_proof_blocker:remote_marker_missing",
+                "rch_proof_blocker:telemetry_gap",
+            ],
+        )];
+        let mut snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-2pos6.3",
+            "insights same-file follow-up",
+            "beads_ready",
+            Some(2),
+        )]);
+        snapshot.checkout.dirty_path_count = 1;
+        snapshot.checkout.dirty_paths = vec!["src/cli/insights/mod.rs".to_owned()];
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let candidate = &packet.candidates[0];
+
+        assert_eq!(candidate.decision, "unsafe_due_to_conflict");
+        for reason in [
+            SAME_FILE_PROOF_DEBT_REASON,
+            "dirty_checkout_path_count:1",
+            "dirty_path_overlap:src/cli/insights/mod.rs",
+            "reservation_collision:src/cli/insights/mod.rs",
+            "related_bead_collision:src/cli/insights/mod.rs",
+        ] {
+            assert!(
+                candidate.unsafe_reasons.contains(&reason.to_owned()),
+                "missing unsafe reason {reason}"
+            );
+        }
+        assert_eq!(packet.recommended_action.action, "coordinate_before_claim");
+
+        let gate = packet.claim_gate(Some("bd-2pos6.3"));
+
+        assert!(!gate.safe_to_claim);
+        assert!(gate.claim_command_action.is_none());
+        assert!(
+            gate.unsafe_reasons
+                .contains(&SAME_FILE_PROOF_DEBT_REASON.to_owned())
+        );
+        assert_eq!(gate.source_authority.source_test_verdict, "not_evaluated");
+    }
+
+    #[test]
+    fn work_packet_abstains_same_file_proof_debt_for_ambiguous_prose_only_path() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.file_surface_risks = vec![same_file_proof_debt_risk(
+            "src/cli/insights/mod.rs",
+            &["bd-2pos6.2"],
+            &[],
+            &[],
+            &["comment mentions src/cli/insights/mod.rs but has no structured proof marker"],
+        )];
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-2pos6.4",
+            "insights same-file follow-up",
+            "beads_ready",
+            Some(2),
+        )]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let candidate = &packet.candidates[0];
+
+        assert_eq!(candidate.decision, "unsafe_due_to_conflict");
+        assert!(
+            candidate
+                .unsafe_reasons
+                .contains(&"related_bead_collision:src/cli/insights/mod.rs".to_owned())
+        );
+        assert!(
+            !candidate
+                .unsafe_reasons
+                .contains(&SAME_FILE_PROOF_DEBT_REASON.to_owned())
+        );
+    }
+
+    #[test]
+    fn work_packet_abstains_same_file_proof_debt_after_remote_pass() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.file_surface_risks = vec![same_file_proof_debt_risk(
+            "src/cli/insights/mod.rs",
+            &["bd-2pos6.2"],
+            &["PeerAgent"],
+            &["active_exclusive_reservation"],
+            &[
+                "beads_comment:source-complete",
+                "rch_proof_pass:remote_pass",
+                "rch_proof_blocker:remote_marker_missing",
+            ],
+        )];
+        let mut snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-2pos6.5",
+            "insights same-file follow-up",
+            "beads_ready",
+            Some(2),
+        )]);
+        snapshot.checkout.dirty_path_count = 1;
+        snapshot.checkout.dirty_paths = vec!["src/cli/insights/mod.rs".to_owned()];
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let candidate = &packet.candidates[0];
+
+        assert_eq!(candidate.decision, "unsafe_due_to_conflict");
+        assert!(
+            candidate
+                .unsafe_reasons
+                .contains(&"related_bead_collision:src/cli/insights/mod.rs".to_owned())
+        );
+        assert!(
+            !candidate
+                .unsafe_reasons
+                .contains(&SAME_FILE_PROOF_DEBT_REASON.to_owned())
+        );
+    }
+
+    fn same_file_proof_debt_risk(
+        path_pattern: &str,
+        related_bead_ids: &[&str],
+        reservation_holders: &[&str],
+        risk_factors: &[&str],
+        evidence: &[&str],
+    ) -> SwarmBriefFileSurfaceRisk {
+        SwarmBriefFileSurfaceRisk {
+            path_pattern: path_pattern.to_owned(),
+            git_status_buckets: vec!["modified".to_owned()],
+            reservation_holders: reservation_holders
+                .iter()
+                .map(|holder| (*holder).to_owned())
+                .collect(),
+            related_bead_ids: related_bead_ids
+                .iter()
+                .map(|bead_id| (*bead_id).to_owned())
+                .collect(),
+            severity: "high".to_owned(),
+            score: 95,
+            risk_factors: risk_factors
+                .iter()
+                .map(|factor| (*factor).to_owned())
+                .collect(),
+            evidence: evidence.iter().map(|entry| (*entry).to_owned()).collect(),
+            suggested_commands: vec!["CI=1 br show bd-2pos6.2 --json".to_owned()],
+        }
     }
 
     fn snapshot_with_candidates(
