@@ -1,0 +1,211 @@
+{
+  "schema": "ee.unsafe_claim_planner.conformance_cases.v1",
+  "requiredCoverage": [
+    "unsafe_due_to_conflict",
+    "tracker_stale",
+    "agent_mail_degraded_read_only",
+    "dirty_path_overlap",
+    "same_file_proof_debt",
+    "rch_unavailable",
+    "stale_installed_binary",
+    "reservation_conflict",
+    "unknown_reason_preservation",
+    "no_safe_alternate"
+  ],
+  "cases": [
+    {
+      "id": "batch_unsafe_shared_blockers",
+      "coverage": [
+        "unsafe_due_to_conflict",
+        "tracker_stale",
+        "agent_mail_degraded_read_only",
+        "dirty_path_overlap",
+        "same_file_proof_debt",
+        "rch_unavailable",
+        "stale_installed_binary",
+        "reservation_conflict",
+        "unknown_reason_preservation"
+      ],
+      "unsafeReasons": [
+        "beads_tracker_not_authoritative:external_changes_pending_import",
+        "agent_mail_unavailable",
+        "dirty_checkout_path_count:63",
+        "dirty_path_overlap:src/db/mod.rs",
+        "source_overlap_same_file_proof_debt:bd-2pos6.2:src/cli/insights/mod.rs",
+        "rch_unavailable:remote_marker_missing",
+        "stale_binary_suspected:installed-ee-0.3.3",
+        "reservation_collision:src/db/mod.rs:OtherAgent",
+        "packet_recommendation_candidate_mismatch:requested=bd-1n3x1.16.1:selected=bd-1n3x1.16",
+        "future_gate_reason:opaque_value"
+      ],
+      "degradedCodes": [
+        "agent_mail_unavailable",
+        "bv_command_timeout",
+        "memory_drift_source_unverifiable",
+        "memory_probe_unavailable"
+      ],
+      "decomposition": {
+        "candidateId": "bd-batch-unsafe",
+        "issueType": "feature",
+        "title": "[CLUSTER] unsafe claim batch proof",
+        "priority": 3,
+        "pathFamilies": [
+          "src/db",
+          "src/cli",
+          "tests"
+        ],
+        "rawPathThatMustNotAppear": "src/db/mod.rs"
+      },
+      "alternatePlanner": {
+        "candidateId": "bd-batch-unsafe",
+        "unsafePathFamilies": [],
+        "sourceAuthorityDegraded": true,
+        "candidates": [
+          {
+            "id": "bd-1n3x1.16.1",
+            "title": "unsafe-claim planner: contract leaf",
+            "issueType": "task",
+            "status": "open",
+            "priority": 3,
+            "assignee": null,
+            "labels": [
+              "contract"
+            ],
+            "paths": [
+              "docs/schemas/ee.swarm.unsafe_claim_plan.v1.json"
+            ],
+            "gateSafeToClaim": false,
+            "gateClaimCommandActionPresent": false,
+            "reasonGroupRefs": [
+              "tracker_authority",
+              "agent_mail_readiness",
+              "dirty_checkout"
+            ],
+            "candidateSpecificDeltas": [
+              "shared_gate:unsafe_due_to_conflict"
+            ]
+          },
+          {
+            "id": "bd-1tp6p.2.1",
+            "title": "db repair honors unsafe path overlap",
+            "issueType": "bug",
+            "status": "open",
+            "priority": 2,
+            "assignee": null,
+            "labels": [],
+            "paths": [
+              "src/db/mod.rs"
+            ],
+            "gateSafeToClaim": false,
+            "gateClaimCommandActionPresent": false,
+            "reasonGroupRefs": [
+              "dirty_checkout"
+            ],
+            "candidateSpecificDeltas": [
+              "dirty_path_overlap:src/db/mod.rs"
+            ]
+          },
+          {
+            "id": "bd-3utv2.11",
+            "title": "install-freshness runner queue follow-up",
+            "issueType": "task",
+            "status": "open",
+            "priority": 2,
+            "assignee": null,
+            "labels": [
+              "no-cargo"
+            ],
+            "paths": [
+              "scripts/install_freshness"
+            ],
+            "gateSafeToClaim": null,
+            "gateClaimCommandActionPresent": false,
+            "reasonGroupRefs": [
+              "installed_binary_freshness"
+            ],
+            "candidateSpecificDeltas": [
+              "install_freshness:runner_queue_follow_up"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "no_safe_alternate",
+      "coverage": [
+        "no_safe_alternate"
+      ],
+      "unsafeReasons": [
+        "agent_mail_unavailable",
+        "rch_unavailable:topology_blocked",
+        "reservation_collision:docs/unsafe_claim_plan.md:OtherAgent",
+        "candidate_is_rollup_not_leaf:bd-parent"
+      ],
+      "degradedCodes": [],
+      "decomposition": null,
+      "alternatePlanner": {
+        "candidateId": "bd-no-safe",
+        "unsafePathFamilies": [],
+        "sourceAuthorityDegraded": true,
+        "candidates": [
+          {
+            "id": "bd-owned",
+            "title": "docs-only candidate held by peer",
+            "issueType": "task",
+            "status": "open",
+            "priority": 1,
+            "assignee": "OtherAgent",
+            "labels": [
+              "docs"
+            ],
+            "paths": [
+              "docs/unsafe_claim_plan.md"
+            ],
+            "gateSafeToClaim": null,
+            "gateClaimCommandActionPresent": false,
+            "reasonGroupRefs": [
+              "reservation_conflict"
+            ],
+            "candidateSpecificDeltas": []
+          },
+          {
+            "id": "bd-epic",
+            "title": "rollup is not claimable",
+            "issueType": "epic",
+            "status": "open",
+            "priority": 1,
+            "assignee": null,
+            "labels": [
+              "contract"
+            ],
+            "paths": [],
+            "gateSafeToClaim": null,
+            "gateClaimCommandActionPresent": false,
+            "reasonGroupRefs": [
+              "recommendation_mismatch"
+            ],
+            "candidateSpecificDeltas": []
+          },
+          {
+            "id": "bd-scanned",
+            "title": "already scanned unsafe leaf",
+            "issueType": "task",
+            "status": "open",
+            "priority": 1,
+            "assignee": null,
+            "labels": [
+              "tracker-only"
+            ],
+            "paths": [],
+            "gateSafeToClaim": false,
+            "gateClaimCommandActionPresent": false,
+            "reasonGroupRefs": [
+              "rch_proof_admission"
+            ],
+            "candidateSpecificDeltas": []
+          }
+        ]
+      }
+    }
+  ]
+}

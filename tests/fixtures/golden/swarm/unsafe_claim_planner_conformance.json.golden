@@ -1,0 +1,189 @@
+{
+  "cases": [
+    {
+      "alternate": {
+        "candidates": [
+          {
+            "actionsMutateState": false,
+            "deltaCount": 8,
+            "id": "bd-3utv2.11",
+            "mayEmitClaimCommand": false,
+            "needsFreshClaimGate": true,
+            "state": "plausible_but_requires_gate",
+            "workClass": "shell_only_no_cargo"
+          },
+          {
+            "actionsMutateState": false,
+            "deltaCount": 8,
+            "id": "bd-1n3x1.16.1",
+            "mayEmitClaimCommand": false,
+            "needsFreshClaimGate": true,
+            "state": "scanned_and_unsafe",
+            "workClass": "contract_design"
+          },
+          {
+            "actionsMutateState": false,
+            "deltaCount": 8,
+            "id": "bd-1tp6p.2.1",
+            "mayEmitClaimCommand": false,
+            "needsFreshClaimGate": true,
+            "state": "scanned_and_unsafe",
+            "workClass": "rust_source"
+          }
+        ],
+        "recommendedAction": "gate_plausible_alternate",
+        "topCommandIds": [
+          "bead_show_candidate:bd-3utv2.11",
+          "claim_gate_retry:bd-3utv2.11"
+        ],
+        "topCopySafety": [
+          "safe_structured_argv",
+          "safe_structured_argv"
+        ]
+      },
+      "coverage": [
+        "unsafe_due_to_conflict",
+        "tracker_stale",
+        "agent_mail_degraded_read_only",
+        "dirty_path_overlap",
+        "same_file_proof_debt",
+        "rch_unavailable",
+        "stale_installed_binary",
+        "reservation_conflict",
+        "unknown_reason_preservation"
+      ],
+      "decomposition": {
+        "commentTemplateContainsRawPath": false,
+        "decompose": true,
+        "labels": [
+          [
+            "decomposed-from:bd-batch-unsafe",
+            "lane:storage"
+          ],
+          [
+            "decomposed-from:bd-batch-unsafe",
+            "lane:cli"
+          ],
+          [
+            "decomposed-from:bd-batch-unsafe",
+            "lane:tests"
+          ]
+        ],
+        "suggestedCount": 3
+      },
+      "forbiddenMarkersPresent": false,
+      "id": "batch_unsafe_shared_blockers",
+      "plannerActionKinds": [
+        "inspect",
+        "decompose_candidate",
+        "alternate_candidate",
+        "retry_with_snapshot",
+        "wait_or_coordinate"
+      ],
+      "plannerActionsMutateState": false,
+      "rawReasonIndexCount": 14,
+      "reasonCategories": [
+        "tracker_authority",
+        "agent_mail_readiness",
+        "source_overlap",
+        "dirty_checkout",
+        "rch_proof_admission",
+        "installed_binary_freshness",
+        "reservation_conflict",
+        "bv_staleness",
+        "recommendation_mismatch",
+        "memory_source_drift",
+        "unknown"
+      ],
+      "unknownReasons": [
+        "future_gate_reason:opaque_value"
+      ]
+    },
+    {
+      "alternate": {
+        "candidates": [
+          {
+            "actionsMutateState": false,
+            "deltaCount": 7,
+            "id": "bd-scanned",
+            "mayEmitClaimCommand": false,
+            "needsFreshClaimGate": true,
+            "state": "scanned_and_unsafe",
+            "workClass": "tracker_only"
+          },
+          {
+            "actionsMutateState": false,
+            "deltaCount": 6,
+            "id": "bd-owned",
+            "mayEmitClaimCommand": false,
+            "needsFreshClaimGate": false,
+            "state": "blocked_or_owned",
+            "workClass": "docs_only"
+          },
+          {
+            "actionsMutateState": false,
+            "deltaCount": 6,
+            "id": "bd-epic",
+            "mayEmitClaimCommand": false,
+            "needsFreshClaimGate": false,
+            "state": "blocked_or_owned",
+            "workClass": "contract_design"
+          }
+        ],
+        "recommendedAction": "stop_or_coordinate",
+        "topCommandIds": [
+          "bead_show_candidate:bd-scanned",
+          "claim_gate_retry:bd-scanned"
+        ],
+        "topCopySafety": [
+          "safe_structured_argv",
+          "safe_structured_argv"
+        ]
+      },
+      "coverage": [
+        "no_safe_alternate"
+      ],
+      "decomposition": null,
+      "forbiddenMarkersPresent": false,
+      "id": "no_safe_alternate",
+      "plannerActionKinds": [
+        "alternate_candidate",
+        "retry_with_snapshot",
+        "wait_or_coordinate"
+      ],
+      "plannerActionsMutateState": false,
+      "rawReasonIndexCount": 4,
+      "reasonCategories": [
+        "agent_mail_readiness",
+        "rch_proof_admission",
+        "reservation_conflict",
+        "recommendation_mismatch"
+      ],
+      "unknownReasons": []
+    }
+  ],
+  "coverageSatisfied": true,
+  "fixtureSchema": "ee.unsafe_claim_planner.conformance_cases.v1",
+  "nonMutationPolicy": {
+    "claimsBeads": false,
+    "deletesFiles": false,
+    "reservesFiles": false,
+    "runsCargo": false,
+    "runsRch": false,
+    "sendsAgentMail": false,
+    "stagesGit": false
+  },
+  "requiredCoverage": [
+    "unsafe_due_to_conflict",
+    "tracker_stale",
+    "agent_mail_degraded_read_only",
+    "dirty_path_overlap",
+    "same_file_proof_debt",
+    "rch_unavailable",
+    "stale_installed_binary",
+    "reservation_conflict",
+    "unknown_reason_preservation",
+    "no_safe_alternate"
+  ],
+  "schema": "ee.unsafe_claim_planner.conformance.v1"
+}
