@@ -1,0 +1,73 @@
+{
+  "schema": "ee.rch.pressure_telemetry_fixture.v1",
+  "name": "capabilities_refresh_budget_timeout",
+  "bead_id": "bd-1n3x1.14.2",
+  "contract": "docs/rch_verification.md Pressure-Telemetry Gap Blocker Contract (bd-1n3x1.14)",
+  "case": "required case 3a: capabilities refresh exceeded its bounded budget and was terminated by the wrapper; bounded elapsed time only, no raw worker log body",
+  "observed_at": "2026-06-09T20:24:00Z",
+  "input_rch_status": {
+    "posture": "remote_ready",
+    "daemon": {
+      "slots_total": 4,
+      "slots_available": 4
+    },
+    "workers": [
+      {
+        "worker_id": "trj",
+        "status": "healthy",
+        "circuit_state": "closed",
+        "used_slots": 0,
+        "total_slots": 4,
+        "pressure_state": "telemetry_gap",
+        "pressure_reason_code": "telemetry_unavailable",
+        "pressure_policy_rule": "fail_open_telemetry_gap",
+        "pressure_telemetry_fresh": false,
+        "telemetry_age_secs": 5100
+      }
+    ],
+    "active_builds": [],
+    "queued_builds": [],
+    "recent_cancellations": [],
+    "capabilities_refresh": {
+      "attempted": true,
+      "budget_ms": 120000,
+      "elapsed_ms": 124000,
+      "exit_class": "budget_timeout"
+    }
+  },
+  "expected": {
+    "blocker_reason": "capabilities_refresh_timeout",
+    "detail_reason": null,
+    "known_blocker_kind": "pressure_telemetry_gap",
+    "posture": "remote_ready",
+    "worker_id": "trj",
+    "active_build_count": 0,
+    "queued_build_count": 0,
+    "worker_probe_status": "skipped",
+    "pressure_state": "telemetry_gap",
+    "pressure_reason_code": "telemetry_unavailable",
+    "pressure_policy_rule": "fail_open_telemetry_gap",
+    "telemetry_fresh": false,
+    "telemetry_age_secs": 5100,
+    "refresh_elapsed_ms": 124000,
+    "refresh_exit_class": "budget_timeout",
+    "retry_after": "2026-06-09T20:54:00Z",
+    "next_action": "coordinate_with_owner",
+    "owner_routing": "rch_owner",
+    "source_verdict": "no_rust_verdict",
+    "redaction": {
+      "host_private_paths_present": false,
+      "raw_worker_logs_present": false
+    },
+    "must_not_emit": [
+      "active_project_exclusion",
+      "topology_blocked",
+      "rch_verify_topology_blocked"
+    ],
+    "must_not_recommend": [
+      "cancel_active_build",
+      "local_cargo_fallback",
+      "agent_daemon_restart"
+    ]
+  }
+}

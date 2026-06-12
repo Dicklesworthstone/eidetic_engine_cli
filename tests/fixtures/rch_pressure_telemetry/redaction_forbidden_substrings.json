@@ -1,0 +1,31 @@
+{
+  "schema": "ee.rch.pressure_telemetry_fixture.v1",
+  "name": "redaction_forbidden_substrings",
+  "bead_id": "bd-1n3x1.14.2",
+  "contract": "docs/rch_verification.md Pressure-Telemetry Gap Blocker Contract (bd-1n3x1.14)",
+  "case": "redaction assertion control: every fixture in this directory, and every implementation output built from them, must contain none of these substrings (case-insensitive)",
+  "forbidden_substrings": [
+    "/Users/",
+    "/private/",
+    "/var/folders/",
+    "/home/",
+    "pid=",
+    "pid:",
+    "process_id=",
+    "process_id:",
+    ".sqlite",
+    ".db-wal",
+    "BEGIN PGP",
+    "BEGIN RSA",
+    "BEGIN OPENSSH",
+    "aws_secret_access_key",
+    "ghp_",
+    "github_pat_",
+    "body_md",
+    "raw_worker_log",
+    "ssh -i"
+  ],
+  "applies_to": "tests/fixtures/rch_pressure_telemetry/*.json",
+  "excludes_self": true,
+  "notes": "Mirrors the fixtures_do_not_leak_pids_paths_or_secrets discipline from tests/verify_ledger_fixtures_unit.rs. The implementation test for bd-1n3x1.14.3 must scan every other fixture in this directory plus the bounded pressure_telemetry detail objects it emits; this control file is the token list and must be excluded from its own scan (excludes_self). Hashes must be sha256-prefixed bounded values; recent-build arrays must be hashed or omitted; worker logs and mail bodies must never be embedded."
+}

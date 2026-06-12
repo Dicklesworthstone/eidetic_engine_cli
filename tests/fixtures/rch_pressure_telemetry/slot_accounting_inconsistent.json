@@ -1,0 +1,68 @@
+{
+  "schema": "ee.rch.pressure_telemetry_fixture.v1",
+  "name": "slot_accounting_inconsistent",
+  "bead_id": "bd-1n3x1.14.2",
+  "contract": "docs/rch_verification.md Pressure-Telemetry Gap Blocker Contract (bd-1n3x1.14)",
+  "case": "slot-accounting contradiction variant (HazyWren 2026-06-09 / TealElk 2026-06-10 live evidence): zero builds anywhere while daemon and worker slot accounting both report full",
+  "observed_at": "2026-06-10T15:01:00Z",
+  "input_rch_status": {
+    "posture": "remote_ready",
+    "daemon": {
+      "slots_total": 4,
+      "slots_available": 0
+    },
+    "workers": [
+      {
+        "worker_id": "trj",
+        "status": "healthy",
+        "circuit_state": "closed",
+        "used_slots": 4,
+        "total_slots": 4,
+        "pressure_state": "telemetry_gap",
+        "pressure_reason_code": "telemetry_unavailable",
+        "pressure_policy_rule": "fail_open_telemetry_gap",
+        "pressure_telemetry_fresh": false,
+        "telemetry_age_secs": 6800
+      }
+    ],
+    "active_builds": [],
+    "queued_builds": [],
+    "recent_cancellations": []
+  },
+  "expected": {
+    "blocker_reason": "rch_pressure_telemetry_unavailable",
+    "detail_reason": "slot_accounting_inconsistent",
+    "known_blocker_kind": "pressure_telemetry_gap",
+    "posture": "remote_ready",
+    "worker_id": "trj",
+    "active_build_count": 0,
+    "queued_build_count": 0,
+    "worker_probe_status": "skipped",
+    "pressure_state": "telemetry_gap",
+    "pressure_reason_code": "telemetry_unavailable",
+    "pressure_policy_rule": "fail_open_telemetry_gap",
+    "telemetry_fresh": false,
+    "telemetry_age_secs": 6800,
+    "refresh_elapsed_ms": null,
+    "refresh_exit_class": null,
+    "retry_after": "2026-06-10T15:31:00Z",
+    "next_action": "coordinate_with_owner",
+    "owner_routing": "rch_owner",
+    "source_verdict": "no_rust_verdict",
+    "redaction": {
+      "host_private_paths_present": false,
+      "raw_worker_logs_present": false
+    },
+    "must_not_emit": [
+      "active_project_exclusion",
+      "topology_blocked",
+      "rch_verify_topology_blocked"
+    ],
+    "must_not_recommend": [
+      "cancel_active_build",
+      "local_cargo_fallback",
+      "agent_daemon_restart"
+    ],
+    "notes": "active_build_count and queued_build_count must be preserved as 0; the contradiction is reported as bounded detail, never as active_project_exclusion ownership; no claim that remote Cargo was attempted"
+  }
+}
