@@ -803,7 +803,8 @@ fn process_read_pool_registry_key(database: &DatabaseConfig) -> String {
     match database.location() {
         super::DatabaseLocation::Memory => "memory".to_owned(),
         super::DatabaseLocation::File(path) => {
-            let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            let path = std::fs::canonicalize(path)
+                .unwrap_or_else(|_| super::normalized_write_owner_file_key(path));
             format!("file:{}", path.display())
         }
     }
@@ -2140,6 +2141,24 @@ mod tests {
         assert!(
             process_read_pool_stats_for_database(&database).is_none(),
             "registry must store Weak handles so command-local pools can drop"
+        );
+    }
+
+    #[test]
+    fn process_registry_key_normalizes_missing_file_paths_lexically() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let direct = DatabaseConfig::file(tempdir.path().join("read-pool-missing.db"));
+        let indirect = DatabaseConfig::file(
+            tempdir
+                .path()
+                .join("not-created")
+                .join("..")
+                .join("read-pool-missing.db"),
+        );
+
+        assert_eq!(
+            process_read_pool_registry_key(&direct),
+            process_read_pool_registry_key(&indirect)
         );
     }
 

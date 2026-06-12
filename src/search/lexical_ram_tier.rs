@@ -38,10 +38,11 @@ use serde::Serialize;
 use crate::models::CorpusRevision;
 
 /// `degraded[]` code emitted when an operator requested transparent
-/// hugepages but the host platform or kernel does not expose
-/// `MADV_HUGEPAGE` (every non-Linux host, and Linux builds without THP
-/// configured). Functionality is unchanged; the optimization falls back to
-/// regular page-size mmap.
+/// hugepages but the current platform arm cannot even attempt
+/// `MADV_HUGEPAGE` (every non-Linux host in the scaffold). The future
+/// Linux syscall adapter may also emit this when the kernel rejects the
+/// hint; the current heap-warmload scaffold does not probe Linux THP
+/// state.
 pub const LEXICAL_HUGEPAGES_UNAVAILABLE_CODE: &str = "lexical_hugepages_unavailable";
 
 /// `degraded[]` code emitted when an operator has disabled the
@@ -90,9 +91,10 @@ pub const STATUS_SEARCH_LEXICAL_RAM_TIER_SCHEMA_V1: &str = "ee.status.search.lex
 pub const LEXICAL_RAM_TIER_PIN_RAM_ENV: &str = "EE_LEXICAL_INDEX_PIN_RAM";
 
 /// Companion env-var name for the transparent-hugepages opt-in.
-/// Only effective when `EE_LEXICAL_INDEX_PIN_RAM=1` AND the host kernel
-/// supports `MADV_HUGEPAGE`; otherwise the loader emits
-/// [`LEXICAL_HUGEPAGES_UNAVAILABLE_CODE`].
+/// Only effective when `EE_LEXICAL_INDEX_PIN_RAM=1` and the platform arm can
+/// attempt transparent-hugepage advice; otherwise the loader emits
+/// [`LEXICAL_HUGEPAGES_UNAVAILABLE_CODE`]. The current scaffold does not
+/// probe Linux THP state.
 pub const LEXICAL_RAM_TIER_HUGEPAGES_ENV: &str = "EE_LEXICAL_INDEX_HUGEPAGES";
 
 /// Coarse host classification for the lexical RAM-tier optimization.

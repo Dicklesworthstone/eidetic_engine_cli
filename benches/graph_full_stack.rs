@@ -314,6 +314,7 @@ fn context_options(fixture: &BenchFixture, query: &str, mode: CacheMode) -> Cont
             .with_resource_profile(PackResourceProfile::SwarmHeavy)
             .with_cache_json_response(mode.cache_json_response()),
         persist_pack: true,
+        baseline_write: None,
         no_lod: false,
         require_fresh_sentinels: false,
     }

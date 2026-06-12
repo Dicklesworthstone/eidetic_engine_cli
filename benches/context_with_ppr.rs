@@ -230,6 +230,7 @@ fn options(
         coordination_stale_after_ms: DEFAULT_COORDINATION_STALE_AFTER_MS,
         output_options: ContextPackOutputOptions::default(),
         persist_pack: true,
+        baseline_write: None,
         no_lod: false,
         require_fresh_sentinels: false,
     }
