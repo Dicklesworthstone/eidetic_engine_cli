@@ -13,6 +13,10 @@ use crate::mesh::auto_enrollment_safety::{
     AutoEnrollmentSummary, AutoEnrollmentSummaryInput, DiscoveryPolicyDecision, IntendedLanePolicy,
     IntendedPeer, MaterializationOutcome, TriggerReason, compute_summary,
 };
+use crate::mesh::identity_change_guard::{
+    AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE, BoundIdentity, CurrentIdentity, IdentityGuardVerdict,
+    evaluate_identity_guard,
+};
 
 pub const AUTO_ENROLLMENT_RESULT_SCHEMA_V1: &str = "ee.mesh.auto_enrollment_result.v1";
 
@@ -118,6 +122,8 @@ pub struct ExistingAutoEnrollmentPeer {
     pub peer_id: String,
     pub node_key: String,
     pub tailnet_id: Option<String>,
+    pub tailnet_display_name: Option<String>,
+    pub materialized_on_node_key: Option<String>,
     pub hostname: String,
     pub tailscale_ip: String,
     pub magic_dns_name: Option<String>,
@@ -395,13 +401,17 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
         .cloned()
         .collect();
     let local_tailnet = input.tailnet_id.as_deref();
-    let tailnet_changed = local_tailnet.is_some_and(|tailnet_id| {
+    let legacy_tailnet_changed = local_tailnet.is_some_and(|tailnet_id| {
         existing_enabled.iter().any(|peer| {
             peer.tailnet_id
                 .as_deref()
                 .is_some_and(|existing| existing != tailnet_id)
         })
     });
+    let identity_guard = identity_guard_for_input(&input, &existing_enabled);
+    let tailnet_changed = legacy_tailnet_changed
+        || matches!(identity_guard, IdentityGuardVerdict::TailnetChanged { .. });
+    let node_key_changed = matches!(identity_guard, IdentityGuardVerdict::NodeKeyChanged { .. });
     let manual_conflict = existing_enabled.iter().any(|peer| !peer.is_auto_managed());
     let manual_migration = manual_conflict && input.options.replace_manual_with_auto;
 
@@ -430,6 +440,7 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
     let outcome = initial_outcome(
         &input,
         tailnet_changed,
+        node_key_changed,
         manual_conflict && !input.options.replace_manual_with_auto,
         selected.is_empty(),
         !peers_to_revoke.is_empty(),
@@ -474,6 +485,17 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
                 "medium",
                 "existing mesh materialization belongs to a different tailnet",
                 "Run `ee mesh disable --workspace <path>` before auto-enrolling on the new tailnet.",
+            ),
+        );
+    }
+    if node_key_changed {
+        push_degradation_once(
+            &mut degraded,
+            AutoEnrollmentDegradation::new(
+                AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE,
+                "medium",
+                "existing mesh materialization was created on a different Tailscale node key",
+                "Run `ee mesh disable --workspace <path> --reason \"restored from different machine\"` before auto-enrolling on this machine.",
             ),
         );
     }
@@ -609,13 +631,14 @@ impl AutoEnrollmentOutcome {
 fn initial_outcome(
     input: &AutoEnrollmentInput,
     tailnet_changed: bool,
+    node_key_changed: bool,
     manual_conflict: bool,
     no_eligible_peers: bool,
     has_revocations: bool,
     existing_hash: Option<&str>,
     selected: &[AutoEnrollmentCandidate],
 ) -> AutoEnrollmentOutcome {
-    if tailnet_changed || manual_conflict {
+    if tailnet_changed || node_key_changed || manual_conflict {
         return AutoEnrollmentOutcome::Blocked;
     }
     if no_eligible_peers && !has_revocations {
@@ -636,6 +659,39 @@ fn initial_outcome(
         return AutoEnrollmentOutcome::ExplainOnly;
     }
     AutoEnrollmentOutcome::Materialized
+}
+
+fn identity_guard_for_input(
+    input: &AutoEnrollmentInput,
+    existing_enabled: &[ExistingAutoEnrollmentPeer],
+) -> IdentityGuardVerdict {
+    let (Some(tailnet_id), Some(self_node_key)) =
+        (input.tailnet_id.as_deref(), input.self_node_key.as_deref())
+    else {
+        return IdentityGuardVerdict::NoBoundIdentity;
+    };
+    let current = CurrentIdentity {
+        tailnet_id: tailnet_id.to_owned(),
+        tailnet_display_name: input.tailnet_display_name.clone(),
+        self_node_key: self_node_key.to_owned(),
+    };
+    let bound = bound_identity_from_existing_peers(existing_enabled);
+    evaluate_identity_guard(bound.as_ref(), &current)
+}
+
+fn bound_identity_from_existing_peers(
+    existing_enabled: &[ExistingAutoEnrollmentPeer],
+) -> Option<BoundIdentity> {
+    existing_enabled
+        .iter()
+        .filter(|peer| peer.is_auto_managed())
+        .find_map(|peer| {
+            Some(BoundIdentity {
+                tailnet_id: peer.tailnet_id.clone()?,
+                tailnet_display_name: peer.tailnet_display_name.clone(),
+                materialized_on_node_key: peer.materialized_on_node_key.clone()?,
+            })
+        })
 }
 
 fn revocation_node_keys(
@@ -906,17 +962,11 @@ mod tests {
     #[test]
     fn auto_enrollment_idempotent_on_second_call_with_same_peer_set_hash() {
         let mut input = input(vec![candidate("nodekey:alpha")]);
-        input.existing_peers = vec![ExistingAutoEnrollmentPeer {
-            peer_id: "peer_alpha".to_owned(),
-            node_key: "nodekey:alpha".to_owned(),
-            tailnet_id: Some("tailnet-alpha".to_owned()),
-            hostname: "alpha".to_owned(),
-            tailscale_ip: "100.64.0.2".to_owned(),
-            magic_dns_name: None,
-            ee_protocol_version: "1.0".to_owned(),
-            enrollment_source: "tailscale_auto_enrollment".to_owned(),
-            enabled: true,
-        }];
+        input.existing_peers = vec![existing_auto_peer(
+            "nodekey:alpha",
+            "tailnet-alpha",
+            Some("nodekey:self"),
+        )];
         let result = plan_auto_enrollment(input);
         assert_eq!(result.outcome, "already_complete");
         assert_eq!(
@@ -928,17 +978,11 @@ mod tests {
     #[test]
     fn auto_enrollment_refuses_when_tailnet_id_differs() {
         let mut input = input(vec![candidate("nodekey:alpha")]);
-        input.existing_peers = vec![ExistingAutoEnrollmentPeer {
-            peer_id: "peer_alpha".to_owned(),
-            node_key: "nodekey:alpha".to_owned(),
-            tailnet_id: Some("tailnet-old".to_owned()),
-            hostname: "alpha".to_owned(),
-            tailscale_ip: "100.64.0.2".to_owned(),
-            magic_dns_name: None,
-            ee_protocol_version: "1.0".to_owned(),
-            enrollment_source: "tailscale_auto_enrollment".to_owned(),
-            enabled: true,
-        }];
+        input.existing_peers = vec![existing_auto_peer(
+            "nodekey:alpha",
+            "tailnet-old",
+            Some("nodekey:self"),
+        )];
         let result = plan_auto_enrollment(input);
         assert_eq!(result.outcome, "blocked");
         assert!(
@@ -946,6 +990,87 @@ mod tests {
                 .degraded
                 .iter()
                 .any(|item| item.code == AUTO_ENROLLMENT_TAILNET_CHANGED_CODE)
+        );
+    }
+
+    #[test]
+    fn auto_enrollment_refuses_when_materialized_node_key_differs() {
+        let mut input = input(vec![candidate("nodekey:alpha")]);
+        input.existing_peers = vec![existing_auto_peer(
+            "nodekey:alpha",
+            "tailnet-alpha",
+            Some("nodekey:old-self"),
+        )];
+
+        let result = plan_auto_enrollment(input);
+
+        assert_eq!(result.outcome, "blocked");
+        assert!(!result.materialization.writes_peer_rows);
+        assert!(result.degraded.iter().any(|item| {
+            item.code == AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE && item.severity == "medium"
+        }));
+    }
+
+    #[test]
+    fn auto_enrollment_tailnet_change_takes_priority_over_node_key_change() {
+        let mut input = input(vec![candidate("nodekey:alpha")]);
+        input.tailnet_id = Some("tailnet-new".to_owned());
+        input.existing_peers = vec![existing_auto_peer(
+            "nodekey:alpha",
+            "tailnet-old",
+            Some("nodekey:old-self"),
+        )];
+
+        let result = plan_auto_enrollment(input);
+
+        assert_eq!(result.outcome, "blocked");
+        assert!(
+            result
+                .degraded
+                .iter()
+                .any(|item| item.code == AUTO_ENROLLMENT_TAILNET_CHANGED_CODE)
+        );
+        assert!(
+            !result
+                .degraded
+                .iter()
+                .any(|item| item.code == AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE)
+        );
+    }
+
+    #[test]
+    fn auto_enrollment_tailnet_display_name_rename_does_not_block() {
+        let mut input = input(vec![candidate("nodekey:alpha")]);
+        input.tailnet_display_name = Some("renamed.example".to_owned());
+        input.existing_peers = vec![existing_auto_peer(
+            "nodekey:alpha",
+            "tailnet-alpha",
+            Some("nodekey:self"),
+        )];
+
+        let result = plan_auto_enrollment(input);
+
+        assert_eq!(result.outcome, "already_complete");
+        assert!(result.degraded.iter().all(|item| {
+            item.code != AUTO_ENROLLMENT_TAILNET_CHANGED_CODE
+                && item.code != AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE
+        }));
+    }
+
+    #[test]
+    fn auto_enrollment_allows_auto_rows_without_materialized_node_key() {
+        let mut input = input(vec![candidate("nodekey:alpha")]);
+        input.self_node_key = Some("nodekey:new-self".to_owned());
+        input.existing_peers = vec![existing_auto_peer("nodekey:alpha", "tailnet-alpha", None)];
+
+        let result = plan_auto_enrollment(input);
+
+        assert_eq!(result.outcome, "already_complete");
+        assert!(
+            !result
+                .degraded
+                .iter()
+                .any(|item| item.code == AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE)
         );
     }
 
@@ -1052,17 +1177,11 @@ mod tests {
     #[test]
     fn auto_enrollment_exclude_existing_peer_materializes_revocation_when_no_candidates_remain() {
         let mut input = input(vec![candidate("nodekey:alpha")]);
-        input.existing_peers = vec![ExistingAutoEnrollmentPeer {
-            peer_id: "peer_alpha".to_owned(),
-            node_key: "nodekey:alpha".to_owned(),
-            tailnet_id: Some("tailnet-alpha".to_owned()),
-            hostname: "alpha".to_owned(),
-            tailscale_ip: "100.64.0.2".to_owned(),
-            magic_dns_name: None,
-            ee_protocol_version: "1.0".to_owned(),
-            enrollment_source: "tailscale_auto_enrollment".to_owned(),
-            enabled: true,
-        }];
+        input.existing_peers = vec![existing_auto_peer(
+            "nodekey:alpha",
+            "tailnet-alpha",
+            Some("nodekey:self"),
+        )];
         input.options.exclude_overrides = vec!["nodekey:alpha".to_owned()];
 
         let result = plan_auto_enrollment(input);
@@ -1151,11 +1270,33 @@ mod tests {
             peer_id: format!("peer_{}", node_key.replace("nodekey:", "")),
             node_key: node_key.to_owned(),
             tailnet_id: Some("tailnet-alpha".to_owned()),
+            tailnet_display_name: Some("alpha.example".to_owned()),
+            materialized_on_node_key: None,
             hostname: node_key.to_owned(),
             tailscale_ip: "100.64.0.3".to_owned(),
             magic_dns_name: None,
             ee_protocol_version: "1.0".to_owned(),
             enrollment_source: "explicit_human_consent".to_owned(),
+            enabled: true,
+        }
+    }
+
+    fn existing_auto_peer(
+        node_key: &str,
+        tailnet_id: &str,
+        materialized_on_node_key: Option<&str>,
+    ) -> ExistingAutoEnrollmentPeer {
+        ExistingAutoEnrollmentPeer {
+            peer_id: format!("peer_{}", node_key.replace("nodekey:", "")),
+            node_key: node_key.to_owned(),
+            tailnet_id: Some(tailnet_id.to_owned()),
+            tailnet_display_name: Some("alpha.example".to_owned()),
+            materialized_on_node_key: materialized_on_node_key.map(str::to_owned),
+            hostname: node_key.replace("nodekey:", "host-"),
+            tailscale_ip: "100.64.0.2".to_owned(),
+            magic_dns_name: None,
+            ee_protocol_version: "1.0".to_owned(),
+            enrollment_source: "tailscale_auto_enrollment".to_owned(),
             enabled: true,
         }
     }

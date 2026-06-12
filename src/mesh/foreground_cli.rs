@@ -18,7 +18,8 @@ use crate::mesh::anti_entropy_protocol::{
     MeshAntiEntropyRetryPolicy, MeshRoundPeerOutcome, MeshSyncSummaryInput, build_sync_summary,
 };
 use crate::mesh::identity_change_guard::{
-    AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE, AUTO_ENROLLMENT_TAILNET_CHANGED_CODE,
+    AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE, AUTO_ENROLLMENT_TAILNET_CHANGED_CODE, BoundIdentity,
+    CurrentIdentity, IdentityGuardVerdict, evaluate_identity_guard,
 };
 use crate::mesh::peer::{MESH_PEER_RECORD_SCHEMA_V1, MeshPeerRecord};
 use crate::mesh::repair_action_graph::{
@@ -1048,6 +1049,19 @@ impl MeshForegroundSnapshot {
     }
 
     #[must_use]
+    pub fn status_report_with_autodiscovery(
+        &self,
+        autodiscovery: &TailscaleAutodiscoveryReport,
+    ) -> MeshCliStatusReport {
+        let mut report = self.status_report();
+        report.auto_enrollment = auto_enrollment_status_for_snapshot(
+            self,
+            auto_status_signals_from_autodiscovery(self, autodiscovery),
+        );
+        report
+    }
+
+    #[must_use]
     pub fn peers_report(&self) -> MeshCliPeersReport {
         MeshCliPeersReport {
             schema: MESH_CLI_PEERS_SCHEMA_V1,
@@ -1208,6 +1222,60 @@ fn auto_status_discovery_report(signals: &MeshAutoStatusSignals) -> TailscaleAut
     }
 }
 
+fn auto_status_signals_from_autodiscovery(
+    snapshot: &MeshForegroundSnapshot,
+    autodiscovery: &TailscaleAutodiscoveryReport,
+) -> MeshAutoStatusSignals {
+    let identity_guard = auto_status_identity_guard(snapshot, autodiscovery);
+    MeshAutoStatusSignals {
+        tailscale_authenticated: (autodiscovery.tailnet_id.is_some()
+            || autodiscovery.self_node_key.is_some())
+        .then_some(autodiscovery.tailnet_id.is_some() && autodiscovery.self_node_key.is_some()),
+        discovered_peer_count: autodiscovery.eligible_peer_count,
+        tailnet_changed: auto_status_tailnet_changed(snapshot, autodiscovery)
+            || matches!(identity_guard, IdentityGuardVerdict::TailnetChanged { .. }),
+        node_key_changed: matches!(identity_guard, IdentityGuardVerdict::NodeKeyChanged { .. }),
+        ..MeshAutoStatusSignals::default()
+    }
+}
+
+fn auto_status_tailnet_changed(
+    snapshot: &MeshForegroundSnapshot,
+    autodiscovery: &TailscaleAutodiscoveryReport,
+) -> bool {
+    let Some(current_tailnet_id) = autodiscovery.tailnet_id.as_deref() else {
+        return false;
+    };
+    auto_materialized_peer_record(snapshot)
+        .as_ref()
+        .is_some_and(|record| record.endpoint.tailnet_id != current_tailnet_id)
+}
+
+fn auto_status_identity_guard(
+    snapshot: &MeshForegroundSnapshot,
+    autodiscovery: &TailscaleAutodiscoveryReport,
+) -> IdentityGuardVerdict {
+    let (Some(tailnet_id), Some(self_node_key)) = (
+        autodiscovery.tailnet_id.as_deref(),
+        autodiscovery.self_node_key.as_deref(),
+    ) else {
+        return IdentityGuardVerdict::NoBoundIdentity;
+    };
+    let current = CurrentIdentity {
+        tailnet_id: tailnet_id.to_owned(),
+        tailnet_display_name: autodiscovery.tailnet_display_name.clone(),
+        self_node_key: self_node_key.to_owned(),
+    };
+    let bound = auto_materialized_peer_record(snapshot).and_then(|record| {
+        Some(BoundIdentity {
+            tailnet_id: record.endpoint.tailnet_id,
+            tailnet_display_name: record.endpoint.tailnet_display_name,
+            materialized_on_node_key: record.materialized_on_node_key?,
+        })
+    });
+    evaluate_identity_guard(bound.as_ref(), &current)
+}
+
 fn auto_materialized_status(
     snapshot: &MeshForegroundSnapshot,
 ) -> Option<MeshAutoMaterializedStatus> {
@@ -1215,6 +1283,7 @@ fn auto_materialized_status(
         return None;
     }
 
+    let materialized_record = auto_materialized_peer_record(snapshot);
     let peer_set_hash = mesh_auto_peer_set_hash(&snapshot.peers);
     let digest = peer_set_hash
         .strip_prefix("blake3:")
@@ -1232,11 +1301,32 @@ fn auto_materialized_status(
             revision_notice: "allow",
             curation_signal: "allow",
         },
-        bound_tailnet_id: None,
-        materialized_on_node_key: None,
+        bound_tailnet_id: materialized_record
+            .as_ref()
+            .map(|record| record.endpoint.tailnet_id.clone()),
+        materialized_on_node_key: materialized_record
+            .as_ref()
+            .and_then(|record| record.materialized_on_node_key.clone()),
         last_materialized_at: latest_peer_seen_at(snapshot),
-        enrollment_source: "manual".to_owned(),
+        enrollment_source: materialized_record
+            .as_ref()
+            .map(|record| record.trust_established_by.clone())
+            .unwrap_or_else(|| "manual".to_owned()),
     })
+}
+
+fn auto_materialized_peer_record(snapshot: &MeshForegroundSnapshot) -> Option<MeshPeerRecord> {
+    snapshot
+        .peers
+        .iter()
+        .filter(|peer| peer.enabled)
+        .filter_map(foreground_sync_peer_record)
+        .find(|record| {
+            matches!(
+                record.trust_established_by.as_str(),
+                "tailscale_auto_enrollment" | "auto_replaced_manual"
+            )
+        })
 }
 
 fn mesh_auto_peer_set_hash(peers: &[MeshPeerRow]) -> String {
@@ -1911,6 +2001,9 @@ mod tests {
         MESH_PEER_RECORD_SCHEMA_V1, MeshPeerCapabilities, MeshPeerCapabilityProfile,
         MeshPeerEndpoint, MeshPeerHandshake, MeshPeerKey, MeshPeerRecord, MeshPeerState,
     };
+    use crate::mesh::tailscale_autodiscovery::{
+        TAILSCALE_AUTODISCOVERY_SCHEMA_V1, TailscaleAutodiscoveryReport,
+    };
     use asupersync::runtime::JoinError;
     use asupersync::{Budget, CancelReason, Cx, LabConfig, LabRuntime, Outcome};
     use std::sync::{Arc, Mutex as StdMutex};
@@ -2045,6 +2138,48 @@ mod tests {
                 .iter()
                 .any(|item| item.code == "auto_enrollment_node_key_changed")
         );
+    }
+
+    #[test]
+    fn auto_status_materialized_reports_persisted_node_key_binding() {
+        let snapshot = sample_snapshot(vec![sample_auto_enrolled_peer(
+            "peer-a",
+            "nodekey:self-materializer",
+        )]);
+
+        let auto_status =
+            auto_enrollment_status_for_snapshot(&snapshot, MeshAutoStatusSignals::default());
+        let materialized = auto_status
+            .materialized
+            .expect("auto-enrolled peer should produce materialized status");
+
+        assert_eq!(
+            materialized.materialized_on_node_key.as_deref(),
+            Some("nodekey:self-materializer")
+        );
+        assert_eq!(
+            materialized.bound_tailnet_id.as_deref(),
+            Some("tailnet-test")
+        );
+        assert_eq!(materialized.enrollment_source, "tailscale_auto_enrollment");
+    }
+
+    #[test]
+    fn status_report_with_autodiscovery_detects_node_key_drift() {
+        let snapshot = sample_snapshot(vec![sample_auto_enrolled_peer(
+            "peer-a",
+            "nodekey:old-materializer",
+        )]);
+        let autodiscovery = sample_autodiscovery("tailnet-test", "nodekey:new-materializer");
+
+        let status = snapshot.status_report_with_autodiscovery(&autodiscovery);
+
+        assert_eq!(status.auto_enrollment.tailscale.authenticated, Some(true));
+        assert!(status.auto_enrollment.drift.node_key_changed);
+        assert!(!status.auto_enrollment.drift.tailnet_changed);
+        assert!(status.auto_enrollment.degraded.iter().any(|item| {
+            item.code == AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE && item.severity == "medium"
+        }));
     }
 
     #[test]
@@ -2490,6 +2625,7 @@ mod tests {
                 endpoint: format!("https://{peer_id}.tailnet.test/ee/mesh"),
                 magic_dns_name: Some(format!("{peer_id}.tailnet.test")),
             },
+            materialized_on_node_key: None,
             capabilities: MeshPeerCapabilities::from_profile(
                 MeshPeerCapabilityProfile::MetadataOnly,
             ),
@@ -2514,5 +2650,35 @@ mod tests {
         peer.policy_summary_json =
             Some(serde_json::to_string(&record).expect("sample mesh peer record should serialize"));
         peer
+    }
+
+    fn sample_auto_enrolled_peer(peer_id: &str, materialized_on_node_key: &str) -> MeshPeerRow {
+        let mut peer = sample_trusted_sync_peer(peer_id);
+        let policy_summary_json = peer
+            .policy_summary_json
+            .as_deref()
+            .expect("sample trusted peer should have policy summary");
+        let mut record: MeshPeerRecord =
+            serde_json::from_str(policy_summary_json).expect("sample record should deserialize");
+        record.trust_established_by = "tailscale_auto_enrollment".to_owned();
+        record.materialized_on_node_key = Some(materialized_on_node_key.to_owned());
+        peer.policy_summary_json = Some(
+            serde_json::to_string(&record).expect("sample auto-enrolled peer should serialize"),
+        );
+        peer
+    }
+
+    fn sample_autodiscovery(tailnet_id: &str, self_node_key: &str) -> TailscaleAutodiscoveryReport {
+        TailscaleAutodiscoveryReport {
+            schema: TAILSCALE_AUTODISCOVERY_SCHEMA_V1,
+            tailnet_id: Some(tailnet_id.to_owned()),
+            tailnet_display_name: Some("test tailnet".to_owned()),
+            self_node_key: Some(self_node_key.to_owned()),
+            probed_peer_count: 1,
+            eligible_peer_count: 1,
+            ee_capable_peers: Vec::new(),
+            skipped_peers: Vec::new(),
+            degraded: Vec::new(),
+        }
     }
 }

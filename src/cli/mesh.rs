@@ -914,6 +914,7 @@ where
     let report = snapshot.status_report();
     if cli.wants_json() {
         let autodiscovery = build_tailscale_autodiscovery_report(cli, &snapshot);
+        let report = snapshot.status_report_with_autodiscovery(&autodiscovery);
         return write_mesh_status_json_with_autodiscovery(stdout, &report, &autodiscovery);
     }
     write_mesh_report(cli, &report, &render_mesh_status_human(&report), stdout)
@@ -1212,6 +1213,7 @@ where
             &snapshot.workspace_id,
             discovery.tailnet_id.as_deref().unwrap_or("tailnet_unknown"),
             discovery.tailnet_display_name.as_deref(),
+            discovery.self_node_key.as_deref(),
             &now,
             &report.materialization.peers_to_upsert,
         ) {
@@ -2490,6 +2492,8 @@ fn auto_enrollment_existing_peers(
                 peer_id: row.peer_id.clone(),
                 node_key: record.endpoint.tailscale_node_key,
                 tailnet_id: Some(record.endpoint.tailnet_id),
+                tailnet_display_name: record.endpoint.tailnet_display_name,
+                materialized_on_node_key: record.materialized_on_node_key,
                 hostname: record.alias,
                 tailscale_ip: record.endpoint.endpoint,
                 magic_dns_name: record.endpoint.magic_dns_name,
@@ -2502,6 +2506,8 @@ fn auto_enrollment_existing_peers(
                 peer_id: row.peer_id.clone(),
                 node_key: row.origin_node_id.clone(),
                 tailnet_id: None,
+                tailnet_display_name: None,
+                materialized_on_node_key: None,
                 hostname: row
                     .display_name
                     .clone()
@@ -2567,6 +2573,7 @@ fn auto_enrollment_peer_upserts(
     workspace_id: &str,
     tailnet_id: &str,
     tailnet_display_name: Option<&str>,
+    self_node_key: Option<&str>,
     now: &str,
     candidates: &[AutoEnrollmentCandidate],
 ) -> Result<Vec<UpsertMeshPeerInput>, DomainError> {
@@ -2604,6 +2611,7 @@ fn auto_enrollment_peer_upserts(
             ),
         })?;
         peer.trust_established_by = "tailscale_auto_enrollment".to_owned();
+        peer.materialized_on_node_key = self_node_key.map(str::to_owned);
         let policy_summary_json =
             serde_json::to_string(&peer).map_err(|error| DomainError::Usage {
                 message: format!("Failed to serialize auto-enrolled mesh peer: {error}"),
@@ -3897,6 +3905,42 @@ mod tests {
             envelope["data"]["autoEnrollment"]["discovery"]["schema"],
             crate::mesh::tailscale_autodiscovery::TAILSCALE_AUTODISCOVERY_SCHEMA_V1
         );
+    }
+
+    #[test]
+    fn auto_enrollment_peer_upserts_persist_materialized_node_key_binding() {
+        let candidates = vec![AutoEnrollmentCandidate {
+            node_key: "nodekey:alpha".to_owned(),
+            tailscale_ip: "100.64.0.2".to_owned(),
+            magic_dns_name: Some("alpha.tailnet.test.".to_owned()),
+            hostname: "alpha".to_owned(),
+            ee_protocol_version: "1.0".to_owned(),
+            discovery_policy_decision: "service_tag_match".to_owned(),
+        }];
+
+        let upserts = auto_enrollment_peer_upserts(
+            "wsp_test_workspace",
+            "tailnet-alpha",
+            Some("alpha.example"),
+            Some("nodekey:self"),
+            "2026-05-20T00:00:00Z",
+            &candidates,
+        )
+        .expect("auto-enrollment peer upsert should build");
+        let policy_summary_json = upserts[0]
+            .policy_summary_json
+            .as_deref()
+            .expect("auto-enrollment should persist peer record JSON");
+        let value: serde_json::Value =
+            serde_json::from_str(policy_summary_json).expect("peer record JSON should parse");
+
+        assert_eq!(
+            value["schema"],
+            crate::mesh::peer::MESH_PEER_RECORD_SCHEMA_V1
+        );
+        assert_eq!(value["materializedOnNodeKey"], "nodekey:self");
+        assert_eq!(value["endpoint"]["tailnetId"], "tailnet-alpha");
+        assert_eq!(value["trustEstablishedBy"], "tailscale_auto_enrollment");
     }
 
     #[test]
