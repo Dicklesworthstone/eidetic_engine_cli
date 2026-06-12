@@ -2207,6 +2207,10 @@ pub struct WhyNotSelectedInput {
     pub profile: ContextPackProfile,
     pub exclusions: Vec<WhyNotSelectionExclusion>,
     pub degraded: Vec<WhyNotSelectionDegradation>,
+    /// Assembly options the counterfactual pack is built with. Must match
+    /// the options of the pack being explained, or the report describes a
+    /// different selector (LOD default vs classic) than the one that ran.
+    pub options: PackAssemblyOptions,
 }
 
 impl WhyNotSelectedInput {
@@ -2226,7 +2230,14 @@ impl WhyNotSelectedInput {
             profile,
             exclusions: Vec::new(),
             degraded: Vec::new(),
+            options: PackAssemblyOptions::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_options(mut self, options: PackAssemblyOptions) -> Self {
+        self.options = options;
+        self
     }
 
     #[must_use]
@@ -2436,11 +2447,12 @@ pub fn explain_why_not_selected(
     let degraded = input.degraded;
 
     let draft = if target_present && exclusions.is_empty() {
-        Some(assemble_draft_with_profile(
+        Some(assemble_draft_with_profile_and_options(
             input.profile,
             task.clone(),
             input.budget,
             input.candidates,
+            input.options,
         )?)
     } else {
         None
@@ -8559,7 +8571,11 @@ mod tests {
             )?,
             candidate_with_content(3, 0.7, 0.5, 10, "keep release notes concise")?,
         ];
-        let mut draft = assemble_classic_draft_with_profile(
+        // Deliberately the LOD-default path: this fixture's "all three
+        // selected" baseline was calibrated under LOD tier budgets
+        // (test refreshed in a55ae417, after the 10499e2c LOD default),
+        // and the guard accounting under test is selector-agnostic.
+        let mut draft = assemble_draft_with_profile(
             ContextPackProfile::Balanced,
             "network retry policy",
             TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?,
@@ -12199,13 +12215,16 @@ mod tests {
             "Secret diagnostic api_key=why-not-fixture should never render.",
         )?;
         let budget = TokenBudget::new(60).map_err(|error| format!("budget rejected: {error:?}"))?;
-        let report = super::explain_why_not_selected(super::WhyNotSelectedInput::new(
-            "prepare release",
-            target.clone(),
-            budget,
-            ContextPackProfile::Compact,
-            vec![selected, target],
-        ))
+        let report = super::explain_why_not_selected(
+            super::WhyNotSelectedInput::new(
+                "prepare release",
+                target.clone(),
+                budget,
+                ContextPackProfile::Compact,
+                vec![selected, target],
+            )
+            .with_options(classic_pack_options()),
+        )
         .map_err(|error| format!("why-not rejected: {error:?}"))?;
 
         ensure_equal(

@@ -3352,7 +3352,16 @@ fn work_packet_candidate_decision(
         "blocked" => return "blocked_by_dependency",
         "closed" => return "skip",
         "deferred" => return "external_state_required",
-        "in_progress" => return "already_owned",
+        // Stale-work evidence must override bare in_progress ownership
+        // (the work_packet_uses_stale_thresholds_before_owned_claims
+        // contract): an in_progress row whose owner shows no reservation,
+        // commit, or mail activity is reclaimable, not silently owned.
+        // 10499e2c regressed this by hard-returning before the stale match.
+        "in_progress" => match stale_decision {
+            Some("reopenSuggested") => return "stale_but_reclaimable",
+            Some("contactSuggested") => return "stale_review",
+            _ => return "already_owned",
+        },
         _ => {}
     }
     if !candidate_release_operator_reasons(candidate).is_empty() {
