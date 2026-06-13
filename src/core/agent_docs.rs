@@ -1,9 +1,8 @@
 use crate::config::EnvVar;
 use crate::core::docs_bootstrap::{DOCS_BOOTSTRAP_APPLY_SCHEMA_V1, DOCS_BOOTSTRAP_RUN_SCHEMA_V1};
 use crate::core::recall::RECALL_SCHEMA_V1;
+use crate::hooks::HARNESS_HOOK_INSTALL_SCHEMA_V1;
 use crate::models::{ERROR_SCHEMA_V2, PACK_SCHEMA_V2, RESPONSE_SCHEMA_V2};
-
-const HOOK_HARNESS_INSTALL_SCHEMA_V1: &str = "ee.hook.harness_install.v1";
 
 fn normalized_agent_docs_token(value: &str) -> String {
     let mut normalized = String::with_capacity(value.len());
@@ -1107,7 +1106,7 @@ pub const CONTRACTS: &[ContractEntry] = &[
     },
     ContractEntry {
         name: "hook_harness_install",
-        schema: HOOK_HARNESS_INSTALL_SCHEMA_V1,
+        schema: HARNESS_HOOK_INSTALL_SCHEMA_V1,
         description: "Agent-harness hook generation, install, and undo report for Claude Code, Codex, and capability-gap targets",
         stability: "stable",
     },
