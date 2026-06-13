@@ -834,6 +834,7 @@ fn source_authority_snapshot_contract_covers_source_state_taxonomy() -> TestResu
     let expected_outcomes = [
         "candidate_present",
         "candidate_absent_confirmed",
+        "candidate_known_non_actionable",
         "candidate_lookup_unavailable",
         "candidate_lookup_timed_out",
         "candidate_stale_fallback_only",
@@ -867,6 +868,7 @@ fn source_authority_fixtures_cover_taxonomy_and_redaction() -> TestResult {
 
     let all_states = read_json(&fixture_dir.join("all_source_states.json"))?;
     let candidate_timeout = read_json(&fixture_dir.join("candidate_beads_timeout.json"))?;
+    let known_non_actionable = read_json(&fixture_dir.join("known_non_actionable_candidate.json"))?;
     let redaction_proof = read_json(&fixture_dir.join("redaction_proof.json"))?;
 
     // 1. The state-coverage fixture must exercise every source state.
@@ -968,11 +970,52 @@ fn source_authority_fixtures_cover_taxonomy_and_redaction() -> TestResult {
         return Err("candidate_beads_timeout fixture must fail closed".into());
     }
 
-    // 4. Redaction posture: serialized fixtures must not leak host-private
+    // 4. The non-actionable fixture pins existence-vs-actionability:
+    //    Beads knows the id, the actionable queue excludes it, and the
+    //    contract does not collapse that into true absence.
+    if string_field(
+        &known_non_actionable,
+        "/candidateEvidence/lookupOutcome",
+        "known_non_actionable_candidate fixture",
+    )? != "candidate_known_non_actionable"
+    {
+        return Err(
+            "known_non_actionable_candidate fixture must report candidate_known_non_actionable"
+                .into(),
+        );
+    }
+    if string_array_at(
+        &known_non_actionable,
+        "/candidateEvidence/presentIn",
+        "known_non_actionable_candidate fixture",
+    )? != ["beads".to_owned()]
+    {
+        return Err("known_non_actionable_candidate fixture must prove Beads presence".into());
+    }
+    if string_array_at(
+        &known_non_actionable,
+        "/candidateEvidence/absentFrom",
+        "known_non_actionable_candidate fixture",
+    )? != ["actionable_queue".to_owned()]
+    {
+        return Err(
+            "known_non_actionable_candidate fixture must prove actionable queue exclusion".into(),
+        );
+    }
+    if !bool_field(
+        &known_non_actionable,
+        "/overall/failClosed",
+        "known_non_actionable_candidate fixture",
+    )? {
+        return Err("known_non_actionable_candidate fixture must fail closed".into());
+    }
+
+    // 5. Redaction posture: serialized fixtures must not leak host-private
     //    absolute paths, raw mail/memory bodies, or secret-shaped argv.
     for (name, fixture) in [
         ("all_source_states", &all_states),
         ("candidate_beads_timeout", &candidate_timeout),
+        ("known_non_actionable_candidate", &known_non_actionable),
         ("redaction_proof", &redaction_proof),
     ] {
         let serialized = fixture.to_string();

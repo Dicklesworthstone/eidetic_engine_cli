@@ -1,0 +1,154 @@
+{
+  "schema": "ee.source_authority.snapshot.v1",
+  "snapshotId": "sas-fixture-known-non-actionable-0001",
+  "generatedAt": "2026-06-10T15:06:00Z",
+  "workspace": {
+    "workspaceLabel": "eidetic_engine_cli",
+    "workspaceIdHash": "blake3:a7f2c19e6b3d48aa"
+  },
+  "redactionStatus": "paths_counts_subjects_only_no_content",
+  "ordering": {
+    "sources": "sourceKind ascending byte order",
+    "evidence": "evidenceId ascending byte order",
+    "contradictions": "contradictionId ascending byte order"
+  },
+  "sources": [
+    {
+      "sourceKind": "actionable_queue",
+      "state": "ready",
+      "authoritative": true,
+      "freshness": {
+        "capturedAt": "2026-06-10T15:05:59Z",
+        "ageMs": 1000,
+        "staleAfterMs": 300000,
+        "freshnessState": "fresh"
+      },
+      "budget": {
+        "commandBudgetMs": 12000,
+        "elapsedMs": 210,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 3
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": {
+        "available": true,
+        "droppedSections": [],
+        "reason": null
+      },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": {
+        "guidance": "Inspect the candidate with br show and br dep list before claiming; actionable queue exclusion is not true absence.",
+        "command": "scripts/br_retry.sh actionable --json",
+        "safety": "read_only_probe"
+      },
+      "evidenceId": "sre-actionable-queue-2001",
+      "statusDetail": "actionable queue answered and excludes this known non-actionable candidate",
+      "actionableQueue": {
+        "commandId": "beads_actionable_queue",
+        "commandTemplate": "scripts/br_retry.sh actionable --json",
+        "rowCount": 1,
+        "candidateIds": ["bd-example.ready"],
+        "truncatedCandidateCount": 0,
+        "filterContract": {
+          "excludesEpics": true,
+          "excludesAssigned": true,
+          "excludesBlocked": true,
+          "excludesDeferred": true,
+          "excludesInProgress": true
+        }
+      }
+    },
+    {
+      "sourceKind": "beads",
+      "state": "ready",
+      "authoritative": true,
+      "freshness": {
+        "capturedAt": "2026-06-10T15:05:59Z",
+        "ageMs": 1000,
+        "staleAfterMs": 300000,
+        "freshnessState": "fresh"
+      },
+      "budget": {
+        "commandBudgetMs": 4000,
+        "elapsedMs": 92,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 3
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": {
+        "available": true,
+        "droppedSections": [],
+        "reason": null
+      },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": {
+        "guidance": null,
+        "command": "br show bd-example.blocked --json",
+        "safety": "read_only_probe"
+      },
+      "evidenceId": "sre-beads-2002",
+      "statusDetail": "br show resolves the candidate id and dependency evidence marks it non-actionable"
+    },
+    {
+      "sourceKind": "git",
+      "state": "ready",
+      "authoritative": true,
+      "freshness": {
+        "capturedAt": "2026-06-10T15:05:59Z",
+        "ageMs": 1000,
+        "staleAfterMs": 60000,
+        "freshnessState": "fresh"
+      },
+      "budget": {
+        "commandBudgetMs": 2000,
+        "elapsedMs": 72,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 0
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": {
+        "available": true,
+        "droppedSections": [],
+        "reason": null
+      },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": { "guidance": null, "command": null, "safety": "read_only_probe" },
+      "evidenceId": "sre-git-2003",
+      "statusDetail": "branch main, HEAD matches origin"
+    }
+  ],
+  "candidateEvidence": {
+    "candidateId": "bd-example.blocked",
+    "lookupOutcome": "candidate_known_non_actionable",
+    "presentIn": ["beads"],
+    "absentFrom": ["actionable_queue"],
+    "unavailableIn": [],
+    "staleFallbackPresence": {
+      "present": false,
+      "sourceKind": null,
+      "fallbackAgeMs": null
+    },
+    "explanation": "Beads resolves the candidate id, but the authoritative actionable queue excludes it under the safe claimable-leaf contract. This is known non-actionable work, not an unknown id or confirmed candidate absence."
+  },
+  "contradictions": [],
+  "overall": {
+    "verdict": "fail_closed_insufficient_authority",
+    "failClosed": true,
+    "authoritativeSourceCount": 3,
+    "degradedSourceCount": 0,
+    "unavailableSourceCount": 0
+  },
+  "degraded": [
+    {
+      "code": "source_authority_candidate_known_non_actionable",
+      "severity": "warning",
+      "message": "Candidate exists in Beads but is excluded by the safe actionable queue; do not report candidate_not_found.",
+      "repair": "br show bd-example.blocked --json",
+      "sourceKind": "actionable_queue"
+    }
+  ],
+  "provenanceHash": "blake3:6c5f4e3d2a19087766554433221100ff"
+}

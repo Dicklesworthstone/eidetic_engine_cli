@@ -73,6 +73,13 @@ timeout, exit class, freshness, and fallback semantics stay on the shared
 `sourceRecord` fields — that per-source granularity is why the queue is a
 new `sourceKind` rather than a sub-object on the `beads` record.
 
+When `br show`/Beads evidence proves a candidate id exists but the
+actionable queue excludes it because it is blocked, dependency-blocked,
+assigned, deferred, in progress, an epic, or otherwise non-actionable, the
+snapshot uses `lookupOutcome=candidate_known_non_actionable`. That is distinct
+from `candidate_absent_confirmed`: known-but-excluded work must fail closed
+without telling agents the id is unknown.
+
 The claim gate (`ee.swarm.work_packet.claim_gate.v1`, `actionableQueue`
 field) consumes this evidence and emits candidate-conditional states:
 

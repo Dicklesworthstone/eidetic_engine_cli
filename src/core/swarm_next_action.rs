@@ -32,8 +32,8 @@ use crate::core::swarm_brief::{
     DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, SwarmBriefBead, SwarmBriefCollectOptions,
     SwarmBriefCommandError, SwarmBriefCommandOutput, SwarmBriefCommandRunner, SwarmBriefCommit,
     SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefFileSurfaceRisk, SwarmBriefReport,
-    SwarmBriefSourceKind, SwarmBriefSourceSnapshot, SwarmBriefSourceStatus,
-    SwarmBriefThreadSummary, agent_mail_snapshot_brief_retry_command_template,
+    SwarmBriefSourceKind, SwarmBriefSourceStatus, SwarmBriefThreadSummary,
+    agent_mail_snapshot_brief_retry_command_template,
     agent_mail_snapshot_producer_command_template, collect_swarm_brief,
 };
 use crate::core::verify_ledger::{RchVerifyRunView, list_rch_verify_blockers};
@@ -10418,12 +10418,12 @@ mod tests {
     fn source_authority_snapshot_projects_all_read_only_sources() {
         let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
         brief.sources = vec![
-            SwarmBriefSourceSnapshot::ready(
+            crate::core::swarm_brief::SwarmBriefSourceSnapshot::ready(
                 SwarmBriefSourceKind::AgentMail,
                 crate::core::swarm_brief::SwarmBriefSourceProvenance::local_probe(),
                 2,
             ),
-            SwarmBriefSourceSnapshot::ready(
+            crate::core::swarm_brief::SwarmBriefSourceSnapshot::ready(
                 SwarmBriefSourceKind::Beads,
                 crate::core::swarm_brief::SwarmBriefSourceProvenance::command(
                     "br",
@@ -10431,7 +10431,7 @@ mod tests {
                 ),
                 1,
             ),
-            SwarmBriefSourceSnapshot::ready(
+            crate::core::swarm_brief::SwarmBriefSourceSnapshot::ready(
                 SwarmBriefSourceKind::Bv,
                 crate::core::swarm_brief::SwarmBriefSourceProvenance::command(
                     "bv",
@@ -10439,7 +10439,7 @@ mod tests {
                 ),
                 1,
             ),
-            SwarmBriefSourceSnapshot::ready(
+            crate::core::swarm_brief::SwarmBriefSourceSnapshot::ready(
                 SwarmBriefSourceKind::Git,
                 crate::core::swarm_brief::SwarmBriefSourceProvenance::command(
                     "git",
@@ -10447,17 +10447,17 @@ mod tests {
                 ),
                 0,
             ),
-            SwarmBriefSourceSnapshot::ready(
+            crate::core::swarm_brief::SwarmBriefSourceSnapshot::ready(
                 SwarmBriefSourceKind::HostProfile,
                 crate::core::swarm_brief::SwarmBriefSourceProvenance::local_probe(),
                 1,
             ),
-            SwarmBriefSourceSnapshot::ready(
+            crate::core::swarm_brief::SwarmBriefSourceSnapshot::ready(
                 SwarmBriefSourceKind::MemoryDrift,
                 crate::core::swarm_brief::SwarmBriefSourceProvenance::local_probe(),
                 1,
             ),
-            SwarmBriefSourceSnapshot::ready(
+            crate::core::swarm_brief::SwarmBriefSourceSnapshot::ready(
                 SwarmBriefSourceKind::Rch,
                 crate::core::swarm_brief::SwarmBriefSourceProvenance::command(
                     "rch",
