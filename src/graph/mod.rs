@@ -4056,15 +4056,22 @@ fn refresh_centrality_from_links(
         );
     }
 
-    let pagerank_start = Instant::now();
-    let pagerank = compute_pagerank(&projection)?;
+    compute_centrality_from_projection(&projection, total_start)
+}
+
+fn compute_centrality_from_projection(
+    projection: &MemoryGraphProjection,
+    total_start: std::time::Instant,
+) -> GraphResult<CentralityRefreshReport> {
+    let pagerank_start = std::time::Instant::now();
+    let pagerank = compute_pagerank(projection)?;
     let pagerank_ms = pagerank_start.elapsed().as_secs_f64() * 1000.0;
 
-    let betweenness_start = Instant::now();
-    let betweenness = compute_betweenness(&projection)?;
+    let betweenness_start = std::time::Instant::now();
+    let betweenness = compute_betweenness(projection)?;
     let betweenness_ms = betweenness_start.elapsed().as_secs_f64() * 1000.0;
 
-    let hits_start = Instant::now();
+    let hits_start = std::time::Instant::now();
     let hits = crate::graph::hits::compute_hits(&projection.graph)?;
     let hits_ms = hits_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -5066,20 +5073,72 @@ pub fn graph_snapshot_centrality_report(
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| GraphError::invalid_snapshot_metrics("missing centrality nodes"))?;
 
-    let mut scores_by_memory = BTreeMap::new();
+    let mut parsed_nodes = Vec::new();
     for node in nodes {
         let Some(memory_id) = first_string(node, &["memoryId", "id", "nodeId"]) else {
             continue;
         };
-        let pagerank = first_number(node, &["pagerank", "pageRank"]).unwrap_or(0.0);
-        let betweenness =
-            first_number(node, &["betweenness", "betweennessCentrality"]).unwrap_or(0.0);
-        let hub = first_number(node, &["hub", "hubScore"]).unwrap_or(0.0);
-        let authority = first_number(node, &["authority", "authorityScore"]).unwrap_or(0.0);
+        parsed_nodes.push(SnapshotCentralityNode {
+            memory_id,
+            pagerank: first_number(node, &["pagerank", "pageRank"]),
+            betweenness: first_number(node, &["betweenness", "betweennessCentrality"]),
+            hub: first_number(node, &["hub", "hubScore"]),
+            authority: first_number(node, &["authority", "authorityScore"]),
+        });
+    }
+
+    if parsed_nodes.is_empty() {
+        return Err(GraphError::invalid_snapshot_metrics(
+            "missing memory centrality scores",
+        ));
+    }
+
+    let explicit_pagerank_status = centrality_algorithm_status_from_metrics(&value, "pagerank")?;
+    let explicit_betweenness_status =
+        centrality_algorithm_status_from_metrics(&value, "betweenness")?;
+    let explicit_hits_status = centrality_algorithm_status_from_metrics(&value, "hits")?;
+    if should_compute_snapshot_topology(
+        &parsed_nodes,
+        explicit_pagerank_status,
+        explicit_betweenness_status,
+        explicit_hits_status,
+    ) {
+        return compute_centrality_from_snapshot_topology(snapshot);
+    }
+
+    let pagerank_status = explicit_pagerank_status
+        .unwrap_or_else(|| infer_single_metric_status(&parsed_nodes, |node| node.pagerank));
+    let betweenness_status = explicit_betweenness_status
+        .unwrap_or_else(|| infer_single_metric_status(&parsed_nodes, |node| node.betweenness));
+    let hits_status =
+        explicit_hits_status.unwrap_or_else(|| infer_hits_metric_status(&parsed_nodes));
+
+    if pagerank_status != CentralityAlgorithmStatus::Computed
+        && betweenness_status != CentralityAlgorithmStatus::Computed
+        && hits_status != CentralityAlgorithmStatus::Computed
+    {
+        return Err(GraphError::invalid_snapshot_metrics(
+            "missing computed centrality scores",
+        ));
+    }
+
+    let mut scores_by_memory = BTreeMap::new();
+    for node in parsed_nodes {
+        let pagerank =
+            snapshot_metric_value(node.pagerank, pagerank_status, "pagerank", &node.memory_id)?;
+        let betweenness = snapshot_metric_value(
+            node.betweenness,
+            betweenness_status,
+            "betweenness",
+            &node.memory_id,
+        )?;
+        let hub = snapshot_metric_value(node.hub, hits_status, "hub", &node.memory_id)?;
+        let authority =
+            snapshot_metric_value(node.authority, hits_status, "authority", &node.memory_id)?;
         scores_by_memory.insert(
-            memory_id.clone(),
+            node.memory_id.clone(),
             MemoryCentralityScore {
-                memory_id,
+                memory_id: node.memory_id,
                 pagerank,
                 betweenness,
                 hub,
@@ -5102,7 +5161,6 @@ pub fn graph_snapshot_centrality_report(
     );
 
     let mut top_pagerank = scores.clone();
-    let pagerank_status = centrality_algorithm_status_from_metrics(&value, "pagerank");
     if pagerank_status == CentralityAlgorithmStatus::Computed {
         top_pagerank.truncate(10);
     } else {
@@ -5110,7 +5168,6 @@ pub fn graph_snapshot_centrality_report(
     }
 
     let mut top_betweenness = scores.clone();
-    let betweenness_status = centrality_algorithm_status_from_metrics(&value, "betweenness");
     if betweenness_status == CentralityAlgorithmStatus::Computed {
         sort_scores_by_metrics_desc_then_memory_id(
             &mut top_betweenness,
@@ -5123,7 +5180,6 @@ pub fn graph_snapshot_centrality_report(
     }
 
     let mut top_hubs = scores.clone();
-    let hits_status = centrality_algorithm_status_from_metrics(&value, "hits");
     if hits_status == CentralityAlgorithmStatus::Computed {
         sort_scores_by_metrics_desc_then_memory_id(
             &mut top_hubs,
@@ -5169,16 +5225,158 @@ pub fn graph_snapshot_centrality_report(
     })
 }
 
+#[derive(Debug)]
+struct SnapshotCentralityNode {
+    memory_id: String,
+    pagerank: Option<f64>,
+    betweenness: Option<f64>,
+    hub: Option<f64>,
+    authority: Option<f64>,
+}
+
+fn should_compute_snapshot_topology(
+    nodes: &[SnapshotCentralityNode],
+    pagerank_status: Option<CentralityAlgorithmStatus>,
+    betweenness_status: Option<CentralityAlgorithmStatus>,
+    hits_status: Option<CentralityAlgorithmStatus>,
+) -> bool {
+    (pagerank_status.is_none() && nodes.iter().any(|node| node.pagerank.is_none()))
+        || (betweenness_status.is_none() && nodes.iter().any(|node| node.betweenness.is_none()))
+        || (hits_status.is_none()
+            && nodes
+                .iter()
+                .any(|node| node.hub.is_none() || node.authority.is_none()))
+}
+
+fn compute_centrality_from_snapshot_topology(
+    snapshot: &StoredGraphSnapshot,
+) -> GraphResult<CentralityRefreshReport> {
+    let total_start = std::time::Instant::now();
+    let projection = graph_snapshot_topology_projection(snapshot)?;
+    if projection.node_count == 0 {
+        return Ok(CentralityRefreshReport {
+            version: env!("CARGO_PKG_VERSION"),
+            status: CentralityRefreshStatus::EmptyGraph,
+            pagerank_status: CentralityAlgorithmStatus::Skipped,
+            betweenness_status: CentralityAlgorithmStatus::Skipped,
+            hits_status: CentralityAlgorithmStatus::Skipped,
+            dry_run: false,
+            node_count: 0,
+            edge_count: 0,
+            projection_ms: projection.build_ms,
+            pagerank_ms: 0.0,
+            betweenness_ms: 0.0,
+            hits_ms: 0.0,
+            total_ms: total_start.elapsed().as_secs_f64() * 1000.0,
+            scores: Vec::new(),
+            top_pagerank: Vec::new(),
+            top_betweenness: Vec::new(),
+            top_hubs: Vec::new(),
+            top_authorities: Vec::new(),
+        });
+    }
+    compute_centrality_from_projection(&projection, total_start)
+}
+
+fn graph_snapshot_topology_projection(
+    snapshot: &StoredGraphSnapshot,
+) -> GraphResult<MemoryGraphProjection> {
+    let build_start = std::time::Instant::now();
+    let document = parse_graph_snapshot_metrics(&snapshot.metrics_json)?;
+    let mut graph = DiGraph::new(CompatibilityMode::Strict);
+    for node in &document.nodes {
+        graph.add_node(node.id.as_str());
+    }
+
+    let mut edge_count = 0usize;
+    for edge in &document.edges {
+        let attrs = snapshot_projection_edge_attrs(edge);
+        add_projection_edge(&mut graph, &edge.source, &edge.target, attrs.clone())?;
+        edge_count = edge_count.saturating_add(1);
+        if !edge.directed && edge.source != edge.target {
+            add_projection_edge(&mut graph, &edge.target, &edge.source, attrs)?;
+            edge_count = edge_count.saturating_add(1);
+        }
+    }
+
+    Ok(MemoryGraphProjection {
+        node_count: graph.nodes_ordered().len(),
+        edge_count,
+        build_ms: build_start.elapsed().as_secs_f64() * 1000.0,
+        snapshot_version: u64::from(snapshot.snapshot_version),
+        graph,
+    })
+}
+
+fn snapshot_projection_edge_attrs(edge: &ParsedGraphEdge) -> AttrMap {
+    let mut attrs = AttrMap::new();
+    attrs.insert(
+        "relation".to_owned(),
+        CgseValue::String(edge.relation.clone()),
+    );
+    attrs
+}
+
+fn snapshot_metric_value(
+    value: Option<f64>,
+    status: CentralityAlgorithmStatus,
+    metric: &'static str,
+    memory_id: &str,
+) -> GraphResult<f64> {
+    match value {
+        Some(value) if value.is_finite() => Ok(value),
+        Some(_) => Err(GraphError::invalid_snapshot_metrics(format!(
+            "non-finite {metric} score for {memory_id}"
+        ))),
+        None if status == CentralityAlgorithmStatus::Computed => {
+            Err(GraphError::invalid_snapshot_metrics(format!(
+                "missing computed {metric} score for {memory_id}"
+            )))
+        }
+        None => Ok(0.0),
+    }
+}
+
+fn infer_single_metric_status(
+    nodes: &[SnapshotCentralityNode],
+    metric: fn(&SnapshotCentralityNode) -> Option<f64>,
+) -> CentralityAlgorithmStatus {
+    if nodes.iter().any(|node| metric(node).is_some()) {
+        CentralityAlgorithmStatus::Computed
+    } else {
+        CentralityAlgorithmStatus::Skipped
+    }
+}
+
+fn infer_hits_metric_status(nodes: &[SnapshotCentralityNode]) -> CentralityAlgorithmStatus {
+    if nodes
+        .iter()
+        .any(|node| node.hub.is_some() || node.authority.is_some())
+    {
+        CentralityAlgorithmStatus::Computed
+    } else {
+        CentralityAlgorithmStatus::Skipped
+    }
+}
+
 fn centrality_algorithm_status_from_metrics(
     value: &serde_json::Value,
     algorithm: &str,
-) -> CentralityAlgorithmStatus {
-    value
+) -> GraphResult<Option<CentralityAlgorithmStatus>> {
+    let Some(raw_status) = value
         .pointer("/centrality/algorithmStatus")
         .and_then(|statuses| statuses.get(algorithm))
         .and_then(serde_json::Value::as_str)
-        .and_then(CentralityAlgorithmStatus::from_str)
-        .unwrap_or(CentralityAlgorithmStatus::Computed)
+    else {
+        return Ok(None);
+    };
+    CentralityAlgorithmStatus::from_str(raw_status)
+        .map(Some)
+        .ok_or_else(|| {
+            GraphError::invalid_snapshot_metrics(format!(
+                "invalid {algorithm} algorithm status {raw_status:?}"
+            ))
+        })
 }
 
 fn enriched_feature_for_score(
@@ -9376,6 +9574,178 @@ mod tests {
         );
         assert!(report.top_hubs.is_empty());
         assert!(report.top_authorities.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn graph_snapshot_centrality_report_computes_legacy_missing_hits_from_topology() -> TestResult {
+        let snapshot = StoredGraphSnapshot {
+            id: "gsnap_0000000000000000000000889".to_owned(),
+            workspace_id: WORKSPACE_ID.to_owned(),
+            snapshot_version: 1,
+            schema_version: "ee.graph.snapshot.v1".to_owned(),
+            graph_type: GraphSnapshotType::MemoryLinks,
+            node_count: 2,
+            edge_count: 1,
+            metrics_json: serde_json::json!({
+                "nodes": [
+                    {
+                        "id": MEMORY_A,
+                        "memoryId": MEMORY_A,
+                        "pagerank": 0.7,
+                        "betweenness": 0.2,
+                    },
+                    {
+                        "id": MEMORY_B,
+                        "memoryId": MEMORY_B,
+                        "pagerank": 0.3,
+                        "betweenness": 0.8,
+                    },
+                ],
+                "edges": [
+                    {"source": MEMORY_A, "target": MEMORY_B},
+                ],
+            })
+            .to_string(),
+            content_hash: "blake3:legacy-missing-hits".to_owned(),
+            source_generation: 1,
+            created_at: "2026-05-22T00:00:00Z".to_owned(),
+            expires_at: None,
+            status: GraphSnapshotStatus::Valid,
+        };
+
+        let report = graph_result(super::graph_snapshot_centrality_report(&snapshot))?;
+
+        assert_eq!(
+            report.pagerank_status,
+            super::CentralityAlgorithmStatus::Computed
+        );
+        assert_eq!(
+            report.betweenness_status,
+            super::CentralityAlgorithmStatus::Computed
+        );
+        assert_eq!(
+            report.hits_status,
+            super::CentralityAlgorithmStatus::Computed
+        );
+        assert!(!report.top_hubs.is_empty());
+        assert!(!report.top_authorities.is_empty());
+        assert!(report.scores.iter().any(|score| score.hub > 0.0));
+        assert!(report.scores.iter().any(|score| score.authority > 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn graph_snapshot_centrality_report_computes_topology_only_snapshot() -> TestResult {
+        let snapshot = StoredGraphSnapshot {
+            id: "gsnap_0000000000000000000000891".to_owned(),
+            workspace_id: WORKSPACE_ID.to_owned(),
+            snapshot_version: 1,
+            schema_version: "ee.graph.snapshot.v1".to_owned(),
+            graph_type: GraphSnapshotType::MemoryLinks,
+            node_count: 3,
+            edge_count: 2,
+            metrics_json: serde_json::json!({
+                "nodes": [
+                    {
+                        "id": MEMORY_A,
+                        "memoryId": MEMORY_A,
+                    },
+                    {
+                        "id": MEMORY_B,
+                        "memoryId": MEMORY_B,
+                    },
+                    {
+                        "id": MEMORY_C,
+                        "memoryId": MEMORY_C,
+                    },
+                ],
+                "edges": [
+                    {"source": MEMORY_A, "target": MEMORY_B},
+                    {"source": MEMORY_B, "target": MEMORY_C},
+                ],
+            })
+            .to_string(),
+            content_hash: "blake3:topology-only-centrality".to_owned(),
+            source_generation: 1,
+            created_at: "2026-05-22T00:00:00Z".to_owned(),
+            expires_at: None,
+            status: GraphSnapshotStatus::Valid,
+        };
+
+        let report = graph_result(super::graph_snapshot_centrality_report(&snapshot))?;
+
+        assert_eq!(report.status, super::CentralityRefreshStatus::Refreshed);
+        assert_eq!(
+            report.pagerank_status,
+            super::CentralityAlgorithmStatus::Computed
+        );
+        assert_eq!(
+            report.betweenness_status,
+            super::CentralityAlgorithmStatus::Computed
+        );
+        assert_eq!(
+            report.hits_status,
+            super::CentralityAlgorithmStatus::Computed
+        );
+        assert_eq!(report.node_count, 3);
+        assert_eq!(report.edge_count, 2);
+        assert_eq!(report.scores.len(), 3);
+        assert!(!report.top_pagerank.is_empty());
+        assert!(!report.top_betweenness.is_empty());
+        assert!(!report.top_hubs.is_empty());
+        assert!(!report.top_authorities.is_empty());
+        assert!(report.scores.iter().any(|score| score.pagerank > 0.0));
+        assert!(report.scores.iter().any(|score| score.betweenness > 0.0));
+        assert!(report.scores.iter().any(|score| score.hub > 0.0));
+        assert!(report.scores.iter().any(|score| score.authority > 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn graph_snapshot_centrality_report_rejects_missing_computed_metric() -> TestResult {
+        let snapshot = StoredGraphSnapshot {
+            id: "gsnap_0000000000000000000000890".to_owned(),
+            workspace_id: WORKSPACE_ID.to_owned(),
+            snapshot_version: 1,
+            schema_version: "ee.graph.snapshot.v1".to_owned(),
+            graph_type: GraphSnapshotType::MemoryLinks,
+            node_count: 1,
+            edge_count: 0,
+            metrics_json: serde_json::json!({
+                "nodes": [
+                    {
+                        "id": MEMORY_A,
+                        "memoryId": MEMORY_A,
+                        "betweenness": 0.2,
+                    },
+                ],
+                "edges": [],
+                "centrality": {
+                    "algorithmStatus": {
+                        "pagerank": "computed",
+                        "betweenness": "computed",
+                        "hits": "skipped",
+                    }
+                },
+            })
+            .to_string(),
+            content_hash: "blake3:missing-computed-pagerank".to_owned(),
+            source_generation: 1,
+            created_at: "2026-05-22T00:00:00Z".to_owned(),
+            expires_at: None,
+            status: GraphSnapshotStatus::Valid,
+        };
+
+        let error = super::graph_snapshot_centrality_report(&snapshot)
+            .expect_err("computed pagerank without a score must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing computed pagerank score"),
+            "unexpected error: {error}"
+        );
         Ok(())
     }
 
