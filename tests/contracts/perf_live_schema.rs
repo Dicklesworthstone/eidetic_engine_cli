@@ -72,6 +72,13 @@ const AUDIT_LANE_REQUIRED_FIELDS: &[&str] = &[
     "backpressureEvents",
     "channelDepth",
 ];
+const NULLABLE_AUDIT_LANE_COUNTER_FIELDS: &[&str] = &[
+    "batchCount",
+    "batchSizeP50",
+    "batchSizeP99",
+    "backpressureEvents",
+    "channelDepth",
+];
 const L2_CACHE_REQUIRED_FIELDS: &[&str] = &[
     "status",
     "hits",
@@ -274,6 +281,20 @@ fn surface_metrics_allow_explicit_null_when_unmeasured() -> TestResult {
             &surface_schema["properties"][field],
             &[numeric_type, "null"],
             format!("$defs.surface.properties.{field}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn audit_lane_counters_allow_explicit_null_when_unmeasured() -> TestResult {
+    let schema = load_schema()?;
+    let audit_lane_schema = resolve_ref(&schema, &schema["properties"]["auditLane"]);
+    for field in NULLABLE_AUDIT_LANE_COUNTER_FIELDS {
+        ensure_schema_type_set(
+            &audit_lane_schema["properties"][field],
+            &["integer", "null"],
+            format!("$defs.auditLane.properties.{field}"),
         )?;
     }
     Ok(())

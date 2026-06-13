@@ -393,11 +393,11 @@ fn perf_live_sample() -> Value {
             "queueDepth": 0
         },
         "auditLane": {
-            "batchCount": 0,
-            "batchSizeP50": 0,
-            "batchSizeP99": 0,
-            "backpressureEvents": 0,
-            "channelDepth": 0
+            "batchCount": null,
+            "batchSizeP50": null,
+            "batchSizeP99": null,
+            "backpressureEvents": null,
+            "channelDepth": null
         },
         "l2Cache": {
             "status": "disabled",

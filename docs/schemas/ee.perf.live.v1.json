@@ -104,11 +104,11 @@
         "channelDepth"
       ],
       "properties": {
-        "batchCount": { "type": "integer", "minimum": 0 },
-        "batchSizeP50": { "type": "integer", "minimum": 0 },
-        "batchSizeP99": { "type": "integer", "minimum": 0 },
-        "backpressureEvents": { "type": "integer", "minimum": 0 },
-        "channelDepth": { "type": "integer", "minimum": 0 }
+        "batchCount": { "type": ["integer", "null"], "minimum": 0 },
+        "batchSizeP50": { "type": ["integer", "null"], "minimum": 0 },
+        "batchSizeP99": { "type": ["integer", "null"], "minimum": 0 },
+        "backpressureEvents": { "type": ["integer", "null"], "minimum": 0 },
+        "channelDepth": { "type": ["integer", "null"], "minimum": 0 }
       }
     },
     "l2Cache": {

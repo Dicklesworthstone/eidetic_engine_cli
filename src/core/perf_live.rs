@@ -132,11 +132,11 @@ pub struct PerfLiveReadPool {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PerfLiveAuditLane {
-    pub batch_count: u64,
-    pub batch_size_p50: u64,
-    pub batch_size_p99: u64,
-    pub backpressure_events: u64,
-    pub channel_depth: u64,
+    pub batch_count: Option<u64>,
+    pub batch_size_p50: Option<u64>,
+    pub batch_size_p99: Option<u64>,
+    pub backpressure_events: Option<u64>,
+    pub channel_depth: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -295,7 +295,7 @@ pub fn collect_perf_live_snapshot<R: SwarmBriefCommandRunner>(
     degraded.push(PerfLiveDegradation::warning(
         "perf_live_audit_lane_counters_unavailable",
         "auditLane",
-        "Audit-lane global counters are not yet published by the source bead; audit lane fields are zero-filled.",
+        "Audit-lane global counters are not yet published by the source bead; unmeasured audit-lane fields are null.",
         Some("Finish bd-wp5ac counter publication and route it into perf live.".to_owned()),
     ));
 
@@ -864,6 +864,31 @@ mod tests {
             assert!(
                 encoded[field].is_null(),
                 "expected {field} to serialize as null when no live counter source is wired"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn audit_lane_fixture_serializes_unmeasured_counters_as_null() -> Result<(), String> {
+        let audit_lane = PerfLiveAuditLane::default();
+        assert_eq!(audit_lane.batch_count, None);
+        assert_eq!(audit_lane.batch_size_p50, None);
+        assert_eq!(audit_lane.batch_size_p99, None);
+        assert_eq!(audit_lane.backpressure_events, None);
+        assert_eq!(audit_lane.channel_depth, None);
+
+        let encoded = serde_json::to_value(&audit_lane).map_err(|error| error.to_string())?;
+        for field in [
+            "batchCount",
+            "batchSizeP50",
+            "batchSizeP99",
+            "backpressureEvents",
+            "channelDepth",
+        ] {
+            assert!(
+                encoded[field].is_null(),
+                "expected {field} to serialize as null when no audit-lane counter source is wired"
             );
         }
         Ok(())
