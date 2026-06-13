@@ -5081,6 +5081,497 @@ pub fn render_doctor_mermaid(report: &DoctorReport) -> String {
     output
 }
 
+/// Render a why report as the canonical machine-readable response envelope.
+#[must_use]
+pub fn render_why_json(report: &WhyReport) -> String {
+    let storage = report.storage.as_ref().map(|storage| {
+        serde_json::json!({
+            "origin": &storage.origin,
+            "trustClass": &storage.trust_class,
+            "trustSubclass": &storage.trust_subclass,
+            "provenanceUri": &storage.provenance_uri,
+            "workflowId": &storage.workflow_id,
+            "createdAt": &storage.created_at,
+            "validFrom": &storage.valid_from,
+            "validTo": &storage.valid_to,
+            "validityStatus": &storage.validity_status,
+            "validityWindowKind": &storage.validity_window_kind,
+        })
+    });
+
+    let retrieval = report.retrieval.as_ref().map(|retrieval| {
+        serde_json::json!({
+            "confidence": why_score_json_value(retrieval.confidence),
+            "utility": why_score_json_value(retrieval.utility),
+            "importance": why_score_json_value(retrieval.importance),
+            "tags": &retrieval.tags,
+            "level": &retrieval.level,
+            "kind": &retrieval.kind,
+        })
+    });
+
+    let graph_retrieval = report.graph_retrieval.as_ref().map(|graph| {
+        let snapshot = graph.source.snapshot.as_ref().map(|snapshot| {
+            serde_json::json!({
+                "id": &snapshot.id,
+                "schemaVersion": &snapshot.schema_version,
+                "snapshotVersion": snapshot.snapshot_version,
+                "sourceGeneration": snapshot.source_generation,
+                "status": &snapshot.status,
+                "contentHash": &snapshot.content_hash,
+                "createdAt": &snapshot.created_at,
+            })
+        });
+        let degraded = why_degraded_json("why_graph_retrieval", &graph.degraded);
+        let hits = graph.hits.as_ref().map(|hits| {
+            serde_json::json!({
+                "schema": &hits.schema,
+                "authority": {
+                    "raw": why_graph_score_json_value(hits.authority.raw),
+                    "normalized": why_graph_score_json_value(hits.authority.normalized),
+                    "rank": hits.authority.rank,
+                    "percentile": hits.authority.percentile.map(why_graph_score_json_value),
+                },
+                "hub": {
+                    "raw": why_graph_score_json_value(hits.hub.raw),
+                    "normalized": why_graph_score_json_value(hits.hub.normalized),
+                    "rank": hits.hub.rank,
+                    "percentile": hits.hub.percentile.map(why_graph_score_json_value),
+                },
+                "roleLabel": &hits.role_label,
+                "roleRationale": &hits.role_rationale,
+            })
+        });
+
+        serde_json::json!({
+            "status": &graph.status,
+            "source": {
+                "kind": &graph.source.kind,
+                "workspaceId": &graph.source.workspace_id,
+                "graphType": &graph.source.graph_type,
+                "snapshot": snapshot,
+            },
+            "centralityScore": why_graph_score_json_value(graph.centrality_score),
+            "authorityScore": why_graph_score_json_value(graph.authority_score),
+            "hubScore": why_graph_score_json_value(graph.hub_score),
+            "hits": hits,
+            "communityId": &graph.community_id,
+            "distanceToQuerySeed": graph.distance_to_query_seed,
+            "sameClusterAsTopResult": graph.same_cluster_as_top_result,
+            "evidenceSupportCount": graph.evidence_support_count,
+            "contradictionCount": graph.contradiction_count,
+            "orphanPenalty": why_graph_score_json_value(graph.orphan_penalty),
+            "staleBridgePenalty": why_graph_score_json_value(graph.stale_bridge_penalty),
+            "pagerank": {
+                "raw": why_graph_score_json_value(graph.pagerank.raw),
+                "normalized": why_graph_score_json_value(graph.pagerank.normalized),
+                "rank": graph.pagerank.rank,
+                "weight": why_graph_score_json_value(graph.pagerank.weight),
+                "contribution": why_graph_score_json_value(graph.pagerank.contribution),
+                "formula": &graph.pagerank.formula,
+            },
+            "betweenness": {
+                "raw": why_graph_score_json_value(graph.betweenness.raw),
+                "normalized": why_graph_score_json_value(graph.betweenness.normalized),
+                "rank": graph.betweenness.rank,
+                "weight": why_graph_score_json_value(graph.betweenness.weight),
+                "contribution": why_graph_score_json_value(graph.betweenness.contribution),
+                "formula": &graph.betweenness.formula,
+            },
+            "labels": &graph.labels,
+            "reasons": &graph.reasons,
+            "centralityFormula": &graph.centrality_formula,
+            "orphanPenaltyFormula": &graph.orphan_penalty_formula,
+            "staleBridgePenaltyFormula": &graph.stale_bridge_penalty_formula,
+            "degraded": degraded,
+        })
+    });
+
+    let selection = report.selection.as_ref().map(|selection| {
+        let pack = selection.latest_pack_selection.as_ref().map(|pack| {
+            serde_json::json!({
+                "packId": &pack.pack_id,
+                "query": &pack.query,
+                "profile": &pack.profile,
+                "rank": pack.rank,
+                "section": &pack.section,
+                "estimatedTokens": pack.estimated_tokens,
+                "relevance": why_score_json_value(pack.relevance),
+                "utility": why_score_json_value(pack.utility),
+                "why": &pack.why,
+                "packHash": &pack.pack_hash,
+                "ledgerHash": &pack.ledger_hash,
+                "ledgerStatus": &pack.ledger_status,
+                "ledgerStorage": &pack.ledger_storage,
+                "selectedAt": &pack.selected_at,
+            })
+        });
+
+        serde_json::json!({
+            "selectionScore": why_score_json_value(selection.selection_score),
+            "aboveConfidenceThreshold": selection.above_confidence_threshold,
+            "isActive": selection.is_active,
+            "scoreBreakdown": &selection.score_breakdown,
+            "latestPackSelection": pack,
+        })
+    });
+
+    let lifecycle = report.lifecycle.as_ref().map(|lifecycle| {
+        serde_json::json!({
+            "status": &lifecycle.status,
+            "tombstoned_at": &lifecycle.tombstoned_at,
+            "tombstoned_reason": &lifecycle.tombstoned_reason,
+        })
+    });
+
+    let agent_profile = report.agent_profile.as_ref().map(|profile| {
+        serde_json::json!({
+            "schema": &profile.schema,
+            "agentName": &profile.agent_name,
+            "agentNameHash": &profile.agent_name_hash,
+            "helpfulCount": profile.helpful_count,
+            "harmfulCount": profile.harmful_count,
+            "ignoredCount": profile.ignored_count,
+            "observedOutcomes": profile.observed_outcomes,
+            "bias": why_graph_score_json_value(profile.bias),
+            "maxBiasMagnitude": why_graph_score_json_value(profile.max_bias_magnitude),
+            "coldStart": profile.cold_start,
+            "coldStartThreshold": profile.cold_start_threshold,
+            "lastSeenAt": &profile.last_seen_at,
+        })
+    });
+
+    let bayes_posterior = report.bayes_posterior.as_ref().map(|posterior| {
+        serde_json::json!({
+            "schema": "ee.bayes.posterior.v1",
+            "alpha": why_posterior_json_value(posterior.alpha),
+            "beta": why_posterior_json_value(posterior.beta),
+            "mean": why_posterior_json_value(posterior.mean),
+            "effectiveSampleSize": why_posterior_json_value(posterior.effective_sample_size),
+            "credibleInterval90": why_posterior_interval_json_value(posterior.credible_interval_90, 0.90),
+            "credibleInterval50": why_posterior_interval_json_value(posterior.credible_interval_50, 0.50),
+        })
+    });
+    let confidence_intervals = report.confidence_intervals.as_ref().map(|intervals| {
+        let prediction_set = intervals
+            .prediction_set
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "memoryId": &entry.memory_id,
+                    "rank": entry.rank,
+                    "source": &entry.source,
+                    "score": why_score_json_value(entry.score),
+                    "nonconformityScore": why_score_json_value(entry.nonconformity_score),
+                    "included": entry.included,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "schema": &intervals.schema,
+            "method": &intervals.method,
+            "coverageGuarantee": why_score_json_value(intervals.coverage_guarantee),
+            "alpha": why_score_json_value(intervals.alpha),
+            "targetMemoryId": &intervals.target_memory_id,
+            "scoreInterval": [
+                why_score_json_value(intervals.score_interval[0]),
+                why_score_json_value(intervals.score_interval[1]),
+            ],
+            "nonconformityQuantile": why_score_json_value(intervals.nonconformity_quantile),
+            "calibrationSampleCount": intervals.calibration_sample_count,
+            "calibrationStatus": &intervals.calibration_status,
+            "predictionSet": prediction_set,
+        })
+    });
+    let counterfactual_influence = report.counterfactual_influence.as_ref().map(|influence| {
+        let top_positive = influence
+            .top_positive
+            .iter()
+            .map(why_influence_entry_json)
+            .collect::<Vec<_>>();
+        let top_negative = influence
+            .top_negative
+            .iter()
+            .map(why_influence_entry_json)
+            .collect::<Vec<_>>();
+        let entries = influence
+            .entries
+            .iter()
+            .map(why_influence_entry_json)
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "schema": &influence.schema,
+            "method": &influence.method,
+            "targetMemoryId": &influence.target_memory_id,
+            "baselineTopScore": why_score_json_value(influence.baseline_top_score),
+            "approximationErrorRatio": why_score_json_value(influence.approximation_error_ratio),
+            "totalAbsoluteInfluence": why_score_json_value(influence.total_absolute_influence),
+            "topPositive": top_positive,
+            "topNegative": top_negative,
+            "entries": entries,
+        })
+    });
+
+    let degraded = why_degraded_json("why", &report.degraded);
+
+    let contradictions: Vec<serde_json::Value> = report
+        .contradictions
+        .iter()
+        .map(|contradiction| {
+            serde_json::json!({
+                "eventId": &contradiction.event_id,
+                "weight": why_score_json_value(contradiction.weight),
+                "sourceType": &contradiction.source_type,
+                "reason": &contradiction.reason,
+                "createdAt": &contradiction.created_at,
+                "applied": contradiction.applied,
+            })
+        })
+        .collect();
+
+    let links: Vec<serde_json::Value> = report
+        .links
+        .iter()
+        .map(|link| {
+            serde_json::json!({
+                "linkId": &link.link_id,
+                "linkedMemoryId": &link.linked_memory_id,
+                "relation": &link.relation,
+                "direction": &link.direction,
+                "confidence": why_score_json_value(link.confidence),
+                "weight": why_score_json_value(link.weight),
+                "evidenceCount": link.evidence_count,
+                "source": &link.source,
+                "createdAt": &link.created_at,
+            })
+        })
+        .collect();
+
+    let history = report.history.as_ref().map(|history| {
+        let entries: Vec<serde_json::Value> = history
+            .entries
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "auditId": entry.audit_id,
+                    "timestamp": entry.timestamp,
+                    "actor": entry.actor,
+                    "action": entry.action,
+                    "details": entry.details,
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "entries": entries,
+            "totalCount": history.total_count,
+            "truncated": history.truncated,
+        })
+    });
+
+    let verification_evidence = serde_json::to_value(&report.verification_evidence)
+        .unwrap_or_else(|_| serde_json::json!([]));
+    let coordination_fallback_evidence: Vec<serde_json::Value> = report
+        .coordination_fallback_evidence
+        .iter()
+        .map(|evidence| {
+            serde_json::json!({
+                "sourceSchema": &evidence.source_schema,
+                "evidenceId": &evidence.evidence_id,
+                "status": &evidence.status,
+                "sourceKind": &evidence.source_kind,
+                "reasonCode": &evidence.reason_code,
+                "capturedAt": &evidence.captured_at,
+                "contentHash": &evidence.content_hash,
+                "linkedBeadIds": &evidence.linked_bead_ids,
+                "linkedVerificationIds": &evidence.linked_verification_ids,
+                "linkedSupportBundleIds": &evidence.linked_support_bundle_ids,
+            })
+        })
+        .collect();
+    let load_bearing = report.load_bearing.as_ref().map(|load_bearing| {
+        let citing_rules = load_bearing
+            .citing_rules
+            .iter()
+            .map(|rule| {
+                serde_json::json!({
+                    "ruleId": &rule.rule_id,
+                    "relation": &rule.relation,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "isLoadBearing": load_bearing.is_load_bearing,
+            "loadBearingScore": load_bearing
+                .load_bearing_score
+                .map(why_graph_score_json_value)
+                .unwrap_or(serde_json::Value::Null),
+            "authorityRank": load_bearing.authority_rank,
+            "citingRuleCount": load_bearing.citing_rule_count,
+            "citingRules": citing_rules,
+            "interpretation": &load_bearing.interpretation,
+            "evidence": {
+                "schema": &load_bearing.evidence.schema,
+                "algorithm": &load_bearing.evidence.algorithm,
+                "projection": &load_bearing.evidence.projection,
+                "snapshotVersion": load_bearing.evidence.snapshot_version,
+            },
+            "rationale": &load_bearing.rationale,
+        })
+    });
+
+    let mut json = serde_json::json!({
+        "schema": RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": {
+            "command": "why",
+            "version": report.version,
+            "memoryId": &report.memory_id,
+            "found": report.found,
+            "content": &report.content,
+            "storage": storage,
+            "retrieval": retrieval,
+            "graphRetrievalFeatures": graph_retrieval,
+            "selection": selection,
+            "agentProfile": agent_profile,
+            "bayesPosterior": bayes_posterior,
+            "lifecycle": lifecycle,
+            "contradictions": contradictions,
+            "links": links,
+            "history": history,
+            "verificationEvidence": verification_evidence,
+            "coordinationFallbackEvidence": coordination_fallback_evidence,
+            "attestationBundle": report.attestation_manifest.clone(),
+            "degraded": degraded,
+        }
+    });
+    if let Some(load_bearing) = load_bearing
+        && let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        data.insert(
+            "graph".to_owned(),
+            serde_json::json!({
+                "loadBearing": load_bearing,
+            }),
+        );
+    }
+    if let Some(causal_explanation) = &report.causal_explanation {
+        if let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            data.insert("causalExplanation".to_owned(), causal_explanation.clone());
+        }
+    }
+    if let Some(revision_lineage) = &report.revision_lineage {
+        if let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            data.insert("revisionLineage".to_owned(), revision_lineage.clone());
+        }
+    }
+    if let Some(confidence_intervals) = confidence_intervals
+        && let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        data.insert("confidenceIntervals".to_owned(), confidence_intervals);
+    }
+    if let Some(counterfactual_influence) = counterfactual_influence
+        && let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        data.insert(
+            "counterfactualInfluence".to_owned(),
+            counterfactual_influence,
+        );
+    }
+
+    json.to_string()
+}
+
+fn why_degraded_json(
+    source: &'static str,
+    degraded: &[crate::core::why::WhyDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            source,
+            entry.code,
+            entry.severity,
+            entry.message.as_str(),
+            entry.repair.as_deref().unwrap_or_default(),
+        )
+    }))
+    .into_iter()
+    .map(|entry| {
+        serde_json::json!({
+            "code": entry.code,
+            "severity": entry.severity,
+            "message": entry.message,
+            "repair": entry.repair,
+            "sources": entry.sources,
+        })
+    })
+    .collect()
+}
+
+fn why_influence_entry_json(
+    entry: &crate::core::influence::WhyInfluenceEntry,
+) -> serde_json::Value {
+    serde_json::json!({
+        "memoryId": &entry.memory_id,
+        "rank": entry.rank,
+        "relation": &entry.relation,
+        "baselineScore": why_score_json_value(entry.baseline_score),
+        "leaveOneOutScore": why_score_json_value(entry.leave_one_out_score),
+        "influenceDelta": why_score_json_value(entry.influence_delta),
+        "absoluteInfluence": why_score_json_value(entry.absolute_influence),
+        "direction": entry.direction,
+    })
+}
+
+fn why_score_json_value(value: f32) -> serde_json::Value {
+    let rounded = (f64::from(value) * 10_000.0).round() / 10_000.0;
+    serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
+}
+
+fn why_graph_score_json_value(value: f64) -> serde_json::Value {
+    let rounded = if value.is_finite() {
+        (value * 10_000.0).round() / 10_000.0
+    } else {
+        return serde_json::Value::Null;
+    };
+    serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
+}
+
+fn why_posterior_json_value(value: f64) -> serde_json::Value {
+    let rounded = if value.is_finite() {
+        (value * 1_000_000.0).round() / 1_000_000.0
+    } else {
+        return serde_json::Value::Null;
+    };
+    serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
+}
+
+fn why_posterior_interval_json_value(
+    interval: Option<(f64, f64)>,
+    level: f64,
+) -> serde_json::Value {
+    let Some((lower, upper)) = interval else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "lower": why_posterior_json_value(lower),
+        "upper": why_posterior_json_value(upper),
+        "level": why_posterior_json_value(level),
+    })
+}
+
 /// Render a why report as a deterministic Mermaid diagram.
 #[must_use]
 pub fn render_why_mermaid(report: &WhyReport) -> String {

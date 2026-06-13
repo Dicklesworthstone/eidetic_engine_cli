@@ -1536,21 +1536,7 @@ fn serve_why_payload_json(request: &ServeHttpRequest) -> Result<JsonValue, Domai
             repair: Some("ee memory list".to_owned()),
         });
     }
-    let degraded = why_degraded_entries_json(&report.degraded);
-    Ok(serve_response_payload_from_data(
-        json!({
-            "command": "why",
-            "version": report.version,
-            "memoryId": report.memory_id,
-            "found": report.found,
-            "content": report.content,
-            "storage": report.storage.as_ref().map(why_storage_json),
-            "retrieval": report.retrieval.as_ref().map(why_retrieval_json),
-            "selection": report.selection.as_ref().map(why_selection_json),
-            "degraded": degraded.clone()
-        }),
-        JsonValue::Array(degraded),
-    ))
+    parse_rendered_response_json(&crate::output::render_why_json(&report), "why")
 }
 
 fn serve_swarm_brief_payload_json() -> Result<JsonValue, DomainError> {
@@ -1626,56 +1612,6 @@ fn serve_context_error_to_domain(error: crate::core::context::ContextPackError) 
             repair: error.repair_hint().map(str::to_owned),
         }
     }
-}
-
-fn why_storage_json(storage: &crate::core::why::StorageExplanation) -> JsonValue {
-    json!({
-        "origin": &storage.origin,
-        "trustClass": &storage.trust_class,
-        "trustSubclass": &storage.trust_subclass,
-        "provenanceUri": &storage.provenance_uri,
-        "workflowId": &storage.workflow_id,
-        "createdAt": &storage.created_at,
-        "validFrom": &storage.valid_from,
-        "validTo": &storage.valid_to,
-        "validityStatus": &storage.validity_status,
-        "validityWindowKind": &storage.validity_window_kind
-    })
-}
-
-fn why_retrieval_json(retrieval: &crate::core::why::RetrievalExplanation) -> JsonValue {
-    json!({
-        "confidence": retrieval.confidence,
-        "utility": retrieval.utility,
-        "importance": retrieval.importance,
-        "tags": &retrieval.tags,
-        "level": &retrieval.level,
-        "kind": &retrieval.kind
-    })
-}
-
-fn why_selection_json(selection: &crate::core::why::SelectionExplanation) -> JsonValue {
-    json!({
-        "selectionScore": selection.selection_score,
-        "aboveConfidenceThreshold": selection.above_confidence_threshold,
-        "isActive": selection.is_active,
-        "scoreBreakdown": &selection.score_breakdown,
-        "latestPackSelectionPresent": selection.latest_pack_selection.is_some()
-    })
-}
-
-fn why_degraded_entries_json(degraded: &[crate::core::why::WhyDegradation]) -> Vec<JsonValue> {
-    degraded
-        .iter()
-        .map(|entry| {
-            json!({
-                "code": &entry.code,
-                "severity": &entry.severity,
-                "message": &entry.message,
-                "repair": &entry.repair
-            })
-        })
-        .collect()
 }
 
 fn serve_status_code_for_payload_error(error: &DomainError) -> u16 {

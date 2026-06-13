@@ -1,7 +1,10 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::serve::{SERVE_ENDPOINT_SCHEMA_V1, ServeLimits, render_serve_transport_exchange};
 use serde_json::{Value as JsonValue, json};
 
@@ -11,6 +14,36 @@ mod test_tracing;
 type TestResult = Result<(), String>;
 
 // bd-2bw8m: endpoint-level regression coverage for serve query percent decoding.
+fn current_dir_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct CurrentDirGuard<'a> {
+    _guard: MutexGuard<'a, ()>,
+    previous: PathBuf,
+}
+
+impl Drop for CurrentDirGuard<'_> {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous);
+    }
+}
+
+fn enter_current_dir(path: &Path) -> Result<CurrentDirGuard<'static>, String> {
+    let guard = current_dir_test_lock()
+        .lock()
+        .map_err(|_| "current-dir test lock poisoned".to_owned())?;
+    let previous =
+        std::env::current_dir().map_err(|error| format!("read current directory: {error}"))?;
+    std::env::set_current_dir(path)
+        .map_err(|error| format!("set current directory to {}: {error}", path.display()))?;
+    Ok(CurrentDirGuard {
+        _guard: guard,
+        previous,
+    })
+}
+
 fn split_http_response(response: &str) -> Result<(&str, &str), String> {
     response
         .split_once("\r\n\r\n")
@@ -375,6 +408,113 @@ fn serve_why_endpoint_attempts_real_memory_explanation() -> TestResult {
     } else {
         return Err(format!(
             "expected real why success/not-found/storage response, got {response}"
+        ));
+    }
+    assert!(
+        payload["data"]["businessLogicExecuted"].is_null(),
+        "why endpoint must not return the old dispatch-plan-only stub payload: {payload}"
+    );
+    Ok(())
+}
+
+#[test]
+fn serve_why_endpoint_returns_canonical_why_payload_shape() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let remembered = remember_memory(&RememberMemoryOptions {
+        workspace_path: workspace.path(),
+        database_path: None,
+        content: "Serve why must preserve the canonical ee why JSON payload.",
+        workflow_id: Some("serve-why-canonical"),
+        level: "procedural",
+        kind: "rule",
+        tags: Some("serve,why,contract"),
+        confidence: 0.91,
+        source: Some("serve://e2e/why-canonical"),
+        allow_secret_mention: false,
+        valid_from: None,
+        valid_to: None,
+        dry_run: false,
+        auto_link: false,
+        propose_candidates: false,
+    })
+    .map_err(|error| error.to_string())?;
+    let memory_id = remembered.memory_id.to_string();
+    let _current_dir = enter_current_dir(workspace.path())?;
+    let raw = format!(
+        "GET /v1/why/{memory_id} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
+    let response = render_serve_transport_exchange(
+        "req-why-canonical-payload",
+        raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(token),
+        0,
+    );
+    if !response.starts_with("HTTP/1.1 200 OK\r\n") {
+        return Err(format!("expected 200 response, got {response}"));
+    }
+
+    let envelope = response_body_json(&response)?;
+    assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+    assert_eq!(envelope["request"]["endpoint"].as_str(), Some("why"));
+    assert_eq!(
+        envelope["request"]["cliEquivalent"].as_str(),
+        Some("ee why <memory-id> --json")
+    );
+    assert_eq!(
+        envelope["response"]["payloadSchema"].as_str(),
+        Some("ee.response.v2")
+    );
+    let payload = &envelope["response"]["payload"];
+    assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
+    assert_eq!(payload["success"].as_bool(), Some(true));
+
+    let data = payload["data"]
+        .as_object()
+        .ok_or_else(|| format!("why payload data must be an object: {payload}"))?;
+    assert_eq!(data.get("command").and_then(JsonValue::as_str), Some("why"));
+    assert_eq!(
+        data.get("memoryId").and_then(JsonValue::as_str),
+        Some(memory_id.as_str())
+    );
+    assert_eq!(data.get("found").and_then(JsonValue::as_bool), Some(true));
+
+    for key in [
+        "storage",
+        "retrieval",
+        "graphRetrievalFeatures",
+        "selection",
+        "agentProfile",
+        "bayesPosterior",
+        "lifecycle",
+        "contradictions",
+        "links",
+        "history",
+        "verificationEvidence",
+        "coordinationFallbackEvidence",
+        "attestationBundle",
+        "degraded",
+    ] {
+        if !data.contains_key(key) {
+            return Err(format!(
+                "/v1/why dropped canonical ee why field {key}: {payload}"
+            ));
+        }
+    }
+
+    let selection = data
+        .get("selection")
+        .and_then(JsonValue::as_object)
+        .ok_or_else(|| format!("why selection must preserve nested object shape: {payload}"))?;
+    if selection.contains_key("latestPackSelectionPresent") {
+        return Err(format!(
+            "/v1/why must expose latestPackSelection, not a flattened presence flag: {payload}"
+        ));
+    }
+    if !selection.contains_key("latestPackSelection") {
+        return Err(format!(
+            "/v1/why selection dropped latestPackSelection: {payload}"
         ));
     }
     assert!(
