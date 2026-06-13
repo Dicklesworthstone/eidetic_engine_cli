@@ -10,7 +10,8 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use asupersync::runtime::yield_now::yield_now;
@@ -5717,10 +5718,6 @@ impl DaemonForegroundReport {
                 .iter()
                 .map(DaemonForegroundTick::data_json)
                 .collect::<Vec<_>>(),
-            "capabilityGap": {
-                "code": "daemon_background_mode_unimplemented",
-                "capabilitiesCommand": "ee capabilities --json"
-            },
             "degraded": [],
         })
     }
@@ -5942,6 +5939,63 @@ async fn sleep_daemon_foreground_interval(
     }
 
     daemon_checkpoint(cx)
+}
+
+/// Cadence between background scheduler ticks. One minute is a reasonable
+/// default: short enough to stay fresh, long enough to amortize runtime
+/// construction overhead across many idle workspaces.
+pub const BACKGROUND_SCHEDULER_INTERVAL_MS: u64 = 60_000;
+
+/// Resolution used when polling the shutdown signal during the inter-tick
+/// sleep. 500 ms gives sub-second shutdown latency without busy-waiting.
+const BACKGROUND_SCHEDULER_SLEEP_SLICE_MS: u64 = 500;
+
+/// Job types run by the background scheduler on every tick. These are the
+/// low-overhead jobs safe to run unattended inside the daemon process.
+const BACKGROUND_SCHEDULER_JOB_TYPES: &[JobType] =
+    &[JobType::DecaySweep, JobType::HealthCheck];
+
+/// Run the steward scheduler indefinitely on a background cadence.
+///
+/// Called by the daemon server when it starts for a bound workspace.
+/// Exits only when `shutdown` is set — the `Arc<AtomicBool>` is the same
+/// signal used by [`crate::daemon::server::DaemonServerHandle::shutdown`].
+///
+/// The scheduler sleeps FIRST, then ticks (sleep-tick pattern). This ensures
+/// that a daemon that starts and stops within the interval never executes a
+/// steward job, and that `DaemonServerHandle::shutdown` completes promptly
+/// regardless of when it is called.
+///
+/// Each tick builds a fresh Asupersync runtime, runs the configured steward
+/// jobs with `tick_limit = 1`. Per-tick errors are swallowed: the scheduler
+/// is best-effort and must not crash the daemon over a transient DB open
+/// failure. The steward's own job rows record per-tick outcomes.
+pub fn run_daemon_background_scheduler(workspace: &str, shutdown: Arc<AtomicBool>) {
+    loop {
+        // Sleep first so short-lived daemon processes never run a steward tick
+        // and so shutdown() completes within BACKGROUND_SCHEDULER_SLEEP_SLICE_MS.
+        let deadline = Instant::now() + Duration::from_millis(BACKGROUND_SCHEDULER_INTERVAL_MS);
+        while Instant::now() < deadline {
+            if shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(BACKGROUND_SCHEDULER_SLEEP_SLICE_MS));
+        }
+
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let options = DaemonForegroundOptions {
+            workspace: workspace.to_owned(),
+            tick_limit: 1,
+            interval_ms: 0,
+            dry_run: false,
+            job_types: BACKGROUND_SCHEDULER_JOB_TYPES.to_vec(),
+            runner_options: RunnerOptions::new(),
+        };
+        let _ = run_daemon_foreground(&options);
+    }
 }
 
 // ============================================================================
@@ -10122,6 +10176,37 @@ mod tests {
         assert!(
             job.duration_ms.is_none(),
             "duration should be None without started_at"
+        );
+    }
+
+    // ========================================================================
+    // Background Scheduler (bd-2ohzq)
+    // ========================================================================
+
+    #[test]
+    fn background_scheduler_exits_promptly_when_shutdown_fires() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_for_thread = Arc::clone(&shutdown);
+
+        // Signal shutdown after a short delay (well within any test timeout).
+        let signal_thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            shutdown_for_thread.store(true, Ordering::SeqCst);
+        });
+
+        // The scheduler exits once the shutdown signal fires.
+        // A non-existent workspace causes the first tick to skip gracefully.
+        run_daemon_background_scheduler(
+            "/tmp/ee-bg-sched-test-nonexistent-workspace",
+            Arc::clone(&shutdown),
+        );
+
+        signal_thread.join().expect("signal thread must not panic");
+        assert!(
+            shutdown.load(Ordering::Relaxed),
+            "shutdown signal must be set after scheduler returns"
         );
     }
 }

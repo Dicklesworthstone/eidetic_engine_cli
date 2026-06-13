@@ -283,6 +283,10 @@ pub struct DaemonServerHandle {
     shutdown: Arc<AtomicBool>,
     pool: Arc<InflightPool>,
     accept_thread: Option<JoinHandle<()>>,
+    /// Background steward scheduler thread (bd-2ohzq). `None` when the
+    /// daemon was started without a bound workspace (e.g. via the bare
+    /// `start_server` entry point). The thread runs until `shutdown` fires.
+    scheduler_thread: Option<JoinHandle<()>>,
     /// Once-guard for accept-loop and socket teardown. The first
     /// shutdown call stops the listener and unlinks the socket; later
     /// calls skip that irreversible section but may still wait for a
@@ -329,6 +333,14 @@ impl DaemonServerHandle {
                 handle
                     .join()
                     .map_err(|_| io::Error::other("daemon accept thread panicked"))?;
+            }
+            // Join the background steward scheduler thread (bd-2ohzq). The
+            // shutdown signal was already set above; the scheduler polls it
+            // every BACKGROUND_SCHEDULER_SLEEP_SLICE_MS and will exit
+            // promptly. Swallow panics — a panicking scheduler must not
+            // prevent the socket from being cleaned up.
+            if let Some(handle) = self.scheduler_thread.take() {
+                let _ = handle.join();
             }
             // Idempotent guarded unlink (bd-wj6v9, bd-2z3e8): tolerate
             // `NotFound`, but do not let shutdown delete an arbitrary
@@ -730,11 +742,32 @@ fn start_server_with_dispatch_policy(
         });
     }
 
+    // Spawn the background steward scheduler when the daemon is bound to a
+    // workspace (bd-2ohzq). Uses the same `shutdown` signal as the accept
+    // loop so a single `DaemonServerHandle::shutdown()` call stops both.
+    let scheduler_thread = dispatch_policy
+        .bound_workspace_id
+        .as_deref()
+        .and_then(|workspace| {
+            let scheduler_shutdown = Arc::clone(&shutdown);
+            let workspace = workspace.to_owned();
+            thread::Builder::new()
+                .name("ee-daemon-steward".to_owned())
+                .spawn(move || {
+                    crate::steward::run_daemon_background_scheduler(
+                        &workspace,
+                        scheduler_shutdown,
+                    );
+                })
+                .ok()
+        });
+
     Ok(DaemonServerHandle {
         socket_path,
         shutdown,
         pool,
         accept_thread: Some(accept_thread),
+        scheduler_thread,
         shutdown_done: AtomicBool::new(false),
         workers_drained: AtomicBool::new(false),
     })
@@ -2664,6 +2697,7 @@ mod tests {
             shutdown: Arc::new(AtomicBool::new(false)),
             pool,
             accept_thread: None,
+            scheduler_thread: None,
             shutdown_done: AtomicBool::new(false),
             workers_drained: AtomicBool::new(false),
         };
