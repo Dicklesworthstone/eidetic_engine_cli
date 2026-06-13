@@ -1,8 +1,9 @@
 //! Unix-domain socket accept loop + per-connection dispatcher
 //! (bd-oja31 skeleton). Wraps the framing in
 //! [`super::protocol`] with the seed dispatch table for
-//! `ee.daemon.capabilities`, `ee.daemon.echo`, and the
-//! workspace-bound `ee.daemon.context` pack path.
+//! `ee.daemon.capabilities`, `ee.daemon.echo`,
+//! `ee.daemon.shutdown`, and the workspace-bound
+//! `ee.daemon.context` pack path.
 //!
 //! Threading: each accepted connection is dispatched onto a bounded
 //! worker pool (capped at [`super::DAEMON_MAX_INFLIGHT`], overridable
@@ -60,6 +61,9 @@ pub const METHOD_ECHO: &str = "ee.daemon.echo";
 
 /// Method dispatch name for daemon protocol discovery.
 pub const METHOD_CAPABILITIES: &str = "ee.daemon.capabilities";
+
+/// Method dispatch name for graceful daemon shutdown.
+pub const METHOD_SHUTDOWN: &str = "ee.daemon.shutdown";
 
 /// Error code returned when the diagnostic echo method is not enabled.
 pub const DAEMON_ECHO_DISABLED_CODE: &str = "daemon_echo_disabled";
@@ -303,6 +307,16 @@ impl DaemonServerHandle {
     #[must_use]
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// Whether any daemon control path has requested shutdown. The
+    /// foreground CLI process uses this to turn an RPC shutdown request
+    /// into an explicit [`DaemonServerHandle::shutdown`] call so the
+    /// accept loop, background scheduler, and socket teardown all join
+    /// on the owning thread.
+    #[must_use]
+    pub fn shutdown_requested(&self) -> bool {
+        self.shutdown.load(Ordering::SeqCst)
     }
 
     /// Signal the accept loop to stop and wait for it to drain. Also
@@ -754,10 +768,7 @@ fn start_server_with_dispatch_policy(
             thread::Builder::new()
                 .name("ee-daemon-steward".to_owned())
                 .spawn(move || {
-                    crate::steward::run_daemon_background_scheduler(
-                        &workspace,
-                        scheduler_shutdown,
-                    );
+                    crate::steward::run_daemon_background_scheduler(&workspace, scheduler_shutdown);
                 })
                 .ok()
         });
@@ -1539,6 +1550,18 @@ fn dispatch_with_echo_policy_and_workspace(
             DAEMON_ECHO_DISABLED_CODE,
             "ee.daemon.echo is disabled by default; set EE_DAEMON_ENABLE_ECHO=1 for local diagnostics.",
         ),
+        METHOD_SHUTDOWN => {
+            shutdown.store(true, Ordering::SeqCst);
+            DaemonResponse::ok(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                serde_json::json!({
+                    "schema": "ee.daemon.shutdown.v1",
+                    "accepted": true
+                }),
+            )
+        }
         METHOD_CONTEXT => dispatch_context(request, shutdown),
         _ => unreachable!("registered daemon methods are handled above"),
     }
@@ -1944,7 +1967,7 @@ fn parse_daemon_pack_output_profile(
 
 fn daemon_method_authority(method: &str) -> Option<DaemonAuthority> {
     match method {
-        METHOD_CAPABILITIES | METHOD_ECHO => Some(DaemonAuthority::SameUid),
+        METHOD_CAPABILITIES | METHOD_ECHO | METHOD_SHUTDOWN => Some(DaemonAuthority::SameUid),
         METHOD_CONTEXT => Some(DaemonAuthority::SameUidWorkspace),
         _ => None,
     }
@@ -2002,12 +2025,14 @@ fn daemon_capabilities_result() -> serde_json::Value {
         "methods": [
             METHOD_CAPABILITIES,
             METHOD_CONTEXT,
-            METHOD_ECHO
+            METHOD_ECHO,
+            METHOD_SHUTDOWN
         ],
         "authorization": {
             "ee.daemon.capabilities": daemon_method_authority(METHOD_CAPABILITIES).expect("registered method").as_wire_label(),
             "ee.daemon.context": daemon_method_authority(METHOD_CONTEXT).expect("registered method").as_wire_label(),
-            "ee.daemon.echo": daemon_method_authority(METHOD_ECHO).expect("registered method").as_wire_label()
+            "ee.daemon.echo": daemon_method_authority(METHOD_ECHO).expect("registered method").as_wire_label(),
+            "ee.daemon.shutdown": daemon_method_authority(METHOD_SHUTDOWN).expect("registered method").as_wire_label()
         },
         "forward_compat": {
             "v1_unknown_fields": "rejected",
@@ -2448,6 +2473,10 @@ mod tests {
             Some(DaemonAuthority::SameUid)
         );
         assert_eq!(
+            daemon_method_authority(METHOD_SHUTDOWN),
+            Some(DaemonAuthority::SameUid)
+        );
+        assert_eq!(
             daemon_method_authority(METHOD_CONTEXT),
             Some(DaemonAuthority::SameUidWorkspace)
         );
@@ -2489,7 +2518,8 @@ mod tests {
             Some(&serde_json::json!([
                 METHOD_CAPABILITIES,
                 METHOD_CONTEXT,
-                METHOD_ECHO
+                METHOD_ECHO,
+                METHOD_SHUTDOWN
             ]))
         );
         assert_eq!(
@@ -2515,6 +2545,43 @@ mod tests {
                 .pointer("/authorization/ee.daemon.context")
                 .and_then(serde_json::Value::as_str),
             Some(DaemonAuthority::SameUidWorkspace.as_wire_label())
+        );
+        assert_eq!(
+            result
+                .pointer("/authorization/ee.daemon.shutdown")
+                .and_then(serde_json::Value::as_str),
+            Some(DaemonAuthority::SameUid.as_wire_label())
+        );
+    }
+
+    #[test]
+    fn dispatch_shutdown_sets_shutdown_latch() {
+        let request = DaemonRequest::new(
+            "req-shutdown-001",
+            TEST_AGENT_ID,
+            METHOD_SHUTDOWN,
+            serde_json::json!({}),
+        );
+        let shutdown = AtomicBool::new(false);
+        let response = dispatch_with_echo_policy_and_workspace(&request, false, None, &shutdown);
+
+        assert!(response.error.is_none());
+        assert!(shutdown.load(Ordering::SeqCst));
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|value| value.pointer("/schema"))
+                .and_then(serde_json::Value::as_str),
+            Some("ee.daemon.shutdown.v1")
+        );
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|value| value.pointer("/accepted"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
         );
     }
 

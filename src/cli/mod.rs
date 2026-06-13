@@ -51465,17 +51465,28 @@ fn daemon_foreground_shutdown_signals() -> Result<signal_hook::iterator::Signals
 }
 
 #[cfg(unix)]
-fn wait_for_daemon_shutdown_signal(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DaemonShutdownTrigger {
+    Signal(i32),
+    RpcRequest,
+}
+
+#[cfg(unix)]
+fn wait_for_daemon_shutdown_signal_or_request(
     signals: &mut signal_hook::iterator::Signals,
-) -> Result<i32, DomainError> {
-    signals
-        .forever()
-        .next()
-        .ok_or_else(|| DomainError::Configuration {
-            message: "Daemon foreground signal iterator ended before receiving SIGINT or SIGTERM."
-                .to_owned(),
-            repair: Some("Retry `ee daemon start --foreground`.".to_owned()),
-        })
+    handle: &crate::daemon::server::DaemonServerHandle,
+) -> DaemonShutdownTrigger {
+    const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+    loop {
+        if handle.shutdown_requested() {
+            return DaemonShutdownTrigger::RpcRequest;
+        }
+        if let Some(signal) = signals.pending().next() {
+            return DaemonShutdownTrigger::Signal(signal);
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
 }
 
 /// Handler for `ee daemon start` (bd-oja31 skeleton, lifecycle fix
@@ -51548,19 +51559,20 @@ where
                     let rendered =
                         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
                     write_stdout(stdout, &(rendered + "\n"));
-                    let signal = match wait_for_daemon_shutdown_signal(&mut shutdown_signals) {
-                        Ok(signal) => signal,
-                        Err(error) => {
-                            let _ = handle.shutdown();
-                            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                    let trigger =
+                        wait_for_daemon_shutdown_signal_or_request(&mut shutdown_signals, &handle);
+                    let shutdown_reason = match trigger {
+                        DaemonShutdownTrigger::Signal(signal) => {
+                            format!("termination signal {signal}")
                         }
+                        DaemonShutdownTrigger::RpcRequest => "daemon shutdown request".to_owned(),
                     };
                     match handle.shutdown() {
                         Ok(()) => ProcessExitCode::Success,
                         Err(error) => {
                             let domain_error = DomainError::Configuration {
                                 message: format!(
-                                    "Daemon received termination signal {signal} but failed to shut down cleanly: {error}"
+                                    "Daemon received {shutdown_reason} but failed to shut down cleanly: {error}"
                                 ),
                                 repair: Some(
                                     "Inspect the daemon socket path before restarting.".to_owned(),
@@ -51753,12 +51765,14 @@ where
 
 #[cfg(unix)]
 const DAEMON_STOP_LIVENESS_TIMEOUT: Duration = Duration::from_millis(1_000);
+#[cfg(unix)]
+const DAEMON_STOP_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(5_000);
 
 #[cfg(unix)]
 fn daemon_stop_refusal(socket_path: &Path, reason: impl std::fmt::Display) -> DomainError {
     DomainError::Configuration {
         message: format!(
-            "Refusing to remove daemon socket {}: {reason}",
+            "Refusing to stop daemon at {}: {reason}",
             socket_path.display()
         ),
         repair: Some(
@@ -51767,6 +51781,68 @@ fn daemon_stop_refusal(socket_path: &Path, reason: impl std::fmt::Display) -> Do
                 .to_owned(),
         ),
     }
+}
+
+#[cfg(unix)]
+fn request_daemon_shutdown(socket_path: &Path) -> Result<(), DomainError> {
+    let request = crate::daemon::protocol::DaemonRequest::new(
+        "daemon-stop-shutdown",
+        "ee-cli-daemon-stop",
+        crate::daemon::server::METHOD_SHUTDOWN,
+        serde_json::json!({}),
+    );
+    let response =
+        crate::daemon::server::client_round_trip(socket_path, &request).map_err(|error| {
+            daemon_stop_refusal(socket_path, format!("shutdown RPC failed: {error}"))
+        })?;
+    if let Some(error) = response.error {
+        return Err(daemon_stop_refusal(
+            socket_path,
+            format!("shutdown RPC returned {}: {}", error.code, error.message),
+        ));
+    }
+    let accepted = response
+        .result
+        .as_ref()
+        .and_then(|value| value.pointer("/accepted"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    if !accepted {
+        return Err(daemon_stop_refusal(
+            socket_path,
+            format!("shutdown RPC returned an unexpected result: {response:?}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn wait_for_daemon_socket_removed(
+    socket_path: &Path,
+    timeout: Duration,
+) -> Result<bool, DomainError> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !socket_path.exists() {
+            return Ok(true);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if !socket_path.exists() {
+        return Ok(true);
+    }
+    Err(DomainError::Configuration {
+        message: format!(
+            "Daemon accepted the shutdown request, but socket {} was still present after {}ms.",
+            socket_path.display(),
+            timeout.as_millis()
+        ),
+        repair: Some(
+            "Inspect the daemon process and retry `ee daemon stop`; do not remove the socket until \
+             the process is confirmed stopped."
+                .to_owned(),
+        ),
+    })
 }
 
 #[cfg(unix)]
@@ -51941,9 +52017,10 @@ fn probe_daemon_stop_liveness(socket_path: &Path) -> Result<(), DomainError> {
     Ok(())
 }
 
-/// Skeleton handler for `ee daemon stop`. Best-effort: removes the
-/// UDS file so subsequent CLI invocations stop trying to dial it. A
-/// follow-up daemonization slice will add a proper shutdown RPC.
+/// Handler for `ee daemon stop`. Sends the daemon shutdown RPC and
+/// waits for the foreground daemon process to run
+/// `DaemonServerHandle::shutdown`, which joins the accept loop and the
+/// background steward scheduler before unlinking its socket.
 fn handle_daemon_hot_mode_stop<W, E>(
     cli: &Cli,
     args: &DaemonHotModeStopArgs,
@@ -51970,21 +52047,12 @@ where
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
         let removed = if should_remove {
-            match fs::remove_file(&socket_path) {
-                Ok(()) => true,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-                Err(error) => {
-                    let domain_error = DomainError::Configuration {
-                        message: format!(
-                            "Failed to remove daemon socket {}: {error}",
-                            socket_path.display()
-                        ),
-                        repair: Some(
-                            "Remove the socket manually with `rm <path>` and retry.".to_owned(),
-                        ),
-                    };
-                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-                }
+            if let Err(error) = request_daemon_shutdown(&socket_path) {
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+            match wait_for_daemon_socket_removed(&socket_path, DAEMON_STOP_SHUTDOWN_TIMEOUT) {
+                Ok(removed) => removed,
+                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
             }
         } else {
             false

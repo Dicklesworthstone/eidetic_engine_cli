@@ -77,6 +77,103 @@ fn run_daemon_start(socket_path: &Path) -> Result<Value, String> {
         .map_err(|error| format!("envelope is not valid JSON: {error}; line={line:?}"))
 }
 
+fn run_daemon_stop(socket_path: &Path) -> Result<Value, String> {
+    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["daemon", "stop", "--socket"])
+        .arg(socket_path)
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("failed to run `ee daemon stop`: {error}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with('{'))
+        .ok_or_else(|| {
+            format!(
+                "no JSON envelope on stdout; stdout={stdout:?} stderr={:?}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })?;
+    serde_json::from_str(line)
+        .map_err(|error| format!("envelope is not valid JSON: {error}; line={line:?}"))
+}
+
+fn daemon_pids_for_socket_path(socket_path: &Path) -> Result<Vec<u32>, String> {
+    let needle = socket_path.display().to_string();
+    let output = Command::new("ps")
+        .args(["-eo", "pid=,command="])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("failed to invoke ps: {error}"))?;
+    ensure(
+        output.status.success(),
+        format!(
+            "ps exited with {}; stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+
+    let current_pid = std::process::id();
+    let mut pids = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if !line.contains(&needle) {
+            continue;
+        }
+        let Some(pid_field) = line.split_whitespace().next() else {
+            continue;
+        };
+        let pid = pid_field
+            .parse::<u32>()
+            .map_err(|error| format!("failed to parse ps pid {pid_field:?}: {error}"))?;
+        if pid != current_pid {
+            pids.push(pid);
+        }
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    Ok(pids)
+}
+
+fn wait_for_detached_daemon_pid(socket_path: &Path, timeout: Duration) -> Result<u32, String> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let pids = daemon_pids_for_socket_path(socket_path)?;
+        if let Some(pid) = pids.first() {
+            return Ok(*pid);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Err(format!(
+        "no detached daemon process containing {} appeared within {}ms",
+        socket_path.display(),
+        timeout.as_millis()
+    ))
+}
+
+fn wait_for_no_daemon_pids(socket_path: &Path, timeout: Duration) -> TestResult {
+    let deadline = Instant::now() + timeout;
+    let mut last_pids = Vec::new();
+    while Instant::now() < deadline {
+        last_pids = daemon_pids_for_socket_path(socket_path)?;
+        if last_pids.is_empty() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Err(format!(
+        "detached daemon processes {last_pids:?} still matched {} after {}ms",
+        socket_path.display(),
+        timeout.as_millis()
+    ))
+}
+
 fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Result<ExitStatus, String> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -250,6 +347,43 @@ fn daemon_start_detached_socket_is_connectable_before_success() -> TestResult {
             ),
         )?;
         Ok(())
+    })();
+
+    teardown_daemon(&socket_path);
+    result
+}
+
+#[test]
+fn daemon_stop_detached_child_exits_and_unlinks_socket() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-stop-detached.sock");
+
+    let envelope = run_daemon_start(&socket_path)?;
+    let result: TestResult = (|| {
+        ensure(
+            envelope.pointer("/success").and_then(Value::as_bool) == Some(true),
+            format!("detached start must report success:true; got {envelope}"),
+        )?;
+        let daemon_pid = wait_for_detached_daemon_pid(&socket_path, Duration::from_secs(2))?;
+        ensure(
+            daemon_pid > 0,
+            format!("detached daemon pid must be positive; got {daemon_pid}"),
+        )?;
+
+        let stopped = run_daemon_stop(&socket_path)?;
+        ensure(
+            stopped.pointer("/success").and_then(Value::as_bool) == Some(true),
+            format!("daemon stop must report success:true; got {stopped}"),
+        )?;
+        ensure(
+            stopped.pointer("/data/removed").and_then(Value::as_bool) == Some(true),
+            format!("daemon stop must report data.removed:true; got {stopped}"),
+        )?;
+        wait_for_no_daemon_pids(&socket_path, Duration::from_secs(5))?;
+        ensure(
+            !socket_path.exists(),
+            "daemon stop must let the daemon unlink its socket during shutdown",
+        )
     })();
 
     teardown_daemon(&socket_path);
