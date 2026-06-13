@@ -51,6 +51,18 @@ memory_id_from_search() {
     json_value "$1" '.data.results[0].memoryId // .data.results[0].docId // empty'
 }
 
+pack_hash_from_pack() {
+    json_value "$1" '.data.pack.hash // empty'
+}
+
+pack_rank_for_memory() {
+    local json="$1" memory_id="$2"
+    printf '%s' "$json" \
+        | jq -r --arg memory_id "$memory_id" \
+            '(.data.pack.items[]? | select(.memoryId == $memory_id) | .rank) // empty' \
+            2>/dev/null || true
+}
+
 assert_nonempty() {
     local value="$1" label="$2"
     if [ -n "$value" ]; then
@@ -73,6 +85,20 @@ assert_search_returns_distilled_memory() {
         _harness_pass "$label"
     else
         _harness_fail "$label: search results did not contain $memory_id"
+    fi
+}
+
+assert_pack_contains_distilled_memory() {
+    local json="$1" memory_id="$2" label="$3" result
+    result="$(printf '%s' "$json" \
+        | jq -e --arg memory_id "$memory_id" \
+            'any(.data.pack.items[]?; .memoryId == $memory_id and (.content | contains("Recurring command failure")))' \
+            >/dev/null 2>&1 && printf true || printf false)"
+    e2e_log_assert_eq "$result" "true" "$label" || true
+    if [ "$result" = "true" ]; then
+        _harness_pass "$label"
+    else
+        _harness_fail "$label: pack items did not contain $memory_id"
     fi
 }
 
@@ -182,13 +208,27 @@ assert_search_returns_distilled_memory "$search_out" "$memory_id" \
 search_memory_id="$(memory_id_from_search "$search_out")"
 assert_nonempty "$search_memory_id" "search returns a memory id for outcome feedback"
 
-outcome_out="$(ee_json --workspace "$WS" outcome "$memory_id" \
+pack_out="$(ee_json --workspace "$WS" pack "linker cache missing object journal capture" \
+    --max-tokens 1200 \
+    --json)"
+assert_jq "$pack_out" '.success == true and ((.data.pack.hash // "") | startswith("blake3:"))' \
+    "pack creates a persisted replay ledger addressable by hash"
+assert_pack_contains_distilled_memory "$pack_out" "$memory_id" \
+    "pack includes the journal-distilled failure memory"
+pack_hash="$(pack_hash_from_pack "$pack_out")"
+pack_rank="$(pack_rank_for_memory "$pack_out" "$memory_id")"
+assert_nonempty "$pack_hash" "pack returns a hash for item-addressed outcome"
+assert_nonempty "$pack_rank" "pack returns the distilled memory item rank"
+
+outcome_out="$(ee_json --workspace "$WS" outcome \
+    --pack "$pack_hash" \
+    --item "$pack_rank" \
     --signal helpful \
     --source-id e2e-journal-capture \
     --reason "journal capture E2E found the distilled repeated failure" \
     --json)"
 assert_jq "$outcome_out" '.success == true and .data.status == "recorded" and .data.target.verified == true' \
-    "outcome records helpful feedback against the created memory"
+    "outcome records helpful feedback through pack-item addressing"
 
 trace_out="$(ee_json --workspace "$WS" outcome trace "$memory_id" --json)"
 assert_jq "$trace_out" '.success == true and .data.memoryId == "'"$memory_id"'" and .data.eventCount >= 1 and any(.data.events[]?; .signal == "helpful")' \
