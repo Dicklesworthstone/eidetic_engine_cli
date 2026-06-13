@@ -1784,23 +1784,54 @@ impl EmbeddingConfig {
 
     /// Create config for the default hash embedder.
     #[must_use]
-    pub const fn hash_256() -> Self {
-        Self {
-            model_id: String::new(), // Will be set below
-            dimension: 256,
-            deterministic: true,
-        }
+    pub fn hash_256() -> Self {
+        Self::new("hash-256", 256, true)
+    }
+
+    /// Stable 256-bit content hash over the embedding configuration fields.
+    #[must_use]
+    pub fn content_hash(&self) -> String {
+        compute_embedding_config_hash(self)
     }
 }
 
 impl Default for EmbeddingConfig {
     fn default() -> Self {
-        Self {
-            model_id: "hash-256".to_owned(),
-            dimension: 256,
-            deterministic: true,
-        }
+        Self::hash_256()
     }
+}
+
+const EMBEDDING_CONFIG_HASH_DOMAIN: &[u8] = b"ee.search.embedding_config.v1";
+
+fn compute_embedding_config_hash(config: &EmbeddingConfig) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(EMBEDDING_CONFIG_HASH_DOMAIN);
+    hash_embedding_config_str_field(&mut hasher, "model_id", &config.model_id);
+    hash_embedding_config_usize_field(&mut hasher, "dimension", config.dimension);
+    hash_embedding_config_bool_field(&mut hasher, "deterministic", config.deterministic);
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn hash_embedding_config_str_field(hasher: &mut blake3::Hasher, field: &str, value: &str) {
+    hash_embedding_config_str(hasher, field);
+    hash_embedding_config_str(hasher, value);
+}
+
+fn hash_embedding_config_usize_field(hasher: &mut blake3::Hasher, field: &str, value: usize) {
+    hash_embedding_config_str(hasher, field);
+    let value = u64::try_from(value).unwrap_or(u64::MAX);
+    hasher.update(&value.to_le_bytes());
+}
+
+fn hash_embedding_config_bool_field(hasher: &mut blake3::Hasher, field: &str, value: bool) {
+    hash_embedding_config_str(hasher, field);
+    hasher.update(&[u8::from(value)]);
+}
+
+fn hash_embedding_config_str(hasher: &mut blake3::Hasher, value: &str) {
+    let len = u64::try_from(value.len()).unwrap_or(u64::MAX);
+    hasher.update(&len.to_le_bytes());
+    hasher.update(value.as_bytes());
 }
 
 /// Mesh search-surrogate shape pinned by `ee.mesh.surrogate.v1`.
@@ -2467,6 +2498,7 @@ impl IndexManifest {
                 "model_id": self.embedding.model_id,
                 "dimension": self.embedding.dimension,
                 "deterministic": self.embedding.deterministic,
+                "content_hash": self.embedding.content_hash(),
             },
         });
 
@@ -4714,9 +4746,36 @@ mod tests {
     #[test]
     fn embedding_config_default_is_hash_256() {
         let config = EmbeddingConfig::default();
+        assert_eq!(config, EmbeddingConfig::hash_256());
         assert_eq!(config.model_id, "hash-256");
         assert_eq!(config.dimension, 256);
         assert!(config.deterministic);
+    }
+
+    #[test]
+    fn embedding_config_hash_is_deterministic_and_field_sensitive() {
+        let config = EmbeddingConfig::hash_256();
+        let hash = config.content_hash();
+
+        assert_eq!(hash, config.content_hash());
+        assert_eq!(
+            hash,
+            EmbeddingConfig::new("hash-256", 256, true).content_hash()
+        );
+        assert!(hash.starts_with("blake3:"));
+        assert_eq!(hash.len(), "blake3:".len() + 64);
+        assert_ne!(
+            hash,
+            EmbeddingConfig::new("model2vec-base", 256, true).content_hash()
+        );
+        assert_ne!(
+            hash,
+            EmbeddingConfig::new("hash-256", 384, true).content_hash()
+        );
+        assert_ne!(
+            hash,
+            EmbeddingConfig::new("hash-256", 256, false).content_hash()
+        );
     }
 
     fn local_surrogate_model() -> SearchSurrogateModelFingerprint {
@@ -5439,6 +5498,11 @@ mod tests {
         assert_eq!(json["embedding"]["model_id"], "hash-256");
         assert_eq!(json["embedding"]["dimension"], 256);
         assert_eq!(json["embedding"]["deterministic"], true);
+        let embedding_hash = json["embedding"]["content_hash"]
+            .as_str()
+            .expect("embedding content hash");
+        assert!(embedding_hash.starts_with("blake3:"));
+        assert_eq!(embedding_hash.len(), "blake3:".len() + 64);
         assert_eq!(json["lexical_index_path"], "lexical");
         assert_eq!(json["vector_index_path"], "vector.fast.idx");
     }
