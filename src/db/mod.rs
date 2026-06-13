@@ -13146,12 +13146,19 @@ impl DbConnection {
         rows.iter().map(stored_journal_entry_from_row).collect()
     }
 
-    /// Get one journal entry by id.
-    pub fn get_journal_entry(&self, entry_id: &str) -> Result<Option<StoredJournalEntry>> {
+    /// Get one journal entry by workspace and id.
+    pub fn get_journal_entry(
+        &self,
+        workspace_id: &str,
+        entry_id: &str,
+    ) -> Result<Option<StoredJournalEntry>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT entry_id, workspace_id, agent_name, session_key, kind, source, body, structured, redaction_report, instruction_risk, created_at, distilled_at, tombstoned_at FROM journal_entries WHERE entry_id = ?1 ORDER BY entry_id ASC LIMIT 1",
-            &[Value::Text(entry_id.to_string())],
+            "SELECT entry_id, workspace_id, agent_name, session_key, kind, source, body, structured, redaction_report, instruction_risk, created_at, distilled_at, tombstoned_at FROM journal_entries WHERE workspace_id = ?1 AND entry_id = ?2 ORDER BY entry_id ASC LIMIT 1",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(entry_id.to_string()),
+            ],
         )?;
         rows.first().map(stored_journal_entry_from_row).transpose()
     }

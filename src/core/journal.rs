@@ -864,8 +864,9 @@ pub fn show_journal_entry(
 
     let database_path = effective_database_path(&workspace_path, options.database_path);
     let connection = open_journal_database(&database_path)?;
+    let workspace_id = stable_workspace_id(&workspace_path);
     let stored = connection
-        .get_journal_entry(entry_id)
+        .get_journal_entry(&workspace_id, entry_id)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to read journal entry: {error}"),
             repair: Some("ee doctor".to_owned()),
@@ -1787,7 +1788,7 @@ fn apply_distill_proposals(
                     .collect();
                 for (entry_id, _span_id, content_hash) in &mut refs {
                     let entry = connection
-                        .get_journal_entry(entry_id)
+                        .get_journal_entry(workspace_id, entry_id)
                         .map_err(|error| {
                             distill_storage_error("Failed to re-read journal entry", error)
                         })?
@@ -1917,14 +1918,14 @@ fn apply_distill_proposals(
                         if connection.get_evidence_span(&span_id)?.is_some() {
                             continue;
                         }
-                        let entry = connection.get_journal_entry(entry_id)?.ok_or_else(|| {
-                            crate::db::DbError::MalformedRow {
+                        let entry = connection
+                            .get_journal_entry(workspace_id, entry_id)?
+                            .ok_or_else(|| crate::db::DbError::MalformedRow {
                                 operation: crate::db::DbOperation::Execute,
                                 message: format!(
                                     "journal entry {entry_id} vanished mid-distillation"
                                 ),
-                            }
-                        })?;
+                            })?;
                         let metadata_json = serde_json::json!({
                             "schema": JOURNAL_DISTILL_EVIDENCE_SCHEMA_V1,
                             "command": "ee journal distill --apply",
@@ -2957,6 +2958,51 @@ mod tests {
         ensure(
             matches!(missing, Err(DomainError::NotFound { .. })),
             "unknown entry id maps to NotFound",
+        )
+    }
+
+    #[test]
+    fn show_journal_entry_is_workspace_scoped_when_database_is_shared() -> TestResult {
+        let (_dir_a, workspace_a, database_path) = seed_journal_workspace("jrn-shared-a")?;
+        let (_dir_b, workspace_b, _database_b) = seed_journal_workspace("jrn-shared-b")?;
+        let options_a = JournalAppendOptions {
+            workspace_path: &workspace_a,
+            database_path: Some(&database_path),
+            agent_name: Some("agent-alpha".to_owned()),
+            source: JournalSource::Manual,
+        };
+        let report = append_journal_entry(&options_a, &body_draft("alpha-only note"))
+            .map_err(|error| error.to_string())?;
+        let entry_id = report
+            .entry
+            .as_ref()
+            .ok_or("entry must be present")?
+            .entry_id
+            .clone();
+
+        let shown_from_a = show_journal_entry(&JournalShowOptions {
+            workspace_path: &workspace_a,
+            database_path: Some(&database_path),
+            entry_id: &entry_id,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &shown_from_a
+                .entry
+                .as_ref()
+                .map(|entry| entry.entry_id.clone()),
+            &Some(entry_id.clone()),
+            "own workspace can show its entry",
+        )?;
+
+        let shown_from_b = show_journal_entry(&JournalShowOptions {
+            workspace_path: &workspace_b,
+            database_path: Some(&database_path),
+            entry_id: &entry_id,
+        });
+        ensure(
+            matches!(shown_from_b, Err(DomainError::NotFound { .. })),
+            "different workspace sharing the same database cannot read the entry",
         )
     }
 
