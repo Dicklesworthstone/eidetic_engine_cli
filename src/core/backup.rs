@@ -720,20 +720,6 @@ struct BackupMemoryGraphFields {
 }
 
 impl BackupMemoryGraphFields {
-    fn export_baseline() -> Self {
-        Self {
-            pagerank_score: Some(0.0),
-            betweenness_score: Some(0.0),
-            hits_authority: Some(0.0),
-            hits_hub: Some(0.0),
-            onion_layer: Some(0),
-            k_truss_max: Some(0),
-            articulation_point: Some(false),
-            bayes_alpha: Some(0.5),
-            bayes_beta: Some(0.5),
-        }
-    }
-
     fn overlay_present(&mut self, imported: Self) {
         if imported.pagerank_score.is_some() {
             self.pagerank_score = imported.pagerank_score;
@@ -2799,18 +2785,11 @@ fn export_memory_graph_fields_by_id(
     links: &[StoredMemoryLink],
     audits: &[StoredAuditEntry],
 ) -> Result<BTreeMap<String, BackupMemoryGraphFields>, DomainError> {
-    let mut fields_by_memory = BTreeMap::new();
-    for memory in memories {
-        fields_by_memory
-            .entry(memory.id.clone())
-            .or_insert_with(BackupMemoryGraphFields::export_baseline);
-    }
+    let mut fields_by_memory: BTreeMap<String, BackupMemoryGraphFields> = BTreeMap::new();
+    // No pre-insertion: graph fields are only emitted when backed by real evidence.
     apply_imported_memory_graph_fields(&mut fields_by_memory, memories, audits);
 
     for memory in memories {
-        let fields = fields_by_memory
-            .entry(memory.id.clone())
-            .or_insert_with(BackupMemoryGraphFields::export_baseline);
         if let Some((alpha, beta)) =
             connection
                 .get_memory_bayes_posterior(&memory.id)
@@ -2819,6 +2798,7 @@ fn export_memory_graph_fields_by_id(
                     repair: Some("ee db check --workspace .".to_owned()),
                 })?
         {
+            let fields = fields_by_memory.entry(memory.id.clone()).or_default();
             fields.bayes_alpha = finite_f64(alpha);
             fields.bayes_beta = finite_f64(beta);
         }
@@ -2833,9 +2813,7 @@ fn export_memory_graph_fields_by_id(
     {
         if let Ok(centrality) = crate::graph::graph_snapshot_centrality_report(&snapshot) {
             for score in centrality.scores {
-                let fields = fields_by_memory
-                    .entry(score.memory_id)
-                    .or_insert_with(BackupMemoryGraphFields::export_baseline);
+                let fields = fields_by_memory.entry(score.memory_id).or_default();
                 fields.pagerank_score = finite_f64(score.pagerank);
                 fields.betweenness_score = finite_f64(score.betweenness);
                 fields.hits_authority = finite_f64(score.authority);
@@ -2881,7 +2859,7 @@ fn apply_imported_memory_graph_fields(
         }
         fields_by_memory
             .entry(memory_id.to_owned())
-            .or_insert_with(BackupMemoryGraphFields::export_baseline)
+            .or_default()
             .overlay_present(imported_fields);
     }
 }
@@ -2948,10 +2926,7 @@ fn add_structural_graph_fields(
     let onion = crate::graph::decay::compute_onion_layers(&graph);
     for (memory_id, layer) in onion.layers_by_memory {
         if let Some(layer) = usize_to_u32(layer) {
-            fields_by_memory
-                .entry(memory_id)
-                .or_insert_with(BackupMemoryGraphFields::export_baseline)
-                .onion_layer = Some(layer);
+            fields_by_memory.entry(memory_id).or_default().onion_layer = Some(layer);
         }
     }
 
@@ -2962,7 +2937,7 @@ fn add_structural_graph_fields(
     for memory in memories {
         fields_by_memory
             .entry(memory.id.clone())
-            .or_insert_with(BackupMemoryGraphFields::export_baseline)
+            .or_default()
             .articulation_point = Some(articulation_points.contains(&memory.id));
     }
 
@@ -2970,7 +2945,7 @@ fn add_structural_graph_fields(
         if let Some(max_k) = usize_to_u32(member.max_k) {
             fields_by_memory
                 .entry(member.memory_id)
-                .or_insert_with(BackupMemoryGraphFields::export_baseline)
+                .or_default()
                 .k_truss_max = Some(max_k);
         }
     }
@@ -5016,14 +4991,18 @@ mod tests {
     }
 
     #[test]
-    fn backup_create_exports_all_graph_fields_with_baselines() -> TestResult {
+    fn backup_create_omits_graph_fields_when_no_graph_evidence_exists() -> TestResult {
+        // Without an imported graph snapshot, structural links, or imported
+        // graph fields, the backup MUST NOT emit placeholder zero/default
+        // graph metrics — absent evidence stays absent. Bayes posterior fields
+        // are DB-backed memory columns and may be exported independently.
         let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
-        let out = workspace.join("baseline-graph-field-backups");
+        let out = workspace.join("no-graph-evidence-backups");
         let report = create_backup(&BackupCreateOptions {
             workspace_path: workspace.clone(),
             database_path: Some(database),
             output_dir: Some(out),
-            label: Some("baseline-graph-fields".to_owned()),
+            label: Some("no-graph-evidence".to_owned()),
             redaction_level: RedactionLevel::None,
             include_derived: false,
             include_graph_cache: false,
@@ -5038,20 +5017,20 @@ mod tests {
             .find(|line| line.contains(r#""schema":"ee.export.memory.v1""#))
             .ok_or_else(|| "backup JSONL memory record missing".to_owned())?;
 
-        for expected in [
-            r#""pagerank_score":0.0"#,
-            r#""betweenness_score":0.0"#,
-            r#""hits_authority":0.0"#,
-            r#""hits_hub":0.0"#,
-            r#""onion_layer":0"#,
-            r#""k_truss_max":0"#,
-            r#""articulation_point":false"#,
-            r#""bayes_alpha":0.5"#,
-            r#""bayes_beta":0.5"#,
+        for absent in [
+            "pagerank_score",
+            "betweenness_score",
+            "hits_authority",
+            "hits_hub",
+            "onion_layer",
+            "k_truss_max",
+            "articulation_point",
         ] {
             ensure(
-                memory_record.contains(expected),
-                format!("memory export record must include {expected}: {memory_record}"),
+                !memory_record.contains(absent),
+                format!(
+                    "memory export record must NOT include placeholder {absent} without real evidence: {memory_record}"
+                ),
             )?;
         }
         Ok(())
