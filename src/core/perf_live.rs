@@ -725,6 +725,7 @@ fn usize_to_u64(value: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::path::Path;
     use std::time::{Duration, Instant};
 
@@ -732,7 +733,7 @@ mod tests {
     use crate::core::swarm_brief::{SwarmBriefCommandOutput, SwarmBriefCommandRunner};
 
     const BOUNDED_TEST_FSYNC_SAMPLES: usize = 1;
-    const BOUNDED_TEST_FSYNC_TIMEOUT: Duration = Duration::from_secs(90);
+    const BOUNDED_TEST_FSYNC_TIMEOUT: Duration = Duration::from_secs(5);
 
     #[derive(Debug, Eq, PartialEq)]
     struct BoundedFsyncFixture {
@@ -741,15 +742,20 @@ mod tests {
     }
 
     fn one_sample_fsync_latency_fixture() -> Result<BoundedFsyncFixture, String> {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("rust-toolchain.toml");
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let sample = (|| -> Result<Duration, String> {
-                let file = std::fs::File::open(&path)
-                    .map_err(|error| format!("open {}: {error}", path.display()))?;
+                let mut file = tempfile::Builder::new()
+                    .prefix("ee-perf-live-fsync-")
+                    .tempfile()
+                    .map_err(|error| format!("temp fsync fixture: {error}"))?;
+                file.as_file_mut()
+                    .write_all(b"ee perf-live fsync fixture\n")
+                    .map_err(|error| format!("write temp fsync fixture: {error}"))?;
                 let start = Instant::now();
-                file.sync_all()
-                    .map_err(|error| format!("sync_all {}: {error}", path.display()))?;
+                file.as_file()
+                    .sync_all()
+                    .map_err(|error| format!("sync_all temp fsync fixture: {error}"))?;
                 Ok(start.elapsed())
             })();
             let _ = sender.send(sample);
