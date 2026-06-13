@@ -4947,7 +4947,7 @@ pub struct GraphFeatureEnrichmentArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Compute only the projection plan; enriched features will be degraded.
+    /// Read the persisted graph snapshot and report enrichment without writes.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 
@@ -31271,96 +31271,56 @@ where
         return exit_code;
     }
 
-    let report = if args.dry_run {
-        match crate::core::singleflight::run_graph_feature_enrichment(
-            workspace.to_string_lossy().as_ref(),
-            0,
-            None,
-            "dry_run",
-            &enrichment_options,
-            || {
-                let centrality = crate::graph::CentralityRefreshReport {
-                    version: env!("CARGO_PKG_VERSION"),
-                    status: crate::graph::CentralityRefreshStatus::DryRun,
-                    pagerank_status: crate::graph::CentralityAlgorithmStatus::Skipped,
-                    betweenness_status: crate::graph::CentralityAlgorithmStatus::Skipped,
-                    hits_status: crate::graph::CentralityAlgorithmStatus::Skipped,
-                    dry_run: true,
-                    node_count: 0,
-                    edge_count: 0,
-                    projection_ms: 0.0,
-                    pagerank_ms: 0.0,
-                    betweenness_ms: 0.0,
-                    hits_ms: 0.0,
-                    total_ms: 0.0,
-                    scores: Vec::new(),
-                    top_pagerank: Vec::new(),
-                    top_betweenness: Vec::new(),
-                    top_authorities: Vec::new(),
-                    top_hubs: Vec::new(),
-                };
-                crate::graph::enrich_graph_features(&centrality, &enrichment_options)
-            },
-        ) {
-            Ok(run) => run.value,
-            Err(error) => graph_feature_enrichment_singleflight_error_report(
-                &enrichment_options,
-                "dry_run",
-                error,
-            ),
+    let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
+        Ok(workspace_id) => workspace_id,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
+    };
+    let snapshot = match conn
+        .get_latest_graph_snapshot(&workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to query graph snapshot: {error}"),
+                repair: Some("ee graph centrality-refresh".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let workspace_generation = snapshot
+        .as_ref()
+        .map_or(0, |snapshot| u64::from(snapshot.source_generation));
+    let graph_generation = snapshot
+        .as_ref()
+        .map(|snapshot| u64::from(snapshot.snapshot_version));
+    let source_mode = if snapshot.is_some() {
+        "graph_snapshot"
     } else {
-        let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
-            Ok(workspace_id) => workspace_id,
-            Err(domain_error) => {
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-            }
-        };
-        let snapshot = match conn
-            .get_latest_graph_snapshot(&workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
-        {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                let domain_error = DomainError::Storage {
-                    message: format!("Failed to query graph snapshot: {error}"),
-                    repair: Some("ee graph centrality-refresh".to_string()),
-                };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-            }
-        };
-        let workspace_generation = snapshot
-            .as_ref()
-            .map_or(0, |snapshot| u64::from(snapshot.source_generation));
-        let graph_generation = snapshot
-            .as_ref()
-            .map(|snapshot| u64::from(snapshot.snapshot_version));
-        let source_mode = if snapshot.is_some() {
-            "graph_snapshot"
-        } else {
-            "graph_snapshot_missing"
-        };
-        match crate::core::singleflight::run_graph_feature_enrichment(
-            workspace.to_string_lossy().as_ref(),
-            workspace_generation,
-            graph_generation,
-            source_mode,
-            &enrichment_options,
-            || {
-                crate::graph::enrich_graph_features_from_graph_snapshot(
-                    snapshot.as_ref(),
-                    &workspace_id,
-                    crate::db::GraphSnapshotType::MemoryLinks,
-                    &enrichment_options,
-                )
-            },
-        ) {
-            Ok(run) => run.value,
-            Err(error) => graph_feature_enrichment_singleflight_error_report(
+        "graph_snapshot_missing"
+    };
+    let report = match crate::core::singleflight::run_graph_feature_enrichment(
+        workspace.to_string_lossy().as_ref(),
+        workspace_generation,
+        graph_generation,
+        source_mode,
+        &enrichment_options,
+        || {
+            crate::graph::enrich_graph_features_from_graph_snapshot(
+                snapshot.as_ref(),
+                &workspace_id,
+                crate::db::GraphSnapshotType::MemoryLinks,
                 &enrichment_options,
-                source_mode,
-                error,
-            ),
-        }
+            )
+        },
+    ) {
+        Ok(run) => run.value,
+        Err(error) => graph_feature_enrichment_singleflight_error_report(
+            &enrichment_options,
+            source_mode,
+            error,
+        ),
     };
 
     match cli.renderer() {

@@ -251,7 +251,7 @@ Command-specific graph flags:
 | `ee graph snapshot refresh` | `--dry-run` | boolean | false | Reports the refresh plan without persisting. |
 | `ee graph snapshot refresh` | `--graph <GRAPH>` | `memory_links`, `causal`, `revision`, `rules`, `contradictions`, `all` | `memory_links` | Selects which graph family to refresh. |
 | `ee graph snapshot refresh` | `--min-weight`, `--min-confidence`, `--link-limit` | see above | omitted | Filters `memory_links` refreshes. |
-| `ee graph feature-enrichment` | `--dry-run` | boolean | false | Computes only the projection plan; enriched features are degraded. |
+| `ee graph feature-enrichment` | `--dry-run` | boolean | false | Reads the persisted graph snapshot and reports enrichment without writes. |
 | `ee graph feature-enrichment` | `--database`, `--min-weight`, `--min-confidence`, `--link-limit` | see above | see above | Filters the enrichment graph. |
 | `ee graph feature-enrichment` | `--max-features <COUNT>` | integer | omitted | Caps emitted enriched features. |
 | `ee graph feature-enrichment` | `--min-combined-score <SCORE>` | `0.0..=1.0` | omitted | Drops graph features below a combined score threshold. |

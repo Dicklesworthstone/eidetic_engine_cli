@@ -34,6 +34,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ee::db::{CreateMemoryLinkInput, DbConnection, MemoryLinkRelation, MemoryLinkSource};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -77,6 +78,62 @@ fn init_workspace(workspace_arg: &str) -> TestResult {
     )
 }
 
+fn remember(workspace_arg: &str, content: &str) -> Result<String, String> {
+    let output = run_ee(&[
+        "--workspace",
+        workspace_arg,
+        "--json",
+        "remember",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        content,
+    ])?;
+    if !output.status.success() {
+        return Err(format!(
+            "remember failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    let parsed: Value =
+        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+    parsed["data"]["public_id"]
+        .as_str()
+        .or_else(|| parsed["data"]["memory_id"].as_str())
+        .or_else(|| parsed["data"]["id"].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            format!(
+                "remember response missing memory id: {}",
+                serde_json::to_string(&parsed).unwrap_or_default()
+            )
+        })
+}
+
+fn insert_link(database_path: &std::path::Path, link_id: &str, src: &str, dst: &str) -> TestResult {
+    let connection = DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+    connection
+        .insert_memory_link(
+            link_id,
+            &CreateMemoryLinkInput {
+                src_memory_id: src.to_owned(),
+                dst_memory_id: dst.to_owned(),
+                relation: MemoryLinkRelation::Supports,
+                weight: 0.9,
+                confidence: 0.8,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: Some("2026-05-01T00:00:00Z".to_string()),
+                source: MemoryLinkSource::Human,
+                created_by: Some("e2e-graph-feature-enrichment-pin".to_string()),
+                metadata_json: None,
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
 fn run_feature_enrichment(workspace_arg: &str, extra: &[&str]) -> Result<(Output, Value), String> {
     let mut args: Vec<&str> = vec![
         "--workspace",
@@ -90,6 +147,54 @@ fn run_feature_enrichment(workspace_arg: &str, extra: &[&str]) -> Result<(Output
     let parsed: Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("graph feature-enrichment stdout must be JSON: {error}"))?;
     Ok((output, parsed))
+}
+
+fn refresh_centrality(workspace_arg: &str) -> Result<(Output, Value), String> {
+    let output = run_ee(&[
+        "--workspace",
+        workspace_arg,
+        "--json",
+        "graph",
+        "centrality-refresh",
+    ])?;
+    let parsed: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("graph centrality-refresh stdout must be JSON: {error}"))?;
+    Ok((output, parsed))
+}
+
+fn seed_feature_enrichment_graph() -> Result<(PathBuf, String), String> {
+    let workspace = unique_workspace("dry-run-snapshot")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    init_workspace(&workspace_arg)?;
+
+    let alpha = remember(&workspace_arg, "Pin-test feature enrichment alpha node.")?;
+    let beta = remember(&workspace_arg, "Pin-test feature enrichment beta node.")?;
+    let gamma = remember(&workspace_arg, "Pin-test feature enrichment gamma node.")?;
+    let database_path = workspace.join(".ee").join("ee.db");
+
+    insert_link(
+        &database_path,
+        "link_0000000000000000000feat001",
+        &alpha,
+        &beta,
+    )?;
+    insert_link(
+        &database_path,
+        "link_0000000000000000000feat002",
+        &beta,
+        &gamma,
+    )?;
+    insert_link(
+        &database_path,
+        "link_0000000000000000000feat003",
+        &gamma,
+        &alpha,
+    )?;
+
+    Ok((workspace, workspace_arg))
 }
 
 fn assert_usage_error(parsed: &Value, message_needles: &[&str], repair_needle: &str) -> TestResult {
@@ -111,6 +216,73 @@ fn assert_usage_error(parsed: &Value, message_needles: &[&str], repair_needle: &
         format!("usage repair must contain {repair_needle:?}; got {repair}"),
     )?;
     Ok(())
+}
+
+#[test]
+fn graph_feature_enrichment_dry_run_uses_persisted_snapshot() -> TestResult {
+    let (_workspace, workspace_arg) = seed_feature_enrichment_graph()?;
+    let (refresh_output, _) = refresh_centrality(&workspace_arg)?;
+    ensure(
+        refresh_output.status.success(),
+        format!(
+            "centrality-refresh must succeed before feature enrichment; stdout={} stderr={}",
+            String::from_utf8_lossy(&refresh_output.stdout),
+            String::from_utf8_lossy(&refresh_output.stderr)
+        ),
+    )?;
+
+    let (output, parsed) =
+        run_feature_enrichment(&workspace_arg, &["--dry-run", "--max-features", "2"])?;
+    ensure(
+        output.status.success(),
+        format!(
+            "feature-enrichment --dry-run must succeed; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+
+    let data = &parsed["data"];
+    ensure(
+        data["schema"].as_str() == Some("ee.graph.feature_enrichment.v1"),
+        format!("feature enrichment schema must be stable; got {data}"),
+    )?;
+    ensure(
+        data["status"].as_str() == Some("enriched"),
+        format!("dry-run must report real enriched features from the snapshot; got {data}"),
+    )?;
+    ensure(
+        data["sourceStatus"].as_str() == Some("refreshed"),
+        format!("dry-run source status must come from refreshed centrality; got {data}"),
+    )?;
+    ensure(
+        data["source"]["kind"].as_str() == Some("graph_snapshot"),
+        format!("dry-run must use the persisted graph snapshot source; got {data}"),
+    )?;
+    ensure(
+        data["source"]["snapshot"].is_object(),
+        format!("dry-run must include the persisted snapshot witness; got {data}"),
+    )?;
+    let features = data["features"]
+        .as_array()
+        .ok_or_else(|| format!("features must be an array; got {data}"))?;
+    ensure(
+        !features.is_empty(),
+        "dry-run should emit real graph features",
+    )?;
+    ensure(
+        features
+            .iter()
+            .all(|feature| feature["memoryId"].as_str().is_some()),
+        format!("every feature must identify a memory; got {features:?}"),
+    )?;
+    let degraded = data["degraded"]
+        .as_array()
+        .ok_or_else(|| format!("degraded must be an array; got {data}"))?;
+    ensure(
+        degraded.is_empty(),
+        format!("dry-run over a refreshed snapshot must not degrade; got {degraded:?}"),
+    )
 }
 
 #[test]
