@@ -497,6 +497,468 @@ pub enum ResourceReplayPosture {
     Unknown,
 }
 
+pub const RESOURCE_QUEUE_PRESSURE_REDACTION_POSTURE: &str =
+    "counts_ids_statuses_hashes_only_no_mail_body_no_command_argv_no_absolute_paths";
+pub const RESOURCE_QUEUE_PRESSURE_MAX_SOURCE_REFS: usize = 12;
+pub const RESOURCE_QUEUE_PRESSURE_BOUNDED_PREVIEW_MAX_CHARS: usize = 160;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceQueuePressureLevel {
+    Idle,
+    Low,
+    Moderate,
+    Saturated,
+    Unknown,
+}
+
+impl ResourceQueuePressureLevel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Low => "low",
+            Self::Moderate => "moderate",
+            Self::Saturated => "saturated",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceQueuePressureReasonCode {
+    RchLaneBusy,
+    RchTelemetryGap,
+    ActiveBuildSlotExhausted,
+    StaleInProgressBead,
+    AgentMailUnavailable,
+    AgentMailRecoveryCorrupt,
+    DirtyCheckoutSaturated,
+    LocalCargoRefused,
+    OutputBudgetPressure,
+    HostCalibrationMissing,
+    ContradictorySourceState,
+}
+
+impl ResourceQueuePressureReasonCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RchLaneBusy => "rch_lane_busy",
+            Self::RchTelemetryGap => "rch_telemetry_gap",
+            Self::ActiveBuildSlotExhausted => "active_build_slot_exhausted",
+            Self::StaleInProgressBead => "stale_in_progress_bead",
+            Self::AgentMailUnavailable => "agent_mail_unavailable",
+            Self::AgentMailRecoveryCorrupt => "agent_mail_recovery_corrupt",
+            Self::DirtyCheckoutSaturated => "dirty_checkout_saturated",
+            Self::LocalCargoRefused => "local_cargo_refused",
+            Self::OutputBudgetPressure => "output_budget_pressure",
+            Self::HostCalibrationMissing => "host_calibration_missing",
+            Self::ContradictorySourceState => "contradictory_source_state",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 11] {
+        [
+            Self::RchLaneBusy,
+            Self::RchTelemetryGap,
+            Self::ActiveBuildSlotExhausted,
+            Self::StaleInProgressBead,
+            Self::AgentMailUnavailable,
+            Self::AgentMailRecoveryCorrupt,
+            Self::DirtyCheckoutSaturated,
+            Self::LocalCargoRefused,
+            Self::OutputBudgetPressure,
+            Self::HostCalibrationMissing,
+            Self::ContradictorySourceState,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceQueuePressureSourceKind {
+    RchStatus,
+    RchSelectorAdmissionProbe,
+    BuildSlotLease,
+    BeadsInProgressSummary,
+    AgentMailHealth,
+    AgentMailRecoveryProbe,
+    GitDirtySummary,
+    LocalCargoTripwire,
+    OutputBudgetGovernor,
+    HostCalibrationPosture,
+    SourceAuthoritySnapshot,
+    ManualFixture,
+}
+
+impl ResourceQueuePressureSourceKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RchStatus => "rch_status",
+            Self::RchSelectorAdmissionProbe => "rch_selector_admission_probe",
+            Self::BuildSlotLease => "build_slot_lease",
+            Self::BeadsInProgressSummary => "beads_in_progress_summary",
+            Self::AgentMailHealth => "agent_mail_health",
+            Self::AgentMailRecoveryProbe => "agent_mail_recovery_probe",
+            Self::GitDirtySummary => "git_dirty_summary",
+            Self::LocalCargoTripwire => "local_cargo_tripwire",
+            Self::OutputBudgetGovernor => "output_budget_governor",
+            Self::HostCalibrationPosture => "host_calibration_posture",
+            Self::SourceAuthoritySnapshot => "source_authority_snapshot",
+            Self::ManualFixture => "manual_fixture",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 12] {
+        [
+            Self::RchStatus,
+            Self::RchSelectorAdmissionProbe,
+            Self::BuildSlotLease,
+            Self::BeadsInProgressSummary,
+            Self::AgentMailHealth,
+            Self::AgentMailRecoveryProbe,
+            Self::GitDirtySummary,
+            Self::LocalCargoTripwire,
+            Self::OutputBudgetGovernor,
+            Self::HostCalibrationPosture,
+            Self::SourceAuthoritySnapshot,
+            Self::ManualFixture,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceQueuePressureSourceState {
+    Fresh,
+    Partial,
+    Degraded,
+    Unavailable,
+    Corrupt,
+    Stale,
+    Contradictory,
+}
+
+impl ResourceQueuePressureSourceState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Partial => "partial",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+            Self::Corrupt => "corrupt",
+            Self::Stale => "stale",
+            Self::Contradictory => "contradictory",
+        }
+    }
+
+    #[must_use]
+    pub const fn freshness(self) -> &'static str {
+        match self {
+            Self::Fresh | Self::Partial | Self::Degraded => "fresh",
+            Self::Unavailable | Self::Corrupt => "unavailable",
+            Self::Stale => "stale",
+            Self::Contradictory => "contradictory",
+        }
+    }
+
+    #[must_use]
+    pub const fn evidence_state(self) -> &'static str {
+        match self {
+            Self::Fresh | Self::Partial | Self::Degraded | Self::Stale => "observed",
+            Self::Unavailable => "unavailable",
+            Self::Corrupt => "corrupt",
+            Self::Contradictory => "contradictory",
+        }
+    }
+
+    #[must_use]
+    pub const fn confidence(self) -> &'static str {
+        match self {
+            Self::Fresh => "high",
+            Self::Partial | Self::Degraded => "medium",
+            Self::Unavailable | Self::Corrupt | Self::Stale | Self::Contradictory => "low",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_untrusted(self) -> bool {
+        matches!(
+            self,
+            Self::Unavailable | Self::Corrupt | Self::Stale | Self::Contradictory
+        )
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 7] {
+        [
+            Self::Fresh,
+            Self::Partial,
+            Self::Degraded,
+            Self::Unavailable,
+            Self::Corrupt,
+            Self::Stale,
+            Self::Contradictory,
+        ]
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceQueuePressureSourceRef {
+    pub kind: ResourceQueuePressureSourceKind,
+    pub source_schema: Option<&'static str>,
+    pub state: ResourceQueuePressureSourceState,
+    pub reason_code: Option<ResourceQueuePressureReasonCode>,
+    pub hash: Option<String>,
+    pub bounded_preview: Option<String>,
+}
+
+impl ResourceQueuePressureSourceRef {
+    #[must_use]
+    pub const fn new(
+        kind: ResourceQueuePressureSourceKind,
+        state: ResourceQueuePressureSourceState,
+    ) -> Self {
+        Self {
+            kind,
+            source_schema: None,
+            state,
+            reason_code: None,
+            hash: None,
+            bounded_preview: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_source_schema(mut self, source_schema: &'static str) -> Self {
+        self.source_schema = Some(source_schema);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_reason_code(mut self, reason_code: ResourceQueuePressureReasonCode) -> Self {
+        self.reason_code = Some(reason_code);
+        self
+    }
+
+    #[must_use]
+    pub fn with_hash(mut self, hash: impl Into<String>) -> Self {
+        self.hash = Some(hash.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_bounded_preview(mut self, preview: impl AsRef<str>) -> Self {
+        self.bounded_preview = Some(truncate_bounded_preview(preview.as_ref()));
+        self
+    }
+
+    #[must_use]
+    pub const fn source_label(&self) -> &'static str {
+        self.kind.as_str()
+    }
+
+    #[must_use]
+    pub const fn freshness(&self) -> &'static str {
+        self.state.freshness()
+    }
+
+    #[must_use]
+    pub const fn evidence_state(&self) -> &'static str {
+        self.state.evidence_state()
+    }
+
+    #[must_use]
+    pub const fn confidence(&self) -> &'static str {
+        self.state.confidence()
+    }
+
+    #[must_use]
+    pub const fn resolved_reason_code(&self) -> Option<ResourceQueuePressureReasonCode> {
+        match self.reason_code {
+            Some(reason_code) => Some(reason_code),
+            None => default_queue_pressure_reason(self.kind, self.state),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceQueuePressureInventory {
+    source_refs: Vec<ResourceQueuePressureSourceRef>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceQueuePressureReport {
+    pub level: ResourceQueuePressureLevel,
+    pub can_authorize_claim: bool,
+    pub reason_codes: Vec<String>,
+    pub abstained_sources: Vec<String>,
+    pub source_refs: Vec<ResourceQueuePressureSourceRef>,
+    pub redaction_posture: &'static str,
+}
+
+impl ResourceQueuePressureInventory {
+    #[must_use]
+    pub fn new(source_refs: Vec<ResourceQueuePressureSourceRef>) -> Self {
+        Self {
+            source_refs: source_refs
+                .into_iter()
+                .take(RESOURCE_QUEUE_PRESSURE_MAX_SOURCE_REFS)
+                .collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn source_refs(&self) -> &[ResourceQueuePressureSourceRef] {
+        &self.source_refs
+    }
+
+    #[must_use]
+    pub fn report(&self) -> ResourceQueuePressureReport {
+        ResourceQueuePressureReport {
+            level: self.level(),
+            can_authorize_claim: false,
+            reason_codes: self.reason_codes(),
+            abstained_sources: self.abstained_sources(),
+            source_refs: self.source_refs.clone(),
+            redaction_posture: self.redaction_posture(),
+        }
+    }
+
+    #[must_use]
+    pub fn level(&self) -> ResourceQueuePressureLevel {
+        if self.source_refs.is_empty()
+            || self
+                .source_refs
+                .iter()
+                .any(|source_ref| source_ref.state.is_untrusted())
+        {
+            return ResourceQueuePressureLevel::Unknown;
+        }
+
+        let reason_codes = self.resolved_reason_code_values();
+        if reason_codes.iter().any(|reason_code| {
+            matches!(
+                reason_code,
+                ResourceQueuePressureReasonCode::ActiveBuildSlotExhausted
+                    | ResourceQueuePressureReasonCode::DirtyCheckoutSaturated
+                    | ResourceQueuePressureReasonCode::RchLaneBusy
+            )
+        }) {
+            ResourceQueuePressureLevel::Saturated
+        } else if reason_codes.iter().any(|reason_code| {
+            matches!(
+                reason_code,
+                ResourceQueuePressureReasonCode::LocalCargoRefused
+                    | ResourceQueuePressureReasonCode::OutputBudgetPressure
+                    | ResourceQueuePressureReasonCode::StaleInProgressBead
+            )
+        }) {
+            ResourceQueuePressureLevel::Moderate
+        } else if self.source_refs.iter().any(|source_ref| {
+            matches!(
+                source_ref.state,
+                ResourceQueuePressureSourceState::Partial
+                    | ResourceQueuePressureSourceState::Degraded
+            )
+        }) {
+            ResourceQueuePressureLevel::Low
+        } else {
+            ResourceQueuePressureLevel::Idle
+        }
+    }
+
+    #[must_use]
+    pub fn reason_codes(&self) -> Vec<String> {
+        let mut reason_codes = Vec::new();
+        for reason_code in self.resolved_reason_code_values() {
+            push_unique(&mut reason_codes, reason_code.as_str());
+        }
+        reason_codes
+    }
+
+    #[must_use]
+    pub fn abstained_sources(&self) -> Vec<String> {
+        let mut sources = Vec::new();
+        for source_ref in &self.source_refs {
+            if source_ref.state.is_untrusted() {
+                push_unique(&mut sources, source_ref.kind.as_str());
+            }
+        }
+        sources
+    }
+
+    #[must_use]
+    pub const fn redaction_posture(&self) -> &'static str {
+        RESOURCE_QUEUE_PRESSURE_REDACTION_POSTURE
+    }
+
+    fn resolved_reason_code_values(&self) -> Vec<ResourceQueuePressureReasonCode> {
+        let mut reason_codes = Vec::new();
+        for source_ref in &self.source_refs {
+            if let Some(reason_code) = source_ref.resolved_reason_code() {
+                push_reason_unique(&mut reason_codes, reason_code);
+            }
+            if source_ref.state == ResourceQueuePressureSourceState::Contradictory {
+                push_reason_unique(
+                    &mut reason_codes,
+                    ResourceQueuePressureReasonCode::ContradictorySourceState,
+                );
+            }
+        }
+        reason_codes
+    }
+}
+
+fn truncate_bounded_preview(preview: &str) -> String {
+    preview
+        .chars()
+        .take(RESOURCE_QUEUE_PRESSURE_BOUNDED_PREVIEW_MAX_CHARS)
+        .collect()
+}
+
+const fn default_queue_pressure_reason(
+    kind: ResourceQueuePressureSourceKind,
+    state: ResourceQueuePressureSourceState,
+) -> Option<ResourceQueuePressureReasonCode> {
+    use ResourceQueuePressureReasonCode as Reason;
+    use ResourceQueuePressureSourceKind as Kind;
+    use ResourceQueuePressureSourceState as State;
+
+    match (kind, state) {
+        (_, State::Contradictory) => Some(Reason::ContradictorySourceState),
+        (Kind::AgentMailRecoveryProbe, State::Corrupt) => Some(Reason::AgentMailRecoveryCorrupt),
+        (Kind::AgentMailHealth, State::Unavailable | State::Degraded) => {
+            Some(Reason::AgentMailUnavailable)
+        }
+        (Kind::RchStatus | Kind::RchSelectorAdmissionProbe, State::Partial | State::Degraded)
+        | (Kind::RchStatus | Kind::RchSelectorAdmissionProbe, State::Unavailable | State::Stale)
+        | (Kind::BuildSlotLease, State::Unavailable) => Some(Reason::RchTelemetryGap),
+        (Kind::BuildSlotLease, State::Degraded) => Some(Reason::ActiveBuildSlotExhausted),
+        (Kind::BeadsInProgressSummary, State::Stale) => Some(Reason::StaleInProgressBead),
+        (Kind::GitDirtySummary, State::Degraded) => Some(Reason::DirtyCheckoutSaturated),
+        (Kind::LocalCargoTripwire, State::Degraded | State::Unavailable | State::Stale) => {
+            Some(Reason::LocalCargoRefused)
+        }
+        (Kind::OutputBudgetGovernor, State::Degraded | State::Partial) => {
+            Some(Reason::OutputBudgetPressure)
+        }
+        (Kind::HostCalibrationPosture, State::Unavailable) => Some(Reason::HostCalibrationMissing),
+        _ => None,
+    }
+}
+
+fn push_reason_unique(
+    values: &mut Vec<ResourceQueuePressureReasonCode>,
+    value: ResourceQueuePressureReasonCode,
+) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResourceAdmissionInput {
     pub requested_profile: Option<ResourceOperatingProfile>,
@@ -2327,6 +2789,223 @@ mod tests {
 
         assert_eq!(config.mode, ShadowMode::CompareLogAlert);
         assert!((config.quality_threshold - 0.10).abs() < 0.001);
+    }
+
+    #[test]
+    fn queue_pressure_source_states_are_schema_bounded() {
+        let cases = [
+            (
+                ResourceQueuePressureSourceState::Fresh,
+                "fresh",
+                "fresh",
+                "observed",
+                "high",
+                false,
+            ),
+            (
+                ResourceQueuePressureSourceState::Partial,
+                "partial",
+                "fresh",
+                "observed",
+                "medium",
+                false,
+            ),
+            (
+                ResourceQueuePressureSourceState::Degraded,
+                "degraded",
+                "fresh",
+                "observed",
+                "medium",
+                false,
+            ),
+            (
+                ResourceQueuePressureSourceState::Unavailable,
+                "unavailable",
+                "unavailable",
+                "unavailable",
+                "low",
+                true,
+            ),
+            (
+                ResourceQueuePressureSourceState::Corrupt,
+                "corrupt",
+                "unavailable",
+                "corrupt",
+                "low",
+                true,
+            ),
+            (
+                ResourceQueuePressureSourceState::Stale,
+                "stale",
+                "stale",
+                "observed",
+                "low",
+                true,
+            ),
+            (
+                ResourceQueuePressureSourceState::Contradictory,
+                "contradictory",
+                "contradictory",
+                "contradictory",
+                "low",
+                true,
+            ),
+        ];
+
+        assert_eq!(ResourceQueuePressureSourceState::all().len(), cases.len());
+        for (state, label, freshness, evidence_state, confidence, untrusted) in cases {
+            assert_eq!(state.as_str(), label);
+            assert_eq!(state.freshness(), freshness);
+            assert_eq!(state.evidence_state(), evidence_state);
+            assert_eq!(state.confidence(), confidence);
+            assert_eq!(state.is_untrusted(), untrusted);
+        }
+    }
+
+    #[test]
+    fn queue_pressure_taxonomy_matches_schema_codes() {
+        let reason_codes: Vec<_> = ResourceQueuePressureReasonCode::all()
+            .iter()
+            .map(|reason_code| reason_code.as_str())
+            .collect();
+        assert_eq!(
+            reason_codes,
+            vec![
+                "rch_lane_busy",
+                "rch_telemetry_gap",
+                "active_build_slot_exhausted",
+                "stale_in_progress_bead",
+                "agent_mail_unavailable",
+                "agent_mail_recovery_corrupt",
+                "dirty_checkout_saturated",
+                "local_cargo_refused",
+                "output_budget_pressure",
+                "host_calibration_missing",
+                "contradictory_source_state",
+            ]
+        );
+
+        let source_kinds: Vec<_> = ResourceQueuePressureSourceKind::all()
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect();
+        assert_eq!(
+            source_kinds,
+            vec![
+                "rch_status",
+                "rch_selector_admission_probe",
+                "build_slot_lease",
+                "beads_in_progress_summary",
+                "agent_mail_health",
+                "agent_mail_recovery_probe",
+                "git_dirty_summary",
+                "local_cargo_tripwire",
+                "output_budget_governor",
+                "host_calibration_posture",
+                "source_authority_snapshot",
+                "manual_fixture",
+            ]
+        );
+    }
+
+    #[test]
+    fn queue_pressure_agent_mail_green_health_does_not_hide_recovery_corrupt() {
+        let inventory = ResourceQueuePressureInventory::new(vec![
+            ResourceQueuePressureSourceRef::new(
+                ResourceQueuePressureSourceKind::AgentMailHealth,
+                ResourceQueuePressureSourceState::Fresh,
+            )
+            .with_source_schema("ee.agent_mail.snapshot.v1")
+            .with_hash("blake3:agent-mail-health-green"),
+            ResourceQueuePressureSourceRef::new(
+                ResourceQueuePressureSourceKind::AgentMailRecoveryProbe,
+                ResourceQueuePressureSourceState::Corrupt,
+            )
+            .with_source_schema("ee.agent_mail.snapshot.v1")
+            .with_bounded_preview("recovery.mode=corrupt"),
+        ]);
+
+        let report = inventory.report();
+        assert_eq!(report.level, ResourceQueuePressureLevel::Unknown);
+        assert!(!report.can_authorize_claim);
+        assert_eq!(report.reason_codes, vec!["agent_mail_recovery_corrupt"]);
+        assert_eq!(report.abstained_sources, vec!["agent_mail_recovery_probe"]);
+        assert_eq!(
+            report.redaction_posture,
+            RESOURCE_QUEUE_PRESSURE_REDACTION_POSTURE
+        );
+    }
+
+    #[test]
+    fn queue_pressure_beads_clean_plus_doctor_external_changes_is_contradictory() {
+        let inventory = ResourceQueuePressureInventory::new(vec![
+            ResourceQueuePressureSourceRef::new(
+                ResourceQueuePressureSourceKind::BeadsInProgressSummary,
+                ResourceQueuePressureSourceState::Fresh,
+            )
+            .with_bounded_preview("br sync status clean"),
+            ResourceQueuePressureSourceRef::new(
+                ResourceQueuePressureSourceKind::SourceAuthoritySnapshot,
+                ResourceQueuePressureSourceState::Contradictory,
+            )
+            .with_bounded_preview("doctor=external_changes_pending_import"),
+        ]);
+
+        let report = inventory.report();
+        assert_eq!(report.level, ResourceQueuePressureLevel::Unknown);
+        assert_eq!(report.reason_codes, vec!["contradictory_source_state"]);
+        assert_eq!(report.abstained_sources, vec!["source_authority_snapshot"]);
+    }
+
+    #[test]
+    fn queue_pressure_rch_idle_lists_with_exhausted_slots_are_saturated() {
+        let inventory = ResourceQueuePressureInventory::new(vec![
+            ResourceQueuePressureSourceRef::new(
+                ResourceQueuePressureSourceKind::RchStatus,
+                ResourceQueuePressureSourceState::Fresh,
+            )
+            .with_bounded_preview("active_builds=0 queued_builds=0"),
+            ResourceQueuePressureSourceRef::new(
+                ResourceQueuePressureSourceKind::BuildSlotLease,
+                ResourceQueuePressureSourceState::Degraded,
+            )
+            .with_bounded_preview("available_slots=0 worker_used_slots=4/4"),
+        ]);
+
+        let report = inventory.report();
+        assert_eq!(report.level, ResourceQueuePressureLevel::Saturated);
+        assert_eq!(report.reason_codes, vec!["active_build_slot_exhausted"]);
+        assert!(report.abstained_sources.is_empty());
+    }
+
+    #[test]
+    fn queue_pressure_dirty_checkout_saturation_is_bounded() {
+        let long_preview = "x".repeat(RESOURCE_QUEUE_PRESSURE_BOUNDED_PREVIEW_MAX_CHARS + 32);
+        let many_sources = (0..(RESOURCE_QUEUE_PRESSURE_MAX_SOURCE_REFS + 3))
+            .map(|_| {
+                ResourceQueuePressureSourceRef::new(
+                    ResourceQueuePressureSourceKind::GitDirtySummary,
+                    ResourceQueuePressureSourceState::Degraded,
+                )
+                .with_bounded_preview(&long_preview)
+            })
+            .collect();
+        let inventory = ResourceQueuePressureInventory::new(many_sources);
+
+        let report = inventory.report();
+        assert_eq!(report.level, ResourceQueuePressureLevel::Saturated);
+        assert_eq!(report.reason_codes, vec!["dirty_checkout_saturated"]);
+        assert_eq!(
+            report.source_refs.len(),
+            RESOURCE_QUEUE_PRESSURE_MAX_SOURCE_REFS
+        );
+        assert_eq!(
+            report.source_refs[0]
+                .bounded_preview
+                .as_ref()
+                .map(String::len),
+            Some(RESOURCE_QUEUE_PRESSURE_BOUNDED_PREVIEW_MAX_CHARS)
+        );
     }
 
     mod pack_tests {
