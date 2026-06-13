@@ -102,6 +102,7 @@ const RCH_REQUIRED_FIELDS: &[&str] = &[
 ];
 const GRAPH_SNAPSHOT_REQUIRED_FIELDS: &[&str] =
     &["ageMs", "refreshedCount", "refreshLockWaitMsP99"];
+const NULLABLE_GRAPH_SNAPSHOT_METRIC_FIELDS: &[&str] = &["refreshLockWaitMsP99"];
 const HOST_PRESSURE_REQUIRED_FIELDS: &[&str] = &[
     "cpuUserPct",
     "cpuIowaitPct",
@@ -316,6 +317,20 @@ fn l2_cache_metrics_allow_explicit_null_when_unmeasured() -> TestResult {
             &l2_cache_schema["properties"][field],
             &["integer", "null"],
             format!("$defs.l2Cache.properties.{field}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn graph_snapshot_metrics_allow_explicit_null_when_unmeasured() -> TestResult {
+    let schema = load_schema()?;
+    let graph_snapshot_schema = resolve_ref(&schema, &schema["properties"]["graphSnapshot"]);
+    for field in NULLABLE_GRAPH_SNAPSHOT_METRIC_FIELDS {
+        ensure_schema_type_set(
+            &graph_snapshot_schema["properties"][field],
+            &["integer", "null"],
+            format!("$defs.graphSnapshot.properties.{field}"),
         )?;
     }
     Ok(())

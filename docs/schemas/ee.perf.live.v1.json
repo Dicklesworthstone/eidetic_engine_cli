@@ -142,7 +142,7 @@
       "properties": {
         "ageMs": { "type": ["integer", "null"], "minimum": 0 },
         "refreshedCount": { "type": "integer", "minimum": 0 },
-        "refreshLockWaitMsP99": { "type": "integer", "minimum": 0 }
+        "refreshLockWaitMsP99": { "type": ["integer", "null"], "minimum": 0 }
       }
     },
     "hostPressure": {

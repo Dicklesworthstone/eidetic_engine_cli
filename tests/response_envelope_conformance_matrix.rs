@@ -416,7 +416,7 @@ fn perf_live_sample() -> Value {
         "graphSnapshot": {
             "ageMs": null,
             "refreshedCount": 0,
-            "refreshLockWaitMsP99": 0
+            "refreshLockWaitMsP99": null
         },
         "hostPressure": {
             "cpuUserPct": null,

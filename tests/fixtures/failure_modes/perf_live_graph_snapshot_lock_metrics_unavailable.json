@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "perf_live_graph_snapshot_lock_metrics_unavailable",
+  "introduced_by": {
+    "bead": "bd-z5knh",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "perf live",
+    "perf snapshot"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Perf-live can derive graph snapshot freshness from status but no graph refresh lock-wait histogram is published.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee perf snapshot --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "perf_live_graph_snapshot_lock_metrics_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "Graph snapshot freshness",
+      "refresh lock-wait p99"
+    ],
+    "repair_contains": "graph snapshot refresh lock-wait telemetry"
+  }
+}

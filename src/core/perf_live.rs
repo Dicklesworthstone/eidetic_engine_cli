@@ -177,7 +177,7 @@ pub struct PerfLiveRch {
 pub struct PerfLiveGraphSnapshot {
     pub age_ms: Option<u64>,
     pub refreshed_count: u64,
-    pub refresh_lock_wait_ms_p99: u64,
+    pub refresh_lock_wait_ms_p99: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -306,7 +306,7 @@ pub fn collect_perf_live_snapshot<R: SwarmBriefCommandRunner>(
         runner,
         &mut degraded,
     );
-    let graph_snapshot = graph_snapshot(&status);
+    let graph_snapshot = graph_snapshot(&status, &mut degraded);
     let host_pressure = host_pressure(&mut degraded);
     let bead_activity = bead_activity(
         &options.workspace,
@@ -400,7 +400,10 @@ fn l2_cache_snapshot(
     }
 }
 
-fn graph_snapshot(status: &StatusReport) -> PerfLiveGraphSnapshot {
+fn graph_snapshot(
+    status: &StatusReport,
+    degraded: &mut Vec<PerfLiveDegradation>,
+) -> PerfLiveGraphSnapshot {
     let refreshed_count = if matches!(
         status.graph_snapshot_artifact.status,
         DerivedAssetStatus::Current
@@ -414,10 +417,16 @@ fn graph_snapshot(status: &StatusReport) -> PerfLiveGraphSnapshot {
         .last_built_at
         .as_deref()
         .and_then(age_ms_since_rfc3339);
+    degraded.push(PerfLiveDegradation::warning(
+        "perf_live_graph_snapshot_lock_metrics_unavailable",
+        "graphSnapshot",
+        "Graph snapshot freshness is available but refresh lock-wait p99 is not published.",
+        Some("Wire graph snapshot refresh lock-wait telemetry into perf live.".to_owned()),
+    ));
     PerfLiveGraphSnapshot {
         age_ms,
         refreshed_count,
-        refresh_lock_wait_ms_p99: 0,
+        refresh_lock_wait_ms_p99: None,
     }
 }
 
@@ -717,9 +726,48 @@ fn usize_to_u64(value: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::time::{Duration, Instant};
 
     use super::*;
     use crate::core::swarm_brief::{SwarmBriefCommandOutput, SwarmBriefCommandRunner};
+
+    const BOUNDED_TEST_FSYNC_SAMPLES: usize = 1;
+    const BOUNDED_TEST_FSYNC_TIMEOUT: Duration = Duration::from_secs(90);
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct BoundedFsyncFixture {
+        samples: usize,
+        p99_ms: u64,
+    }
+
+    fn one_sample_fsync_latency_fixture() -> Result<BoundedFsyncFixture, String> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("rust-toolchain.toml");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let sample = (|| -> Result<Duration, String> {
+                let file = std::fs::File::open(&path)
+                    .map_err(|error| format!("open {}: {error}", path.display()))?;
+                let start = Instant::now();
+                file.sync_all()
+                    .map_err(|error| format!("sync_all {}: {error}", path.display()))?;
+                Ok(start.elapsed())
+            })();
+            let _ = sender.send(sample);
+        });
+
+        let elapsed = receiver
+            .recv_timeout(BOUNDED_TEST_FSYNC_TIMEOUT)
+            .map_err(|_| {
+                format!(
+                    "bounded fsync fixture exceeded {}ms",
+                    BOUNDED_TEST_FSYNC_TIMEOUT.as_millis()
+                )
+            })??;
+        Ok(BoundedFsyncFixture {
+            samples: BOUNDED_TEST_FSYNC_SAMPLES,
+            p99_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        })
+    }
 
     #[derive(Default)]
     struct FakeRunner {
@@ -844,7 +892,18 @@ mod tests {
     }
 
     #[test]
-    fn host_pressure_does_not_fake_unmeasured_fsync_latency() {
+    fn host_pressure_does_not_fake_unmeasured_fsync_latency() -> Result<(), String> {
+        // Exercise a real fsync measurement path with one bounded sample. The
+        // production perf-live snapshot remains read-only, so it still reports
+        // fsync latency as null until a durable telemetry source is wired.
+        let fsync_fixture = one_sample_fsync_latency_fixture()?;
+        assert_eq!(fsync_fixture.samples, BOUNDED_TEST_FSYNC_SAMPLES);
+        let timeout_ms = u64::try_from(BOUNDED_TEST_FSYNC_TIMEOUT.as_millis()).unwrap_or(u64::MAX);
+        assert!(
+            fsync_fixture.p99_ms < timeout_ms,
+            "bounded fsync fixture should finish below the test timeout"
+        );
+
         let mut degraded = Vec::new();
         let pressure = host_pressure(&mut degraded);
         assert_eq!(pressure.fsync_latency_p99_ms, None);
@@ -853,6 +912,7 @@ mod tests {
                 .iter()
                 .any(|entry| entry.code == "perf_live_host_pressure_partial")
         );
+        Ok(())
     }
 
     #[test]
@@ -922,6 +982,16 @@ mod tests {
                 "expected {field} to serialize as null when no L2 cache counter source is wired"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn graph_snapshot_fixture_serializes_unmeasured_lock_wait_as_null() -> Result<(), String> {
+        let snapshot = PerfLiveGraphSnapshot::default();
+        assert_eq!(snapshot.refresh_lock_wait_ms_p99, None);
+
+        let encoded = serde_json::to_value(&snapshot).map_err(|error| error.to_string())?;
+        assert!(encoded["refreshLockWaitMsP99"].is_null());
         Ok(())
     }
 }
