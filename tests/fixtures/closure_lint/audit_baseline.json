@@ -572,6 +572,27 @@
       "label": "implements-surface",
       "reason": "missing tests/golden/external_derivation_candidates.snap",
       "surface": "external_derivation_candidates"
+    },
+    {
+      "bead": "bd-2pos6.3",
+      "label": "implements-surface",
+      "reason": "close_reason contains abstention language",
+      "surface": "insights_kCore",
+      "note": "false positive: close_reason describes PLACEHOLDER_BACKED_SECTIONS retirement, not a current stub"
+    },
+    {
+      "bead": "bd-2pos6.4",
+      "label": "implements-surface",
+      "reason": "close_reason contains abstention language",
+      "surface": "insights_kTruss",
+      "note": "false positive: close_reason describes placeholder retirement, not a current stub"
+    },
+    {
+      "bead": "bd-2pos6.5",
+      "label": "implements-surface",
+      "reason": "close_reason contains abstention language",
+      "surface": "insights_revisionFrontiers",
+      "note": "false positive: close_reason mentions insights_section_unavailable and placeholder describing what was removed"
     }
   ]
 }
