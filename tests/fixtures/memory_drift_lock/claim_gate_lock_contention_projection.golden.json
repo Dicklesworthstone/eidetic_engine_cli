@@ -1,0 +1,11 @@
+{
+  "schema": "ee.memory_drift.lock_contention.claim_gate_projection.v1",
+  "claimCommandAction": null,
+  "memoryDrift": {
+    "code": "memory_drift_lock_contention",
+    "severity": "warning",
+    "messageContainsBlockedByLock": true,
+    "messageContainsNotInspected": true,
+    "repairMentionsAdvisoryLockDiag": true
+  }
+}
