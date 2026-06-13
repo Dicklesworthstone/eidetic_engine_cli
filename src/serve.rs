@@ -9,8 +9,19 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
+use crate::core::context::{
+    ContextPackOptions, ContextPackOutputOptions, run_context_pack_with_performance,
+};
+use crate::core::doctor::DoctorReport;
 use crate::core::memory::{RememberMemoryOptions, RememberMemoryReport, remember_memory};
-use crate::models::DomainError;
+use crate::core::search::{SearchDedupMode, SearchOptions, SearchSourceMode, run_search};
+use crate::core::subscribe::{SubscribePollOptions, parse_subscribe_filter, poll_memory_deltas};
+use crate::core::swarm_brief::{
+    SwarmBriefCollectOptions, SwarmBriefSourceKind, SystemSwarmBriefCommandRunner,
+    collect_swarm_brief,
+};
+use crate::core::why::{WhyOptions, explain_memory};
+use crate::models::{DomainError, MemoryScope, QueryFilters, RESPONSE_SCHEMA_V2, RedactionLevel};
 use crate::steward::{DaemonForegroundOptions, DaemonForegroundReport, JobRunResult, JobType};
 
 pub const SUBSYSTEM: &str = "serve";
@@ -759,6 +770,53 @@ pub fn serve_auth_failure_envelope(
 
 #[must_use]
 pub fn render_serve_sse_event(event_kind: &str, terminal: bool, payload: &JsonValue) -> String {
+    let request = json!({
+        "requestId": "sse-stream",
+        "method": "GET",
+        "path": "/v1/events",
+        "endpoint": ServeEndpoint::Events.as_str(),
+        "cliEquivalent": ServeEndpoint::Events.cli_equivalent(),
+        "auth": {
+            "required": true,
+            "state": "accepted",
+            "tokenMaterialExposed": false
+        },
+        "bodyBytes": 0,
+        "query": {},
+        "contentLengthRequired": false,
+        "chunkedUploadAccepted": false
+    });
+    render_serve_sse_event_with_metadata(event_kind, terminal, payload, request, 0, 0)
+}
+
+fn render_serve_sse_event_for_request(
+    event_kind: &str,
+    terminal: bool,
+    payload: &JsonValue,
+    request_id: &str,
+    request: &ServeHttpRequest,
+    auth_state: &'static str,
+    elapsed_ms: u64,
+    event_buffer_remaining: usize,
+) -> String {
+    render_serve_sse_event_with_metadata(
+        event_kind,
+        terminal,
+        payload,
+        serve_request_metadata_json(request_id, request, auth_state),
+        elapsed_ms,
+        event_buffer_remaining,
+    )
+}
+
+fn render_serve_sse_event_with_metadata(
+    event_kind: &str,
+    terminal: bool,
+    payload: &JsonValue,
+    request: JsonValue,
+    elapsed_ms: u64,
+    event_buffer_remaining: usize,
+) -> String {
     let wrapped_payload = if matches!(
         payload.get("schema").and_then(JsonValue::as_str),
         Some("ee.response.v2" | "ee.error.v2")
@@ -786,27 +844,12 @@ pub fn render_serve_sse_event(event_kind: &str, terminal: bool, payload: &JsonVa
     let degraded_codes = serve_payload_degraded_codes(&wrapped_payload, payload_schema);
     let event_payload = json!({
         "schema": SERVE_ENDPOINT_SCHEMA_V1,
-        "request": {
-            "requestId": "sse-stream",
-            "method": "GET",
-            "path": "/v1/events",
-            "endpoint": ServeEndpoint::Events.as_str(),
-            "cliEquivalent": ServeEndpoint::Events.cli_equivalent(),
-            "auth": {
-                "required": true,
-                "state": "accepted",
-                "tokenMaterialExposed": false
-            },
-            "bodyBytes": 0,
-            "query": {},
-            "contentLengthRequired": false,
-            "chunkedUploadAccepted": false
-        },
+        "request": request,
         "response": {
             "statusCode": if payload_schema == "ee.error.v2" { 500 } else { 200 },
             "payloadSchema": payload_schema,
             "payload": wrapped_payload,
-            "elapsedMs": 0,
+            "elapsedMs": elapsed_ms,
             "degradedCodes": degraded_codes,
             "volatileTransportFields": ["request.requestId", "response.elapsedMs"]
         },
@@ -814,7 +857,7 @@ pub fn render_serve_sse_event(event_kind: &str, terminal: bool, payload: &JsonVa
             "readOnly": true,
             "eventKind": event_kind,
             "terminal": terminal,
-            "eventBufferRemaining": 0
+            "eventBufferRemaining": event_buffer_remaining
         }
     });
     format!("event: {event_kind}\ndata: {event_payload}\n\n")
@@ -918,11 +961,21 @@ pub fn render_serve_transport_exchange(
     };
 
     if plan.sse_stream {
-        let frame = render_serve_sse_event(
-            "header",
-            false,
-            &serve_dispatch_payload_json(&plan, "transport_only"),
-        );
+        let frame = match serve_sse_payload_for_plan(&plan, &request, limits) {
+            Ok(payload) => render_serve_sse_event_for_request(
+                "complete", true, &payload, request_id, &request, auth_state, elapsed_ms, 0,
+            ),
+            Err(error) => render_serve_sse_event_for_request(
+                "error",
+                true,
+                &serve_error_payload(&error),
+                request_id,
+                &request,
+                auth_state,
+                elapsed_ms,
+                0,
+            ),
+        };
         return render_serve_http_sse_response(&frame);
     }
 
@@ -1302,29 +1355,327 @@ fn serve_error_exchange_envelope(
     })
 }
 
-fn serve_dispatch_payload_json(plan: &ServeDispatchPlan, execution: &'static str) -> JsonValue {
-    json!({
-        "schema": "ee.response.v2",
-        "success": true,
-        "data": {
-            "execution": execution,
-            "executionBoundary": "serve_transport_adapter",
-            "businessLogicExecuted": false,
-            "dispatchPlan": plan.to_json()
-        },
-        "degraded": []
-    })
-}
-
 fn serve_dispatch_payload_for_plan(
     plan: &ServeDispatchPlan,
     request: &ServeHttpRequest,
 ) -> Result<JsonValue, DomainError> {
     match plan.endpoint {
         ServeEndpoint::Status => serve_status_payload_json(),
+        ServeEndpoint::Doctor => serve_doctor_payload_json(),
+        ServeEndpoint::Search => serve_search_payload_json(request),
+        ServeEndpoint::Context => serve_context_payload_json(request),
+        ServeEndpoint::Why => serve_why_payload_json(request),
+        ServeEndpoint::SwarmBrief => serve_swarm_brief_payload_json(),
         ServeEndpoint::DurableWrite => serve_durable_write_payload_json(plan, request),
-        _ => Ok(serve_dispatch_payload_json(plan, "not_started")),
+        ServeEndpoint::Events | ServeEndpoint::Unknown => Err(serve_usage_error(format!(
+            "Endpoint `{}` is not a JSON dispatch endpoint.",
+            plan.endpoint.as_str()
+        ))),
     }
+}
+
+fn serve_sse_payload_for_plan(
+    plan: &ServeDispatchPlan,
+    request: &ServeHttpRequest,
+    limits: &ServeLimits,
+) -> Result<JsonValue, DomainError> {
+    match plan.endpoint {
+        ServeEndpoint::Events => serve_events_payload_json(plan, request, limits),
+        _ => Err(serve_usage_error(format!(
+            "Endpoint `{}` is not an SSE endpoint.",
+            plan.endpoint.as_str()
+        ))),
+    }
+}
+
+fn serve_current_workspace_path() -> Result<PathBuf, DomainError> {
+    std::env::current_dir().map_err(|error| DomainError::Configuration {
+        message: format!("Failed to resolve current workspace for ee serve request: {error}"),
+        repair: Some("Start `ee serve --foreground` from a readable workspace.".to_owned()),
+    })
+}
+
+fn serve_response_payload_from_data(data: JsonValue, degraded: JsonValue) -> JsonValue {
+    json!({
+        "schema": RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": degraded
+    })
+}
+
+fn parse_rendered_response_json(
+    raw: &str,
+    surface: &'static str,
+) -> Result<JsonValue, DomainError> {
+    serde_json::from_str(raw).map_err(|error| DomainError::Storage {
+        message: format!("Failed to parse {surface} JSON response rendered for ee serve: {error}"),
+        repair: Some("Fix the response renderer before serving this endpoint.".to_owned()),
+    })
+}
+
+fn serve_doctor_payload_json() -> Result<JsonValue, DomainError> {
+    let workspace_path = serve_current_workspace_path()?;
+    let report = DoctorReport::gather_for_workspace(&workspace_path);
+    parse_rendered_response_json(&crate::output::render_doctor_json(&report), "doctor")
+}
+
+fn serve_search_payload_json(request: &ServeHttpRequest) -> Result<JsonValue, DomainError> {
+    let workspace_path = serve_current_workspace_path()?;
+    let query = require_single_query_value(request, "q", "/v1/search")?;
+    let report = run_search(&SearchOptions {
+        workspace_path,
+        database_path: None,
+        index_dir: None,
+        query,
+        limit: 10,
+        speed: crate::search::SpeedMode::Default,
+        explain: false,
+        as_of: None,
+        include_tombstoned: false,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
+        relevance_floor: None,
+        dedup_mode: SearchDedupMode::DocId,
+        source_mode: SearchSourceMode::Hybrid,
+        strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+    })
+    .map_err(|error| DomainError::SearchIndex {
+        message: error.to_string(),
+        repair: error.repair_hint().map(str::to_owned),
+    })?;
+    let data = report.data_json();
+    let degraded = data.get("degraded").cloned().unwrap_or_else(|| json!([]));
+    Ok(serve_response_payload_from_data(data, degraded))
+}
+
+fn serve_context_payload_json(request: &ServeHttpRequest) -> Result<JsonValue, DomainError> {
+    let workspace_path = serve_current_workspace_path()?;
+    let task = require_single_query_value(request, "task", "/v1/context")?;
+    let output_options = ContextPackOutputOptions::default();
+    let options = ContextPackOptions {
+        workspace_path,
+        database_path: None,
+        index_dir: None,
+        query: task,
+        speed: crate::search::SpeedMode::Default,
+        source_mode: SearchSourceMode::Hybrid,
+        strict_source_mode: false,
+        filters: QueryFilters::default(),
+        profile: None,
+        max_tokens: None,
+        candidate_pool: None,
+        max_results: None,
+        include_tombstoned: false,
+        as_of: None,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
+        relevance_floor: None,
+        redaction_level: RedactionLevel::Minimal,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        ppr_weight: None,
+        changed_symbols: Vec::new(),
+        changed_symbols_from_git: false,
+        pagination: None,
+        coordination_snapshot_path: None,
+        coordination_stale_after_ms: 0,
+        task_lens: None,
+        require_fresh_sentinels: false,
+        output_options,
+        persist_pack: false,
+        baseline_write: None,
+        no_lod: false,
+    };
+    let response = run_context_pack_with_performance(&options, "pack")
+        .map(|run| run.response)
+        .map_err(serve_context_error_to_domain)?;
+    parse_rendered_response_json(
+        &crate::output::render_context_response_json(&response),
+        "pack",
+    )
+}
+
+fn serve_why_payload_json(request: &ServeHttpRequest) -> Result<JsonValue, DomainError> {
+    let workspace_path = serve_current_workspace_path()?;
+    let memory_id = request
+        .path
+        .strip_prefix("/v1/why/")
+        .filter(|value| !value.trim().is_empty() && !value.contains('/'))
+        .ok_or_else(|| {
+            serve_usage_error(
+                "GET /v1/why/{memory_id} requires exactly one memory ID path segment.",
+            )
+        })?;
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_owned()),
+        });
+    }
+    let report = explain_memory(&WhyOptions {
+        database_path: &database_path,
+        memory_id,
+        confidence_threshold: 0.5,
+    });
+    if let Some(error) = report.error.as_ref() {
+        return Err(DomainError::Storage {
+            message: error.clone(),
+            repair: Some("ee init --workspace . --repair-plan".to_owned()),
+        });
+    }
+    if !report.found {
+        return Err(DomainError::NotFound {
+            resource: "memory".to_owned(),
+            id: memory_id.to_owned(),
+            repair: Some("ee memory list".to_owned()),
+        });
+    }
+    let degraded = why_degraded_entries_json(&report.degraded);
+    Ok(serve_response_payload_from_data(
+        json!({
+            "command": "why",
+            "version": report.version,
+            "memoryId": report.memory_id,
+            "found": report.found,
+            "content": report.content,
+            "storage": report.storage.as_ref().map(why_storage_json),
+            "retrieval": report.retrieval.as_ref().map(why_retrieval_json),
+            "selection": report.selection.as_ref().map(why_selection_json),
+            "degraded": degraded.clone()
+        }),
+        JsonValue::Array(degraded),
+    ))
+}
+
+fn serve_swarm_brief_payload_json() -> Result<JsonValue, DomainError> {
+    let workspace_path = serve_current_workspace_path()?;
+    let mut options = SwarmBriefCollectOptions::for_workspace(workspace_path);
+    options.enabled_sources.insert(SwarmBriefSourceKind::Rch);
+    options.include_rch = true;
+    let runner = SystemSwarmBriefCommandRunner;
+    let report = collect_swarm_brief(&options, &runner);
+    let degraded =
+        serde_json::to_value(&report.degraded).map_err(|error| DomainError::Storage {
+            message: format!("Failed to serialize swarm brief degraded entries: {error}"),
+            repair: Some("Fix the swarm brief serializer before serving this endpoint.".to_owned()),
+        })?;
+    let data = serde_json::to_value(&report).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize swarm brief report: {error}"),
+        repair: Some("Fix the swarm brief serializer before serving this endpoint.".to_owned()),
+    })?;
+    Ok(serve_response_payload_from_data(data, degraded))
+}
+
+fn serve_events_payload_json(
+    plan: &ServeDispatchPlan,
+    request: &ServeHttpRequest,
+    limits: &ServeLimits,
+) -> Result<JsonValue, DomainError> {
+    let workspace_path = serve_current_workspace_path()?;
+    let cursor = optional_query_u64(request, "cursor", "/v1/events")?.unwrap_or(0);
+    let limit = optional_query_u32(request, "limit", "/v1/events")?.unwrap_or_else(|| {
+        u32::try_from(limits.sse_event_buffer)
+            .unwrap_or(u32::MAX)
+            .max(1)
+    });
+    let filter = optional_single_query_value(request, "filter", "/v1/events")?;
+    let filter = parse_subscribe_filter(filter.as_deref())?;
+    let report = poll_memory_deltas(&SubscribePollOptions {
+        workspace_path: &workspace_path,
+        database_path: None,
+        cursor,
+        filter,
+        limit,
+    })?;
+    let degraded =
+        serde_json::to_value(&report.degraded).map_err(|error| DomainError::Storage {
+            message: format!("Failed to serialize subscribe-poll degraded entries: {error}"),
+            repair: Some("Fix the subscribe-poll serializer before serving /v1/events.".to_owned()),
+        })?;
+    let mut data = report.data_json();
+    if let Some(data) = data.as_object_mut() {
+        data.insert(
+            "serve".to_owned(),
+            json!({
+                "executionBoundary": "serve_sse_events",
+                "handlerSurface": plan.handler_surface,
+                "readOnly": true,
+                "terminalFrame": true,
+                "dispatchPlan": plan.to_json()
+            }),
+        );
+    }
+    Ok(serve_response_payload_from_data(data, degraded))
+}
+
+fn serve_context_error_to_domain(error: crate::core::context::ContextPackError) -> DomainError {
+    if error.is_policy_denied() {
+        DomainError::PolicyDenied {
+            message: error.to_string(),
+            repair: error.repair_hint().map(str::to_owned),
+        }
+    } else {
+        DomainError::Storage {
+            message: error.to_string(),
+            repair: error.repair_hint().map(str::to_owned),
+        }
+    }
+}
+
+fn why_storage_json(storage: &crate::core::why::StorageExplanation) -> JsonValue {
+    json!({
+        "origin": &storage.origin,
+        "trustClass": &storage.trust_class,
+        "trustSubclass": &storage.trust_subclass,
+        "provenanceUri": &storage.provenance_uri,
+        "workflowId": &storage.workflow_id,
+        "createdAt": &storage.created_at,
+        "validFrom": &storage.valid_from,
+        "validTo": &storage.valid_to,
+        "validityStatus": &storage.validity_status,
+        "validityWindowKind": &storage.validity_window_kind
+    })
+}
+
+fn why_retrieval_json(retrieval: &crate::core::why::RetrievalExplanation) -> JsonValue {
+    json!({
+        "confidence": retrieval.confidence,
+        "utility": retrieval.utility,
+        "importance": retrieval.importance,
+        "tags": &retrieval.tags,
+        "level": &retrieval.level,
+        "kind": &retrieval.kind
+    })
+}
+
+fn why_selection_json(selection: &crate::core::why::SelectionExplanation) -> JsonValue {
+    json!({
+        "selectionScore": selection.selection_score,
+        "aboveConfidenceThreshold": selection.above_confidence_threshold,
+        "isActive": selection.is_active,
+        "scoreBreakdown": &selection.score_breakdown,
+        "latestPackSelectionPresent": selection.latest_pack_selection.is_some()
+    })
+}
+
+fn why_degraded_entries_json(degraded: &[crate::core::why::WhyDegradation]) -> Vec<JsonValue> {
+    degraded
+        .iter()
+        .map(|entry| {
+            json!({
+                "code": &entry.code,
+                "severity": &entry.severity,
+                "message": &entry.message,
+                "repair": &entry.repair
+            })
+        })
+        .collect()
 }
 
 fn serve_status_code_for_payload_error(error: &DomainError) -> u16 {
@@ -1650,6 +2001,55 @@ fn require_single_query_value(
             "{endpoint_path} requires a `{name}` query parameter."
         ))),
     }
+}
+
+fn optional_single_query_value(
+    request: &ServeHttpRequest,
+    name: &str,
+    endpoint_path: &str,
+) -> Result<Option<String>, DomainError> {
+    match request.query.get(name).map(Vec::as_slice) {
+        Some([value]) if !is_effectively_empty_query_value(value) => Ok(Some(value.clone())),
+        Some([_]) => Err(serve_usage_error(format!(
+            "{endpoint_path} requires a non-empty `{name}` query parameter when provided."
+        ))),
+        Some(_) => Err(serve_usage_error(format!(
+            "{endpoint_path} requires at most one `{name}` query parameter."
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn optional_query_u64(
+    request: &ServeHttpRequest,
+    name: &str,
+    endpoint_path: &str,
+) -> Result<Option<u64>, DomainError> {
+    optional_single_query_value(request, name, endpoint_path)?
+        .map(|raw| {
+            raw.parse::<u64>().map_err(|error| {
+                serve_usage_error(format!(
+                    "{endpoint_path} query parameter `{name}` must be an unsigned integer: {error}."
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn optional_query_u32(
+    request: &ServeHttpRequest,
+    name: &str,
+    endpoint_path: &str,
+) -> Result<Option<u32>, DomainError> {
+    optional_single_query_value(request, name, endpoint_path)?
+        .map(|raw| {
+            raw.parse::<u32>().map_err(|error| {
+                serve_usage_error(format!(
+                    "{endpoint_path} query parameter `{name}` must be an unsigned integer: {error}."
+                ))
+            })
+        })
+        .transpose()
 }
 
 /// bd-2f09u: post-percent-decode emptiness check that treats control
@@ -1990,7 +2390,6 @@ impl DaemonStatusReport {
         })
     }
 }
-
 
 #[must_use]
 pub fn daemon_job_table_path(workspace_path: &Path) -> PathBuf {
@@ -3690,8 +4089,8 @@ mod tests {
     }
 
     #[test]
-    fn serve_transport_exchange_returns_dispatch_envelope_without_executing_business_logic()
-    -> TestResult {
+    fn serve_transport_exchange_executes_search_endpoint_or_returns_real_search_error() -> TestResult
+    {
         let token = "01234567890123456789012345678901";
         let raw = format!(
             "GET /v1/search?q=release+check HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
@@ -3704,11 +4103,6 @@ mod tests {
             11,
         );
 
-        ensure(
-            response.starts_with("HTTP/1.1 200 OK\r\n"),
-            true,
-            "transport status line",
-        )?;
         let (_, body) = split_http_response(&response)?;
         let envelope: JsonValue = serde_json::from_str(body).map_err(|error| error.to_string())?;
         ensure(
@@ -3721,30 +4115,43 @@ mod tests {
             Some("accepted"),
             "accepted auth state",
         )?;
+        let payload = &envelope["response"]["payload"];
+        if response.starts_with("HTTP/1.1 200 OK\r\n") {
+            ensure(
+                payload["schema"].as_str(),
+                Some("ee.response.v2"),
+                "search response schema",
+            )?;
+            ensure(
+                payload["data"]["command"].as_str(),
+                Some("search"),
+                "search command",
+            )?;
+            ensure(
+                payload["data"]["query"].as_str(),
+                Some("release check"),
+                "search query",
+            )?;
+        } else if response.starts_with("HTTP/1.1 500 Internal Server Error\r\n") {
+            ensure(
+                payload["schema"].as_str(),
+                Some("ee.error.v2"),
+                "search error schema",
+            )?;
+            ensure(
+                payload["error"]["code"].as_str(),
+                Some("search_index"),
+                "search error code",
+            )?;
+        } else {
+            return Err(format!(
+                "search endpoint expected 200 or real search-index error, got {response}"
+            ));
+        }
         ensure(
-            envelope["response"]["payload"]["data"]["businessLogicExecuted"].as_bool(),
-            Some(false),
-            "business logic boundary",
-        )?;
-        ensure(
-            envelope["response"]["payload"]["data"]["dispatchPlan"]["handlerSurface"].as_str(),
-            Some("cli.search"),
-            "dispatch handler",
-        )?;
-        ensure(
-            envelope["response"]["payload"]["data"]["dispatchPlan"]["cliArgv"]
-                .as_array()
-                .is_some_and(|argv| {
-                    argv.iter().map(JsonValue::as_str).collect::<Vec<_>>()
-                        == vec![
-                            Some("ee"),
-                            Some("search"),
-                            Some("release check"),
-                            Some("--json"),
-                        ]
-                }),
+            payload["data"]["businessLogicExecuted"].is_null(),
             true,
-            "dispatch argv",
+            "search endpoint must not return the old dispatch-plan-only stub payload",
         )
     }
 
@@ -3953,7 +4360,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_transport_exchange_returns_sse_header_frame_for_events() -> TestResult {
+    fn serve_transport_exchange_returns_terminal_events_sse_frame() -> TestResult {
         let token = "01234567890123456789012345678901";
         let raw = format!(
             "GET /v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
@@ -3977,11 +4384,9 @@ mod tests {
             true,
             "transport sse no content length",
         )?;
-        ensure(
-            body.starts_with("event: header\n"),
-            true,
-            "transport sse header event",
-        )?;
+        let event_is_terminal =
+            body.starts_with("event: complete\n") || body.starts_with("event: error\n");
+        ensure(event_is_terminal, true, "transport sse terminal event")?;
         let data_line = body
             .lines()
             .find_map(|line| line.strip_prefix("data: "))
@@ -3989,10 +4394,43 @@ mod tests {
         let event: JsonValue =
             serde_json::from_str(data_line).map_err(|error| error.to_string())?;
         ensure(
-            event["response"]["payload"]["data"]["dispatchPlan"]["endpoint"].as_str(),
-            Some("events"),
-            "events dispatch plan",
-        )
+            event["sse"]["terminal"].as_bool(),
+            Some(true),
+            "events terminal frame",
+        )?;
+        let payload = &event["response"]["payload"];
+        match event["sse"]["eventKind"].as_str() {
+            Some("complete") => {
+                ensure(
+                    payload["schema"].as_str(),
+                    Some("ee.response.v2"),
+                    "events response schema",
+                )?;
+                ensure(
+                    payload["data"]["command"].as_str(),
+                    Some("subscribe poll"),
+                    "events command",
+                )?;
+                ensure(
+                    payload["data"]["serve"]["dispatchPlan"]["endpoint"].as_str(),
+                    Some("events"),
+                    "events dispatch plan",
+                )
+            }
+            Some("error") => {
+                ensure(
+                    payload["schema"].as_str(),
+                    Some("ee.error.v2"),
+                    "events error schema",
+                )?;
+                ensure(
+                    payload["error"]["code"].as_str(),
+                    Some("storage"),
+                    "events storage error",
+                )
+            }
+            other => Err(format!("unexpected events SSE kind {other:?}: {event}")),
+        }
     }
 
     #[test]

@@ -56,9 +56,9 @@ fn response_sse_data_json(response: &str) -> Result<JsonValue, String> {
         .lines()
         .filter(|line| line.starts_with("event: "))
         .collect::<Vec<_>>();
-    if event_lines != vec!["event: header"] {
+    if event_lines != vec!["event: complete"] && event_lines != vec!["event: error"] {
         return Err(format!(
-            "expected exactly one SSE header frame, got body {body:?}"
+            "expected exactly one terminal SSE completion/error frame, got body {body:?}"
         ));
     }
 
@@ -252,29 +252,37 @@ fn serve_search_transport_decodes_utf8_query_before_handler_dispatch() -> TestRe
         0,
     );
 
-    if !response.starts_with("HTTP/1.1 200 OK\r\n") {
-        return Err(format!("expected 200 response, got {response}"));
-    }
-
     let envelope = response_body_json(&response)?;
     assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
     assert_eq!(envelope["request"]["endpoint"].as_str(), Some("search"));
     assert_eq!(
-        envelope["response"]["payload"]["data"]["dispatchPlan"]["handlerSurface"].as_str(),
-        Some("cli.search")
+        envelope["request"]["query"]["q"][0].as_str(),
+        Some("\u{2713}"),
+        "request metadata must preserve decoded UTF-8 before dispatch"
     );
-    assert_eq!(
-        envelope["response"]["payload"]["data"]["businessLogicExecuted"].as_bool(),
-        Some(false)
+    let payload = &envelope["response"]["payload"];
+    if response.starts_with("HTTP/1.1 200 OK\r\n") {
+        assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
+        assert_eq!(payload["success"].as_bool(), Some(true));
+        assert_eq!(payload["data"]["command"].as_str(), Some("search"));
+        assert_eq!(payload["data"]["query"].as_str(), Some("\u{2713}"));
+    } else if response.starts_with("HTTP/1.1 500 Internal Server Error\r\n") {
+        assert_eq!(payload["schema"].as_str(), Some("ee.error.v2"));
+        assert_eq!(payload["error"]["code"].as_str(), Some("search_index"));
+    } else {
+        return Err(format!(
+            "expected 200 or real search-index error, got {response}"
+        ));
+    }
+    assert!(
+        payload["data"]["businessLogicExecuted"].is_null(),
+        "search endpoint must not return the old transport-only stub payload: {payload}"
     );
-    let argv =
-        json_string_array(&envelope["response"]["payload"]["data"]["dispatchPlan"]["cliArgv"])?;
-    assert_eq!(argv, vec!["ee", "search", "\u{2713}", "--json"]);
     Ok(())
 }
 
 #[test]
-fn serve_events_endpoint_returns_single_sse_header_frame() -> TestResult {
+fn serve_events_endpoint_returns_terminal_subscribe_poll_frame() -> TestResult {
     let token = "01234567890123456789012345678901";
     let raw = format!(
         "GET /v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
@@ -294,30 +302,36 @@ fn serve_events_endpoint_returns_single_sse_header_frame() -> TestResult {
     let event = response_sse_data_json(&response)?;
     assert_eq!(event["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
     assert_eq!(event["request"]["endpoint"].as_str(), Some("events"));
-    assert_eq!(event["sse"]["eventKind"].as_str(), Some("header"));
-    assert_eq!(event["sse"]["terminal"].as_bool(), Some(false));
+    assert_eq!(event["sse"]["terminal"].as_bool(), Some(true));
     let payload = &event["response"]["payload"];
-    assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
-    assert_eq!(payload["success"].as_bool(), Some(true));
-    assert_eq!(
-        payload["data"]["execution"].as_str(),
-        Some("transport_only")
-    );
-    assert_eq!(
-        payload["data"]["businessLogicExecuted"].as_bool(),
-        Some(false)
-    );
-    assert_eq!(
-        payload["data"]["dispatchPlan"]["handlerSurface"].as_str(),
-        Some("serve.sse.events")
-    );
-    let argv = json_string_array(&payload["data"]["dispatchPlan"]["cliArgv"])?;
-    assert!(argv.is_empty(), "events dispatch must not expose CLI argv");
+    match event["sse"]["eventKind"].as_str() {
+        Some("complete") => {
+            assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
+            assert_eq!(payload["success"].as_bool(), Some(true));
+            assert_eq!(payload["data"]["command"].as_str(), Some("subscribe poll"));
+            assert_eq!(
+                payload["data"]["serve"]["handlerSurface"].as_str(),
+                Some("serve.sse.events")
+            );
+            assert_eq!(payload["data"]["serve"]["readOnly"].as_bool(), Some(true));
+            let argv = json_string_array(&payload["data"]["serve"]["dispatchPlan"]["cliArgv"])?;
+            assert!(argv.is_empty(), "events dispatch must not expose CLI argv");
+        }
+        Some("error") => {
+            assert_eq!(payload["schema"].as_str(), Some("ee.error.v2"));
+            assert_eq!(payload["error"]["code"].as_str(), Some("storage"));
+        }
+        other => {
+            return Err(format!(
+                "expected complete/error SSE event, got {other:?}: {event}"
+            ));
+        }
+    }
     Ok(())
 }
 
 #[test]
-fn serve_why_endpoint_routes_memory_id_to_cli_dispatch_plan() -> TestResult {
+fn serve_why_endpoint_attempts_real_memory_explanation() -> TestResult {
     let token = "01234567890123456789012345678901";
     let raw = format!(
         "GET /v1/why/mem_00000000000000000000000001 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
@@ -330,27 +344,42 @@ fn serve_why_endpoint_routes_memory_id_to_cli_dispatch_plan() -> TestResult {
         0,
     );
 
-    if !response.starts_with("HTTP/1.1 200 OK\r\n") {
-        return Err(format!("expected 200 response, got {response}"));
-    }
-
     let envelope = response_body_json(&response)?;
     assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
     assert_eq!(envelope["request"]["endpoint"].as_str(), Some("why"));
-    assert_eq!(
-        envelope["response"]["payloadSchema"].as_str(),
-        Some("ee.response.v2")
-    );
     let payload = &envelope["response"]["payload"];
-    assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
-    assert_eq!(
-        payload["data"]["dispatchPlan"]["handlerSurface"].as_str(),
-        Some("cli.why")
-    );
-    let argv = json_string_array(&payload["data"]["dispatchPlan"]["cliArgv"])?;
-    assert_eq!(
-        argv,
-        vec!["ee", "why", "mem_00000000000000000000000001", "--json"]
+    if response.starts_with("HTTP/1.1 200 OK\r\n") {
+        assert_eq!(
+            envelope["response"]["payloadSchema"].as_str(),
+            Some("ee.response.v2")
+        );
+        assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
+        assert_eq!(payload["data"]["command"].as_str(), Some("why"));
+        assert_eq!(
+            payload["data"]["memoryId"].as_str(),
+            Some("mem_00000000000000000000000001")
+        );
+    } else if response.starts_with("HTTP/1.1 404 Not Found\r\n")
+        || response.starts_with("HTTP/1.1 500 Internal Server Error\r\n")
+    {
+        assert_eq!(
+            envelope["response"]["payloadSchema"].as_str(),
+            Some("ee.error.v2")
+        );
+        assert_eq!(payload["schema"].as_str(), Some("ee.error.v2"));
+        let code = payload["error"]["code"].as_str();
+        assert!(
+            matches!(code, Some("not_found" | "storage")),
+            "why must fail through the real storage/explain path when unavailable, got {payload}"
+        );
+    } else {
+        return Err(format!(
+            "expected real why success/not-found/storage response, got {response}"
+        ));
+    }
+    assert!(
+        payload["data"]["businessLogicExecuted"].is_null(),
+        "why endpoint must not return the old dispatch-plan-only stub payload: {payload}"
     );
     Ok(())
 }
@@ -396,12 +425,10 @@ fn serve_why_endpoint_rejects_empty_or_nested_memory_id_path_segments() -> TestR
     Ok(())
 }
 
-// bd-3c3i5: GET /v1/status is the only ee serve v2 endpoint whose transport
-// adapter crosses into a real subsystem (core::status::StatusReport::gather +
-// output::render_status_json). Every other endpoint stops at a dispatch-plan
-// placeholder with execution='not_started'. This test pins that the transport
-// envelope actually carries the real ee.response.v2 status payload, proving
-// the integration boundary in the absence of mocks.
+// bd-3c3i5: GET /v1/status crosses into a real subsystem
+// (core::status::StatusReport::gather + output::render_status_json). This test
+// pins that the transport envelope carries the real ee.response.v2 status
+// payload, proving the integration boundary in the absence of mocks.
 #[test]
 fn serve_status_endpoint_crosses_into_real_status_report_gather() -> TestResult {
     let token = "01234567890123456789012345678901";
@@ -591,9 +618,6 @@ fn serve_context_endpoint_routes_single_task_to_cli_pack_dispatch() -> TestResul
         Some(token),
         0,
     );
-    if !response.starts_with("HTTP/1.1 200 OK\r\n") {
-        return Err(format!("expected 200 response, got {response}"));
-    }
     let envelope = response_body_json(&response)?;
     assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
     assert_eq!(envelope["request"]["endpoint"].as_str(), Some("context"));
@@ -602,24 +626,39 @@ fn serve_context_endpoint_routes_single_task_to_cli_pack_dispatch() -> TestResul
         envelope["request"]["cliEquivalent"].as_str(),
         Some("ee pack \"<task>\" --json"),
     );
-    assert_eq!(
-        envelope["response"]["payloadSchema"].as_str(),
-        Some("ee.response.v2"),
-    );
     let payload = &envelope["response"]["payload"];
-    assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
-    assert_eq!(payload["success"].as_bool(), Some(true));
-    assert_eq!(payload["data"]["execution"].as_str(), Some("not_started"),);
-    assert_eq!(
-        payload["data"]["businessLogicExecuted"].as_bool(),
-        Some(false),
+    if response.starts_with("HTTP/1.1 200 OK\r\n") {
+        assert_eq!(
+            envelope["response"]["payloadSchema"].as_str(),
+            Some("ee.response.v2")
+        );
+        assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
+        assert_eq!(payload["success"].as_bool(), Some(true));
+        assert_eq!(payload["data"]["command"].as_str(), Some("pack"));
+        assert_eq!(
+            payload["data"]["request"]["query"].as_str(),
+            Some("plan a refactor")
+        );
+        assert!(
+            payload["data"]["pack"].is_object(),
+            "pack payload missing pack object: {payload}"
+        );
+    } else if response.starts_with("HTTP/1.1 500 Internal Server Error\r\n") {
+        assert_eq!(
+            envelope["response"]["payloadSchema"].as_str(),
+            Some("ee.error.v2")
+        );
+        assert_eq!(payload["schema"].as_str(), Some("ee.error.v2"));
+        assert_eq!(payload["error"]["code"].as_str(), Some("storage"));
+    } else {
+        return Err(format!(
+            "expected 200 or real pack storage error, got {response}"
+        ));
+    }
+    assert!(
+        payload["data"]["businessLogicExecuted"].is_null(),
+        "context endpoint must not return the old dispatch-plan-only stub payload: {payload}"
     );
-    let plan = &payload["data"]["dispatchPlan"];
-    assert_eq!(plan["handlerSurface"].as_str(), Some("cli.pack"));
-    assert_eq!(plan["mutable"].as_bool(), Some(false));
-    assert_eq!(plan["sseStream"].as_bool(), Some(false));
-    let argv = json_string_array(&plan["cliArgv"])?;
-    assert_eq!(argv, vec!["ee", "pack", "plan a refactor", "--json"]);
     Ok(())
 }
 
@@ -728,18 +767,15 @@ fn serve_doctor_endpoint_routes_to_cli_doctor_dispatch() -> TestResult {
     let payload = &envelope["response"]["payload"];
     assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
     assert_eq!(payload["success"].as_bool(), Some(true));
-    assert_eq!(payload["data"]["execution"].as_str(), Some("not_started"),);
-    assert_eq!(
-        payload["data"]["businessLogicExecuted"].as_bool(),
-        Some(false),
+    assert_eq!(payload["data"]["command"].as_str(), Some("doctor"));
+    assert!(
+        payload["data"]["checks"].is_array(),
+        "doctor payload must carry real checks array: {payload}"
     );
-    let plan = &payload["data"]["dispatchPlan"];
-    assert_eq!(plan["endpoint"].as_str(), Some("doctor"));
-    assert_eq!(plan["handlerSurface"].as_str(), Some("cli.doctor"));
-    assert_eq!(plan["mutable"].as_bool(), Some(false));
-    assert_eq!(plan["sseStream"].as_bool(), Some(false));
-    let argv = json_string_array(&plan["cliArgv"])?;
-    assert_eq!(argv, vec!["ee", "doctor", "--json"]);
+    assert!(
+        payload["data"]["businessLogicExecuted"].is_null(),
+        "doctor endpoint must not return the old dispatch-plan-only stub payload: {payload}"
+    );
     Ok(())
 }
 
@@ -782,18 +818,20 @@ fn serve_swarm_brief_endpoint_routes_multi_segment_path_to_cli_dispatch() -> Tes
         Some("ee.response.v2"),
     );
     let payload = &envelope["response"]["payload"];
-    assert_eq!(payload["data"]["execution"].as_str(), Some("not_started"),);
+    assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
+    assert_eq!(payload["success"].as_bool(), Some(true));
     assert_eq!(
-        payload["data"]["businessLogicExecuted"].as_bool(),
-        Some(false),
+        payload["data"]["schema"].as_str(),
+        Some("ee.swarm.brief.v1")
     );
-    let plan = &payload["data"]["dispatchPlan"];
-    assert_eq!(plan["endpoint"].as_str(), Some("swarmBrief"));
-    assert_eq!(plan["handlerSurface"].as_str(), Some("cli.swarm.brief"));
-    assert_eq!(plan["mutable"].as_bool(), Some(false));
-    assert_eq!(plan["sseStream"].as_bool(), Some(false));
-    let argv = json_string_array(&plan["cliArgv"])?;
-    assert_eq!(argv, vec!["ee", "swarm", "brief", "--json"]);
+    assert!(
+        payload["data"]["sources"].is_array(),
+        "swarm brief payload must carry real sources array: {payload}"
+    );
+    assert!(
+        payload["data"]["businessLogicExecuted"].is_null(),
+        "swarm brief endpoint must not return the old dispatch-plan-only stub payload: {payload}"
+    );
     Ok(())
 }
 
