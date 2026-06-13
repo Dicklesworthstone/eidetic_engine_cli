@@ -558,15 +558,20 @@ impl CommandContext {
         self.capabilities
     }
 
-    /// Checks the request budget and underlying runtime cancellation context.
+    /// Checks the request budget and the Cx cooperative-cancellation signal.
+    ///
+    /// A cancelled Cx is mapped to a sentinel `BudgetExceeded` so callers see
+    /// a uniform error type regardless of which limit fired.
     pub fn check_cancellation(
         &self,
-        _cx: &asupersync::Cx,
+        cx: &asupersync::Cx,
     ) -> Result<(), crate::core::budget::BudgetExceeded> {
         self.budget.check()?;
-        // Assume asupersync::Cx has a check or is_cancelled mechanism.
-        // If not, we still check the budget correctly.
-        Ok(())
+        cx.checkpoint().map_err(|_| crate::core::budget::BudgetExceeded {
+            dimension: crate::core::budget::BudgetDimension::WallClock,
+            limit: 0,
+            used: 1,
+        })
     }
 
     /// Return a clone whose capability set is the element-wise `min`
