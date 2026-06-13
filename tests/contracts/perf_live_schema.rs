@@ -17,8 +17,12 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use ee::core::perf_live::{PerfLiveOptions, collect_perf_live_snapshot};
+use ee::core::swarm_brief::{
+    SwarmBriefCommandError, SwarmBriefCommandOutput, SwarmBriefCommandRunner,
+};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -168,6 +172,37 @@ fn expected_string_set(expected: &[&str]) -> BTreeSet<String> {
     expected.iter().map(|field| (*field).to_owned()).collect()
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CrossReviewPerfLiveRunner;
+
+impl SwarmBriefCommandRunner for CrossReviewPerfLiveRunner {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        _cwd: &Path,
+        _timeout_ms: u64,
+    ) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
+        let stdout = match (program, args) {
+            ("rch", ["status", "--workers", "--jobs", "--json"]) => {
+                r#"{"workersHealthy":1,"slotsAvailable":1,"queueDepth":0,"headOfLineAgeMs":0}"#
+            }
+            ("br", _) => "[]",
+            _ => {
+                return Err(SwarmBriefCommandError::Unavailable(format!(
+                    "unexpected perf-live contract command: {program} {}",
+                    args.join(" ")
+                )));
+            }
+        };
+
+        Ok(SwarmBriefCommandOutput {
+            stdout: stdout.to_owned(),
+            stderr: String::new(),
+        })
+    }
+}
+
 fn ensure_exact_required_fields(schema: &Value, expected: &[&str], ctx: &str) -> TestResult {
     let required_ctx = format!("{ctx}.required");
     let actual = collect_string_set(&schema["required"], &required_ctx)?;
@@ -197,6 +232,22 @@ fn ensure_schema_type_set(node: &Value, expected: &[&str], ctx: impl AsRef<str>)
     ensure(
         actual == expected,
         format!("{ctx}.type drifted\nexpected={expected:?}\nactual={actual:?}"),
+    )
+}
+
+#[test]
+fn cross_review_perf_live_snapshot_reports_real_fsync_latency() -> TestResult {
+    let mut options = PerfLiveOptions::for_workspace(repo_root());
+    options.command_timeout_ms = 1;
+    options.timestamp_override = Some("2026-06-13T00:00:00.000Z".to_owned());
+
+    let snapshot = collect_perf_live_snapshot(&options, &CrossReviewPerfLiveRunner);
+    let measured = snapshot.host_pressure.fsync_latency_p99_ms.ok_or_else(|| {
+        "perf-live hostPressure must include a real fsync latency sample".to_string()
+    })?;
+    ensure(
+        measured < 5_000,
+        format!("single-sample fsync probe should be bounded; got {measured}ms"),
     )
 }
 

@@ -567,11 +567,12 @@ impl CommandContext {
         cx: &asupersync::Cx,
     ) -> Result<(), crate::core::budget::BudgetExceeded> {
         self.budget.check()?;
-        cx.checkpoint().map_err(|_| crate::core::budget::BudgetExceeded {
-            dimension: crate::core::budget::BudgetDimension::WallClock,
-            limit: 0,
-            used: 1,
-        })
+        cx.checkpoint()
+            .map_err(|_| crate::core::budget::BudgetExceeded {
+                dimension: crate::core::budget::BudgetDimension::WallClock,
+                limit: 0,
+                used: 1,
+            })
     }
 
     /// Return a clone whose capability set is the element-wise `min`
@@ -9541,6 +9542,8 @@ mod tests {
     use proptest::prelude::*;
     use proptest::test_runner::Config as ProptestConfig;
 
+    use asupersync::{CancelReason, Cx};
+
     use super::{
         AccessLevel, CandidateResolutionMetrics, CapabilitySet, CommandContext,
         ContextPerformanceTrace, PackPersistenceSubspans, PackSlotAcquisition, PerformanceTiming,
@@ -9550,7 +9553,7 @@ mod tests {
         push_search_degradations, try_acquire_pack_slot, unit_score,
     };
     use crate::config::{ReadPoolConfig, WorkspaceLocation};
-    use crate::core::budget::RequestBudget;
+    use crate::core::budget::{BudgetDimension, RequestBudget};
     use crate::core::memory::{ReviseMemoryOptions, ReviseReason, revise_memory};
     use crate::core::memory_drift::{MemoryDriftSelectionHint, MemoryDriftStatus};
     use crate::core::profile::{OperatingProfile, RuntimeProfileReport};
@@ -9590,6 +9593,14 @@ mod tests {
         )
     }
 
+    fn ctx_with_budget(budget: RequestBudget) -> CommandContext {
+        CommandContext::new(
+            workspace_at("/tmp/ee-test-workspace"),
+            budget,
+            CapabilitySet::read_only(),
+        )
+    }
+
     fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> Result<(), String>
     where
         T: std::fmt::Debug + PartialEq,
@@ -9603,6 +9614,50 @@ mod tests {
 
     fn test_runtime_profile() -> RuntimeProfileReport {
         RuntimeProfileReport::for_profile(OperatingProfile::Workstation, "test_fixture")
+    }
+
+    #[test]
+    fn check_cancellation_accepts_live_cx_and_unexceeded_budget() -> Result<(), String> {
+        let cx = Cx::for_testing();
+        ctx(CapabilitySet::read_only())
+            .check_cancellation(&cx)
+            .map_err(|error| format!("live Cx should pass cancellation check: {error}"))
+    }
+
+    #[test]
+    fn check_cancellation_maps_cancelled_cx_to_wall_clock_budget_error() -> Result<(), String> {
+        let cx = Cx::for_testing();
+        cx.set_cancel_reason(CancelReason::user("context cancellation test"));
+        let error = ctx(CapabilitySet::read_only())
+            .check_cancellation(&cx)
+            .expect_err("cancelled Cx must fail check_cancellation");
+
+        ensure_equal(
+            &error.dimension,
+            &BudgetDimension::WallClock,
+            "cancelled Cx dimension",
+        )?;
+        ensure_equal(&error.limit, &0, "cancelled Cx sentinel limit")?;
+        ensure_equal(&error.used, &1, "cancelled Cx sentinel used")
+    }
+
+    #[test]
+    fn check_cancellation_preserves_budget_error_before_cx_error() -> Result<(), String> {
+        let cx = Cx::for_testing();
+        cx.set_cancel_reason(CancelReason::user("context cancellation test"));
+        let mut budget = RequestBudget::unbounded().with_tokens(0);
+        budget.record_tokens(1);
+        let error = ctx_with_budget(budget)
+            .check_cancellation(&cx)
+            .expect_err("exceeded budget must fail check_cancellation");
+
+        ensure_equal(
+            &error.dimension,
+            &BudgetDimension::Tokens,
+            "budget-first cancellation dimension",
+        )?;
+        ensure_equal(&error.limit, &0, "budget-first limit")?;
+        ensure_equal(&error.used, &1, "budget-first used")
     }
 
     #[test]

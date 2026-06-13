@@ -1,9 +1,11 @@
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use asupersync::{CancelKind, CancelReason, Outcome};
+use asupersync::{CancelKind, CancelReason, Cx, Outcome};
+use ee::config::WorkspaceLocation;
 use ee::core::{
-    BudgetDimension, CliCancelReason, CliOutcomeClass, CliOutcomeSummary, EXIT_CANCELLED,
-    RequestBudget, outcome_class, outcome_exit_code,
+    BudgetDimension, CapabilitySet, CliCancelReason, CliOutcomeClass, CliOutcomeSummary,
+    CommandContext, EXIT_CANCELLED, RequestBudget, outcome_class, outcome_exit_code,
 };
 use ee::models::DomainError;
 
@@ -22,6 +24,14 @@ where
 
 fn budget_exhausted_outcome() -> Outcome<(), DomainError> {
     Outcome::cancelled(CancelReason::cost_budget().with_message("request budget exhausted"))
+}
+
+fn cross_review_context_with_budget(budget: RequestBudget) -> CommandContext {
+    CommandContext::new(
+        WorkspaceLocation::new(PathBuf::from("/tmp/ee-cross-review-cancellation")),
+        budget,
+        CapabilitySet::read_only(),
+    )
 }
 
 #[test]
@@ -65,6 +75,40 @@ fn budget_exhaustion_maps_to_documented_cli_outcome() -> TestResult {
     )?;
 
     Ok(())
+}
+
+#[test]
+fn cross_review_command_context_check_cancellation_covers_cx_paths() -> TestResult {
+    let live_cx = Cx::for_testing();
+    cross_review_context_with_budget(RequestBudget::unbounded())
+        .check_cancellation(&live_cx)
+        .map_err(|error| format!("live Cx should pass check_cancellation: {error}"))?;
+
+    let cancelled_cx = Cx::for_testing();
+    cancelled_cx.set_cancel_reason(CancelReason::user("cross-review cancellation"));
+    let error = cross_review_context_with_budget(RequestBudget::unbounded())
+        .check_cancellation(&cancelled_cx)
+        .expect_err("cancelled Cx must fail check_cancellation");
+    ensure_equal(
+        &error.dimension,
+        &BudgetDimension::WallClock,
+        "cancelled Cx dimension",
+    )?;
+    ensure_equal(&error.limit, &0, "cancelled Cx sentinel limit")?;
+    ensure_equal(&error.used, &1, "cancelled Cx sentinel used")?;
+
+    let mut exhausted_budget = RequestBudget::unbounded().with_tokens(0);
+    exhausted_budget.record_tokens(1);
+    let error = cross_review_context_with_budget(exhausted_budget)
+        .check_cancellation(&cancelled_cx)
+        .expect_err("exhausted budget must fail check_cancellation before Cx cancellation");
+    ensure_equal(
+        &error.dimension,
+        &BudgetDimension::Tokens,
+        "budget-first dimension",
+    )?;
+    ensure_equal(&error.limit, &0, "budget-first limit")?;
+    ensure_equal(&error.used, &1, "budget-first used")
 }
 
 #[test]

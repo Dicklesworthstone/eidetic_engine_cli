@@ -1,7 +1,9 @@
 //! Read-only live performance snapshots for swarm observability.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -17,6 +19,7 @@ pub const PERF_LIVE_BEAD_ID: &str = "bd-1zwi4";
 const DEFAULT_INTERVAL_MS: u64 = 1_000;
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 500;
 const READ_ONLY_REDACTION_STATUS: &str = "counts_metrics_codes_only_no_content";
+const HOST_PRESSURE_FSYNC_SAMPLE: &[u8] = b"ee perf-live fsync pressure probe\n";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PerfLiveOptions {
@@ -619,6 +622,7 @@ fn host_pressure(degraded: &mut Vec<PerfLiveDegradation>) -> PerfLiveHostPressur
     let mut pressure = PerfLiveHostPressure::default();
     pressure.memory_rss_mb = current_rss_mb();
     pressure.page_cache_mb = page_cache_mb();
+    pressure.fsync_latency_p99_ms = measure_one_fsync_latency_ms();
     if pressure.memory_rss_mb.is_none()
         || pressure.page_cache_mb.is_none()
         || pressure.cpu_user_pct.is_none()
@@ -633,6 +637,25 @@ fn host_pressure(degraded: &mut Vec<PerfLiveDegradation>) -> PerfLiveHostPressur
         ));
     }
     pressure
+}
+
+fn measure_one_fsync_latency_ms() -> Option<u64> {
+    let mut file = tempfile::Builder::new()
+        .prefix("ee-perf-live-fsync-")
+        .tempfile()
+        .ok()?;
+    file.as_file_mut()
+        .write_all(HOST_PRESSURE_FSYNC_SAMPLE)
+        .ok()?;
+    let start = Instant::now();
+    file.as_file().sync_all().ok()?;
+    Some(duration_to_ceil_ms(start.elapsed()))
+}
+
+fn duration_to_ceil_ms(duration: Duration) -> u64 {
+    let nanos = duration.as_nanos();
+    let millis = nanos.saturating_add(999_999) / 1_000_000;
+    u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
 #[cfg(target_os = "linux")]
@@ -725,9 +748,8 @@ fn usize_to_u64(value: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use std::path::Path;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::*;
     use crate::core::swarm_brief::{SwarmBriefCommandOutput, SwarmBriefCommandRunner};
@@ -771,7 +793,7 @@ mod tests {
             })??;
         Ok(BoundedFsyncFixture {
             samples: BOUNDED_TEST_FSYNC_SAMPLES,
-            p99_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            p99_ms: duration_to_ceil_ms(elapsed),
         })
     }
 
@@ -898,10 +920,10 @@ mod tests {
     }
 
     #[test]
-    fn host_pressure_does_not_fake_unmeasured_fsync_latency() -> Result<(), String> {
+    fn host_pressure_measures_bounded_real_fsync_latency() -> Result<(), String> {
         // Exercise a real fsync measurement path with one bounded sample. The
-        // production perf-live snapshot remains read-only, so it still reports
-        // fsync latency as null until a durable telemetry source is wired.
+        // production perf-live snapshot must use the same real temp-file
+        // write+sync path rather than a hardcoded placeholder.
         let fsync_fixture = one_sample_fsync_latency_fixture()?;
         assert_eq!(fsync_fixture.samples, BOUNDED_TEST_FSYNC_SAMPLES);
         let timeout_ms = u64::try_from(BOUNDED_TEST_FSYNC_TIMEOUT.as_millis()).unwrap_or(u64::MAX);
@@ -912,7 +934,13 @@ mod tests {
 
         let mut degraded = Vec::new();
         let pressure = host_pressure(&mut degraded);
-        assert_eq!(pressure.fsync_latency_p99_ms, None);
+        let measured = pressure
+            .fsync_latency_p99_ms
+            .ok_or_else(|| "host_pressure must report a real fsync latency sample".to_string())?;
+        assert!(
+            measured < timeout_ms,
+            "host_pressure fsync probe should finish below the test timeout"
+        );
         assert!(
             degraded
                 .iter()
