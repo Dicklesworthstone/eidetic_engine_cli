@@ -482,6 +482,10 @@ def malformed_actionable_queue_reasons(gate):
         value = queue.get(field)
         if field in queue and not isinstance(value, list):
             reasons.append(f"malformed_claim_gate_actionable_queue_{suffix}")
+        elif isinstance(value, list) and any(
+            safe_command_string_malformed(item) for item in value
+        ):
+            reasons.append(f"malformed_claim_gate_actionable_queue_{suffix}")
 
     for field, suffix in [
         ("filterContract", "filter_contract"),
@@ -1259,6 +1263,7 @@ def packet_safe_to_claim(packet, candidate, envelope_degraded=None):
     coordination = dict_or_empty(packet.get("coordination"))
     agent_mail = dict_or_empty(coordination.get("agentMail"))
     tracker_authoritative = tracker.get("brReadsAuthoritative")
+    requires_candidate_downgrade = tracker.get("requiresCandidateDowngrade")
     return (
         raw_safe is True
         and decision == "safe_to_claim"
@@ -1273,6 +1278,7 @@ def packet_safe_to_claim(packet, candidate, envelope_degraded=None):
             packet, "packet_degraded_authority", envelope_degraded
         )
         and tracker_authoritative is True
+        and requires_candidate_downgrade is not True
         and not agent_mail_authority_reasons(agent_mail)
         and agent_mail.get("status") != "semantic_readiness_failed"
         and rch_remote_verification_reason(packet) is None

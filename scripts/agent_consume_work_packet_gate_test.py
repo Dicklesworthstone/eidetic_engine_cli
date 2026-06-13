@@ -5,8 +5,10 @@ Run:
     python3 scripts/agent_consume_work_packet_gate_test.py
 """
 
+import copy
 import importlib.util
 import json
+import random
 import subprocess
 import sys
 import unittest
@@ -244,6 +246,30 @@ SCHEMA_FORBIDDEN_SAFE_STRING_EXAMPLES = {
 def safe_string_forbidden_patterns(schema, definition_name):
     safe_string = schema["definitions"][definition_name]
     return [entry["pattern"] for entry in safe_string["not"]["anyOf"]]
+
+
+def assert_fail_closed_decision(testcase, decision, forbidden_markers=()):
+    testcase.assertIsInstance(decision, dict)
+    testcase.assertFalse(decision["safeToClaim"])
+    testcase.assertIsInstance(decision["whyNotSafe"], list)
+    testcase.assertLessEqual(
+        len(decision["whyNotSafe"]),
+        consumer.DECISION_DIAGNOSTIC_LIMIT,
+    )
+    testcase.assertIsInstance(decision["argvActions"], list)
+    testcase.assertLessEqual(
+        len(decision["argvActions"]),
+        consumer.DECISION_ACTION_LIMIT,
+    )
+    testcase.assertFalse(
+        any(
+            action.get("runnable") and action.get("mutatesState")
+            for action in decision["argvActions"]
+        )
+    )
+    serialized = json.dumps(decision)
+    for marker in forbidden_markers:
+        testcase.assertNotIn(marker, serialized)
 
 
 class ClaimGateConsumer(unittest.TestCase):
@@ -2526,6 +2552,218 @@ class WorkPacketConsumer(unittest.TestCase):
             "malformed_claim_gate_next_command_action_argv",
             decision["whyNotSafe"],
         )
+
+    def test_seeded_malformed_claim_gate_payloads_fail_closed(self):
+        token = "ghp_" + "0123456789abcdef0123456789abcdef0123"
+        cases = [
+            (
+                "source_authority_shape",
+                lambda gate: gate.__setitem__("sourceAuthority", ["not", "a", "map"]),
+            ),
+            (
+                "tracker_authority_type",
+                lambda gate: gate["sourceAuthority"].__setitem__(
+                    "trackerAuthoritative", "true"
+                ),
+            ),
+            (
+                "candidate_id_type",
+                lambda gate: gate["selectedCandidate"].__setitem__(
+                    "id", ["bd-safe.1"]
+                ),
+            ),
+            (
+                "actionable_queue_absent",
+                lambda gate: gate["actionableQueue"].__setitem__(
+                    "candidateState", "candidate_absent_from_actionable"
+                ),
+            ),
+            (
+                "actionable_queue_candidate_ids_type",
+                lambda gate: gate["actionableQueue"].__setitem__(
+                    "candidateIds", ["bd-safe.1", 17]
+                ),
+            ),
+            (
+                "unsafe_reasons_present",
+                lambda gate: gate.__setitem__("unsafeReasons", ["peer_dirty_file"]),
+            ),
+            (
+                "stale_reasons_present",
+                lambda gate: gate.__setitem__("staleReasons", ["stale_assignee"]),
+            ),
+            (
+                "authority_degraded_code",
+                lambda gate: gate.__setitem__(
+                    "degradedCodes", ["memory_drift_lock_contention"]
+                ),
+            ),
+            (
+                "recommended_not_safe",
+                lambda gate: gate.__setitem__("recommendedSafeToClaim", False),
+            ),
+            (
+                "claim_action_string_argv",
+                lambda gate: gate["claimCommandAction"].__setitem__(
+                    "argv", "br update bd-safe.1 --status in_progress --json"
+                ),
+            ),
+            (
+                "claim_action_private_path",
+                lambda gate: gate["claimCommandAction"].__setitem__(
+                    "displayCommand",
+                    "br update bd-safe.1 --status in_progress --json /Users/jemanuel/private",
+                ),
+            ),
+            (
+                "claim_action_secret_argv",
+                lambda gate: gate["claimCommandAction"]["argv"].append(token),
+            ),
+            (
+                "claim_action_unknown_field",
+                lambda gate: gate["claimCommandAction"].__setitem__(
+                    "shellCommand", "br update bd-safe.1 --status in_progress"
+                ),
+            ),
+            (
+                "next_action_string",
+                lambda gate: gate.__setitem__(
+                    "nextCommandActions", ["br show bd-safe.1 --json"]
+                ),
+            ),
+            (
+                "next_action_body_marker",
+                lambda gate: gate["nextCommandActions"][0].__setitem__(
+                    "rationale", "body: raw mailbox content"
+                ),
+            ),
+            (
+                "candidate_not_found_verdict",
+                lambda gate: (
+                    gate.__setitem__("safeToClaim", False),
+                    gate.__setitem__("verdict", "candidate_not_found"),
+                    gate.__setitem__("claimCommandAction", None),
+                    gate.__setitem__("unsafeReasons", ["candidate_not_found:bd-safe.1"]),
+                ),
+            ),
+        ]
+        random.Random(3403202).shuffle(cases)
+
+        for name, mutate in cases:
+            with self.subTest(name=name):
+                gate = safe_gate()
+                mutate(gate)
+
+                decision = consumer.consume(envelope(gate))
+
+                assert_fail_closed_decision(
+                    self,
+                    decision,
+                    forbidden_markers=("/Users/jemanuel", token, "body:"),
+                )
+
+    def test_seeded_malformed_work_packet_payloads_fail_closed(self):
+        token = "ghp_" + "0123456789abcdef0123456789abcdef0123"
+        cases = [
+            (
+                "safe_to_claim_type",
+                lambda packet: packet["data"].__setitem__("safeToClaim", "true"),
+            ),
+            (
+                "tracker_authority_type",
+                lambda packet: packet["data"]["trackerIntegrity"].__setitem__(
+                    "brReadsAuthoritative", "true"
+                ),
+            ),
+            (
+                "tracker_requires_downgrade",
+                lambda packet: packet["data"]["trackerIntegrity"].__setitem__(
+                    "requiresCandidateDowngrade", True
+                ),
+            ),
+            (
+                "reservation_not_authoritative",
+                lambda packet: packet["data"]["coordination"]["agentMail"].__setitem__(
+                    "reservationAuthoritative", False
+                ),
+            ),
+            (
+                "inbox_not_authoritative",
+                lambda packet: packet["data"]["coordination"]["agentMail"].__setitem__(
+                    "inboxAuthoritative", None
+                ),
+            ),
+            (
+                "remote_required_without_safe_proof",
+                lambda packet: packet["data"]["verification"].update(
+                    {"remoteOnlyRequired": True, "remoteOnlySafe": None}
+                ),
+            ),
+            (
+                "degraded_authority_code",
+                lambda packet: packet["data"].__setitem__(
+                    "degraded",
+                    [{"code": "memory_drift_lock_contention", "severity": "warning"}],
+                ),
+            ),
+            (
+                "recommended_action_shape",
+                lambda packet: packet["data"].__setitem__(
+                    "recommendedAction", "inspect_and_claim"
+                ),
+            ),
+            (
+                "recommended_action_secret",
+                lambda packet: packet["data"].__setitem__(
+                    "recommendedAction",
+                    {
+                        "action": "inspect_and_claim",
+                        "candidateId": "bd-safe",
+                        "safeToClaim": True,
+                        "suggestedCommands": [],
+                        "suggestedCommandActions": [
+                            dict(
+                                safe_action(
+                                    "bead_claim_candidate",
+                                    [
+                                        "br",
+                                        "update",
+                                        "bd-safe",
+                                        "--status",
+                                        "in_progress",
+                                        "--json",
+                                    ],
+                                    mutates=True,
+                                ),
+                                rationale=f"Bearer {token}",
+                            )
+                        ],
+                    },
+                ),
+            ),
+            (
+                "required_commands_shape",
+                lambda packet: packet["data"]["verification"].__setitem__(
+                    "requiredCommands", "cargo test --lib"
+                ),
+            ),
+        ]
+        random.Random(3403203).shuffle(cases)
+
+        for name, mutate in cases:
+            with self.subTest(name=name):
+                packet = copy.deepcopy(
+                    load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+                )
+                mutate(packet)
+
+                decision = consumer.consume(packet)
+
+                assert_fail_closed_decision(
+                    self,
+                    decision,
+                    forbidden_markers=("/Users/jemanuel", token),
+                )
 
 
 class ErrorHandling(unittest.TestCase):
