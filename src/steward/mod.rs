@@ -29,7 +29,9 @@ use serde_json::{Value as JsonValue, json};
 use crate::cache::pack_l2::{PackL2Cache, PackL2CacheOptions};
 use crate::config::{ConfigFile, EnvVar, read_env_var};
 use crate::core::backup::{BackupCreateOptions, create_backup};
-use crate::core::curate::{CurateDispositionOptions, run_curation_disposition};
+use crate::core::curate::{
+    CurateDispositionOptions, CurateDispositionReport, run_curation_disposition,
+};
 use crate::core::graph_telemetry::{CacheEvictEvent, CacheEvictReason, emit_cache_evict};
 use crate::curate::{CandidateSource, CandidateType};
 use crate::db::{
@@ -4408,31 +4410,16 @@ impl ManualRunner {
         budget: &mut JobBudgetState,
     ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
         let workspace_path = self.normalized_workspace_path();
-        if budget_cancels_before_mutation(budget) {
-            return (
-                RunOutcome::Cancelled,
-                Some(0),
-                Some("Budget exceeded before curation disposition".to_owned()),
-                Some(json!({
-                    "schema": "ee.steward.curation_review.v1",
-                    "jobType": JobType::CurationReview.as_str(),
-                    "workspace": workspace_path.display().to_string(),
-                    "dryRun": self.options.dry_run,
-                    "durableMutation": false,
-                    "cancelledBeforeMutation": true,
-                })),
-            );
-        }
         let actor = self
             .options
             .actor
             .as_deref()
             .unwrap_or("ee-steward-manual-runner");
-        let report = match run_curation_disposition(&CurateDispositionOptions {
+        let preview = match run_curation_disposition(&CurateDispositionOptions {
             workspace_path: &workspace_path,
             database_path: self.options.database_path.as_deref(),
             actor: Some(actor),
-            apply: !self.options.dry_run,
+            apply: false,
             structural_decay: self.options.structural_decay,
             now_rfc3339: self.options.as_of.as_deref(),
         }) {
@@ -4449,33 +4436,83 @@ impl ManualRunner {
                 );
             }
         };
-        let item_count = usize_to_u64(report.summary.total_candidates);
+        let item_count = usize_to_u64(preview.summary.total_candidates);
         budget.record(ResourceType::Items, item_count);
-        let report_json = serde_json::to_value(&report).unwrap_or_else(|error| {
-            json!({
-                "schema": "ee.curate.disposition.serialization_failed.v1",
-                "message": error.to_string(),
-            })
-        });
+
+        if budget_times_out_before_mutation(budget) {
+            return (
+                RunOutcome::TimedOut,
+                Some(item_count),
+                Some("Timed out before curation disposition".to_owned()),
+                Some(curation_review_job_details(
+                    &preview,
+                    self.options.dry_run,
+                    false,
+                    false,
+                    true,
+                )),
+            );
+        }
+
+        if budget_cancels_before_mutation(budget) {
+            return (
+                RunOutcome::Cancelled,
+                Some(item_count),
+                Some("Budget exceeded before curation disposition".to_owned()),
+                Some(curation_review_job_details(
+                    &preview,
+                    self.options.dry_run,
+                    false,
+                    true,
+                    false,
+                )),
+            );
+        }
+
+        if self.options.dry_run {
+            return (
+                RunOutcome::Success,
+                Some(item_count),
+                None,
+                Some(curation_review_job_details(
+                    &preview, true, false, false, false,
+                )),
+            );
+        }
+
+        let report = match run_curation_disposition(&CurateDispositionOptions {
+            workspace_path: &workspace_path,
+            database_path: self.options.database_path.as_deref(),
+            actor: Some(actor),
+            apply: true,
+            structural_decay: self.options.structural_decay,
+            now_rfc3339: self.options.as_of.as_deref(),
+        }) {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("Failed to run curation disposition: {error}");
+                return steward_job_failure(
+                    "ee.steward.curation_review.error.v1",
+                    "curation_review_disposition_failed",
+                    message,
+                    self.options.dry_run,
+                    self.options.database_path.as_deref(),
+                    "ee curate disposition --dry-run --json",
+                );
+            }
+        };
 
         (
             RunOutcome::Success,
             Some(item_count),
             None,
-            Some(json!({
-                "schema": "ee.steward.curation_review.v1",
-                "jobType": JobType::CurationReview.as_str(),
-                "workspaceId": report.workspace_id,
-                "workspacePath": report.workspace_path,
-                "databasePath": report.database_path,
-                "command": report.command,
-                "summary": &report.summary,
-                "degraded": &report.degraded,
-                "nextAction": report.next_action,
-                "report": report_json,
-                "dryRun": self.options.dry_run,
-                "durableMutation": report.durable_mutation,
-            })),
+            Some(curation_review_job_details(
+                &report,
+                false,
+                report.durable_mutation,
+                false,
+                false,
+            )),
         )
     }
 
@@ -5794,6 +5831,46 @@ fn budget_times_out_before_mutation(budget: &JobBudgetState) -> bool {
             && limit.on_exceed == BudgetExceedAction::Cancel
             && limit.limit == 0
     })
+}
+
+fn curation_review_job_details(
+    report: &CurateDispositionReport,
+    runner_dry_run: bool,
+    durable_mutation: bool,
+    cancelled_before_mutation: bool,
+    timed_out_before_mutation: bool,
+) -> JsonValue {
+    let report_json = serde_json::to_value(report).unwrap_or_else(|error| {
+        json!({
+            "schema": "ee.curate.disposition.serialization_failed.v1",
+            "message": error.to_string(),
+        })
+    });
+    let mut details = json!({
+        "schema": "ee.steward.curation_review.v1",
+        "jobType": JobType::CurationReview.as_str(),
+        "workspaceId": report.workspace_id.as_str(),
+        "workspacePath": report.workspace_path.as_str(),
+        "databasePath": report.database_path.as_str(),
+        "command": report.command,
+        "summary": &report.summary,
+        "degraded": &report.degraded,
+        "nextAction": report.next_action.as_str(),
+        "report": report_json,
+        "dryRun": runner_dry_run,
+        "durableMutation": durable_mutation,
+    });
+
+    if let Some(object) = details.as_object_mut() {
+        if cancelled_before_mutation {
+            object.insert("cancelledBeforeMutation".to_owned(), JsonValue::Bool(true));
+        }
+        if timed_out_before_mutation {
+            object.insert("timedOutBeforeMutation".to_owned(), JsonValue::Bool(true));
+        }
+    }
+
+    details
 }
 
 fn qos_throttle_decision_for_steward_job(
