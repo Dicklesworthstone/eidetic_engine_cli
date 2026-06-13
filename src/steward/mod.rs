@@ -26,15 +26,20 @@ use rustix::fs::{FlockOperation, flock};
 use rustix::io::Errno;
 use serde_json::{Value as JsonValue, json};
 
+use crate::cache::pack_l2::{PackL2Cache, PackL2CacheOptions};
+use crate::config::{ConfigFile, EnvVar, read_env_var};
+use crate::core::backup::{BackupCreateOptions, create_backup};
+use crate::core::curate::{CurateDispositionOptions, run_curation_disposition};
 use crate::core::graph_telemetry::{CacheEvictEvent, CacheEvictReason, emit_cache_evict};
 use crate::curate::{CandidateSource, CandidateType};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, ApplyMemoryDecayDemotionInput, ApplyMemoryScoreUpdateInput,
     CreateCurationCandidateInput, DbConnection, FeedbackCounts, GraphSnapshotPruneCandidate,
     GraphSnapshotType, StoredAuditEntry, StoredFeedbackEvent, StoredMemory, StoredMemoryLink,
-    audit_actions, feedback_scoring,
+    WalCheckpointMode, audit_actions, feedback_scoring,
 };
 use crate::graph::decay::{StructuralDecayMultiplier, compute_structural_decay_adjustment};
+use crate::models::RedactionLevel;
 use crate::policy::{
     MEMORY_DECAY_SOURCE, MemoryDecayAction, MemoryDecayEvaluation, MemoryDecayHalfLives,
     MemoryDecaySettings, MemoryDecayThresholds, evaluate_memory_decay_with_settings,
@@ -4402,51 +4407,74 @@ impl ManualRunner {
         &self,
         budget: &mut JobBudgetState,
     ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
-        let opened = match self.open_workspace_database_for_job(
-            "ee.steward.curation_review.error.v1",
-            "curation_review",
-            "ee curate status --json",
-        ) {
-            Ok(opened) => opened,
-            Err(result) => return result,
-        };
-        let candidates = match opened.connection.list_curation_candidates(
-            &opened.workspace_id,
-            None,
-            Some("pending"),
-            None,
-        ) {
-            Ok(candidates) => candidates,
+        let workspace_path = self.normalized_workspace_path();
+        if budget_cancels_before_mutation(budget) {
+            return (
+                RunOutcome::Cancelled,
+                Some(0),
+                Some("Budget exceeded before curation disposition".to_owned()),
+                Some(json!({
+                    "schema": "ee.steward.curation_review.v1",
+                    "jobType": JobType::CurationReview.as_str(),
+                    "workspace": workspace_path.display().to_string(),
+                    "dryRun": self.options.dry_run,
+                    "durableMutation": false,
+                    "cancelledBeforeMutation": true,
+                })),
+            );
+        }
+        let actor = self
+            .options
+            .actor
+            .as_deref()
+            .unwrap_or("ee-steward-manual-runner");
+        let report = match run_curation_disposition(&CurateDispositionOptions {
+            workspace_path: &workspace_path,
+            database_path: self.options.database_path.as_deref(),
+            actor: Some(actor),
+            apply: !self.options.dry_run,
+            structural_decay: self.options.structural_decay,
+            now_rfc3339: self.options.as_of.as_deref(),
+        }) {
+            Ok(report) => report,
             Err(error) => {
-                let message = format!("Failed to list pending curation candidates: {error}");
+                let message = format!("Failed to run curation disposition: {error}");
                 return steward_job_failure(
                     "ee.steward.curation_review.error.v1",
-                    "curation_review_query_failed",
+                    "curation_review_disposition_failed",
                     message,
                     self.options.dry_run,
-                    Some(&opened.database_path),
-                    "ee doctor --json",
+                    self.options.database_path.as_deref(),
+                    "ee curate disposition --dry-run --json",
                 );
             }
         };
-        budget.record(ResourceType::Items, usize_to_u64(candidates.len()));
+        let item_count = usize_to_u64(report.summary.total_candidates);
+        budget.record(ResourceType::Items, item_count);
+        let report_json = serde_json::to_value(&report).unwrap_or_else(|error| {
+            json!({
+                "schema": "ee.curate.disposition.serialization_failed.v1",
+                "message": error.to_string(),
+            })
+        });
 
         (
             RunOutcome::Success,
-            Some(usize_to_u64(candidates.len())),
+            Some(item_count),
             None,
             Some(json!({
                 "schema": "ee.steward.curation_review.v1",
                 "jobType": JobType::CurationReview.as_str(),
-                "workspaceId": opened.workspace_id,
-                "databasePath": opened.database_path.display().to_string(),
-                "pendingCandidates": candidates.len(),
-                "candidateIds": candidates
-                    .iter()
-                    .map(|candidate| candidate.id.as_str())
-                    .collect::<Vec<_>>(),
+                "workspaceId": report.workspace_id,
+                "workspacePath": report.workspace_path,
+                "databasePath": report.database_path,
+                "command": report.command,
+                "summary": &report.summary,
+                "degraded": &report.degraded,
+                "nextAction": report.next_action,
+                "report": report_json,
                 "dryRun": self.options.dry_run,
-                "durableMutation": false,
+                "durableMutation": report.durable_mutation,
             })),
         )
     }
@@ -4607,23 +4635,120 @@ impl ManualRunner {
         budget: &mut JobBudgetState,
     ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
         let workspace_path = self.normalized_workspace_path();
-        let cache_path = workspace_path.join(".ee").join("cache");
-        let exists = cache_path.exists();
-        budget.record(ResourceType::Items, 0);
+        let workspace_id = self
+            .options
+            .workspace_id
+            .clone()
+            .unwrap_or_else(|| stable_runner_workspace_id(&workspace_path));
+        let Some(cache) = (match steward_pack_l2_cache(&workspace_path, &workspace_id) {
+            Ok(cache) => cache,
+            Err(message) => {
+                return steward_job_failure(
+                    "ee.steward.cache_pruning.error.v1",
+                    "cache_pruning_config_failed",
+                    message,
+                    self.options.dry_run,
+                    None,
+                    "ee config show --json",
+                );
+            }
+        }) else {
+            return (
+                RunOutcome::Skipped,
+                Some(0),
+                Some("L2 pack cache is disabled by config or environment".to_owned()),
+                Some(json!({
+                    "schema": "ee.steward.cache_pruning.v1",
+                    "jobType": JobType::CachePruning.as_str(),
+                    "workspace": workspace_path.display().to_string(),
+                    "workspaceId": workspace_id,
+                    "cacheEnabled": false,
+                    "dryRun": self.options.dry_run,
+                    "durableMutation": false,
+                })),
+            );
+        };
+
+        if self.options.dry_run || budget_cancels_before_mutation(budget) {
+            let exists = cache.root().exists();
+            return (
+                if budget_cancels_before_mutation(budget) {
+                    RunOutcome::Cancelled
+                } else {
+                    RunOutcome::Success
+                },
+                Some(0),
+                if budget_cancels_before_mutation(budget) {
+                    Some("Budget exceeded before cache pruning".to_owned())
+                } else {
+                    None
+                },
+                Some(json!({
+                    "schema": "ee.steward.cache_pruning.v1",
+                    "jobType": JobType::CachePruning.as_str(),
+                    "workspace": workspace_path.display().to_string(),
+                    "workspaceId": workspace_id,
+                    "cacheEnabled": true,
+                    "cachePath": cache.root().display().to_string(),
+                    "cacheExists": exists,
+                    "maxBytes": cache.options().max_bytes,
+                    "maxEntryBytes": cache.options().max_entry_bytes,
+                    "maxAgeSeconds": cache.options().max_age.as_secs(),
+                    "filesDeleted": 0,
+                    "bytesFreed": 0,
+                    "dryRun": self.options.dry_run,
+                    "durableMutation": false,
+                    "cancelledBeforeMutation": budget_cancels_before_mutation(budget),
+                })),
+            );
+        }
+
+        let report = match cache.evict_best_effort() {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("Failed to prune L2 pack cache: {error}");
+                return steward_job_failure(
+                    "ee.steward.cache_pruning.error.v1",
+                    "cache_pruning_evict_failed",
+                    message,
+                    false,
+                    None,
+                    "ee doctor --json",
+                );
+            }
+        };
+        budget.record(
+            ResourceType::Items,
+            report.removed.saturating_add(report.skipped),
+        );
+        if report.removed > 0 {
+            emit_cache_evict(CacheEvictEvent {
+                reason: CacheEvictReason::OperatorRequest,
+                count: u32::try_from(report.removed).unwrap_or(u32::MAX),
+            });
+        }
 
         (
             RunOutcome::Success,
-            Some(0),
+            Some(report.removed.saturating_add(report.skipped)),
             None,
             Some(json!({
                 "schema": "ee.steward.cache_pruning.v1",
                 "jobType": JobType::CachePruning.as_str(),
                 "workspace": workspace_path.display().to_string(),
-                "cachePath": cache_path.display().to_string(),
-                "cacheExists": exists,
-                "filesDeleted": 0,
-                "durableMutation": false,
-                "policy": "No cache files are deleted without explicit file-deletion approval.",
+                "workspaceId": workspace_id,
+                "cacheEnabled": true,
+                "cachePath": cache.root().display().to_string(),
+                "cacheExists": cache.root().exists(),
+                "maxBytes": cache.options().max_bytes,
+                "maxEntryBytes": cache.options().max_entry_bytes,
+                "maxAgeSeconds": cache.options().max_age.as_secs(),
+                "filesDeleted": report.removed,
+                "filesSkipped": report.skipped,
+                "bytesBefore": report.bytes_before,
+                "bytesAfter": report.bytes_after,
+                "bytesFreed": report.bytes_removed,
+                "durableMutation": report.removed > 0,
                 "dryRun": self.options.dry_run,
             })),
         )
@@ -4851,8 +4976,8 @@ impl ManualRunner {
             Ok(opened) => opened,
             Err(result) => return result,
         };
-        let workspaces = match opened.connection.list_workspaces() {
-            Ok(workspaces) => workspaces,
+        let page_size_before = match opened.connection.page_size() {
+            Ok(value) => value,
             Err(error) => {
                 let message = format!("Failed to inspect database before storage compact: {error}");
                 return steward_job_failure(
@@ -4865,20 +4990,192 @@ impl ManualRunner {
                 );
             }
         };
-        budget.record(ResourceType::Items, usize_to_u64(workspaces.len()));
+        let page_count_before = match opened.connection.page_count() {
+            Ok(value) => value,
+            Err(error) => {
+                let message =
+                    format!("Failed to inspect database page count before compact: {error}");
+                return steward_job_failure(
+                    "ee.steward.storage_compact.error.v1",
+                    "storage_compact_preflight_failed",
+                    message,
+                    self.options.dry_run,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+        let wal_before = match opened.connection.wal_status() {
+            Ok(value) => value,
+            Err(error) => {
+                let message = format!("Failed to inspect WAL before storage compact: {error}");
+                return steward_job_failure(
+                    "ee.steward.storage_compact.error.v1",
+                    "storage_compact_preflight_failed",
+                    message,
+                    self.options.dry_run,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+        budget.record(ResourceType::Items, page_count_before);
+        let bytes_before = page_count_before.saturating_mul(u64::from(page_size_before));
+
+        if self.options.dry_run || budget_cancels_before_mutation(budget) {
+            return (
+                if budget_cancels_before_mutation(budget) {
+                    RunOutcome::Cancelled
+                } else {
+                    RunOutcome::Success
+                },
+                Some(page_count_before),
+                if budget_cancels_before_mutation(budget) {
+                    Some("Budget exceeded before storage compaction".to_owned())
+                } else {
+                    None
+                },
+                Some(json!({
+                    "schema": "ee.steward.storage_compact.v1",
+                    "jobType": JobType::StorageCompact.as_str(),
+                    "workspaceId": opened.workspace_id,
+                    "databasePath": opened.database_path.display().to_string(),
+                    "operation": "vacuum_optimize_checkpoint",
+                    "pageSize": page_size_before,
+                    "pageCountBefore": page_count_before,
+                    "bytesBefore": bytes_before,
+                    "walBefore": {
+                        "bytes": wal_before.bytes,
+                        "frames": wal_before.frames,
+                        "pageSize": wal_before.page_size,
+                    },
+                    "dryRun": self.options.dry_run,
+                    "durableMutation": false,
+                    "cancelledBeforeMutation": budget_cancels_before_mutation(budget),
+                })),
+            );
+        }
+
+        let checkpoint = match opened
+            .connection
+            .wal_checkpoint(WalCheckpointMode::Truncate)
+        {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("Failed to checkpoint WAL before storage compact: {error}");
+                return steward_job_failure(
+                    "ee.steward.storage_compact.error.v1",
+                    "storage_compact_checkpoint_failed",
+                    message,
+                    false,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+        if let Err(error) = opened.connection.execute_raw("PRAGMA optimize") {
+            let message = format!("Failed to run PRAGMA optimize before storage compact: {error}");
+            return steward_job_failure(
+                "ee.steward.storage_compact.error.v1",
+                "storage_compact_optimize_failed",
+                message,
+                false,
+                Some(&opened.database_path),
+                "ee doctor --json",
+            );
+        }
+        if let Err(error) = opened.connection.execute_raw("VACUUM") {
+            let message = format!("Failed to run VACUUM during storage compact: {error}");
+            return steward_job_failure(
+                "ee.steward.storage_compact.error.v1",
+                "storage_compact_vacuum_failed",
+                message,
+                false,
+                Some(&opened.database_path),
+                "ee doctor --json",
+            );
+        }
+        let page_size_after = match opened.connection.page_size() {
+            Ok(value) => value,
+            Err(error) => {
+                let message = format!("Failed to inspect page size after storage compact: {error}");
+                return steward_job_failure(
+                    "ee.steward.storage_compact.error.v1",
+                    "storage_compact_postflight_failed",
+                    message,
+                    false,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+        let page_count_after = match opened.connection.page_count() {
+            Ok(value) => value,
+            Err(error) => {
+                let message =
+                    format!("Failed to inspect page count after storage compact: {error}");
+                return steward_job_failure(
+                    "ee.steward.storage_compact.error.v1",
+                    "storage_compact_postflight_failed",
+                    message,
+                    false,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+        let wal_after = match opened.connection.wal_status() {
+            Ok(value) => value,
+            Err(error) => {
+                let message = format!("Failed to inspect WAL after storage compact: {error}");
+                return steward_job_failure(
+                    "ee.steward.storage_compact.error.v1",
+                    "storage_compact_postflight_failed",
+                    message,
+                    false,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+        let bytes_after = page_count_after.saturating_mul(u64::from(page_size_after));
 
         (
             RunOutcome::Success,
-            Some(usize_to_u64(workspaces.len())),
+            Some(page_count_before),
             None,
             Some(json!({
                 "schema": "ee.steward.storage_compact.v1",
                 "jobType": JobType::StorageCompact.as_str(),
                 "workspaceId": opened.workspace_id,
                 "databasePath": opened.database_path.display().to_string(),
-                "operation": "preflight_only",
-                "durableMutation": false,
-                "reason": "Storage compaction is held to read-only diagnostics until the DB layer exposes an audited vacuum/optimize operation.",
+                "operation": "vacuum_optimize_checkpoint",
+                "pageSizeBefore": page_size_before,
+                "pageSizeAfter": page_size_after,
+                "pageCountBefore": page_count_before,
+                "pageCountAfter": page_count_after,
+                "bytesBefore": bytes_before,
+                "bytesAfter": bytes_after,
+                "bytesFreedEstimate": bytes_before.saturating_sub(bytes_after),
+                "walCheckpoint": {
+                    "mode": checkpoint.mode.as_str(),
+                    "busy": checkpoint.busy,
+                    "logFrames": checkpoint.log_frames,
+                    "checkpointedFrames": checkpoint.checkpointed_frames,
+                    "bytesBefore": checkpoint.before.bytes,
+                    "bytesAfter": checkpoint.after.bytes,
+                },
+                "walBefore": {
+                    "bytes": wal_before.bytes,
+                    "frames": wal_before.frames,
+                    "pageSize": wal_before.page_size,
+                },
+                "walAfter": {
+                    "bytes": wal_after.bytes,
+                    "frames": wal_after.frames,
+                    "pageSize": wal_after.page_size,
+                },
+                "durableMutation": true,
                 "dryRun": self.options.dry_run,
             })),
         )
@@ -4896,16 +5193,13 @@ impl ManualRunner {
             Ok(opened) => opened,
             Err(result) => return result,
         };
-        let memories = match opened
-            .connection
-            .list_memories(&opened.workspace_id, None, false)
-        {
-            Ok(memories) => memories,
+        let report = match opened.connection.integrity_report() {
+            Ok(report) => report,
             Err(error) => {
-                let message = format!("Failed to inspect memories for integrity check: {error}");
+                let message = format!("Failed to run database integrity report: {error}");
                 return steward_job_failure(
                     "ee.steward.integrity_check.error.v1",
-                    "integrity_check_memory_query_failed",
+                    "integrity_check_report_failed",
                     message,
                     self.options.dry_run,
                     Some(&opened.database_path),
@@ -4913,19 +5207,78 @@ impl ManualRunner {
                 );
             }
         };
-        budget.record(ResourceType::Items, usize_to_u64(memories.len()));
+        let issue_count = usize_to_u64(report.integrity_check.issues.len())
+            .saturating_add(usize_to_u64(report.foreign_key_check.violations.len()))
+            .saturating_add(u64::from(report.reference_check.issue_count))
+            .saturating_add(u64::from(report.needs_migration));
+        budget.record(ResourceType::Items, issue_count);
+        let reference_issues = report
+            .reference_check
+            .issues
+            .iter()
+            .map(|issue| {
+                json!({
+                    "scope": issue.scope.as_str(),
+                    "code": issue.code.as_str(),
+                    "ownerId": issue.owner_id,
+                    "referencedId": issue.referenced_id,
+                    "expected": issue.expected,
+                    "actual": issue.actual,
+                    "detail": issue.detail,
+                })
+            })
+            .collect::<Vec<_>>();
+        let foreign_key_violations = report
+            .foreign_key_check
+            .violations
+            .iter()
+            .map(|violation| {
+                json!({
+                    "table": violation.table,
+                    "rowid": violation.rowid,
+                    "parent": violation.parent,
+                    "fkid": violation.fkid,
+                })
+            })
+            .collect::<Vec<_>>();
+        let healthy = report.is_healthy();
 
         (
-            RunOutcome::Success,
-            Some(usize_to_u64(memories.len())),
-            None,
+            if healthy {
+                RunOutcome::Success
+            } else {
+                RunOutcome::Failed
+            },
+            Some(issue_count),
+            if healthy {
+                None
+            } else {
+                Some(format!(
+                    "Database integrity check found {issue_count} issue(s)"
+                ))
+            },
             Some(json!({
                 "schema": "ee.steward.integrity_check.v1",
                 "jobType": JobType::IntegrityCheck.as_str(),
                 "workspaceId": opened.workspace_id,
                 "databasePath": opened.database_path.display().to_string(),
-                "checkedMemories": memories.len(),
-                "issues": [],
+                "healthy": healthy,
+                "issueCount": issue_count,
+                "schemaVersion": report.schema_version,
+                "needsMigration": report.needs_migration,
+                "sqliteIntegrity": {
+                    "passed": report.integrity_check.passed,
+                    "issues": report.integrity_check.issues,
+                },
+                "foreignKeys": {
+                    "passed": report.foreign_key_check.passed,
+                    "violations": foreign_key_violations,
+                },
+                "references": {
+                    "passed": report.reference_check.is_clean(),
+                    "issueCount": report.reference_check.issue_count,
+                    "issues": reference_issues,
+                },
                 "dryRun": self.options.dry_run,
                 "durableMutation": false,
             })),
@@ -4936,32 +5289,67 @@ impl ManualRunner {
         &self,
         budget: &mut JobBudgetState,
     ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
-        let Some(database_path) = self.resolve_database_path() else {
-            let message = "Backup export requires a database path or workspace path with .ee/ee.db"
-                .to_owned();
-            return steward_job_failure(
-                "ee.steward.backup_export.error.v1",
-                "backup_export_database_unresolved",
-                message,
-                self.options.dry_run,
-                None,
-                "ee init --workspace .",
+        let workspace_path = self.normalized_workspace_path();
+        if budget_cancels_before_mutation(budget) {
+            return (
+                RunOutcome::Cancelled,
+                Some(0),
+                Some("Budget exceeded before backup export".to_owned()),
+                Some(json!({
+                    "schema": "ee.steward.backup_export.v1",
+                    "jobType": JobType::BackupExport.as_str(),
+                    "workspacePath": workspace_path.display().to_string(),
+                    "databasePath": self.resolve_database_path().map(|path| path.display().to_string()),
+                    "dryRun": self.options.dry_run,
+                    "durableMutation": false,
+                    "cancelledBeforeMutation": true,
+                })),
             );
+        }
+        let report = match create_backup(&BackupCreateOptions {
+            workspace_path: workspace_path.clone(),
+            database_path: self.options.database_path.clone(),
+            output_dir: None,
+            label: Some("steward-backup-export".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: true,
+            include_graph_cache: true,
+            dry_run: self.options.dry_run,
+        }) {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("Failed to create steward backup export: {error}");
+                return steward_job_failure(
+                    "ee.steward.backup_export.error.v1",
+                    "backup_export_create_failed",
+                    message,
+                    self.options.dry_run,
+                    self.options.database_path.as_deref(),
+                    "ee backup create --workspace . --json",
+                );
+            }
         };
-        let database_exists = if database_path.exists() { 1_u64 } else { 0 };
-        budget.record(ResourceType::Items, database_exists);
+        budget.record(ResourceType::Items, report.total_records);
+        let backup_json = report.data_json();
         (
             RunOutcome::Success,
-            Some(database_exists),
+            Some(report.total_records),
             None,
             Some(json!({
                 "schema": "ee.steward.backup_export.v1",
                 "jobType": JobType::BackupExport.as_str(),
-                "databasePath": database_path.display().to_string(),
-                "databaseExists": database_exists == 1,
-                "operation": "planned",
-                "durableMutation": false,
-                "reason": "Backup export is exposed through dedicated backup commands; daemon records readiness without copying files.",
+                "workspacePath": workspace_path.display().to_string(),
+                "workspaceId": report.workspace_id,
+                "databasePath": report.database_path,
+                "backupPath": report.backup_path,
+                "manifestPath": report.manifest_path,
+                "recordsPath": report.records_path,
+                "operation": "backup_create",
+                "status": report.status,
+                "totalRecords": report.total_records,
+                "verificationStatus": report.verification_status,
+                "backup": backup_json,
+                "durableMutation": !report.dry_run,
                 "dryRun": self.options.dry_run,
             })),
         )
@@ -4971,17 +5359,150 @@ impl ManualRunner {
         &self,
         budget: &mut JobBudgetState,
     ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
-        budget.record(ResourceType::Items, 0);
+        let opened = match self.open_workspace_database_for_job(
+            "ee.steward.garbage_collection.error.v1",
+            "garbage_collection",
+            "ee doctor --json",
+        ) {
+            Ok(opened) => opened,
+            Err(result) => return result,
+        };
+        let memories = match opened
+            .connection
+            .list_memories(&opened.workspace_id, None, true)
+        {
+            Ok(memories) => memories,
+            Err(error) => {
+                let message = format!("Failed to list memories for garbage collection: {error}");
+                return steward_job_failure(
+                    "ee.steward.garbage_collection.error.v1",
+                    "garbage_collection_memory_query_failed",
+                    message,
+                    self.options.dry_run,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+        let scan_limit = self
+            .options
+            .item_limit
+            .and_then(|limit| usize::try_from(limit).ok())
+            .unwrap_or(memories.len())
+            .min(memories.len());
+        let planned_scan_count = usize_to_u64(scan_limit);
+        budget.record(ResourceType::Items, planned_scan_count);
+        if self.options.dry_run || budget_cancels_before_mutation(budget) {
+            return (
+                if budget_cancels_before_mutation(budget) {
+                    RunOutcome::Cancelled
+                } else {
+                    RunOutcome::Success
+                },
+                Some(planned_scan_count),
+                if budget_cancels_before_mutation(budget) {
+                    Some("Budget exceeded before garbage collection".to_owned())
+                } else {
+                    None
+                },
+                Some(json!({
+                    "schema": "ee.steward.garbage_collection.v1",
+                    "jobType": JobType::GarbageCollection.as_str(),
+                    "workspaceId": opened.workspace_id,
+                    "databasePath": opened.database_path.display().to_string(),
+                    "memoryRowsScanned": planned_scan_count,
+                    "memoryRowsAvailable": memories.len(),
+                    "itemsCollected": 0,
+                    "autoMemoryLinksCollected": 0,
+                    "staleGraphResultsEvicted": 0,
+                    "graphTypesChecked": steward_gc_graph_types()
+                        .iter()
+                        .map(|graph_type| graph_type.as_str())
+                        .collect::<Vec<_>>(),
+                    "dryRun": self.options.dry_run,
+                    "durableMutation": false,
+                    "cancelledBeforeMutation": budget_cancels_before_mutation(budget),
+                })),
+            );
+        }
+
+        let mut removed_link_ids = Vec::new();
+        for memory in memories.iter().take(scan_limit) {
+            let removed = match opened
+                .connection
+                .garbage_collect_auto_memory_links_for_memory(&memory.id)
+            {
+                Ok(removed) => removed,
+                Err(error) => {
+                    let message = format!(
+                        "Failed to collect auto memory links for {}: {error}",
+                        memory.id
+                    );
+                    return steward_job_failure(
+                        "ee.steward.garbage_collection.error.v1",
+                        "garbage_collection_auto_link_failed",
+                        message,
+                        false,
+                        Some(&opened.database_path),
+                        "ee doctor --json",
+                    );
+                }
+            };
+            removed_link_ids.extend(removed.into_iter().map(|link| link.id));
+        }
+        let mut graph_evictions = BTreeMap::new();
+        let mut stale_graph_results_evicted = 0_u64;
+        for graph_type in steward_gc_graph_types() {
+            let evicted = match opened
+                .connection
+                .evict_stale_graph_algorithm_results(&opened.workspace_id, graph_type)
+            {
+                Ok(evicted) => evicted,
+                Err(error) => {
+                    let message = format!(
+                        "Failed to evict stale {} graph algorithm results: {error}",
+                        graph_type.as_str()
+                    );
+                    return steward_job_failure(
+                        "ee.steward.garbage_collection.error.v1",
+                        "garbage_collection_graph_result_failed",
+                        message,
+                        false,
+                        Some(&opened.database_path),
+                        "ee doctor --json",
+                    );
+                }
+            };
+            graph_evictions.insert(graph_type.as_str(), evicted);
+            stale_graph_results_evicted = stale_graph_results_evicted.saturating_add(evicted);
+        }
+        if stale_graph_results_evicted > 0 {
+            emit_cache_evict(CacheEvictEvent {
+                reason: CacheEvictReason::OperatorRequest,
+                count: u32::try_from(stale_graph_results_evicted).unwrap_or(u32::MAX),
+            });
+        }
+        let auto_memory_links_collected = usize_to_u64(removed_link_ids.len());
+        let items_collected =
+            auto_memory_links_collected.saturating_add(stale_graph_results_evicted);
         (
             RunOutcome::Success,
-            Some(0),
+            Some(planned_scan_count),
             None,
             Some(json!({
                 "schema": "ee.steward.garbage_collection.v1",
                 "jobType": JobType::GarbageCollection.as_str(),
-                "itemsCollected": 0,
-                "durableMutation": false,
-                "policy": "Garbage collection never deletes files or rows without an audited subsystem-specific operation.",
+                "workspaceId": opened.workspace_id,
+                "databasePath": opened.database_path.display().to_string(),
+                "memoryRowsScanned": planned_scan_count,
+                "memoryRowsAvailable": memories.len(),
+                "itemsCollected": items_collected,
+                "autoMemoryLinksCollected": auto_memory_links_collected,
+                "removedAutoMemoryLinkIds": removed_link_ids.iter().take(25).collect::<Vec<_>>(),
+                "removedAutoMemoryLinkIdsTruncated": removed_link_ids.len() > 25,
+                "staleGraphResultsEvicted": stale_graph_results_evicted,
+                "graphResultEvictions": graph_evictions,
+                "durableMutation": items_collected > 0,
                 "dryRun": self.options.dry_run,
             })),
         )
@@ -5335,6 +5856,140 @@ struct OpenedWorkspaceDatabase {
     connection: DbConnection,
     database_path: PathBuf,
     workspace_id: String,
+}
+
+fn steward_gc_graph_types() -> &'static [GraphSnapshotType] {
+    &[
+        GraphSnapshotType::MemoryLinks,
+        GraphSnapshotType::SessionGraph,
+        GraphSnapshotType::ProcedureGraph,
+        GraphSnapshotType::EvidenceGraph,
+        GraphSnapshotType::Composite,
+        GraphSnapshotType::CausalEvidence,
+        GraphSnapshotType::RevisionDag,
+        GraphSnapshotType::RuleProvenance,
+        GraphSnapshotType::ContradictionSubgraph,
+    ]
+}
+
+fn steward_pack_l2_cache(
+    workspace_path: &Path,
+    workspace_id: &str,
+) -> Result<Option<PackL2Cache>, String> {
+    let Some(config) = steward_pack_l2_config(workspace_path)? else {
+        return Ok(None);
+    };
+    let root = if config.root.as_os_str().is_empty() {
+        steward_pack_l2_default_root()
+    } else {
+        config.root
+    };
+    let workspace_root = root.join(steward_pack_l2_workspace_component(workspace_id));
+    Ok(Some(PackL2Cache::new(
+        workspace_root,
+        PackL2CacheOptions::new(config.max_bytes, config.max_age)
+            .with_max_entry_bytes(config.max_entry_bytes),
+    )))
+}
+
+struct StewardPackL2Config {
+    root: PathBuf,
+    max_bytes: u64,
+    max_entry_bytes: u64,
+    max_age: Duration,
+}
+
+fn steward_pack_l2_config(workspace_path: &Path) -> Result<Option<StewardPackL2Config>, String> {
+    let project = steward_workspace_config(workspace_path, "steward cache pruning")?;
+    let project_l2 = project.as_ref().map(|config| &config.cache.pack_l2);
+    let disabled_by_env = steward_read_env_bool(EnvVar::L2PackCacheDisable).unwrap_or(false);
+    let enabled = !disabled_by_env && project_l2.and_then(|config| config.enabled).unwrap_or(true);
+    if !enabled {
+        return Ok(None);
+    }
+
+    let root = read_env_var(EnvVar::L2PackCacheDir)
+        .map(PathBuf::from)
+        .or_else(|| project_l2.and_then(|config| config.directory.clone()))
+        .unwrap_or_default();
+    let max_bytes = steward_read_env_u64(EnvVar::L2PackCacheBytes)
+        .or_else(|| project_l2.and_then(|config| config.max_bytes))
+        .unwrap_or(crate::cache::pack_l2::DEFAULT_MAX_BYTES);
+    let max_age_days = project_l2
+        .and_then(|config| config.max_age_days)
+        .unwrap_or(30);
+
+    Ok(Some(StewardPackL2Config {
+        root,
+        max_bytes,
+        max_entry_bytes: crate::cache::pack_l2::DEFAULT_MAX_ENTRY_BYTES,
+        max_age: Duration::from_secs(max_age_days.saturating_mul(24 * 60 * 60)),
+    }))
+}
+
+fn steward_workspace_config(
+    workspace_path: &Path,
+    surface: &str,
+) -> Result<Option<ConfigFile>, String> {
+    let Some(contents) =
+        crate::config::read_workspace_config_contents(workspace_path).map_err(|error| {
+            format!(
+                "{surface} skipped because workspace config could not be read under {}: {error}",
+                workspace_path.display()
+            )
+        })?
+    else {
+        return Ok(None);
+    };
+    ConfigFile::parse(&contents)
+        .map_err(|error| {
+            format!(
+                "{surface} skipped because workspace config under {} could not be parsed: {error}",
+                workspace_path.display()
+            )
+        })
+        .map(Some)
+}
+
+fn steward_pack_l2_default_root() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        let shm = Path::new("/dev/shm");
+        if shm.is_dir() {
+            shm.join("ee").join("pack-l2")
+        } else {
+            std::env::temp_dir().join("ee").join("pack-l2")
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::temp_dir().join("ee").join("pack-l2")
+    }
+}
+
+fn steward_pack_l2_workspace_component(workspace_id: &str) -> String {
+    workspace_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn steward_read_env_u64(var: EnvVar) -> Option<u64> {
+    read_env_var(var).and_then(|raw| raw.parse::<u64>().ok())
+}
+
+fn steward_read_env_bool(var: EnvVar) -> Option<bool> {
+    read_env_var(var).and_then(|raw| match raw.as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    })
 }
 
 fn graph_snapshot_prune_holder_id() -> String {
@@ -5952,8 +6607,7 @@ const BACKGROUND_SCHEDULER_SLEEP_SLICE_MS: u64 = 500;
 
 /// Job types run by the background scheduler on every tick. These are the
 /// low-overhead jobs safe to run unattended inside the daemon process.
-const BACKGROUND_SCHEDULER_JOB_TYPES: &[JobType] =
-    &[JobType::DecaySweep, JobType::HealthCheck];
+const BACKGROUND_SCHEDULER_JOB_TYPES: &[JobType] = &[JobType::DecaySweep, JobType::HealthCheck];
 
 /// Run the steward scheduler indefinitely on a background cadence.
 ///
@@ -9885,6 +10539,234 @@ mod tests {
                 .is_some(),
             true,
             "pre-existing refresh lock should remain held",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn manual_runner_maintenance_cluster_uses_real_subsystems() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = temp.path().to_path_buf();
+        let ee_dir = workspace_path.join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let database_path = ee_dir.join("ee.db");
+        let cache_root = workspace_path.join("pack-l2-root");
+        let cache_workspace =
+            cache_root.join(steward_pack_l2_workspace_component(SCORE_WORKSPACE_ID));
+        fs::create_dir_all(&cache_workspace).map_err(|error| error.to_string())?;
+        let cache_entry = cache_workspace.join("cluster-cache.json");
+        fs::write(
+            &cache_entry,
+            br#"{"schema":"ee.pack.l2_cache.entry.v1","storedAtEpochSeconds":1,"body":{"stale":true}}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        let cache_root_literal = serde_json::to_string(&cache_root.to_string_lossy().to_string())
+            .map_err(|error| error.to_string())?;
+        fs::write(
+            ee_dir.join("config.toml"),
+            format!(
+                "[cache.pack_l2]\ndirectory = {cache_root_literal}\nmax_bytes = 1\nmax_age_days = 30\n"
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+
+        {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    SCORE_WORKSPACE_ID,
+                    &CreateWorkspaceInput {
+                        path: workspace_path.to_string_lossy().into_owned(),
+                        name: Some("manual-runner-maintenance-cluster".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+            insert_score_memory(&connection, SCORE_MEMORY_B, 0.7)?;
+            let mut auto_link = CreateMemoryLinkInput {
+                src_memory_id: SCORE_MEMORY_A.to_owned(),
+                dst_memory_id: SCORE_MEMORY_B.to_owned(),
+                relation: MemoryLinkRelation::Related,
+                weight: 1.0,
+                confidence: 1.0,
+                directed: false,
+                evidence_count: 1,
+                last_reinforced_at: None,
+                source: MemoryLinkSource::Auto,
+                created_by: Some("manual-runner-cluster-test".to_owned()),
+                metadata_json: Some(r#"{"schema":"test.auto_link"}"#.to_owned()),
+            };
+            connection
+                .insert_memory_link("link_00000000000000000000009901", &auto_link)
+                .map_err(|error| error.to_string())?;
+            auto_link.source = MemoryLinkSource::Agent;
+            connection
+                .insert_memory_link("link_00000000000000000000009902", &auto_link)
+                .map_err(|error| error.to_string())?;
+            connection
+                .insert_curation_candidate(
+                    "cur_stewardcluster0000000000001",
+                    &CreateCurationCandidateInput {
+                        workspace_id: SCORE_WORKSPACE_ID.to_owned(),
+                        candidate_type: CandidateType::Consolidate.as_str().to_owned(),
+                        target_memory_id: Some(SCORE_MEMORY_A.to_owned()),
+                        proposed_content: Some("Prefer the canonical steward fixture.".to_owned()),
+                        proposed_confidence: Some(0.82),
+                        proposed_trust_class: None,
+                        source_type: CandidateSource::RuleEngine.as_str().to_owned(),
+                        source_id: Some(SCORE_MEMORY_B.to_owned()),
+                        reason: "manual runner cluster fixture".to_owned(),
+                        confidence: 0.82,
+                        status: Some("pending".to_owned()),
+                        created_at: Some("2026-05-01T00:00:00Z".to_owned()),
+                        ttl_expires_at: None,
+                        derivation_source_refs_json: None,
+                        derivation_metadata_json: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+
+        let opts = RunnerOptions::new()
+            .with_workspace_path(workspace_path.clone())
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_structural_decay(false)
+            .with_actor("manual-runner-cluster-test");
+        let mut runner = ManualRunner::new(opts);
+
+        let cache = runner.run_job_type(JobType::CachePruning, Some("cluster cache".to_owned()));
+        ensure(cache.outcome, RunOutcome::Success, "cache outcome")?;
+        let cache_details = cache
+            .details
+            .ok_or_else(|| "cache pruning details missing".to_owned())?;
+        ensure(
+            cache_details["filesDeleted"].as_u64(),
+            Some(1),
+            "cache files deleted",
+        )?;
+        ensure(
+            cache_details["durableMutation"].as_bool(),
+            Some(true),
+            "cache durable mutation",
+        )?;
+        ensure(cache_entry.exists(), false, "cache entry pruned")?;
+
+        let garbage =
+            runner.run_job_type(JobType::GarbageCollection, Some("cluster gc".to_owned()));
+        ensure(garbage.outcome, RunOutcome::Success, "garbage outcome")?;
+        let garbage_details = garbage
+            .details
+            .ok_or_else(|| "garbage collection details missing".to_owned())?;
+        ensure(
+            garbage_details["autoMemoryLinksCollected"].as_u64(),
+            Some(1),
+            "auto links collected",
+        )?;
+        ensure(
+            garbage_details["durableMutation"].as_bool(),
+            Some(true),
+            "garbage durable mutation",
+        )?;
+
+        let integrity = runner.run_job_type(
+            JobType::IntegrityCheck,
+            Some("cluster integrity".to_owned()),
+        );
+        ensure(integrity.outcome, RunOutcome::Success, "integrity outcome")?;
+        let integrity_details = integrity
+            .details
+            .ok_or_else(|| "integrity details missing".to_owned())?;
+        ensure(
+            integrity_details["healthy"].as_bool(),
+            Some(true),
+            "integrity healthy",
+        )?;
+        ensure(
+            integrity_details["sqliteIntegrity"]["passed"].as_bool(),
+            Some(true),
+            "sqlite integrity passed",
+        )?;
+
+        let storage =
+            runner.run_job_type(JobType::StorageCompact, Some("cluster compact".to_owned()));
+        ensure(storage.outcome, RunOutcome::Success, "storage outcome")?;
+        let storage_details = storage
+            .details
+            .ok_or_else(|| "storage compact details missing".to_owned())?;
+        ensure(
+            storage_details["operation"].as_str(),
+            Some("vacuum_optimize_checkpoint"),
+            "storage operation",
+        )?;
+        ensure(
+            storage_details["durableMutation"].as_bool(),
+            Some(true),
+            "storage durable mutation",
+        )?;
+
+        let backup = runner.run_job_type(JobType::BackupExport, Some("cluster backup".to_owned()));
+        ensure(backup.outcome, RunOutcome::Success, "backup outcome")?;
+        let backup_details = backup
+            .details
+            .ok_or_else(|| "backup details missing".to_owned())?;
+        ensure(
+            backup_details["operation"].as_str(),
+            Some("backup_create"),
+            "backup operation",
+        )?;
+        ensure(
+            backup_details["status"].as_str(),
+            Some("completed"),
+            "backup status",
+        )?;
+        let backup_path = backup_details["backupPath"]
+            .as_str()
+            .ok_or_else(|| "backup path missing".to_owned())?;
+        ensure(
+            Path::new(backup_path).is_dir(),
+            true,
+            "backup directory exists",
+        )?;
+
+        let curation =
+            runner.run_job_type(JobType::CurationReview, Some("cluster curation".to_owned()));
+        ensure(curation.outcome, RunOutcome::Success, "curation outcome")?;
+        let curation_details = curation
+            .details
+            .ok_or_else(|| "curation details missing".to_owned())?;
+        ensure(
+            curation_details["command"].as_str(),
+            Some("curate disposition"),
+            "curation command",
+        )?;
+        ensure(
+            curation_details["summary"]["totalCandidates"].as_u64(),
+            Some(1),
+            "curation candidate count",
+        )?;
+
+        let connection =
+            DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+        let remaining_links = connection
+            .list_all_memory_links(None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            remaining_links
+                .iter()
+                .any(|link| link.source == MemoryLinkSource::Auto.as_str()),
+            false,
+            "auto links removed",
+        )?;
+        ensure(
+            remaining_links
+                .iter()
+                .any(|link| link.source == MemoryLinkSource::Agent.as_str()),
+            true,
+            "agent links retained",
         )?;
         connection.close().map_err(|error| error.to_string())
     }
