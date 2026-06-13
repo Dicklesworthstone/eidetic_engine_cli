@@ -1075,6 +1075,11 @@ run_stage "Output Governor E2E (bd-7lvbg.4)" "EE_GOVERNOR_E2E_CORPUS=120 ./scrip
 # --no-baseline-write opt-out (bd-7lvbg.6).
 run_stage "Pack Delta E2E (bd-7lvbg.6)" "./scripts/e2e_pack_delta.sh"
 
+# Gate 6.057: code-anchored recall plus harness hooks — real scratch git
+# workspace, anchored memories, recall path/diff selectors, Claude Code hook
+# install, PreToolUse context injection, and Bash failure journal capture.
+run_stage "Recall Hooks E2E (bd-u875s.5)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_recall_hooks.sh"
+
 # Gate 6.06: Replay lab smoke. This is intentionally no-Cargo and exercises
 # the public `ee lab swarm replay --dry-run` path plus ee.test_event.v1 logging
 # before the heavier replay/RCH proof lanes.

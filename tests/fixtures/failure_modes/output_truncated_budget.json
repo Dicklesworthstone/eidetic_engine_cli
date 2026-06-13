@@ -19,11 +19,13 @@
   "severity": "info",
   "repair_present": true,
   "trigger": {
-    "description": "A machine response exceeds the declared --max-output-tokens (or EE_MAX_OUTPUT_TOKENS) ceiling and the response schema declares a truncation point in the output-governor registry. The engine drops trailing whole elements from the declared array until the estimate fits (ADR 0063 §2 — no mid-object truncation, ever), then reports the drop with details.droppedCount and an ee.cursor.v1 details.continuationCursor. meta.tokensEstimated reflects the final emitted payload.",
+    "description": "A machine response exceeds the declared --max-output-tokens (or EE_MAX_OUTPUT_TOKENS) ceiling and the response schema declares a truncation point in the output-governor registry. The engine drops trailing whole elements from the declared array until the estimate fits (ADR 0063 §2 — no mid-object truncation, ever), then reports the drop with details.droppedCount and an ee.cursor.v1 details.continuationCursor. The recall surface also emits this shared code when --budget-tokens drops trailing ranked recall items, using an ee.recall.cursor.v1 continuation cursor. meta.tokensEstimated reflects the final emitted payload where the global output governor is active.",
     "setup_commands": [
-      "ee init --workspace ."
+      "ee init --workspace .",
+      "ee remember 'Large anchored rule about anchor:path:src/db/mod.rs' --workspace . --level procedural --kind rule --json",
+      "ee remember 'Second large anchored failure about anchor:path:src/db/mod.rs' --workspace . --level episodic --kind failure --json"
     ],
-    "invocation": "ee schema list --max-output-tokens 150 --json"
+    "invocation": "ee schema list --max-output-tokens 150 --json  # recall variant: ee recall --path 'src/db/*.rs' --budget-tokens 20 --workspace . --json"
   },
   "expected_emission": {
     "code": "output_truncated_budget",

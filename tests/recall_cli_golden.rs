@@ -16,6 +16,10 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+use ee::core::recall::{RecallCandidateRow, RecallProvenanceRef, RecallQuery, evaluate_recall};
+use ee::models::{MemoryAnchorFreshnessState, MemoryAnchorKind};
+use proptest::prelude::*;
+use proptest::test_runner::Config as ProptestConfig;
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -195,6 +199,98 @@ fn item_memory_ids(response: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn recall_item_ids(report: &ee::core::recall::RecallReport) -> Vec<String> {
+    report
+        .items
+        .iter()
+        .map(|item| item.memory_id.clone())
+        .collect()
+}
+
+fn property_rows() -> impl Strategy<Value = Vec<RecallCandidateRow>> {
+    proptest::collection::vec((16_usize..320, 30_u8..=100, 0_u8..4), 1..16).prop_map(|specs| {
+        specs
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (content_len, confidence, flavor))| {
+                let path = format!("src/recall/item_{idx}.rs");
+                let content = format!(
+                    "{} anchor:path:{path}",
+                    "recall budget monotonicity ".repeat(content_len / 28 + 1)
+                );
+                let (level, kind) = match flavor {
+                    0 => ("procedural", "rule"),
+                    1 => ("semantic", "decision"),
+                    2 => ("episodic", "failure"),
+                    _ => ("working", "note"),
+                };
+                RecallCandidateRow {
+                    memory_id: format!("mem_recall_property_{idx:024}"),
+                    anchor_kind: MemoryAnchorKind::Path,
+                    normalized_path: Some(path),
+                    symbol: None,
+                    freshness_state: MemoryAnchorFreshnessState::Current,
+                    row_generation: 7,
+                    level: level.to_owned(),
+                    kind: kind.to_owned(),
+                    confidence: f32::from(confidence) / 100.0,
+                    content,
+                    tombstoned: false,
+                    tags: vec!["recall-property".to_owned()],
+                    provenance: vec![RecallProvenanceRef {
+                        uri: "test://recall-property".to_owned(),
+                        source_type: "memory_provenance".to_owned(),
+                    }],
+                }
+            })
+            .collect()
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn recall_ranking_is_scan_order_deterministic_and_budget_monotone(
+        rows in property_rows(),
+        small_budget in 0_u32..320,
+        extra_budget in 0_u32..320,
+    ) {
+        let query = RecallQuery {
+            paths: vec!["src/recall/*.rs".to_owned()],
+            ..RecallQuery::default()
+        };
+        let forward = evaluate_recall(&query, &rows, Some(7), 7);
+        let mut reversed_rows = rows.clone();
+        reversed_rows.reverse();
+        let reversed = evaluate_recall(&query, &reversed_rows, Some(7), 7);
+        prop_assert_eq!(
+            recall_item_ids(&forward),
+            recall_item_ids(&reversed),
+            "recall ranking must not depend on DB scan order"
+        );
+
+        let mut small_query = query.clone();
+        small_query.max_tokens = Some(small_budget);
+        let small = evaluate_recall(&small_query, &rows, Some(7), 7);
+
+        let mut large_query = query;
+        large_query.max_tokens = Some(small_budget.saturating_add(extra_budget));
+        let large = evaluate_recall(&large_query, &rows, Some(7), 7);
+
+        let small_ids = recall_item_ids(&small);
+        let large_ids = recall_item_ids(&large);
+        prop_assert!(
+            large_ids.starts_with(&small_ids),
+            "smaller recall budget must emit a ranked prefix; small={small_ids:?}, large={large_ids:?}"
+        );
+        prop_assert!(
+            small.items.len() <= large.items.len(),
+            "larger recall budget must not drop items that fit in the smaller budget"
+        );
+    }
 }
 
 #[test]

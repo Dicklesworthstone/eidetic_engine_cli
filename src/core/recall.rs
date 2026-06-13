@@ -644,16 +644,18 @@ pub fn evaluate_recall(
         None => (paged, 0),
         Some(budget) => {
             let budget = budget as usize;
+            let total = paged.len();
             let mut kept = Vec::new();
             let mut spent = 0_usize;
             let mut dropped = 0_usize;
-            for item in paged {
+            for (idx, item) in paged.into_iter().enumerate() {
                 let cost = recall_item_token_estimate(&item);
                 if spent + cost <= budget {
                     spent += cost;
                     kept.push(item);
                 } else {
-                    dropped += 1;
+                    dropped = total - idx;
+                    break;
                 }
             }
             (kept, dropped)
