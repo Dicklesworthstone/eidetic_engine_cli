@@ -6726,7 +6726,7 @@ ee index status --workspace . --index-dir stale-index --json
 
 **Retirement reason.** kTruss now has a DB-backed structural evidence builder, so no registered insights section is metadata-only.
 
-**Historical trigger.** Historical: a registered ee insights section was selected while its evidence builder was still metadata-only.
+**Historical trigger.** Historical tombstone: a registered ee insights section was selected while its evidence builder was still metadata-only.
 
 **Setup.**
 
@@ -6740,7 +6740,7 @@ ee init --workspace .
 ee insights --section kTruss --workspace . --json
 ```
 
-**Historical expected emission.** Message contains: `registered insights sections ... DB-backed evidence`
+**Expected emission.** Message contains: `registered insights sections ... DB-backed evidence`
 
 **Repair hint.** `implement the unavailable section builder`
 
@@ -9290,18 +9290,20 @@ ee search 'rotate api key' --workspace . --json
 
 **Introduced by:** bd-7lvbg.2 (epic GOV)
 
-**Trigger.** A machine response exceeds the declared --max-output-tokens (or EE_MAX_OUTPUT_TOKENS) ceiling and the response schema declares a truncation point in the output-governor registry. The engine drops trailing whole elements from the declared array until the estimate fits (ADR 0063 §2 — no mid-object truncation, ever), then reports the drop with details.droppedCount and an ee.cursor.v1 details.continuationCursor. meta.tokensEstimated reflects the final emitted payload.
+**Trigger.** A machine response exceeds the declared --max-output-tokens (or EE_MAX_OUTPUT_TOKENS) ceiling and the response schema declares a truncation point in the output-governor registry. The engine drops trailing whole elements from the declared array until the estimate fits (ADR 0063 §2 — no mid-object truncation, ever), then reports the drop with details.droppedCount and an ee.cursor.v1 details.continuationCursor. The recall surface also emits this shared code when --budget-tokens drops trailing ranked recall items, using an ee.recall.cursor.v1 continuation cursor. meta.tokensEstimated reflects the final emitted payload where the global output governor is active.
 
 **Setup.**
 
 ```bash
 ee init --workspace .
+ee remember 'Large anchored rule about anchor:path:src/db/mod.rs' --workspace . --level procedural --kind rule --json
+ee remember 'Second large anchored failure about anchor:path:src/db/mod.rs' --workspace . --level episodic --kind failure --json
 ```
 
 **Invocation.**
 
 ```bash
-ee schema list --max-output-tokens 150 --json
+ee schema list --max-output-tokens 150 --json  # recall variant: ee recall --path 'src/db/*.rs' --budget-tokens 20 --workspace . --json
 ```
 
 **Expected emission.** Message contains: `trailing element(s) ... declared truncation point`
@@ -12151,7 +12153,7 @@ ee graph feature-enrichment --workspace . --json
 
 **Retirement reason.** Persisted situation storage landed in V079 and `ee situation show` / `ee situation explain` now read stored situation_records rows. Missing records surface as `not_found` or storage initialization errors instead of the old honesty-only unavailable code.
 
-**Historical trigger.** Retired legacy code. Situation show/explain used to return an explicit unavailable error while persisted situation storage was not implemented. V079 persisted situation storage now backs these read surfaces.
+**Historical trigger.** Retired legacy code. Situation show/explain used to return an explicit unavailable error while persisted situation storage was not implemented.
 
 **Setup.**
 

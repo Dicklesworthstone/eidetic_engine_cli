@@ -1,6 +1,9 @@
 use crate::config::EnvVar;
 use crate::core::docs_bootstrap::{DOCS_BOOTSTRAP_APPLY_SCHEMA_V1, DOCS_BOOTSTRAP_RUN_SCHEMA_V1};
+use crate::core::recall::RECALL_SCHEMA_V1;
 use crate::models::{ERROR_SCHEMA_V2, PACK_SCHEMA_V2, RESPONSE_SCHEMA_V2};
+
+const HOOK_HARNESS_INSTALL_SCHEMA_V1: &str = "ee.hook.harness_install.v1";
 
 fn normalized_agent_docs_token(value: &str) -> String {
     let mut normalized = String::with_capacity(value.len());
@@ -164,6 +167,10 @@ pub const GUIDE_SECTIONS: &[GuideSection] = &[
     GuideSection {
         title: "Task Lenses",
         content: "Use `ee lens list --json` to discover named pack policies, `ee lens explain <id> --json` to inspect effective options and the stable lens hash, and `ee pack \"<task>\" --lens <id> --json` to bind that policy into the persisted pack replay ledger.",
+    },
+    GuideSection {
+        title: "Code-Anchored Recall",
+        content: "Run `ee recall --path <path> --workspace . --budget-tokens 400 --format markdown` before editing known files, or `ee recall --diff HEAD --workspace . --json` before reviewing a diff. Recall is a narrow anchor lookup; use `ee search` for free-text discovery and `ee pack` for task context.",
     },
     GuideSection {
         title: "Machine Output",
@@ -1093,6 +1100,18 @@ pub const CONTRACTS: &[ContractEntry] = &[
         stability: "stable",
     },
     ContractEntry {
+        name: "recall",
+        schema: RECALL_SCHEMA_V1,
+        description: "Code-anchored recall payload for path, symbol, and git-diff selectors; carried under ee.response.v2 data.recall",
+        stability: "stable",
+    },
+    ContractEntry {
+        name: "hook_harness_install",
+        schema: HOOK_HARNESS_INSTALL_SCHEMA_V1,
+        description: "Agent-harness hook generation, install, and undo report for Claude Code, Codex, and capability-gap targets",
+        stability: "stable",
+    },
+    ContractEntry {
         name: "docs_bootstrap_run",
         schema: DOCS_BOOTSTRAP_RUN_SCHEMA_V1,
         description: "Docs bootstrap dry-run payload with allowlisted sources, candidate proposals, parser version, and degraded read/quarantine signals",
@@ -1162,6 +1181,18 @@ pub const EXAMPLES: &[ExampleEntry] = &[
         description: "Find memories attached to a path or typed surface before editing it",
         command: "ee impact src/core/search.rs --workspace . --json",
         category: "context",
+    },
+    ExampleEntry {
+        title: "Recall before editing",
+        description: "Fetch memories anchored to the file or diff you are about to touch",
+        command: "ee recall --path src/core/search.rs --workspace . --budget-tokens 400 --format markdown",
+        category: "context",
+    },
+    ExampleEntry {
+        title: "Preview recall hook install",
+        description: "Print a harness hook plan before mutating agent settings",
+        command: "ee hook claude-code --print --workspace . --json",
+        category: "hooks",
     },
     ExampleEntry {
         title: "Check system health",
@@ -1335,6 +1366,24 @@ pub const IMPACT_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     },
 ];
 
+pub const RECALL_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "no anchors have been indexed for the workspace",
+        jq: r#".degraded[]? | select(.code == "anchor_index_empty")"#,
+        next_action: "Continue without injected recall context; create anchored memories naturally, or run `ee index rebuild --workspace .` after memories exist.",
+    },
+    FailureBranchEntry {
+        condition: "anchor reverse index is stale",
+        jq: r#".degraded[]? | select(.code == "anchor_index_stale")"#,
+        next_action: "Run `ee index rebuild --workspace .`, then retry the same recall selector.",
+    },
+    FailureBranchEntry {
+        condition: "git diff selector could not be read",
+        jq: r#".degraded[]? | select(.code == "recall_git_unavailable")"#,
+        next_action: "Retry with explicit `--path` selectors; recall must not block the edit path.",
+    },
+];
+
 pub const TYPED_SEARCH_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
         condition: "typed field filter is malformed",
@@ -1463,6 +1512,19 @@ pub const AGENTSMD_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     },
 ];
 
+pub const HOOK_HARNESS_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "requested harness has no writable hook surface",
+        jq: r#".data.capabilityGaps[]? | select(.code == "harness_hooks_unsupported")"#,
+        next_action: "Use `--print` and wire the snippet manually, or keep recall as an explicit pre-edit command.",
+    },
+    FailureBranchEntry {
+        condition: "undo was requested but no backup exists",
+        jq: r#".data.capabilityGaps[]? | select(.code == "harness_backup_missing")"#,
+        next_action: "Inspect the target settings path and remove the managed ee hook block manually only after preserving the current file.",
+    },
+];
+
 pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
     AgentDocsRecipeEntry {
         id: "local-attestation",
@@ -1503,6 +1565,16 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#".data.results[]? | {memoryId, matchType, score, preview: .memory.contentPreview}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.impact.v1""#,
         failure_branches: IMPACT_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "recall-before-edit",
+        title: "Recall anchored memory before editing",
+        description: "Fetch path, symbol, or diff-anchored memories before touching code, using a small hook-safe token budget.",
+        category: "context",
+        command: "ee recall --path <path> --workspace . --budget-tokens 400 --json",
+        jq: r#".data.recall.items[]? | {memoryId, freshnessState, kind, level, anchor, repair}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.recall.schema == "ee.recall.v1""#,
+        failure_branches: RECALL_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
         id: "typed-memory-search",
@@ -1654,6 +1726,16 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#"{stale: .data.managedBlock.stale, hashMatches: .data.managedBlock.hashMatches, contradictions: (.data.contradictions | length), missingRules: (.data.missingRules | length), suggested: .data.suggestedCommands}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.agentsmd.drift.v1""#,
         failure_branches: AGENTSMD_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "install-recall-hooks",
+        title: "Install recall hooks for an agent harness",
+        description: "Preview, install, or undo managed recall hook snippets for Claude Code or Codex while preserving the harness settings file.",
+        category: "hooks",
+        command: "ee hook claude-code --print --workspace . --json",
+        jq: r#"{harness: .data.harness, mode: .data.mode, supported: .data.supported, writtenPaths: .data.writtenPaths, capabilityGaps: .data.capabilityGaps}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.hook.harness_install.v1""#,
+        failure_branches: HOOK_HARNESS_RECIPE_FAILURES,
     },
 ];
 

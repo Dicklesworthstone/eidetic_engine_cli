@@ -56,6 +56,36 @@ An empty snapshot artifact is normal on a fresh workspace. It means no
 `ee graph centrality-refresh --workspace .` run has produced a persisted
 snapshot yet; it does not mean live graph compute is unavailable.
 
+## Code-Anchored Recall Index
+
+Migration V076 adds `memory_anchor_index`, the derived reverse lookup table
+used by `ee recall`. It maps a workspace, memory id, and normalized anchor
+surface to one of the hot selectors recall can answer quickly:
+workspace-relative paths and exact symbol names. The durable source of truth is
+still the memory plus anchor records; this table exists only to make pre-edit
+lookups fast and deterministic.
+
+`ee migrate status --workspace . --json` reports whether the local database has
+applied V076 and later migrations. If the database is older than the binary,
+machine-facing commands fail with exit code 8 and an `ee.error.v2` envelope
+whose `error.code` is `migration_required`. The repair remains:
+
+```bash
+ee migrate run --workspace . --json
+```
+
+The table is rebuilt through the normal derived-index path:
+
+```bash
+ee index rebuild --workspace . --json
+```
+
+Rollback posture is derived-asset safe: losing or dropping
+`memory_anchor_index` does not lose memories, anchors, provenance, or feedback.
+Do not repair it with manual SQL. Re-run migrations for schema drift and
+`ee index rebuild` for stale or missing derived rows so generation accounting
+and recall degraded codes stay honest.
+
 ## Core Documents
 
 - [Mechanical Boundary Command Inventory](./mechanical-boundary-command-inventory.md) — full command matrix

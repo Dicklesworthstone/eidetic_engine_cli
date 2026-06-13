@@ -83,6 +83,7 @@ For agent use, the core rhythm is small and repetitive:
 ee orient "<task>" --workspace . --include-primer --fast --json
 ee swarm brief --workspace . --json
 ee pack "<task>" --workspace . --read-only --source-mode lexical_only --max-tokens 4000 --format markdown
+ee recall --path <path> --workspace . --budget-tokens 400 --format markdown
 ee search "<specific question>" --workspace . --limit 20 --explain --json
 ee why <memory-id> --workspace . --json
 ee preflight check --cmd "<risky shell command>" --workspace . --json
@@ -96,6 +97,7 @@ ee outcome <memory-id> --workspace . --signal helpful --reason "<what it changed
 | You want the standing workspace charter | `ee primer --workspace . --format markdown` |
 | AGENTS.md might be lying about the rules | `ee diag agentsmd-drift --workspace . --json` |
 | Starting substantive work | `ee pack "<task>" --workspace . --read-only --source-mode lexical_only --max-tokens 4000 --format markdown` |
+| About to edit known files or a diff | `ee recall --path <path> --workspace . --budget-tokens 400 --format markdown` |
 | Joining a crowded checkout | `ee swarm brief --workspace . --json` |
 | Learning a durable rule | `ee remember "<text>" --workspace . --level procedural --kind rule --json` |
 | A memory helped or misled you | `ee outcome <id> --signal helpful\|harmful --reason "<one sentence>"` |
@@ -429,7 +431,7 @@ Current top-level groups:
 |---|---|
 | Core memory loop | `init`, `remember`, `search`, `context`, `why`, `status`, `doctor`, `capabilities`, `check`, `health` |
 | Memory lifecycle | `memory`, `rule`, `curate`, `review`, `playbook`, `procedure`, `workflow`, `outcome`, `outcome-quarantine` |
-| Packing and retrieval | `pack`, `lens`, `context-show`, `show`, `link`, `tag`, `history`, `proximity`, `insights`, `subscribe` |
+| Packing and retrieval | `pack`, `recall`, `lens`, `context-show`, `show`, `link`, `tag`, `history`, `proximity`, `insights`, `subscribe` |
 | Graph and structure | `graph`, `causal`, `economy`, `focus`, `learn`, `lab`, `rehearse`, `rationale`, `situation`, `task-frame` |
 | Storage and derived assets | `db`, `migrate`, `index`, `model`, `schema`, `backup`, `export`, `artifact`, `config`, `workspace` |
 | Diagnostics and release gates | `diag`, `eval`, `perf`, `preflight`, `tripwire`, `verify`, `verification`, `audit`, `claim`, `certificate`, `demo` |
@@ -453,6 +455,7 @@ Current top-level groups:
 | `ee pack "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the headline command) |
 | `ee lens list --json` / `ee lens explain <id> --json` | Inspect named task lenses such as `bugfix`, `code-review`, and `release-readiness` before applying them |
 | `ee search "<query>" [--limit N] [--explain] [--json]` | Hybrid retrieval over memories, sessions, rules, evidence |
+| `ee recall --path <glob>` / `--symbol <name>` / `--diff <ref>` | Fetch memories anchored to a code surface before editing; returns `ee.recall.v1` under the standard response envelope |
 | `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b]` | Capture a durable memory |
 | `ee outcome <id> --signal helpful\|harmful [--reason "<reason>"]` | Record feedback, updating utility/confidence |
 | `ee why <memory-id> [--json]` | Explain why a memory was selected, scored, or curated the way it was |
@@ -463,6 +466,13 @@ Current top-level groups:
 | `ee support bundle --out <dir> --json` | Create a redacted diagnostic bundle, including pack replay and swarm-brief summaries without raw query, mail body, memory, or full file-listing content |
 | `ee preflight check --cmd "<shell command>" --json` | Check shell commands against the policy/trauma guard before risky operations |
 | `ee verify proofs --json` | Check committed Lean4 and TLA+ proof artifacts |
+
+### Agent integration
+
+| Command | Purpose |
+|---|---|
+| `ee hook claude-code --print\|--install\|--undo --json` | Preview, install, or undo managed Claude Code recall hooks; report schema `ee.hook.harness_install.v1` |
+| `ee hook codex --print\|--install\|--undo --json` | Preview, install, or undo managed Codex recall hooks; unsupported targets report capability gaps instead of mutating settings |
 
 ### JSON output and exit codes
 
@@ -1631,6 +1641,10 @@ Before starting substantial work, run:
   ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json
   ee pack "<task>" --workspace . --read-only --source-mode lexical_only --max-tokens 4000 --format markdown
 
+Before editing known files or a diff:
+  ee recall --path <path> --workspace . --budget-tokens 400 --format markdown
+  ee recall --diff HEAD --workspace . --budget-tokens 400 --json
+
 When you discover a durable project convention:
   ee remember --workspace . --level procedural --kind rule "<rule>"
 
@@ -1644,12 +1658,25 @@ After a remembered rule helps or harms:
 ```
 
 You can also wire it into a PreToolUse hook that injects context before risky
-commands. The `ee pack` JSON is stable and parseable.
+commands. Preview the managed recall hook before installation:
+
+```bash
+ee hook claude-code --print --workspace . --json
+ee hook claude-code --install --workspace . --json
+```
+
+The `ee pack`, `ee recall`, and hook-install JSON outputs are stable and parseable.
 
 ### Codex
 
 Codex shells out, so the same calls work. `ee pack "<task>" --json` can be
-inserted directly into a system or developer message.
+inserted directly into a system or developer message. Use `ee recall --path`
+as the pre-edit surface and preview managed hooks with:
+
+```bash
+ee hook codex --print --workspace . --json
+ee hook codex --install --workspace . --json
+```
 
 ### MCP
 
