@@ -35,10 +35,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use ee::output::{JsonBuilder, ResponseEnvelope, escape_json_string};
+use ee::output::{
+    JsonBuilder, OutputSizeDiagnostic, ResponseEnvelope, escape_json_string, render_toon_from_json,
+};
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 fn json_key() -> impl Strategy<Value = String> {
     // Restrict keys to ASCII-safe identifiers to keep the property
@@ -52,6 +54,46 @@ fn json_string_value() -> impl Strategy<Value = String> {
     // exercised: double quote, backslash, control characters, and
     // multi-byte unicode all need to survive a round trip.
     proptest::collection::vec(any::<char>(), 0..32).prop_map(|chars| chars.into_iter().collect())
+}
+
+fn bounded_json_value() -> impl Strategy<Value = Value> {
+    let leaf = prop_oneof![
+        Just(Value::Null),
+        any::<bool>().prop_map(Value::Bool),
+        any::<i64>().prop_map(|value| Value::Number(value.into())),
+        json_string_value().prop_map(Value::String),
+    ];
+
+    leaf.prop_recursive(3, 32, 4, |inner| {
+        prop_oneof![
+            proptest::collection::vec(inner.clone(), 0..4).prop_map(Value::Array),
+            proptest::collection::vec((json_key(), inner), 0..4).prop_map(|entries| {
+                let mut object = Map::new();
+                for (key, value) in entries {
+                    object.insert(key, value);
+                }
+                Value::Object(object)
+            }),
+        ]
+    })
+}
+
+fn response_envelope_value() -> impl Strategy<Value = Value> {
+    bounded_json_value().prop_map(|data| {
+        let mut root = Map::new();
+        root.insert(
+            "schema".to_string(),
+            Value::String("ee.response.v2".to_string()),
+        );
+        root.insert("success".to_string(), Value::Bool(true));
+        root.insert("data".to_string(), data);
+        root.insert("degraded".to_string(), Value::Array(Vec::new()));
+        Value::Object(root)
+    })
+}
+
+fn raw_jsonish_input() -> impl Strategy<Value = String> {
+    proptest::collection::vec(any::<char>(), 0..256).prop_map(|chars| chars.into_iter().collect())
 }
 
 proptest! {
@@ -191,6 +233,70 @@ proptest! {
             .and_then(Value::as_i64)
             .ok_or_else(|| TestCaseError::fail(format!("missing n in {output}")))?;
         prop_assert_eq!(got, i64::from(value));
+    }
+
+    /// The JSON->TOON adapter is an input-parsing boundary used by many
+    /// renderers. Bounded generated response envelopes should never hit the
+    /// fallback error path, and identical input must produce byte-identical
+    /// TOON output.
+    #[test]
+    fn toon_rendering_of_generated_response_envelopes_is_deterministic(value in response_envelope_value()) {
+        let json = serde_json::to_string(&value)
+            .map_err(|error| TestCaseError::fail(format!("generated JSON failed to serialize: {error}")))?;
+
+        let first = render_toon_from_json(&json);
+        let second = render_toon_from_json(&json);
+
+        prop_assert_eq!(&first, &second);
+        prop_assert!(!first.is_empty(), "TOON output must not be empty for response envelope {json}");
+        prop_assert!(
+            !first.contains("toon_encoding_failed"),
+            "valid generated response envelope hit TOON fallback: json={json} toon={first}"
+        );
+        prop_assert!(
+            first.contains("schema: ee.response.v2"),
+            "TOON output must preserve the response schema: json={json} toon={first}"
+        );
+    }
+
+    /// Arbitrary raw input, valid JSON or not, should keep the TOON diagnostic
+    /// path total: no panic, deterministic fallback, internally consistent byte
+    /// accounting, and parseable diagnostic JSON.
+    #[test]
+    fn toon_size_diagnostics_stay_total_for_arbitrary_raw_input(raw in raw_jsonish_input()) {
+        let first = render_toon_from_json(&raw);
+        let second = render_toon_from_json(&raw);
+        prop_assert_eq!(&first, &second);
+
+        let diagnostic = OutputSizeDiagnostic::from_json(&raw);
+        prop_assert_eq!(diagnostic.json_bytes, raw.len());
+        prop_assert_eq!(diagnostic.toon_bytes, first.len());
+        prop_assert_eq!(
+            diagnostic.byte_savings,
+            diagnostic.json_bytes as i64 - diagnostic.toon_bytes as i64
+        );
+        prop_assert_eq!(
+            diagnostic.token_savings,
+            diagnostic.json_estimated_tokens as i64 - diagnostic.toon_estimated_tokens as i64
+        );
+        if raw.is_empty() {
+            prop_assert_eq!(diagnostic.compression_ratio, 1.0);
+        } else {
+            let expected_ratio = diagnostic.toon_bytes as f64 / diagnostic.json_bytes as f64;
+            prop_assert!(
+                (diagnostic.compression_ratio - expected_ratio).abs() < f64::EPSILON,
+                "compression ratio drifted: expected={expected_ratio} actual={}",
+                diagnostic.compression_ratio
+            );
+        }
+        prop_assert!(diagnostic.compression_ratio.is_finite());
+
+        let diagnostic_json = diagnostic.to_json();
+        let parsed: Value = serde_json::from_str(&diagnostic_json)
+            .map_err(|error| TestCaseError::fail(format!("diagnostic JSON failed to parse: {error}; {diagnostic_json}")))?;
+        prop_assert_eq!(parsed["schema"].as_str(), Some("ee.output_size_diagnostic.v1"));
+        prop_assert_eq!(parsed["json"]["bytes"].as_u64(), Some(raw.len() as u64));
+        prop_assert_eq!(parsed["toon"]["bytes"].as_u64(), Some(first.len() as u64));
     }
 }
 
