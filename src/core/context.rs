@@ -6353,6 +6353,34 @@ fn apply_personalized_pagerank_rerank(
     else {
         return PersonalizedPageRankRerankMetrics::default();
     };
+    let current_generation = match current_memory_links_snapshot_generation(connection) {
+        Ok(generation) => generation,
+        Err(message) => {
+            push_degradation(
+                degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!(
+                    "PPR rerank skipped because graph source generation could not be checked: {message}"
+                ),
+                Some("ee graph centrality-refresh".to_string()),
+            );
+            return PersonalizedPageRankRerankMetrics::default();
+        }
+    };
+    if current_generation != snapshot.source_generation {
+        push_degradation(
+            degraded,
+            GRAPH_PPR_SNAPSHOT_STALE_CODE,
+            ContextResponseSeverity::Medium,
+            format!(
+                "PPR rerank skipped because graph snapshot {} is generation {} but memory_links is generation {}.",
+                snapshot.id, snapshot.source_generation, current_generation
+            ),
+            Some("ee graph snapshot refresh --workspace .".to_string()),
+        );
+        return PersonalizedPageRankRerankMetrics::default();
+    }
 
     let seed_map = personalized_pagerank_seed_map(search_report, candidates);
     if seed_map.is_empty() {
@@ -7630,6 +7658,19 @@ fn latest_valid_memory_links_snapshot(
         );
     }
     None
+}
+
+fn current_memory_links_snapshot_generation(connection: &DbConnection) -> Result<u32, String> {
+    let visible_count = connection
+        .list_all_memory_links(None)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|link| {
+            crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
+        })
+        .count();
+    u32::try_from(visible_count)
+        .map_err(|_| format!("visible memory link count {visible_count} does not fit u32"))
 }
 
 fn personalized_pagerank_seed_map(
@@ -11328,6 +11369,58 @@ pub fn unrelated_context() -> u64 {{
         assert!(
             degraded.is_empty(),
             "enabled proximity should not degrade: {degraded:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_ppr_rerank_skips_valid_status_snapshot_when_generation_lags() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        enable_context_ppr_feature(&fixture.workspace_path)?;
+        fixture
+            .connection
+            .insert_memory_link(
+                "link_00000000000000000000000903",
+                &crate::db::CreateMemoryLinkInput {
+                    src_memory_id: fixture.seed.to_string(),
+                    dst_memory_id: fixture.orphan.to_string(),
+                    relation: crate::db::MemoryLinkRelation::Supports,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: true,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: crate::db::MemoryLinkSource::Agent,
+                    created_by: Some("context-ppr-generation-test".to_string()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let mut candidates = vec![
+            ppr_candidate(fixture.seed, 0.80)?,
+            ppr_candidate(fixture.neighbor, 0.20)?,
+            ppr_candidate(fixture.orphan, 0.60)?,
+        ];
+        let search_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
+        let mut degraded = Vec::new();
+
+        let metrics = super::apply_personalized_pagerank_rerank(
+            &fixture.connection,
+            &fixture.workspace_path,
+            &search_report,
+            &mut candidates,
+            super::DEFAULT_CONTEXT_PPR_WEIGHT,
+            &mut degraded,
+        );
+
+        assert_eq!(metrics.reranked_candidates, 0);
+        assert_eq!(candidates[1].relevance.into_inner(), 0.20);
+        assert_eq!(candidates[2].relevance.into_inner(), 0.60);
+        assert!(
+            degraded.iter().any(
+                |entry| entry.code == crate::models::degradation::GRAPH_PPR_SNAPSHOT_STALE_CODE
+            ),
+            "generation-stale snapshot should emit graph snapshot degradation: {degraded:?}"
         );
         Ok(())
     }
