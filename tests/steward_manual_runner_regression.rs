@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 
 use ee::core::curate::{CurateDispositionOptions, run_curation_disposition};
 use ee::curate::{CandidateSource, CandidateType};
@@ -131,4 +132,146 @@ fn curation_review_zero_item_budget_cancels_before_disposition_apply() -> TestRe
     assert!(candidate.reviewed_at.is_none());
     assert!(candidate.snoozed_until.is_none());
     connection.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn cache_pruning_uses_persisted_workspace_id_without_explicit_option() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace_path = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let ee_dir = workspace_path.join(".ee");
+    fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+    let database_path = ee_dir.join("ee.db");
+    let cache_root = workspace_path.join("pack-l2-root");
+    let cache_workspace = cache_root.join(WORKSPACE_ID);
+    fs::create_dir_all(&cache_workspace).map_err(|error| error.to_string())?;
+    let stale_entry = cache_workspace.join("stale-pack.json");
+    fs::write(
+        &stale_entry,
+        br#"{"schema":"ee.pack.l2_cache.entry.v1","storedAtEpochSeconds":1,"body":{"stale":true}}"#,
+    )
+    .map_err(|error| error.to_string())?;
+    let cache_root_literal = serde_json::to_string(&cache_root.to_string_lossy().to_string())
+        .map_err(|error| error.to_string())?;
+    fs::write(
+        ee_dir.join("config.toml"),
+        format!(
+            "[cache.pack_l2]\ndirectory = {cache_root_literal}\nmax_bytes = 1\nmax_age_days = 30\n"
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+
+    {
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: Some("steward-cache-workspace-regression".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+    }
+
+    let mut runner = ManualRunner::new(
+        RunnerOptions::new()
+            .with_workspace_path(workspace_path)
+            .with_database_path(database_path),
+    );
+    let result = runner.run_job_type(
+        JobType::CachePruning,
+        Some("cache workspace id regression".to_owned()),
+    );
+
+    assert_eq!(result.outcome, RunOutcome::Success);
+    assert_eq!(result.items_processed, Some(1));
+    let details = result
+        .details
+        .ok_or_else(|| "cache pruning details missing".to_owned())?;
+    assert_eq!(details["workspaceId"].as_str(), Some(WORKSPACE_ID));
+    assert_eq!(details["filesDeleted"].as_u64(), Some(1));
+    assert_eq!(details["durableMutation"].as_bool(), Some(true));
+    assert!(!stale_entry.exists());
+
+    Ok(())
+}
+
+#[test]
+fn backup_export_item_budget_cancels_before_creating_backup() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace_path = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let ee_dir = workspace_path.join(".ee");
+    fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+    let database_path = ee_dir.join("ee.db");
+
+    {
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: Some("steward-backup-budget-regression".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                MEMORY_ID,
+                &CreateMemoryInput {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "backup budget regression fixture".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.6,
+                    provenance_uri: Some("test://steward-backup-budget".to_owned()),
+                    trust_class: "agent_validated".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["backup".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+    }
+
+    let mut runner = ManualRunner::new(
+        RunnerOptions::new()
+            .with_workspace_path(workspace_path)
+            .with_database_path(database_path)
+            .with_item_limit(1),
+    );
+    let result = runner.run_job_type(
+        JobType::BackupExport,
+        Some("backup item budget regression".to_owned()),
+    );
+
+    assert_eq!(result.outcome, RunOutcome::Cancelled);
+    assert!(result.items_processed.unwrap_or(0) > 1);
+    let details = result
+        .details
+        .ok_or_else(|| "backup export details missing".to_owned())?;
+    assert_eq!(details["durableMutation"].as_bool(), Some(false));
+    assert_eq!(details["cancelledBeforeMutation"].as_bool(), Some(true));
+    let backup_path = details["backupPath"]
+        .as_str()
+        .ok_or_else(|| "backup path missing".to_owned())?;
+    assert!(!Path::new(backup_path).exists());
+
+    Ok(())
 }

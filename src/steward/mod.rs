@@ -28,7 +28,7 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::cache::pack_l2::{PackL2Cache, PackL2CacheOptions};
 use crate::config::{ConfigFile, EnvVar, read_env_var};
-use crate::core::backup::{BackupCreateOptions, create_backup};
+use crate::core::backup::{BackupCreateOptions, BackupCreateReport, create_backup};
 use crate::core::curate::{
     CurateDispositionOptions, CurateDispositionReport, run_curation_disposition,
 };
@@ -4672,11 +4672,7 @@ impl ManualRunner {
         budget: &mut JobBudgetState,
     ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
         let workspace_path = self.normalized_workspace_path();
-        let workspace_id = self
-            .options
-            .workspace_id
-            .clone()
-            .unwrap_or_else(|| stable_runner_workspace_id(&workspace_path));
+        let workspace_id = self.resolve_pack_l2_workspace_id(&workspace_path);
         let Some(cache) = (match steward_pack_l2_cache(&workspace_path, &workspace_id) {
             Ok(cache) => cache,
             Err(message) => {
@@ -5110,7 +5106,7 @@ impl ManualRunner {
                 );
             }
         };
-        if let Err(error) = opened.connection.execute_raw("PRAGMA optimize") {
+        if let Err(error) = opened.connection.optimize_storage() {
             let message = format!("Failed to run PRAGMA optimize before storage compact: {error}");
             return steward_job_failure(
                 "ee.steward.storage_compact.error.v1",
@@ -5121,7 +5117,7 @@ impl ManualRunner {
                 "ee doctor --json",
             );
         }
-        if let Err(error) = opened.connection.execute_raw("VACUUM") {
+        if let Err(error) = opened.connection.vacuum_storage() {
             let message = format!("Failed to run VACUUM during storage compact: {error}");
             return steward_job_failure(
                 "ee.steward.storage_compact.error.v1",
@@ -5327,22 +5323,61 @@ impl ManualRunner {
         budget: &mut JobBudgetState,
     ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
         let workspace_path = self.normalized_workspace_path();
+        let preflight = match create_backup(&BackupCreateOptions {
+            workspace_path: workspace_path.clone(),
+            database_path: self.options.database_path.clone(),
+            output_dir: None,
+            label: Some("steward-backup-export".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: true,
+            include_graph_cache: true,
+            dry_run: true,
+        }) {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("Failed to inspect steward backup export: {error}");
+                return steward_job_failure(
+                    "ee.steward.backup_export.error.v1",
+                    "backup_export_preflight_failed",
+                    message,
+                    self.options.dry_run,
+                    self.options.database_path.as_deref(),
+                    "ee backup create --workspace . --dry-run --json",
+                );
+            }
+        };
+        budget.record(ResourceType::Items, preflight.total_records);
+
         if budget_cancels_before_mutation(budget) {
             return (
                 RunOutcome::Cancelled,
-                Some(0),
+                Some(preflight.total_records),
                 Some("Budget exceeded before backup export".to_owned()),
-                Some(json!({
-                    "schema": "ee.steward.backup_export.v1",
-                    "jobType": JobType::BackupExport.as_str(),
-                    "workspacePath": workspace_path.display().to_string(),
-                    "databasePath": self.resolve_database_path().map(|path| path.display().to_string()),
-                    "dryRun": self.options.dry_run,
-                    "durableMutation": false,
-                    "cancelledBeforeMutation": true,
-                })),
+                Some(backup_export_job_details(
+                    &workspace_path,
+                    &preflight,
+                    self.options.dry_run,
+                    false,
+                    true,
+                )),
             );
         }
+
+        if self.options.dry_run {
+            return (
+                RunOutcome::Success,
+                Some(preflight.total_records),
+                None,
+                Some(backup_export_job_details(
+                    &workspace_path,
+                    &preflight,
+                    true,
+                    false,
+                    false,
+                )),
+            );
+        }
+
         let report = match create_backup(&BackupCreateOptions {
             workspace_path: workspace_path.clone(),
             database_path: self.options.database_path.clone(),
@@ -5351,7 +5386,7 @@ impl ManualRunner {
             redaction_level: RedactionLevel::Standard,
             include_derived: true,
             include_graph_cache: true,
-            dry_run: self.options.dry_run,
+            dry_run: false,
         }) {
             Ok(report) => report,
             Err(error) => {
@@ -5366,29 +5401,17 @@ impl ManualRunner {
                 );
             }
         };
-        budget.record(ResourceType::Items, report.total_records);
-        let backup_json = report.data_json();
         (
             RunOutcome::Success,
-            Some(report.total_records),
+            Some(preflight.total_records),
             None,
-            Some(json!({
-                "schema": "ee.steward.backup_export.v1",
-                "jobType": JobType::BackupExport.as_str(),
-                "workspacePath": workspace_path.display().to_string(),
-                "workspaceId": report.workspace_id,
-                "databasePath": report.database_path,
-                "backupPath": report.backup_path,
-                "manifestPath": report.manifest_path,
-                "recordsPath": report.records_path,
-                "operation": "backup_create",
-                "status": report.status,
-                "totalRecords": report.total_records,
-                "verificationStatus": report.verification_status,
-                "backup": backup_json,
-                "durableMutation": !report.dry_run,
-                "dryRun": self.options.dry_run,
-            })),
+            Some(backup_export_job_details(
+                &workspace_path,
+                &report,
+                false,
+                !report.dry_run,
+                false,
+            )),
         )
     }
 
@@ -5576,12 +5599,17 @@ impl ManualRunner {
 
         if let Some(workspace_path) = self.options.workspace_path.as_ref() {
             let workspace_path = normalize_runner_workspace_path(workspace_path);
-            let path = workspace_path.to_string_lossy().into_owned();
-            let workspace = connection
-                .get_workspace_by_path(&path)
-                .map_err(|error| format!("Failed to query workspace path {path}: {error}"))?;
-            if let Some(workspace) = workspace {
-                return Ok(workspace.id);
+            for path in runner_workspace_path_keys(&workspace_path) {
+                let path_string = path.to_string_lossy().into_owned();
+                let workspace =
+                    connection
+                        .get_workspace_by_path(&path_string)
+                        .map_err(|error| {
+                            format!("Failed to query workspace path {path_string}: {error}")
+                        })?;
+                if let Some(workspace) = workspace {
+                    return Ok(workspace.id);
+                }
             }
             return Ok(stable_runner_workspace_id(&workspace_path));
         }
@@ -5594,6 +5622,26 @@ impl ManualRunner {
         }
 
         Err("Could not resolve a unique workspace row for decay sweep".to_owned())
+    }
+
+    fn resolve_pack_l2_workspace_id(&self, workspace_path: &Path) -> String {
+        if let Some(workspace_id) = self.options.workspace_id.as_ref() {
+            return workspace_id.clone();
+        }
+
+        if let Some(database_path) = self.resolve_database_path().filter(|path| path.exists()) {
+            if let Ok(connection) = DbConnection::open_file(&database_path) {
+                for path in runner_workspace_path_keys(workspace_path) {
+                    if let Ok(Some(workspace)) =
+                        connection.get_workspace_by_path(&path.to_string_lossy())
+                    {
+                        return workspace.id;
+                    }
+                }
+            }
+        }
+
+        stable_runner_workspace_id(workspace_path)
     }
 
     fn graph_link_limit(&self) -> Result<Option<u32>, String> {
@@ -5789,6 +5837,23 @@ fn normalize_runner_workspace_path(path: &Path) -> PathBuf {
     absolute.canonicalize().unwrap_or(absolute)
 }
 
+fn runner_workspace_path_keys(workspace_path: &Path) -> BTreeSet<PathBuf> {
+    let mut path_keys = BTreeSet::new();
+    let absolute = if workspace_path.is_absolute() {
+        workspace_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(workspace_path)
+    };
+    path_keys.insert(workspace_path.to_path_buf());
+    path_keys.insert(absolute.clone());
+    if let Ok(canonical) = absolute.canonicalize() {
+        path_keys.insert(canonical);
+    }
+    path_keys
+}
+
 fn stable_runner_workspace_id(path: &Path) -> String {
     let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
     crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_bytes(blake3_uuid_bytes(&hash)))
@@ -5867,6 +5932,41 @@ fn curation_review_job_details(
         }
         if timed_out_before_mutation {
             object.insert("timedOutBeforeMutation".to_owned(), JsonValue::Bool(true));
+        }
+    }
+
+    details
+}
+
+fn backup_export_job_details(
+    workspace_path: &Path,
+    report: &BackupCreateReport,
+    runner_dry_run: bool,
+    durable_mutation: bool,
+    cancelled_before_mutation: bool,
+) -> JsonValue {
+    let backup_json = report.data_json();
+    let mut details = json!({
+        "schema": "ee.steward.backup_export.v1",
+        "jobType": JobType::BackupExport.as_str(),
+        "workspacePath": workspace_path.display().to_string(),
+        "workspaceId": report.workspace_id.as_str(),
+        "databasePath": report.database_path.as_str(),
+        "backupPath": report.backup_path.as_str(),
+        "manifestPath": report.manifest_path.as_str(),
+        "recordsPath": report.records_path.as_str(),
+        "operation": "backup_create",
+        "status": report.status.as_str(),
+        "totalRecords": report.total_records,
+        "verificationStatus": report.verification_status.as_str(),
+        "backup": backup_json,
+        "durableMutation": durable_mutation,
+        "dryRun": runner_dry_run,
+    });
+
+    if cancelled_before_mutation {
+        if let Some(object) = details.as_object_mut() {
+            object.insert("cancelledBeforeMutation".to_owned(), JsonValue::Bool(true));
         }
     }
 

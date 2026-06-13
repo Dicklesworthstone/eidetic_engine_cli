@@ -1030,6 +1030,18 @@ impl DbConnection {
             .map_err(|source| DbError::sqlmodel(DbOperation::Execute, source))
     }
 
+    /// Run SQLite's opportunistic query planner/index optimization while
+    /// holding the file writer ownership gate.
+    pub fn optimize_storage(&self) -> Result<()> {
+        self.execute_raw_for(DbOperation::Execute, "PRAGMA optimize")
+    }
+
+    /// Rebuild the SQLite database file while holding the file writer
+    /// ownership gate. Callers must ensure no transaction is open.
+    pub fn vacuum_storage(&self) -> Result<()> {
+        self.execute_raw_for(DbOperation::Execute, "VACUUM")
+    }
+
     /// Run SQLite PRAGMA integrity_check and return results.
     pub fn check_integrity(&self) -> Result<IntegrityCheckResult> {
         let rows = self.query_for(DbOperation::IntegrityCheck, "PRAGMA integrity_check", &[])?;
