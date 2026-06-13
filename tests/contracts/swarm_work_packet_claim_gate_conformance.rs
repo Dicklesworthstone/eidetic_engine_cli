@@ -9,9 +9,12 @@ use ee::core::beads_integrity::{
     BeadsIntegrityInputs, BeadsIntegrityReport, JsonlParseError, compose_integrity_report,
     compose_integrity_report_from_br_doctor_json,
 };
+use ee::core::memory_drift;
 use ee::core::swarm_brief::{
     SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandError, SwarmBriefCommandOutput,
-    SwarmBriefCommandRunner, SwarmBriefReport,
+    SwarmBriefCommandRunner, SwarmBriefDegradation, SwarmBriefMemoryDriftSummary, SwarmBriefReport,
+    SwarmBriefSourceFreshness, SwarmBriefSourceKind, SwarmBriefSourceProvenance,
+    SwarmBriefSourceSnapshot, SwarmBriefSourceStatus,
 };
 use ee::core::swarm_next_action::{
     SWARM_NEXT_ACTION_REDACTION_STATUS, SWARM_NEXT_ACTION_SCHEMA_V1, SwarmNextActionCandidate,
@@ -1531,6 +1534,460 @@ fn actionable_queue_collection_is_read_only_and_records_command_ids() -> TestRes
     assert_no_forbidden_markers(&rendered, context)?;
     assert_next_actions_are_read_only(&rendered, context)?;
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Memory-drift lock contention (bd-koag5)
+//
+// bd-1xpq9 defines the public contract: lock contention is not stale
+// memory evidence because the collector never inspected evidence. bd-14cue
+// made the interim collector strategy explicit. These fixtures pin the
+// claim-gate/work-packet projection so future agents can distinguish
+// `memory_drift_lock_contention` from ordinary
+// `memory_drift_source_unverifiable`, and so the degraded path stays
+// read-only.
+// ---------------------------------------------------------------------------
+
+fn memory_drift_lock_fixture(file_name: &str) -> Result<Value, String> {
+    read_json(&[
+        "tests",
+        "fixtures",
+        "swarm_work_packet",
+        "memory_drift_lock_contention",
+        file_name,
+    ])
+}
+
+fn source_status_from_fixture(
+    value: &Value,
+    pointer: &str,
+    context: &str,
+) -> Result<SwarmBriefSourceStatus, String> {
+    Ok(match string_at(value, pointer, context)? {
+        "ready" => SwarmBriefSourceStatus::Ready,
+        "degraded" => SwarmBriefSourceStatus::Degraded,
+        "unavailable" => SwarmBriefSourceStatus::Unavailable,
+        other => return Err(format!("{context}: unsupported source status {other}")),
+    })
+}
+
+fn optional_string_array_at(
+    value: &Value,
+    pointer: &str,
+    context: &str,
+) -> Result<Vec<String>, String> {
+    if value.pointer(pointer).is_none_or(Value::is_null) {
+        Ok(Vec::new())
+    } else {
+        string_array_at(value, pointer, context)
+    }
+}
+
+fn u32_at(value: &Value, pointer: &str, context: &str) -> Result<u32, String> {
+    let raw = u64_at(value, pointer, context)?;
+    u32::try_from(raw).map_err(|_| format!("{context}: {pointer} value {raw} exceeds u32::MAX"))
+}
+
+fn memory_drift_summary_from_fixture(
+    value: &Value,
+    context: &str,
+) -> Result<Option<SwarmBriefMemoryDriftSummary>, String> {
+    let Some(summary) = value.pointer("/memoryDriftSource/summary") else {
+        return Ok(None);
+    };
+    if summary.is_null() {
+        return Ok(None);
+    }
+    Ok(Some(SwarmBriefMemoryDriftSummary {
+        status: string_at(summary, "/status", context)?.to_owned(),
+        report_mode: string_at(summary, "/reportMode", context)?.to_owned(),
+        total_memories: u32_at(summary, "/totalMemories", context)?,
+        current_count: u32_at(summary, "/currentCount", context)?,
+        changed_count: u32_at(summary, "/changedCount", context)?,
+        missing_source_count: u32_at(summary, "/missingSourceCount", context)?,
+        stale_anchor_count: u32_at(summary, "/staleAnchorCount", context)?,
+        unverifiable_count: u32_at(summary, "/unverifiableCount", context)?,
+        suppressed_count: u32_at(summary, "/suppressedCount", context)?,
+        affected_count: u32_at(summary, "/affectedCount", context)?,
+        top_affected_memory_ids: optional_string_array_at(
+            summary,
+            "/topAffectedMemoryIds",
+            context,
+        )?,
+        degraded_codes: optional_string_array_at(summary, "/degradedCodes", context)?,
+        source_kind_counts: serde_json::from_value(
+            summary
+                .get("sourceKindCounts")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        )
+        .map_err(|error| format!("{context}: sourceKindCounts malformed: {error}"))?,
+    }))
+}
+
+fn memory_drift_degradation_from_case(
+    value: &Value,
+    context: &str,
+) -> Result<Option<SwarmBriefDegradation>, String> {
+    let code = value.pointer("/memoryDriftSource/degradedCode");
+    let Some(code) = code.and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let message = if code == memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_CODE {
+        memory_drift::memory_drift_lock_contention_message("swarm_brief")
+    } else {
+        string_at(value, "/memoryDriftSource/message", context)?.to_owned()
+    };
+    let repair = if code == memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_CODE {
+        Some(memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_REPAIR.to_owned())
+    } else {
+        value
+            .pointer("/memoryDriftSource/repair")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    Ok(Some(SwarmBriefDegradation::warning(
+        SwarmBriefSourceKind::MemoryDrift,
+        code.to_owned(),
+        message,
+        repair,
+    )))
+}
+
+fn memory_drift_report_from_case(value: &Value, context: &str) -> Result<SwarmBriefReport, String> {
+    let candidate_id = string_at(value, "/candidateId", context)?;
+    let candidate_title = string_at(value, "/candidateTitle", context)?;
+    let source_status = source_status_from_fixture(value, "/memoryDriftSource/status", context)?;
+    let source_degradation = memory_drift_degradation_from_case(value, context)?;
+    let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+    brief.beads.ready.push(SwarmBriefBead {
+        id: candidate_id.to_owned(),
+        title: candidate_title.to_owned(),
+        status: "open".to_owned(),
+        priority: Some(2),
+        assignee: None,
+        issue_type: Some("task".to_owned()),
+        created_at: None,
+        updated_at: None,
+        latest_comment_at: None,
+        comment_count: 0,
+        source_bucket: "ready".to_owned(),
+    });
+
+    let degraded = source_degradation.into_iter().collect::<Vec<_>>();
+    brief.sources.push(SwarmBriefSourceSnapshot {
+        source: SwarmBriefSourceKind::MemoryDrift,
+        status: source_status,
+        freshness: if source_status == SwarmBriefSourceStatus::Ready {
+            SwarmBriefSourceFreshness::current()
+        } else {
+            SwarmBriefSourceFreshness::unknown()
+        },
+        provenance: SwarmBriefSourceProvenance::local_probe(),
+        item_count: usize::try_from(u64_at(value, "/memoryDriftSource/itemCount", context)?)
+            .map_err(|_| format!("{context}: itemCount exceeds usize::MAX"))?,
+        degraded: degraded.clone(),
+    });
+    brief.degraded = degraded;
+    brief.memory_drift = memory_drift_summary_from_fixture(value, context)?;
+    brief.finalize();
+    Ok(brief)
+}
+
+fn memory_drift_packet_and_gate_from_case(
+    value: &Value,
+    context: &str,
+) -> Result<(SwarmWorkPacket, SwarmWorkPacketClaimGate), String> {
+    let candidate_id = string_at(value, "/candidateId", context)?;
+    let brief = memory_drift_report_from_case(value, context)?;
+    let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+    let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+    let gate = packet.claim_gate(Some(candidate_id));
+    Ok((packet, gate))
+}
+
+fn lock_contention_claim_gate_projection(
+    packet: &SwarmWorkPacket,
+    gate: &SwarmWorkPacketClaimGate,
+) -> Value {
+    json!({
+        "schema": gate.schema,
+        "requestedCandidateId": &gate.requested_candidate_id,
+        "verdict": gate.verdict,
+        "safeToClaim": gate.safe_to_claim,
+        "recommendedAction": gate.recommended_action,
+        "recommendedSafeToClaim": &gate.recommended_safe_to_claim,
+        "selectedCandidate": gate.selected_candidate.as_ref().map(|candidate| json!({
+            "id": &candidate.id,
+            "decision": candidate.decision,
+            "collisionRisk": candidate.collision_risk,
+        })),
+        "sourceAuthority": {
+            "environmentVerdict": gate.source_authority.environment_verdict,
+            "sourceTestVerdict": gate.source_authority.source_test_verdict,
+            "remoteVerificationAdmitted": &gate.source_authority.remote_verification_admitted,
+        },
+        "unsafeReasons": &gate.unsafe_reasons,
+        "degradedCodes": &gate.degraded_codes,
+        "claimCommandAction": &gate.claim_command_action,
+        "packetRecommendedAction": {
+            "action": packet.recommended_action.action,
+            "safeToClaim": &packet.recommended_action.safe_to_claim,
+            "reasons": &packet.recommended_action.reasons,
+            "proofObligations": &packet.recommended_action.proof_obligations,
+        },
+        "packetMutationPolicy": &packet.mutation_policy,
+        "packetDegraded": &packet.degraded,
+    })
+}
+
+#[test]
+fn memory_drift_lock_contention_conformance_matrix_matches_contract() -> TestResult {
+    let fixture = memory_drift_lock_fixture("conformance_matrix.json")?;
+    let requirements = fixture
+        .pointer("/requirements")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "memory-drift conformance fixture missing requirements[]".to_owned())?;
+    if requirements.len() != 8 {
+        return Err(format!(
+            "bd-koag5 compliance matrix must pin 8 MUST/SHOULD clauses, found {}",
+            requirements.len()
+        ));
+    }
+    let cases = fixture
+        .pointer("/cases")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "memory-drift conformance fixture missing cases[]".to_owned())?;
+    if cases.len() != 3 {
+        return Err(format!(
+            "bd-koag5 fixture must cover lock, no-lock, and inspected-unverifiable cases; found {}",
+            cases.len()
+        ));
+    }
+
+    for case in cases {
+        let name = string_at(case, "/name", "memory-drift matrix case")?;
+        let context = format!("memory-drift matrix case {name}");
+        let (packet, gate) = memory_drift_packet_and_gate_from_case(case, &context)?;
+        let rendered_gate = serde_json::to_value(&gate)
+            .map_err(|error| format!("{context}: serialize gate: {error}"))?;
+        let rendered_packet = serde_json::to_value(&packet)
+            .map_err(|error| format!("{context}: serialize packet: {error}"))?;
+        assert_no_forbidden_markers(&rendered_gate, &context)?;
+        assert_no_forbidden_markers(&rendered_packet, &context)?;
+
+        let forbidden_codes = optional_string_array_at(case, "/expected/forbiddenCodes", &context)?;
+        for code in forbidden_codes {
+            if gate.degraded_codes.iter().any(|actual| actual == &code)
+                || gate.unsafe_reasons.iter().any(|actual| actual == &code)
+            {
+                return Err(format!(
+                    "{context}: forbidden code {code} appeared in gate projection"
+                ));
+            }
+        }
+
+        let expected_codes = optional_string_array_at(case, "/expected/degradedCodes", &context)?;
+        for code in expected_codes {
+            if !gate.degraded_codes.iter().any(|actual| actual == &code) {
+                return Err(format!(
+                    "{context}: missing degraded code {code}; got {:?}",
+                    gate.degraded_codes
+                ));
+            }
+        }
+
+        let expected_reasons = optional_string_array_at(case, "/expected/unsafeReasons", &context)?;
+        for reason in expected_reasons {
+            if !gate.unsafe_reasons.iter().any(|actual| actual == &reason) {
+                return Err(format!(
+                    "{context}: missing unsafe reason {reason}; got {:?}",
+                    gate.unsafe_reasons
+                ));
+            }
+        }
+
+        if let Some(expected_safe) = case
+            .pointer("/expected/safeToClaim")
+            .and_then(Value::as_bool)
+        {
+            if gate.safe_to_claim != expected_safe {
+                return Err(format!(
+                    "{context}: safeToClaim expected {expected_safe}, got {}",
+                    gate.safe_to_claim
+                ));
+            }
+        }
+        if let Some(expected_verdict) = case.pointer("/expected/verdict").and_then(Value::as_str) {
+            if gate.verdict != expected_verdict {
+                return Err(format!(
+                    "{context}: verdict expected {expected_verdict}, got {}",
+                    gate.verdict
+                ));
+            }
+        }
+        if case
+            .pointer("/expected/claimCommandActionNull")
+            .and_then(Value::as_bool)
+            == Some(true)
+            && gate.claim_command_action.is_some()
+        {
+            return Err(format!(
+                "{context}: claimCommandAction must stay null on lock-contention gate"
+            ));
+        }
+        if let Some(expected_action) = case
+            .pointer("/expected/recommendedAction")
+            .and_then(Value::as_str)
+            && packet.recommended_action.action != expected_action
+        {
+            return Err(format!(
+                "{context}: recommendedAction expected {expected_action}, got {}",
+                packet.recommended_action.action
+            ));
+        }
+        if let Some(expected_env) = case
+            .pointer("/expected/environmentVerdict")
+            .and_then(Value::as_str)
+            && gate.source_authority.environment_verdict != expected_env
+        {
+            return Err(format!(
+                "{context}: environmentVerdict expected {expected_env}, got {}",
+                gate.source_authority.environment_verdict
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn memory_drift_lock_contention_details_and_golden_projection_are_stable() -> TestResult {
+    let fixture = memory_drift_lock_fixture("conformance_matrix.json")?;
+    let case = fixture
+        .pointer("/cases")
+        .and_then(Value::as_array)
+        .and_then(|cases| {
+            cases.iter().find(|case| {
+                case.pointer("/name").and_then(Value::as_str)
+                    == Some("lock_contention_before_evidence")
+            })
+        })
+        .ok_or_else(|| "lock-contention case missing from fixture".to_owned())?;
+    let context = "memory-drift lock-contention golden projection";
+    let details = memory_drift::memory_drift_lock_contention_details("swarm_brief");
+    let expected_details = case
+        .pointer("/memoryDriftSource/expectedDetails")
+        .ok_or_else(|| format!("{context}: missing expectedDetails"))?;
+    if &details != expected_details {
+        return Err(format!(
+            "{context}: lock-contention details drifted\nactual: {details:#}\nexpected: {expected_details:#}"
+        ));
+    }
+
+    let message = memory_drift::memory_drift_lock_contention_message("swarm_brief");
+    for needle in string_array_at(
+        case,
+        "/memoryDriftSource/expectedMessageSubstrings",
+        context,
+    )? {
+        if !message.contains(&needle) {
+            return Err(format!(
+                "{context}: message missing substring {needle:?}: {message}"
+            ));
+        }
+    }
+    assert_no_forbidden_markers(&details, context)?;
+
+    let (packet, gate) = memory_drift_packet_and_gate_from_case(case, context)?;
+    let projection = lock_contention_claim_gate_projection(&packet, &gate);
+    let golden = fixture
+        .pointer("/goldenClaimGateProjection")
+        .ok_or_else(|| format!("{context}: missing goldenClaimGateProjection"))?;
+    if &projection != golden {
+        return Err(format!(
+            "{context}: golden projection drifted\nactual: {projection:#}\nexpected: {golden:#}"
+        ));
+    }
+    let first = serde_json::to_string(&projection)
+        .map_err(|error| format!("{context}: serialize projection first: {error}"))?;
+    let second = serde_json::to_string(&projection)
+        .map_err(|error| format!("{context}: serialize projection second: {error}"))?;
+    if first != second {
+        return Err(format!(
+            "{context}: projection serialization is not byte-stable"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn memory_drift_lock_contention_no_mutation_guard_is_explicit() -> TestResult {
+    let fixture = memory_drift_lock_fixture("no_mutation_guard.json")?;
+    let tempdir = tempfile::tempdir().map_err(|error| format!("create tempdir: {error}"))?;
+    let sentinels = fixture
+        .pointer("/sentinels")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "no-mutation fixture missing sentinels[]".to_owned())?;
+    for sentinel in sentinels {
+        let file_name = string_at(sentinel, "/fileName", "no-mutation sentinel")?;
+        let before = string_at(sentinel, "/before", "no-mutation sentinel")?;
+        fs::write(tempdir.path().join(file_name), before)
+            .map_err(|error| format!("write sentinel {file_name}: {error}"))?;
+    }
+
+    let matrix = memory_drift_lock_fixture("conformance_matrix.json")?;
+    let case = matrix
+        .pointer("/cases")
+        .and_then(Value::as_array)
+        .and_then(|cases| {
+            cases.iter().find(|case| {
+                case.pointer("/name").and_then(Value::as_str)
+                    == Some("lock_contention_before_evidence")
+            })
+        })
+        .ok_or_else(|| "lock-contention case missing from fixture".to_owned())?;
+    let (packet, gate) = memory_drift_packet_and_gate_from_case(
+        case,
+        "memory-drift no-mutation lock-contention case",
+    )?;
+
+    if !packet.mutation_policy.side_effect_free
+        || packet.mutation_policy.claims_beads
+        || packet.mutation_policy.reserves_files
+        || packet.mutation_policy.sends_agent_mail
+        || packet.mutation_policy.runs_cargo
+        || packet.mutation_policy.stages_git
+        || packet.mutation_policy.deletes_files
+    {
+        return Err("memory-drift lock-contention packet must remain fully read-only".into());
+    }
+    if gate.claim_command_action.is_some() {
+        return Err(
+            "memory-drift lock-contention gate must not emit a mutating claim action".into(),
+        );
+    }
+    for action in &gate.next_command_actions {
+        if action.mutates_state {
+            return Err(format!(
+                "nextCommandActions must be read-only, got mutating action {}",
+                action.command_id
+            ));
+        }
+    }
+
+    for sentinel in sentinels {
+        let file_name = string_at(sentinel, "/fileName", "no-mutation sentinel")?;
+        let expected = string_at(sentinel, "/after", "no-mutation sentinel")?;
+        let actual = fs::read_to_string(tempdir.path().join(file_name))
+            .map_err(|error| format!("read sentinel {file_name}: {error}"))?;
+        if actual != expected {
+            return Err(format!(
+                "sentinel {file_name} mutated\nexpected: {expected}\nactual: {actual}"
+            ));
+        }
+    }
     Ok(())
 }
 

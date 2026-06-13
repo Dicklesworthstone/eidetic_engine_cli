@@ -1,0 +1,37 @@
+{
+  "schema": "ee.memory_drift.lock_contention.no_mutation.v1",
+  "beadId": "bd-koag5",
+  "description": "Reviewable no-mutation sentinels for the lock-contention collector degradation. The conformance test writes each before value to a temporary file, builds the in-memory work-packet/claim-gate projection, and proves every after value is unchanged.",
+  "sentinels": [
+    {
+      "surface": "database_generation",
+      "fileName": "db_generation.txt",
+      "before": "generation=42;memory_rows=3",
+      "after": "generation=42;memory_rows=3"
+    },
+    {
+      "surface": "pack_and_audit_rows",
+      "fileName": "pack_audit_counts.txt",
+      "before": "pack_rows=7;audit_rows=11",
+      "after": "pack_rows=7;audit_rows=11"
+    },
+    {
+      "surface": "beads_jsonl",
+      "fileName": "issues.jsonl",
+      "before": "{\"id\":\"bd-md-lock\",\"status\":\"open\"}\n",
+      "after": "{\"id\":\"bd-md-lock\",\"status\":\"open\"}\n"
+    },
+    {
+      "surface": "agent_mail",
+      "fileName": "agent_mail_snapshot.json",
+      "before": "{\"reservations\":[],\"inbox\":[]}\n",
+      "after": "{\"reservations\":[],\"inbox\":[]}\n"
+    },
+    {
+      "surface": "proof_state",
+      "fileName": "proof_state.json",
+      "before": "{\"rch\":\"not_started\",\"localCargo\":\"not_observed\"}\n",
+      "after": "{\"rch\":\"not_started\",\"localCargo\":\"not_observed\"}\n"
+    }
+  ]
+}

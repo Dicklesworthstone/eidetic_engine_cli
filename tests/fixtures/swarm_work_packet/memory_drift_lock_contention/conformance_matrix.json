@@ -1,0 +1,211 @@
+{
+  "schema": "ee.memory_drift.lock_contention.conformance.v1",
+  "beadId": "bd-koag5",
+  "description": "Fixture-backed conformance matrix for memory-drift lock-contention work-packet and claim-gate projection. Lock contention means the collector did not inspect memory evidence; it must fail closed without a claim command and must remain distinguishable from inspected-but-unverifiable evidence.",
+  "requirements": [
+    {
+      "id": "bd-1xpq9.must.lock-code",
+      "level": "MUST",
+      "text": "Lock contention uses the dedicated memory_drift_lock_contention degraded code."
+    },
+    {
+      "id": "bd-1xpq9.must.not-inspected",
+      "level": "MUST",
+      "text": "Lock contention states memoryEvidenceInspected=false and sourceFreshness=not_inspected."
+    },
+    {
+      "id": "bd-1xpq9.must.redaction",
+      "level": "MUST",
+      "text": "Lock details are redaction-safe: relative lock path only, no lock-holder internals, no stack traces, and no host-private absolute paths."
+    },
+    {
+      "id": "bd-1xpq9.must.repair",
+      "level": "MUST",
+      "text": "Repair guidance is non-mutating and points at retry/read-only advisory-lock inspection."
+    },
+    {
+      "id": "bd-14cue.must.strategy",
+      "level": "MUST",
+      "text": "The interim collector strategy is a bounded workspace write-lock probe until true read-only open lands under bd-3sh42."
+    },
+    {
+      "id": "bd-14cue.must.fail-closed",
+      "level": "MUST",
+      "text": "Work-packet and claim-gate fail closed under lock contention: safeToClaim=false and claimCommandAction=null."
+    },
+    {
+      "id": "bd-14cue.must.no-mutation",
+      "level": "MUST",
+      "text": "The degraded collector path does not claim Beads, reserve files, send Agent Mail, run Cargo, stage Git, delete files, or mutate durable memory state."
+    },
+    {
+      "id": "bd-koag5.should.distinguish-unverifiable",
+      "level": "SHOULD",
+      "text": "Consumers can distinguish not-inspected lock contention from inspected-but-unverifiable memory evidence."
+    }
+  ],
+  "cases": [
+    {
+      "name": "lock_contention_before_evidence",
+      "candidateId": "bd-md-lock",
+      "candidateTitle": "Handle memory-drift lock contention",
+      "memoryDriftSource": {
+        "status": "unavailable",
+        "itemCount": 0,
+        "degradedCode": "memory_drift_lock_contention",
+        "expectedMessageSubstrings": [
+          "workspace write-lock contention",
+          "before any evidence inspection",
+          "NOT inspected",
+          "does not indicate stale provenance"
+        ],
+        "expectedDetails": {
+          "schema": "ee.memory_drift.lock_contention.v1",
+          "collectorSurface": "swarm_brief",
+          "lockAcquisitionClass": "workspace_write_lock",
+          "lockPath": ".ee/ee.write.lock",
+          "sourceFreshness": "not_inspected",
+          "memoryEvidenceInspected": false
+        },
+        "summary": null
+      },
+      "expected": {
+        "safeToClaim": false,
+        "verdict": "coordinate_first",
+        "claimCommandActionNull": true,
+        "recommendedAction": "coordinate_before_claim",
+        "environmentVerdict": "coordinate_before_claim",
+        "degradedCodes": ["memory_drift_lock_contention"],
+        "unsafeReasons": ["memory_drift_lock_contention"]
+      }
+    },
+    {
+      "name": "no_lock_empty_queue",
+      "candidateId": "bd-md-clean",
+      "candidateTitle": "Document clean memory drift posture",
+      "memoryDriftSource": {
+        "status": "ready",
+        "itemCount": 0,
+        "degradedCode": null,
+        "summary": {
+          "status": "empty_queue",
+          "reportMode": "recent_pack_items",
+          "totalMemories": 0,
+          "currentCount": 0,
+          "changedCount": 0,
+          "missingSourceCount": 0,
+          "staleAnchorCount": 0,
+          "unverifiableCount": 0,
+          "suppressedCount": 0,
+          "affectedCount": 0,
+          "topAffectedMemoryIds": [],
+          "degradedCodes": [],
+          "sourceKindCounts": {}
+        }
+      },
+      "expected": {
+        "forbiddenCodes": [
+          "memory_drift_lock_contention",
+          "memory_drift_source_unverifiable"
+        ]
+      }
+    },
+    {
+      "name": "inspected_but_unverifiable",
+      "candidateId": "bd-md-unverifiable",
+      "candidateTitle": "Document unverifiable memory drift evidence",
+      "memoryDriftSource": {
+        "status": "degraded",
+        "itemCount": 1,
+        "degradedCode": "memory_drift_source_unverifiable",
+        "message": "Memory drift evidence was inspected but the source could not be verified.",
+        "repair": "ee memory drift --workspace . --json",
+        "summary": {
+          "status": "degraded",
+          "reportMode": "recent_pack_items",
+          "totalMemories": 1,
+          "currentCount": 0,
+          "changedCount": 0,
+          "missingSourceCount": 0,
+          "staleAnchorCount": 0,
+          "unverifiableCount": 1,
+          "suppressedCount": 0,
+          "affectedCount": 1,
+          "topAffectedMemoryIds": ["mem_unverifiable"],
+          "degradedCodes": ["memory_drift_source_unverifiable"],
+          "sourceKindCounts": {
+            "memory_record": 1
+          }
+        }
+      },
+      "expected": {
+        "degradedCodes": ["memory_drift_source_unverifiable"],
+        "unsafeReasons": ["memory_drift_source_unverifiable"],
+        "forbiddenCodes": ["memory_drift_lock_contention"]
+      }
+    }
+  ],
+  "goldenClaimGateProjection": {
+    "schema": "ee.swarm.work_packet.claim_gate.v1",
+    "requestedCandidateId": "bd-md-lock",
+    "verdict": "coordinate_first",
+    "safeToClaim": false,
+    "recommendedAction": "coordinate_before_claim",
+    "recommendedSafeToClaim": false,
+    "selectedCandidate": {
+      "id": "bd-md-lock",
+      "decision": "safe_to_claim",
+      "collisionRisk": "none"
+    },
+    "sourceAuthority": {
+      "environmentVerdict": "coordinate_before_claim",
+      "sourceTestVerdict": "not_evaluated",
+      "remoteVerificationAdmitted": true
+    },
+    "unsafeReasons": [
+      "gate_verdict:coordinate_first",
+      "memory_drift_lock_contention",
+      "packet_recommendation_not_claim_safe:coordinate_before_claim"
+    ],
+    "degradedCodes": ["memory_drift_lock_contention"],
+    "claimCommandAction": null,
+    "packetRecommendedAction": {
+      "action": "coordinate_before_claim",
+      "safeToClaim": false,
+      "reasons": [
+        "blocked_by_compile_health",
+        "blocked_by_count",
+        "memory_drift_lock_contention",
+        "priority",
+        "rank_milli",
+        "source_rank",
+        "status"
+      ],
+      "proofObligations": [
+        "record_overlap_decision_in_closeout",
+        "repair_degraded_sources_before_claim",
+        "reserve_files_before_editing",
+        "run_claim_gate_before_claim",
+        "use_rch_for_cargo_verification"
+      ]
+    },
+    "packetMutationPolicy": {
+      "sideEffectFree": true,
+      "claimsBeads": false,
+      "reservesFiles": false,
+      "sendsAgentMail": false,
+      "runsCargo": false,
+      "stagesGit": false,
+      "deletesFiles": false
+    },
+    "packetDegraded": [
+      {
+        "code": "memory_drift_lock_contention",
+        "source": "memory-drift",
+        "severity": "warning",
+        "message": "Memory drift collection on swarm_brief was blocked by workspace write-lock contention before any evidence inspection; memory evidence was NOT inspected and this does not indicate stale provenance.",
+        "repair": "Retry after the current lock holder finishes, or inspect holders read-only with `ee diag advisory-lock --workspace . --resource-type workspace --json`."
+      }
+    ]
+  }
+}
