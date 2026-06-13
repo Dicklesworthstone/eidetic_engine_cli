@@ -529,6 +529,9 @@ mod pack_quality_report_conformance_v1;
 #[path = "contracts/graph_surfaces_conformance_v1.rs"]
 mod graph_surfaces_conformance_v1;
 
+#[path = "contracts/serve_transport_conformance_v1.rs"]
+mod serve_transport_conformance_v1;
+
 #[path = "contracts/swarm_brief_conformance_v1.rs"]
 mod swarm_brief_conformance_v1;
 
