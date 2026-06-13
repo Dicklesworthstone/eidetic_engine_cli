@@ -1,0 +1,27 @@
+---
+source: src/steward/mod.rs
+assertion: daemon background mode runs the detached steward scheduler in a bounded cadence without requiring a foreground process
+schema:
+  job_output: ee.steward.daemon_foreground.v1
+  job_row: ee.steward.daemon_job_row.v1
+  capabilities: ee.capabilities.v1
+contracts:
+  - run_daemon_background_scheduler spawned as named thread "ee-daemon-steward" when daemon binds a workspace
+  - scheduler uses sleep-first pattern: ticks only after BACKGROUND_SCHEDULER_INTERVAL_MS (60 000 ms), never on short-lived processes
+  - each tick invokes run_daemon_foreground with tick_limit=1 covering DecaySweep and HealthCheck job types
+  - tick errors are swallowed; per-tick outcomes recorded in daemon job rows via the steward job store
+  - shutdown signal terminates the scheduler within BACKGROUND_SCHEDULER_SLEEP_SLICE_MS (500 ms)
+  - capabilities report lists "daemon background" as available=true with description "Detached background steward scheduler"
+  - effect manifest classifies "daemon background" as supervised_job touching memories, feedback_events, audit_log
+  - no daemon_background_mode_unimplemented sentinel survives in capabilities or effect surfaces
+evidence:
+  - BACKGROUND_SCHEDULER_INTERVAL_MS (60 000 ms)
+  - BACKGROUND_SCHEDULER_SLEEP_SLICE_MS (500 ms)
+  - BACKGROUND_SCHEDULER_JOB_TYPES: [DecaySweep, HealthCheck]
+  - DaemonServerHandle.scheduler_thread
+  - dispatch_policy.bound_workspace_id guards scheduler spawn
+  - shutdown Arc<AtomicBool> shared between accept loop and scheduler thread
+  - capabilities.commands["daemon background"].available = true
+verified_by:
+  - cargo test --lib background_scheduler_exits_promptly_when_shutdown_fires -- --nocapture
+  - cargo test --lib -- daemon_background
