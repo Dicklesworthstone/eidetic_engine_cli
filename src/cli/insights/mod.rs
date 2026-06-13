@@ -4558,6 +4558,21 @@ mod tests {
             stored_memory("mem_core_a", "semantic", "fact", "Core memory A.", 0.9),
             stored_memory("mem_core_b", "semantic", "fact", "Core memory B.", 0.9),
             stored_memory("mem_core_c", "semantic", "fact", "Core memory C.", 0.9),
+            stored_memory("mem_core_d", "semantic", "fact", "Core memory D.", 0.9),
+            stored_memory(
+                "mem_core_pendant",
+                "semantic",
+                "fact",
+                "Pendant memory.",
+                0.8,
+            ),
+            stored_memory(
+                "mem_core_isolated",
+                "semantic",
+                "fact",
+                "Isolated memory.",
+                0.7,
+            ),
         ];
         let links = vec![
             stored_memory_link_with_relation(
@@ -4581,29 +4596,114 @@ mod tests {
                 "supports",
                 None,
             ),
+            stored_memory_link_with_relation(
+                "link_core_4",
+                "mem_core_a",
+                "mem_core_d",
+                "supports",
+                None,
+            ),
+            stored_memory_link_with_relation(
+                "link_core_5",
+                "mem_core_b",
+                "mem_core_d",
+                "supports",
+                None,
+            ),
+            stored_memory_link_with_relation(
+                "link_core_6",
+                "mem_core_c",
+                "mem_core_d",
+                "supports",
+                None,
+            ),
+            stored_memory_link_with_relation(
+                "link_core_7",
+                "mem_core_a",
+                "mem_core_pendant",
+                "supports",
+                None,
+            ),
         ];
         let input =
             crate::graph::structural::build_structural_graph_input(&memories, &links, Some(17));
         let section = k_core_section_from_structural_input(Some(&input));
 
         assert_eq!(section.name, "kCore");
-        assert_eq!(section.items.len(), 3);
+        assert_eq!(section.items.len(), 6);
         assert_eq!(section.next_commands.len(), 2);
         assert_eq!(section.items[0]["memoryId"], "mem_core_a");
         assert_eq!(section.items[0]["rank"], 1);
-        assert_eq!(section.items[0]["coreNumber"], 2);
-        assert_eq!(section.items[0]["degree"], 2);
-        assert_eq!(section.items[0]["maxCoreNumber"], 2);
+        assert_eq!(section.items[0]["coreNumber"], 3);
+        assert_eq!(section.items[0]["degree"], 4);
+        assert_eq!(section.items[0]["maxCoreNumber"], 3);
         assert_eq!(section.items[0]["mainCoreMember"].as_bool(), Some(true));
         assert_eq!(section.items[0]["interpretation"], "main_core_member");
+        assert_eq!(
+            section
+                .items
+                .iter()
+                .map(|item| (
+                    item["memoryId"].as_str(),
+                    item["coreNumber"].as_u64(),
+                    item["degree"].as_u64(),
+                    item["mainCoreMember"].as_bool(),
+                    item["interpretation"].as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    Some("mem_core_a"),
+                    Some(3),
+                    Some(4),
+                    Some(true),
+                    Some("main_core_member"),
+                ),
+                (
+                    Some("mem_core_b"),
+                    Some(3),
+                    Some(3),
+                    Some(true),
+                    Some("main_core_member"),
+                ),
+                (
+                    Some("mem_core_c"),
+                    Some(3),
+                    Some(3),
+                    Some(true),
+                    Some("main_core_member"),
+                ),
+                (
+                    Some("mem_core_d"),
+                    Some(3),
+                    Some(3),
+                    Some(true),
+                    Some("main_core_member"),
+                ),
+                (
+                    Some("mem_core_pendant"),
+                    Some(1),
+                    Some(1),
+                    Some(false),
+                    Some("peripheral_core_member"),
+                ),
+                (
+                    Some("mem_core_isolated"),
+                    Some(0),
+                    Some(0),
+                    Some(false),
+                    Some("isolated_memory"),
+                ),
+            ]
+        );
         assert_eq!(
             section.items[0]["evidence"]["schema"],
             crate::graph::structural::STRUCTURAL_GRAPH_EVIDENCE_SCHEMA
         );
         assert_eq!(section.items[0]["evidence"]["algorithm"], "core_number");
         assert_eq!(section.items[0]["evidence"]["snapshotVersion"], 17);
-        assert_eq!(section.items[0]["evidence"]["nodeCount"], 3);
-        assert_eq!(section.items[0]["evidence"]["edgeCount"], 3);
+        assert_eq!(section.items[0]["evidence"]["nodeCount"], 6);
+        assert_eq!(section.items[0]["evidence"]["edgeCount"], 7);
         assert_eq!(
             section.items[0]["evidence"]["filterPosture"],
             crate::graph::structural::STRUCTURAL_GRAPH_FILTER_POSTURE
@@ -4617,14 +4717,14 @@ mod tests {
                 .items
                 .last()
                 .and_then(|item| item["memoryId"].as_str()),
-            Some("mem_core_c")
+            Some("mem_core_isolated")
         );
         assert_eq!(
             section
                 .items
                 .last()
                 .and_then(|item| item["interpretation"].as_str()),
-            Some("main_core_member")
+            Some("isolated_memory")
         );
 
         let edge_free_input =
