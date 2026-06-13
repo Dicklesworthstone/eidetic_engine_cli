@@ -1,0 +1,41 @@
+---
+source: src/cli/insights/mod.rs
+assertion: kTruss insight section exposes triangle-supported structural health using fnx_algorithms::k_truss
+schema:
+  structural_input: ee.insights.structural_graph.v1
+  structural_report: ee.health.structural.v1
+  output: ee.insights.v1
+contracts:
+  - k_truss computed from memory_links structural graph via fnx_algorithms::k_truss
+  - items ordered by truss_level descending, then memoryId ascending
+  - mainTrussMember is true when truss_level equals max_truss_level and max_truss_level >= 3
+  - memberCountAtTrussLevel reflects the member distribution at the item's truss level
+  - evidence.memberCounts is a map of k -> count for all k values found
+  - honest empty section returned when no structural graph data is available
+  - evidence includes algorithm=fnx_algorithms::k_truss, structuralGraphSchema, snapshotVersion, nodeCount, edgeCount
+evidence:
+  - KTrussInsightInput.memory_id
+  - KTrussInsightInput.truss_level
+  - KTrussInsightInput.max_truss_level
+  - KTrussInsightInput.member_count_at_truss_level
+  - KTrussInsightInput.degree
+  - item.rank
+  - item.memoryId
+  - item.trussLevel
+  - item.maxTrussLevel
+  - item.degree
+  - item.memberCountAtTrussLevel
+  - item.mainTrussMember
+  - item.interpretation
+  - item.evidence.schema
+  - item.evidence.algorithm
+  - item.evidence.graphType
+  - item.evidence.snapshotVersion
+  - item.evidence.nodeCount
+  - item.evidence.edgeCount
+  - item.evidence.filterPosture
+  - item.evidence.structuralGraphSchema
+  - item.evidence.memberCounts
+verified_by:
+  - cargo test --lib k_truss_section_emits_structural_triangle_support_evidence -- --nocapture
+  - cargo test --lib k_truss_section -- --nocapture

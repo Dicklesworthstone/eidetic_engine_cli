@@ -1,0 +1,36 @@
+---
+source: src/cli/insights/mod.rs
+assertion: kCore insight section exposes per-memory k-core decomposition using fnx_algorithms::core_number
+schema:
+  structural_input: ee.insights.structural_graph.v1
+  output: ee.insights.v1
+contracts:
+  - core_number computed from memory_links structural graph via fnx_algorithms::core_number
+  - items ordered by core_number descending, then degree descending, then memoryId ascending
+  - mainCoreMember is true when core_number equals max_core_number
+  - interpretation field carries human-readable core membership tier
+  - honest empty section returned when no structural graph data is available
+  - evidence includes algorithm=core_number, graphType, snapshotVersion, nodeCount, edgeCount, filterPosture, witness
+evidence:
+  - KCoreInsightInput.memory_id
+  - KCoreInsightInput.core_number
+  - KCoreInsightInput.max_core_number
+  - KCoreInsightInput.degree
+  - item.rank
+  - item.memoryId
+  - item.coreNumber
+  - item.maxCoreNumber
+  - item.degree
+  - item.mainCoreMember
+  - item.interpretation
+  - item.evidence.schema
+  - item.evidence.algorithm
+  - item.evidence.graphType
+  - item.evidence.snapshotVersion
+  - item.evidence.nodeCount
+  - item.evidence.edgeCount
+  - item.evidence.filterPosture
+  - item.evidence.witness
+verified_by:
+  - cargo test --lib k_core_section_emits_structural_core_number_evidence -- --nocapture
+  - cargo test --lib k_core_section -- --nocapture

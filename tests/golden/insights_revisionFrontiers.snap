@@ -1,0 +1,35 @@
+---
+source: src/cli/insights/mod.rs
+assertion: revisionFrontiers insight section surfaces dominance-frontier leaders from the logical memory revision DAG
+schema:
+  item: ee.graph.revision_frontier.v1
+  output: ee.insights.v1
+contracts:
+  - compute_workspace_revision_frontiers operates over the revision DAG built from logical memory IDs
+  - items limited to MAX_SECTION_LIMIT, ranked by dominance_frontier_size descending
+  - frontierRole is chain_root (no predecessors), interior (has successors), or chain_head (current, has predecessors)
+  - stalePosture is superseded when the memory has successors in the revision DAG, otherwise current
+  - affectedMemoryIds truncated to REVISION_FRONTIER_AFFECTED_ID_LIMIT; affectedMemoryIdsTruncated signals overflow
+  - honest empty section returned when no revision DAG data is available or graph has zero nodes
+  - evidence includes algorithm=dominance_frontiers and snapshotVersion from the latest revision DAG snapshot
+evidence:
+  - RevisionFrontierInsightInput.memory_id
+  - RevisionFrontierInsightInput.frontier_role
+  - RevisionFrontierInsightInput.stale_posture
+  - RevisionFrontierInsightInput.dominance_frontier_size
+  - RevisionFrontierInsightInput.affected_memory_ids
+  - RevisionFrontierInsightInput.snapshot_version
+  - item.rank
+  - item.memoryId
+  - item.frontierRole
+  - item.stalePosture
+  - item.dominanceFrontierSize
+  - item.affectedMemoryIds
+  - item.affectedMemoryIdsTruncated
+  - item.evidence.schema
+  - item.evidence.algorithm
+  - item.evidence.snapshotVersion
+verified_by:
+  - cargo test --lib revision_frontiers_is_no_longer_placeholder_backed -- --nocapture
+  - cargo test --lib revision_frontiers_section_from_inputs_emits_dominance_evidence -- --nocapture
+  - cargo test --lib revision_frontiers -- --nocapture
