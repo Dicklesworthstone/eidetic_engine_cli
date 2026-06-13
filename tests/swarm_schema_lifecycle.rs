@@ -502,6 +502,28 @@ fn string_array_at(value: &Value, pointer: &str, context: &str) -> Result<Vec<St
         .collect()
 }
 
+fn source_state_for_case(case: &Value, source_kind: &str, context: &str) -> Result<String, String> {
+    let sources = case
+        .pointer("/sourceAuthoritySnapshot/sources")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context} missing sourceAuthoritySnapshot.sources"))?;
+    for source in sources {
+        if string_field(source, "/sourceKind", context)? == source_kind {
+            return Ok(string_field(source, "/state", context)?.to_owned());
+        }
+    }
+    Err(format!(
+        "{context} missing sourceAuthoritySnapshot sourceKind {source_kind}"
+    ))
+}
+
+fn replay_case<'a>(cases: &'a BTreeMap<String, &'a Value>, id: &str) -> Result<&'a Value, String> {
+    cases
+        .get(id)
+        .copied()
+        .ok_or_else(|| format!("replay fixture missing case {id}"))
+}
+
 #[test]
 fn swarm_schema_catalog_is_complete_and_canonical() -> TestResult {
     let actual_files = fs::read_dir(swarm_schema_dir())
@@ -1041,6 +1063,239 @@ fn source_authority_fixtures_cover_taxonomy_and_redaction() -> TestResult {
         {
             return Err(format!("{name} fixture redactionStatus drifted"));
         }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn source_authority_replay_fixtures_pin_claim_gate_projections() -> TestResult {
+    let fixture_path = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("source_authority")
+        .join("replay_claim_gate_cases.json");
+    let fixture = read_json(&fixture_path)?;
+    if string_field(&fixture, "/schema", "replay_claim_gate_cases fixture")?
+        != "ee.source_authority.replay_claim_gate_cases.v1"
+    {
+        return Err("replay_claim_gate_cases fixture schema drifted".into());
+    }
+
+    let cases = fixture
+        .pointer("/cases")
+        .and_then(Value::as_array)
+        .ok_or("replay_claim_gate_cases fixture missing cases array")?;
+    let mut case_ids = Vec::new();
+    let mut cases_by_id = BTreeMap::new();
+    for case in cases {
+        let id = string_field(case, "/id", "source-authority replay case")?.to_owned();
+        case_ids.push(id.clone());
+        cases_by_id.insert(id, case);
+
+        if string_field(
+            case,
+            "/sourceAuthoritySnapshot/schema",
+            "source-authority replay snapshot",
+        )? != "ee.source_authority.snapshot.v1"
+        {
+            return Err("replay case must embed source-authority snapshot schema".into());
+        }
+        if string_field(
+            case,
+            "/claimGateProjection/schema",
+            "source-authority replay claim-gate projection",
+        )? != "ee.swarm.work_packet.claim_gate.v1"
+        {
+            return Err("replay case must embed claim-gate projection schema".into());
+        }
+        if bool_field(
+            case,
+            "/claimGateProjection/safeToClaim",
+            &case_ids.last().unwrap(),
+        )? {
+            return Err(format!(
+                "{} must never be safe to claim",
+                case_ids.last().unwrap()
+            ));
+        }
+        if !case
+            .pointer("/claimGateProjection/claimCommandAction")
+            .is_some_and(Value::is_null)
+        {
+            return Err(format!(
+                "{} must keep claimCommandAction null",
+                case_ids.last().unwrap()
+            ));
+        }
+        if !bool_field(
+            case,
+            "/sourceAuthoritySnapshot/overall/failClosed",
+            &case_ids.last().unwrap(),
+        )? {
+            return Err(format!(
+                "{} must preserve fail-closed source authority",
+                case_ids.last().unwrap()
+            ));
+        }
+        for action in case
+            .pointer("/claimGateProjection/nextCommandActions")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{} missing nextCommandActions", case_ids.last().unwrap()))?
+        {
+            if bool_field(action, "/mutatesState", case_ids.last().unwrap())? {
+                return Err(format!(
+                    "{} emitted a mutating next command action",
+                    case_ids.last().unwrap()
+                ));
+            }
+        }
+
+        let serialized = case.to_string();
+        for forbidden in [
+            "/Users/",
+            "/home/",
+            "/private/",
+            "body_md",
+            "rawBody",
+            "AKIA",
+        ] {
+            if serialized.contains(forbidden) {
+                return Err(format!(
+                    "{} leaks forbidden replay content {forbidden}",
+                    case_ids.last().unwrap()
+                ));
+            }
+        }
+    }
+    let mut sorted_case_ids = case_ids.clone();
+    sorted_case_ids.sort();
+    if case_ids != sorted_case_ids {
+        return Err(format!(
+            "replay_claim_gate_cases must be sorted by id\nactual: {case_ids:?}"
+        ));
+    }
+
+    let timeout = replay_case(&cases_by_id, "candidate_present_but_actionable_timeout")?;
+    if string_field(
+        timeout,
+        "/sourceAuthoritySnapshot/candidateEvidence/lookupOutcome",
+        "candidate_present_but_actionable_timeout",
+    )? != "candidate_lookup_timed_out"
+    {
+        return Err("timeout replay must not collapse timed-out lookup into absence".into());
+    }
+    if !bool_field(
+        timeout,
+        "/sourceAuthoritySnapshot/candidateEvidence/staleFallbackPresence/present",
+        "candidate_present_but_actionable_timeout",
+    )? {
+        return Err("timeout replay must preserve stale fallback candidate presence".into());
+    }
+    let timeout_reasons = string_array_at(
+        timeout,
+        "/claimGateProjection/unsafeReasons",
+        "candidate_present_but_actionable_timeout",
+    )?;
+    if timeout_reasons.contains(&"candidate_not_found:bd-27dae".to_owned()) {
+        return Err("timeout replay must not emit candidate_not_found".into());
+    }
+    if !timeout_reasons.contains(
+        &"candidate_unresolved_due_to_tracker_state:external_changes_pending_import:bd-27dae"
+            .to_owned(),
+    ) {
+        return Err("timeout replay must preserve tracker-state unresolved reason".into());
+    }
+
+    let corrupt_mail = replay_case(&cases_by_id, "agent_mail_green_but_recovery_corrupt")?;
+    if source_state_for_case(
+        corrupt_mail,
+        "agent_mail",
+        "agent_mail_green_but_recovery_corrupt",
+    )? != "corrupt_recovery"
+    {
+        return Err("Agent Mail corrupt replay must use corrupt_recovery source state".into());
+    }
+    if bool_field(
+        corrupt_mail,
+        "/claimGateProjection/sourceAuthority/reservationAuthoritative",
+        "agent_mail_green_but_recovery_corrupt",
+    )? || bool_field(
+        corrupt_mail,
+        "/claimGateProjection/sourceAuthority/inboxAuthoritative",
+        "agent_mail_green_but_recovery_corrupt",
+    )? {
+        return Err(
+            "Agent Mail corrupt replay must make inbox/reservation non-authoritative".into(),
+        );
+    }
+    let corrupt_codes = string_array_at(
+        corrupt_mail,
+        "/claimGateProjection/degradedCodes",
+        "agent_mail_green_but_recovery_corrupt",
+    )?;
+    if !corrupt_codes.contains(&"agent_mail_unavailable".to_owned()) {
+        return Err("Agent Mail corrupt replay must preserve agent_mail_unavailable".into());
+    }
+
+    let memory_drift = replay_case(&cases_by_id, "memory_drift_write_lock_contention")?;
+    if source_state_for_case(
+        memory_drift,
+        "memory_drift",
+        "memory_drift_write_lock_contention",
+    )? != "degraded_read_only"
+    {
+        return Err("memory-drift lock replay must stay degraded_read_only".into());
+    }
+    if string_field(
+        memory_drift,
+        "/claimGateProjection/verdict",
+        "memory_drift_write_lock_contention",
+    )? != "external_state_required"
+    {
+        return Err("memory-drift lock replay must fail as external_state_required".into());
+    }
+    let drift_codes = string_array_at(
+        memory_drift,
+        "/claimGateProjection/degradedCodes",
+        "memory_drift_write_lock_contention",
+    )?;
+    if !drift_codes.contains(&"memory_drift_lock_contention".to_owned()) {
+        return Err("memory-drift lock replay must preserve the lock-contention code".into());
+    }
+
+    let rch_pressure = replay_case(&cases_by_id, "rch_pressure_telemetry_unavailable")?;
+    if source_state_for_case(rch_pressure, "rch", "rch_pressure_telemetry_unavailable")?
+        != "degraded_read_only"
+    {
+        return Err("RCH pressure replay must be degraded_read_only, not source failure".into());
+    }
+    if string_field(
+        rch_pressure,
+        "/claimGateProjection/verdict",
+        "rch_pressure_telemetry_unavailable",
+    )? != "blocked_by_verification"
+    {
+        return Err("RCH pressure replay must block proof-required claims".into());
+    }
+    if bool_field(
+        rch_pressure,
+        "/claimGateProjection/sourceAuthority/rchSafeToLaunchCargoVerification",
+        "rch_pressure_telemetry_unavailable",
+    )? {
+        return Err("RCH pressure replay must not authorize Cargo verification launch".into());
+    }
+    let rch_reasons = string_array_at(
+        rch_pressure,
+        "/claimGateProjection/unsafeReasons",
+        "rch_pressure_telemetry_unavailable",
+    )?;
+    if !rch_reasons.contains(&"rch_pressure_telemetry_unavailable".to_owned())
+        || !rch_reasons.contains(&"no_rust_source_verdict_reached".to_owned())
+    {
+        return Err(
+            "RCH pressure replay must preserve proof gap and no-source-verdict reasons".into(),
+        );
     }
 
     Ok(())

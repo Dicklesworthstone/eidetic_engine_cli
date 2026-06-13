@@ -1,0 +1,586 @@
+{
+  "schema": "ee.source_authority.replay_claim_gate_cases.v1",
+  "cases": [
+    {
+      "id": "agent_mail_green_but_recovery_corrupt",
+      "description": "Agent Mail transport can be green while recovery mode is corrupt; reservation and inbox evidence cannot authorize a claim.",
+      "sourceAuthoritySnapshot": {
+        "schema": "ee.source_authority.snapshot.v1",
+        "snapshotId": "sas-replay-agent-mail-corrupt-0001",
+        "generatedAt": "2026-06-10T18:01:00Z",
+        "workspace": {
+          "workspaceLabel": "eidetic_engine_cli",
+          "workspaceIdHash": "blake3:a7f2c19e6b3d48aa"
+        },
+        "redactionStatus": "paths_counts_subjects_only_no_content",
+        "ordering": {
+          "sources": "sourceKind ascending byte order",
+          "evidence": "evidenceId ascending byte order",
+          "contradictions": "contradictionId ascending byte order"
+        },
+        "sources": [
+          {
+            "sourceKind": "agent_mail",
+            "state": "corrupt_recovery",
+            "authoritative": false,
+            "freshness": {
+              "capturedAt": "2026-06-10T18:00:59Z",
+              "ageMs": 1000,
+              "staleAfterMs": 120000,
+              "freshnessState": "fresh"
+            },
+            "budget": {
+              "commandBudgetMs": 3000,
+              "elapsedMs": 320,
+              "timedOut": false,
+              "retriesUsed": 0,
+              "retryBudget": 1
+            },
+            "exit": { "exitClass": "ok", "exitCode": 0 },
+            "partialData": {
+              "available": true,
+              "droppedSections": [],
+              "reason": null
+            },
+            "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+            "repair": {
+              "guidance": "Record recovery-corrupt authority loss in Beads and coordinate without Agent Mail reservations until repair.",
+              "command": "br comments add bd-example.mail --message 'agent_mail recovery_corrupt archive_corruption; coordinating via beads'",
+              "safety": "read_only_probe"
+            },
+            "evidenceId": "sre-agent-mail-replay-0001",
+            "statusDetail": "health endpoint reachable, but recovery.mode=corrupt and durabilityState=corrupt"
+          },
+          {
+            "sourceKind": "beads",
+            "state": "ready",
+            "authoritative": true,
+            "freshness": {
+              "capturedAt": "2026-06-10T18:00:58Z",
+              "ageMs": 2000,
+              "staleAfterMs": 300000,
+              "freshnessState": "fresh"
+            },
+            "budget": {
+              "commandBudgetMs": 4000,
+              "elapsedMs": 110,
+              "timedOut": false,
+              "retriesUsed": 0,
+              "retryBudget": 3
+            },
+            "exit": { "exitClass": "ok", "exitCode": 0 },
+            "partialData": { "available": true, "droppedSections": [], "reason": null },
+            "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+            "repair": { "guidance": null, "command": "br show bd-example.mail --json", "safety": "read_only_probe" },
+            "evidenceId": "sre-beads-replay-0002",
+            "statusDetail": "candidate resolves in Beads"
+          }
+        ],
+        "candidateEvidence": {
+          "candidateId": "bd-example.mail",
+          "lookupOutcome": "candidate_present",
+          "presentIn": ["beads"],
+          "absentFrom": [],
+          "unavailableIn": ["agent_mail"],
+          "staleFallbackPresence": { "present": false, "sourceKind": null, "fallbackAgeMs": null },
+          "explanation": "Beads can resolve the candidate, but Agent Mail recovery corruption makes reservation and inbox evidence non-authoritative."
+        },
+        "contradictions": [],
+        "overall": {
+          "verdict": "fail_closed_insufficient_authority",
+          "failClosed": true,
+          "authoritativeSourceCount": 1,
+          "degradedSourceCount": 1,
+          "unavailableSourceCount": 0
+        },
+        "degraded": [
+          {
+            "code": "source_authority_agent_mail_corrupt_recovery",
+            "severity": "high",
+            "message": "Agent Mail health is reachable but recovery posture is corrupt; do not treat reservation or inbox evidence as authoritative.",
+            "repair": "br comments add bd-example.mail --message 'agent_mail recovery_corrupt archive_corruption; coordinating via beads'",
+            "sourceKind": "agent_mail"
+          }
+        ],
+        "provenanceHash": "blake3:aa0102030405060708090a0b0c0d0e0f"
+      },
+      "claimGateProjection": {
+        "schema": "ee.swarm.work_packet.claim_gate.v1",
+        "requestedCandidateId": "bd-example.mail",
+        "verdict": "external_state_required",
+        "safeToClaim": false,
+        "claimCommandAction": null,
+        "sourceAuthority": {
+          "trackerAuthoritative": true,
+          "trackerHealth": "ok",
+          "agentMailStatus": "unavailable",
+          "reservationAuthoritative": false,
+          "inboxAuthoritative": false,
+          "rchRemoteOnlyRequired": true,
+          "rchSafeToLaunchCargoVerification": true
+        },
+        "actionableQueue": {
+          "queueState": "ready",
+          "candidateState": "candidate_present_actionable",
+          "authoritative": true
+        },
+        "unsafeReasons": [
+          "agent_mail_recovery_corrupt",
+          "inbox_evidence_not_authoritative",
+          "reservation_evidence_not_authoritative"
+        ],
+        "degradedCodes": ["agent_mail_unavailable"],
+        "nextCommandActions": [
+          {
+            "commandId": "bead_comment_agent_mail_recovery_corrupt",
+            "mutatesState": false,
+            "copySafety": "safe_structured_argv"
+          }
+        ]
+      }
+    },
+    {
+      "id": "candidate_present_but_actionable_timeout",
+      "description": "A candidate visible in stale-safe Beads evidence must not be collapsed into candidate_not_found when the actionable source times out.",
+      "sourceAuthoritySnapshot": {
+        "schema": "ee.source_authority.snapshot.v1",
+        "snapshotId": "sas-replay-actionable-timeout-0001",
+        "generatedAt": "2026-06-10T18:02:00Z",
+        "workspace": {
+          "workspaceLabel": "eidetic_engine_cli",
+          "workspaceIdHash": "blake3:a7f2c19e6b3d48aa"
+        },
+        "redactionStatus": "paths_counts_subjects_only_no_content",
+        "ordering": {
+          "sources": "sourceKind ascending byte order",
+          "evidence": "evidenceId ascending byte order",
+          "contradictions": "contradictionId ascending byte order"
+        },
+        "sources": [
+          {
+            "sourceKind": "actionable_queue",
+            "state": "timed_out",
+            "authoritative": false,
+            "freshness": {
+              "capturedAt": null,
+              "ageMs": null,
+              "staleAfterMs": 300000,
+              "freshnessState": "unknown"
+            },
+            "budget": {
+              "commandBudgetMs": 12000,
+              "elapsedMs": 12000,
+              "timedOut": true,
+              "retriesUsed": 3,
+              "retryBudget": 3
+            },
+            "exit": { "exitClass": "timeout", "exitCode": null },
+            "partialData": {
+              "available": false,
+              "droppedSections": ["candidate_ids", "exclusion_accounting"],
+              "reason": "actionable queue exhausted retry budget during Beads import"
+            },
+            "fallback": {
+              "active": true,
+              "fallbackKind": "stale_safe_snapshot",
+              "fallbackAgeMs": 182000
+            },
+            "repair": {
+              "guidance": "Retry the read-only actionable wrapper after Beads import settles.",
+              "command": "scripts/br_retry.sh actionable --json",
+              "safety": "read_only_probe"
+            },
+            "evidenceId": "sre-actionable-timeout-0001",
+            "statusDetail": "actionable source timed out; stale-safe snapshot mentioned bd-27dae"
+          },
+          {
+            "sourceKind": "beads",
+            "state": "stale_fallback",
+            "authoritative": false,
+            "freshness": {
+              "capturedAt": "2026-06-10T17:59:00Z",
+              "ageMs": 182000,
+              "staleAfterMs": 300000,
+              "freshnessState": "stale"
+            },
+            "budget": {
+              "commandBudgetMs": 4000,
+              "elapsedMs": 4000,
+              "timedOut": true,
+              "retriesUsed": 3,
+              "retryBudget": 3
+            },
+            "exit": { "exitClass": "timeout", "exitCode": null },
+            "partialData": {
+              "available": true,
+              "droppedSections": ["comments"],
+              "reason": "stale-safe snapshot was used after live lookup timeout"
+            },
+            "fallback": {
+              "active": true,
+              "fallbackKind": "stale_safe_snapshot",
+              "fallbackAgeMs": 182000
+            },
+            "repair": {
+              "guidance": "Read br show for the candidate after tracker authority recovers.",
+              "command": "br show bd-27dae --json",
+              "safety": "read_only_probe"
+            },
+            "evidenceId": "sre-beads-timeout-0002",
+            "statusDetail": "stale-safe Beads snapshot contains the requested candidate"
+          }
+        ],
+        "candidateEvidence": {
+          "candidateId": "bd-27dae",
+          "lookupOutcome": "candidate_lookup_timed_out",
+          "presentIn": [],
+          "absentFrom": [],
+          "unavailableIn": ["actionable_queue", "beads"],
+          "staleFallbackPresence": {
+            "present": true,
+            "sourceKind": "beads",
+            "fallbackAgeMs": 182000
+          },
+          "explanation": "The candidate appears in stale-safe evidence, but live actionable authority timed out. The gate must fail closed with unresolved tracker state instead of candidate_not_found."
+        },
+        "contradictions": [],
+        "overall": {
+          "verdict": "fail_closed_timeout",
+          "failClosed": true,
+          "authoritativeSourceCount": 0,
+          "degradedSourceCount": 1,
+          "unavailableSourceCount": 1
+        },
+        "degraded": [
+          {
+            "code": "source_authority_actionable_queue_timed_out",
+            "severity": "medium",
+            "message": "Actionable source timed out; candidate absence is not confirmed.",
+            "repair": "scripts/br_retry.sh actionable --json",
+            "sourceKind": "actionable_queue"
+          }
+        ],
+        "provenanceHash": "blake3:bb0102030405060708090a0b0c0d0e0f"
+      },
+      "claimGateProjection": {
+        "schema": "ee.swarm.work_packet.claim_gate.v1",
+        "requestedCandidateId": "bd-27dae",
+        "verdict": "external_state_required",
+        "safeToClaim": false,
+        "claimCommandAction": null,
+        "sourceAuthority": {
+          "trackerAuthoritative": false,
+          "trackerHealth": "external_changes_pending_import",
+          "agentMailStatus": "skipped",
+          "reservationAuthoritative": null,
+          "inboxAuthoritative": null,
+          "rchRemoteOnlyRequired": true,
+          "rchSafeToLaunchCargoVerification": null
+        },
+        "actionableQueue": {
+          "queueState": "timed_out",
+          "candidateState": "actionable_queue_timed_out",
+          "authoritative": false
+        },
+        "unsafeReasons": [
+          "actionable_queue_timed_out",
+          "beads_tracker_not_authoritative:external_changes_pending_import",
+          "candidate_unresolved_due_to_tracker_state:external_changes_pending_import:bd-27dae",
+          "gate_verdict:external_state_required",
+          "packet_recommendation_not_claim_safe:coordinate_before_claim"
+        ],
+        "degradedCodes": [
+          "actionable_queue_timed_out",
+          "tracker_authority_degraded"
+        ],
+        "nextCommandActions": [
+          {
+            "commandId": "bead_show_candidate",
+            "mutatesState": false,
+            "copySafety": "safe_structured_argv"
+          },
+          {
+            "commandId": "claim_gate_retry_with_snapshot",
+            "mutatesState": false,
+            "copySafety": "safe_structured_argv"
+          }
+        ]
+      }
+    },
+    {
+      "id": "memory_drift_write_lock_contention",
+      "description": "Memory-drift read-only collection can hit ee.write.lock; the projection keeps it as source authority unavailable without claiming.",
+      "sourceAuthoritySnapshot": {
+        "schema": "ee.source_authority.snapshot.v1",
+        "snapshotId": "sas-replay-memory-drift-lock-0001",
+        "generatedAt": "2026-06-10T18:03:00Z",
+        "workspace": {
+          "workspaceLabel": "eidetic_engine_cli",
+          "workspaceIdHash": "blake3:a7f2c19e6b3d48aa"
+        },
+        "redactionStatus": "paths_counts_subjects_only_no_content",
+        "ordering": {
+          "sources": "sourceKind ascending byte order",
+          "evidence": "evidenceId ascending byte order",
+          "contradictions": "contradictionId ascending byte order"
+        },
+        "sources": [
+          {
+            "sourceKind": "beads",
+            "state": "ready",
+            "authoritative": true,
+            "freshness": {
+              "capturedAt": "2026-06-10T18:02:59Z",
+              "ageMs": 1000,
+              "staleAfterMs": 300000,
+              "freshnessState": "fresh"
+            },
+            "budget": {
+              "commandBudgetMs": 4000,
+              "elapsedMs": 118,
+              "timedOut": false,
+              "retriesUsed": 0,
+              "retryBudget": 3
+            },
+            "exit": { "exitClass": "ok", "exitCode": 0 },
+            "partialData": { "available": true, "droppedSections": [], "reason": null },
+            "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+            "repair": { "guidance": null, "command": "br show bd-example.memory --json", "safety": "read_only_probe" },
+            "evidenceId": "sre-beads-memory-0001",
+            "statusDetail": "candidate resolves in Beads"
+          },
+          {
+            "sourceKind": "memory_drift",
+            "state": "degraded_read_only",
+            "authoritative": false,
+            "freshness": {
+              "capturedAt": null,
+              "ageMs": null,
+              "staleAfterMs": 300000,
+              "freshnessState": "unknown"
+            },
+            "budget": {
+              "commandBudgetMs": 3000,
+              "elapsedMs": 3000,
+              "timedOut": true,
+              "retriesUsed": 1,
+              "retryBudget": 1
+            },
+            "exit": { "exitClass": "lock_contention", "exitCode": 75 },
+            "partialData": {
+              "available": false,
+              "droppedSections": ["memory_drift_snapshot"],
+              "reason": "ee.write.lock was held by another process"
+            },
+            "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+            "repair": {
+              "guidance": "Retry read-only memory drift collection after the writer releases ee.write.lock.",
+              "command": "ee memory drift queue --json",
+              "safety": "read_only_probe"
+            },
+            "evidenceId": "sre-memory-drift-0002",
+            "statusDetail": "read-only memory drift collector refused to infer freshness while ee.write.lock was held"
+          }
+        ],
+        "candidateEvidence": {
+          "candidateId": "bd-example.memory",
+          "lookupOutcome": "candidate_present",
+          "presentIn": ["beads"],
+          "absentFrom": [],
+          "unavailableIn": ["memory_drift"],
+          "staleFallbackPresence": { "present": false, "sourceKind": null, "fallbackAgeMs": null },
+          "explanation": "Candidate identity is known, but memory-drift source authority was not available because the write lock was held."
+        },
+        "contradictions": [],
+        "overall": {
+          "verdict": "fail_closed_insufficient_authority",
+          "failClosed": true,
+          "authoritativeSourceCount": 1,
+          "degradedSourceCount": 1,
+          "unavailableSourceCount": 0
+        },
+        "degraded": [
+          {
+            "code": "source_authority_memory_drift_lock_contention",
+            "severity": "warning",
+            "message": "Memory-drift source authority could not be collected because ee.write.lock was held.",
+            "repair": "ee memory drift queue --json",
+            "sourceKind": "memory_drift"
+          }
+        ],
+        "provenanceHash": "blake3:cc0102030405060708090a0b0c0d0e0f"
+      },
+      "claimGateProjection": {
+        "schema": "ee.swarm.work_packet.claim_gate.v1",
+        "requestedCandidateId": "bd-example.memory",
+        "verdict": "external_state_required",
+        "safeToClaim": false,
+        "claimCommandAction": null,
+        "sourceAuthority": {
+          "trackerAuthoritative": true,
+          "trackerHealth": "ok",
+          "agentMailStatus": "healthy",
+          "reservationAuthoritative": true,
+          "inboxAuthoritative": true,
+          "rchRemoteOnlyRequired": true,
+          "rchSafeToLaunchCargoVerification": true
+        },
+        "actionableQueue": {
+          "queueState": "ready",
+          "candidateState": "candidate_present_actionable",
+          "authoritative": true
+        },
+        "unsafeReasons": [
+          "memory_drift_source_unverifiable",
+          "packet_recommendation_not_claim_safe:coordinate_before_claim"
+        ],
+        "degradedCodes": ["memory_drift_lock_contention"],
+        "nextCommandActions": [
+          {
+            "commandId": "memory_drift_retry_read_only",
+            "mutatesState": false,
+            "copySafety": "safe_structured_argv"
+          }
+        ]
+      }
+    },
+    {
+      "id": "rch_pressure_telemetry_unavailable",
+      "description": "RCH remote_ready with missing pressure telemetry is proof-admission unavailable, not a Rust source verdict.",
+      "sourceAuthoritySnapshot": {
+        "schema": "ee.source_authority.snapshot.v1",
+        "snapshotId": "sas-replay-rch-pressure-0001",
+        "generatedAt": "2026-06-10T18:04:00Z",
+        "workspace": {
+          "workspaceLabel": "eidetic_engine_cli",
+          "workspaceIdHash": "blake3:a7f2c19e6b3d48aa"
+        },
+        "redactionStatus": "paths_counts_subjects_only_no_content",
+        "ordering": {
+          "sources": "sourceKind ascending byte order",
+          "evidence": "evidenceId ascending byte order",
+          "contradictions": "contradictionId ascending byte order"
+        },
+        "sources": [
+          {
+            "sourceKind": "beads",
+            "state": "ready",
+            "authoritative": true,
+            "freshness": {
+              "capturedAt": "2026-06-10T18:03:59Z",
+              "ageMs": 1000,
+              "staleAfterMs": 300000,
+              "freshnessState": "fresh"
+            },
+            "budget": {
+              "commandBudgetMs": 4000,
+              "elapsedMs": 94,
+              "timedOut": false,
+              "retriesUsed": 0,
+              "retryBudget": 3
+            },
+            "exit": { "exitClass": "ok", "exitCode": 0 },
+            "partialData": { "available": true, "droppedSections": [], "reason": null },
+            "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+            "repair": { "guidance": null, "command": "br show bd-example.rch --json", "safety": "read_only_probe" },
+            "evidenceId": "sre-beads-rch-0001",
+            "statusDetail": "candidate resolves in Beads"
+          },
+          {
+            "sourceKind": "rch",
+            "state": "degraded_read_only",
+            "authoritative": false,
+            "freshness": {
+              "capturedAt": "2026-06-10T18:03:58Z",
+              "ageMs": 2000,
+              "staleAfterMs": 60000,
+              "freshnessState": "fresh"
+            },
+            "budget": {
+              "commandBudgetMs": 5000,
+              "elapsedMs": 5000,
+              "timedOut": true,
+              "retriesUsed": 1,
+              "retryBudget": 1
+            },
+            "exit": { "exitClass": "timeout", "exitCode": null },
+            "partialData": {
+              "available": true,
+              "droppedSections": ["pressure_telemetry", "capabilities_refresh"],
+              "reason": "pressure_state=telemetry_gap and capabilities refresh timed out"
+            },
+            "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+            "repair": {
+              "guidance": "Wait for RCH pressure telemetry or retry the read-only status/probe before launching proof-required Cargo.",
+              "command": "rch status --json",
+              "safety": "read_only_probe"
+            },
+            "evidenceId": "sre-rch-pressure-0002",
+            "statusDetail": "remote_ready with zero active builds, but pressure_reason_code=telemetry_unavailable and capabilities refresh timed out"
+          }
+        ],
+        "candidateEvidence": {
+          "candidateId": "bd-example.rch",
+          "lookupOutcome": "candidate_present",
+          "presentIn": ["beads"],
+          "absentFrom": [],
+          "unavailableIn": ["rch"],
+          "staleFallbackPresence": { "present": false, "sourceKind": null, "fallbackAgeMs": null },
+          "explanation": "The candidate is known, but proof admission cannot decide whether Cargo verification is safe because RCH pressure telemetry is unavailable."
+        },
+        "contradictions": [],
+        "overall": {
+          "verdict": "fail_closed_proof_unavailable",
+          "failClosed": true,
+          "authoritativeSourceCount": 1,
+          "degradedSourceCount": 1,
+          "unavailableSourceCount": 0
+        },
+        "degraded": [
+          {
+            "code": "source_authority_rch_pressure_telemetry_unavailable",
+            "severity": "medium",
+            "message": "RCH pressure telemetry is unavailable; no Rust source verdict was reached.",
+            "repair": "rch status --json",
+            "sourceKind": "rch"
+          }
+        ],
+        "provenanceHash": "blake3:dd0102030405060708090a0b0c0d0e0f"
+      },
+      "claimGateProjection": {
+        "schema": "ee.swarm.work_packet.claim_gate.v1",
+        "requestedCandidateId": "bd-example.rch",
+        "verdict": "blocked_by_verification",
+        "safeToClaim": false,
+        "claimCommandAction": null,
+        "sourceAuthority": {
+          "trackerAuthoritative": true,
+          "trackerHealth": "ok",
+          "agentMailStatus": "healthy",
+          "reservationAuthoritative": true,
+          "inboxAuthoritative": true,
+          "rchRemoteOnlyRequired": true,
+          "rchSafeToLaunchCargoVerification": false
+        },
+        "actionableQueue": {
+          "queueState": "ready",
+          "candidateState": "candidate_present_actionable",
+          "authoritative": true
+        },
+        "unsafeReasons": [
+          "no_rust_source_verdict_reached",
+          "packet_recommendation_not_claim_safe:coordinate_before_claim",
+          "rch_pressure_telemetry_unavailable"
+        ],
+        "degradedCodes": ["rch_pressure_telemetry_unavailable"],
+        "nextCommandActions": [
+          {
+            "commandId": "rch_status_retry_read_only",
+            "mutatesState": false,
+            "copySafety": "safe_structured_argv"
+          }
+        ]
+      }
+    }
+  ]
+}
