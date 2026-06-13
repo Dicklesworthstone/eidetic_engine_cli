@@ -19,7 +19,7 @@
             "mayEmitClaimCommand": false,
             "needsFreshClaimGate": true,
             "state": "scanned_and_unsafe",
-            "workClass": "contract_design"
+            "workClass": "docs_only"
           },
           {
             "actionsMutateState": false,

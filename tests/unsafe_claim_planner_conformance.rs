@@ -130,7 +130,7 @@ fn unsafe_claim_planner_source_stays_read_only() -> TestResult {
     Ok(())
 }
 
-fn build_conformance_report(corpus: &FixtureCorpus) -> TestResult {
+fn build_conformance_report(corpus: &FixtureCorpus) -> Result<Value, String> {
     let mut covered = BTreeSet::new();
     let mut case_reports = Vec::new();
 
