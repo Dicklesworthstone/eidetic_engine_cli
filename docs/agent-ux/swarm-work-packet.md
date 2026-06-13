@@ -173,7 +173,7 @@ evidence is missing:
 CANDIDATE=bd-example.1
 ee swarm work-packet --workspace . --include-rch \
   --claim-gate --candidate "$CANDIDATE" --json \
-  | jq '.data | {schema, verdict, safeToClaim, agentMailStatus: .sourceAuthority.agentMailStatus, unsafeReasons, degradedCodes}'
+  | jq '.data | {schema, verdict, safeToClaim, agentMailStatus: .sourceAuthority.agentMailStatus, snapshotId: .sourceAuthoritySnapshot.snapshotId, lookupOutcome: .sourceAuthoritySnapshot.candidateEvidence.lookupOutcome, unsafeReasons, degradedCodes}'
 
 SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
 scripts/agent_mail_snapshot.sh \
@@ -184,7 +184,7 @@ scripts/agent_mail_snapshot.sh \
 ee swarm work-packet --workspace . --include-rch \
   --agent-mail-snapshot "$SNAPSHOT_PATH" \
   --claim-gate --candidate "$CANDIDATE" --json \
-  | jq '.data | {schema, verdict, safeToClaim, agentMailStatus: .sourceAuthority.agentMailStatus, unsafeReasons, staleReasons, degradedCodes}'
+  | jq '.data | {schema, verdict, safeToClaim, agentMailStatus: .sourceAuthority.agentMailStatus, snapshotId: .sourceAuthoritySnapshot.snapshotId, sourceStates: .sourceAuthoritySnapshot.sourceStates, unsafeReasons, staleReasons, degradedCodes}'
 ```
 
 Treat `agent_mail_unavailable` and `agentMailStatus` values of `unavailable`,
@@ -195,6 +195,12 @@ the retry still reports `safeToClaim=true`, `verdict=safe_to_claim`, and a
 runnable `claimCommandAction`. If `unsafeReasons` or `staleReasons` still name
 reservation collisions, stale tracker state, Beads/BV disagreement, or RCH
 blockers, coordinate instead of claiming.
+
+Use `sourceAuthoritySnapshot.candidateEvidence.lookupOutcome` to distinguish a
+confirmed missing candidate from `candidate_lookup_timed_out`,
+`candidate_lookup_unavailable`, `candidate_stale_fallback_only`, or
+`candidate_contradicted`. Those outcomes require read-only refresh or
+coordination; they must not be rewritten into a plain invalid-candidate story.
 
 Treat `bv_command_timeout` and `bv_no_output` as graph-triage liveness
 failures, not as "no good work exists." Do not wait indefinitely on raw

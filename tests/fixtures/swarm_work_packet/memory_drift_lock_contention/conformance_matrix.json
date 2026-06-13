@@ -160,7 +160,7 @@
     "sourceAuthority": {
       "environmentVerdict": "coordinate_before_claim",
       "sourceTestVerdict": "not_evaluated",
-      "remoteVerificationAdmitted": true
+      "remoteVerificationAdmitted": false
     },
     "unsafeReasons": [
       "gate_verdict:coordinate_first",

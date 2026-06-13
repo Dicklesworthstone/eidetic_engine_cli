@@ -758,6 +758,7 @@ pub struct SwarmWorkPacketClaimGate {
     pub recommended_action: &'static str,
     pub recommended_safe_to_claim: Option<bool>,
     pub source_authority: SwarmWorkPacketClaimGateSourceAuthority,
+    pub source_authority_snapshot: SwarmWorkPacketClaimGateSourceAuthoritySnapshot,
     pub actionable_queue: SwarmWorkPacketClaimGateActionableQueue,
     pub resource_admission: SwarmWorkPacketResourceAdmission,
     pub unsafe_reasons: Vec<String>,
@@ -800,6 +801,59 @@ pub struct SwarmWorkPacketClaimGateSourceAuthority {
     pub install_freshness_authoritative: Option<bool>,
     pub install_freshness_repair: Option<&'static str>,
     pub source_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketClaimGateSourceAuthoritySnapshot {
+    pub schema: &'static str,
+    pub snapshot_id: String,
+    pub provenance_hash: String,
+    pub redaction_status: &'static str,
+    pub overall: SwarmWorkPacketClaimGateSourceAuthoritySnapshotOverall,
+    pub candidate_evidence: Option<SwarmWorkPacketClaimGateSourceAuthoritySnapshotCandidate>,
+    pub source_states: Vec<SwarmWorkPacketClaimGateSourceAuthoritySnapshotSourceState>,
+    pub degraded_codes: Vec<String>,
+    pub repair_guidance: Vec<SwarmWorkPacketClaimGateSourceAuthoritySnapshotRepair>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketClaimGateSourceAuthoritySnapshotOverall {
+    pub verdict: &'static str,
+    pub fail_closed: bool,
+    pub authoritative_source_count: u64,
+    pub degraded_source_count: u64,
+    pub unavailable_source_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketClaimGateSourceAuthoritySnapshotCandidate {
+    pub candidate_id: String,
+    pub lookup_outcome: &'static str,
+    pub stale_fallback_present: Option<bool>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketClaimGateSourceAuthoritySnapshotSourceState {
+    pub source_kind: &'static str,
+    pub state: &'static str,
+    pub authoritative: bool,
+    pub freshness_state: &'static str,
+    pub timed_out: bool,
+    pub exit_class: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketClaimGateSourceAuthoritySnapshotRepair {
+    pub source_kind: &'static str,
+    pub state: &'static str,
+    pub guidance: Option<String>,
+    pub command: Option<String>,
+    pub safety: &'static str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1022,6 +1076,74 @@ pub struct SwarmSourceAuthorityDegradation {
     pub message: String,
     pub repair: Option<String>,
     pub source_kind: Option<String>,
+}
+
+impl From<&SwarmSourceAuthoritySnapshot> for SwarmWorkPacketClaimGateSourceAuthoritySnapshot {
+    fn from(snapshot: &SwarmSourceAuthoritySnapshot) -> Self {
+        let mut degraded_codes = snapshot
+            .degraded
+            .iter()
+            .map(|entry| entry.code.clone())
+            .collect::<Vec<_>>();
+        degraded_codes.sort();
+        degraded_codes.dedup();
+
+        let repair_guidance = snapshot
+            .sources
+            .iter()
+            .filter(|source| {
+                source.state != "ready"
+                    || source.repair.guidance.is_some()
+                    || source.repair.command.is_some()
+            })
+            .map(
+                |source| SwarmWorkPacketClaimGateSourceAuthoritySnapshotRepair {
+                    source_kind: source.source_kind,
+                    state: source.state,
+                    guidance: source.repair.guidance.clone(),
+                    command: source.repair.command.clone(),
+                    safety: source.repair.safety,
+                },
+            )
+            .collect();
+
+        Self {
+            schema: snapshot.schema,
+            snapshot_id: snapshot.snapshot_id.clone(),
+            provenance_hash: snapshot.provenance_hash.clone(),
+            redaction_status: snapshot.redaction_status,
+            overall: SwarmWorkPacketClaimGateSourceAuthoritySnapshotOverall {
+                verdict: snapshot.overall.verdict,
+                fail_closed: snapshot.overall.fail_closed,
+                authoritative_source_count: snapshot.overall.authoritative_source_count,
+                degraded_source_count: snapshot.overall.degraded_source_count,
+                unavailable_source_count: snapshot.overall.unavailable_source_count,
+            },
+            candidate_evidence: snapshot.candidate_evidence.as_ref().map(|candidate| {
+                SwarmWorkPacketClaimGateSourceAuthoritySnapshotCandidate {
+                    candidate_id: candidate.candidate_id.clone(),
+                    lookup_outcome: candidate.lookup_outcome,
+                    stale_fallback_present: candidate.stale_fallback_presence.present,
+                }
+            }),
+            source_states: snapshot
+                .sources
+                .iter()
+                .map(
+                    |source| SwarmWorkPacketClaimGateSourceAuthoritySnapshotSourceState {
+                        source_kind: source.source_kind,
+                        state: source.state,
+                        authoritative: source.authoritative,
+                        freshness_state: source.freshness.freshness_state,
+                        timed_out: source.budget.timed_out,
+                        exit_class: source.exit.exit_class,
+                    },
+                )
+                .collect(),
+            degraded_codes,
+            repair_guidance,
+        }
+    }
 }
 
 /// Raw actionable-queue evidence collected once per work packet
@@ -1822,13 +1944,30 @@ fn work_packet_source_authority_snapshot(
     let candidate = work_packet_claim_gate_candidate(packet, requested_candidate_id);
     let actionable_queue =
         work_packet_claim_gate_actionable_queue(packet, candidate, requested_candidate_id);
+    let install_freshness = work_packet_claim_gate_install_freshness(packet);
+    work_packet_source_authority_snapshot_from_gate(
+        packet,
+        requested_candidate_id,
+        candidate,
+        &actionable_queue,
+        install_freshness,
+    )
+}
+
+fn work_packet_source_authority_snapshot_from_gate(
+    packet: &SwarmWorkPacket,
+    requested_candidate_id: Option<&str>,
+    candidate: Option<&SwarmWorkPacketCandidate>,
+    actionable_queue: &SwarmWorkPacketClaimGateActionableQueue,
+    install_freshness: SwarmWorkPacketClaimGateInstallFreshness,
+) -> SwarmSourceAuthoritySnapshot {
     let candidate_id = candidate
         .map(|candidate| candidate.id.as_str())
         .or(requested_candidate_id);
 
     let mut sources = source_authority_source_kinds()
         .iter()
-        .map(|kind| source_authority_record(packet, kind, &actionable_queue))
+        .map(|kind| source_authority_record(packet, kind, actionable_queue, install_freshness))
         .collect::<Vec<_>>();
     sources.sort_by(|left, right| left.source_kind.cmp(right.source_kind));
 
@@ -1893,12 +2032,13 @@ fn source_authority_record(
     packet: &SwarmWorkPacket,
     source_kind: &'static str,
     actionable_queue: &SwarmWorkPacketClaimGateActionableQueue,
+    install_freshness: SwarmWorkPacketClaimGateInstallFreshness,
 ) -> SwarmSourceAuthorityRecord {
     match source_kind {
         "actionable_queue" => {
             return source_authority_actionable_queue_record(packet, actionable_queue);
         }
-        "installed_binary" => return source_authority_install_record(packet),
+        "installed_binary" => return source_authority_install_record(packet, install_freshness),
         "workspace_hygiene" => return source_authority_workspace_hygiene_record(packet),
         "support_bundle" => {
             return source_authority_unavailable_record(
@@ -2060,8 +2200,10 @@ fn source_authority_actionable_queue_record(
     )
 }
 
-fn source_authority_install_record(packet: &SwarmWorkPacket) -> SwarmSourceAuthorityRecord {
-    let install = packet.claim_gate_install_freshness;
+fn source_authority_install_record(
+    packet: &SwarmWorkPacket,
+    install: SwarmWorkPacketClaimGateInstallFreshness,
+) -> SwarmSourceAuthorityRecord {
     let (state, authoritative) = match (install.verdict, install.authoritative) {
         ("fresh", Some(true)) => ("ready", true),
         ("not_evaluated", _) => ("unavailable", false),
@@ -2859,6 +3001,13 @@ impl SwarmWorkPacket {
             work_packet_claim_gate_candidate_recommended_safe_to_claim(self, candidate)
         });
         let install_freshness = work_packet_claim_gate_install_freshness(self);
+        let source_authority_snapshot = work_packet_source_authority_snapshot_from_gate(
+            self,
+            requested_candidate_id,
+            candidate,
+            &actionable_queue,
+            install_freshness,
+        );
         let source_authority_attestation = work_packet_claim_gate_attestation_summary(self);
         let resource_admission = work_packet_resource_admission(
             "claim_gate",
@@ -2975,6 +3124,9 @@ impl SwarmWorkPacket {
                 install_freshness_repair: install_freshness.repair,
                 source_count: self.source_provenance.len(),
             },
+            source_authority_snapshot: SwarmWorkPacketClaimGateSourceAuthoritySnapshot::from(
+                &source_authority_snapshot,
+            ),
             actionable_queue,
             resource_admission,
             unsafe_reasons,
@@ -4016,7 +4168,10 @@ fn work_packet_claim_gate_attestation_summary(
 }
 
 fn work_packet_claim_gate_remote_verification_admitted(packet: &SwarmWorkPacket) -> Option<bool> {
-    packet.rch_proof_posture.safe_to_launch_cargo_verification
+    match packet.rch_proof_posture.safe_to_launch_cargo_verification {
+        Some(true) if work_packet_has_coordination_degradation(packet) => Some(false),
+        verdict => verdict,
+    }
 }
 
 fn environment_attestation_verdict_label(verdict: EnvironmentAttestationVerdict) -> &'static str {
@@ -10542,6 +10697,29 @@ mod tests {
         assert_eq!(candidate.present_in, vec!["actionable_queue".to_owned()]);
         assert!(!authority.overall.fail_closed);
 
+        let gate = packet.claim_gate(Some("bd-safe"));
+        let gate_snapshot = &gate.source_authority_snapshot;
+        assert_eq!(gate_snapshot.schema, SOURCE_AUTHORITY_SNAPSHOT_SCHEMA_V1);
+        assert_eq!(gate_snapshot.snapshot_id, authority.snapshot_id);
+        assert_eq!(gate_snapshot.provenance_hash, authority.provenance_hash);
+        assert_eq!(gate_snapshot.overall.verdict, authority.overall.verdict);
+        assert_eq!(
+            gate_snapshot
+                .candidate_evidence
+                .as_ref()
+                .expect("gate candidate evidence")
+                .lookup_outcome,
+            "candidate_present"
+        );
+        assert_eq!(
+            gate_snapshot
+                .source_states
+                .iter()
+                .map(|source| source.source_kind)
+                .collect::<Vec<_>>(),
+            source_authority_source_kinds().to_vec()
+        );
+
         let rendered = serde_json::to_string(&authority).expect("serialize source authority");
         for forbidden in [
             "br update",
@@ -10616,6 +10794,22 @@ mod tests {
             entry.code == "source_authority_actionable_queue_timed_out"
                 && entry.source_kind.as_deref() == Some("actionable_queue")
         }));
+
+        let gate = packet.claim_gate(Some("bd-safe"));
+        let gate_candidate = gate
+            .source_authority_snapshot
+            .candidate_evidence
+            .as_ref()
+            .expect("gate candidate evidence");
+        assert_eq!(gate_candidate.lookup_outcome, "candidate_lookup_timed_out");
+        assert_eq!(gate_candidate.stale_fallback_present, Some(true));
+        assert!(gate.source_authority_snapshot.overall.fail_closed);
+        assert!(
+            gate.source_authority_snapshot
+                .degraded_codes
+                .iter()
+                .any(|code| { code == "source_authority_actionable_queue_timed_out" })
+        );
     }
 
     #[test]

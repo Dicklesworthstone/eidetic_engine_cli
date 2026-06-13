@@ -140,6 +140,67 @@ fn resource_admission_sample(decision: &str, recommended_profile: &str) -> Value
     })
 }
 
+fn source_authority_snapshot_sample(
+    candidate_id: &str,
+    lookup_outcome: &str,
+    fail_closed: bool,
+) -> Value {
+    json!({
+        "schema": "ee.source_authority.snapshot.v1",
+        "snapshotId": "sas-1111111111111111",
+        "provenanceHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+        "redactionStatus": "paths_counts_subjects_only_no_content",
+        "overall": {
+            "verdict": if fail_closed { "fail_closed_insufficient_authority" } else { "all_sources_authoritative" },
+            "failClosed": fail_closed,
+            "authoritativeSourceCount": if fail_closed { 1 } else { 2 },
+            "degradedSourceCount": if fail_closed { 1 } else { 0 },
+            "unavailableSourceCount": 0
+        },
+        "candidateEvidence": {
+            "candidateId": candidate_id,
+            "lookupOutcome": lookup_outcome,
+            "staleFallbackPresent": false
+        },
+        "sourceStates": [
+            {
+                "sourceKind": "actionable_queue",
+                "state": "ready",
+                "authoritative": true,
+                "freshnessState": "fresh",
+                "timedOut": false,
+                "exitClass": "ok"
+            },
+            {
+                "sourceKind": if fail_closed { "rch" } else { "beads" },
+                "state": if fail_closed { "degraded_read_only" } else { "ready" },
+                "authoritative": !fail_closed,
+                "freshnessState": "fresh",
+                "timedOut": false,
+                "exitClass": "ok"
+            }
+        ],
+        "degradedCodes": if fail_closed {
+            json!(["source_authority_rch_degraded_read_only"])
+        } else {
+            json!([])
+        },
+        "repairGuidance": if fail_closed {
+            json!([
+                {
+                    "sourceKind": "rch",
+                    "state": "degraded_read_only",
+                    "guidance": "rch answered but is not authoritative for claims.",
+                    "command": "rch status --json",
+                    "safety": "read_only_probe"
+                }
+            ])
+        } else {
+            json!([])
+        }
+    })
+}
+
 fn claim_gate_required_fields() -> Vec<String> {
     [
         "schema",
@@ -154,6 +215,7 @@ fn claim_gate_required_fields() -> Vec<String> {
         "recommendedAction",
         "recommendedSafeToClaim",
         "sourceAuthority",
+        "sourceAuthoritySnapshot",
         "actionableQueue",
         "resourceAdmission",
         "unsafeReasons",
@@ -390,6 +452,11 @@ fn claim_gate_sample_payloads_are_redacted_and_safe() -> TestResult {
             "installFreshnessRepair": null,
             "sourceCount": 4
         },
+        "sourceAuthoritySnapshot": source_authority_snapshot_sample(
+            "bd-owned.1",
+            "candidate_present",
+            true
+        ),
         "actionableQueue": {
             "commandId": "beads_actionable_queue",
             "displayCommand": "scripts/br_retry.sh actionable --json",
@@ -1224,6 +1291,88 @@ fn claim_gate_actionable_presence_is_necessary_but_not_sufficient() -> TestResul
     assert_no_forbidden_markers(&rendered, context)?;
     assert_next_actions_are_read_only(&rendered, context)?;
 
+    Ok(())
+}
+
+#[test]
+fn claim_gate_embeds_compact_source_authority_snapshot_reference() -> TestResult {
+    let candidate_id = "bd-source-authority";
+    let snapshot = claim_ready_snapshot(candidate_id, "Pin source authority snapshot in gate");
+    let evidence = SwarmWorkPacketActionableQueueEvidence {
+        collection_mode: "br_retry_script",
+        queue_state: "ready",
+        exit_class: "ok",
+        row_count: Some(1),
+        candidate_ids: vec![candidate_id.to_owned()],
+        exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+    };
+    let (_, gate) = packet_and_gate_with_actionable_queue(
+        clean_tracker_report(),
+        &snapshot,
+        evidence,
+        candidate_id,
+    );
+
+    let authority = &gate.source_authority_snapshot;
+    if authority.schema != "ee.source_authority.snapshot.v1" {
+        return Err(format!(
+            "sourceAuthoritySnapshot schema drifted: {}",
+            authority.schema
+        ));
+    }
+    if !authority.snapshot_id.starts_with("sas-") {
+        return Err(format!(
+            "sourceAuthoritySnapshot snapshotId must be present, got {}",
+            authority.snapshot_id
+        ));
+    }
+    if !authority.provenance_hash.starts_with("blake3:") {
+        return Err(format!(
+            "sourceAuthoritySnapshot provenanceHash must be present, got {}",
+            authority.provenance_hash
+        ));
+    }
+    let candidate = authority
+        .candidate_evidence
+        .as_ref()
+        .ok_or("sourceAuthoritySnapshot missing candidateEvidence")?;
+    if candidate.candidate_id != candidate_id || candidate.lookup_outcome != "candidate_present" {
+        return Err(format!(
+            "sourceAuthoritySnapshot candidate evidence drifted: {candidate:?}"
+        ));
+    }
+    let source_kinds = authority
+        .source_states
+        .iter()
+        .map(|source| source.source_kind)
+        .collect::<Vec<_>>();
+    let mut sorted_source_kinds = source_kinds.clone();
+    sorted_source_kinds.sort();
+    if source_kinds != sorted_source_kinds {
+        return Err(format!(
+            "sourceAuthoritySnapshot sourceStates must be sorted by sourceKind, got {source_kinds:?}"
+        ));
+    }
+    if !authority.source_states.iter().any(|source| {
+        source.source_kind == "actionable_queue"
+            && source.state == "ready"
+            && source.authoritative
+            && !source.timed_out
+    }) {
+        return Err("sourceAuthoritySnapshot must preserve ready actionable_queue state".into());
+    }
+    if authority.repair_guidance.iter().any(|repair| {
+        repair
+            .command
+            .as_deref()
+            .is_some_and(|command| command.contains("br update"))
+    }) {
+        return Err("sourceAuthoritySnapshot repair guidance must stay non-mutating".into());
+    }
+
+    let rendered = serde_json::to_value(&gate)
+        .map_err(|error| format!("serialize sourceAuthoritySnapshot gate: {error}"))?;
+    assert_no_forbidden_markers(&rendered, "sourceAuthoritySnapshot gate")?;
     Ok(())
 }
 

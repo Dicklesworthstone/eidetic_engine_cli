@@ -289,7 +289,9 @@ pub fn categorize_unsafe_claim_reason(reason: &str) -> UnsafeClaimReasonCategory
         | "topology_blocked"
         | "worker_health_threshold" => UnsafeClaimReasonCategory::RchProofAdmission,
         _ => {
-            if head.starts_with("agent_mail") {
+            if let Some(category) = source_authority_reason_category(head) {
+                category
+            } else if head.starts_with("agent_mail") {
                 UnsafeClaimReasonCategory::AgentMailReadiness
             } else if head.starts_with("rch_") {
                 UnsafeClaimReasonCategory::RchProofAdmission
@@ -320,6 +322,29 @@ pub fn categorize_unsafe_claim_reason(reason: &str) -> UnsafeClaimReasonCategory
                 UnsafeClaimReasonCategory::Unknown
             }
         }
+    }
+}
+
+fn source_authority_reason_category(head: &str) -> Option<UnsafeClaimReasonCategory> {
+    let tail = head.strip_prefix("source_authority_")?;
+    if tail.starts_with("actionable_queue_") || tail.starts_with("beads_") {
+        Some(UnsafeClaimReasonCategory::TrackerAuthority)
+    } else if tail.starts_with("agent_mail_") {
+        Some(UnsafeClaimReasonCategory::AgentMailReadiness)
+    } else if tail.starts_with("bv_") {
+        Some(UnsafeClaimReasonCategory::BvStaleness)
+    } else if tail.starts_with("git_") || tail.starts_with("workspace_hygiene_") {
+        Some(UnsafeClaimReasonCategory::DirtyCheckout)
+    } else if tail.starts_with("rch_") {
+        Some(UnsafeClaimReasonCategory::RchProofAdmission)
+    } else if tail.starts_with("installed_binary_") {
+        Some(UnsafeClaimReasonCategory::InstalledBinaryFreshness)
+    } else if tail.starts_with("memory_drift_") {
+        Some(UnsafeClaimReasonCategory::MemorySourceDrift)
+    } else if tail.starts_with("host_profile_") || tail.starts_with("support_bundle_") {
+        Some(UnsafeClaimReasonCategory::ResourceAdmission)
+    } else {
+        Some(UnsafeClaimReasonCategory::Unknown)
     }
 }
 
@@ -1752,7 +1777,19 @@ mod tests {
                 UnsafeClaimReasonCategory::TrackerAuthority,
             ),
             (
+                "source_authority_actionable_queue_timed_out",
+                UnsafeClaimReasonCategory::TrackerAuthority,
+            ),
+            (
+                "source_authority_beads_stale_fallback",
+                UnsafeClaimReasonCategory::TrackerAuthority,
+            ),
+            (
                 "agent_mail_recovery_corrupt",
+                UnsafeClaimReasonCategory::AgentMailReadiness,
+            ),
+            (
+                "source_authority_agent_mail_corrupt_recovery",
                 UnsafeClaimReasonCategory::AgentMailReadiness,
             ),
             (
@@ -1808,8 +1845,20 @@ mod tests {
                 UnsafeClaimReasonCategory::RchProofAdmission,
             ),
             (
+                "source_authority_rch_degraded_read_only",
+                UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
                 "dirty_compile_health_blocks_rch",
                 UnsafeClaimReasonCategory::RchProofAdmission,
+            ),
+            (
+                "source_authority_installed_binary_stale_fallback",
+                UnsafeClaimReasonCategory::InstalledBinaryFreshness,
+            ),
+            (
+                "source_authority_memory_drift_degraded_read_only",
+                UnsafeClaimReasonCategory::MemorySourceDrift,
             ),
             (
                 "active_project_exclusion",

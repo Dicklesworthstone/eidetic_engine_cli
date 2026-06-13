@@ -17,6 +17,7 @@
     "recommendedAction",
     "recommendedSafeToClaim",
     "sourceAuthority",
+    "sourceAuthoritySnapshot",
     "actionableQueue",
     "resourceAdmission",
     "unsafeReasons",
@@ -70,6 +71,7 @@
       "description": "Whether the selected or requested candidate is safe under the packet recommendation, candidate identity, tracker authority, Agent Mail authority, and RCH posture."
     },
     "sourceAuthority": {"$ref": "#/definitions/sourceAuthority"},
+    "sourceAuthoritySnapshot": {"$ref": "#/definitions/sourceAuthoritySnapshot"},
     "actionableQueue": {"$ref": "#/definitions/actionableQueueAuthority"},
     "resourceAdmission": {"$ref": "#/definitions/resourceAdmission"},
     "unsafeReasons": {"$ref": "#/definitions/stringArray"},
@@ -404,6 +406,179 @@
         "sourceCount": {"type": "integer", "minimum": 0}
       }
     },
+    "sourceAuthoritySnapshot": {
+      "type": "object",
+      "description": "Compact claim-gate reference to the redacted ee.source_authority.snapshot.v1 evidence vector used for this verdict. It preserves the deterministic snapshot id, source states, candidate lookup class, degraded source codes, and read-only repair guidance without embedding raw source output.",
+      "required": [
+        "schema",
+        "snapshotId",
+        "provenanceHash",
+        "redactionStatus",
+        "overall",
+        "candidateEvidence",
+        "sourceStates",
+        "degradedCodes",
+        "repairGuidance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.source_authority.snapshot.v1"},
+        "snapshotId": {
+          "type": "string",
+          "pattern": "^sas-[A-Za-z0-9._-]+$",
+          "description": "Stable id for the source-authority snapshot projection."
+        },
+        "provenanceHash": {
+          "type": "string",
+          "pattern": "^blake3:[A-Za-z0-9]+$"
+        },
+        "redactionStatus": {
+          "type": "string",
+          "const": "paths_counts_subjects_only_no_content"
+        },
+        "overall": {
+          "type": "object",
+          "required": [
+            "verdict",
+            "failClosed",
+            "authoritativeSourceCount",
+            "degradedSourceCount",
+            "unavailableSourceCount"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "all_sources_authoritative",
+                "degraded_but_decidable",
+                "fail_closed_contradiction",
+                "fail_closed_timeout",
+                "fail_closed_insufficient_authority",
+                "fail_closed_proof_unavailable"
+              ]
+            },
+            "failClosed": {"type": "boolean"},
+            "authoritativeSourceCount": {"type": "integer", "minimum": 0},
+            "degradedSourceCount": {"type": "integer", "minimum": 0},
+            "unavailableSourceCount": {"type": "integer", "minimum": 0}
+          }
+        },
+        "candidateEvidence": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["candidateId", "lookupOutcome", "staleFallbackPresent"],
+              "additionalProperties": false,
+              "properties": {
+                "candidateId": {"type": "string", "minLength": 1, "maxLength": 120},
+                "lookupOutcome": {
+                  "type": "string",
+                  "enum": [
+                    "candidate_present",
+                    "candidate_absent_confirmed",
+                    "candidate_lookup_timed_out",
+                    "candidate_lookup_unavailable",
+                    "candidate_stale_fallback_only",
+                    "candidate_contradicted"
+                  ]
+                },
+                "staleFallbackPresent": {"type": ["boolean", "null"]}
+              }
+            }
+          ]
+        },
+        "sourceStates": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "required": [
+              "sourceKind",
+              "state",
+              "authoritative",
+              "freshnessState",
+              "timedOut",
+              "exitClass"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "sourceKind": {"$ref": "#/definitions/sourceAuthoritySourceKind"},
+              "state": {"$ref": "#/definitions/sourceAuthoritySourceState"},
+              "authoritative": {"type": "boolean"},
+              "freshnessState": {"type": "string", "enum": ["fresh", "stale", "unknown"]},
+              "timedOut": {"type": "boolean"},
+              "exitClass": {"$ref": "#/definitions/safeString"}
+            }
+          }
+        },
+        "degradedCodes": {"$ref": "#/definitions/stringArray"},
+        "repairGuidance": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "required": ["sourceKind", "state", "guidance", "command", "safety"],
+            "additionalProperties": false,
+            "properties": {
+              "sourceKind": {"$ref": "#/definitions/sourceAuthoritySourceKind"},
+              "state": {"$ref": "#/definitions/sourceAuthoritySourceState"},
+              "guidance": {
+                "oneOf": [
+                  {"type": "null"},
+                  {
+                    "allOf": [{"$ref": "#/definitions/safeString"}],
+                    "maxLength": 240
+                  }
+                ]
+              },
+              "command": {
+                "oneOf": [
+                  {"type": "null"},
+                  {
+                    "allOf": [{"$ref": "#/definitions/safeString"}],
+                    "maxLength": 240
+                  }
+                ]
+              },
+              "safety": {
+                "type": "string",
+                "enum": ["read_only_probe", "unavailable_or_manual_only"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "sourceAuthoritySourceKind": {
+      "type": "string",
+      "enum": [
+        "actionable_queue",
+        "agent_mail",
+        "beads",
+        "bv",
+        "git",
+        "host_profile",
+        "installed_binary",
+        "memory_drift",
+        "rch",
+        "support_bundle",
+        "workspace_hygiene"
+      ]
+    },
+    "sourceAuthoritySourceState": {
+      "type": "string",
+      "enum": [
+        "ready",
+        "degraded_read_only",
+        "stale_fallback",
+        "timed_out",
+        "unavailable",
+        "corrupt_recovery",
+        "contradicted"
+      ]
+    },
     "actionableQueueAuthority": {
       "type": "object",
       "description": "First-class actionable-queue evidence (bd-3w4pv.7). scripts/br_retry.sh actionable --json is the safe claimable-leaf queue; raw br ready and bv --robot-next are broad/advisory. Precedence: (1) actionable presence is necessary but never sufficient — tracker authority, reservations, RCH posture, and the conflict gate must still agree; (2) BV recommendations are advisory unless the id is in the actionable queue AND the gate passes; a BV pick that Beads marks blocked or that is absent from the queue surfaces as bvAdvisoryContradiction, never as a claim; (3) raw br ready rows never override the actionable queue or gate safety — excluded rows appear only in exclusionAccounting; (4) timed_out is never collapsed into absence; (5) queueState=not_evaluated (archived payloads, snapshot-only consumers) never blocks. Redaction: bounded bead ids and counts only — no row titles, no raw command stdout, no host-private paths.",
@@ -652,6 +827,44 @@
         "installFreshnessAuthoritative": null,
         "installFreshnessRepair": null,
         "sourceCount": 4
+      },
+      "sourceAuthoritySnapshot": {
+        "schema": "ee.source_authority.snapshot.v1",
+        "snapshotId": "sas-1111111111111111",
+        "provenanceHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+        "redactionStatus": "paths_counts_subjects_only_no_content",
+        "overall": {
+          "verdict": "all_sources_authoritative",
+          "failClosed": false,
+          "authoritativeSourceCount": 2,
+          "degradedSourceCount": 0,
+          "unavailableSourceCount": 0
+        },
+        "candidateEvidence": {
+          "candidateId": "bd-example.1",
+          "lookupOutcome": "candidate_present",
+          "staleFallbackPresent": false
+        },
+        "sourceStates": [
+          {
+            "sourceKind": "actionable_queue",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "beads",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          }
+        ],
+        "degradedCodes": [],
+        "repairGuidance": []
       },
       "actionableQueue": {
         "commandId": "beads_actionable_queue",

@@ -1303,6 +1303,44 @@
         "installFreshnessRepair": null,
         "sourceCount": 4
       },
+      "sourceAuthoritySnapshot": {
+        "schema": "ee.source_authority.snapshot.v1",
+        "snapshotId": "sas-1111111111111111",
+        "provenanceHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+        "redactionStatus": "paths_counts_subjects_only_no_content",
+        "overall": {
+          "verdict": "all_sources_authoritative",
+          "failClosed": false,
+          "authoritativeSourceCount": 2,
+          "degradedSourceCount": 0,
+          "unavailableSourceCount": 0
+        },
+        "candidateEvidence": {
+          "candidateId": "bd-example.1",
+          "lookupOutcome": "candidate_present",
+          "staleFallbackPresent": false
+        },
+        "sourceStates": [
+          {
+            "sourceKind": "actionable_queue",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "beads",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          }
+        ],
+        "degradedCodes": [],
+        "repairGuidance": []
+      },
       "actionableQueue": {
         "commandId": "beads_actionable_queue",
         "displayCommand": "scripts/br_retry.sh actionable --json",

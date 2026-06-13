@@ -294,6 +294,15 @@ full `ee diag environment-attestation` surface. `candidate_not_found` and
 `no_candidate` are explicit gate verdicts so
 harnesses do not infer safety from missing candidate data.
 
+`sourceAuthoritySnapshot` is the compact gate-local reference to the redacted
+`ee.source_authority.snapshot.v1` vector used for the verdict. It carries the
+stable `snapshotId`, provenance hash, candidate lookup outcome, ordered source
+states, degraded source codes, and bounded repair guidance. Consumers should
+inspect this block before treating `candidate_not_found` as true absence: a
+timed-out actionable queue, stale Beads fallback, stale tracker authority, or
+cross-source contradiction keeps `safeToClaim=false` and requires a read-only
+refresh or coordination step instead of invalid-candidate language.
+
 `sourceAuthority.trackerAuthoritative` and `sourceAuthority.trackerHealth`
 carry the tracker authority state described in
 [Tracker authority states (bd-3w4pv.6)](#tracker-authority-states-bd-3w4pv6).
