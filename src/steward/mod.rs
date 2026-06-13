@@ -5455,7 +5455,7 @@ impl ManualRunner {
         for graph_type in steward_gc_graph_types() {
             let evicted = match opened
                 .connection
-                .evict_stale_graph_algorithm_results(&opened.workspace_id, graph_type)
+                .evict_stale_graph_algorithm_results(&opened.workspace_id, *graph_type)
             {
                 Ok(evicted) => evicted,
                 Err(error) => {
