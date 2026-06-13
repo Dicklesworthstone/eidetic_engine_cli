@@ -155,6 +155,7 @@ mod tests {
     use ee::models::{ProducerMetadata, WorkspaceId};
     use ee::output;
     use ee::policy::{SharePreviewCandidate, SharePreviewInput, build_share_preview};
+    use ee::steward::{JobType, ManualRunner, RunOutcome, RunnerOptions};
     use std::path::Path;
     use std::process::{Command, Output};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3527,6 +3528,98 @@ mod tests {
         let pretty =
             serde_json::to_string_pretty(&value).map_err(|error| error.to_string())? + "\n";
         assert_golden("pack", "section_budget_report.json", &pretty)
+    }
+
+    #[test]
+    fn steward_garbage_collection_output_matches_golden() -> TestResult {
+        const WORKSPACE_ID: &str = "wsp_00000000000000000000001001";
+        const MEMORY_A: &str = "mem_00000000000000000000001001";
+        const MEMORY_B: &str = "mem_00000000000000000000001002";
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let ee_dir = workspace_path.join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let database_path = ee_dir.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: Some("steward-gc-golden".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for memory_id in [MEMORY_A, MEMORY_B] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: format!("steward golden memory {memory_id}"),
+                        workflow_id: None,
+                        confidence: 0.8,
+                        utility: 0.7,
+                        importance: 0.6,
+                        provenance_uri: Some("test://steward-golden".to_owned()),
+                        trust_class: "agent_validated".to_owned(),
+                        trust_subclass: None,
+                        tags: vec!["steward-golden".to_owned()],
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let mut link = CreateMemoryLinkInput {
+            src_memory_id: MEMORY_A.to_owned(),
+            dst_memory_id: MEMORY_B.to_owned(),
+            relation: MemoryLinkRelation::Related,
+            weight: 1.0,
+            confidence: 1.0,
+            directed: false,
+            evidence_count: 1,
+            last_reinforced_at: None,
+            source: MemoryLinkSource::Auto,
+            created_by: Some("steward-golden-test".to_owned()),
+            metadata_json: Some(r#"{"schema":"test.steward_golden.auto_link"}"#.to_owned()),
+        };
+        connection
+            .insert_memory_link("link_00000000000000000000001001", &link)
+            .map_err(|error| error.to_string())?;
+        link.source = MemoryLinkSource::Agent;
+        link.relation = MemoryLinkRelation::Supports;
+        connection
+            .insert_memory_link("link_00000000000000000000001002", &link)
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let mut runner = ManualRunner::new(
+            RunnerOptions::new()
+                .with_workspace_path(workspace_path.to_path_buf())
+                .with_database_path(database_path.clone())
+                .with_workspace_id(WORKSPACE_ID),
+        );
+        let result = runner.run_job_type(
+            JobType::GarbageCollection,
+            Some("golden steward garbage collection".to_owned()),
+        );
+        ensure(
+            result.outcome == RunOutcome::Success,
+            "garbage collection should succeed",
+        )?;
+        let mut details = result
+            .details
+            .ok_or_else(|| "garbage collection details missing".to_owned())?;
+        details["databasePath"] = serde_json::json!("<workspace>/.ee/ee.db");
+        let pretty =
+            serde_json::to_string_pretty(&details).map_err(|error| error.to_string())? + "\n";
+        assert_json_golden("steward", "manual_runner_garbage_collection", &pretty)
     }
 
     fn normalize_context_pack_json(json: &str) -> String {

@@ -1,0 +1,28 @@
+{
+  "schema": "ee.steward.garbage_collection.v1",
+  "jobType": "garbage_collection",
+  "workspaceId": "wsp_00000000000000000000001001",
+  "databasePath": "<workspace>/.ee/ee.db",
+  "memoryRowsScanned": 2,
+  "memoryRowsAvailable": 2,
+  "itemsCollected": 1,
+  "autoMemoryLinksCollected": 1,
+  "removedAutoMemoryLinkIds": [
+    "link_00000000000000000000001001"
+  ],
+  "removedAutoMemoryLinkIdsTruncated": false,
+  "staleGraphResultsEvicted": 0,
+  "graphResultEvictions": {
+    "causal_evidence": 0,
+    "composite": 0,
+    "contradiction_subgraph": 0,
+    "evidence_graph": 0,
+    "memory_links": 0,
+    "procedure_graph": 0,
+    "revision_dag": 0,
+    "rule_provenance": 0,
+    "session_graph": 0
+  },
+  "durableMutation": true,
+  "dryRun": false
+}
