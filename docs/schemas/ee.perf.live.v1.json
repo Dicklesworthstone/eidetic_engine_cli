@@ -117,11 +117,11 @@
       "required": ["status", "hits", "misses", "hitRateBasisPoints", "byteSize", "evictions"],
       "properties": {
         "status": { "type": "string" },
-        "hits": { "type": "integer", "minimum": 0 },
-        "misses": { "type": "integer", "minimum": 0 },
-        "hitRateBasisPoints": { "type": "integer", "minimum": 0, "maximum": 10000 },
-        "byteSize": { "type": "integer", "minimum": 0 },
-        "evictions": { "type": "integer", "minimum": 0 }
+        "hits": { "type": ["integer", "null"], "minimum": 0 },
+        "misses": { "type": ["integer", "null"], "minimum": 0 },
+        "hitRateBasisPoints": { "type": ["integer", "null"], "minimum": 0, "maximum": 10000 },
+        "byteSize": { "type": ["integer", "null"], "minimum": 0 },
+        "evictions": { "type": ["integer", "null"], "minimum": 0 }
       }
     },
     "rch": {

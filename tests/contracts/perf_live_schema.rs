@@ -87,6 +87,13 @@ const L2_CACHE_REQUIRED_FIELDS: &[&str] = &[
     "byteSize",
     "evictions",
 ];
+const NULLABLE_L2_CACHE_METRIC_FIELDS: &[&str] = &[
+    "hits",
+    "misses",
+    "hitRateBasisPoints",
+    "byteSize",
+    "evictions",
+];
 const RCH_REQUIRED_FIELDS: &[&str] = &[
     "workersHealthy",
     "slotsAvailable",
@@ -295,6 +302,20 @@ fn audit_lane_counters_allow_explicit_null_when_unmeasured() -> TestResult {
             &audit_lane_schema["properties"][field],
             &["integer", "null"],
             format!("$defs.auditLane.properties.{field}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn l2_cache_metrics_allow_explicit_null_when_unmeasured() -> TestResult {
+    let schema = load_schema()?;
+    let l2_cache_schema = resolve_ref(&schema, &schema["properties"]["l2Cache"]);
+    for field in NULLABLE_L2_CACHE_METRIC_FIELDS {
+        ensure_schema_type_set(
+            &l2_cache_schema["properties"][field],
+            &["integer", "null"],
+            format!("$defs.l2Cache.properties.{field}"),
         )?;
     }
     Ok(())

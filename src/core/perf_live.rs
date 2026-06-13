@@ -143,22 +143,22 @@ pub struct PerfLiveAuditLane {
 #[serde(rename_all = "camelCase")]
 pub struct PerfLiveL2Cache {
     pub status: String,
-    pub hits: u64,
-    pub misses: u64,
-    pub hit_rate_basis_points: u16,
-    pub byte_size: u64,
-    pub evictions: u64,
+    pub hits: Option<u64>,
+    pub misses: Option<u64>,
+    pub hit_rate_basis_points: Option<u16>,
+    pub byte_size: Option<u64>,
+    pub evictions: Option<u64>,
 }
 
 impl Default for PerfLiveL2Cache {
     fn default() -> Self {
         Self {
             status: "not_inspected".to_owned(),
-            hits: 0,
-            misses: 0,
-            hit_rate_basis_points: 0,
-            byte_size: 0,
-            evictions: 0,
+            hits: None,
+            misses: None,
+            hit_rate_basis_points: None,
+            byte_size: None,
+            evictions: None,
         }
     }
 }
@@ -387,6 +387,12 @@ fn l2_cache_snapshot(
             asset.repair.map(str::to_owned),
         ));
     }
+    degraded.push(PerfLiveDegradation::warning(
+        "perf_live_l2_cache_source_degraded",
+        "l2Cache",
+        "L2 pack cache status is present but live hit/miss/size counters are not published.",
+        Some("Wire pack L2 cache runtime counters into perf live.".to_owned()),
+    ));
 
     PerfLiveL2Cache {
         status: asset.status.as_str().to_owned(),
@@ -889,6 +895,31 @@ mod tests {
             assert!(
                 encoded[field].is_null(),
                 "expected {field} to serialize as null when no audit-lane counter source is wired"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn l2_cache_fixture_serializes_unmeasured_metrics_as_null() -> Result<(), String> {
+        let cache = PerfLiveL2Cache::default();
+        assert_eq!(cache.hits, None);
+        assert_eq!(cache.misses, None);
+        assert_eq!(cache.hit_rate_basis_points, None);
+        assert_eq!(cache.byte_size, None);
+        assert_eq!(cache.evictions, None);
+
+        let encoded = serde_json::to_value(&cache).map_err(|error| error.to_string())?;
+        for field in [
+            "hits",
+            "misses",
+            "hitRateBasisPoints",
+            "byteSize",
+            "evictions",
+        ] {
+            assert!(
+                encoded[field].is_null(),
+                "expected {field} to serialize as null when no L2 cache counter source is wired"
             );
         }
         Ok(())

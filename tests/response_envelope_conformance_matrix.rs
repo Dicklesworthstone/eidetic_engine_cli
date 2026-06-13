@@ -401,11 +401,11 @@ fn perf_live_sample() -> Value {
         },
         "l2Cache": {
             "status": "disabled",
-            "hits": 0,
-            "misses": 0,
-            "hitRateBasisPoints": 0,
-            "byteSize": 0,
-            "evictions": 0
+            "hits": null,
+            "misses": null,
+            "hitRateBasisPoints": null,
+            "byteSize": null,
+            "evictions": null
         },
         "rch": {
             "workersHealthy": 0,
