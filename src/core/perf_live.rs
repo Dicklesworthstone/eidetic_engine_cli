@@ -604,17 +604,17 @@ fn host_pressure(degraded: &mut Vec<PerfLiveDegradation>) -> PerfLiveHostPressur
     let mut pressure = PerfLiveHostPressure::default();
     pressure.memory_rss_mb = current_rss_mb();
     pressure.page_cache_mb = page_cache_mb();
-    pressure.fsync_latency_p99_ms = Some(0);
     if pressure.memory_rss_mb.is_none()
         || pressure.page_cache_mb.is_none()
         || pressure.cpu_user_pct.is_none()
         || pressure.cpu_iowait_pct.is_none()
+        || pressure.fsync_latency_p99_ms.is_none()
     {
         degraded.push(PerfLiveDegradation::warning(
             "perf_live_host_pressure_partial",
             "hostPressure",
             "Host-pressure probe is partially unavailable on this platform; unavailable fields are null.",
-            Some("Wire platform-specific CPU and memory counters into perf live.".to_owned()),
+            Some("Wire platform-specific CPU, memory, and fsync-latency counters into perf live.".to_owned()),
         ));
     }
     pressure
@@ -834,6 +834,18 @@ mod tests {
             degraded
                 .iter()
                 .any(|entry| entry.code == "perf_live_beads_source_degraded")
+        );
+    }
+
+    #[test]
+    fn host_pressure_does_not_fake_unmeasured_fsync_latency() {
+        let mut degraded = Vec::new();
+        let pressure = host_pressure(&mut degraded);
+        assert_eq!(pressure.fsync_latency_p99_ms, None);
+        assert!(
+            degraded
+                .iter()
+                .any(|entry| entry.code == "perf_live_host_pressure_partial")
         );
     }
 }
