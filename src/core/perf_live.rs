@@ -95,12 +95,12 @@ impl Default for PerfLiveSurfaces {
 #[serde(rename_all = "camelCase")]
 pub struct PerfLiveSurfaceStats {
     pub surface: &'static str,
-    pub p50_ms: u64,
-    pub p95_ms: u64,
-    pub p99_ms: u64,
-    pub p999_ms: u64,
-    pub qps: f64,
-    pub inflight: u64,
+    pub p50_ms: Option<u64>,
+    pub p95_ms: Option<u64>,
+    pub p99_ms: Option<u64>,
+    pub p999_ms: Option<u64>,
+    pub qps: Option<f64>,
+    pub inflight: Option<u64>,
     pub qos_class_counts: BTreeMap<String, u64>,
 }
 
@@ -109,12 +109,12 @@ impl PerfLiveSurfaceStats {
     pub fn for_surface(surface: &'static str) -> Self {
         Self {
             surface,
-            p50_ms: 0,
-            p95_ms: 0,
-            p99_ms: 0,
-            p999_ms: 0,
-            qps: 0.0,
-            inflight: 0,
+            p50_ms: None,
+            p95_ms: None,
+            p99_ms: None,
+            p999_ms: None,
+            qps: None,
+            inflight: None,
             qos_class_counts: BTreeMap::new(),
         }
     }
@@ -281,7 +281,7 @@ pub fn collect_perf_live_snapshot<R: SwarmBriefCommandRunner>(
     degraded.push(PerfLiveDegradation::warning(
         "perf_live_surface_metrics_unavailable",
         "surfaces",
-        "Live per-surface span counters are not yet wired; latency and QPS fields are zero-filled.",
+        "Live per-surface span counters are not yet wired; unmeasured latency, QPS, and inflight fields are null.",
         Some("Wire tracing span counters for context/search/remember/why/pack_build.".to_owned()),
     ));
 
@@ -847,5 +847,25 @@ mod tests {
                 .iter()
                 .any(|entry| entry.code == "perf_live_host_pressure_partial")
         );
+    }
+
+    #[test]
+    fn surface_fixture_serializes_unmeasured_metrics_as_null() -> Result<(), String> {
+        let stats = PerfLiveSurfaceStats::for_surface("context");
+        assert_eq!(stats.p50_ms, None);
+        assert_eq!(stats.p95_ms, None);
+        assert_eq!(stats.p99_ms, None);
+        assert_eq!(stats.p999_ms, None);
+        assert_eq!(stats.qps, None);
+        assert_eq!(stats.inflight, None);
+
+        let encoded = serde_json::to_value(&stats).map_err(|error| error.to_string())?;
+        for field in ["p50Ms", "p95Ms", "p99Ms", "p999Ms", "qps", "inflight"] {
+            assert!(
+                encoded[field].is_null(),
+                "expected {field} to serialize as null when no live counter source is wired"
+            );
+        }
+        Ok(())
     }
 }

@@ -55,6 +55,14 @@ const REQUIRED_SURFACE_FIELDS: &[&str] = &[
     "inflight",
     "qosClassCounts",
 ];
+const NULLABLE_SURFACE_METRIC_FIELDS: &[(&str, &str)] = &[
+    ("p50Ms", "integer"),
+    ("p95Ms", "integer"),
+    ("p99Ms", "integer"),
+    ("p999Ms", "integer"),
+    ("qps", "number"),
+    ("inflight", "integer"),
+];
 const READ_POOL_REQUIRED_FIELDS: &[&str] =
     &["activePins", "expiredPins", "releaseFailures", "queueDepth"];
 const AUDIT_LANE_REQUIRED_FIELDS: &[&str] = &[
@@ -157,6 +165,26 @@ fn ensure_exact_required_fields(schema: &Value, expected: &[&str], ctx: &str) ->
     )
 }
 
+fn collect_schema_type_set(node: &Value, ctx: &str) -> Result<BTreeSet<String>, String> {
+    if node.is_array() {
+        return collect_string_set(node, ctx);
+    }
+    let text = node
+        .as_str()
+        .ok_or_else(|| format!("{ctx}: expected string or array, got: {node}"))?;
+    Ok(BTreeSet::from([text.to_owned()]))
+}
+
+fn ensure_schema_type_set(node: &Value, expected: &[&str], ctx: impl AsRef<str>) -> TestResult {
+    let ctx = ctx.as_ref();
+    let actual = collect_schema_type_set(&node["type"], &format!("{ctx}.type"))?;
+    let expected = expected_string_set(expected);
+    ensure(
+        actual == expected,
+        format!("{ctx}.type drifted\nexpected={expected:?}\nactual={actual:?}"),
+    )
+}
+
 #[test]
 fn perf_live_v1_schema_has_expected_envelope() -> TestResult {
     let schema = load_schema()?;
@@ -229,6 +257,23 @@ fn perf_live_v1_each_surface_carries_latency_percentiles_and_qps() -> TestResult
             resolved,
             REQUIRED_SURFACE_FIELDS,
             &format!("surfaces.{surface}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn surface_metrics_allow_explicit_null_when_unmeasured() -> TestResult {
+    let schema = load_schema()?;
+    let surface_schema = resolve_ref(
+        &schema,
+        &schema["properties"]["surfaces"]["properties"]["context"],
+    );
+    for &(field, numeric_type) in NULLABLE_SURFACE_METRIC_FIELDS {
+        ensure_schema_type_set(
+            &surface_schema["properties"][field],
+            &[numeric_type, "null"],
+            format!("$defs.surface.properties.{field}"),
         )?;
     }
     Ok(())

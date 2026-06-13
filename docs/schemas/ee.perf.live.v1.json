@@ -70,12 +70,12 @@
       ],
       "properties": {
         "surface": { "type": "string" },
-        "p50Ms": { "type": "integer", "minimum": 0 },
-        "p95Ms": { "type": "integer", "minimum": 0 },
-        "p99Ms": { "type": "integer", "minimum": 0 },
-        "p999Ms": { "type": "integer", "minimum": 0 },
-        "qps": { "type": "number", "minimum": 0 },
-        "inflight": { "type": "integer", "minimum": 0 },
+        "p50Ms": { "type": ["integer", "null"], "minimum": 0 },
+        "p95Ms": { "type": ["integer", "null"], "minimum": 0 },
+        "p99Ms": { "type": ["integer", "null"], "minimum": 0 },
+        "p999Ms": { "type": ["integer", "null"], "minimum": 0 },
+        "qps": { "type": ["number", "null"], "minimum": 0 },
+        "inflight": { "type": ["integer", "null"], "minimum": 0 },
         "qosClassCounts": {
           "type": "object",
           "additionalProperties": { "type": "integer", "minimum": 0 }

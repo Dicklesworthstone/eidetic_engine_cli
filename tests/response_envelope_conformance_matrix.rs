@@ -363,12 +363,12 @@ fn perf_live_sample() -> Value {
     let surface = |name: &str| {
         json!({
             "surface": name,
-            "p50Ms": 0,
-            "p95Ms": 0,
-            "p99Ms": 0,
-            "p999Ms": 0,
-            "qps": 0.0,
-            "inflight": 0,
+            "p50Ms": null,
+            "p95Ms": null,
+            "p99Ms": null,
+            "p999Ms": null,
+            "qps": null,
+            "inflight": null,
             "qosClassCounts": {}
         })
     };
