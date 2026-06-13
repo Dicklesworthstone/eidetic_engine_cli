@@ -524,6 +524,50 @@ fn replay_case<'a>(cases: &'a BTreeMap<String, &'a Value>, id: &str) -> Result<&
         .ok_or_else(|| format!("replay fixture missing case {id}"))
 }
 
+fn mutating_replay_command_shape(command: &str) -> Option<&'static str> {
+    let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    [
+        "br comments add",
+        "br update",
+        "br close",
+        "br create",
+        "br reopen",
+        "br dep add",
+        "br sync",
+        "git add",
+        "git commit",
+        "git push",
+        "git reset",
+        "git restore",
+        "git checkout",
+        "git clean",
+        "git rebase",
+        "git stash",
+    ]
+    .into_iter()
+    .find(|marker| {
+        normalized == *marker
+            || normalized
+                .strip_prefix(marker)
+                .is_some_and(|rest| rest.starts_with(' '))
+    })
+}
+
+fn mutating_replay_action_id(action_id: &str) -> Option<&'static str> {
+    [
+        "bead_comment",
+        "bead_claim",
+        "bead_close",
+        "bead_update",
+        "bead_reopen",
+        "git_",
+        "agent_mail_send",
+        "file_reservation",
+    ]
+    .into_iter()
+    .find(|marker| action_id.starts_with(marker))
+}
+
 #[test]
 fn swarm_schema_catalog_is_complete_and_canonical() -> TestResult {
     let actual_files = fs::read_dir(swarm_schema_dir())
@@ -1143,10 +1187,58 @@ fn source_authority_replay_fixtures_pin_claim_gate_projections() -> TestResult {
             .and_then(Value::as_array)
             .ok_or_else(|| format!("{} missing nextCommandActions", case_ids.last().unwrap()))?
         {
-            if bool_field(action, "/mutatesState", case_ids.last().unwrap())? {
+            let context = case_ids.last().unwrap();
+            if bool_field(action, "/mutatesState", context)? {
                 return Err(format!(
                     "{} emitted a mutating next command action",
+                    context
+                ));
+            }
+            let action_id = string_field(action, "/commandId", context)?;
+            if let Some(marker) = mutating_replay_action_id(action_id) {
+                return Err(format!(
+                    "{context} labels mutating action id {action_id} as read-only via {marker}"
+                ));
+            }
+        }
+
+        for source in case
+            .pointer("/sourceAuthoritySnapshot/sources")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                format!(
+                    "{} missing sourceAuthoritySnapshot.sources",
                     case_ids.last().unwrap()
+                )
+            })?
+        {
+            let context = case_ids.last().unwrap();
+            if source.pointer("/repair/safety").and_then(Value::as_str) == Some("read_only_probe")
+                && let Some(command) = source.pointer("/repair/command").and_then(Value::as_str)
+                && let Some(marker) = mutating_replay_command_shape(command)
+            {
+                return Err(format!(
+                    "{context} labels mutating repair command {command:?} as read_only_probe via {marker}"
+                ));
+            }
+        }
+
+        for degraded in case
+            .pointer("/sourceAuthoritySnapshot/degraded")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                format!(
+                    "{} missing sourceAuthoritySnapshot.degraded",
+                    case_ids.last().unwrap()
+                )
+            })?
+        {
+            let context = case_ids.last().unwrap();
+            if let Some(repair) = degraded.pointer("/repair").and_then(Value::as_str)
+                && let Some(marker) = mutating_replay_command_shape(repair)
+            {
+                return Err(format!(
+                    "{context} degraded repair {repair:?} smuggles mutating command via {marker}"
                 ));
             }
         }

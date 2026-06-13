@@ -44,8 +44,8 @@
             },
             "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
             "repair": {
-              "guidance": "Record recovery-corrupt authority loss in Beads and coordinate without Agent Mail reservations until repair.",
-              "command": "br comments add bd-example.mail --message 'agent_mail recovery_corrupt archive_corruption; coordinating via beads'",
+              "guidance": "Inspect a redacted Agent Mail snapshot and coordinate without treating reservations or inbox evidence as authoritative until repair.",
+              "command": "scripts/agent_mail_snapshot.sh --json",
               "safety": "read_only_probe"
             },
             "evidenceId": "sre-agent-mail-replay-0001",
@@ -98,7 +98,7 @@
             "code": "source_authority_agent_mail_corrupt_recovery",
             "severity": "high",
             "message": "Agent Mail health is reachable but recovery posture is corrupt; do not treat reservation or inbox evidence as authoritative.",
-            "repair": "br comments add bd-example.mail --message 'agent_mail recovery_corrupt archive_corruption; coordinating via beads'",
+            "repair": "scripts/agent_mail_snapshot.sh --json",
             "sourceKind": "agent_mail"
           }
         ],
@@ -132,7 +132,7 @@
         "degradedCodes": ["agent_mail_unavailable"],
         "nextCommandActions": [
           {
-            "commandId": "bead_comment_agent_mail_recovery_corrupt",
+            "commandId": "bead_show_candidate",
             "mutatesState": false,
             "copySafety": "safe_structured_argv"
           }
