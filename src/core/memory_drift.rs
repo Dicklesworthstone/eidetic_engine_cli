@@ -963,6 +963,7 @@ pub fn memory_drift_support_summary_unavailable(
             "severity": severity,
             "message": memory_drift_support_message(message),
         }],
+        "evidenceInspection": memory_drift_support_unavailable_evidence_inspection(degraded_code),
         "limits": {
             "maxTopAffected": MAX_MEMORY_DRIFT_SUPPORT_SUMMARY_ITEMS,
         },
@@ -973,6 +974,41 @@ pub fn memory_drift_support_summary_unavailable(
             "fullListingsIncluded": false,
             "revalidationCommandIncluded": false,
         },
+    })
+}
+
+fn memory_drift_support_unavailable_evidence_inspection(degraded_code: &str) -> serde_json::Value {
+    if degraded_code == MEMORY_DRIFT_LOCK_CONTENTION_CODE {
+        return serde_json::json!({
+            "status": "not_inspected",
+            "memoryEvidenceInspected": false,
+            "sourceFreshness": "not_inspected",
+            "degradationClass": "workspace_write_lock_contention",
+            "lockAcquisitionClass": MEMORY_DRIFT_READ_ONLY_COLLECTOR_LOCK_CLASS,
+            "lockPath": ".ee/ee.write.lock",
+            "supportBundleMeaning": "collector_blocked_before_evidence",
+            "advisoryOnly": true,
+            "mutatesState": false,
+            "recoverySuggestions": [
+                "rerun_after_write_owner_releases_lock",
+                "inspect_advisory_lock_read_only",
+                "use_source_authority_snapshot",
+                "continue_plan_space",
+            ],
+        });
+    }
+
+    serde_json::json!({
+        "status": "unknown",
+        "memoryEvidenceInspected": null,
+        "sourceFreshness": "unknown",
+        "degradationClass": "report_unavailable",
+        "advisoryOnly": true,
+        "mutatesState": false,
+        "recoverySuggestions": [
+            "rerun_read_only_drift_report",
+            "inspect_doctor",
+        ],
     })
 }
 
@@ -2458,6 +2494,67 @@ mod tests {
         assert!(!encoded.contains("/Users"));
         assert!(!encoded.contains('$'));
         assert!(!encoded.contains('`'));
+    }
+
+    #[test]
+    fn support_summary_lock_contention_projects_not_inspected_recovery() {
+        let summary = memory_drift_support_summary_unavailable(
+            "lock_contention",
+            MEMORY_DRIFT_LOCK_CONTENTION_CODE,
+            &memory_drift_lock_contention_message("support_bundle"),
+        );
+        let encoded = serde_json::to_string(&summary).expect("support summary serializes");
+
+        assert_eq!(
+            summary.get("status").and_then(serde_json::Value::as_str),
+            Some("lock_contention")
+        );
+        assert_eq!(
+            summary
+                .pointer("/evidenceInspection/memoryEvidenceInspected")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            summary
+                .pointer("/evidenceInspection/sourceFreshness")
+                .and_then(serde_json::Value::as_str),
+            Some("not_inspected")
+        );
+        assert_eq!(
+            summary
+                .pointer("/evidenceInspection/lockAcquisitionClass")
+                .and_then(serde_json::Value::as_str),
+            Some(MEMORY_DRIFT_READ_ONLY_COLLECTOR_LOCK_CLASS)
+        );
+        assert_eq!(
+            summary
+                .pointer("/evidenceInspection/supportBundleMeaning")
+                .and_then(serde_json::Value::as_str),
+            Some("collector_blocked_before_evidence")
+        );
+        assert_eq!(
+            summary
+                .pointer("/degraded/0/severity")
+                .and_then(serde_json::Value::as_str),
+            Some("warning")
+        );
+        assert!(
+            summary
+                .pointer("/evidenceInspection/recoverySuggestions")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|actions| {
+                    actions.iter().any(|action| {
+                        action.as_str() == Some("rerun_after_write_owner_releases_lock")
+                    }) && actions
+                        .iter()
+                        .any(|action| action.as_str() == Some("use_source_authority_snapshot"))
+                })
+        );
+        assert!(encoded.contains(MEMORY_DRIFT_LOCK_CONTENTION_CODE));
+        assert!(!encoded.contains("/Users"));
+        assert!(!encoded.contains("stdout"));
+        assert!(!encoded.contains("stderr"));
     }
 
     #[test]

@@ -1992,6 +1992,79 @@ fn memory_drift_lock_contention_no_mutation_guard_is_explicit() -> TestResult {
 }
 
 #[test]
+fn memory_drift_lock_contention_composes_with_tracker_and_dirty_blockers() -> TestResult {
+    let fixture = memory_drift_lock_fixture("conformance_matrix.json")?;
+    let case = fixture
+        .pointer("/cases")
+        .and_then(Value::as_array)
+        .and_then(|cases| {
+            cases.iter().find(|case| {
+                case.pointer("/name").and_then(Value::as_str)
+                    == Some("lock_contention_before_evidence")
+            })
+        })
+        .ok_or_else(|| "lock-contention case missing from fixture".to_owned())?;
+    let context = "memory-drift lock-contention multi-blocker composition";
+    let candidate_id = string_at(case, "/candidateId", context)?;
+    let mut brief = memory_drift_report_from_case(case, context)?;
+    brief.beads.ready[0].title = "Polish swarm next-action conflict surfaces".to_owned();
+
+    let mut snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+    snapshot.checkout.dirty_path_count = 1;
+    snapshot.checkout.dirty_paths = vec!["src/core/swarm_next_action.rs".to_owned()];
+
+    let merge_artifact_paths: &[String] = &[];
+    let tracker = compose_integrity_report(BeadsIntegrityInputs {
+        jsonl_path: ".beads/issues.jsonl",
+        db_path: ".beads/beads.db",
+        jsonl_record_count: 5,
+        db_record_count: 5,
+        auto_import_enabled: true,
+        external_changes_pending_import: false,
+        dirty_issue_count: 1,
+        merge_artifact_paths,
+        jsonl_parse_error: None,
+    });
+    let packet = SwarmWorkPacket::from_brief_and_next_action_with_tracker_integrity(
+        &brief, &snapshot, tracker,
+    );
+    let gate = packet.claim_gate(Some(candidate_id));
+
+    if gate.safe_to_claim || gate.claim_command_action.is_some() {
+        return Err(format!(
+            "{context}: multi-blocker lock-contention gate must stay closed"
+        ));
+    }
+    for expected in [
+        memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_CODE,
+        "beads_tracker_not_authoritative:dirty_issues",
+        "dirty_checkout_path_count:1",
+        "dirty_path_overlap:src/core/swarm_next_action.rs",
+    ] {
+        if !gate.unsafe_reasons.iter().any(|reason| reason == expected) {
+            return Err(format!(
+                "{context}: missing unsafe reason {expected}; got {:?}",
+                gate.unsafe_reasons
+            ));
+        }
+    }
+    if !gate
+        .degraded_codes
+        .iter()
+        .any(|code| code == memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_CODE)
+    {
+        return Err(format!(
+            "{context}: degradedCodes must retain raw lock code; got {:?}",
+            gate.degraded_codes
+        ));
+    }
+    let rendered = serde_json::to_value(&gate)
+        .map_err(|error| format!("{context}: serialize gate: {error}"))?;
+    assert_no_forbidden_markers(&rendered, context)?;
+    Ok(())
+}
+
+#[test]
 fn claim_gate_actionable_queue_failure_states_fail_closed() -> TestResult {
     let fixture = actionable_queue_fixture("failure_states.json")?;
     let candidate_id = string_at(&fixture, "/candidateId", "actionable failure fixture")?;

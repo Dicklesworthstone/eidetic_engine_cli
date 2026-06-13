@@ -1527,6 +1527,66 @@ mod tests {
     }
 
     #[test]
+    fn lock_contention_stays_resource_admission_without_hiding_memory_drift() -> TestResult {
+        let classification = classify_unsafe_claim_evidence(
+            &strings(&[
+                "memory_drift_lock_contention",
+                "memory_drift_source_unverifiable",
+            ]),
+            &strings(&["memory_drift_lock_contention"]),
+        );
+
+        let resource_group = classification
+            .reason_groups
+            .iter()
+            .find(|group| group.category == UnsafeClaimReasonCategory::ResourceAdmission)
+            .ok_or("lock contention must produce resource_admission group")?;
+        ensure(
+            resource_group
+                .reason_codes
+                .iter()
+                .filter(|code| code.as_str() == "memory_drift_lock_contention")
+                .count()
+                == 2,
+            format!(
+                "resource_admission must preserve raw lock-contention reason and degraded code, got {:?}",
+                resource_group.reason_codes
+            ),
+        )?;
+
+        let drift_group = classification
+            .reason_groups
+            .iter()
+            .find(|group| group.category == UnsafeClaimReasonCategory::MemorySourceDrift)
+            .ok_or("ordinary memory drift must keep memory_source_drift group")?;
+        ensure(
+            drift_group
+                .reason_codes
+                .iter()
+                .any(|code| code == "memory_drift_source_unverifiable"),
+            format!(
+                "memory_source_drift must preserve ordinary drift evidence, got {:?}",
+                drift_group.reason_codes
+            ),
+        )?;
+        ensure(
+            has_action(
+                &classification,
+                UnsafeClaimActionKind::WaitOrCoordinate,
+                UnsafeClaimReasonCategory::ResourceAdmission.as_str(),
+            ),
+            "resource-admission lock contention must recommend wait_or_coordinate",
+        )?;
+        ensure(
+            classification
+                .planner_actions
+                .iter()
+                .all(|action| action.advisory_only && !action.mutates_state),
+            "lock-contention planner actions must stay advisory-only",
+        )
+    }
+
+    #[test]
     fn action_families_rank_deterministically() -> TestResult {
         let reasons = strings(&[
             "reservation_evidence_not_authoritative",

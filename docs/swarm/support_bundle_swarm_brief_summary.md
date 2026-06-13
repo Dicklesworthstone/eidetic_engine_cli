@@ -26,6 +26,13 @@ raw queries or memory content.
 Memory drift posture appears under `memoryDrift` with recent-pack counts,
 affected memory IDs, source-kind counts, and degraded codes only. It does not
 include source snippets, command output bodies, or full file listings.
+When read-only memory-drift collection is blocked by the workspace write lock,
+the support-bundle summary uses `status=lock_contention` and carries an
+`evidenceInspection` block with `memoryEvidenceInspected=false`,
+`sourceFreshness=not_inspected`, `lockAcquisitionClass=workspace_write_lock`,
+the workspace-relative lock path, and non-mutating recovery suggestions. This
+means the collector stopped before inspecting memory evidence; it is not the
+same as stale or unverifiable selected memories.
 RCH worker pressure appears under `rchWorkerPressure`; when no RCH capability
 snapshot is present, its status is `not_collected`. Otherwise it uses the
 redaction-safe `ee.rch.worker_pressure.v1` shape to distinguish
@@ -61,7 +68,8 @@ schema version and a migration note. Additive counts may remain in
 ignore them.
 
 Redaction rules: counts, severity labels, risk codes, hashed reservation holder
-labels, Bead IDs, affected memory IDs, drift status codes, path hashes, command
+labels, Bead IDs, affected memory IDs, drift status codes, the relative
+`.ee/ee.write.lock` path for lock-contention posture, path hashes, command
 hashes, single-flight key hashes, surface names, and generation counters are
 allowed. Raw reservation holder labels, raw paths in the top-risk summary, raw
 commands, mail bodies, raw logs, raw memory content, raw source snippets, raw
