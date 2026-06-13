@@ -912,6 +912,61 @@ impl ResourceQueuePressureInventory {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceQueuePressureHysteresisHint {
+    pub state_key: &'static str,
+    pub stable_after_observations: u8,
+    pub cooldown_observations: u8,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceQueuePressureBackoffInput {
+    pub queue_pressure: ResourceQueuePressureReport,
+    pub estimated_cost_class: ResourceCostClass,
+    pub claim_gate_safe_to_claim: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceQueuePressureBackoffAdvice {
+    pub decision: ResourceAdmissionDecision,
+    pub can_authorize_claim: bool,
+    pub primary_reason: String,
+    pub contributing_reasons: Vec<String>,
+    pub blocked_by: Vec<String>,
+    pub next_safe_action: &'static str,
+    pub what_would_change: &'static str,
+    pub hysteresis: ResourceQueuePressureHysteresisHint,
+}
+
+#[must_use]
+pub fn evaluate_resource_queue_pressure_backoff(
+    input: &ResourceQueuePressureBackoffInput,
+) -> ResourceQueuePressureBackoffAdvice {
+    let contributing_reasons = sorted_queue_pressure_reasons(&input.queue_pressure.reason_codes);
+    let primary_reason =
+        queue_pressure_primary_reason(input.queue_pressure.level, &contributing_reasons);
+    let decision = queue_pressure_backoff_decision(
+        input.queue_pressure.level,
+        input.estimated_cost_class,
+        &contributing_reasons,
+    );
+    let mut blocked_by = queue_pressure_blockers(&contributing_reasons);
+    if !input.claim_gate_safe_to_claim {
+        push_unique(&mut blocked_by, "claim_gate_authority");
+    }
+
+    ResourceQueuePressureBackoffAdvice {
+        decision,
+        can_authorize_claim: false,
+        primary_reason,
+        contributing_reasons,
+        blocked_by,
+        next_safe_action: queue_pressure_next_safe_action(decision),
+        what_would_change: queue_pressure_what_would_change(decision),
+        hysteresis: queue_pressure_hysteresis_hint(decision),
+    }
+}
+
 fn truncate_bounded_preview(preview: &str) -> String {
     preview
         .chars()
@@ -956,6 +1011,232 @@ fn push_reason_unique(
 ) {
     if !values.contains(&value) {
         values.push(value);
+    }
+}
+
+fn sorted_queue_pressure_reasons(reason_codes: &[String]) -> Vec<String> {
+    let mut sorted = reason_codes.to_vec();
+    sorted.sort_by(|left, right| {
+        queue_pressure_reason_rank(left)
+            .cmp(&queue_pressure_reason_rank(right))
+            .then_with(|| left.cmp(right))
+    });
+    sorted.dedup();
+    sorted
+}
+
+fn queue_pressure_primary_reason(
+    level: ResourceQueuePressureLevel,
+    contributing_reasons: &[String],
+) -> String {
+    contributing_reasons
+        .first()
+        .cloned()
+        .unwrap_or_else(|| match level {
+            ResourceQueuePressureLevel::Idle => "queue_pressure_idle".to_owned(),
+            ResourceQueuePressureLevel::Low => "queue_pressure_low".to_owned(),
+            ResourceQueuePressureLevel::Moderate => "queue_pressure_moderate".to_owned(),
+            ResourceQueuePressureLevel::Saturated => "queue_pressure_saturated".to_owned(),
+            ResourceQueuePressureLevel::Unknown => "queue_pressure_unknown".to_owned(),
+        })
+}
+
+fn queue_pressure_backoff_decision(
+    level: ResourceQueuePressureLevel,
+    estimated_cost_class: ResourceCostClass,
+    contributing_reasons: &[String],
+) -> ResourceAdmissionDecision {
+    if has_queue_pressure_reason(
+        contributing_reasons,
+        ResourceQueuePressureReasonCode::LocalCargoRefused,
+    ) {
+        return ResourceAdmissionDecision::RefuseLocalCargo;
+    }
+    if has_any_queue_pressure_reason(
+        contributing_reasons,
+        &[
+            ResourceQueuePressureReasonCode::ContradictorySourceState,
+            ResourceQueuePressureReasonCode::AgentMailRecoveryCorrupt,
+            ResourceQueuePressureReasonCode::AgentMailUnavailable,
+            ResourceQueuePressureReasonCode::HostCalibrationMissing,
+        ],
+    ) || level == ResourceQueuePressureLevel::Unknown
+    {
+        return ResourceAdmissionDecision::Abstain;
+    }
+    if has_any_queue_pressure_reason(
+        contributing_reasons,
+        &[
+            ResourceQueuePressureReasonCode::RchTelemetryGap,
+            ResourceQueuePressureReasonCode::ActiveBuildSlotExhausted,
+            ResourceQueuePressureReasonCode::RchLaneBusy,
+        ],
+    ) {
+        return ResourceAdmissionDecision::WaitForRch;
+    }
+    if estimated_cost_class == ResourceCostClass::SwarmHeavy
+        && matches!(
+            level,
+            ResourceQueuePressureLevel::Moderate | ResourceQueuePressureLevel::Saturated
+        )
+    {
+        return ResourceAdmissionDecision::SplitWorkload;
+    }
+    if level == ResourceQueuePressureLevel::Saturated
+        || has_queue_pressure_reason(
+            contributing_reasons,
+            ResourceQueuePressureReasonCode::StaleInProgressBead,
+        )
+    {
+        return ResourceAdmissionDecision::Queue;
+    }
+    if level == ResourceQueuePressureLevel::Moderate
+        || has_any_queue_pressure_reason(
+            contributing_reasons,
+            &[
+                ResourceQueuePressureReasonCode::DirtyCheckoutSaturated,
+                ResourceQueuePressureReasonCode::OutputBudgetPressure,
+            ],
+        )
+    {
+        return ResourceAdmissionDecision::DegradeToLean;
+    }
+    ResourceAdmissionDecision::Admit
+}
+
+fn queue_pressure_blockers(contributing_reasons: &[String]) -> Vec<String> {
+    let mut blocked_by = Vec::new();
+    for reason in contributing_reasons {
+        match reason.as_str() {
+            "agent_mail_unavailable" | "agent_mail_recovery_corrupt" => {
+                push_unique(&mut blocked_by, "agent_mail");
+            }
+            "contradictory_source_state" | "host_calibration_missing" => {
+                push_unique(&mut blocked_by, "source_authority");
+            }
+            "rch_lane_busy" | "rch_telemetry_gap" | "active_build_slot_exhausted" => {
+                push_unique(&mut blocked_by, "rch_lane");
+            }
+            "local_cargo_refused" => {
+                push_unique(&mut blocked_by, "local_cargo_tripwire");
+            }
+            "stale_in_progress_bead" => {
+                push_unique(&mut blocked_by, "beads_in_progress");
+            }
+            _ => {}
+        }
+    }
+    blocked_by
+}
+
+fn queue_pressure_next_safe_action(decision: ResourceAdmissionDecision) -> &'static str {
+    match decision {
+        ResourceAdmissionDecision::Admit => "continue_with_existing_claim_gate",
+        ResourceAdmissionDecision::DegradeToLean => {
+            "ee pack <task> --resource-profile constrained --json"
+        }
+        ResourceAdmissionDecision::Queue => "wait_for_lane_capacity_then_refresh_swarm_brief",
+        ResourceAdmissionDecision::WaitForRch => "rch status --json",
+        ResourceAdmissionDecision::SplitWorkload => {
+            "split_workload_or_create_narrower_bead_before_claim"
+        }
+        ResourceAdmissionDecision::RefuseLocalCargo => {
+            "scripts/check-local-cargo-tripwire.sh --probe-processes --json"
+        }
+        ResourceAdmissionDecision::Abstain => {
+            "collect_bounded_support_bundle_or_agent_mail_snapshot"
+        }
+    }
+}
+
+fn queue_pressure_what_would_change(decision: ResourceAdmissionDecision) -> &'static str {
+    match decision {
+        ResourceAdmissionDecision::Admit => "stronger_pressure_evidence_appears",
+        ResourceAdmissionDecision::DegradeToLean => "output_budget_or_checkout_pressure_clears",
+        ResourceAdmissionDecision::Queue => "queue_pressure_drops_below_saturated",
+        ResourceAdmissionDecision::WaitForRch => "rch_lane_has_capacity_and_fresh_telemetry",
+        ResourceAdmissionDecision::SplitWorkload => "workload_becomes_standard_or_narrower",
+        ResourceAdmissionDecision::RefuseLocalCargo => {
+            "remote_proof_path_succeeds_without_local_cargo"
+        }
+        ResourceAdmissionDecision::Abstain => "untrusted_source_becomes_fresh_and_consistent",
+    }
+}
+
+fn queue_pressure_hysteresis_hint(
+    decision: ResourceAdmissionDecision,
+) -> ResourceQueuePressureHysteresisHint {
+    match decision {
+        ResourceAdmissionDecision::Admit => ResourceQueuePressureHysteresisHint {
+            state_key: "admit",
+            stable_after_observations: 1,
+            cooldown_observations: 0,
+        },
+        ResourceAdmissionDecision::DegradeToLean => ResourceQueuePressureHysteresisHint {
+            state_key: "degrade_to_lean",
+            stable_after_observations: 2,
+            cooldown_observations: 1,
+        },
+        ResourceAdmissionDecision::Queue => ResourceQueuePressureHysteresisHint {
+            state_key: "queue",
+            stable_after_observations: 2,
+            cooldown_observations: 2,
+        },
+        ResourceAdmissionDecision::WaitForRch => ResourceQueuePressureHysteresisHint {
+            state_key: "wait_for_rch",
+            stable_after_observations: 2,
+            cooldown_observations: 2,
+        },
+        ResourceAdmissionDecision::SplitWorkload => ResourceQueuePressureHysteresisHint {
+            state_key: "split_workload",
+            stable_after_observations: 2,
+            cooldown_observations: 1,
+        },
+        ResourceAdmissionDecision::RefuseLocalCargo => ResourceQueuePressureHysteresisHint {
+            state_key: "refuse_local_cargo",
+            stable_after_observations: 1,
+            cooldown_observations: 1,
+        },
+        ResourceAdmissionDecision::Abstain => ResourceQueuePressureHysteresisHint {
+            state_key: "abstain",
+            stable_after_observations: 1,
+            cooldown_observations: 1,
+        },
+    }
+}
+
+fn has_queue_pressure_reason(
+    contributing_reasons: &[String],
+    reason_code: ResourceQueuePressureReasonCode,
+) -> bool {
+    contributing_reasons
+        .iter()
+        .any(|reason| reason == reason_code.as_str())
+}
+
+fn has_any_queue_pressure_reason(
+    contributing_reasons: &[String],
+    reason_codes: &[ResourceQueuePressureReasonCode],
+) -> bool {
+    reason_codes
+        .iter()
+        .any(|reason_code| has_queue_pressure_reason(contributing_reasons, *reason_code))
+}
+
+fn queue_pressure_reason_rank(reason: &str) -> u8 {
+    match reason {
+        "local_cargo_refused" => 0,
+        "contradictory_source_state" => 1,
+        "agent_mail_recovery_corrupt" => 2,
+        "agent_mail_unavailable" => 3,
+        "host_calibration_missing" => 4,
+        "rch_telemetry_gap" => 5,
+        "active_build_slot_exhausted" => 6,
+        "rch_lane_busy" => 7,
+        "stale_in_progress_bead" => 8,
+        "dirty_checkout_saturated" => 9,
+        "output_budget_pressure" => 10,
+        _ => 100,
     }
 }
 
@@ -3006,6 +3287,223 @@ mod tests {
                 .map(String::len),
             Some(RESOURCE_QUEUE_PRESSURE_BOUNDED_PREVIEW_MAX_CHARS)
         );
+    }
+
+    #[test]
+    fn queue_pressure_backoff_covers_each_decision() {
+        struct Case {
+            level: ResourceQueuePressureLevel,
+            reasons: &'static [&'static str],
+            cost: ResourceCostClass,
+            decision: ResourceAdmissionDecision,
+            primary_reason: &'static str,
+        }
+
+        let cases = [
+            Case {
+                level: ResourceQueuePressureLevel::Idle,
+                reasons: &[],
+                cost: ResourceCostClass::Standard,
+                decision: ResourceAdmissionDecision::Admit,
+                primary_reason: "queue_pressure_idle",
+            },
+            Case {
+                level: ResourceQueuePressureLevel::Moderate,
+                reasons: &["output_budget_pressure"],
+                cost: ResourceCostClass::Standard,
+                decision: ResourceAdmissionDecision::DegradeToLean,
+                primary_reason: "output_budget_pressure",
+            },
+            Case {
+                level: ResourceQueuePressureLevel::Saturated,
+                reasons: &["dirty_checkout_saturated"],
+                cost: ResourceCostClass::Standard,
+                decision: ResourceAdmissionDecision::Queue,
+                primary_reason: "dirty_checkout_saturated",
+            },
+            Case {
+                level: ResourceQueuePressureLevel::Saturated,
+                reasons: &["active_build_slot_exhausted"],
+                cost: ResourceCostClass::Standard,
+                decision: ResourceAdmissionDecision::WaitForRch,
+                primary_reason: "active_build_slot_exhausted",
+            },
+            Case {
+                level: ResourceQueuePressureLevel::Saturated,
+                reasons: &["dirty_checkout_saturated"],
+                cost: ResourceCostClass::SwarmHeavy,
+                decision: ResourceAdmissionDecision::SplitWorkload,
+                primary_reason: "dirty_checkout_saturated",
+            },
+            Case {
+                level: ResourceQueuePressureLevel::Low,
+                reasons: &["local_cargo_refused"],
+                cost: ResourceCostClass::Standard,
+                decision: ResourceAdmissionDecision::RefuseLocalCargo,
+                primary_reason: "local_cargo_refused",
+            },
+            Case {
+                level: ResourceQueuePressureLevel::Low,
+                reasons: &["agent_mail_recovery_corrupt"],
+                cost: ResourceCostClass::Standard,
+                decision: ResourceAdmissionDecision::Abstain,
+                primary_reason: "agent_mail_recovery_corrupt",
+            },
+        ];
+
+        for case in cases {
+            let advice = evaluate_resource_queue_pressure_backoff(&backoff_input(
+                case.level,
+                case.reasons,
+                case.cost,
+                true,
+            ));
+            assert_eq!(advice.decision, case.decision);
+            assert_eq!(advice.primary_reason, case.primary_reason);
+            assert!(!advice.can_authorize_claim);
+            assert!(!advice.next_safe_action.is_empty());
+            assert!(!advice.what_would_change.is_empty());
+        }
+    }
+
+    #[test]
+    fn queue_pressure_backoff_precedence_is_safety_dominant() {
+        let local_cargo_wins = evaluate_resource_queue_pressure_backoff(&backoff_input(
+            ResourceQueuePressureLevel::Saturated,
+            &[
+                "output_budget_pressure",
+                "active_build_slot_exhausted",
+                "local_cargo_refused",
+            ],
+            ResourceCostClass::SwarmHeavy,
+            true,
+        ));
+        assert_eq!(
+            local_cargo_wins.decision,
+            ResourceAdmissionDecision::RefuseLocalCargo
+        );
+        assert_eq!(local_cargo_wins.primary_reason, "local_cargo_refused");
+        assert_eq!(
+            local_cargo_wins.contributing_reasons,
+            vec![
+                "local_cargo_refused",
+                "active_build_slot_exhausted",
+                "output_budget_pressure"
+            ]
+        );
+
+        let untrusted_mail_wins = evaluate_resource_queue_pressure_backoff(&backoff_input(
+            ResourceQueuePressureLevel::Saturated,
+            &["rch_lane_busy", "agent_mail_unavailable"],
+            ResourceCostClass::Standard,
+            true,
+        ));
+        assert_eq!(
+            untrusted_mail_wins.decision,
+            ResourceAdmissionDecision::Abstain
+        );
+        assert_eq!(untrusted_mail_wins.primary_reason, "agent_mail_unavailable");
+        assert_eq!(
+            untrusted_mail_wins.blocked_by,
+            vec!["agent_mail", "rch_lane"]
+        );
+
+        let rch_wins_over_split = evaluate_resource_queue_pressure_backoff(&backoff_input(
+            ResourceQueuePressureLevel::Saturated,
+            &["dirty_checkout_saturated", "rch_telemetry_gap"],
+            ResourceCostClass::SwarmHeavy,
+            true,
+        ));
+        assert_eq!(
+            rch_wins_over_split.decision,
+            ResourceAdmissionDecision::WaitForRch
+        );
+        assert_eq!(rch_wins_over_split.primary_reason, "rch_telemetry_gap");
+    }
+
+    #[test]
+    fn queue_pressure_backoff_never_authorizes_claims() {
+        let unsafe_claim_gate = evaluate_resource_queue_pressure_backoff(&backoff_input(
+            ResourceQueuePressureLevel::Idle,
+            &[],
+            ResourceCostClass::Standard,
+            false,
+        ));
+        assert_eq!(unsafe_claim_gate.decision, ResourceAdmissionDecision::Admit);
+        assert!(!unsafe_claim_gate.can_authorize_claim);
+        assert_eq!(unsafe_claim_gate.blocked_by, vec!["claim_gate_authority"]);
+
+        let safe_claim_gate = evaluate_resource_queue_pressure_backoff(&backoff_input(
+            ResourceQueuePressureLevel::Idle,
+            &[],
+            ResourceCostClass::Standard,
+            true,
+        ));
+        assert_eq!(safe_claim_gate.decision, ResourceAdmissionDecision::Admit);
+        assert!(!safe_claim_gate.can_authorize_claim);
+        assert!(safe_claim_gate.blocked_by.is_empty());
+    }
+
+    #[test]
+    fn queue_pressure_backoff_summary_is_byte_stable() {
+        let advice = evaluate_resource_queue_pressure_backoff(&backoff_input(
+            ResourceQueuePressureLevel::Saturated,
+            &["dirty_checkout_saturated", "rch_lane_busy"],
+            ResourceCostClass::Standard,
+            false,
+        ));
+
+        assert_eq!(
+            render_backoff_advice_golden(&advice),
+            "{\"decision\":\"wait_for_rch\",\"canAuthorizeClaim\":false,\"primaryReason\":\"rch_lane_busy\",\"contributingReasons\":[\"rch_lane_busy\",\"dirty_checkout_saturated\"],\"blockedBy\":[\"rch_lane\",\"claim_gate_authority\"],\"nextSafeAction\":\"rch status --json\",\"whatWouldChange\":\"rch_lane_has_capacity_and_fresh_telemetry\",\"hysteresis\":{\"stateKey\":\"wait_for_rch\",\"stableAfterObservations\":2,\"cooldownObservations\":2}}"
+        );
+    }
+
+    fn backoff_input(
+        level: ResourceQueuePressureLevel,
+        reasons: &'static [&'static str],
+        estimated_cost_class: ResourceCostClass,
+        claim_gate_safe_to_claim: bool,
+    ) -> ResourceQueuePressureBackoffInput {
+        ResourceQueuePressureBackoffInput {
+            queue_pressure: ResourceQueuePressureReport {
+                level,
+                can_authorize_claim: false,
+                reason_codes: reasons.iter().map(|reason| (*reason).to_owned()).collect(),
+                abstained_sources: Vec::new(),
+                source_refs: Vec::new(),
+                redaction_posture: RESOURCE_QUEUE_PRESSURE_REDACTION_POSTURE,
+            },
+            estimated_cost_class,
+            claim_gate_safe_to_claim,
+        }
+    }
+
+    fn render_backoff_advice_golden(advice: &ResourceQueuePressureBackoffAdvice) -> String {
+        format!(
+            "{{\"decision\":\"{}\",\"canAuthorizeClaim\":{},\"primaryReason\":\"{}\",\"contributingReasons\":{},\"blockedBy\":{},\"nextSafeAction\":\"{}\",\"whatWouldChange\":\"{}\",\"hysteresis\":{{\"stateKey\":\"{}\",\"stableAfterObservations\":{},\"cooldownObservations\":{}}}}}",
+            advice.decision.as_str(),
+            advice.can_authorize_claim,
+            advice.primary_reason,
+            quoted_string_list(&advice.contributing_reasons),
+            quoted_string_list(&advice.blocked_by),
+            advice.next_safe_action,
+            advice.what_would_change,
+            advice.hysteresis.state_key,
+            advice.hysteresis.stable_after_observations,
+            advice.hysteresis.cooldown_observations
+        )
+    }
+
+    fn quoted_string_list(values: &[String]) -> String {
+        format!(
+            "[{}]",
+            values
+                .iter()
+                .map(|value| format!("\"{value}\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
     }
 
     mod pack_tests {
