@@ -535,48 +535,107 @@ fn effect_manifest_includes_config_write_commands() -> TestResult {
 }
 
 #[test]
-fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestResult {
-    use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
+fn effect_manifest_does_not_classify_daemon_paths_as_unavailable() -> TestResult {
+    use ee::core::effect::{EffectManifest, SideEffectClass};
 
     let manifest = EffectManifest::build();
 
-    // Economy report/score/simulate/prune-plan now describe real DB-backed
-    // read-only implementations. The entries here are still in their
-    // honesty-only abstention state.
-    for (command, code) in [
-        ("daemon", "daemon_jobs_unavailable"),
-        ("daemon background", "daemon_jobs_unavailable"),
-        ("daemon foreground non-decay", "daemon_jobs_unavailable"),
+    for command in [
+        "daemon",
+        "daemon background",
+        "daemon foreground decay_sweep",
+        "daemon foreground non-decay",
+    ] {
+        let effect = manifest
+            .get(command)
+            .ok_or_else(|| format!("{command} not in manifest"))?;
+        ensure(
+            effect.mutation_contract.side_effect_class != SideEffectClass::DegradedUnavailable,
+            true,
+            &format!("{command} must not be modeled as unavailable"),
+        )?;
+        ensure(
+            effect.mutation_contract.degraded_code,
+            None,
+            &format!("{command} has no unavailable sentinel"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn effect_manifest_tracks_daemon_jobs_as_real_supervised_jobs() -> TestResult {
+    use ee::core::effect::{EffectClass, EffectManifest, RuntimeClass, SideEffectClass};
+
+    let manifest = EffectManifest::build();
+
+    let daemon = manifest
+        .get("daemon")
+        .ok_or_else(|| "daemon not in manifest".to_owned())?;
+    ensure(
+        daemon.default_effect,
+        EffectClass::ExternalIo,
+        "daemon family conservatively covers socket lifecycle plus foreground jobs",
+    )?;
+    ensure(
+        daemon.mutation_contract.side_effect_class,
+        SideEffectClass::Mixed,
+        "daemon family is mixed, not unavailable",
+    )?;
+    ensure(
+        daemon.dry_run_effect,
+        Some(EffectClass::WorkspaceFileWrite),
+        "daemon dry-run still writes daemon job ledger rows",
+    )?;
+    ensure(
+        daemon.mutation_contract.degraded_code,
+        None,
+        "daemon family has no unavailable sentinel",
+    )?;
+    ensure(
+        daemon
+            .write_surfaces
+            .workspace_files
+            .contains(&".ee/daemon-jobs.jsonl"),
+        true,
+        "daemon family names persisted daemon job ledger",
+    )?;
+
+    for command in [
+        "daemon background",
+        "daemon foreground decay_sweep",
+        "daemon foreground non-decay",
     ] {
         let effect = manifest
             .get(command)
             .ok_or_else(|| format!("{command} not in manifest"))?;
         ensure(
             effect.default_effect,
-            EffectClass::ReadOnly,
-            &format!("{command} has no mutation while unavailable"),
+            EffectClass::DurableMemoryWrite,
+            &format!("{command} may run real steward mutations"),
         )?;
         ensure(
             effect.mutation_contract.side_effect_class,
-            SideEffectClass::DegradedUnavailable,
-            &format!("{command} degraded class"),
+            SideEffectClass::SupervisedJobs,
+            &format!("{command} uses the supervised job contract"),
         )?;
         ensure(
-            effect.write_surfaces.is_empty(),
-            true,
-            &format!("{command} has no write surfaces"),
-        )?;
-        ensure(
-            effect.mutation_contract.audit_surface,
-            None,
-            &format!("{command} does not write audit while unavailable"),
+            effect.runtime_contract.runtime_class,
+            RuntimeClass::Supervised,
+            &format!("{command} runs under supervised job runtime"),
         )?;
         ensure(
             effect.mutation_contract.degraded_code,
-            Some(code),
-            &format!("{command} degraded code"),
+            None,
+            &format!("{command} has no unavailable sentinel"),
+        )?;
+        ensure(
+            effect.requires_audit,
+            true,
+            &format!("{command} requires audit"),
         )?;
     }
+
     Ok(())
 }
 

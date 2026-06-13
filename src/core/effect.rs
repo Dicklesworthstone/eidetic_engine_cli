@@ -1692,30 +1692,61 @@ impl EffectManifest {
     }
 
     fn degraded_unavailable_commands() -> Vec<CommandEffect> {
-        vec![
-            CommandEffect::degraded_unavailable(
-                "daemon",
-                "daemon_jobs_unavailable",
-                "Daemon background and non-decay foreground jobs abstain; foreground decay_sweep has a separate supervised-job entry",
-            )
-            .with_runtime_contract(CommandRuntimeContract::supervised_unavailable()),
-            CommandEffect::degraded_unavailable(
-                "daemon background",
-                "daemon_jobs_unavailable",
-                "Background daemon scheduling abstains until write-owner supervision exists",
-            )
-            .with_runtime_contract(CommandRuntimeContract::supervised_unavailable()),
-            CommandEffect::degraded_unavailable(
-                "daemon foreground non-decay",
-                "daemon_jobs_unavailable",
-                "Non-decay foreground daemon jobs abstain until real steward handlers are wired",
-            )
-            .with_runtime_contract(CommandRuntimeContract::supervised_unavailable()),
-        ]
+        Vec::new()
+    }
+
+    fn daemon_command_effect() -> CommandEffect {
+        let mut effect = CommandEffect::external_io_write(
+            "daemon",
+            vec!["memories", "feedback_events", "audit_log"],
+            vec![
+                "$XDG_RUNTIME_DIR/ee/daemon.sock or ${TMPDIR:-/tmp}/ee-<uid>/daemon.sock",
+                ".ee/daemon-jobs.jsonl",
+            ],
+            "daemon subcommand plus socket path plus workspace plus job type",
+            "Run daemon status, foreground steward jobs, background steward scheduling, or UDS hot-mode lifecycle operations",
+        );
+        effect.idempotency = IdempotencyClass::DryRunAvailable;
+        effect.dry_run_effect = Some(EffectClass::WorkspaceFileWrite);
+        effect.mutation_contract = CommandMutationContract {
+            side_effect_class: SideEffectClass::Mixed,
+            transaction_scope: Some("daemon subcommand-specific operation"),
+            idempotency_key: Some(
+                "daemon subcommand plus socket path plus workspace plus job type",
+            ),
+            audit_surface: Some(
+                "daemon job ledger or audit_log when a selected subcommand mutates",
+            ),
+            db_generation_effect: "subcommand-specific: status is read-only; foreground jobs may advance handler-owned state",
+            index_generation_effect: "subcommand-specific: unchanged unless a selected steward job processes index work",
+            dry_run_behavior: Some(
+                "foreground --dry-run records planned daemon job rows and reports handler plans without committing handler mutations",
+            ),
+            recovery_behavior: "foreground and background job rows are persisted and recovered on restart",
+            no_overwrite_behavior: Some(
+                "daemon socket paths are guarded by same-UID socket checks; stop refuses regular files and stale unauthenticated sockets",
+            ),
+            degraded_code: None,
+        };
+        effect.runtime_contract = CommandRuntimeContract {
+            runtime_class: RuntimeClass::MultiStage,
+            default_budget_ms: Some(300_000),
+            cancellation_points: &[
+                "before_daemon_mode_dispatch",
+                "before_socket_publish_or_probe",
+                "before_foreground_job_schedule",
+                "before_steward_handler",
+                "before_daemon_job_row_commit",
+            ],
+            partial_progress_policy: "option-specific: status is read-only; foreground jobs persist planned rows before handler execution and terminal rows after completion",
+            outcome_mapping: "success, usage_error, storage_error, policy_denied, or supervised job failure",
+        };
+        effect
     }
 
     fn external_io_write_commands() -> Vec<CommandEffect> {
         vec![
+            Self::daemon_command_effect(),
             CommandEffect::external_io_write(
                 "demo run",
                 vec!["audit_log"],
@@ -1780,6 +1811,16 @@ impl EffectManifest {
                 "daemon foreground decay_sweep",
                 vec!["memories", "feedback_events", "audit_log"],
                 "Run the real score-decay steward handler in a bounded foreground daemon tick",
+            ),
+            CommandEffect::supervised_job(
+                "daemon background",
+                vec!["memories", "feedback_events", "audit_log"],
+                "Run configured steward handlers on the daemon background scheduler",
+            ),
+            CommandEffect::supervised_job(
+                "daemon foreground non-decay",
+                vec!["memories", "feedback_events", "audit_log"],
+                "Run real non-decay steward handlers in a bounded foreground daemon tick",
             ),
             CommandEffect::supervised_job(
                 "job run",

@@ -358,15 +358,6 @@ impl CapabilitiesReport {
                 "Optional mesh memory surfaces are disabled or not linked in this build.",
             ));
         }
-        if !cfg!(feature = "serve") {
-            unimplemented.push(UnimplementedCapabilityEntry::new(
-                "daemon_background_mode_unimplemented",
-                "serve",
-                "v0.5",
-                "bd-17c65.5.5",
-                "Background daemon mode is not implemented in this build; bounded foreground mode is available.",
-            ));
-        }
         unimplemented.push(UnimplementedCapabilityEntry::new(
             "diagram_backend_unavailable",
             "franken-mermaid-adapter",
@@ -440,13 +431,13 @@ impl CapabilitiesReport {
             ),
             CommandEntry::new(
                 "daemon background",
-                false,
-                "Background daemon scheduling is unavailable",
+                true,
+                "Detached background steward scheduler",
             ),
             CommandEntry::new(
                 "daemon foreground non-decay",
-                false,
-                "Non-decay steward jobs report unavailable until real handlers are wired",
+                true,
+                "Bounded foreground steward jobs beyond decay_sweep",
             ),
         ];
 
@@ -627,11 +618,6 @@ mod tests {
                 "mcp feature gap should be in capabilities.unimplemented; got {codes:?}"
             ));
         }
-        if !cfg!(feature = "serve") && !codes.contains(&"daemon_background_mode_unimplemented") {
-            return Err(format!(
-                "daemon background gap should be in capabilities.unimplemented; got {codes:?}"
-            ));
-        }
         if !codes.contains(&"diagram_backend_unavailable") {
             return Err(format!(
                 "diagram backend gap should be in capabilities.unimplemented; got {codes:?}"
@@ -717,7 +703,11 @@ mod tests {
             .iter()
             .find(|c| c.name == "daemon background")
             .unwrap_or_else(|| panic!("daemon background command must exist")); // ubs:ignore
-        ensure(background.available, false, "background daemon unavailable")?;
+        ensure(
+            background.available,
+            true,
+            "detached background daemon scheduler is available",
+        )?;
 
         let non_decay = report
             .commands
@@ -726,8 +716,8 @@ mod tests {
             .unwrap_or_else(|| panic!("daemon foreground non-decay command must exist")); // ubs:ignore
         ensure(
             non_decay.available,
-            false,
-            "non-decay daemon jobs unavailable",
+            true,
+            "non-decay foreground daemon jobs are available",
         )
     }
 

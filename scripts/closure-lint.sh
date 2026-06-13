@@ -36,11 +36,13 @@ CLI_MOD="src/cli/mod.rs"
 # / `*_NOT_YET_IMPLEMENTED_CODE` sentinel slipped past Rule 2 and the
 # close-reason abstention scrub. Recognize all three suffixes.
 SENTINEL_CODE_SUFFIX_REGEX='_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE'
-# Source files that may DECLARE a sentinel constant for an
-# implements-surface. The `*_UNAVAILABLE_CODE` family historically lived in
-# src/cli/mod.rs, but the `*_NOT_(YET_)?IMPLEMENTED_CODE` family lives in
-# the owning subsystem module, so Rule 2 must scan those too.
-SENTINEL_SRC_FILES="src/cli/mod.rs src/daemon/mod.rs src/graph/numa_pin.rs src/search/lexical_ram_tier.rs"
+# Source files that may declare or expose a sentinel for an implements-surface.
+# The `*_UNAVAILABLE_CODE` family historically lived in src/cli/mod.rs, but the
+# `*_NOT_(YET_)?IMPLEMENTED_CODE` family lives in owning subsystem modules, and
+# bd-gwgo7 found the historical daemon sentinel as a literal registry code in
+# effect/capabilities. Rule 2 scans each of these surfaces so closed
+# implements-surface beads cannot hide a live abstention behind registry text.
+SENTINEL_SRC_FILES="src/cli/mod.rs src/daemon/mod.rs src/core/effect.rs src/core/capabilities.rs src/graph/numa_pin.rs src/search/lexical_ram_tier.rs"
 REPORT_FILE=".closure-lint-report.json"
 QUALITY_REPORT_FILE=".closure-quality-report.json"
 AUDIT_BASELINE_FILE="${CLOSURE_LINT_AUDIT_BASELINE_FILE:-tests/fixtures/closure_lint/audit_baseline.json}"
@@ -507,6 +509,10 @@ surface_unavailable_constant() {
 # <SURFACE>_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE.
 surface_sentinel_regex() {
     local surface="$1"
+    if [ "$surface" = "daemon" ]; then
+        echo "DAEMON${SENTINEL_CODE_SUFFIX_REGEX}|DAEMON_JOBS_UNAVAILABLE_CODE|daemon_jobs_unavailable"
+        return 0
+    fi
     echo "$(echo "$surface" | tr '[:lower:]-' '[:upper:]_')${SENTINEL_CODE_SUFFIX_REGEX}"
 }
 

@@ -328,6 +328,44 @@ fn closure_lint_reports_non_cli_sentinel_families() -> TestResult {
 }
 
 #[test]
+fn closure_lint_reports_daemon_jobs_unavailable_registry_literal() -> TestResult {
+    let temp = closure_lint_worker_local_tempdir("closure-lint-daemon-jobs-literal-")?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"closed-daemon","title":"[implements-surface:daemon] real daemon implementation","status":"closed","close_reason":"implemented daemon foreground jobs with durable evidence","labels":["implements-surface:daemon"]}"#,
+        ],
+        "",
+        &["daemon"],
+    )?;
+    write_text_file(
+        temp.path(),
+        "src/core/effect.rs",
+        "CommandEffect::degraded_unavailable(\"daemon\", \"daemon_jobs_unavailable\", \"stale registry literal\");\n",
+    )?;
+
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "linter should fail closed daemon implementation with stale registry literal\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "fail", "report status")?;
+    ensure_eq(report_count(&report)?, 1, "report count")?;
+    ensure_eq(
+        violation_keys(&report)?,
+        vec![(
+            "closed-daemon".to_owned(),
+            "daemon".to_owned(),
+            "daemon_jobs_unavailable (src/core/effect.rs) sentinel still exists".to_owned(),
+        )],
+        "closure-lint must catch daemon_jobs_unavailable outside src/cli/mod.rs",
+    )
+}
+
+#[test]
 fn closure_lint_accepts_clean_implementation_and_honesty_sibling() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     write_workspace(

@@ -235,7 +235,6 @@ memory bodies in `sources[]`.
 | Code | Surface | Feature flag | Notes |
 |------|---------|--------------|-------|
 | `agent_detection_unavailable` | agent sources, doctor | (binary detection logic) | Reflects compile-time exclusion of agent-detection paths. |
-| `daemon_background_mode_unimplemented` | serve | (daemon background-mode build) | Background daemon mode not built; foreground still works. |
 | `diagram_backend_unavailable` | doctor, dependency contract | (mermaid renderer feature) | Mermaid backend not linked. |
 | `lexical_unavailable` | search | `frankensearch/lexical` | BM25 arm disabled at build. |
 | `mcp_feature_disabled` | mcp manifest, mcp serve-stdio | `mcp` | MCP discovery remains available, but the stdio adapter is disabled in this build. |

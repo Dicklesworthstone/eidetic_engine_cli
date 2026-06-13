@@ -1000,9 +1000,6 @@ run_fixture_scenario() {
                 SCENARIO_OUTPUT=""
             fi
             ;;
-        daemon_background_mode_unimplemented)
-            SCENARIO_OUTPUT=$(ee_global daemon --json 2>/dev/null || true)
-            ;;
         policy_secret_detected_with_offsets)
             SCENARIO_OUTPUT=$(ee_workspace remember \
                 "Document API_KEY=sk-FAKEabc123def456ghi789jkl012." \
