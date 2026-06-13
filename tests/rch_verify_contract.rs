@@ -1,3 +1,9 @@
+use ee::shadow::{
+    ResourceAdmissionDecision, ResourceCostClass, ResourceQueuePressureBackoffInput,
+    ResourceQueuePressureInventory, ResourceQueuePressureLevel, ResourceQueuePressureReasonCode,
+    ResourceQueuePressureSourceKind, ResourceQueuePressureSourceRef,
+    ResourceQueuePressureSourceState, evaluate_resource_queue_pressure_backoff,
+};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
@@ -3553,6 +3559,89 @@ fn active_project_known_blocker_refusal_keeps_selector_evidence() -> TestResult 
             return Err(format!("second summary missing {expected}: {summary}"));
         }
     }
+    Ok(())
+}
+
+#[test]
+fn slot_accounting_fixture_drives_wait_for_rch_queue_pressure() -> TestResult {
+    let fixture =
+        read_repo_json("tests/fixtures/rch_pressure_telemetry/slot_accounting_inconsistent.json")?;
+    if fixture["name"] != "slot_accounting_inconsistent" {
+        return Err(format!("unexpected slot-accounting fixture: {fixture}"));
+    }
+
+    let input = fixture
+        .get("input_rch_status")
+        .ok_or_else(|| format!("slot-accounting fixture missing input: {fixture}"))?;
+    let expected = fixture
+        .get("expected")
+        .ok_or_else(|| format!("slot-accounting fixture missing expected block: {fixture}"))?;
+    let worker = input["workers"]
+        .as_array()
+        .and_then(|workers| workers.first())
+        .ok_or_else(|| format!("slot-accounting fixture missing worker: {fixture}"))?;
+
+    if input["posture"] != "remote_ready"
+        || input["active_builds"].as_array().map_or(1, Vec::len) != 0
+        || input["queued_builds"].as_array().map_or(1, Vec::len) != 0
+        || input["daemon"]["slots_available"] != 0
+        || worker["status"] != "healthy"
+        || worker["used_slots"] != worker["total_slots"]
+        || worker["pressure_state"] != "telemetry_gap"
+        || worker["pressure_reason_code"] != "telemetry_unavailable"
+        || expected["source_verdict"] != "no_rust_verdict"
+    {
+        return Err(format!(
+            "slot-accounting fixture no longer captures the remote-ready saturated telemetry gap: {fixture}"
+        ));
+    }
+
+    let inventory = ResourceQueuePressureInventory::new(vec![
+        ResourceQueuePressureSourceRef::new(
+            ResourceQueuePressureSourceKind::RchStatus,
+            ResourceQueuePressureSourceState::Degraded,
+        )
+        .with_reason_code(ResourceQueuePressureReasonCode::RchTelemetryGap)
+        .with_bounded_preview("remote_ready active_builds=0 queued_builds=0 telemetry_gap"),
+        ResourceQueuePressureSourceRef::new(
+            ResourceQueuePressureSourceKind::BuildSlotLease,
+            ResourceQueuePressureSourceState::Degraded,
+        )
+        .with_reason_code(ResourceQueuePressureReasonCode::ActiveBuildSlotExhausted)
+        .with_bounded_preview("slots_available=0 worker_used_slots=4/4"),
+    ]);
+    let report = inventory.report();
+    let expected_reasons = vec![
+        "rch_telemetry_gap".to_owned(),
+        "active_build_slot_exhausted".to_owned(),
+    ];
+    if report.level != ResourceQueuePressureLevel::Saturated
+        || report.reason_codes != expected_reasons
+    {
+        return Err(format!(
+            "slot-accounting fixture normalized to the wrong queue pressure report: {report:?}"
+        ));
+    }
+
+    let advice = evaluate_resource_queue_pressure_backoff(&ResourceQueuePressureBackoffInput {
+        queue_pressure: report,
+        estimated_cost_class: ResourceCostClass::SwarmHeavy,
+        claim_gate_safe_to_claim: false,
+    });
+    if advice.decision != ResourceAdmissionDecision::WaitForRch
+        || advice.can_authorize_claim
+        || advice.primary_reason != "rch_telemetry_gap"
+        || !advice.blocked_by.contains(&"rch_lane".to_owned())
+        || !advice
+            .blocked_by
+            .contains(&"claim_gate_authority".to_owned())
+        || advice.what_would_change != "rch_lane_has_capacity_and_fresh_telemetry"
+    {
+        return Err(format!(
+            "remote_ready slot-accounting contradiction must wait for RCH without authorizing claims: {advice:?}"
+        ));
+    }
+
     Ok(())
 }
 
