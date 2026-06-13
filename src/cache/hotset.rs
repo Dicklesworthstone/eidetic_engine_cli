@@ -1724,10 +1724,38 @@ fn report_status(report: &Value) -> Option<&str> {
 }
 
 fn cache_prewarm_latency_estimate(search_report: &Value, pack_report: &Value) -> Value {
-    let search_cold = latency_field(search_report, "coldLatencyUs");
-    let search_warm = latency_field(search_report, "warmLatencyUs");
-    let pack_cold = latency_field(pack_report, "coldLatencyUs");
-    let pack_warm = latency_field(pack_report, "warmLatencyUs");
+    let mut estimated_components = Vec::new();
+    let mut unmeasured_components = Vec::new();
+    let (search_cold, search_warm) = match latency_fields(search_report) {
+        Some(latency) => {
+            estimated_components.push("search");
+            latency
+        }
+        None => {
+            if search_report.get("prewarmEvidence").is_some() {
+                unmeasured_components.push(json!({
+                    "component": "search",
+                    "reason": "search_prewarm_reports_admission_stats_not_latency",
+                }));
+            }
+            (0, 0)
+        }
+    };
+    let (pack_cold, pack_warm) = match latency_fields(pack_report) {
+        Some(latency) => {
+            estimated_components.push("pack");
+            latency
+        }
+        None => {
+            if pack_report.get("prewarmEvidence").is_some() {
+                unmeasured_components.push(json!({
+                    "component": "pack",
+                    "reason": "pack_prewarm_reports_admission_stats_not_latency",
+                }));
+            }
+            (0, 0)
+        }
+    };
     let cold = search_cold.saturating_add(pack_cold);
     let warm = search_warm.saturating_add(pack_warm);
     let win = cold.saturating_sub(warm);
@@ -1742,15 +1770,16 @@ fn cache_prewarm_latency_estimate(search_report: &Value, pack_report: &Value) ->
         "expectedWinUs": win,
         "expectedWinMs": win / 1_000,
         "latencyWinRatio": ratio,
+        "estimatedComponents": estimated_components,
+        "unmeasuredComponents": unmeasured_components,
     })
 }
 
-fn latency_field(report: &Value, field: &str) -> u64 {
-    report
-        .get("benchmarkEvidence")
-        .and_then(|benchmark| benchmark.get(field))
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
+fn latency_fields(report: &Value) -> Option<(u64, u64)> {
+    let benchmark = report.get("benchmarkEvidence")?;
+    let cold = benchmark.get("coldLatencyUs").and_then(Value::as_u64)?;
+    let warm = benchmark.get("warmLatencyUs").and_then(Value::as_u64)?;
+    Some((cold, warm))
 }
 
 fn max_report_pressure(search_report: &Value, pack_report: &Value) -> MemoryPressure {
@@ -2942,6 +2971,44 @@ mod tests {
         let json = plan.to_json();
         assert_eq!(json["candidateCount"], 0);
         assert_eq!(json["degraded"][0]["code"], "hotset_prewarm_no_signals");
+    }
+
+    #[test]
+    fn cache_prewarm_reports_search_admission_evidence_without_fake_latency() -> TestResult {
+        let manifest = builder(10)
+            .search_entries([
+                SearchHotsetEntry::memory("mem-search-a", 10, 3),
+                SearchHotsetEntry::memory("mem-search-b", 10, 2),
+            ])
+            .build()
+            .to_json();
+
+        let report = cache_prewarm_report_from_manifest_json(
+            &manifest,
+            &CachePrewarmOptions::new("balanced", CacheBudget::new(16, 16 * 1024))
+                .with_current_generation(Some(10)),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let search_report = &report["reports"]["search"];
+        assert_eq!(
+            search_report["prewarmEvidence"]["evidenceKind"],
+            "search_hotset_admission"
+        );
+        assert_eq!(search_report["prewarmEvidence"]["requestedHitCount"], 5);
+        assert!(search_report.get("benchmarkEvidence").is_none());
+        let latency = &report["latencyEstimate"];
+        assert!(
+            latency["unmeasuredComponents"]
+                .as_array()
+                .is_some_and(|components| components.iter().any(|component| {
+                    component["component"] == "search"
+                        && component["reason"]
+                            == "search_prewarm_reports_admission_stats_not_latency"
+                })),
+            "search must be marked unmeasured instead of folded in as zero latency: {latency:?}"
+        );
+        Ok(())
     }
 
     #[test]

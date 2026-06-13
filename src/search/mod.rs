@@ -2752,40 +2752,78 @@ impl SearchCacheGovernor {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SearchCacheBenchmarkEvidence {
+pub struct SearchCachePrewarmEvidence {
     pub operations: usize,
-    pub cold_latency_us: u64,
-    pub warm_latency_us: u64,
-    pub latency_win_ratio: f64,
+    pub requested_entries: usize,
+    pub admitted_entries: usize,
+    pub rejected_entries: usize,
+    pub requested_bytes: usize,
+    pub admitted_bytes: usize,
+    pub rejected_bytes: usize,
+    pub requested_hit_count: u64,
+    pub admitted_hit_count: u64,
+    pub rejected_hit_count: u64,
+    pub hit_coverage_ratio: f64,
+    pub byte_coverage_ratio: f64,
 }
 
-impl SearchCacheBenchmarkEvidence {
+impl SearchCachePrewarmEvidence {
     #[must_use]
-    pub fn from_prewarm_counts(requested: usize, admitted: usize) -> Self {
-        let cold_latency_us = usize_to_u64(requested).saturating_mul(1_000);
-        let warm_latency_us = usize_to_u64(admitted)
-            .saturating_mul(180)
-            .saturating_add(usize_to_u64(requested.saturating_sub(admitted)).saturating_mul(1_000));
-        let latency_win_ratio = if cold_latency_us == 0 {
+    pub fn from_prewarm_entries(
+        requested: &[SearchHotsetEntry],
+        admitted: &[SearchHotsetEntry],
+    ) -> Self {
+        let requested_entries = requested.len();
+        let admitted_entries = admitted.len();
+        let requested_bytes = entries_estimated_bytes(requested);
+        let admitted_bytes = entries_estimated_bytes(admitted);
+        let requested_hit_count = entries_hit_count(requested);
+        let admitted_hit_count = entries_hit_count(admitted);
+        let rejected_entries = requested_entries.saturating_sub(admitted_entries);
+        let rejected_bytes = requested_bytes.saturating_sub(admitted_bytes);
+        let rejected_hit_count = requested_hit_count.saturating_sub(admitted_hit_count);
+        let hit_coverage_ratio = if requested_hit_count == 0 {
             0.0
         } else {
-            (cold_latency_us.saturating_sub(warm_latency_us)) as f64 / cold_latency_us as f64
+            admitted_hit_count as f64 / requested_hit_count as f64
+        };
+        let byte_coverage_ratio = if requested_bytes == 0 {
+            0.0
+        } else {
+            admitted_bytes as f64 / requested_bytes as f64
         };
         Self {
-            operations: requested,
-            cold_latency_us,
-            warm_latency_us,
-            latency_win_ratio,
+            operations: requested_entries,
+            requested_entries,
+            admitted_entries,
+            rejected_entries,
+            requested_bytes,
+            admitted_bytes,
+            rejected_bytes,
+            requested_hit_count,
+            admitted_hit_count,
+            rejected_hit_count,
+            hit_coverage_ratio,
+            byte_coverage_ratio,
         }
     }
 
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
+            "evidenceKind": "search_hotset_admission",
             "operations": self.operations,
-            "coldLatencyUs": self.cold_latency_us,
-            "warmLatencyUs": self.warm_latency_us,
-            "latencyWinRatio": rounded_f64(self.latency_win_ratio),
+            "requestedEntries": self.requested_entries,
+            "admittedEntries": self.admitted_entries,
+            "rejectedEntries": self.rejected_entries,
+            "requestedBytes": self.requested_bytes,
+            "admittedBytes": self.admitted_bytes,
+            "rejectedBytes": self.rejected_bytes,
+            "requestedHitCount": self.requested_hit_count,
+            "admittedHitCount": self.admitted_hit_count,
+            "rejectedHitCount": self.rejected_hit_count,
+            "hitCoverageRatio": rounded_f64(self.hit_coverage_ratio),
+            "byteCoverageRatio": rounded_f64(self.byte_coverage_ratio),
         })
     }
 }
@@ -2804,7 +2842,7 @@ pub struct SearchCachePrewarmReport {
     pub memory_pressure: MemoryPressure,
     pub hit_rate: f64,
     pub fallback_reason: Option<&'static str>,
-    pub benchmark: SearchCacheBenchmarkEvidence,
+    pub prewarm_evidence: SearchCachePrewarmEvidence,
     pub admitted: Vec<SearchHotsetEntry>,
 }
 
@@ -2827,7 +2865,7 @@ impl SearchCachePrewarmReport {
             "memoryPressure": self.memory_pressure.as_str(),
             "hitRate": rounded_f64(self.hit_rate),
             "fallbackReason": self.fallback_reason,
-            "benchmarkEvidence": self.benchmark.data_json(),
+            "prewarmEvidence": self.prewarm_evidence.data_json(),
             "admitted": self.admitted.iter().map(SearchHotsetEntry::data_json).collect::<Vec<_>>(),
         })
     }
@@ -2851,9 +2889,8 @@ pub fn prewarm_search_hotset(
             SearchCacheStatus::StaleGeneration,
             source_generation,
             governor,
-            requested_entries,
+            hotset.entries(),
             Vec::new(),
-            hotset.total_hit_count(),
             Some("generation_mismatch"),
         );
     }
@@ -2863,9 +2900,8 @@ pub fn prewarm_search_hotset(
             SearchCacheStatus::Bypassed,
             source_generation,
             governor,
-            requested_entries,
+            hotset.entries(),
             Vec::new(),
-            hotset.total_hit_count(),
             Some("memory_pressure_critical"),
         );
     }
@@ -2900,9 +2936,8 @@ pub fn prewarm_search_hotset(
         status,
         source_generation,
         governor,
-        requested_entries,
+        hotset.entries(),
         admitted,
-        hotset.total_hit_count(),
         fallback_reason,
     )
 }
@@ -2911,14 +2946,13 @@ fn search_cache_report(
     status: SearchCacheStatus,
     source_generation: Option<u64>,
     governor: SearchCacheGovernor,
-    requested_entries: usize,
+    requested: &[SearchHotsetEntry],
     admitted: Vec<SearchHotsetEntry>,
-    total_hit_count: u64,
     fallback_reason: Option<&'static str>,
 ) -> SearchCachePrewarmReport {
-    let admitted_hit_count = admitted
-        .iter()
-        .fold(0u64, |total, entry| total.saturating_add(entry.hit_count));
+    let requested_entries = requested.len();
+    let total_hit_count = entries_hit_count(requested);
+    let admitted_hit_count = entries_hit_count(&admitted);
     let hit_rate = if total_hit_count == 0 {
         0.0
     } else {
@@ -2940,12 +2974,21 @@ fn search_cache_report(
         memory_pressure: governor.pressure(),
         hit_rate,
         fallback_reason,
-        benchmark: SearchCacheBenchmarkEvidence::from_prewarm_counts(
-            requested_entries,
-            admitted_entries,
-        ),
+        prewarm_evidence: SearchCachePrewarmEvidence::from_prewarm_entries(requested, &admitted),
         admitted,
     }
+}
+
+fn entries_estimated_bytes(entries: &[SearchHotsetEntry]) -> usize {
+    entries.iter().fold(0usize, |total, entry| {
+        total.saturating_add(entry.estimated_bytes)
+    })
+}
+
+fn entries_hit_count(entries: &[SearchHotsetEntry]) -> u64 {
+    entries
+        .iter()
+        .fold(0u64, |total, entry| total.saturating_add(entry.hit_count))
 }
 
 fn normalized_query_shape(query: &str) -> Option<String> {
@@ -2993,10 +3036,6 @@ const fn max_pressure(left: MemoryPressure, right: MemoryPressure) -> MemoryPres
     } else {
         right
     }
-}
-
-fn usize_to_u64(value: usize) -> u64 {
-    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn rounded_f64(value: f64) -> f64 {
@@ -5421,7 +5460,29 @@ mod tests {
         assert_eq!(report.admitted_entries, 2);
         assert_eq!(report.rejected_entries, 1);
         assert_eq!(report.fallback_reason, Some("budget_trimmed"));
-        assert!(report.benchmark.warm_latency_us < report.benchmark.cold_latency_us);
+        assert_eq!(report.prewarm_evidence.operations, 3);
+        assert_eq!(report.prewarm_evidence.requested_entries, 3);
+        assert_eq!(report.prewarm_evidence.admitted_entries, 2);
+        assert_eq!(report.prewarm_evidence.rejected_entries, 1);
+        assert_eq!(report.prewarm_evidence.requested_hit_count, 6);
+        assert_eq!(report.prewarm_evidence.admitted_hit_count, 5);
+        assert_eq!(report.prewarm_evidence.rejected_hit_count, 1);
+        assert!((report.prewarm_evidence.hit_coverage_ratio - (5.0 / 6.0)).abs() < f64::EPSILON);
+
+        let report_json = report.data_json();
+        let report_object = report_json.as_object().expect("report JSON object");
+        assert!(!report_object.contains_key("benchmarkEvidence"));
+        assert_eq!(
+            report_json["prewarmEvidence"]["evidenceKind"],
+            "search_hotset_admission"
+        );
+        assert!(
+            report_json["prewarmEvidence"]
+                .as_object()
+                .expect("evidence JSON object")
+                .get("coldLatencyUs")
+                .is_none()
+        );
 
         let stale = prewarm_search_hotset(
             &hotset,
@@ -5429,6 +5490,9 @@ mod tests {
         );
         assert_eq!(stale.status, SearchCacheStatus::StaleGeneration);
         assert_eq!(stale.admitted_entries, 0);
+        assert_eq!(stale.prewarm_evidence.rejected_entries, 3);
+        assert_eq!(stale.prewarm_evidence.requested_hit_count, 6);
+        assert_eq!(stale.prewarm_evidence.admitted_hit_count, 0);
         assert_eq!(stale.fallback_reason, Some("generation_mismatch"));
     }
 
