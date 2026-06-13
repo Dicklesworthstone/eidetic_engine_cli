@@ -954,6 +954,8 @@ pub fn evaluate_resource_queue_pressure_backoff(
     if !input.claim_gate_safe_to_claim {
         push_unique(&mut blocked_by, "claim_gate_authority");
     }
+    let next_safe_action = queue_pressure_next_safe_action(decision, &contributing_reasons);
+    let what_would_change = queue_pressure_what_would_change(decision, &contributing_reasons);
 
     ResourceQueuePressureBackoffAdvice {
         decision,
@@ -961,8 +963,8 @@ pub fn evaluate_resource_queue_pressure_backoff(
         primary_reason,
         contributing_reasons,
         blocked_by,
-        next_safe_action: queue_pressure_next_safe_action(decision),
-        what_would_change: queue_pressure_what_would_change(decision),
+        next_safe_action,
+        what_would_change,
         hysteresis: queue_pressure_hysteresis_hint(decision),
     }
 }
@@ -1074,6 +1076,12 @@ fn queue_pressure_backoff_decision(
     ) {
         return ResourceAdmissionDecision::WaitForRch;
     }
+    if has_queue_pressure_reason(
+        contributing_reasons,
+        ResourceQueuePressureReasonCode::StaleInProgressBead,
+    ) {
+        return ResourceAdmissionDecision::Queue;
+    }
     if estimated_cost_class == ResourceCostClass::SwarmHeavy
         && matches!(
             level,
@@ -1082,12 +1090,7 @@ fn queue_pressure_backoff_decision(
     {
         return ResourceAdmissionDecision::SplitWorkload;
     }
-    if level == ResourceQueuePressureLevel::Saturated
-        || has_queue_pressure_reason(
-            contributing_reasons,
-            ResourceQueuePressureReasonCode::StaleInProgressBead,
-        )
-    {
+    if level == ResourceQueuePressureLevel::Saturated {
         return ResourceAdmissionDecision::Queue;
     }
     if level == ResourceQueuePressureLevel::Moderate
@@ -1129,11 +1132,22 @@ fn queue_pressure_blockers(contributing_reasons: &[String]) -> Vec<String> {
     blocked_by
 }
 
-fn queue_pressure_next_safe_action(decision: ResourceAdmissionDecision) -> &'static str {
+fn queue_pressure_next_safe_action(
+    decision: ResourceAdmissionDecision,
+    contributing_reasons: &[String],
+) -> &'static str {
     match decision {
         ResourceAdmissionDecision::Admit => "continue_with_existing_claim_gate",
         ResourceAdmissionDecision::DegradeToLean => {
             "ee pack <task> --resource-profile constrained --json"
+        }
+        ResourceAdmissionDecision::Queue
+            if has_queue_pressure_reason(
+                contributing_reasons,
+                ResourceQueuePressureReasonCode::StaleInProgressBead,
+            ) =>
+        {
+            "message_in_progress_holder_then_refresh_swarm_brief"
         }
         ResourceAdmissionDecision::Queue => "wait_for_lane_capacity_then_refresh_swarm_brief",
         ResourceAdmissionDecision::WaitForRch => "rch status --json",
@@ -1149,10 +1163,21 @@ fn queue_pressure_next_safe_action(decision: ResourceAdmissionDecision) -> &'sta
     }
 }
 
-fn queue_pressure_what_would_change(decision: ResourceAdmissionDecision) -> &'static str {
+fn queue_pressure_what_would_change(
+    decision: ResourceAdmissionDecision,
+    contributing_reasons: &[String],
+) -> &'static str {
     match decision {
         ResourceAdmissionDecision::Admit => "stronger_pressure_evidence_appears",
         ResourceAdmissionDecision::DegradeToLean => "output_budget_or_checkout_pressure_clears",
+        ResourceAdmissionDecision::Queue
+            if has_queue_pressure_reason(
+                contributing_reasons,
+                ResourceQueuePressureReasonCode::StaleInProgressBead,
+            ) =>
+        {
+            "stale_in_progress_owner_updates_or_releases_claim"
+        }
         ResourceAdmissionDecision::Queue => "queue_pressure_drops_below_saturated",
         ResourceAdmissionDecision::WaitForRch => "rch_lane_has_capacity_and_fresh_telemetry",
         ResourceAdmissionDecision::SplitWorkload => "workload_becomes_standard_or_narrower",
@@ -3419,6 +3444,35 @@ mod tests {
             ResourceAdmissionDecision::WaitForRch
         );
         assert_eq!(rch_wins_over_split.primary_reason, "rch_telemetry_gap");
+    }
+
+    #[test]
+    fn queue_pressure_backoff_queues_stale_in_progress_before_splitting() {
+        let advice = evaluate_resource_queue_pressure_backoff(&backoff_input(
+            ResourceQueuePressureLevel::Moderate,
+            &["output_budget_pressure", "stale_in_progress_bead"],
+            ResourceCostClass::SwarmHeavy,
+            false,
+        ));
+
+        assert_eq!(advice.decision, ResourceAdmissionDecision::Queue);
+        assert_eq!(advice.primary_reason, "stale_in_progress_bead");
+        assert_eq!(
+            advice.contributing_reasons,
+            vec!["stale_in_progress_bead", "output_budget_pressure"]
+        );
+        assert_eq!(
+            advice.blocked_by,
+            vec!["beads_in_progress", "claim_gate_authority"]
+        );
+        assert_eq!(
+            advice.next_safe_action,
+            "message_in_progress_holder_then_refresh_swarm_brief"
+        );
+        assert_eq!(
+            advice.what_would_change,
+            "stale_in_progress_owner_updates_or_releases_claim"
+        );
     }
 
     #[test]
