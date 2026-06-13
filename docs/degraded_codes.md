@@ -3430,36 +3430,6 @@ Historical ee.daemon.context RPC sent over the UDS socket before bd-16pwc.1; cur
 
 ---
 
-## `daemon_background_mode_unimplemented`
-
-**Severity:** low
-
-**Surfaces:** daemon
-
-**Introduced by:** bd-17c65.10.6 (epic J)
-
-**Trigger.** Daemon status reporting explains that only bounded foreground daemon mode exists today.
-
-**Setup.**
-
-```bash
-none
-```
-
-**Invocation.**
-
-```bash
-ee daemon --json
-```
-
-**Expected emission.** Message contains: `Only bounded foreground daemon mode`
-
-**Repair hint.** `ee daemon --foreground`
-
-**Fixture.** [`tests/fixtures/failure_modes/daemon_background_mode_unimplemented.json`](../tests/fixtures/failure_modes/daemon_background_mode_unimplemented.json)
-
----
-
 ## `daemon_handler_panic`
 
 **Severity:** high

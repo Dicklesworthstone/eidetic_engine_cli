@@ -3797,12 +3797,6 @@ fn daemon_foreground_runs_real_health_job_without_unavailable_sentinel() -> Test
         "daemon foreground build-time gap is not logged as response degradation",
     )?;
     ensure_json_pointer(
-        &result.parsed,
-        "/data/capabilityGap/code",
-        json!("daemon_background_mode_unimplemented"),
-        "daemon foreground capability gap code",
-    )?;
-    ensure_json_pointer(
         &log_json,
         "/repairCommand",
         json!(null),
