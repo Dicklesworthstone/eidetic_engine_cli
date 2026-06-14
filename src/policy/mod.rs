@@ -2908,11 +2908,27 @@ fn redact_regex_matches(
 }
 
 fn normalize_for_instruction_detection(content: &str) -> String {
-    content
-        .to_ascii_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut normalized = String::with_capacity(content.len());
+    let mut previous_was_space = true;
+    for ch in content.chars() {
+        if ch.is_whitespace() || is_instruction_invisible_separator(ch) {
+            if !previous_was_space {
+                normalized.push(' ');
+                previous_was_space = true;
+            }
+            continue;
+        }
+        normalized.push(ch.to_ascii_lowercase());
+        previous_was_space = false;
+    }
+    normalized.trim().to_owned()
+}
+
+fn is_instruction_invisible_separator(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{00ad}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}'
+    )
 }
 
 fn add_role_markup_signals(normalized: &str, signals: &mut Vec<InstructionSignalMatch>) {
