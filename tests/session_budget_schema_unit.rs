@@ -1,8 +1,8 @@
 //! bd-1clqr.1: structural contract for `ee.session_budget.v1`.
 //!
-//! This pins the opt-in session budget ledger row before the recording path
-//! lands in bd-1clqr.2. The schema and fixtures are the implementation
-//! contract for later low-overhead recording and planner work.
+//! This pins the opt-in session budget ledger row and the bd-1clqr.2 recording
+//! path contract. The schema and fixtures are the implementation contract for
+//! low-overhead recording and later planner work.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -95,8 +95,15 @@ fn session_budget_schema_identity_status_and_registry_are_pinned() -> TestResult
         schema
             .pointer("/x-ee-status/shipped")
             .and_then(Value::as_bool)
-            == Some(false),
-        "schema must stay unshipped until bd-1clqr.2 lands the recorder",
+            == Some(true),
+        "schema must be marked shipped once bd-1clqr.2 lands the recorder",
+    )?;
+    ensure(
+        schema
+            .pointer("/x-ee-status/emitter")
+            .and_then(Value::as_str)
+            == Some("core_session_budget_recorder"),
+        "schema emitter must identify the recorder implementation",
     )?;
     ensure(
         schema

@@ -70,9 +70,9 @@
     }
   },
   "x-ee-status": {
-    "shipped": false,
+    "shipped": true,
     "tracking_bead": "bd-1clqr.2",
-    "emitter": "pending_low_overhead_ledger_recording_path"
+    "emitter": "core_session_budget_recorder"
   },
   "$defs": {
     "optIn": {

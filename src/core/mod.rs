@@ -111,6 +111,7 @@ pub mod rule;
 pub mod sandbox;
 pub mod search;
 pub mod sentinel;
+pub mod session_budget;
 pub mod singleflight;
 pub mod situation;
 pub mod source_run;

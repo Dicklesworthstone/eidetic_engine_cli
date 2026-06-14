@@ -1,6 +1,6 @@
 # ADR 0073: Session Budget Ledger and Cost Planner Substrate
 
-Status: proposed
+Status: accepted
 Date: 2026-06-14
 Bead: bd-1clqr.1 (epic bd-1clqr, 2026-06 idea-wizard wave)
 
@@ -26,9 +26,9 @@ memory bodies, mail bodies, private absolute paths, secrets, or prompt text.
 
 `ee.session_budget.v1` is the ledger-row contract:
 [`docs/schemas/ee.session_budget.v1.json`](../schemas/ee.session_budget.v1.json).
-The schema is marked `x-ee-status.shipped = false` until bd-1clqr.2 lands the
-recording path. The schema itself is the stable contract for later recording,
-retention, and planner work.
+The schema is marked `x-ee-status.shipped = true` by bd-1clqr.2, with
+`core_session_budget_recorder` as the first emitter. The schema itself is the
+stable contract for recording, retention, and planner work.
 
 Each row includes:
 
@@ -63,16 +63,22 @@ The row is `paths_counts_hashes_no_content` by construction:
 
 ### 3. Opt-in and zero-overhead disabled path
 
-The recorder in bd-1clqr.2 must be explicitly enabled by CLI flag, environment,
-or config. When disabled, it must avoid estimator, queue, ledger, and retention
-work. This ADR does not introduce any always-on measurement path.
+The recorder in bd-1clqr.2 is explicitly enabled by constructing
+`SessionBudgetRecorder::enabled` with a bounded local ledger path and an opt-in
+source (`cli_flag`, `env`, `config`, or `test_fixture`). When disabled,
+`SessionBudgetRecorder::disabled().record_with(...)` returns before invoking
+the estimator closure, so the ordinary command path avoids estimator, queue,
+ledger, and retention work. This ADR does not introduce any always-on
+measurement path.
 
 ### 4. Retention
 
 The ledger is bounded per workspace. The row carries the retention policy that
 was active when it was recorded: `maxRowsPerWorkspace`, `maxAgeDays`, and
-`evictedRows`. The recording path may evict old rows, but it must not silently
-mutate memory records or derived search/graph assets.
+`evictedRows`. The recording path prunes expired rows and drops oldest rows
+when appending would exceed the configured row cap. It mutates only the
+configured local JSONL ledger file; it does not silently mutate memory records
+or derived search/graph assets.
 
 ### 5. Planner handoff
 
@@ -118,8 +124,9 @@ RCH-blocked proof, and Agent Mail degraded coordination.
 - `tests/session_budget_schema_unit.rs` pins the schema identity, known-schema
   registration, required field sets, privacy consts, enum-backed examples, and
   deterministic fixture parse/serialize behavior.
-- bd-1clqr.2 adds recorder unit tests proving the disabled path avoids ledger
-  work, enabled recording writes bounded rows, and retention prevents unbounded
-  growth.
+- `src/core/session_budget.rs` adds recorder unit tests proving the disabled
+  path avoids estimator and ledger work, enabled recording writes bounded
+  schema-shaped rows, and retention prevents unbounded growth by row count and
+  age.
 - bd-1clqr.3 adds planner tests proving deterministic recommendations,
   explainable fallbacks, and local-Cargo refusal.
