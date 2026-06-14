@@ -1,0 +1,357 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.harness_conformance.v1.json",
+  "title": "ee.harness_conformance.v1",
+  "description": "Redaction-safe harness conformance fixture contract for hook-event and transcript simulation. ADR 0075.",
+  "type": "object",
+  "required": [
+    "schema",
+    "fixtureVersion",
+    "caseId",
+    "harness",
+    "fixtureKind",
+    "eventName",
+    "harnessSupport",
+    "input",
+    "expected",
+    "assertions",
+    "artifactPolicy",
+    "compatibility"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.harness_conformance.v1"
+    },
+    "fixtureVersion": {
+      "type": "string",
+      "description": "Major version 1, minor increments are additive fixture-only changes.",
+      "pattern": "^1\\.[0-9]+$"
+    },
+    "caseId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]{2,96}$"
+    },
+    "harness": {
+      "$ref": "#/$defs/harnessId"
+    },
+    "fixtureKind": {
+      "$ref": "#/$defs/fixtureKind"
+    },
+    "eventName": {
+      "$ref": "#/$defs/eventName"
+    },
+    "harnessSupport": {
+      "$ref": "#/$defs/harnessSupport"
+    },
+    "input": {
+      "$ref": "#/$defs/input"
+    },
+    "expected": {
+      "$ref": "#/$defs/expected"
+    },
+    "assertions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/assertion"
+      }
+    },
+    "artifactPolicy": {
+      "$ref": "#/$defs/artifactPolicy"
+    },
+    "compatibility": {
+      "$ref": "#/$defs/compatibility"
+    }
+  },
+  "$defs": {
+    "harnessId": {
+      "type": "string",
+      "enum": ["codex", "claude-code", "generic-shell", "mcp-client"]
+    },
+    "fixtureKind": {
+      "type": "string",
+      "enum": [
+        "session_start",
+        "pre_tool_edit",
+        "pre_tool_shell",
+        "post_tool_success",
+        "post_tool_failure",
+        "compaction_resume"
+      ]
+    },
+    "eventName": {
+      "type": "string",
+      "enum": ["SessionStart", "PreToolUse", "PostToolUse", "CompactionResume"]
+    },
+    "transport": {
+      "type": "string",
+      "enum": ["hook_json", "shell_env", "mcp_json_rpc"]
+    },
+    "supportLevel": {
+      "type": "string",
+      "enum": ["supported", "adapter", "unsupported"]
+    },
+    "payloadShape": {
+      "type": "string",
+      "enum": [
+        "codex_hook_json",
+        "claude_code_hook_json",
+        "generic_shell_event",
+        "mcp_json_rpc_notification"
+      ]
+    },
+    "conformanceVerdict": {
+      "type": "string",
+      "enum": ["pass", "fail", "blocked", "unsupported"]
+    },
+    "assertionStatus": {
+      "type": "string",
+      "enum": ["pass", "fail", "not_applicable"]
+    },
+    "assertionKind": {
+      "type": "string",
+      "enum": [
+        "command_invoked",
+        "json_envelope_valid",
+        "output_budget_respected",
+        "degraded_handled",
+        "secret_redaction",
+        "non_zero_exit_policy",
+        "no_local_cargo_fallback"
+      ]
+    },
+    "eventOutcome": {
+      "type": "string",
+      "enum": ["success", "failure", "not_applicable"]
+    },
+    "exitPolicy": {
+      "type": "string",
+      "enum": [
+        "zero_required",
+        "non_zero_allowed",
+        "non_zero_required",
+        "not_applicable"
+      ]
+    },
+    "degradedPolicy": {
+      "type": "string",
+      "enum": [
+        "must_absorb",
+        "must_emit",
+        "must_fail_closed",
+        "not_applicable"
+      ]
+    },
+    "harnessSupport": {
+      "type": "object",
+      "required": ["harness", "supportLevel", "transport", "events", "installSurface"],
+      "additionalProperties": false,
+      "properties": {
+        "harness": {
+          "$ref": "#/$defs/harnessId"
+        },
+        "supportLevel": {
+          "$ref": "#/$defs/supportLevel"
+        },
+        "transport": {
+          "$ref": "#/$defs/transport"
+        },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/eventName"
+          },
+          "uniqueItems": true
+        },
+        "installSurface": {
+          "type": "string",
+          "maxLength": 160
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "required": ["redactionStatus", "payloadShape", "commandTemplate", "transcript"],
+      "additionalProperties": false,
+      "properties": {
+        "redactionStatus": {
+          "type": "string",
+          "const": "redacted_bounded_no_secrets"
+        },
+        "payloadShape": {
+          "$ref": "#/$defs/payloadShape"
+        },
+        "commandTemplate": {
+          "type": ["string", "null"],
+          "maxLength": 200
+        },
+        "transcript": {
+          "$ref": "#/$defs/transcript"
+        }
+      }
+    },
+    "transcript": {
+      "type": "object",
+      "required": ["kind", "lineCount", "byteCount", "maxLineBytes", "lines"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["none", "redacted_excerpt", "synthetic"]
+        },
+        "lineCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "byteCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8192
+        },
+        "maxLineBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256
+        },
+        "lines": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 256
+          }
+        }
+      }
+    },
+    "expected": {
+      "type": "object",
+      "required": [
+        "conformanceVerdict",
+        "eventOutcome",
+        "exitPolicy",
+        "degradedPolicy",
+        "outputBudgetBytes",
+        "localCargoFallbackAllowed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "conformanceVerdict": {
+          "$ref": "#/$defs/conformanceVerdict"
+        },
+        "eventOutcome": {
+          "$ref": "#/$defs/eventOutcome"
+        },
+        "exitPolicy": {
+          "$ref": "#/$defs/exitPolicy"
+        },
+        "degradedPolicy": {
+          "$ref": "#/$defs/degradedPolicy"
+        },
+        "outputBudgetBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        },
+        "localCargoFallbackAllowed": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    },
+    "assertion": {
+      "type": "object",
+      "required": ["kind", "expectedStatus", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/assertionKind"
+        },
+        "expectedStatus": {
+          "$ref": "#/$defs/assertionStatus"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        }
+      }
+    },
+    "artifactPolicy": {
+      "type": "object",
+      "required": [
+        "rawTranscriptAllowed",
+        "secretMaterialAllowed",
+        "inlineTranscriptMaxBytes",
+        "maxArtifactBytes",
+        "allowedArtifactKinds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "rawTranscriptAllowed": {
+          "type": "boolean",
+          "const": false
+        },
+        "secretMaterialAllowed": {
+          "type": "boolean",
+          "const": false
+        },
+        "inlineTranscriptMaxBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8192
+        },
+        "maxArtifactBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "allowedArtifactKinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "redacted_json_event",
+              "redacted_transcript_excerpt",
+              "summary_only",
+              "none"
+            ]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "required": ["contractMajor", "fixtureVersionPolicy", "compatibleWith"],
+      "additionalProperties": false,
+      "properties": {
+        "contractMajor": {
+          "type": "integer",
+          "const": 1
+        },
+        "fixtureVersionPolicy": {
+          "type": "string",
+          "const": "additive_minor_required"
+        },
+        "compatibleWith": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "const": "ee.harness_conformance.v1"
+          },
+          "uniqueItems": true
+        }
+      }
+    }
+  },
+  "x-ee-status": {
+    "shipped": false,
+    "available_in_build": false,
+    "tracking_bead": "bd-i0iiw.2"
+  }
+}

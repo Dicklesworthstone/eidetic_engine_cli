@@ -1,0 +1,72 @@
+{
+  "schema": "ee.harness_conformance.v1",
+  "fixtureVersion": "1.0",
+  "caseId": "generic_shell.pre_tool_shell.no_local_cargo",
+  "harness": "generic-shell",
+  "fixtureKind": "pre_tool_shell",
+  "eventName": "PreToolUse",
+  "harnessSupport": {
+    "harness": "generic-shell",
+    "supportLevel": "adapter",
+    "transport": "shell_env",
+    "events": ["PreToolUse", "PostToolUse"],
+    "installSurface": "manual shell wrapper"
+  },
+  "input": {
+    "redactionStatus": "redacted_bounded_no_secrets",
+    "payloadShape": "generic_shell_event",
+    "commandTemplate": "cargo test --lib",
+    "transcript": {
+      "kind": "synthetic",
+      "lineCount": 2,
+      "byteCount": 112,
+      "maxLineBytes": 96,
+      "lines": [
+        "PreToolUse shell command template cargo test --lib",
+        "RCH remote-only policy is active; local Cargo fallback must fail closed"
+      ]
+    }
+  },
+  "expected": {
+    "conformanceVerdict": "pass",
+    "eventOutcome": "not_applicable",
+    "exitPolicy": "non_zero_required",
+    "degradedPolicy": "must_fail_closed",
+    "outputBudgetBytes": 2048,
+    "localCargoFallbackAllowed": false
+  },
+  "assertions": [
+    {
+      "kind": "command_invoked",
+      "expectedStatus": "pass",
+      "message": "The shell pre-tool adapter receives the command template."
+    },
+    {
+      "kind": "no_local_cargo_fallback",
+      "expectedStatus": "pass",
+      "message": "Local Cargo fallback is denied and reported as a closed gate."
+    },
+    {
+      "kind": "non_zero_exit_policy",
+      "expectedStatus": "pass",
+      "message": "The denial path is allowed to return non-zero."
+    },
+    {
+      "kind": "degraded_handled",
+      "expectedStatus": "pass",
+      "message": "The response reports the RCH-only degradation instead of silently running Cargo."
+    }
+  ],
+  "artifactPolicy": {
+    "rawTranscriptAllowed": false,
+    "secretMaterialAllowed": false,
+    "inlineTranscriptMaxBytes": 2048,
+    "maxArtifactBytes": 8192,
+    "allowedArtifactKinds": ["redacted_transcript_excerpt", "summary_only"]
+  },
+  "compatibility": {
+    "contractMajor": 1,
+    "fixtureVersionPolicy": "additive_minor_required",
+    "compatibleWith": ["ee.harness_conformance.v1"]
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "schema": "ee.harness_conformance.v1",
+  "fixtureVersion": "1.0",
+  "caseId": "codex.session_start.context_pack",
+  "harness": "codex",
+  "fixtureKind": "session_start",
+  "eventName": "SessionStart",
+  "harnessSupport": {
+    "harness": "codex",
+    "supportLevel": "supported",
+    "transport": "hook_json",
+    "events": ["SessionStart", "PreToolUse", "PostToolUse", "CompactionResume"],
+    "installSurface": "ee hook harness install --harness codex"
+  },
+  "input": {
+    "redactionStatus": "redacted_bounded_no_secrets",
+    "payloadShape": "codex_hook_json",
+    "commandTemplate": null,
+    "transcript": {
+      "kind": "synthetic",
+      "lineCount": 1,
+      "byteCount": 50,
+      "maxLineBytes": 80,
+      "lines": ["SessionStart for workspace <workspace-hash:d37f1e828e51>"]
+    }
+  },
+  "expected": {
+    "conformanceVerdict": "pass",
+    "eventOutcome": "not_applicable",
+    "exitPolicy": "zero_required",
+    "degradedPolicy": "not_applicable",
+    "outputBudgetBytes": 2048,
+    "localCargoFallbackAllowed": false
+  },
+  "assertions": [
+    {
+      "kind": "json_envelope_valid",
+      "expectedStatus": "pass",
+      "message": "SessionStart response uses ee.response.v2 or ee.error.v2."
+    },
+    {
+      "kind": "output_budget_respected",
+      "expectedStatus": "pass",
+      "message": "SessionStart context stays inside the 2048 byte budget."
+    },
+    {
+      "kind": "secret_redaction",
+      "expectedStatus": "pass",
+      "message": "Workspace identity is hashed and no private path appears."
+    }
+  ],
+  "artifactPolicy": {
+    "rawTranscriptAllowed": false,
+    "secretMaterialAllowed": false,
+    "inlineTranscriptMaxBytes": 1024,
+    "maxArtifactBytes": 4096,
+    "allowedArtifactKinds": ["redacted_json_event", "summary_only"]
+  },
+  "compatibility": {
+    "contractMajor": 1,
+    "fixtureVersionPolicy": "additive_minor_required",
+    "compatibleWith": ["ee.harness_conformance.v1"]
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "schema": "ee.harness_conformance.v1",
+  "fixtureVersion": "1.0",
+  "caseId": "claude_code.pre_tool_edit.redaction",
+  "harness": "claude-code",
+  "fixtureKind": "pre_tool_edit",
+  "eventName": "PreToolUse",
+  "harnessSupport": {
+    "harness": "claude-code",
+    "supportLevel": "supported",
+    "transport": "hook_json",
+    "events": ["SessionStart", "PreToolUse", "PostToolUse", "CompactionResume"],
+    "installSurface": "ee hook harness install --harness claude-code"
+  },
+  "input": {
+    "redactionStatus": "redacted_bounded_no_secrets",
+    "payloadShape": "claude_code_hook_json",
+    "commandTemplate": "edit src/lib.rs",
+    "transcript": {
+      "kind": "redacted_excerpt",
+      "lineCount": 2,
+      "byteCount": 107,
+      "maxLineBytes": 80,
+      "lines": [
+        "PreToolUse edit target src/lib.rs",
+        "suppressed credential literal [REDACTED:secret]"
+      ]
+    }
+  },
+  "expected": {
+    "conformanceVerdict": "pass",
+    "eventOutcome": "not_applicable",
+    "exitPolicy": "zero_required",
+    "degradedPolicy": "must_absorb",
+    "outputBudgetBytes": 2048,
+    "localCargoFallbackAllowed": false
+  },
+  "assertions": [
+    {
+      "kind": "command_invoked",
+      "expectedStatus": "pass",
+      "message": "The hook command is invoked for edit intents."
+    },
+    {
+      "kind": "json_envelope_valid",
+      "expectedStatus": "pass",
+      "message": "Hook output parses as a stable machine envelope."
+    },
+    {
+      "kind": "secret_redaction",
+      "expectedStatus": "pass",
+      "message": "Secret-like content is represented only by redaction markers."
+    },
+    {
+      "kind": "output_budget_respected",
+      "expectedStatus": "pass",
+      "message": "The bounded edit response fits the fixture budget."
+    }
+  ],
+  "artifactPolicy": {
+    "rawTranscriptAllowed": false,
+    "secretMaterialAllowed": false,
+    "inlineTranscriptMaxBytes": 2048,
+    "maxArtifactBytes": 8192,
+    "allowedArtifactKinds": ["redacted_json_event", "redacted_transcript_excerpt"]
+  },
+  "compatibility": {
+    "contractMajor": 1,
+    "fixtureVersionPolicy": "additive_minor_required",
+    "compatibleWith": ["ee.harness_conformance.v1"]
+  }
+}
