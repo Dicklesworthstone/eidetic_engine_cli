@@ -6539,6 +6539,21 @@ ON CONFLICT(workspace_id) DO UPDATE SET
     "blake3:v080_workspace_generation_floor_rebuild_2026_06_14",
 );
 
+/// V081: Cover the audit timeline workspace filter and timestamp ordering.
+///
+/// `list_audit_entries(Some(workspace_id), Some(limit))` is a budgeted hot read
+/// (`ee_audit_query`) that filters by workspace and orders by newest audit row.
+/// The older single-column workspace index still required a temp B-tree sort.
+pub const V081_AUDIT_LOG_WORKSPACE_TIMELINE_INDEX: Migration = Migration::new(
+    81,
+    "audit_log_workspace_timeline_index",
+    r#"
+CREATE INDEX IF NOT EXISTS idx_audit_log_workspace_timeline
+    ON audit_log(workspace_id, timestamp DESC, id);
+"#,
+    "blake3:v081_audit_log_workspace_timeline_index_2026_06_14",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -6621,6 +6636,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V078_PACK_BASELINES,
     V079_SITUATION_RECORDS,
     V080_WORKSPACE_GENERATION_FLOOR_REBUILD,
+    V081_AUDIT_LOG_WORKSPACE_TIMELINE_INDEX,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {

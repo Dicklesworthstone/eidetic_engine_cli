@@ -1828,6 +1828,7 @@ mod tests {
 
     const CRITICAL_SCHEMA_INDEXES: &[&str] = &[
         "idx_audit_log_chain",
+        "idx_audit_log_workspace_timeline",
         "idx_ee_advisory_locks_holder",
         "idx_ee_wal_holds_episode",
         "idx_ee_wal_holds_workspace_expires",
