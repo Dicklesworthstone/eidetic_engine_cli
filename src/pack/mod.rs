@@ -3847,15 +3847,31 @@ impl ContextResponseData {
     pub fn advisory_banner(&self) -> PackAdvisoryBanner {
         context_advisory_banner(&self.pack, &self.degraded)
     }
+
+    #[must_use]
+    pub(crate) fn advisory_banner_for_degraded(
+        &self,
+        degraded: &[ContextResponseDegradation],
+    ) -> PackAdvisoryBanner {
+        context_advisory_banner(&self.pack, degraded)
+    }
 }
 
 /// Render a context response as the canonical Markdown prompt fragment.
 #[must_use]
 pub fn render_context_response_markdown(response: &ContextResponse) -> String {
+    render_context_response_markdown_with_degraded(response, &response.data.degraded)
+}
+
+#[must_use]
+pub(crate) fn render_context_response_markdown_with_degraded(
+    response: &ContextResponse,
+    degraded: &[ContextResponseDegradation],
+) -> String {
     let mut body = render_context_markdown_with_analysis(
         &response.data.request,
         &response.data.pack,
-        &response.data.degraded,
+        degraded,
         &response.data.consensus,
         &response.data.conflicts,
         response.data.coordination.as_ref(),

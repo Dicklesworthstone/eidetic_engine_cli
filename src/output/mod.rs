@@ -2414,8 +2414,7 @@ pub fn render_context_response_json_with_options(
                     build_pack_assembly_slo(slo_obj, slo);
                 });
             }
-            let advisory_response = context_response_with_aggregated_degraded(response);
-            let advisory_banner = advisory_response.data.advisory_banner();
+            let advisory_banner = context_advisory_banner_with_aggregated_degraded(response);
             pack.field_object("advisoryBanner", |banner| {
                 build_pack_advisory_banner(banner, &advisory_banner);
             });
@@ -2480,13 +2479,9 @@ pub fn render_context_response_json_with_options(
                 .iter()
                 .map(|s| (s.rank, s))
                 .collect();
-            let footer_for_lookup = response.data.pack.provenance_footer();
+            let footer = response.data.pack.provenance_footer();
             let footer_by_rank: std::collections::BTreeMap<u32, &PackItemProvenance> =
-                footer_for_lookup
-                    .entries
-                    .iter()
-                    .map(|e| (e.rank, e))
-                    .collect();
+                footer.entries.iter().map(|e| (e.rank, e)).collect();
             pack.field_array_of_objects("items", &response.data.pack.items, |obj, item| {
                 obj.field_u32("rank", item.rank);
                 obj.field_str("memoryId", &item.memory_id.to_string());
@@ -2616,7 +2611,6 @@ pub fn render_context_response_json_with_options(
                     build_pack_skipped_item(obj, omission);
                 });
             }
-            let footer = response.data.pack.provenance_footer();
             // Bead bd-2pe1z (A1 phase 2): drop provenanceFooter.entries[]. Each
             // entry's sourceIndex is now emitted inline on the matching
             // items[] entry (A1 phase 1). The summary fields (memoryCount,
@@ -2717,8 +2711,7 @@ pub fn render_context_response_human(response: &ContextResponse) -> String {
         context_pack_hash(response)
     ));
 
-    let advisory_response = context_response_with_aggregated_degraded(response);
-    let advisory_banner = advisory_response.data.advisory_banner();
+    let advisory_banner = context_advisory_banner_with_aggregated_degraded(response);
     output.push_str(&format!(
         "Advisory: {} — {}\n\n",
         advisory_banner.status.as_str(),
@@ -2915,9 +2908,10 @@ pub fn render_context_response_mermaid(response: &ContextResponse) -> String {
 /// pack section, with provenance and why explanations preserved.
 #[must_use]
 pub fn render_context_response_markdown(response: &ContextResponse) -> String {
-    let aggregated_response = context_response_with_aggregated_degraded(response);
-    let mut markdown = crate::pack::render_context_response_markdown(&aggregated_response);
-    if let Some(pack_dna) = &aggregated_response.data.pack_dna {
+    let degraded = aggregate_context_degraded_as_response(response.data.degraded.iter());
+    let mut markdown =
+        crate::pack::render_context_response_markdown_with_degraded(response, &degraded);
+    if let Some(pack_dna) = &response.data.pack_dna {
         insert_context_pack_dna_markdown(&mut markdown, pack_dna);
     }
     markdown
@@ -2937,11 +2931,11 @@ fn context_pack_hash(response: &ContextResponse) -> &str {
     response.data.pack.hash.as_deref().unwrap_or("absent")
 }
 
-fn context_response_with_aggregated_degraded(response: &ContextResponse) -> ContextResponse {
-    let mut aggregated_response = response.clone();
-    aggregated_response.data.degraded =
-        aggregate_context_degraded_as_response(response.data.degraded.iter());
-    aggregated_response
+fn context_advisory_banner_with_aggregated_degraded(
+    response: &ContextResponse,
+) -> PackAdvisoryBanner {
+    let degraded = aggregate_context_degraded_as_response(response.data.degraded.iter());
+    response.data.advisory_banner_for_degraded(&degraded)
 }
 
 fn aggregate_context_degraded<'a, I>(degraded: I) -> Vec<AggregatedDegradation>
@@ -19844,10 +19838,9 @@ mod tests {
             .map_err(|error| format!("degradation rejected: {error:?}"))?,
         );
 
-        let aggregated = super::context_response_with_aggregated_degraded(&response);
+        let aggregated =
+            super::aggregate_context_degraded_as_response(response.data.degraded.iter());
         let severity = aggregated
-            .data
-            .degraded
             .iter()
             .find(|entry| entry.code == "embed_model_unavailable")
             .map(|entry| entry.severity);
@@ -19872,10 +19865,9 @@ mod tests {
             .map_err(|error| format!("degradation rejected: {error:?}"))?,
         );
 
-        let aggregated = super::context_response_with_aggregated_degraded(&response);
+        let aggregated =
+            super::aggregate_context_degraded_as_response(response.data.degraded.iter());
         let severity = aggregated
-            .data
-            .degraded
             .iter()
             .find(|entry| entry.code == "mesh_cursor_repair_required")
             .map(|entry| entry.severity);
