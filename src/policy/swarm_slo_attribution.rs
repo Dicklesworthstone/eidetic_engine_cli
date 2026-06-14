@@ -229,12 +229,24 @@ fn producer_key_needs_redaction(producer: &NormalizedProducerId) -> bool {
     ) {
         return true;
     }
-    let content_redaction = redact_secret_like_content(&producer.canonical);
-    let path_report =
-        workspace_secret_risk_evidence("producer_id", Some(producer.canonical.as_bytes()), 4096);
-    content_redaction.redacted
-        || path_report.secret_risk
+
+    producer_fragment_has_secret_material(&producer.original)
+        || producer_fragment_has_secret_material(&producer.canonical)
+        || workflow_producer_original_needs_redaction(producer)
         || !is_public_producer_key(&producer.canonical)
+}
+
+fn producer_fragment_has_secret_material(value: &str) -> bool {
+    let content_redaction = redact_secret_like_content(value);
+    let path_report = workspace_secret_risk_evidence("producer_id", Some(value.as_bytes()), 4096);
+    content_redaction.redacted || path_report.secret_risk
+}
+
+fn workflow_producer_original_needs_redaction(producer: &NormalizedProducerId) -> bool {
+    matches!(
+        producer.kind,
+        ProducerIdKind::ReflectionContext | ProducerIdKind::Workflow
+    ) && !is_public_producer_key(&producer.original)
 }
 
 fn redact_evidence(evidence: &[(&str, &str)]) -> Vec<SwarmSloRedactedEvidence> {
@@ -553,6 +565,35 @@ mod tests {
         assert!(event.producer.attribution_key.starts_with("human:blake3:"));
         let json = serde_json::to_string(&event).expect("coordination event serializes");
         assert!(!json.contains("person@example.test"));
+    }
+
+    #[test]
+    fn workflow_producer_url_credentials_are_hashed_not_leaked() {
+        let event = adapt_swarm_slo_resource_usage_event(&SwarmSloResourceUsageInput {
+            producer_id: "https://agent:redaction-password@example.test/run",
+            source: "pack",
+            stage: "render",
+            posture: SwarmSloPosture::Ok,
+            elapsed_ms: 1,
+            cpu_ms: None,
+            memory_bytes: None,
+            io_read_bytes: None,
+            io_write_bytes: None,
+            evidence: &[],
+        });
+
+        assert_eq!(event.producer.kind, "workflow");
+        assert!(event.producer.redacted);
+        assert!(
+            event
+                .producer
+                .attribution_key
+                .starts_with("workflow:blake3:")
+        );
+        let json = serde_json::to_string(&event).expect("resource event serializes");
+        assert!(!json.contains("redaction-password"));
+        assert!(!json.contains("agent:redaction"));
+        assert!(!json.contains("example.test/run"));
     }
 
     #[test]

@@ -1328,8 +1328,22 @@ const INSTRUCTION_PATTERNS: &[InstructionPattern] = &[
         weight: 0.75,
     },
     InstructionPattern {
+        code: "ignore_all_previous_instructions",
+        phrase: "ignore all previous instructions",
+        kind: InstructionSignalKind::RoleOverride,
+        risk: InstructionRisk::High,
+        weight: 0.75,
+    },
+    InstructionPattern {
         code: "disregard_previous_instructions",
         phrase: "disregard previous instructions",
+        kind: InstructionSignalKind::RoleOverride,
+        risk: InstructionRisk::High,
+        weight: 0.75,
+    },
+    InstructionPattern {
+        code: "disregard_all_previous_instructions",
+        phrase: "disregard all previous instructions",
         kind: InstructionSignalKind::RoleOverride,
         risk: InstructionRisk::High,
         weight: 0.75,
@@ -1956,6 +1970,9 @@ fn secret_value_range(
         return None;
     }
     cursor = skip_ascii_spaces(input, cursor);
+    if matches!(separator, b'=' | b':') && starts_with_line_break(input, cursor) {
+        cursor = skip_multiline_secret_value_prefix(input, cursor)?;
+    }
     if cursor >= input.len() {
         return None;
     }
@@ -2021,6 +2038,35 @@ fn skip_ascii_spaces(input: &str, mut cursor: usize) -> usize {
         cursor += 1;
     }
     cursor
+}
+
+fn starts_with_line_break(input: &str, cursor: usize) -> bool {
+    matches!(input.as_bytes().get(cursor), Some(b'\n' | b'\r'))
+}
+
+fn skip_multiline_secret_value_prefix(input: &str, mut cursor: usize) -> Option<usize> {
+    let mut saw_line_break = false;
+    while cursor < input.len() {
+        match input.as_bytes().get(cursor).copied() {
+            Some(b'\r') => {
+                saw_line_break = true;
+                cursor += 1;
+                if matches!(input.as_bytes().get(cursor), Some(b'\n')) {
+                    cursor += 1;
+                }
+            }
+            Some(b'\n') => {
+                saw_line_break = true;
+                cursor += 1;
+            }
+            Some(b' ' | b'\t') => {
+                cursor += 1;
+            }
+            Some(_) => break,
+            None => break,
+        }
+    }
+    (saw_line_break && cursor < input.len()).then_some(cursor)
 }
 
 fn redact_url_passwords(input: &str, reasons: &mut Vec<&'static str>) -> (String, bool) {
