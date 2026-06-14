@@ -122,7 +122,7 @@ fn instruction_detector_flags_zero_width_separator_variants() {
         report
             .rejected_reasons
             .iter()
-            .any(|reason| reason == "ignore_previous_instructions"),
+            .any(|reason| *reason == "ignore_previous_instructions"),
         "{report:?}"
     );
 }
