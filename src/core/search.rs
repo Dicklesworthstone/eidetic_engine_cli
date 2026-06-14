@@ -13,8 +13,8 @@ use crate::core::why::{DedupLinkEvidence, find_embed_dedup_link};
 #[cfg(test)]
 use crate::db::generate_audit_id_seeded;
 use crate::db::{
-    CreateAuditInput, DbConnection, StoredFeedbackEvent, StoredMemory, audit_actions,
-    generate_audit_id,
+    CreateAuditInput, DbConnection, FeedbackEventsFingerprint, StoredFeedbackEvent, StoredMemory,
+    audit_actions, generate_audit_id,
 };
 use crate::models::degradation::{
     CONFORMAL_CALIBRATION_INSUFFICIENT_CODE, SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE,
@@ -145,6 +145,12 @@ static SEARCH_INDEX_STATUS_CACHE: OnceLock<Mutex<HashMap<IndexStatusCacheKey, Ca
 static SEARCH_SCORE_CALIBRATION_JSONL_CACHE: OnceLock<
     RwLock<HashMap<PathBuf, CachedSearchScoreCalibrationJsonl>>,
 > = OnceLock::new();
+static SEARCH_SCORE_CALIBRATION_CACHE: OnceLock<
+    RwLock<HashMap<SearchScoreCalibrationCacheKey, SearchScoreCalibration>>,
+> = OnceLock::new();
+#[cfg(test)]
+static SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_FULL_LOADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 static LEXICAL_RAM_TIER_SEARCH_CONFIG_CACHE: OnceLock<
     Mutex<HashMap<PathBuf, CachedLexicalRamTierSearchConfig>>,
 > = OnceLock::new();
@@ -2280,6 +2286,31 @@ struct CachedSearchScoreCalibrationJsonl {
     load: SearchScoreCalibrationJsonlLoad,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SearchScoreCalibrationCacheKey {
+    workspace_path: PathBuf,
+    database_path: PathBuf,
+    workspace_id: String,
+    feedback_fingerprint: SearchScoreCalibrationFeedbackFingerprint,
+    jsonl_fingerprint: SearchScoreCalibrationJsonlCacheFingerprint,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum SearchScoreCalibrationFeedbackFingerprint {
+    NoDatabase,
+    Available(FeedbackEventsFingerprint),
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum SearchScoreCalibrationJsonlCacheFingerprint {
+    Absent,
+    Unreadable(String),
+    Present {
+        len: u64,
+        modified: Option<(u64, u32)>,
+    },
+}
+
 #[derive(Clone, Debug)]
 struct SearchScoreCalibrationFeedbackEvents {
     events: Vec<StoredFeedbackEvent>,
@@ -2332,6 +2363,143 @@ struct SearchScoreCalibration {
     feedback_event_ids_truncated: bool,
 }
 
+fn search_score_calibration_jsonl_path(workspace_path: &Path) -> PathBuf {
+    workspace_path
+        .join(".ee")
+        .join("search")
+        .join("calibration.jsonl")
+}
+
+fn search_score_calibration_jsonl_cache_fingerprint(
+    workspace_path: &Path,
+) -> SearchScoreCalibrationJsonlCacheFingerprint {
+    let path = search_score_calibration_jsonl_path(workspace_path);
+    match std::fs::metadata(path) {
+        Ok(metadata) => SearchScoreCalibrationJsonlCacheFingerprint::Present {
+            len: metadata.len(),
+            modified: metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| (duration.as_secs(), duration.subsec_nanos())),
+        },
+        Err(error) => match classify_calibration_io_error(&error) {
+            None => SearchScoreCalibrationJsonlCacheFingerprint::Absent,
+            Some(reason) => {
+                SearchScoreCalibrationJsonlCacheFingerprint::Unreadable(reason.to_owned())
+            }
+        },
+    }
+}
+
+fn search_score_calibration_feedback_fingerprint(
+    workspace_path: &Path,
+    database_path: &Path,
+    read_connection: Option<&DbConnection>,
+    workspace_id: &str,
+) -> Option<SearchScoreCalibrationFeedbackFingerprint> {
+    if let Some(connection) = read_connection {
+        return connection
+            .feedback_events_fingerprint(workspace_id)
+            .ok()
+            .map(SearchScoreCalibrationFeedbackFingerprint::Available);
+    }
+
+    if !database_path.exists() {
+        return Some(SearchScoreCalibrationFeedbackFingerprint::NoDatabase);
+    }
+
+    DbConnection::open_file(database_path)
+        .ok()
+        .and_then(|connection| {
+            let fingerprint = connection.feedback_events_fingerprint(workspace_id).ok();
+            let _ = connection.close();
+            fingerprint
+        })
+        .map(SearchScoreCalibrationFeedbackFingerprint::Available)
+        .or_else(|| {
+            tracing::debug!(
+                target: "ee::search::score_calibration",
+                workspace = %workspace_path.display(),
+                database_path = %database_path.display(),
+                "feedback-events fingerprint unavailable; falling back to uncached calibration"
+            );
+            None
+        })
+}
+
+fn search_score_calibration_for_workspace_cached(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+    read_connection: Option<&DbConnection>,
+) -> SearchScoreCalibration {
+    let workspace_root = default_workspace_root(workspace_path);
+    let workspace_id = crate::core::curate::stable_workspace_id(&workspace_root);
+    let default_database_path = default_workspace_database_path(workspace_path);
+    let resolved_database_path = database_path.unwrap_or(&default_database_path);
+    let feedback_fingerprint = search_score_calibration_feedback_fingerprint(
+        workspace_path,
+        resolved_database_path,
+        read_connection,
+        &workspace_id,
+    );
+    let Some(feedback_fingerprint) = feedback_fingerprint else {
+        let feedback_events = search_score_calibration_feedback_events_with_workspace_id(
+            workspace_path,
+            Some(resolved_database_path),
+            read_connection,
+            &workspace_id,
+        );
+        return SearchScoreCalibration::for_workspace_with_feedback_event_status(
+            workspace_path,
+            &feedback_events.events,
+            feedback_events.unavailable_reason,
+        );
+    };
+
+    let cache_key = SearchScoreCalibrationCacheKey {
+        workspace_path: workspace_path.to_path_buf(),
+        database_path: resolved_database_path.to_path_buf(),
+        workspace_id: workspace_id.clone(),
+        feedback_fingerprint: feedback_fingerprint.clone(),
+        jsonl_fingerprint: search_score_calibration_jsonl_cache_fingerprint(workspace_path),
+    };
+    let cache = SEARCH_SCORE_CALIBRATION_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Ok(cache_guard) = cache.read()
+        && let Some(calibration) = cache_guard.get(&cache_key)
+    {
+        return calibration.clone();
+    }
+
+    #[cfg(test)]
+    SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_FULL_LOADS
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    let feedback_events = match feedback_fingerprint {
+        SearchScoreCalibrationFeedbackFingerprint::NoDatabase => {
+            SearchScoreCalibrationFeedbackEvents::available(Vec::new())
+        }
+        SearchScoreCalibrationFeedbackFingerprint::Available(_) => {
+            search_score_calibration_feedback_events_with_workspace_id(
+                workspace_path,
+                Some(resolved_database_path),
+                read_connection,
+                &workspace_id,
+            )
+        }
+    };
+    let cacheable = feedback_events.unavailable_reason.is_none();
+    let calibration = SearchScoreCalibration::for_workspace_with_feedback_event_status(
+        workspace_path,
+        &feedback_events.events,
+        feedback_events.unavailable_reason,
+    );
+    if cacheable && let Ok(mut cache_guard) = cache.write() {
+        cache_guard.insert(cache_key, calibration.clone());
+    }
+    calibration
+}
+
 impl SearchScoreCalibration {
     #[cfg(test)]
     fn for_workspace(workspace_path: &Path) -> Self {
@@ -2351,10 +2519,7 @@ impl SearchScoreCalibration {
         feedback_events: &[StoredFeedbackEvent],
         feedback_event_unavailable_reason: Option<String>,
     ) -> Self {
-        let path = workspace_path
-            .join(".ee")
-            .join("search")
-            .join("calibration.jsonl");
+        let path = search_score_calibration_jsonl_path(workspace_path);
         let jsonl_load = load_search_score_calibration_jsonl(&path);
 
         let mut residuals = jsonl_load.residuals.clone();
@@ -2900,12 +3065,10 @@ fn annotate_hits_with_score_calibration(
     hits: &mut [SearchHit],
     degraded: &mut Vec<SearchDegradation>,
 ) {
-    let feedback_events =
-        search_score_calibration_feedback_events(workspace_path, database_path, read_connection);
-    let calibration = SearchScoreCalibration::for_workspace_with_feedback_event_status(
+    let calibration = search_score_calibration_for_workspace_cached(
         workspace_path,
-        &feedback_events.events,
-        feedback_events.unavailable_reason,
+        database_path,
+        read_connection,
     );
     if let Some(reason) = calibration.feedback_event_unavailable_reason.as_deref() {
         degraded.push(SearchDegradation::search_score_calibration_unreadable(
@@ -2990,8 +3153,22 @@ fn search_score_calibration_feedback_events(
 ) -> SearchScoreCalibrationFeedbackEvents {
     let workspace_root = default_workspace_root(workspace_path);
     let workspace_id = crate::core::curate::stable_workspace_id(&workspace_root);
+    search_score_calibration_feedback_events_with_workspace_id(
+        workspace_path,
+        database_path,
+        read_connection,
+        &workspace_id,
+    )
+}
+
+fn search_score_calibration_feedback_events_with_workspace_id(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+    read_connection: Option<&DbConnection>,
+    workspace_id: &str,
+) -> SearchScoreCalibrationFeedbackEvents {
     if let Some(connection) = read_connection {
-        return match connection.list_feedback_events(&workspace_id) {
+        return match connection.list_feedback_events(workspace_id) {
             Ok(events) => SearchScoreCalibrationFeedbackEvents::available(events),
             Err(_error) => {
                 SearchScoreCalibrationFeedbackEvents::unavailable("feedback_events_read_failed")
@@ -3012,7 +3189,7 @@ fn search_score_calibration_feedback_events(
             );
         }
     };
-    match connection.list_feedback_events(&workspace_id) {
+    match connection.list_feedback_events(workspace_id) {
         Ok(events) => SearchScoreCalibrationFeedbackEvents::available(events),
         Err(_error) => {
             SearchScoreCalibrationFeedbackEvents::unavailable("feedback_events_read_failed")
@@ -8432,6 +8609,164 @@ mod tests {
                 })
                 .and_then(serde_json::Value::as_str),
             Some("ok")
+        );
+        Ok(())
+    }
+
+    fn reset_search_score_calibration_cache_for_test() {
+        if let Some(cache) = SEARCH_SCORE_CALIBRATION_CACHE.get()
+            && let Ok(mut guard) = cache.write()
+        {
+            guard.clear();
+        }
+        SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_FULL_LOADS
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn feedback_event_full_loads_for_test() -> usize {
+        SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_FULL_LOADS.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn insert_calibration_feedback_event(
+        connection: &DbConnection,
+        workspace_id: &str,
+        index: usize,
+        score: f32,
+        truth: f32,
+    ) -> TestResult {
+        let evidence = serde_json::json!({
+            "schema": "ee.search.calibration_feedback.v1",
+            "searchCalibration": {
+                "predictedScore": score,
+                "ground_truth_relevance": truth,
+            },
+            "query": "candidate validated by curate"
+        })
+        .to_string();
+        connection
+            .insert_feedback_event(
+                &format!("fb_cache_{index:022}"),
+                &CreateFeedbackEventInput {
+                    workspace_id: workspace_id.to_owned(),
+                    target_type: "candidate".to_owned(),
+                    target_id: format!("cand_cache_{index:02}"),
+                    signal: "confirmation".to_owned(),
+                    weight: 1.0,
+                    source_type: "outcome_observed".to_owned(),
+                    source_id: Some("curate-validation".to_owned()),
+                    reason: Some("curate validation accepted relevance label".to_owned()),
+                    evidence_json: Some(evidence),
+                    session_id: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn hit_score_calibration_sample_count(hit: &SearchHit) -> Result<u64, String> {
+        hit.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/scoreCalibration/sampleCount"))
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "scoreCalibration.sampleCount missing".to_string())
+    }
+
+    #[test]
+    fn search_score_calibration_cache_reuses_feedback_until_fingerprint_changes() -> TestResult {
+        reset_search_score_calibration_cache_for_test();
+        let workspace = unique_test_dir("score-calibration-feedback-cache");
+        let database_path = workspace.join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or_else(|| "database path must have a parent".to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::curate::stable_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("score-calibration-feedback-cache".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        for index in 0..MIN_SEARCH_SCORE_CALIBRATION_SAMPLES {
+            let score = 0.50 + (index as f32 * 0.01);
+            insert_calibration_feedback_event(
+                &connection,
+                &workspace_id,
+                index,
+                score,
+                score - 0.04,
+            )?;
+        }
+
+        let mut first_hits = vec![synthetic_hit("mem_feedback_calibration_cache_1", 0.8)];
+        let mut first_degraded = Vec::new();
+        annotate_hits_with_score_calibration(
+            &workspace,
+            Some(&database_path),
+            Some(&connection),
+            &mut first_hits,
+            &mut first_degraded,
+        );
+        assert!(first_degraded.is_empty());
+        assert_eq!(feedback_event_full_loads_for_test(), 1);
+        assert_eq!(
+            hit_score_calibration_sample_count(&first_hits[0])?,
+            MIN_SEARCH_SCORE_CALIBRATION_SAMPLES as u64
+        );
+
+        let mut second_hits = vec![synthetic_hit("mem_feedback_calibration_cache_2", 0.8)];
+        let mut second_degraded = Vec::new();
+        annotate_hits_with_score_calibration(
+            &workspace,
+            Some(&database_path),
+            Some(&connection),
+            &mut second_hits,
+            &mut second_degraded,
+        );
+        assert!(second_degraded.is_empty());
+        assert_eq!(
+            feedback_event_full_loads_for_test(),
+            1,
+            "unchanged feedback fingerprint must reuse derived calibration"
+        );
+        assert_eq!(
+            hit_score_calibration_sample_count(&second_hits[0])?,
+            MIN_SEARCH_SCORE_CALIBRATION_SAMPLES as u64
+        );
+
+        insert_calibration_feedback_event(
+            &connection,
+            &workspace_id,
+            MIN_SEARCH_SCORE_CALIBRATION_SAMPLES,
+            0.90,
+            0.85,
+        )?;
+        let mut third_hits = vec![synthetic_hit("mem_feedback_calibration_cache_3", 0.8)];
+        let mut third_degraded = Vec::new();
+        annotate_hits_with_score_calibration(
+            &workspace,
+            Some(&database_path),
+            Some(&connection),
+            &mut third_hits,
+            &mut third_degraded,
+        );
+        assert!(third_degraded.is_empty());
+        assert_eq!(
+            feedback_event_full_loads_for_test(),
+            2,
+            "new feedback row must invalidate the derived calibration cache"
+        );
+        assert_eq!(
+            hit_score_calibration_sample_count(&third_hits[0])?,
+            (MIN_SEARCH_SCORE_CALIBRATION_SAMPLES + 1) as u64
         );
         Ok(())
     }

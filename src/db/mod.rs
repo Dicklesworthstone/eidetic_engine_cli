@@ -8933,6 +8933,13 @@ pub struct StoredFeedbackEvent {
     pub created_at: String,
 }
 
+/// Cheap invalidation fingerprint for workspace feedback events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FeedbackEventsFingerprint {
+    pub count: u64,
+    pub max_rowid: Option<u64>,
+}
+
 /// Input for updating one per-agent context profile memory row.
 #[derive(Debug, Clone)]
 pub struct UpsertAgentContextProfileInput {
@@ -10597,6 +10604,26 @@ impl DbConnection {
         )?;
 
         rows.iter().map(stored_feedback_event_from_row).collect()
+    }
+
+    /// Cheaply fingerprint feedback rows for cache invalidation.
+    pub fn feedback_events_fingerprint(
+        &self,
+        workspace_id: &str,
+    ) -> Result<FeedbackEventsFingerprint> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT COUNT(*), MAX(rowid) FROM feedback_events WHERE workspace_id = ?1",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+        let row = rows.first().ok_or_else(|| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "missing feedback_events fingerprint row".to_string(),
+        })?;
+        Ok(FeedbackEventsFingerprint {
+            count: required_u64(row, 0, DbOperation::Query, "feedback_event_count")?,
+            max_rowid: optional_u64(row, 1, DbOperation::Query, "feedback_event_max_rowid")?,
+        })
     }
 
     /// List feedback events by signal type.
