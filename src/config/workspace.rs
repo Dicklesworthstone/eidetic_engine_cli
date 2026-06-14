@@ -27,6 +27,7 @@
 //!   the canonical path due to symlinks (prevents cross-workspace leaks)
 
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -562,15 +563,28 @@ fn read_existing_installation_salt(
 }
 
 fn get_salt_path() -> PathBuf {
-    // XDG_DATA_HOME or ~/.local/share/ee/.salt
-    if let Ok(xdg_data) = env::var("XDG_DATA_HOME") {
-        return PathBuf::from(xdg_data).join("ee").join(".salt");
+    installation_salt_path_from_env(env::var_os("XDG_DATA_HOME"), env::var_os("HOME"))
+}
+
+fn installation_salt_path_from_env(
+    xdg_data_home: Option<OsString>,
+    home: Option<OsString>,
+) -> PathBuf {
+    if let Some(xdg_data) = non_empty_env_path(xdg_data_home) {
+        return xdg_data.join("ee").join(".salt");
     }
-    if let Ok(home) = env::var("HOME") {
-        return PathBuf::from(home).join(".local/share/ee/.salt");
+    if let Some(home) = non_empty_env_path(home) {
+        return home.join(".local/share/ee/.salt");
     }
-    // Fallback for unusual environments
     PathBuf::from("/tmp/ee/.salt")
+}
+
+fn non_empty_env_path(value: Option<OsString>) -> Option<PathBuf> {
+    let value = value?;
+    if value.as_os_str().is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(value))
 }
 
 fn create_installation_salt(salt_path: &Path) -> Result<Vec<u8>, CanonicalizationError> {
@@ -1323,6 +1337,7 @@ pub fn discover_from_current_dir() -> Result<Option<WorkspaceLocation>, Workspac
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
@@ -1331,7 +1346,7 @@ mod tests {
         WORKSPACE_ENV_VAR, WORKSPACE_MARKER, WorkspaceError, WorkspaceLocation,
         WorkspaceResolutionMode, WorkspaceResolutionRequest, WorkspaceResolutionSource,
         WorkspaceScopeKind, detect_git_worktree, discover, discover_from_current_dir,
-        resolve_workspace, workspace_scope_from_repository_root,
+        installation_salt_path_from_env, resolve_workspace, workspace_scope_from_repository_root,
     };
 
     type TestResult = Result<(), String>;
@@ -1998,6 +2013,33 @@ mod tests {
         assert_ne!(second, [0_u8; 32]);
         assert_ne!(first, second);
         Ok(())
+    }
+
+    #[test]
+    fn installation_salt_path_prefers_non_empty_xdg_data_home() {
+        let path = installation_salt_path_from_env(
+            Some(OsString::from("/xdg-data")),
+            Some(OsString::from("/home/agent")),
+        );
+
+        assert_eq!(path, PathBuf::from("/xdg-data/ee/.salt"));
+    }
+
+    #[test]
+    fn installation_salt_path_ignores_empty_xdg_data_home() {
+        let path = installation_salt_path_from_env(
+            Some(OsString::from("")),
+            Some(OsString::from("/home/agent")),
+        );
+
+        assert_eq!(path, PathBuf::from("/home/agent/.local/share/ee/.salt"));
+    }
+
+    #[test]
+    fn installation_salt_path_ignores_empty_home() {
+        let path = installation_salt_path_from_env(None, Some(OsString::from("")));
+
+        assert_eq!(path, PathBuf::from("/tmp/ee/.salt"));
     }
 
     #[test]
