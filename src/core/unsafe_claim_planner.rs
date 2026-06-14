@@ -218,7 +218,13 @@ pub fn categorize_unsafe_claim_reason(reason: &str) -> UnsafeClaimReasonCategory
         | "actionable_queue_timed_out"
         | "actionable_queue_stale_fallback" => UnsafeClaimReasonCategory::TrackerAuthority,
         // Agent Mail readiness: coordination evidence missing or corrupt.
-        "inbox_evidence_not_authoritative" | "archive_index_parity_drift" => {
+        // `archive_corruption` and `green_transport_does_not_imply_authoritative_reads`
+        // are live work-packet coordination strings emitted when Agent Mail
+        // recovery is corrupt or semantic readiness failed (bd-1n3x1.16.7).
+        "inbox_evidence_not_authoritative"
+        | "archive_index_parity_drift"
+        | "archive_corruption"
+        | "green_transport_does_not_imply_authoritative_reads" => {
             UnsafeClaimReasonCategory::AgentMailReadiness
         }
         // Reservations: someone may actively own the surface.
@@ -230,6 +236,11 @@ pub fn categorize_unsafe_claim_reason(reason: &str) -> UnsafeClaimReasonCategory
         | "candidate_assigned_to"
         | "active_owner_or_compile_health_blocker_present"
         | "reserved_file_overlap" => UnsafeClaimReasonCategory::ReservationConflict,
+        // Same-file source proof debt (bd-1n3x1.15 `SAME_FILE_PROOF_DEBT_REASON`):
+        // the candidate would edit a file already changed by source-complete but
+        // Cargo-unproved peer work. That is a source overlap (decompose into the
+        // surface the peer does not hold), not a reservation lease (bd-1n3x1.16.7).
+        "unproved_same_file_source_debt" => UnsafeClaimReasonCategory::SourceOverlap,
         // BV ranking staleness or contradiction.
         "bv_advisory_contradiction"
         | "bv_command_timeout"
@@ -1797,6 +1808,14 @@ mod tests {
                 UnsafeClaimReasonCategory::AgentMailReadiness,
             ),
             (
+                "archive_corruption",
+                UnsafeClaimReasonCategory::AgentMailReadiness,
+            ),
+            (
+                "green_transport_does_not_imply_authoritative_reads",
+                UnsafeClaimReasonCategory::AgentMailReadiness,
+            ),
+            (
                 "active_claim",
                 UnsafeClaimReasonCategory::ReservationConflict,
             ),
@@ -1834,6 +1853,10 @@ mod tests {
             ),
             (
                 "file_collision_related_bead:bd-owned",
+                UnsafeClaimReasonCategory::SourceOverlap,
+            ),
+            (
+                "unproved_same_file_source_debt",
                 UnsafeClaimReasonCategory::SourceOverlap,
             ),
             (
@@ -2089,6 +2112,25 @@ mod tests {
                 "cache_pressure",
                 UnsafeClaimReasonCategory::ResourceAdmission,
                 UnsafeClaimActionKind::WaitOrCoordinate,
+            ),
+            // bd-1n3x1.16.7 fresh-eyes: live Agent Mail corruption coordination
+            // strings drive the read-only retry_with_snapshot family, not unknown.
+            (
+                "archive_corruption",
+                UnsafeClaimReasonCategory::AgentMailReadiness,
+                UnsafeClaimActionKind::RetryWithSnapshot,
+            ),
+            (
+                "green_transport_does_not_imply_authoritative_reads",
+                UnsafeClaimReasonCategory::AgentMailReadiness,
+                UnsafeClaimActionKind::RetryWithSnapshot,
+            ),
+            // bd-1n3x1.16.7 fresh-eyes: same-file proof debt is a source overlap,
+            // so it must drive decompose_candidate, not unknown/inspect.
+            (
+                "unproved_same_file_source_debt",
+                UnsafeClaimReasonCategory::SourceOverlap,
+                UnsafeClaimActionKind::DecomposeCandidate,
             ),
         ] {
             let classification = classify_unsafe_claim_evidence(&strings(&[reason]), &[]);
