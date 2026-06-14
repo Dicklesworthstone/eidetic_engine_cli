@@ -1,0 +1,72 @@
+{
+  "schema": "ee.session_budget.v1",
+  "eventId": "sbud_cheap_recall_0001",
+  "recordedAt": "2026-06-10T20:10:00Z",
+  "workspaceFingerprint": "d37f1e828e51",
+  "optIn": {
+    "enabled": true,
+    "source": "test_fixture",
+    "samplingRate": 1.0
+  },
+  "correlation": {
+    "sessionId": "sess_session_budget_0001",
+    "commandId": "cmd_recall_0001",
+    "parentCommandId": null,
+    "taskHash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "packId": null,
+    "rchJobId": null,
+    "agentMailThreadId": null,
+    "beadId": "bd-1clqr.2"
+  },
+  "command": {
+    "surface": "recall",
+    "commandClass": "read_only",
+    "readOnly": true,
+    "durableMutation": false,
+    "normalizedCommand": "ee recall"
+  },
+  "cost": {
+    "wallClockMs": 42,
+    "outputTokensEstimated": 310,
+    "outputTokensReturned": 292,
+    "outputBytes": 1450,
+    "packTokensRequested": 0,
+    "packTokensUsed": 0,
+    "rch": {
+      "slotsRequested": 0,
+      "slotsUsed": 0,
+      "blockedMs": 0,
+      "queueDepth": null,
+      "workersHealthy": null
+    },
+    "db": {
+      "lockWaitMs": 0,
+      "readPoolAcquireMs": 2,
+      "writeAttemptCount": 0
+    },
+    "derivedAssets": {
+      "freshnessPenaltyMs": 0,
+      "staleSources": ["none"]
+    }
+  },
+  "degradedGroups": [],
+  "privacy": {
+    "redactionStatus": "paths_counts_hashes_no_content",
+    "rawCommandStored": false,
+    "rawOutputStored": false,
+    "contentStored": false,
+    "pathPolicy": "workspace_relative_or_hashed"
+  },
+  "retention": {
+    "maxRowsPerWorkspace": 10000,
+    "maxAgeDays": 30,
+    "evictedRows": 0
+  },
+  "evidence": [
+    {
+      "kind": "response_envelope",
+      "ref": "hash:recall-response",
+      "hash": "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}

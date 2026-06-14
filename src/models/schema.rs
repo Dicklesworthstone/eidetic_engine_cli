@@ -44,6 +44,9 @@ use super::{
     UNCERTAINTY_ESTIMATE_SCHEMA_V1, UPLIFT_ESTIMATE_SCHEMA_V1, UTILITY_VALUE_SCHEMA_V1,
 };
 
+/// Schema identifier for opt-in agent session budget ledger rows.
+pub const SESSION_BUDGET_SCHEMA_V1: &str = "ee.session_budget.v1";
+
 /// All known schema identifiers for validation.
 pub const KNOWN_SCHEMAS: &[&str] = &[
     RESPONSE_SCHEMA_V0,
@@ -121,6 +124,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     ECONOMY_REPORT_SCHEMA_V1,
     ECONOMY_SIMULATION_SCHEMA_V1,
     ECONOMY_SCHEMA_CATALOG_V1,
+    SESSION_BUDGET_SCHEMA_V1,
     // Active learning agenda and experiment schemas (EE-440)
     LEARNING_QUESTION_SCHEMA_V1,
     UNCERTAINTY_ESTIMATE_SCHEMA_V1,

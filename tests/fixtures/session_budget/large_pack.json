@@ -1,0 +1,84 @@
+{
+  "schema": "ee.session_budget.v1",
+  "eventId": "sbud_large_pack_0001",
+  "recordedAt": "2026-06-10T20:11:00Z",
+  "workspaceFingerprint": "d37f1e828e51",
+  "optIn": {
+    "enabled": true,
+    "source": "config",
+    "samplingRate": 1.0
+  },
+  "correlation": {
+    "sessionId": "sess_session_budget_0001",
+    "commandId": "cmd_pack_0001",
+    "parentCommandId": "cmd_recall_0001",
+    "taskHash": "blake3:cccccccccccccccccccccccccccccccc",
+    "packId": "pack_release_0001",
+    "rchJobId": null,
+    "agentMailThreadId": "bd-1clqr.1",
+    "beadId": "bd-1clqr.2"
+  },
+  "command": {
+    "surface": "pack",
+    "commandClass": "read_only",
+    "readOnly": true,
+    "durableMutation": false,
+    "normalizedCommand": "ee pack"
+  },
+  "cost": {
+    "wallClockMs": 318,
+    "outputTokensEstimated": 7050,
+    "outputTokensReturned": 6895,
+    "outputBytes": 31400,
+    "packTokensRequested": 8000,
+    "packTokensUsed": 7420,
+    "rch": {
+      "slotsRequested": 0,
+      "slotsUsed": 0,
+      "blockedMs": 0,
+      "queueDepth": null,
+      "workersHealthy": null
+    },
+    "db": {
+      "lockWaitMs": 8,
+      "readPoolAcquireMs": 5,
+      "writeAttemptCount": 0
+    },
+    "derivedAssets": {
+      "freshnessPenaltyMs": 45,
+      "staleSources": ["graph_snapshot"]
+    }
+  },
+  "degradedGroups": [
+    {
+      "code": "graph_snapshot_stale",
+      "source": "derived_asset",
+      "severity": "low",
+      "count": 1
+    }
+  ],
+  "privacy": {
+    "redactionStatus": "paths_counts_hashes_no_content",
+    "rawCommandStored": false,
+    "rawOutputStored": false,
+    "contentStored": false,
+    "pathPolicy": "workspace_relative_or_hashed"
+  },
+  "retention": {
+    "maxRowsPerWorkspace": 10000,
+    "maxAgeDays": 30,
+    "evictedRows": 0
+  },
+  "evidence": [
+    {
+      "kind": "response_envelope",
+      "ref": "hash:pack-response",
+      "hash": "blake3:dddddddddddddddddddddddddddddddd"
+    },
+    {
+      "kind": "timer",
+      "ref": "monotonic-ms",
+      "hash": null
+    }
+  ]
+}

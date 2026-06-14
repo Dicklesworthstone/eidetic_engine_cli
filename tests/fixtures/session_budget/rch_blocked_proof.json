@@ -1,0 +1,79 @@
+{
+  "schema": "ee.session_budget.v1",
+  "eventId": "sbud_rch_blocked_0001",
+  "recordedAt": "2026-06-10T20:12:00Z",
+  "workspaceFingerprint": "d37f1e828e51",
+  "optIn": {
+    "enabled": true,
+    "source": "env",
+    "samplingRate": 1.0
+  },
+  "correlation": {
+    "sessionId": "sess_session_budget_0002",
+    "commandId": "cmd_proof_0001",
+    "parentCommandId": null,
+    "taskHash": "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "packId": null,
+    "rchJobId": "rch_bd37ugy_0001",
+    "agentMailThreadId": "bd-37ugy",
+    "beadId": "bd-37ugy"
+  },
+  "command": {
+    "surface": "verification_proof",
+    "commandClass": "verification",
+    "readOnly": true,
+    "durableMutation": false,
+    "normalizedCommand": "rch cargo verification"
+  },
+  "cost": {
+    "wallClockMs": 300000,
+    "outputTokensEstimated": 640,
+    "outputTokensReturned": 620,
+    "outputBytes": 3100,
+    "packTokensRequested": 0,
+    "packTokensUsed": 0,
+    "rch": {
+      "slotsRequested": 2,
+      "slotsUsed": 0,
+      "blockedMs": 300000,
+      "queueDepth": 1,
+      "workersHealthy": 3
+    },
+    "db": {
+      "lockWaitMs": 0,
+      "readPoolAcquireMs": 0,
+      "writeAttemptCount": 0
+    },
+    "derivedAssets": {
+      "freshnessPenaltyMs": 0,
+      "staleSources": ["none"]
+    }
+  },
+  "degradedGroups": [
+    {
+      "code": "rch_remote_blocked",
+      "source": "rch",
+      "severity": "warning",
+      "count": 1
+    }
+  ],
+  "privacy": {
+    "redactionStatus": "paths_counts_hashes_no_content",
+    "rawCommandStored": false,
+    "rawOutputStored": false,
+    "contentStored": false,
+    "pathPolicy": "workspace_relative_or_hashed"
+  },
+  "retention": {
+    "maxRowsPerWorkspace": 10000,
+    "maxAgeDays": 30,
+    "evictedRows": 0
+  },
+  "evidence": [
+    {
+      "kind": "rch_queue",
+      "ref": "queue-depth-only",
+      "hash": "blake3:ffffffffffffffffffffffffffffffff"
+    }
+  ]
+}

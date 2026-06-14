@@ -1,0 +1,436 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.session_budget.v1.json",
+  "title": "ee.session_budget.v1",
+  "description": "Opt-in, redaction-safe ledger row for recording low-overhead agent session cost deltas and correlation identifiers. The schema is normative for bd-1clqr.2 recording and bd-1clqr.3 planning; collectors are not allowed to store raw command text, raw output, memory bodies, mail bodies, or host-private absolute paths.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "eventId",
+    "recordedAt",
+    "workspaceFingerprint",
+    "optIn",
+    "correlation",
+    "command",
+    "cost",
+    "degradedGroups",
+    "privacy",
+    "retention",
+    "evidence"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.session_budget.v1"
+    },
+    "eventId": {
+      "type": "string",
+      "pattern": "^sbud_[A-Za-z0-9_-]{8,80}$"
+    },
+    "recordedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "workspaceFingerprint": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{12}$"
+    },
+    "optIn": {
+      "$ref": "#/$defs/optIn"
+    },
+    "correlation": {
+      "$ref": "#/$defs/correlation"
+    },
+    "command": {
+      "$ref": "#/$defs/command"
+    },
+    "cost": {
+      "$ref": "#/$defs/cost"
+    },
+    "degradedGroups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degradedGroup"
+      },
+      "maxItems": 32
+    },
+    "privacy": {
+      "$ref": "#/$defs/privacy"
+    },
+    "retention": {
+      "$ref": "#/$defs/retention"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidenceRef"
+      },
+      "maxItems": 32
+    }
+  },
+  "x-ee-status": {
+    "shipped": false,
+    "tracking_bead": "bd-1clqr.2",
+    "emitter": "pending_low_overhead_ledger_recording_path"
+  },
+  "$defs": {
+    "optIn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "source", "samplingRate"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "const": true
+        },
+        "source": {
+          "type": "string",
+          "enum": ["cli_flag", "env", "config", "test_fixture"]
+        },
+        "samplingRate": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        }
+      }
+    },
+    "correlation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "commandId",
+        "parentCommandId",
+        "taskHash",
+        "packId",
+        "rchJobId",
+        "agentMailThreadId",
+        "beadId"
+      ],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "pattern": "^sess_[A-Za-z0-9_-]{8,80}$"
+        },
+        "commandId": {
+          "type": "string",
+          "pattern": "^cmd_[A-Za-z0-9_-]{8,80}$"
+        },
+        "parentCommandId": {
+          "type": ["string", "null"],
+          "pattern": "^cmd_[A-Za-z0-9_-]{8,80}$"
+        },
+        "taskHash": {
+          "type": "string",
+          "pattern": "^blake3:[A-Fa-f0-9]{32,64}$"
+        },
+        "packId": {
+          "type": ["string", "null"],
+          "pattern": "^pack_[A-Za-z0-9_-]{8,80}$"
+        },
+        "rchJobId": {
+          "type": ["string", "null"],
+          "pattern": "^(rch|job)_[A-Za-z0-9_-]{8,80}$"
+        },
+        "agentMailThreadId": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "beadId": {
+          "type": ["string", "null"],
+          "pattern": "^bd-[A-Za-z0-9][A-Za-z0-9.-]{1,80}$"
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "surface",
+        "commandClass",
+        "readOnly",
+        "durableMutation",
+        "normalizedCommand"
+      ],
+      "properties": {
+        "surface": {
+          "type": "string",
+          "enum": [
+            "primer",
+            "recall",
+            "search",
+            "pack",
+            "ask",
+            "swarm_brief",
+            "work_packet",
+            "agent_mail_coordination",
+            "verification_proof",
+            "proof_wait",
+            "other"
+          ]
+        },
+        "commandClass": {
+          "type": "string",
+          "enum": [
+            "read_only",
+            "durable_write",
+            "derived_asset",
+            "coordination",
+            "verification",
+            "planning"
+          ]
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "durableMutation": {
+          "type": "boolean"
+        },
+        "normalizedCommand": {
+          "type": "string",
+          "enum": [
+            "ee primer",
+            "ee recall",
+            "ee search",
+            "ee pack",
+            "ee ask",
+            "ee swarm brief",
+            "ee swarm work-packet",
+            "agent_mail snapshot",
+            "rch cargo verification",
+            "proof wait",
+            "other"
+          ]
+        }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wallClockMs",
+        "outputTokensEstimated",
+        "outputTokensReturned",
+        "outputBytes",
+        "packTokensRequested",
+        "packTokensUsed",
+        "rch",
+        "db",
+        "derivedAssets"
+      ],
+      "properties": {
+        "wallClockMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputTokensEstimated": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputTokensReturned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "packTokensRequested": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "packTokensUsed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rch": {
+          "$ref": "#/$defs/rchCost"
+        },
+        "db": {
+          "$ref": "#/$defs/dbCost"
+        },
+        "derivedAssets": {
+          "$ref": "#/$defs/derivedAssetCost"
+        }
+      }
+    },
+    "rchCost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slotsRequested",
+        "slotsUsed",
+        "blockedMs",
+        "queueDepth",
+        "workersHealthy"
+      ],
+      "properties": {
+        "slotsRequested": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "slotsUsed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blockedMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "queueDepth": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "workersHealthy": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      }
+    },
+    "dbCost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lockWaitMs", "readPoolAcquireMs", "writeAttemptCount"],
+      "properties": {
+        "lockWaitMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "readPoolAcquireMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "writeAttemptCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "derivedAssetCost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["freshnessPenaltyMs", "staleSources"],
+      "properties": {
+        "freshnessPenaltyMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "staleSources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["search_index", "graph_snapshot", "cass_import", "pack_cache", "none"]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "degradedGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "source", "severity", "count"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{1,80}$"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "output",
+            "pack",
+            "rch",
+            "db",
+            "derived_asset",
+            "agent_mail",
+            "beads",
+            "bv",
+            "memory",
+            "unknown"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "redactionStatus",
+        "rawCommandStored",
+        "rawOutputStored",
+        "contentStored",
+        "pathPolicy"
+      ],
+      "properties": {
+        "redactionStatus": {
+          "type": "string",
+          "const": "paths_counts_hashes_no_content"
+        },
+        "rawCommandStored": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawOutputStored": {
+          "type": "boolean",
+          "const": false
+        },
+        "contentStored": {
+          "type": "boolean",
+          "const": false
+        },
+        "pathPolicy": {
+          "type": "string",
+          "const": "workspace_relative_or_hashed"
+        }
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxRowsPerWorkspace", "maxAgeDays", "evictedRows"],
+      "properties": {
+        "maxRowsPerWorkspace": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxAgeDays": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "evictedRows": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "evidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ref", "hash"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["response_envelope", "rch_queue", "agent_mail_snapshot", "beads_row", "timer", "none"]
+        },
+        "ref": {
+          "type": ["string", "null"],
+          "maxLength": 200
+        },
+        "hash": {
+          "type": ["string", "null"],
+          "pattern": "^blake3:[A-Fa-f0-9]{32,64}$"
+        }
+      }
+    }
+  }
+}
