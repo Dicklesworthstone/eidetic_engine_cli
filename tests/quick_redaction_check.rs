@@ -154,3 +154,22 @@ fn json_escaped_key_values_are_redacted() {
     );
     assert!(report.content.contains(r#"\"next\":\"safe\""#));
 }
+
+#[test]
+fn json_escaped_url_passwords_are_redacted() {
+    let password = "json-url-password-123456";
+    let input = format!(
+        r#"payload={{\"url\":\"https:\/\/agent:{password}@example.test\/path\",\"next\":\"safe\"}}"#
+    );
+    let report = redact_secret_like_content(&input);
+
+    assert!(report.redacted);
+    assert!(report.redacted_reasons.contains(&"url_password"));
+    assert!(!report.content.contains(password));
+    assert!(
+        report
+            .content
+            .contains(r#"https:\/\/agent:[REDACTED:url_password]@example.test"#)
+    );
+    assert!(report.content.contains(r#"\"next\":\"safe\""#));
+}

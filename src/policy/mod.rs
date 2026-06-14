@@ -1636,10 +1636,9 @@ fn detect_url_password_matches(input: &str, matches: &mut Vec<SecretRedactionMat
         if search_start >= lower.len() {
             break;
         }
-        let Some(relative_scheme) = lower[search_start..].find("://") else {
+        let Some(scheme_marker) = next_url_scheme_marker(&lower, search_start) else {
             break;
         };
-        let scheme_marker = search_start + relative_scheme + 3;
         let authority_end = url_authority_end(input, scheme_marker);
         let Some(at_relative) = input[scheme_marker..authority_end].rfind('@') else {
             search_start = authority_end;
@@ -1653,6 +1652,22 @@ fn detect_url_password_matches(input: &str, matches: &mut Vec<SecretRedactionMat
         let value_start = scheme_marker + colon_relative + 1;
         push_secret_match(matches, "url_password", value_start, at_index);
         search_start = at_index + 1;
+    }
+}
+
+fn next_url_scheme_marker(input_lower: &str, search_start: usize) -> Option<usize> {
+    const NORMAL_SCHEME_MARKER: &str = "://";
+    const ESCAPED_SCHEME_MARKER: &str = ":\\/\\/";
+    let normal = input_lower[search_start..]
+        .find(NORMAL_SCHEME_MARKER)
+        .map(|relative| search_start + relative + NORMAL_SCHEME_MARKER.len());
+    let escaped = input_lower[search_start..]
+        .find(ESCAPED_SCHEME_MARKER)
+        .map(|relative| search_start + relative + ESCAPED_SCHEME_MARKER.len());
+    match (normal, escaped) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(marker), None) | (None, Some(marker)) => Some(marker),
+        (None, None) => None,
     }
 }
 
@@ -2249,10 +2264,9 @@ fn redact_url_passwords(input: &str, reasons: &mut Vec<&'static str>) -> (String
         if search_start >= lower.len() {
             break;
         }
-        let Some(relative_scheme) = lower[search_start..].find("://") else {
+        let Some(scheme_marker) = next_url_scheme_marker(&lower, search_start) else {
             break;
         };
-        let scheme_marker = search_start + relative_scheme + 3;
         let authority_end = url_authority_end(&output, scheme_marker);
         let Some(at_relative) = output[scheme_marker..authority_end].rfind('@') else {
             search_start = authority_end;
