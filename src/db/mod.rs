@@ -256,7 +256,18 @@ pub enum DatabaseLocation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseOpenMode {
     ReadWrite,
+    ReadOnly,
     SchemaOnly,
+}
+
+impl DatabaseOpenMode {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ReadWrite => "read-write",
+            Self::ReadOnly => "read-only",
+            Self::SchemaOnly => "schema-only",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,6 +288,13 @@ impl DatabaseConfig {
         Self {
             location: DatabaseLocation::File(path.into()),
             mode: DatabaseOpenMode::ReadWrite,
+        }
+    }
+
+    pub fn read_only_file(path: impl Into<PathBuf>) -> Self {
+        Self {
+            location: DatabaseLocation::File(path.into()),
+            mode: DatabaseOpenMode::ReadOnly,
         }
     }
 
@@ -796,6 +814,7 @@ impl DbConnection {
         if let DatabaseLocation::File(path) = &config.location {
             let operation = match config.mode {
                 DatabaseOpenMode::ReadWrite => DbOperation::OpenReadWrite,
+                DatabaseOpenMode::ReadOnly => DbOperation::OpenReadOnly,
                 DatabaseOpenMode::SchemaOnly => DbOperation::OpenSchemaOnly,
             };
             validate_file_database_open_path(path, operation)?;
@@ -815,17 +834,25 @@ impl DbConnection {
                 FrankenConnection::open_memory()
                     .map_err(|source| DbError::sqlmodel(DbOperation::OpenMemory, source))?
             }
-            (DatabaseLocation::Memory, DatabaseOpenMode::SchemaOnly) => {
+            (
+                DatabaseLocation::Memory,
+                DatabaseOpenMode::ReadOnly | DatabaseOpenMode::SchemaOnly,
+            ) => {
                 return Err(DbError::InvalidMode {
                     location: config.location,
                     mode: config.mode,
-                    message: "schema-only mode requires a file database".to_string(),
+                    message: format!("{} mode requires a file database", config.mode.label()),
                 });
             }
             (DatabaseLocation::File(path), DatabaseOpenMode::ReadWrite) => {
                 let path = database_path_string(path, DbOperation::OpenReadWrite)?;
                 FrankenConnection::open_file(path)
                     .map_err(|source| DbError::sqlmodel(DbOperation::OpenReadWrite, source))?
+            }
+            (DatabaseLocation::File(path), DatabaseOpenMode::ReadOnly) => {
+                let path = database_path_string(path, DbOperation::OpenReadOnly)?;
+                FrankenConnection::open_file_read_only(path)
+                    .map_err(|source| DbError::sqlmodel(DbOperation::OpenReadOnly, source))?
             }
             (DatabaseLocation::File(path), DatabaseOpenMode::SchemaOnly) => {
                 let path = database_path_string(path, DbOperation::OpenSchemaOnly)?;
@@ -853,6 +880,10 @@ impl DbConnection {
         Self::open(DatabaseConfig::file(path))
     }
 
+    pub fn open_file_read_only(path: impl Into<PathBuf>) -> Result<Self> {
+        Self::open(DatabaseConfig::read_only_file(path))
+    }
+
     pub fn open_schema_only(path: impl Into<PathBuf>) -> Result<Self> {
         Self::open(DatabaseConfig::schema_only(path))
     }
@@ -877,6 +908,18 @@ impl DbConnection {
         self.inner
             .close_sync()
             .map_err(|source| DbError::sqlmodel(DbOperation::Close, source))
+    }
+
+    fn reject_read_only_write(&self, operation: DbOperation) -> Result<()> {
+        if self.mode != DatabaseOpenMode::ReadOnly {
+            return Ok(());
+        }
+
+        Err(DbError::InvalidMode {
+            location: self.location.clone(),
+            mode: self.mode,
+            message: format!("read-only database connection cannot perform {operation}"),
+        })
     }
 
     /// Begin a transaction with the specified isolation level.
@@ -985,6 +1028,7 @@ impl DbConnection {
     }
 
     fn begin_write_transaction(&self) -> Result<Option<FileWriteOwnerGuard>> {
+        self.reject_read_only_write(DbOperation::BeginTransaction)?;
         match self.location {
             DatabaseLocation::Memory => {
                 self.begin()?;
@@ -1025,6 +1069,7 @@ impl DbConnection {
     }
 
     pub fn execute_raw(&self, sql: &str) -> Result<()> {
+        self.reject_read_only_write(DbOperation::Execute)?;
         self.inner
             .execute_raw(sql)
             .map_err(|source| DbError::sqlmodel(DbOperation::Execute, source))
@@ -1183,6 +1228,7 @@ impl DbConnection {
 
     /// Run a SQLite WAL checkpoint while holding the file writer ownership gate.
     pub fn wal_checkpoint(&self, mode: WalCheckpointMode) -> Result<WalCheckpointReport> {
+        self.reject_read_only_write(DbOperation::WalCheckpoint)?;
         let before = self.wal_status()?;
         let operation = DbOperation::WalCheckpoint;
         let sql = mode.pragma_sql();
@@ -1555,6 +1601,7 @@ impl DbConnection {
     }
 
     fn execute_raw_for(&self, operation: DbOperation, sql: &str) -> Result<()> {
+        self.reject_read_only_write(operation)?;
         let run = || {
             guard_storage_panic(operation, || {
                 self.inner
@@ -1588,6 +1635,7 @@ impl DbConnection {
     }
 
     fn execute_for(&self, operation: DbOperation, sql: &str, params: &[Value]) -> Result<u64> {
+        self.reject_read_only_write(operation)?;
         let run = || {
             guard_storage_panic(operation, || {
                 self.inner
@@ -2357,6 +2405,7 @@ fn pack_item_cross_shard_reference_is_explicit(
 pub enum DbOperation {
     OpenMemory,
     OpenReadWrite,
+    OpenReadOnly,
     OpenSchemaOnly,
     ConfigureBusyTimeout,
     ConfigureDurabilityPragmas,
@@ -2382,6 +2431,7 @@ impl fmt::Display for DbOperation {
         match self {
             Self::OpenMemory => f.write_str("memory open"),
             Self::OpenReadWrite => f.write_str("read-write open"),
+            Self::OpenReadOnly => f.write_str("read-only open"),
             Self::OpenSchemaOnly => f.write_str("schema-only open"),
             Self::ConfigureBusyTimeout => f.write_str("busy timeout configure"),
             Self::ConfigureDurabilityPragmas => f.write_str("durability pragma configure"),
@@ -24272,6 +24322,127 @@ mod tests {
             &DatabaseOpenMode::SchemaOnly,
             "schema-only config mode",
         )
+    }
+
+    #[test]
+    fn read_only_config_requires_file_location() -> TestResult {
+        let path = PathBuf::from("memory.db");
+        let config = DatabaseConfig::read_only_file(&path);
+
+        ensure_equal(
+            config.location(),
+            &DatabaseLocation::File(PathBuf::from("memory.db")),
+            "read-only config location",
+        )?;
+        ensure_equal(
+            &config.mode(),
+            &DatabaseOpenMode::ReadOnly,
+            "read-only config mode",
+        )
+    }
+
+    #[test]
+    fn read_only_file_connection_reads_existing_rows_and_rejects_writes() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let db_path = tempdir.path().join("read-only-open.db");
+
+        {
+            let writer = DbConnection::open_file(&db_path)?;
+            writer.execute_raw(
+                "CREATE TABLE memories (id INTEGER PRIMARY KEY, body TEXT NOT NULL)",
+            )?;
+            writer.execute_raw("INSERT INTO memories (id, body) VALUES (1, 'persistent rule')")?;
+            writer.close()?;
+        }
+
+        let read_only = DbConnection::open_file_read_only(&db_path)?;
+        ensure_equal(
+            &read_only.mode(),
+            &DatabaseOpenMode::ReadOnly,
+            "read-only connection mode",
+        )?;
+
+        let rows = read_only.query("SELECT body FROM memories WHERE id = 1", &[])?;
+        let body = rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(Value::as_str)
+            .ok_or_else(|| TestFailure::new("read-only query returned no body"))?;
+        ensure_equal(&body, &"persistent rule", "read-only query body")?;
+
+        let insert_result = read_only.execute_raw(
+            "INSERT INTO memories (id, body) VALUES (2, 'must not write')",
+        );
+        ensure(
+            matches!(
+                insert_result,
+                Err(DbError::InvalidMode {
+                    mode: DatabaseOpenMode::ReadOnly,
+                    ..
+                })
+            ),
+            "read-only raw execute must fail before reaching sqlite",
+        )?;
+
+        let transaction_result: super::Result<()> = read_only.with_transaction(|| Ok(()));
+        ensure(
+            matches!(
+                transaction_result,
+                Err(DbError::InvalidMode {
+                    mode: DatabaseOpenMode::ReadOnly,
+                    ..
+                })
+            ),
+            "read-only transaction must fail before acquiring a write owner",
+        )?;
+
+        let checkpoint_result = read_only.wal_checkpoint(WalCheckpointMode::Passive);
+        ensure(
+            matches!(
+                checkpoint_result,
+                Err(DbError::InvalidMode {
+                    mode: DatabaseOpenMode::ReadOnly,
+                    ..
+                })
+            ),
+            "read-only checkpoint must fail before acquiring a write owner",
+        )?;
+
+        read_only.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_file_open_skips_write_owner_gate() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let db_path = tempdir.path().join("read-only-open-while-write-owned.db");
+
+        {
+            let writer = DbConnection::open_file(&db_path)?;
+            writer
+                .execute_raw("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")?;
+            writer.execute_raw("INSERT INTO items (id, value) VALUES (1, 'visible')")?;
+            writer.close()?;
+        }
+
+        let location = DatabaseLocation::File(db_path.clone());
+        let _write_owner = lock_file_write_owner_gate(&location)?;
+        let read_only = DbConnection::open_file_read_only(&db_path)?;
+        ensure_equal(
+            &read_only.mode(),
+            &DatabaseOpenMode::ReadOnly,
+            "read-only connection mode while write owner is held",
+        )?;
+        let rows = read_only.query("SELECT value FROM items WHERE id = 1", &[])?;
+        let value = rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(Value::as_str)
+            .ok_or_else(|| TestFailure::new("read-only gated query returned no value"))?;
+        ensure_equal(&value, &"visible", "read-only gated query value")?;
+
+        read_only.close()?;
+        Ok(())
     }
 
     #[test]

@@ -51,6 +51,61 @@ fn init_workspace(dir: &Path) {
 }
 
 #[test]
+fn e2e_db_read_only_open_reads_existing_file_and_rejects_mutation() {
+    let dir = scenario_dir("read_only_open");
+    fs::create_dir_all(&dir).expect("create read-only DB scenario dir");
+    let database = dir.join("read-only-open.db");
+
+    {
+        let writer = ee::db::DbConnection::open_file(&database).expect("seed DB opens writable");
+        writer
+            .execute_raw("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+            .expect("seed table creates");
+        writer
+            .execute_raw("INSERT INTO items (id, value) VALUES (1, 'visible')")
+            .expect("seed row inserts");
+        writer.close().expect("seed DB closes");
+    }
+
+    let read_only =
+        ee::db::DbConnection::open_file_read_only(&database).expect("read-only DB opens");
+    assert_eq!(read_only.mode(), ee::db::DatabaseOpenMode::ReadOnly);
+
+    let tables = read_only.list_user_tables().expect("read-only table list");
+    assert!(
+        tables.iter().any(|table| table == "items"),
+        "read-only table list must include seeded table: {tables:?}"
+    );
+    assert_eq!(
+        read_only
+            .count_table_rows("items")
+            .expect("read-only row count"),
+        1
+    );
+
+    let insert_result =
+        read_only.execute_raw("INSERT INTO items (id, value) VALUES (2, 'must_not_write')");
+    assert!(matches!(
+        insert_result,
+        Err(ee::db::DbError::InvalidMode {
+            mode: ee::db::DatabaseOpenMode::ReadOnly,
+            ..
+        })
+    ));
+
+    let transaction_result = read_only.with_transaction(|| -> ee::db::Result<()> { Ok(()) });
+    assert!(matches!(
+        transaction_result,
+        Err(ee::db::DbError::InvalidMode {
+            mode: ee::db::DatabaseOpenMode::ReadOnly,
+            ..
+        })
+    ));
+
+    read_only.close().expect("read-only DB closes");
+}
+
+#[test]
 fn e2e_db_contract_exercises_real_initialized_workspace() {
     let dir = scenario_dir("real_initialized_workspace");
     init_workspace(&dir);

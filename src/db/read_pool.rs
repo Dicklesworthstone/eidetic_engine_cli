@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 
-use super::{DatabaseConfig, DbConnection, DbError, DbOperation, Result};
+use super::{DatabaseConfig, DatabaseLocation, DbConnection, DbError, DbOperation, Result};
 
 // SnapshotPin is intentionally a read transaction, not a write-owner transaction.
 // The local adapter path is `src/db/mod.rs`: `begin_read_snapshot()` executes
@@ -308,6 +308,7 @@ impl ReadConnectionPool {
 
     #[must_use]
     pub fn new(database: DatabaseConfig, config: PoolConfig) -> Self {
+        let database = read_pool_database_config(database);
         Self {
             database,
             config,
@@ -807,6 +808,13 @@ fn process_read_pool_registry_key(database: &DatabaseConfig) -> String {
                 .unwrap_or_else(|_| super::normalized_write_owner_file_key(path));
             format!("file:{}", path.display())
         }
+    }
+}
+
+fn read_pool_database_config(database: DatabaseConfig) -> DatabaseConfig {
+    match database.location().clone() {
+        DatabaseLocation::Memory => database,
+        DatabaseLocation::File(path) => DatabaseConfig::read_only_file(path),
     }
 }
 
@@ -1494,6 +1502,26 @@ mod tests {
         let reacquired = must(pool.acquire(), "idle connection reacquired");
         assert_eq!(reacquired.slot_id(), second_slot);
         assert_ne!(reacquired.slot_id(), first_slot);
+    }
+
+    #[test]
+    fn file_pool_connections_open_read_only_and_reject_writes() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+
+        let connection = must(pool.acquire(), "file pool reader opens");
+        assert_eq!(connection.mode(), crate::db::DatabaseOpenMode::ReadOnly);
+        assert_eq!(snapshot_item_count(&connection), 1);
+
+        let write_result = connection.execute_raw(
+            "INSERT INTO snapshot_items (id, value) VALUES (2, 'must_not_write')",
+        );
+        assert!(matches!(
+            write_result,
+            Err(crate::db::DbError::InvalidMode {
+                mode: crate::db::DatabaseOpenMode::ReadOnly,
+                ..
+            })
+        ));
     }
 
     #[test]

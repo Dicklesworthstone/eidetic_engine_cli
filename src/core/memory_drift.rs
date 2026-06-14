@@ -1042,7 +1042,7 @@ pub const fn memory_drift_read_only_collector_strategy() -> MemoryDriftReadOnlyC
     MemoryDriftReadOnlyCollectorStrategy {
         name: MEMORY_DRIFT_READ_ONLY_COLLECTOR_STRATEGY_NAME,
         lock_acquisition_class: MEMORY_DRIFT_READ_ONLY_COLLECTOR_LOCK_CLASS,
-        true_read_only_database_open_available: false,
+        true_read_only_database_open_available: true,
         memory_evidence_inspected_on_lock_contention: false,
         unblocks_true_read_only_bead: MEMORY_DRIFT_TRUE_READ_ONLY_DATABASE_OPEN_BEAD,
     }
@@ -1125,7 +1125,7 @@ fn open_memory_drift_database_for_read_only_report(
         strategy.name,
         MEMORY_DRIFT_READ_ONLY_COLLECTOR_STRATEGY_NAME
     );
-    DbConnection::open_file(database_path).map_err(memory_drift_read_only_open_error)
+    DbConnection::open_file_read_only(database_path).map_err(memory_drift_read_only_open_error)
 }
 
 fn memory_drift_read_only_open_error(error: DbError) -> DomainError {
@@ -2558,7 +2558,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_collector_strategy_is_explicit_until_true_read_only_open_lands() {
+    fn read_only_collector_strategy_uses_true_read_only_open() {
         let strategy = memory_drift_read_only_collector_strategy();
 
         assert_eq!(
@@ -2569,10 +2569,7 @@ mod tests {
             strategy.lock_acquisition_class,
             MEMORY_DRIFT_READ_ONLY_COLLECTOR_LOCK_CLASS
         );
-        assert!(
-            !strategy.true_read_only_database_open_available,
-            "bd-3sh42 owns the future true read-only DB open path"
-        );
+        assert!(strategy.true_read_only_database_open_available);
         assert!(
             !strategy.memory_evidence_inspected_on_lock_contention,
             "lock contention must mean the collector never inspected memory evidence"
