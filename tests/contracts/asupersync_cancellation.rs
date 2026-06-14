@@ -14,7 +14,10 @@ use ee::core::{
     outcome_class, outcome_exit_code, run_cli_future,
 };
 use ee::models::{DomainError, ProcessExitCode};
-use ee::steward::{DaemonForegroundOptions, JobType, run_daemon_foreground_supervised};
+use ee::steward::{
+    DaemonForegroundOptions, JobPriority, JobType, ManualRunner, RunOutcome, RunnerOptions,
+    run_daemon_foreground_supervised,
+};
 
 type TestResult = Result<(), String>;
 
@@ -440,6 +443,77 @@ fn daemon_foreground_loop_cancels_between_maintenance_ticks() -> TestResult {
         &cancellation_reason.message.as_deref(),
         &Some("daemon contract cancellation"),
         "daemon cancellation reason",
+    )
+}
+
+#[test]
+fn daemon_foreground_runner_honors_cx_cancellation_before_job() -> TestResult {
+    let mut lab = LabRuntime::new(LabConfig::new(0xEE_906).max_steps(64));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+
+    let (task_id, mut handle) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let Some(cx) = Cx::current() else {
+                return Outcome::Err("LabRuntime task should install Cx".to_owned());
+            };
+            cx.set_cancel_reason(CancelReason::user("daemon foreground runner cancellation"));
+
+            let mut runner = ManualRunner::new(RunnerOptions::new().with_cancellation_cx(&cx));
+            runner.schedule(
+                JobType::HealthCheck,
+                JobPriority::Normal,
+                Some("foreground cancellation contract".to_owned()),
+            );
+            let report = runner.run_pending();
+            if !report.was_cancelled {
+                return Outcome::Err(format!(
+                    "foreground runner should cancel before maintenance work: {report:?}"
+                ));
+            }
+            Outcome::Ok(report)
+        })
+        .map_err(|error| format!("failed to create daemon foreground runner task: {error}"))?;
+    lab.scheduler.lock().schedule(task_id, 0);
+    let lab_report = lab.run_until_quiescent_with_report();
+    ensure(
+        lab_report.quiescent,
+        "daemon foreground runner cancellation lab run must quiesce",
+    )?;
+    ensure(
+        lab_report.invariant_violations.is_empty(),
+        format!(
+            "daemon foreground runner cancellation must preserve invariants: {:?}",
+            lab_report.invariant_violations
+        ),
+    )?;
+
+    let report = match handle.try_join() {
+        Ok(Some(Outcome::Ok(report))) => report,
+        Ok(Some(other)) => {
+            return Err(format!(
+                "daemon foreground runner cancellation expected ok report, got {other:?}"
+            ));
+        }
+        Ok(None) => return Err("daemon foreground runner task did not finish".to_owned()),
+        Err(error) => {
+            return Err(format!(
+                "daemon foreground runner cancellation join failed: {error}"
+            ));
+        }
+    };
+
+    ensure(report.was_cancelled, "runner report must be cancelled")?;
+    ensure_equal(&report.results.len(), &1, "cancelled job count")?;
+    ensure_equal(
+        &report.results[0].outcome,
+        &RunOutcome::Cancelled,
+        "cancelled job outcome",
+    )?;
+    ensure_equal(
+        &report.results[0].error.as_deref(),
+        &Some("Daemon shutdown requested before maintenance job"),
+        "cancelled job reason",
     )
 }
 

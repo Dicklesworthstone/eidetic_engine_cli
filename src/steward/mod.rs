@@ -2001,6 +2001,7 @@ pub struct ScoreDecayJobOptions {
     pub dry_run: bool,
     pub actor: Option<String>,
     pub cancellation_flag: Option<Arc<AtomicBool>>,
+    pub cancellation_cx: Option<Cx>,
 }
 
 impl ScoreDecayJobOptions {
@@ -2020,12 +2021,19 @@ impl ScoreDecayJobOptions {
             dry_run: false,
             actor: None,
             cancellation_flag: None,
+            cancellation_cx: None,
         }
     }
 
     #[must_use]
     pub fn with_cancellation_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.cancellation_flag = Some(flag);
+        self
+    }
+
+    #[must_use]
+    pub fn with_cancellation_cx(mut self, cx: &Cx) -> Self {
+        self.cancellation_cx = Some(cx.clone());
         self
     }
 }
@@ -2397,6 +2405,10 @@ fn score_decay_check_cancelled(options: &ScoreDecayJobOptions) -> Result<(), Str
         .cancellation_flag
         .as_ref()
         .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        || options
+            .cancellation_cx
+            .as_ref()
+            .is_some_and(Cx::is_cancel_requested)
     {
         return Err(SCORE_DECAY_CANCELLED_MESSAGE.to_owned());
     }
@@ -2955,6 +2967,8 @@ pub struct RunnerOptions {
     pub verbose: bool,
     /// Cooperative cancellation flag shared with daemon shutdown.
     pub cancellation_flag: Option<Arc<AtomicBool>>,
+    /// Cooperative Asupersync cancellation source shared with foreground daemon work.
+    pub cancellation_cx: Option<Cx>,
 }
 
 impl RunnerOptions {
@@ -2981,6 +2995,12 @@ impl RunnerOptions {
     #[must_use]
     pub fn with_cancellation_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.cancellation_flag = Some(flag);
+        self
+    }
+
+    #[must_use]
+    pub fn with_cancellation_cx(mut self, cx: &Cx) -> Self {
+        self.cancellation_cx = Some(cx.clone());
         self
     }
 
@@ -3235,6 +3255,11 @@ impl ManualRunner {
             .cancellation_flag
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::SeqCst))
+            || self
+                .options
+                .cancellation_cx
+                .as_ref()
+                .is_some_and(Cx::is_cancel_requested)
     }
 
     /// Schedule a job for execution.
@@ -4066,6 +4091,7 @@ impl ManualRunner {
             .clone()
             .or_else(|| Some("ee-steward".to_owned()));
         options.cancellation_flag = self.options.cancellation_flag.clone();
+        options.cancellation_cx = self.options.cancellation_cx.clone();
 
         let mut preflight_options = options.clone();
         preflight_options.dry_run = true;
@@ -6843,6 +6869,7 @@ pub async fn run_daemon_foreground_supervised(
         let tick_started_at = chrono::Utc::now().to_rfc3339();
         let mut runner_options = options.runner_options.clone();
         runner_options.dry_run = options.dry_run;
+        runner_options = runner_options.with_cancellation_cx(cx);
         if runner_options.workspace_path.is_none() {
             runner_options.workspace_path = Some(PathBuf::from(&options.workspace));
         }
@@ -6860,6 +6887,9 @@ pub async fn run_daemon_foreground_supervised(
             return cancelled;
         }
         let report = runner.run_pending();
+        if let Some(cancelled) = daemon_checkpoint(cx) {
+            return cancelled;
+        }
         ticks.push(DaemonForegroundTick {
             tick,
             started_at: tick_started_at,
