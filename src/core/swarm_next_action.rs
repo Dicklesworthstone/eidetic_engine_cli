@@ -3342,7 +3342,7 @@ pub fn build_swarm_repair_plan_from_claim_gate(
         degraded_codes: gate.degraded_codes.clone(),
         claim_command_action_present: gate.claim_command_action.is_some(),
     };
-    let source_evidence = swarm_repair_plan_source_evidence(gate);
+    let source_evidence = swarm_repair_plan_source_evidence(packet, gate);
     let action_vocabulary = swarm_repair_plan_action_vocabulary();
     let actions = swarm_repair_plan_actions(packet, gate);
     let stop_conditions = swarm_repair_plan_stop_conditions();
@@ -3472,6 +3472,7 @@ fn swarm_repair_plan_stop_conditions() -> Vec<SwarmRepairPlanStopCondition> {
 }
 
 fn swarm_repair_plan_source_evidence(
+    packet: &SwarmWorkPacket,
     gate: &SwarmWorkPacketClaimGate,
 ) -> Vec<SwarmRepairPlanSourceEvidence> {
     let mut sources = gate
@@ -3493,16 +3494,64 @@ fn swarm_repair_plan_source_evidence(
                 freshness_state: source.freshness_state,
                 timed_out: source.timed_out,
                 exit_class: source.exit_class,
-                detail: format!(
-                    "{} source is {}; authoritative={}",
-                    source.source_kind, source.state, source.authoritative
-                ),
+                detail: repair_plan_source_detail(packet, source),
                 degraded_codes,
             }
         })
         .collect::<Vec<_>>();
     sources.sort_by(|left, right| left.source_kind.cmp(right.source_kind));
     sources
+}
+
+fn repair_plan_source_detail(
+    packet: &SwarmWorkPacket,
+    source: &SwarmWorkPacketClaimGateSourceAuthoritySnapshotSourceState,
+) -> String {
+    let base = format!(
+        "{} source is {}; authoritative={}",
+        source.source_kind, source.state, source.authoritative
+    );
+    if source.source_kind != "rch" {
+        return base;
+    }
+
+    let mut parts = vec![
+        base,
+        format!("posture={}", packet.rch_proof_posture.posture),
+    ];
+    if let Some(blocker) = packet
+        .rch_proof_posture
+        .selector_admission_probe
+        .as_ref()
+        .and_then(|probe| probe.admission_blocker.as_ref())
+    {
+        parts.push(format!("blocker_kind={}", blocker.kind));
+        if let Some(active_build_id) = blocker.active_build_id {
+            parts.push(format!("active_build_id={active_build_id}"));
+        }
+        if let Some(worker_id) = blocker.worker_id.as_deref() {
+            parts.push(format!("worker_id={worker_id}"));
+        }
+        if let Some(progress_age_secs) = blocker.progress_age_secs {
+            parts.push(format!("progress_age_secs={progress_age_secs}"));
+        }
+        if let Some(next_action) = blocker.next_action.as_deref() {
+            parts.push(format!("next_action={next_action}"));
+        }
+        if let Some(retry_after_hint) = blocker.retry_after_hint.as_deref() {
+            parts.push(format!("retry_after_hint={retry_after_hint}"));
+        }
+    }
+    if let Some(retry_after) = packet.rch_proof_posture.retry_after.as_deref() {
+        parts.push(format!("retry_after={retry_after}"));
+    }
+    if !packet.rch_proof_posture.blocker_codes.is_empty() {
+        parts.push(format!(
+            "blocker_codes={}",
+            packet.rch_proof_posture.blocker_codes.join(",")
+        ));
+    }
+    parts.join("; ")
 }
 
 fn repair_plan_code_matches_source(code: &str, source_kind: &str) -> bool {
@@ -3672,8 +3721,11 @@ fn swarm_repair_plan_actions(
             Some(repair_plan_rch_lane_doctor_action()),
             None,
             vec!["source:rch".to_owned()],
-            "Remote proof authority is blocked or under pressure; do not replace it with local Cargo, and do not treat admission failure as a source verdict.",
-            vec!["no_source_verdict_without_rch_cargo", "source_authority_fail_closed"],
+            repair_plan_rch_action_rationale(packet),
+            vec![
+                "no_source_verdict_without_rch_cargo",
+                "source_authority_fail_closed",
+            ],
         ));
     }
 
@@ -3764,6 +3816,34 @@ fn swarm_repair_plan_actions(
         ));
     }
     actions
+}
+
+fn repair_plan_rch_action_rationale(packet: &SwarmWorkPacket) -> String {
+    let mut rationale = "Remote proof authority is blocked or under pressure; do not replace it with local Cargo, and do not treat admission failure as a source verdict.".to_owned();
+    if let Some(blocker) = packet
+        .rch_proof_posture
+        .selector_admission_probe
+        .as_ref()
+        .and_then(|probe| probe.admission_blocker.as_ref())
+    {
+        rationale.push_str(&format!(" Blocker kind: {}.", blocker.kind));
+        if let Some(active_build_id) = blocker.active_build_id {
+            rationale.push_str(&format!(" Active build id: {active_build_id}."));
+        }
+        if let Some(worker_id) = blocker.worker_id.as_deref() {
+            rationale.push_str(&format!(" Worker: {worker_id}."));
+        }
+        if let Some(progress_age_secs) = blocker.progress_age_secs {
+            rationale.push_str(&format!(" Progress age seconds: {progress_age_secs}."));
+        }
+        if let Some(next_action) = blocker.next_action.as_deref() {
+            rationale.push_str(&format!(" Next action: {next_action}."));
+        }
+    }
+    if let Some(retry_after) = packet.rch_proof_posture.retry_after.as_deref() {
+        rationale.push_str(&format!(" Retry after: {retry_after}."));
+    }
+    rationale
 }
 
 fn repair_plan_has_any(gate: &SwarmWorkPacketClaimGate, needles: &[&str]) -> bool {
@@ -12182,6 +12262,260 @@ mod tests {
     }
 
     #[test]
+    fn repair_plan_maps_degraded_source_fixtures_to_bounded_actions() {
+        struct Case {
+            bead_id: &'static str,
+            source: SwarmBriefSourceKind,
+            status: SwarmBriefSourceStatus,
+            code: &'static str,
+            message: &'static str,
+            expected_actions: &'static [&'static str],
+            expected_command_id: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                bead_id: "bd-agent-mail-corrupt",
+                source: SwarmBriefSourceKind::AgentMail,
+                status: SwarmBriefSourceStatus::Degraded,
+                code: "agent_mail_archive_corruption_detected",
+                message: "Agent Mail archive corruption detected; raw mailbox content is not included.",
+                expected_actions: &["rerun_snapshot", "repair_agent_mail_archive"],
+                expected_command_id: Some("agent_mail_snapshot_refresh"),
+            },
+            Case {
+                bead_id: "bd-bv-timeout",
+                source: SwarmBriefSourceKind::Bv,
+                status: SwarmBriefSourceStatus::Unavailable,
+                code: "bv_command_timeout",
+                message: "BV robot triage timed out before producing advisory ranks.",
+                expected_actions: &["refresh_bv_bounded"],
+                expected_command_id: Some("bv_robot_triage_refresh"),
+            },
+            Case {
+                bead_id: "bd-beads-stale",
+                source: SwarmBriefSourceKind::Beads,
+                status: SwarmBriefSourceStatus::Degraded,
+                code: "beads_tracker_metadata_drift",
+                message: "Beads DB and JSONL content match, but freshness metadata is stale.",
+                expected_actions: &["inspect_beads_doctor", "rerun_claim_gate"],
+                expected_command_id: Some("beads_doctor_read_only"),
+            },
+            Case {
+                bead_id: "bd-memory-drift-lock",
+                source: SwarmBriefSourceKind::MemoryDrift,
+                status: SwarmBriefSourceStatus::Unavailable,
+                code: crate::core::memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_CODE,
+                message: "memory drift lock contention prevented recent-pack inspection",
+                expected_actions: &["rerun_snapshot"],
+                expected_command_id: Some("memory_drift_recent_pack_probe"),
+            },
+        ];
+
+        for case in cases {
+            let plan = repair_plan_for_source_degradations(
+                case.bead_id,
+                &[(case.source, case.status, case.code, case.message)],
+            );
+            let action_kinds = repair_plan_action_kinds(&plan);
+            for expected_action in case.expected_actions {
+                assert!(
+                    action_kinds.contains(*expected_action),
+                    "case {} missing action {expected_action}; got {:?}",
+                    case.bead_id,
+                    action_kinds
+                );
+            }
+            if let Some(command_id) = case.expected_command_id {
+                assert!(
+                    plan.actions.iter().any(|action| {
+                        action
+                            .command_action
+                            .as_ref()
+                            .is_some_and(|command| command.command_id == command_id)
+                    }),
+                    "case {} missing command action {command_id}",
+                    case.bead_id
+                );
+            }
+            assert!(
+                plan.source_evidence.iter().any(|evidence| {
+                    evidence.source_kind == case.source.as_str()
+                        && evidence.degraded_codes.contains(&case.code.to_owned())
+                        && !evidence.detail.contains("raw mailbox content")
+                }),
+                "case {} missing redacted source evidence for {}",
+                case.bead_id,
+                case.source.as_str()
+            );
+            assert!(
+                plan.actions.iter().all(|action| {
+                    !action.safety.mutates_tracker_state
+                        && action
+                            .command_action
+                            .as_ref()
+                            .map_or(true, |command| !command.mutates_state)
+                }),
+                "repair-plan commands must remain read-only for {}",
+                case.bead_id
+            );
+        }
+    }
+
+    #[test]
+    fn repair_plan_combines_multiple_degraded_sources_without_mutating_repairs() {
+        let plan = repair_plan_for_source_degradations(
+            "bd-combo",
+            &[
+                (
+                    SwarmBriefSourceKind::AgentMail,
+                    SwarmBriefSourceStatus::Degraded,
+                    "agent_mail_archive_corruption_detected",
+                    "Agent Mail archive corruption detected; mailbox bodies omitted.",
+                ),
+                (
+                    SwarmBriefSourceKind::Bv,
+                    SwarmBriefSourceStatus::Unavailable,
+                    "bv_command_timeout",
+                    "BV robot triage timed out.",
+                ),
+                (
+                    SwarmBriefSourceKind::MemoryDrift,
+                    SwarmBriefSourceStatus::Unavailable,
+                    crate::core::memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_CODE,
+                    "memory drift lock contention prevented recent-pack inspection",
+                ),
+            ],
+        );
+        let action_kinds = repair_plan_action_kinds(&plan);
+
+        for expected_action in [
+            "rerun_snapshot",
+            "repair_agent_mail_archive",
+            "refresh_bv_bounded",
+        ] {
+            assert!(
+                action_kinds.contains(expected_action),
+                "combined repair plan missing {expected_action}: {:?}",
+                action_kinds
+            );
+        }
+        let priorities = plan
+            .actions
+            .iter()
+            .map(|action| action.priority)
+            .collect::<Vec<_>>();
+        let mut sorted = priorities.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            priorities, sorted,
+            "repair actions must stay priority ordered"
+        );
+        assert!(plan.non_mutation_policy.side_effect_free);
+        assert!(!plan.non_mutation_policy.executes_repairs);
+        assert!(
+            plan.actions
+                .iter()
+                .filter(|action| action.kind == "repair_agent_mail_archive")
+                .all(|action| action.command_action.is_none()
+                    && action.safety.requires_human_approval)
+        );
+    }
+
+    #[test]
+    fn repair_plan_preserves_rch_active_build_blocker_without_raw_command_log() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.beads.ready = vec![bead("bd-active", "Needs active-project blocker proof", 2)];
+        let evidence = verifier_evidence_from_json(&serde_json::json!({
+            "schema": "ee.rch.verify.v1",
+            "status": "rch_environment_failure",
+            "command_text": "cargo test --test error_recall_e2e -- --nocapture",
+            "command_kind": "cargo_test",
+            "command_hash": "selector-active-project",
+            "remote_required": true,
+            "retry_after": "2026-06-15T05:03:24Z",
+            "degraded_codes": [
+                "rch_verify_build_admission_unavailable",
+                "rch_verify_local_fallback_refused"
+            ],
+            "selector_admission_probe": {
+                "schema": "ee.rch.selector_admission_probe.v1",
+                "status": "selection_failed",
+                "required_runtime": "Rust",
+                "workers_reported": ["trj"],
+                "daemon_workers_reported": ["trj"],
+                "workers_reported_count": 1,
+                "daemon_workers_reported_count": 1,
+                "selected_worker": null,
+                "selection_failure_reason": "active_project_exclusion",
+                "workers_vs_selection_contradiction": false,
+                "path_normalization_warning": null,
+                "remote_required": true,
+                "local_fallback_refused": true,
+                "admission_blocker": {
+                    "kind": "active_project_exclusion",
+                    "retry_guidance": "wait_for_active_build_or_coordinate_with_owner",
+                    "evidence": "[RCH] selection blocked: active_project_exclusion=1",
+                    "active_build_id": 29879340221071367_u64,
+                    "active_command_preview": "cargo test --test error_recall_e2e -- --nocapture",
+                    "active_command_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                    "worker_id": "trj",
+                    "worker_posture": "active",
+                    "progress_age_secs": 7,
+                    "next_action": "wait_for_active_build_or_contact_owner_before_retry"
+                }
+            }
+        }));
+        let packet = SwarmWorkPacket::from_swarm_brief_with_verifier_evidence(&brief, &evidence);
+        let gate = packet.claim_gate(Some("bd-active"));
+        let plan = build_swarm_repair_plan_from_claim_gate(&packet, &gate);
+
+        let rch_evidence = plan
+            .source_evidence
+            .iter()
+            .find(|evidence| evidence.source_kind == "rch")
+            .expect("rch source evidence");
+        assert!(
+            rch_evidence
+                .detail
+                .contains("blocker_kind=active_project_exclusion")
+        );
+        assert!(
+            rch_evidence
+                .detail
+                .contains("active_build_id=29879340221071367")
+        );
+        assert!(rch_evidence.detail.contains("worker_id=trj"));
+        assert!(rch_evidence.detail.contains("progress_age_secs=7"));
+        assert!(
+            rch_evidence
+                .detail
+                .contains("next_action=wait_for_active_build_or_contact_owner_before_retry")
+        );
+        assert!(
+            !rch_evidence.detail.contains("error_recall_e2e"),
+            "repair-plan evidence must not expose raw command previews"
+        );
+
+        let rch_action = plan
+            .actions
+            .iter()
+            .find(|action| action.kind == "wait_for_rch_build")
+            .expect("wait action for active RCH build");
+        assert!(rch_action.rationale.contains("active_project_exclusion"));
+        assert!(rch_action.rationale.contains("29879340221071367"));
+        assert!(
+            !rch_action.rationale.contains("error_recall_e2e"),
+            "RCH action rationale must stay bounded"
+        );
+        assert!(
+            rch_action
+                .stop_condition_refs
+                .contains(&"no_source_verdict_without_rch_cargo")
+        );
+    }
+
+    #[test]
     fn work_packet_claim_gate_blocks_when_memory_drift_lock_contention_is_present() {
         let lock_degradation = degradation(
             SwarmBriefSourceKind::MemoryDrift,
@@ -13436,6 +13770,46 @@ mod tests {
             blocked_by_compile_health: false,
             action_hint: "reserve_files_and_start_smallest_useful_slice".to_owned(),
         }
+    }
+
+    fn repair_plan_for_source_degradations(
+        bead_id: &str,
+        degradations: &[(SwarmBriefSourceKind, SwarmBriefSourceStatus, &str, &str)],
+    ) -> SwarmRepairPlan {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        for (source, status, code, message) in degradations {
+            let degradation = degradation(
+                *source,
+                code,
+                message,
+                Some(format!(
+                    "Repair {} evidence before claiming.",
+                    source.as_str()
+                )),
+            );
+            brief.sources.push(SwarmBriefSourceSnapshot {
+                source: *source,
+                status: *status,
+                freshness: SwarmBriefSourceFreshness::unknown(),
+                provenance: SwarmBriefSourceProvenance::local_probe(),
+                item_count: 0,
+                degraded: vec![degradation.clone()],
+            });
+            brief.degraded.push(degradation);
+        }
+        brief.beads.ready = vec![bead(bead_id, "Repair-plan degraded fixture", 2)];
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let gate = packet.claim_gate(Some(bead_id));
+        build_swarm_repair_plan_from_claim_gate(&packet, &gate)
+    }
+
+    fn repair_plan_action_kinds(plan: &SwarmRepairPlan) -> BTreeSet<&'static str> {
+        plan.actions
+            .iter()
+            .map(|action| action.kind)
+            .collect::<BTreeSet<_>>()
     }
 
     fn bead(id: &str, title: &str, priority: i64) -> SwarmBriefBead {
