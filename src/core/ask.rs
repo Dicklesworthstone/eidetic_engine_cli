@@ -397,10 +397,7 @@ pub fn score_span(
     let lexical = jaccard_similarity(question_terms, &span_terms);
     let tilt = trust_tilt(trust_class);
 
-    // Semantic unavailable: renormalize w1 to absorb w2 (ADR §5).
-    // w1_adj = w1 + w2, w3 unchanged, sum = 0.80 → renorm to 1.0.
-    let w1_adj = (SPAN_W1_LEXICAL + SPAN_W2_SEMANTIC) / (1.0 - SPAN_W3_TRUST + SPAN_W3_TRUST);
-    // Simpler: w1+w2=0.80, w3=0.20, sum=1.0 → w1_adj = 0.80, w3_adj = 0.20.
+    // Semantic unavailable: w1+w2=0.80 absorbed into lexical, w3=0.20 stays (ADR §5).
     let score = 0.80 * lexical + SPAN_W3_TRUST * (memory_confidence * tilt);
     score.clamp(0.0, 1.0)
 }

@@ -1246,7 +1246,7 @@ pub struct AttestQueryArgs {
 }
 
 /// Arguments for `ee ask`.
-#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+#[derive(Clone, Debug, Parser, PartialEq)]
 pub struct AskArgs {
     /// The question to answer extractively from stored memories.
     #[arg(value_name = "QUESTION")]
@@ -57890,7 +57890,8 @@ mod tests {
         MemoryCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
         RedactionLevelSource, ReflectCommand, ReflectRequestLedgerCommand, RegressCommand,
         RegressExplainArgs, RegressionSurfaceArg, RuleCommand, ShadowMode, SituationCommand,
-        StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmWorkPacketArgs,
+        StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmRepairPlanArgs,
+        SwarmWorkPacketArgs,
         TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand, VerifyRchCommand,
         WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode,
         db_inspect_redact_source_uri, diag_environment_attestation_response_json,
