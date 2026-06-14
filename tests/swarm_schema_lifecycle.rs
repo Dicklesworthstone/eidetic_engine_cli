@@ -127,13 +127,16 @@ const SCHEMA_CASES: &[SchemaCase] = &[
     SchemaCase {
         // Contract-first schema from bd-3w4pv.1: per-decision source-authority
         // aggregate consumed by claim gates and unsafe-claim planners. The
-        // read-only collectors that emit it land under bd-3w4pv.2, which is
-        // the tracking bead for the shipped flip.
+        // read-only collectors that emit it landed under bd-3w4pv.2 (closed):
+        // the claim gate now carries sourceAuthoritySnapshot, and the schema
+        // header already flipped shipped/available_in_build to true. This
+        // catalog row lagged behind that flip (heal-in-passing alongside
+        // bd-1n3x1.16).
         id: "ee.source_authority.snapshot.v1",
         file_name: "ee.source_authority.snapshot.v1.json",
         doc_path: "docs/swarm/source_authority_snapshot.md",
         tracking_bead: "bd-3w4pv.2",
-        shipped: false,
+        shipped: true,
     },
     SchemaCase {
         id: "ee.resource.profile.v1",
@@ -221,7 +224,7 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         file_name: "ee.swarm.unsafe_claim_plan.v1.json",
         doc_path: "docs/swarm/unsafe_claim_plan.md",
         tracking_bead: "bd-1n3x1.16.1",
-        shipped: false,
+        shipped: true,
     },
     SchemaCase {
         // bd-1zb7k.14.1 is closed in the beads tracker (the synthetic

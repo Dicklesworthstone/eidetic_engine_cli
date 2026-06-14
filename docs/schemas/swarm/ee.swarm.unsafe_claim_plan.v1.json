@@ -6,10 +6,10 @@
   "type": "object",
   "additionalProperties": false,
   "x-ee-status": {
-    "shipped": false,
-    "available_in_build": false,
+    "shipped": true,
+    "available_in_build": true,
     "tracking_bead": "bd-1n3x1.16.1",
-    "notes": "Contract-first schema for the unsafe-claim planner. Implementation lands in follow-up beads under bd-1n3x1.16; this contract intentionally does not make unsafe claims safe."
+    "notes": "Shipped: `ee swarm work-packet --unsafe-plan` emits this companion plan for an unsafe claim gate (bd-1n3x1.16). The plan is advisory only and intentionally does not make unsafe claims safe."
   },
   "x-ee-doc": "docs/swarm/unsafe_claim_plan.md",
   "required": [

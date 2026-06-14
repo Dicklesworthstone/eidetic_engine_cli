@@ -11559,6 +11559,12 @@ pub struct SwarmWorkPacketArgs {
     #[arg(long, value_name = "BEAD_ID")]
     pub candidate: Option<String>,
 
+    /// When the claim gate is unsafe (safeToClaim=false), emit the companion
+    /// ee.swarm.unsafe_claim_plan.v1 envelope: classified blockers, advisory
+    /// next-action families, and read-only commands. Advisory only; never claims.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub unsafe_plan: bool,
+
     /// Comma-separated agent connector slugs to inspect when agent-inventory is enabled.
     #[arg(long, value_name = "SLUGS")]
     pub agent_inventory_only: Option<String>,
@@ -18061,7 +18067,7 @@ where
 }
 
 fn format_value_requests_json_error(format: &str) -> bool {
-    matches!(format, "json" | "jsonl" | "compact" | "hook")
+    matches!(format, "json" | "jsonl" | "compact" | "hook" | "binary")
 }
 
 fn args_request_json_slice(args: &[OsString]) -> bool {
@@ -54817,6 +54823,32 @@ where
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
 
+    if args.unsafe_plan {
+        let gate = packet.claim_gate(args.candidate.as_deref());
+        return match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &render_swarm_work_packet_claim_gate_markdown(&gate))
+            }
+            output::Renderer::Toon => {
+                match render_swarm_work_packet_unsafe_claim_plan_json(&gate, &packet) {
+                    Ok(json) => {
+                        write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+                    }
+                    Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                }
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                match render_swarm_work_packet_unsafe_claim_plan_json(&gate, &packet) {
+                    Ok(json) => write_stdout(stdout, &(json + "\n")),
+                    Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                }
+            }
+        };
+    }
+
     if args.claim_gate || args.candidate.is_some() {
         let gate = packet.claim_gate(args.candidate.as_deref());
         return match cli.renderer() {
@@ -55208,6 +55240,80 @@ fn render_swarm_work_packet_claim_gate_json(
     serde_json::to_string_pretty(&response).map_err(|error| DomainError::Storage {
         message: format!("Failed to serialize swarm work-packet claim-gate response: {error}."),
         repair: Some("Fix the swarm work-packet claim-gate response serializer.".to_string()),
+    })
+}
+
+/// Map an unsafe claim gate to the pure planner input (bd-1n3x1.16). Only
+/// non-mutating gate command actions are echoed; nothing here re-runs a source.
+fn unsafe_claim_plan_input_from_gate(
+    gate: &SwarmWorkPacketClaimGate,
+) -> crate::core::unsafe_claim_planner::UnsafeClaimPlanInput {
+    use crate::core::unsafe_claim_planner::{
+        UnsafeClaimPlanInput, UnsafeClaimReadOnlyCommandAction,
+    };
+    let next_command_actions = gate
+        .next_command_actions
+        .iter()
+        .filter(|action| !action.mutates_state)
+        .map(|action| UnsafeClaimReadOnlyCommandAction {
+            command_id: action.command_id.to_owned(),
+            display_command: action.display_command.clone(),
+            argv: action.argv.clone(),
+            shell_required: action.shell_required,
+            copy_safety: action.copy_safety,
+            mutates_state: action.mutates_state,
+            required_substrate: action.required_substrate,
+            when: action.when.to_owned(),
+            rationale: action.rationale.to_owned(),
+        })
+        .collect();
+    UnsafeClaimPlanInput {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        workspace: gate.workspace.clone(),
+        gate_id: gate.gate_id.clone(),
+        packet_id: gate.packet_id.clone(),
+        requested_candidate_id: gate.requested_candidate_id.clone(),
+        selected_candidate_id: gate
+            .selected_candidate
+            .as_ref()
+            .map(|candidate| candidate.id.clone()),
+        verdict: gate.verdict.to_owned(),
+        recommended_action: gate.recommended_action.to_owned(),
+        recommended_safe_to_claim: gate.recommended_safe_to_claim,
+        unsafe_reasons: gate.unsafe_reasons.clone(),
+        stale_reasons: gate.stale_reasons.clone(),
+        degraded_codes: gate.degraded_codes.clone(),
+        source_refs: gate.source_refs.clone(),
+        next_command_actions,
+    }
+}
+
+/// Render the companion `ee.swarm.unsafe_claim_plan.v1` envelope for an unsafe
+/// claim gate. A safe gate has no unsafe-claim plan, so its read-only claim-gate
+/// verdict is emitted instead.
+fn render_swarm_work_packet_unsafe_claim_plan_json(
+    gate: &SwarmWorkPacketClaimGate,
+    packet: &SwarmWorkPacket,
+) -> Result<String, DomainError> {
+    if gate.safe_to_claim {
+        return render_swarm_work_packet_claim_gate_json(gate, packet);
+    }
+    let input = unsafe_claim_plan_input_from_gate(gate);
+    let plan = crate::core::unsafe_claim_planner::build_unsafe_claim_plan(&input);
+    let data = serde_json::to_value(&plan).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize unsafe-claim plan: {error}."),
+        repair: Some("Fix the unsafe-claim plan serializer.".to_string()),
+    })?;
+    let degraded = swarm_work_packet_claim_gate_degraded_json(gate, packet);
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": degraded,
+    });
+    serde_json::to_string_pretty(&response).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize unsafe-claim plan response: {error}."),
+        repair: Some("Fix the unsafe-claim plan response serializer.".to_string()),
     })
 }
 
@@ -58446,6 +58552,7 @@ mod tests {
                 max_recent_commits,
                 command_timeout_ms,
                 require_sources,
+                unsafe_plan,
             }))) => {
                 ensure_equal(&sources, &"git,beads,rch".to_string(), "sources")?;
                 ensure_equal(&include_rch, &true, "include rch")?;
@@ -58472,7 +58579,8 @@ mod tests {
                 )?;
                 ensure_equal(&max_recent_commits, &5, "max recent commits")?;
                 ensure_equal(&command_timeout_ms, &750, "command timeout")?;
-                ensure_equal(&require_sources, &true, "require sources")
+                ensure_equal(&require_sources, &true, "require sources")?;
+                ensure_equal(&unsafe_plan, &false, "unsafe plan default")
             }
             other => Err(format!("expected swarm work-packet command, got {other:?}")),
         }
@@ -72630,6 +72738,18 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Usage, "unknown command exit")?;
         ensure_contains(&stdout, "ee.error.v2", "error schema")?;
         ensure_contains(&stdout, "did you mean", "did_you_mean hint in message")
+    }
+
+    #[test]
+    fn unknown_command_binary_format_emits_error_envelope() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--format", "binary", "statis"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "unknown command exit")?;
+        ensure_contains(&stdout, "ee.error.v2", "error schema")?;
+        ensure_contains(&stdout, "did you mean", "did_you_mean hint in message")?;
+        ensure(
+            stderr.is_empty(),
+            "binary-format parse error stderr must be empty",
+        )
     }
 
     #[test]
