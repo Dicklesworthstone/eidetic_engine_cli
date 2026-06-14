@@ -28,6 +28,37 @@ fn yaml_multiline_secret_values_are_redacted() {
 }
 
 #[test]
+fn adversarial_secret_shapes_are_redacted() {
+    let block_secret = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let phrase_secret = "correct horse battery staple";
+    let backtick_secret = "shell-secret-value-123456";
+    let url_password = "p@ss:word,more;end)";
+    let odd_jwt = "eyAiYWxnIjoiSFMyNTYiLCJ0eXAiOiJKV1QifQ.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkphbmUgRG9lIiwiYWRtaW4iOnRydWV9.b2RkLXNpZ25hdHVyZS1ieXRlcw";
+    let input = format!(
+        "credentials:\n  api_key: |-\n    {block_secret}\n  next: safe\npassword:\n  {phrase_secret}\nshell password=`{backtick_secret}`\nurl=https://agent:{url_password}@example.test/path\nopaque artifact {odd_jwt}\n"
+    );
+
+    let report = redact_secret_like_content(&input);
+
+    assert!(report.redacted);
+    for leaked in [
+        block_secret,
+        phrase_secret,
+        backtick_secret,
+        url_password,
+        odd_jwt,
+    ] {
+        assert!(!report.content.contains(leaked), "{leaked}");
+    }
+    assert!(report.content.contains("\n  next: safe"));
+    assert!(report.content.contains("example.test/path"));
+    assert!(report.content.contains("[REDACTED:api_key]"));
+    assert!(report.content.contains("[REDACTED:password]"));
+    assert!(report.content.contains("[REDACTED:url_password]"));
+    assert!(report.content.contains("[REDACTED:jwt_token]"));
+}
+
+#[test]
 fn swarm_slo_url_credential_producer_is_hashed() {
     let event = adapt_swarm_slo_resource_usage_event(&SwarmSloResourceUsageInput {
         producer_id: "https://agent:redaction-password@example.test/run",

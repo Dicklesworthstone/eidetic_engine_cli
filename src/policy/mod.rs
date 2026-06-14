@@ -1640,16 +1640,13 @@ fn detect_url_password_matches(input: &str, matches: &mut Vec<SecretRedactionMat
             break;
         };
         let scheme_marker = search_start + relative_scheme + 3;
-        let segment_end = input[scheme_marker..]
-            .char_indices()
-            .find_map(|(offset, ch)| ch.is_whitespace().then_some(scheme_marker + offset))
-            .unwrap_or(input.len());
-        let Some(at_relative) = input[scheme_marker..segment_end].find('@') else {
-            search_start = segment_end;
+        let authority_end = url_authority_end(input, scheme_marker);
+        let Some(at_relative) = input[scheme_marker..authority_end].rfind('@') else {
+            search_start = authority_end;
             continue;
         };
         let at_index = scheme_marker + at_relative;
-        let Some(colon_relative) = input[scheme_marker..at_index].rfind(':') else {
+        let Some(colon_relative) = input[scheme_marker..at_index].find(':') else {
             search_start = at_index + 1;
             continue;
         };
@@ -1657,6 +1654,15 @@ fn detect_url_password_matches(input: &str, matches: &mut Vec<SecretRedactionMat
         push_secret_match(matches, "url_password", value_start, at_index);
         search_start = at_index + 1;
     }
+}
+
+fn url_authority_end(input: &str, scheme_marker: usize) -> usize {
+    input[scheme_marker..]
+        .char_indices()
+        .find_map(|(offset, ch)| {
+            (ch.is_whitespace() || matches!(ch, '/' | '?' | '#')).then_some(scheme_marker + offset)
+        })
+        .unwrap_or(input.len())
 }
 
 fn detect_pem_block_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
@@ -1757,36 +1763,23 @@ fn detect_raw_api_token_matches(input: &str, matches: &mut Vec<SecretRedactionMa
 }
 
 fn detect_jwt_token_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
-    let mut search_start = 0;
-    loop {
-        if search_start >= input.len() {
-            break;
-        }
-        let Some(relative) = input[search_start..].find("eyJ") else {
+    let mut cursor = 0;
+    while cursor < input.len() {
+        let Some((jwt_start, jwt_end)) = next_jwt_candidate(input, cursor) else {
             break;
         };
-        let jwt_start = search_start + relative;
-        if jwt_start > 0
-            && input
-                .as_bytes()
-                .get(jwt_start - 1)
-                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-')
-        {
-            search_start = jwt_start + 3;
-            continue;
-        }
-        let jwt_end = input[jwt_start..]
-            .char_indices()
-            .find_map(|(offset, ch)| (!is_jwt_segment_char(ch)).then_some(jwt_start + offset))
-            .unwrap_or(input.len());
         let jwt_candidate = input[jwt_start..jwt_end].trim_end_matches('.');
         let actual_jwt_end = jwt_start + jwt_candidate.len();
         let dot_count = jwt_candidate.bytes().filter(|&byte| byte == b'.').count();
         if dot_count == 2 && jwt_candidate.len() >= 32 && is_valid_jwt_candidate(jwt_candidate) {
             push_secret_match(matches, "jwt_token", jwt_start, actual_jwt_end);
-            search_start = actual_jwt_end;
+            cursor = actual_jwt_end;
         } else {
-            search_start = jwt_end;
+            cursor = if jwt_end > jwt_start {
+                jwt_end
+            } else {
+                jwt_start + 1
+            };
         }
     }
 }
@@ -1963,22 +1956,37 @@ fn secret_value_range(
     let separator_cursor = key_end;
     let mut cursor = skip_ascii_spaces(input, key_end);
     let separator = input.as_bytes().get(cursor).copied()?;
-    if matches!(separator, b'=' | b':') {
+    let explicit_separator = matches!(separator, b'=' | b':');
+    if explicit_separator {
         cursor += 1;
     } else if whitespace_value && cursor > separator_cursor {
     } else {
         return None;
     }
     cursor = skip_ascii_spaces(input, cursor);
-    if matches!(separator, b'=' | b':') && starts_with_line_break(input, cursor) {
-        cursor = skip_multiline_secret_value_prefix(input, cursor)?;
+    let mut multiline_value = false;
+    if explicit_separator {
+        let key_indent = line_indent_before(input, key_end);
+        if matches!(input.as_bytes().get(cursor), Some(b'|' | b'>')) {
+            let value_end = yaml_block_secret_value_end(input, cursor, key_indent);
+            return Some((cursor, value_end));
+        }
+        if starts_with_line_break(input, cursor) {
+            cursor = skip_multiline_secret_value_prefix(input, cursor)?;
+            multiline_value = true;
+        }
     }
     if cursor >= input.len() {
         return None;
     }
+    if multiline_value && matches!(input.as_bytes().get(cursor), Some(b'|' | b'>')) {
+        let key_indent = line_indent_before(input, key_end);
+        let value_end = yaml_block_secret_value_end(input, cursor, key_indent);
+        return Some((cursor, value_end));
+    }
 
     let quote = input.as_bytes().get(cursor).copied();
-    if matches!(quote, Some(b'"' | b'\'')) {
+    if matches!(quote, Some(b'"' | b'\'' | b'`')) {
         let quote = quote?;
         let value_start = cursor + 1;
         let value_end = quoted_secret_value_end(input, value_start, quote);
@@ -1986,23 +1994,112 @@ fn secret_value_range(
     }
 
     let stop_at_uri_fragment = secret_key_appears_in_uri_query(input, key_end);
-    let value_end = input[cursor..]
-        .char_indices()
-        .find_map(|(offset, ch)| {
-            if ch.is_whitespace()
-                || matches!(
-                    ch,
-                    ',' | ';' | '&' | '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}'
-                )
-                || (stop_at_uri_fragment && ch == '#')
-            {
-                Some(cursor + offset)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(input.len());
+    let value_end = if multiline_value {
+        plain_multiline_secret_value_end(input, cursor)
+    } else {
+        input[cursor..]
+            .char_indices()
+            .find_map(|(offset, ch)| {
+                if ch.is_whitespace()
+                    || matches!(
+                        ch,
+                        ',' | ';' | '&' | '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}'
+                    )
+                    || (stop_at_uri_fragment && ch == '#')
+                {
+                    Some(cursor + offset)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(input.len())
+    };
     Some((cursor, value_end))
+}
+
+fn line_indent_before(input: &str, index: usize) -> usize {
+    let line_start = input[..index]
+        .rfind('\n')
+        .map_or(0, |position| position + 1);
+    leading_indent_width(input, line_start, index)
+}
+
+fn leading_indent_width(input: &str, line_start: usize, line_end: usize) -> usize {
+    let mut cursor = line_start;
+    let mut width = 0;
+    while cursor < line_end {
+        match input.as_bytes().get(cursor) {
+            Some(b' ' | b'\t') => {
+                width += 1;
+                cursor += 1;
+            }
+            _ => break,
+        }
+    }
+    width
+}
+
+fn yaml_block_secret_value_end(input: &str, marker_start: usize, parent_indent: usize) -> usize {
+    let Some(relative_line_break) = input[marker_start..].find('\n') else {
+        return input.len();
+    };
+    let mut cursor = marker_start + relative_line_break + 1;
+
+    while cursor < input.len() {
+        let line_start = cursor;
+        let line_end = input[line_start..]
+            .find('\n')
+            .map_or(input.len(), |offset| line_start + offset);
+        let line_body_end =
+            if line_end > line_start && matches!(input.as_bytes().get(line_end - 1), Some(b'\r')) {
+                line_end - 1
+            } else {
+                line_end
+            };
+        if input[line_start..line_body_end].trim().is_empty() {
+            cursor = if line_end < input.len() {
+                line_end + 1
+            } else {
+                line_end
+            };
+            continue;
+        }
+        let indent = leading_indent_width(input, line_start, line_body_end);
+        if indent <= parent_indent {
+            return previous_line_break_start(input, line_start);
+        }
+        cursor = if line_end < input.len() {
+            line_end + 1
+        } else {
+            line_end
+        };
+    }
+
+    cursor
+}
+
+fn previous_line_break_start(input: &str, line_start: usize) -> usize {
+    if line_start >= 2
+        && matches!(input.as_bytes().get(line_start - 2), Some(b'\r'))
+        && matches!(input.as_bytes().get(line_start - 1), Some(b'\n'))
+    {
+        line_start - 2
+    } else if line_start >= 1 && matches!(input.as_bytes().get(line_start - 1), Some(b'\n')) {
+        line_start - 1
+    } else {
+        line_start
+    }
+}
+
+fn plain_multiline_secret_value_end(input: &str, cursor: usize) -> usize {
+    let line_end = input[cursor..]
+        .find('\n')
+        .map_or(input.len(), |offset| cursor + offset);
+    if line_end > cursor && matches!(input.as_bytes().get(line_end - 1), Some(b'\r')) {
+        line_end - 1
+    } else {
+        line_end
+    }
 }
 
 fn secret_key_appears_in_uri_query(input: &str, key_end: usize) -> bool {
@@ -2083,16 +2180,13 @@ fn redact_url_passwords(input: &str, reasons: &mut Vec<&'static str>) -> (String
             break;
         };
         let scheme_marker = search_start + relative_scheme + 3;
-        let segment_end = output[scheme_marker..]
-            .char_indices()
-            .find_map(|(offset, ch)| ch.is_whitespace().then_some(scheme_marker + offset))
-            .unwrap_or(output.len());
-        let Some(at_relative) = output[scheme_marker..segment_end].find('@') else {
-            search_start = segment_end;
+        let authority_end = url_authority_end(&output, scheme_marker);
+        let Some(at_relative) = output[scheme_marker..authority_end].rfind('@') else {
+            search_start = authority_end;
             continue;
         };
         let at_index = scheme_marker + at_relative;
-        let Some(colon_relative) = output[scheme_marker..at_index].rfind(':') else {
+        let Some(colon_relative) = output[scheme_marker..at_index].find(':') else {
             search_start = at_index + 1;
             continue;
         };
@@ -2297,35 +2391,10 @@ fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
     let mut search_start = 0;
     let placeholder = redaction_placeholder("jwt_token");
 
-    loop {
-        if search_start >= input.len() {
-            break;
-        }
-        let Some(relative) = input[search_start..].find("eyJ") else {
+    while search_start < input.len() {
+        let Some((jwt_start, jwt_end)) = next_jwt_candidate(input, search_start) else {
             break;
         };
-        let jwt_start = search_start + relative;
-
-        if jwt_start > 0 {
-            if let Some(byte) = input.as_bytes().get(jwt_start - 1) {
-                if byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-' {
-                    search_start = jwt_start + 3;
-                    continue;
-                }
-            }
-        }
-
-        let jwt_end = input[jwt_start..]
-            .char_indices()
-            .find_map(|(offset, ch)| {
-                if !is_jwt_segment_char(ch) {
-                    Some(jwt_start + offset)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(input.len());
-
         let jwt_candidate = input[jwt_start..jwt_end].trim_end_matches('.');
         let actual_jwt_end = jwt_start + jwt_candidate.len();
 
@@ -2344,7 +2413,11 @@ fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
             emit_start = actual_jwt_end;
             search_start = actual_jwt_end;
         } else {
-            search_start = jwt_end;
+            search_start = if jwt_end > jwt_start {
+                jwt_end
+            } else {
+                jwt_start + 1
+            };
         }
     }
 
@@ -2358,6 +2431,33 @@ fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
 
 fn is_jwt_segment_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')
+}
+
+fn next_jwt_candidate(input: &str, mut cursor: usize) -> Option<(usize, usize)> {
+    while cursor < input.len() {
+        let ch = input[cursor..].chars().next()?;
+        if is_jwt_segment_char(ch) {
+            break;
+        }
+        cursor += ch.len_utf8();
+    }
+
+    if cursor >= input.len() {
+        return None;
+    }
+
+    let token_start = cursor;
+    while cursor < input.len() {
+        let Some(ch) = input[cursor..].chars().next() else {
+            break;
+        };
+        if !is_jwt_segment_char(ch) {
+            break;
+        }
+        cursor += ch.len_utf8();
+    }
+
+    Some((token_start, cursor))
 }
 
 fn is_valid_jwt_candidate(candidate: &str) -> bool {
