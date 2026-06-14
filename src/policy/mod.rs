@@ -1995,7 +1995,10 @@ fn secret_value_range(
 ) -> Option<(usize, usize)> {
     let separator_cursor = key_end;
     let mut cursor = skip_ascii_spaces(input, key_end);
-    if matches!(input.as_bytes().get(cursor), Some(b'"' | b'\'')) {
+    if let Some((_, next_cursor)) = escaped_secret_quote(input, cursor) {
+        cursor = next_cursor;
+        cursor = skip_ascii_spaces(input, cursor);
+    } else if matches!(input.as_bytes().get(cursor), Some(b'"' | b'\'')) {
         cursor += 1;
         cursor = skip_ascii_spaces(input, cursor);
     }
@@ -2022,6 +2025,10 @@ fn secret_value_range(
     }
     if cursor >= input.len() {
         return None;
+    }
+    if let Some((quote, value_start)) = escaped_secret_quote(input, cursor) {
+        let value_end = escaped_quoted_secret_value_end(input, value_start, quote);
+        return Some((value_start, value_end));
     }
     if multiline_value && matches!(input.as_bytes().get(cursor), Some(b'|' | b'>')) {
         let key_indent = line_indent_before(input, key_end);
@@ -2170,6 +2177,28 @@ fn quoted_secret_value_end(input: &str, value_start: usize, quote: u8) -> usize 
         if byte == quote {
             return value_start + relative;
         }
+    }
+    input.len()
+}
+
+fn escaped_secret_quote(input: &str, cursor: usize) -> Option<(u8, usize)> {
+    let quote = input.as_bytes().get(cursor + 1).copied()?;
+    (matches!(input.as_bytes().get(cursor), Some(b'\\')) && matches!(quote, b'"' | b'\''))
+        .then_some((quote, cursor + 2))
+}
+
+fn escaped_quoted_secret_value_end(input: &str, value_start: usize, quote: u8) -> usize {
+    let mut cursor = value_start;
+    while cursor < input.len() {
+        if matches!(input.as_bytes().get(cursor), Some(b'\\'))
+            && matches!(input.as_bytes().get(cursor + 1), Some(next) if *next == quote)
+        {
+            return cursor;
+        }
+        let Some(ch) = input[cursor..].chars().next() else {
+            break;
+        };
+        cursor += ch.len_utf8();
     }
     input.len()
 }

@@ -137,3 +137,20 @@ fn padded_jwt_segments_are_redacted() {
     assert!(!report.content.contains(jwt));
     assert!(report.content.contains("[REDACTED:jwt_token]"));
 }
+
+#[test]
+fn json_escaped_key_values_are_redacted() {
+    let secret = "json-escaped-secret-123456";
+    let input = format!(r#"payload={{\"api_key\":\"{secret}\",\"next\":\"safe\"}}"#);
+    let report = redact_secret_like_content(&input);
+
+    assert!(report.redacted);
+    assert!(report.redacted_reasons.contains(&"api_key"));
+    assert!(!report.content.contains(secret));
+    assert!(
+        report
+            .content
+            .contains(r#"\"api_key\":\"[REDACTED:api_key]\""#)
+    );
+    assert!(report.content.contains(r#"\"next\":\"safe\""#));
+}
