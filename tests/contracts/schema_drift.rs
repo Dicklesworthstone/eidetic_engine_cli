@@ -1309,7 +1309,7 @@ mod tests {
             issues.extend(validate_degradation_array(
                 degraded,
                 "error envelope degraded",
-                &["low", "medium", "high"],
+                &["info", "low", "warning", "medium", "high", "critical"],
             ));
         }
 
@@ -1338,7 +1338,7 @@ mod tests {
         if let Some(severity) = error.get("severity").and_then(JsonValue::as_str) {
             validate_enum(
                 severity,
-                &["low", "medium", "high"],
+                &["info", "low", "warning", "medium", "high", "critical"],
                 "error object severity",
                 &mut issues,
             );

@@ -9,7 +9,7 @@
 //!   "error": {
 //!     "code": "<error_code>",
 //!     "message": "<description>",
-//!     "severity": "low|medium|high",
+//!     "severity": "info|low|warning|medium|high|critical",
 //!     "repair": "<optional command>",
 //!     "details": { ... }
 //!   }
@@ -47,7 +47,7 @@ fn verify_error_envelope(json: &str) -> TestResult {
 
     let severity = error.get("severity").and_then(|s| s.as_str());
     match severity {
-        Some("low" | "medium" | "high") => Ok(()),
+        Some("info" | "low" | "warning" | "medium" | "high" | "critical") => Ok(()),
         Some(other) => Err(format!("invalid severity: {other}")),
         None => Err("severity must be a string".into()),
     }

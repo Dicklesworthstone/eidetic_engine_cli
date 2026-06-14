@@ -2267,9 +2267,14 @@ fn preflight_guard_conformance_sample() -> Value {
 }
 
 fn domain_error_sample() -> Result<Value, String> {
-    serde_json::from_str(&error_response_json(&DomainError::Storage {
-        message: "Database file corrupted.".to_string(),
-        repair: Some("ee doctor --fix-plan --json".to_string()),
+    serde_json::from_str(&error_response_json(&DomainError::UsageCodeWithDetails {
+        code: "handoff_hmac_missing",
+        message: "handoff capsule is missing its HMAC".to_string(),
+        repair: Some("Recreate the capsule with signing enabled.".to_string()),
+        details_json: json!({
+            "capsule": "handoff.json",
+        })
+        .to_string(),
     }))
     .map_err(|error| error.to_string())
 }

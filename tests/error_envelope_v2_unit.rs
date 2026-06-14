@@ -1,4 +1,4 @@
-use ee::models::DomainError;
+use ee::models::{DomainError, ProcessExitCode};
 use ee::output::{error_response_json, render_schema_export_json};
 use serde_json::Value;
 
@@ -12,6 +12,21 @@ fn pointer<'a>(value: &'a Value, path: &str) -> Result<&'a Value, String> {
     value
         .pointer(path)
         .ok_or_else(|| format!("missing JSON pointer {path} in {value}"))
+}
+
+fn run_cli(args: &[&str]) -> (ProcessExitCode, String, String) {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let exit = ee::cli::run(
+        args.iter().map(std::ffi::OsString::from),
+        &mut stdout,
+        &mut stderr,
+    );
+    (
+        exit,
+        String::from_utf8(stdout).expect("stdout is utf8"),
+        String::from_utf8(stderr).expect("stderr is utf8"),
+    )
 }
 
 #[test]
@@ -36,6 +51,25 @@ fn minimum_error_envelope_declares_v2_without_extra_root_fields() -> TestResult 
         &serde_json::json!("low")
     );
     assert_eq!(pointer(&value, "/error/details")?, &serde_json::json!({}));
+    Ok(())
+}
+
+#[test]
+fn binary_format_parse_error_emits_error_envelope() -> TestResult {
+    let (exit, stdout, stderr) = run_cli(&["ee", "--format", "binary", "statis"]);
+    assert_eq!(exit, ProcessExitCode::Usage);
+    if !stderr.is_empty() {
+        return Err(format!(
+            "binary-format parse error wrote stderr: {stderr:?}"
+        ));
+    }
+    let value: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("stdout is not JSON: {error}"))?;
+    assert_eq!(
+        pointer(&value, "/schema")?,
+        &serde_json::json!("ee.error.v2")
+    );
+    assert_eq!(pointer(&value, "/error/code")?, &serde_json::json!("usage"));
     Ok(())
 }
 
@@ -112,6 +146,28 @@ fn memory_not_found_lists_recovery_actions() -> TestResult {
     assert_eq!(
         pointer(&recovery[2], "/command")?,
         &serde_json::json!("ee search '<terms>' --workspace . --json")
+    );
+    Ok(())
+}
+
+#[test]
+fn critical_error_severity_is_schema_vocabulary() -> TestResult {
+    let value = parse_error(DomainError::UsageCodeWithDetails {
+        code: "handoff_hmac_missing",
+        message: "handoff capsule is missing its HMAC".to_owned(),
+        repair: Some("Recreate the capsule with signing enabled.".to_owned()),
+        details_json: serde_json::json!({
+            "capsule": "handoff.json",
+        })
+        .to_string(),
+    })?;
+    assert_eq!(
+        pointer(&value, "/schema")?,
+        &serde_json::json!("ee.error.v2")
+    );
+    assert_eq!(
+        pointer(&value, "/error/severity")?,
+        &serde_json::json!("critical")
     );
     Ok(())
 }
