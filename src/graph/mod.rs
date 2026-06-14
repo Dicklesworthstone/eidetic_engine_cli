@@ -1340,7 +1340,7 @@ pub fn build_memory_graph_for_frontier(
         min_confidence: options.min_confidence,
     };
 
-    for _ in 0..=options.max_depth {
+    for _ in 0..options.max_depth {
         if frontier.is_empty() || links_by_id.len() >= options.max_edges {
             break;
         }
@@ -8757,6 +8757,60 @@ mod tests {
         assert!(projection.graph.has_edge(MEMORY_A, MEMORY_B));
         assert!(!projection.graph.has_node(MEMORY_C));
         assert!(!projection.graph.has_node(MEMORY_D));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn frontier_projection_depth_two_does_not_overexpand_chain() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_memory(&connection, MEMORY_D, "Outside depth-two frontier")?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000035",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000036",
+            MEMORY_B,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000037",
+            MEMORY_C,
+            MEMORY_D,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let projection = graph_result(super::build_memory_graph_for_frontier(
+            &connection,
+            &[MEMORY_A.to_string()],
+            &super::FrontierProjectionOptions {
+                max_depth: 2,
+                max_edges: 30,
+                min_weight: None,
+                min_confidence: None,
+            },
+        ))?;
+
+        assert_eq!(projection.node_count, 3);
+        assert_eq!(projection.edge_count, 2);
+        assert!(projection.graph.has_edge(MEMORY_A, MEMORY_B));
+        assert!(projection.graph.has_edge(MEMORY_B, MEMORY_C));
+        assert!(!projection.graph.has_node(MEMORY_D));
+        assert!(!projection.graph.has_edge(MEMORY_C, MEMORY_D));
 
         connection.close().map_err(|error| error.to_string())
     }
