@@ -456,3 +456,51 @@ fn math_pack_selection_cards_do_not_change_selected_memories() -> TestResult {
     }
     assert_cards_golden("math_pack_selection", &pretty(&value)?)
 }
+
+#[test]
+fn mmr_pack_never_selects_same_memory_id_twice() -> TestResult {
+    let budget = TokenBudget::new(100).map_err(|error| format!("{error:?}"))?;
+    let first = candidate(
+        1,
+        0.90,
+        0.50,
+        "Run cargo fmt --check before release.",
+        "formatting",
+    )?;
+    let duplicate_same_memory = candidate(
+        1,
+        0.80,
+        0.50,
+        "Run cargo clippy --all-targets before release.",
+        "linting",
+    )?;
+
+    let draft = assemble_draft_with_profile(
+        ContextPackProfile::Balanced,
+        "prepare release",
+        budget,
+        vec![duplicate_same_memory, first],
+    )
+    .map_err(|error| format!("{error:?}"))?;
+
+    ensure(
+        draft.items.len() == 1,
+        "same memory id should be selected once",
+    )?;
+    ensure(
+        draft.items[0].memory_id == memory_id(1),
+        "selected item should carry the duplicated memory id",
+    )?;
+    ensure(
+        draft.omitted.len() == 1,
+        "duplicate memory id should be omitted",
+    )?;
+    ensure(
+        draft.omitted[0].memory_id == memory_id(1),
+        "omitted duplicate should carry the duplicated memory id",
+    )?;
+    ensure(
+        draft.omitted[0].reason.as_str() == "redundant_candidate",
+        "duplicate memory id should be redundant, not coverage-filled",
+    )
+}

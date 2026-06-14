@@ -5470,6 +5470,7 @@ fn assemble_mmr_draft(
     let mut lod_usage = PackLodBudgetState::from_options(options, budget);
     let mut next_rank = 1_u32;
     let mut scratch = MmrAssemblyScratch::with_candidate_capacity(candidate_count);
+    let mut selected_memory_ids = BTreeSet::new();
     let mut objective_value = 0.0_f32;
 
     while !candidates.is_empty() {
@@ -5523,6 +5524,7 @@ fn assemble_mmr_draft(
                     let redactions = selection.redactions;
                     section_usage.add_candidate(&candidate);
                     lod_usage.add(tier, candidate.estimated_tokens);
+                    selected_memory_ids.insert(candidate.memory_id);
                     let selected_signature = selection.signature.clone();
                     scratch.selected_signatures.push(selection.signature);
                     update_mmr_max_similarities(
@@ -5577,6 +5579,14 @@ fn assemble_mmr_draft(
         let mut coverage_fill_count = 0_usize;
         let coverage_fill_candidates = std::mem::take(&mut scratch.coverage_fill_candidates);
         for selection in coverage_fill_candidates {
+            if selected_memory_ids.contains(&selection.candidate.memory_id) {
+                scratch.draft.omitted.push(PackOmission::from_candidate(
+                    &selection.candidate,
+                    PackOmissionReason::RedundantCandidate,
+                    None,
+                ));
+                continue;
+            }
             if selection.candidate.relevance.into_inner() < DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR {
                 scratch.draft.omitted.push(PackOmission::from_candidate_at(
                     &selection.candidate,
@@ -5651,6 +5661,7 @@ fn assemble_mmr_draft(
                         let redactions = selection.redactions;
                         section_usage.add_candidate(&candidate);
                         lod_usage.add(tier, candidate.estimated_tokens);
+                        selected_memory_ids.insert(candidate.memory_id);
                         scratch.selected_signatures.push(selection.signature);
                         coverage_fill_count = coverage_fill_count.saturating_add(1);
                         scratch
@@ -5779,6 +5790,7 @@ fn assemble_mmr_draft_reusing_workspace(
     let mut section_usage = SectionTokenUsage::default();
     let mut lod_usage = PackLodBudgetState::from_options(options, budget);
     let mut next_rank = 1_u32;
+    let mut selected_memory_ids = BTreeSet::new();
     let mut objective_value = 0.0_f32;
 
     while !candidates.is_empty() {
@@ -5826,6 +5838,7 @@ fn assemble_mmr_draft_reusing_workspace(
                     let redactions = selection.redactions;
                     section_usage.add_candidate(&candidate);
                     lod_usage.add(tier, candidate.estimated_tokens);
+                    selected_memory_ids.insert(candidate.memory_id);
                     let selected_signature = selection.signature.clone();
                     scratch.selected_signatures.push(selection.signature);
                     update_mmr_max_similarities(
@@ -5880,6 +5893,14 @@ fn assemble_mmr_draft_reusing_workspace(
         let mut coverage_fill_count = 0_usize;
         let coverage_fill_candidates = std::mem::take(&mut scratch.coverage_fill_candidates);
         for selection in coverage_fill_candidates {
+            if selected_memory_ids.contains(&selection.candidate.memory_id) {
+                scratch.draft.omitted.push(PackOmission::from_candidate(
+                    &selection.candidate,
+                    PackOmissionReason::RedundantCandidate,
+                    None,
+                ));
+                continue;
+            }
             if selection.candidate.relevance.into_inner() < DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR {
                 scratch.draft.omitted.push(PackOmission::from_candidate_at(
                     &selection.candidate,
@@ -5944,6 +5965,7 @@ fn assemble_mmr_draft_reusing_workspace(
                         let redactions = selection.redactions;
                         section_usage.add_candidate(&candidate);
                         lod_usage.add(tier, candidate.estimated_tokens);
+                        selected_memory_ids.insert(candidate.memory_id);
                         scratch.selected_signatures.push(selection.signature);
                         coverage_fill_count = coverage_fill_count.saturating_add(1);
                         scratch
@@ -12814,6 +12836,46 @@ mod tests {
             &draft.omitted.len(),
             &0,
             "no exact duplicate omitted when fill can use budget",
+        )
+    }
+
+    #[test]
+    fn assemble_draft_never_selects_same_memory_id_twice() -> TestResult {
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let first =
+            candidate_with_content(1, 0.9, 0.5, 10, "Run cargo fmt --check before release.")?;
+        let duplicate_same_memory = candidate_with_content(
+            1,
+            0.8,
+            0.5,
+            10,
+            "Run cargo clippy --all-targets before release.",
+        )?;
+
+        let draft = assemble_draft(
+            "prepare release",
+            budget,
+            vec![duplicate_same_memory, first],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        ensure_equal(&draft.items.len(), &1, "same memory selected once")?;
+        ensure_equal(
+            &draft.items.first().map(|item| item.memory_id),
+            &Some(memory_id(1)),
+            "selected memory id",
+        )?;
+        ensure_equal(&draft.omitted.len(), &1, "duplicate memory omitted")?;
+        ensure_equal(
+            &draft.omitted.first().map(|omission| omission.memory_id),
+            &Some(memory_id(1)),
+            "omitted duplicate memory id",
+        )?;
+        ensure_equal(
+            &draft.omitted.first().map(|omission| omission.reason),
+            &Some(PackOmissionReason::RedundantCandidate),
+            "duplicate memory omission reason",
         )
     }
 
