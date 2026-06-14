@@ -77,3 +77,5 @@ including rejected alternatives and verification hooks.
 - [ADR 0069: Global Knowledge Lane](0069-global-knowledge-lane.md)
 - [ADR 0070: Outcome-Tuned Retrieval Weights via Shadow Policy](0070-outcome-tuned-retrieval-weights.md)
 - [ADR 0071: Memory Debt and Demand-Driven Knowledge Gaps](0071-memory-debt-and-demand-driven-gaps.md)
+- [ADR 0072: Toolchain Provenance Capsule](0072-toolchain-provenance-capsule.md)
+- [ADR 0074: Embedding Model Lifecycle Readiness](0074-embedding-model-lifecycle-readiness.md)
