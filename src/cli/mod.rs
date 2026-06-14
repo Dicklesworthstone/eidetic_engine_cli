@@ -766,6 +766,8 @@ pub enum Command {
     /// Operation audit timeline and inspection commands.
     #[command(subcommand)]
     Audit(AuditCommand),
+    /// Deterministic extractive question answering with citations and honest abstention (ADR 0067).
+    Ask(AskArgs),
     /// Register and inspect narrow coding artifacts.
     #[command(subcommand)]
     Artifact(ArtifactCommand),
@@ -1241,6 +1243,34 @@ pub struct AttestQueryArgs {
     /// Query text to attest. The raw text is not exported.
     #[arg(value_name = "QUERY")]
     pub query: String,
+}
+
+/// Arguments for `ee ask`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct AskArgs {
+    /// The question to answer extractively from stored memories.
+    #[arg(value_name = "QUESTION")]
+    pub question: Option<String>,
+
+    /// Read question from stdin (alternative to positional QUESTION argument).
+    #[arg(long = "stdin", action = clap::ArgAction::SetTrue)]
+    pub from_stdin: bool,
+
+    /// Maximum number of evidence spans to include in the answer (default 3).
+    #[arg(long = "limit-evidence", value_name = "K", default_value = "3")]
+    pub limit_evidence: usize,
+
+    /// Minimum confidence threshold; answers below this abstain (default 0.55).
+    #[arg(long = "min-confidence", value_name = "THRESHOLD")]
+    pub min_confidence: Option<f32>,
+
+    /// Fail-closed mode: exit 6 if confidence below T (for hooks and scripts).
+    #[arg(long = "require-confidence", value_name = "T")]
+    pub require_confidence: Option<f32>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<std::path::PathBuf>,
 }
 
 /// Arguments for `ee diagnose-error`.
@@ -11905,6 +11935,7 @@ where
             handle_agent_scan(&cli, args, stdout, stderr)
         }
         Some(Command::AgentDocs(ref args)) => handle_agent_docs(&cli, args, stdout, stderr),
+        Some(Command::Ask(ref args)) => handle_ask(&cli, args, stdout, stderr),
         Some(Command::Audit(AuditCommand::Timeline(ref args))) => {
             handle_audit_timeline(&cli, args, stdout, stderr)
         }
@@ -40610,6 +40641,175 @@ where
 }
 
 /// `ee recall` (bd-u875s.3, ADR 0064): reverse lookup from a code surface to
+/// `ee ask "<question>"` — deterministic extractive question answering (ADR 0067, bd-169v0.3).
+/// Read-only. Retrieves non-tombstoned workspace memories, scores every sentence span against
+/// the question (lexical overlap + trust tilt), clusters corroborating spans, composes an
+/// extractive answer with [n] citation markers, and abstains honestly when confidence is low.
+fn handle_ask<W, E>(cli: &Cli, args: &AskArgs, stdout: &mut W, stderr: &mut E) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::ask::{
+        ASK_MAX_EVIDENCE_DEFAULT, ASK_MIN_CONFIDENCE_DEFAULT, AskDegradedEntry, AskRequest,
+        ask_data_json, evaluate_ask, render_ask_markdown,
+    };
+
+    // Resolve question from positional arg or --stdin
+    let question = if args.from_stdin {
+        let mut buf = String::new();
+        if std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut buf).is_err() {
+            let error = DomainError::Usage {
+                message: "failed to read question from stdin".to_owned(),
+                repair: Some("ee ask \"your question\" --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        buf.trim().to_owned()
+    } else {
+        args.question.clone().unwrap_or_default()
+    };
+
+    if question.trim().is_empty() {
+        let error = DomainError::Usage {
+            message: "ee ask requires a question: ee ask \"<question>\" [--json]".to_owned(),
+            repair: Some("ee ask \"what port does the daemon use\" --json".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace . --json".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let connection = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(c) => c,
+        Err(e) => {
+            let error = DomainError::Storage {
+                message: format!("Failed to open database: {e}"),
+                repair: Some("ee status --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    if let Err(e) = connection.migrate() {
+        let error = DomainError::Storage {
+            message: format!("Failed to migrate database: {e}"),
+            repair: Some("ee migrate run --workspace . --json".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let workspace_key = workspace_path.to_string_lossy().into_owned();
+    let workspace_id = match connection.get_workspace_by_path(&workspace_key) {
+        Ok(Some(ws)) => ws.id,
+        Ok(None) => {
+            let error = DomainError::Storage {
+                message: format!("Workspace not registered: {}", workspace_path.display()),
+                repair: Some("ee init --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        Err(e) => {
+            let error = DomainError::Storage {
+                message: format!("Failed to query workspace: {e}"),
+                repair: Some("ee doctor --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    // Fetch non-tombstoned memories for this workspace
+    let stored = match connection.list_memories(&workspace_id, None, false) {
+        Ok(mems) => mems,
+        Err(e) => {
+            let error = DomainError::Storage {
+                message: format!("Failed to list memories: {e}"),
+                repair: Some("ee doctor --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let candidates: Vec<crate::core::ask::AskCandidate> = stored
+        .into_iter()
+        .map(|m| crate::core::ask::AskCandidate {
+            memory_id: m.id,
+            content: m.content,
+            confidence: m.confidence,
+            trust_class: m.trust_class,
+            provenance_uri: m.provenance_uri,
+            level: m.level,
+            kind: m.kind,
+        })
+        .collect();
+
+    let request = AskRequest {
+        question: question.clone(),
+        min_confidence: args.min_confidence.unwrap_or(ASK_MIN_CONFIDENCE_DEFAULT),
+        max_evidence: if args.limit_evidence == 0 {
+            ASK_MAX_EVIDENCE_DEFAULT
+        } else {
+            args.limit_evidence
+        },
+        require_confidence: args.require_confidence,
+    };
+
+    let report = evaluate_ask(&request, &candidates);
+
+    // Build degradation entries
+    let mut degraded: Vec<serde_json::Value> = Vec::new();
+    if report.semantic_degraded {
+        degraded.push(AskDegradedEntry::semantic_degraded().to_json());
+    }
+    if report.conflict_detected {
+        degraded.push(AskDegradedEntry::conflicting_evidence().to_json());
+    }
+    if report.abstained {
+        degraded.push(AskDegradedEntry::no_confident_answer().to_json());
+    }
+
+    // fail-closed mode: exit 6 if confidence below required threshold (ADR 0067 §3)
+    if let Some(required) = request.require_confidence {
+        if report.confidence < required {
+            let error = DomainError::UnsatisfiedDegradedMode {
+                message: format!(
+                    "ask confidence {:.3} below required threshold {required:.3}",
+                    report.confidence
+                ),
+                repair: Some(format!("ee remember \"<fact about {question}>\" --json")),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_ask_markdown(&report))
+        }
+        _ => {
+            let envelope = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": ask_data_json(&report),
+                "degraded": degraded,
+            });
+            write_stdout(stdout, &(envelope.to_string() + "\n"))
+        }
+    }
+}
+
 /// anchored memories. Read-only. `--budget-tokens` is the recall content
 /// budget (engine lane with its deterministic per-item estimate and
 /// `ee.recall.cursor.v1` continuation); the global `--max-output-tokens`
@@ -56408,6 +56608,7 @@ impl NormalizedInvocation {
                     AnalyzeCommand::Clustering(_) => "analyze clustering".to_string(),
                 },
                 Command::AgentDocs(_) => "agent-docs".to_string(),
+                Command::Ask(_) => "ask".to_string(),
                 Command::Audit(audit) => match audit {
                     AuditCommand::Timeline(_) => "audit timeline".to_string(),
                     AuditCommand::Show(_) => "audit show".to_string(),

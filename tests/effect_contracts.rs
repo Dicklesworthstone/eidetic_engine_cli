@@ -11,7 +11,7 @@ use std::process::Command;
 
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
 const EFFECT_SOURCE: &str = include_str!("../src/core/effect.rs");
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 373;
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 374;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",

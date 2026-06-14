@@ -15,6 +15,7 @@ pub mod agent_detect;
 pub mod agent_docs;
 pub mod agentsmd;
 pub mod artifact;
+pub mod ask;
 pub mod artifact_relocation;
 pub mod attest;
 pub mod audit;

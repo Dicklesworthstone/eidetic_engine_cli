@@ -1407,6 +1407,10 @@ impl EffectManifest {
                 "Show one journal entry with structured sidecar and redaction report",
             ),
             CommandEffect::read_only_db(
+                "ask",
+                "Deterministic extractive question answering with citations and honest abstention",
+            ),
+            CommandEffect::read_only_db(
                 "recall",
                 "Code-anchored reverse lookup from paths, symbols, or a git diff to anchored memories",
             ),

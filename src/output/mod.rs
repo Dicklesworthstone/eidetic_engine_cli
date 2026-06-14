@@ -10196,6 +10196,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: cursor_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::ask::ASK_SCHEMA_V1,
+            version: "1",
+            description: "Deterministic extractive question answering emitted by ee ask (ADR 0067): retrieve, segment, score spans, cluster, compose with citations, and abstain honestly when confidence is low.",
+            category: "search",
+            definition: ask_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::recall::RECALL_SCHEMA_V1,
             version: "1",
             description: "Code-anchored recall result emitted by ee recall (ADR 0064): reverse lookup from paths, symbols, or a git diff to anchored memories with deterministic freshness x confidence x level-tilt ranking.",
@@ -10248,6 +10255,10 @@ fn journal_distill_schema_definition() -> String {
 
 fn cursor_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.cursor.v1.json").to_string()
+}
+
+fn ask_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.ask.v1.json").to_string()
 }
 
 fn recall_schema_definition() -> String {
