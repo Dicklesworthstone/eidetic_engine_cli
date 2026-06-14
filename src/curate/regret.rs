@@ -596,7 +596,9 @@ fn action_to_candidate_type(action: SuggestedCurationAction) -> super::Candidate
         SuggestedCurationAction::DeprecateMemory => super::CandidateType::Deprecate,
         SuggestedCurationAction::SupersedeMemory => super::CandidateType::Supersede,
         SuggestedCurationAction::TuneRetrieval => super::CandidateType::Promote,
-        SuggestedCurationAction::None => super::CandidateType::Promote,
+        // generate_candidate_from_regret() returns None before reaching this arm;
+        // reaching here would be a caller contract violation.
+        SuggestedCurationAction::None => unreachable!("None action filtered before type mapping"),
     }
 }
 

@@ -382,18 +382,20 @@ fn coherent_cluster(
         .map(|index| points[*index].memory_id.clone())
         .collect::<Vec<_>>();
     let average_internal_similarity = internal_similarity(members, similarities);
-    let nearest_external_similarity = all_clusters
+    // Compute nearest_external_similarity unrounded so silhouette_score uses consistent
+    // precision for both inputs; round only when storing in the output struct.
+    let nearest_external_similarity_raw = all_clusters
         .iter()
         .filter(|cluster| cluster.as_slice() != members)
         .map(|cluster| average_linkage_similarity(members, cluster, similarities))
-        .max_by(f64::total_cmp)
-        .map(round_metric);
+        .max_by(f64::total_cmp);
     let silhouette_score = silhouette_score(
         average_internal_similarity,
-        nearest_external_similarity,
+        nearest_external_similarity_raw,
         members.len(),
     )
     .map(round_metric);
+    let nearest_external_similarity = nearest_external_similarity_raw.map(round_metric);
     let accepted = members.len() >= config.min_cluster_size
         && silhouette_score.is_some_and(|score| score >= config.silhouette_cutoff);
     let cluster_id = cluster_id(&member_memory_ids, config.merge_threshold);
