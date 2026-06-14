@@ -1995,6 +1995,10 @@ fn secret_value_range(
 ) -> Option<(usize, usize)> {
     let separator_cursor = key_end;
     let mut cursor = skip_ascii_spaces(input, key_end);
+    if matches!(input.as_bytes().get(cursor), Some(b'"' | b'\'')) {
+        cursor += 1;
+        cursor = skip_ascii_spaces(input, cursor);
+    }
     let separator = input.as_bytes().get(cursor).copied()?;
     let explicit_separator = matches!(separator, b'=' | b':');
     if explicit_separator {
