@@ -126,3 +126,14 @@ fn instruction_detector_flags_zero_width_separator_variants() {
         "{report:?}"
     );
 }
+
+#[test]
+fn padded_jwt_segments_are_redacted() {
+    let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ==.c2lnbmF0dXJl";
+    let report = redact_secret_like_content(&format!("Opaque token {jwt}"));
+
+    assert!(report.redacted);
+    assert!(report.redacted_reasons.contains(&"jwt_token"));
+    assert!(!report.content.contains(jwt));
+    assert!(report.content.contains("[REDACTED:jwt_token]"));
+}

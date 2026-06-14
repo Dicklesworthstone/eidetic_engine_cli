@@ -2474,7 +2474,7 @@ fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
 }
 
 fn is_jwt_segment_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '=')
 }
 
 fn next_jwt_candidate(input: &str, mut cursor: usize) -> Option<(usize, usize)> {
@@ -2537,15 +2537,36 @@ fn is_valid_jwt_candidate(candidate: &str) -> bool {
 }
 
 fn decode_base64url_segment(segment: &str) -> Option<Vec<u8>> {
-    if segment.is_empty() || segment.len() % 4 == 1 {
+    if segment.is_empty() {
+        return None;
+    }
+    let (payload, padding_len) = match segment.find('=') {
+        Some(padding_start) => {
+            if !segment[padding_start..].bytes().all(|byte| byte == b'=') {
+                return None;
+            }
+            (&segment[..padding_start], segment.len() - padding_start)
+        }
+        None => (segment, 0),
+    };
+    let expected_padding = match payload.len() % 4 {
+        0 => 0,
+        2 => 2,
+        3 => 1,
+        _ => return None,
+    };
+    if payload.is_empty()
+        || padding_len > 2
+        || (padding_len != 0 && padding_len != expected_padding)
+    {
         return None;
     }
 
-    let mut decoded = Vec::with_capacity(segment.len() * 3 / 4);
+    let mut decoded = Vec::with_capacity(payload.len() * 3 / 4);
     let mut accumulator = 0_u32;
     let mut bits = 0_u8;
 
-    for byte in segment.bytes() {
+    for byte in payload.bytes() {
         accumulator = (accumulator << 6) | u32::from(base64url_value(byte)?);
         bits += 6;
         if bits >= 8 {
