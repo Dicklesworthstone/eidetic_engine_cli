@@ -2095,12 +2095,18 @@ fn run_harness_conformance_hook(
             message: format!("Failed to serialize harness event payload: {error}"),
             repair: Some("Check the fixture payload shape.".to_owned()),
         })?;
-        stdin
-            .write_all(&payload)
-            .map_err(|error| DomainError::Usage {
-                message: format!("Failed to write harness event payload to hook stdin: {error}"),
-                repair: Some("Check the hook command stdin behavior.".to_owned()),
-            })?;
+        match stdin.write_all(&payload) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(error) => {
+                return Err(DomainError::Usage {
+                    message: format!(
+                        "Failed to write harness event payload to hook stdin: {error}"
+                    ),
+                    repair: Some("Check the hook command stdin behavior.".to_owned()),
+                });
+            }
+        }
     }
 
     let output = child
