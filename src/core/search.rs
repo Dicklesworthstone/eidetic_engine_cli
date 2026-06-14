@@ -233,6 +233,12 @@ pub struct SearchOptions {
     pub strict_scope: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct SearchWorkspaceProbeState {
+    pub runtime_profile: RuntimeProfileReport,
+    pub output_redaction_enabled: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SearchDedupMode {
     #[default]
@@ -4923,6 +4929,7 @@ pub fn run_search_with_performance(
             &determinism,
             &mut audit_ids,
             Some(&connection),
+            None,
             true,
             None,
         );
@@ -4935,6 +4942,7 @@ pub fn run_search_with_performance(
         None,
         &determinism,
         &mut audit_ids,
+        None,
         None,
         true,
         None,
@@ -5028,6 +5036,22 @@ pub fn run_context_search_with_preloaded_memories(
     audit_connection: Option<&DbConnection>,
     determinism: &Deterministic<Seed>,
 ) -> Result<ContextSearchReport, SearchError> {
+    run_context_search_with_preloaded_memories_and_workspace_state(
+        options,
+        read_connection,
+        audit_connection,
+        None,
+        determinism,
+    )
+}
+
+pub fn run_context_search_with_preloaded_memories_and_workspace_state(
+    options: &SearchOptions,
+    read_connection: &DbConnection,
+    audit_connection: Option<&DbConnection>,
+    workspace_state: Option<&SearchWorkspaceProbeState>,
+    determinism: &Deterministic<Seed>,
+) -> Result<ContextSearchReport, SearchError> {
     // Context candidate conversion batch-loads memories itself, so passthrough
     // swarm/workspace scopes do not need search-analysis metadata on every hit.
     let mut audit_ids = SearchAuditIdSource::Ambient;
@@ -5038,6 +5062,7 @@ pub fn run_context_search_with_preloaded_memories(
         determinism,
         &mut audit_ids,
         audit_connection,
+        workspace_state,
         false,
         Some(&mut preloaded_memories),
     )?;
@@ -5063,6 +5088,7 @@ fn run_search_inner(
         determinism,
         audit_ids,
         audit_connection,
+        None,
         include_passthrough_scope_analysis_metadata,
         preloaded_memories,
     )
@@ -5075,6 +5101,7 @@ fn run_search_inner_with_performance(
     determinism: &Deterministic<Seed>,
     audit_ids: &mut SearchAuditIdSource,
     audit_connection: Option<&DbConnection>,
+    workspace_state: Option<&SearchWorkspaceProbeState>,
     include_passthrough_scope_analysis_metadata: bool,
     mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
 ) -> Result<SearchPerformanceRun, SearchError> {
@@ -5082,7 +5109,9 @@ fn run_search_inner_with_performance(
     let mut trace = SearchPerformanceTrace::default();
     let setup_start = Instant::now();
     let index_dir = options.resolve_index_dir();
-    let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
+    let runtime_profile = workspace_state
+        .map(|state| state.runtime_profile.clone())
+        .unwrap_or_else(|| runtime_profile_for_workspace(&options.workspace_path));
     let (effective_limit, limit_capped) = runtime_profile.cap_search_limit(options.limit);
     trace.record_elapsed("search::setup", setup_start);
 
@@ -5094,8 +5123,10 @@ fn run_search_inner_with_performance(
     trace.record_elapsed("search::indexExists", index_exists_start);
 
     let degradation_start = Instant::now();
-    let output_redaction_enabled =
-        crate::config::workspace_output_redaction_enabled(&options.workspace_path);
+    let output_redaction_enabled = workspace_state.map_or_else(
+        || crate::config::workspace_output_redaction_enabled(&options.workspace_path),
+        |state| state.output_redaction_enabled,
+    );
     let mut degraded = search_degradations_with_connection(options, &index_dir, read_connection);
     let lexical_ram_tier = pin_lexical_ram_tier_for_search(&options.workspace_path, &index_dir);
     push_lexical_ram_tier_search_degradations(&mut degraded, &lexical_ram_tier);

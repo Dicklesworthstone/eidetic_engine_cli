@@ -66,8 +66,9 @@ use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
     SearchOptions, SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus,
-    elapsed_timing_json, performance_redaction_json, query_observation_json,
-    run_context_search_with_preloaded_memories, search_degraded_data_json,
+    SearchWorkspaceProbeState, elapsed_timing_json, performance_redaction_json,
+    query_observation_json, run_context_search_with_preloaded_memories,
+    run_context_search_with_preloaded_memories_and_workspace_state, search_degraded_data_json,
 };
 use crate::db::read_pool::{
     PoolConfig, PoolStats, READ_POOL_ACQUIRE_TIMEOUT_CODE, READ_POOL_UNDERSIZED_CODE,
@@ -2060,7 +2061,7 @@ fn run_context_pack_with_performance_inner(
     };
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut search_preloaded_memories = BTreeMap::new();
-    let mut search_report = match run_context_search_with_preloaded_memories(
+    let mut search_report = match run_context_search_with_preloaded_memories_and_workspace_state(
         &SearchOptions {
             workspace_path: options.workspace_path.clone(),
             database_path: Some(database_path.clone()),
@@ -2087,6 +2088,10 @@ fn run_context_pack_with_performance_inner(
         },
         read_connection,
         context_write_connection.as_ref(),
+        Some(&SearchWorkspaceProbeState {
+            runtime_profile: runtime_profile.clone(),
+            output_redaction_enabled,
+        }),
         determinism,
     ) {
         Ok(context_search) => {
