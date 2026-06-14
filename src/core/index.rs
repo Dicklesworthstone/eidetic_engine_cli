@@ -15,7 +15,8 @@ use crate::db::{
 use crate::models::MemoryId;
 use crate::search::{
     CanonicalSearchDocument, Embedder, EmbedderStack, HashEmbedder, IndexBuilder,
-    artifact_to_document, memory_to_document_with_context_and_anchors, session_to_document,
+    artifact_to_document, memory_to_document_with_context_anchors_and_typed_fields,
+    session_to_document,
 };
 use sqlmodel_core::Value as SqlValue;
 
@@ -1467,11 +1468,13 @@ fn memory_documents_with_anchors(
                 &memory.id,
                 &memory.content,
             )?;
-            Ok(memory_to_document_with_context_and_anchors(
+            let typed_fields_json = db.get_memory_typed_fields_json(&memory.id)?;
+            Ok(memory_to_document_with_context_anchors_and_typed_fields(
                 memory,
                 None,
                 &[],
                 &anchors,
+                typed_fields_json.as_deref(),
             ))
         })
         .collect()

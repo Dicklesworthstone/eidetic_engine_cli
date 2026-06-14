@@ -13619,7 +13619,7 @@ impl DbConnection {
     /// Validate and store a memory kind-specific typed-field sidecar.
     ///
     /// Passing `None` clears the sidecar. Passing raw JSON stores the
-    /// canonical `ee.memory.typed_fields.v1` envelope for the memory's current
+    /// canonical `ee.memory.typed_fields.v2` envelope for the memory's current
     /// kind.
     pub fn set_memory_typed_fields_json(
         &self,
@@ -29565,7 +29565,7 @@ mod tests {
             serde_json::from_str(&stored).map_err(|error| error.to_string())?;
         ensure_equal(
             &parsed["schema"],
-            &serde_json::json!(crate::models::TYPED_MEMORY_FIELDS_SCHEMA_V1),
+            &serde_json::json!(crate::models::memory::TYPED_MEMORY_FIELDS_SCHEMA_V2),
             "typed fields schema",
         )?;
         ensure_equal(

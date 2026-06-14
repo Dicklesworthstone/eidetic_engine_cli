@@ -730,21 +730,34 @@ pub struct SearchHit {
     pub explanation: Option<ScoreExplanation>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TypedMemoryFieldOperator {
+    Exact,
+    Contains,
+    Prefix,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypedMemoryFieldFilter {
     pub field: String,
     pub value: String,
+    pub operator: TypedMemoryFieldOperator,
 }
 
 impl TypedMemoryFieldFilter {
-    /// Parse `field=value` search filter syntax.
+    /// Parse `field=value`, `field~substring`, or `field^prefix` filter syntax.
     ///
     /// Field names normalize `-` to `_` so CLI callers can use either
     /// `reverted-at-sha=...` or `reverted_at_sha=...`.
     pub fn parse(raw: &str) -> Result<Self, String> {
-        let Some((field, value)) = raw.split_once('=') else {
-            return Err("typed memory field filters must use NAME=VALUE".to_owned());
+        let Some((separator_index, operator)) = typed_memory_filter_separator(raw) else {
+            return Err(
+                "typed memory field filters must use NAME=VALUE, NAME~VALUE, or NAME^VALUE"
+                    .to_owned(),
+            );
         };
+        let field = &raw[..separator_index];
+        let value = &raw[separator_index + 1..];
         let field = normalize_typed_memory_filter_field(field)?;
         let value = value.trim();
         if value.is_empty() {
@@ -753,8 +766,23 @@ impl TypedMemoryFieldFilter {
         Ok(Self {
             field,
             value: value.to_owned(),
+            operator,
         })
     }
+}
+
+fn typed_memory_filter_separator(raw: &str) -> Option<(usize, TypedMemoryFieldOperator)> {
+    raw.char_indices()
+        .filter_map(|(index, ch)| {
+            let operator = match ch {
+                '=' => TypedMemoryFieldOperator::Exact,
+                '~' => TypedMemoryFieldOperator::Contains,
+                '^' => TypedMemoryFieldOperator::Prefix,
+                _ => return None,
+            };
+            Some((index, operator))
+        })
+        .min_by_key(|(index, _)| *index)
 }
 
 fn normalize_typed_memory_filter_field(raw: &str) -> Result<String, String> {
@@ -854,6 +882,11 @@ fn typed_memory_hit_matches(
     {
         return Ok(false);
     }
+    let kind = crate::models::MemoryKind::from_str(&memory.kind).map_err(|error| {
+        SearchError::Index(format!(
+            "Failed to parse memory kind for typed search filter: {error}"
+        ))
+    })?;
     if typed_field_filters.is_empty() {
         return Ok(true);
     }
@@ -865,38 +898,47 @@ fn typed_memory_hit_matches(
             ))
         })?;
     Ok(typed_fields_match_filters(
+        &kind,
         typed_fields_json.as_deref(),
         typed_field_filters,
     ))
 }
 
 fn typed_fields_match_filters(
+    kind: &crate::models::MemoryKind,
     typed_fields_json: Option<&str>,
     filters: &[TypedMemoryFieldFilter],
 ) -> bool {
     let Some(typed_fields_json) = typed_fields_json else {
         return filters.is_empty();
     };
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(typed_fields_json) else {
-        return false;
-    };
-    let Some(fields) = parsed.get("fields").and_then(serde_json::Value::as_object) else {
+    let Ok(fields) = crate::models::memory::typed_memory_fields_from_json(kind, typed_fields_json)
+    else {
         return false;
     };
     filters.iter().all(|filter| {
         fields
             .get(&filter.field)
-            .is_some_and(|value| typed_field_value_matches(value, &filter.value))
+            .is_some_and(|value| typed_field_value_matches(value, filter))
     })
 }
 
-fn typed_field_value_matches(value: &serde_json::Value, expected: &str) -> bool {
+fn typed_field_value_matches(value: &serde_json::Value, filter: &TypedMemoryFieldFilter) -> bool {
     match value {
-        serde_json::Value::String(actual) => actual == expected,
-        serde_json::Value::Array(values) => values
-            .iter()
-            .any(|item| item.as_str().is_some_and(|actual| actual == expected)),
+        serde_json::Value::String(actual) => typed_field_string_matches(actual, filter),
+        serde_json::Value::Array(values) => values.iter().any(|item| {
+            item.as_str()
+                .is_some_and(|actual| typed_field_string_matches(actual, filter))
+        }),
         _ => false,
+    }
+}
+
+fn typed_field_string_matches(actual: &str, filter: &TypedMemoryFieldFilter) -> bool {
+    match filter.operator {
+        TypedMemoryFieldOperator::Exact => actual == filter.value.as_str(),
+        TypedMemoryFieldOperator::Contains => actual.contains(filter.value.as_str()),
+        TypedMemoryFieldOperator::Prefix => actual.starts_with(filter.value.as_str()),
     }
 }
 
@@ -12035,6 +12077,17 @@ mod tests {
         let filter = TypedMemoryFieldFilter::parse(" reverted-at-sha = 9af3c21 ")?;
         assert_eq!(filter.field, "reverted_at_sha");
         assert_eq!(filter.value, "9af3c21");
+        assert_eq!(filter.operator, TypedMemoryFieldOperator::Exact);
+
+        let contains = TypedMemoryFieldFilter::parse("command~cargo test -- --nocapture=1")?;
+        assert_eq!(contains.field, "command");
+        assert_eq!(contains.operator, TypedMemoryFieldOperator::Contains);
+        assert_eq!(contains.value, "cargo test -- --nocapture=1");
+
+        let prefix = TypedMemoryFieldFilter::parse("family^aggressive~prefetch=literal")?;
+        assert_eq!(prefix.field, "family");
+        assert_eq!(prefix.operator, TypedMemoryFieldOperator::Prefix);
+        assert_eq!(prefix.value, "aggressive~prefetch=literal");
 
         assert_eq!(normalize_memory_kind_filter(" failure ")?, "failure");
         assert!(TypedMemoryFieldFilter::parse("Family=cache").is_err());
@@ -12158,6 +12211,78 @@ mod tests {
         assert_eq!(report.status, SearchStatus::Success);
         assert_eq!(report.results.len(), 1);
         assert_eq!(report.results[0].doc_id, "mem_11000000000000000000000001");
+
+        let mut contains_report = SearchReport {
+            status: SearchStatus::Success,
+            query: "contains operator".to_owned(),
+            requested_limit: 10,
+            results: vec![
+                synthetic_hit("mem_11000000000000000000000001", 0.9),
+                synthetic_hit("mem_11000000000000000000000002", 0.8),
+            ],
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+        let filters = [TypedMemoryFieldFilter::parse("family~prefetch")?];
+        apply_memory_kind_and_typed_field_filters_to_report_with_connection(
+            &connection,
+            &mut contains_report,
+            Some("failure"),
+            &filters,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(contains_report.results.len(), 1);
+        assert_eq!(
+            contains_report.results[0].doc_id,
+            "mem_11000000000000000000000001"
+        );
+
+        let mut prefix_report = SearchReport {
+            status: SearchStatus::Success,
+            query: "prefix operator".to_owned(),
+            requested_limit: 10,
+            results: vec![
+                synthetic_hit("mem_11000000000000000000000001", 0.9),
+                synthetic_hit("mem_11000000000000000000000002", 0.8),
+            ],
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+        let filters = [TypedMemoryFieldFilter::parse("family^branch")?];
+        apply_memory_kind_and_typed_field_filters_to_report_with_connection(
+            &connection,
+            &mut prefix_report,
+            Some("failure"),
+            &filters,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(prefix_report.results.len(), 1);
+        assert_eq!(
+            prefix_report.results[0].doc_id,
+            "mem_11000000000000000000000002"
+        );
 
         let mut empty_report = SearchReport {
             status: SearchStatus::Success,

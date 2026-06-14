@@ -10297,7 +10297,7 @@ mod tests {
 
         ensure(
             parsed["schema"].as_str(),
-            Some(crate::models::TYPED_MEMORY_FIELDS_SCHEMA_V1),
+            Some(crate::models::memory::TYPED_MEMORY_FIELDS_SCHEMA_V2),
             "typed fields schema",
         )?;
         ensure(

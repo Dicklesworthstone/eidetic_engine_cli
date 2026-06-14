@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 use crate::cache::{CacheBudget, MemoryPressure, assess_pressure};
 use crate::models::{
@@ -251,6 +252,7 @@ pub struct MemoryDocumentBuilder {
     workspace_path: Option<String>,
     tags: Vec<String>,
     anchors: Vec<StoredMemoryAnchor>,
+    typed_fields_json: Option<String>,
 }
 
 impl MemoryDocumentBuilder {
@@ -261,6 +263,7 @@ impl MemoryDocumentBuilder {
             workspace_path: None,
             tags: Vec::new(),
             anchors: Vec::new(),
+            typed_fields_json: None,
         }
     }
 
@@ -282,6 +285,13 @@ impl MemoryDocumentBuilder {
     #[must_use]
     pub fn with_anchors(mut self, anchors: impl IntoIterator<Item = StoredMemoryAnchor>) -> Self {
         self.anchors = anchors.into_iter().collect();
+        self
+    }
+
+    /// Attach a validated typed-field sidecar for metadata indexing.
+    #[must_use]
+    pub fn with_typed_fields_json(mut self, typed_fields_json: impl Into<String>) -> Self {
+        self.typed_fields_json = Some(typed_fields_json.into());
         self
     }
 
@@ -327,6 +337,18 @@ impl MemoryDocumentBuilder {
         }
         if let Some(valid_to) = &memory.valid_to {
             doc = doc.with_metadata_entry("valid_to", valid_to);
+        }
+
+        if let Some(typed_fields_json) = self.typed_fields_json.as_deref()
+            && let Ok(kind) = crate::models::MemoryKind::from_str(&memory.kind)
+            && let Ok(metadata) = crate::models::memory::typed_memory_index_metadata_from_json(
+                &kind,
+                typed_fields_json,
+            )
+        {
+            for (key, value) in metadata {
+                doc = doc.with_metadata_entry(key, value);
+            }
         }
 
         if !self.tags.is_empty() {
@@ -412,6 +434,24 @@ pub fn memory_to_document_with_context_and_anchors(
     tags: &[String],
     anchors: &[StoredMemoryAnchor],
 ) -> CanonicalSearchDocument {
+    memory_to_document_with_context_anchors_and_typed_fields(
+        memory,
+        workspace_path,
+        tags,
+        anchors,
+        None,
+    )
+}
+
+/// Convert a stored memory with workspace, tags, anchors, and typed fields.
+#[must_use]
+pub fn memory_to_document_with_context_anchors_and_typed_fields(
+    memory: &crate::db::StoredMemory,
+    workspace_path: Option<&str>,
+    tags: &[String],
+    anchors: &[StoredMemoryAnchor],
+    typed_fields_json: Option<&str>,
+) -> CanonicalSearchDocument {
     let mut builder = MemoryDocumentBuilder::new();
 
     if let Some(path) = workspace_path {
@@ -424,6 +464,10 @@ pub fn memory_to_document_with_context_and_anchors(
 
     if !anchors.is_empty() {
         builder = builder.with_anchors(anchors.iter().cloned());
+    }
+
+    if let Some(typed_fields_json) = typed_fields_json {
+        builder = builder.with_typed_fields_json(typed_fields_json);
     }
 
     builder.build(memory)
@@ -3658,6 +3702,29 @@ mod tests {
             indexable.metadata.get("validity_window_kind"),
             Some(&"bounded".to_owned())
         );
+    }
+
+    #[test]
+    fn memory_document_builder_indexes_registry_typed_field_metadata() {
+        let mut memory = make_test_memory();
+        memory.kind = "decision".to_owned();
+        let indexable = super::MemoryDocumentBuilder::new()
+            .with_typed_fields_json(
+                r#"{"chosen":"RCH remote","rationale":"avoid local cargo","supersedes":"mem_old","revisit_by":"2026-07-01T12:00:00Z"}"#,
+            )
+            .build(&memory)
+            .into_indexable();
+
+        assert_eq!(
+            indexable.metadata.get("typed_field.chosen"),
+            Some(&"RCH remote".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("typed_field.supersedes"),
+            Some(&"mem_old".to_owned())
+        );
+        assert!(!indexable.metadata.contains_key("typed_field.rationale"));
+        assert!(!indexable.metadata.contains_key("typed_field.revisit_by"));
     }
 
     #[test]

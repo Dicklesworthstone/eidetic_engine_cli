@@ -176,39 +176,47 @@ pub const KNOWN_MEMORY_KINDS: &[&str] = &[
 ];
 
 pub const TYPED_MEMORY_FIELDS_SCHEMA_V1: &str = "ee.memory.typed_fields.v1";
-pub const MAX_TYPED_MEMORY_FIELDS: usize = 4;
+pub const TYPED_MEMORY_FIELDS_SCHEMA_V2: &str = "ee.memory.typed_fields.v2";
+pub const TYPED_MEMORY_FIELD_METADATA_PREFIX: &str = "typed_field.";
+pub const MAX_TYPED_MEMORY_FIELDS: usize = 8;
 pub const MAX_TYPED_MEMORY_FIELD_VALUE_BYTES: usize = 4096;
 pub const MAX_TYPED_MEMORY_FIELD_LIST_ITEMS: usize = 8;
-pub const MAX_TYPED_MEMORY_FIELDS_JSON_BYTES: usize = 16 * 1024;
+pub const MAX_TYPED_MEMORY_FIELDS_JSON_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TypedMemoryFieldShape {
     Text,
     TextList,
+    Rfc3339,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TypedMemoryFieldSpec {
     name: &'static str,
     shape: TypedMemoryFieldShape,
+    indexed: bool,
 }
 
 const FAILURE_TYPED_MEMORY_FIELDS: &[TypedMemoryFieldSpec] = &[
     TypedMemoryFieldSpec {
         name: "cause",
         shape: TypedMemoryFieldShape::Text,
+        indexed: true,
     },
     TypedMemoryFieldSpec {
         name: "regression_surface",
         shape: TypedMemoryFieldShape::Text,
+        indexed: false,
     },
     TypedMemoryFieldSpec {
         name: "reverted_at_sha",
         shape: TypedMemoryFieldShape::Text,
+        indexed: false,
     },
     TypedMemoryFieldSpec {
         name: "family",
         shape: TypedMemoryFieldShape::Text,
+        indexed: true,
     },
 ];
 
@@ -216,18 +224,27 @@ const DECISION_TYPED_MEMORY_FIELDS: &[TypedMemoryFieldSpec] = &[
     TypedMemoryFieldSpec {
         name: "options",
         shape: TypedMemoryFieldShape::TextList,
+        indexed: false,
     },
     TypedMemoryFieldSpec {
         name: "chosen",
         shape: TypedMemoryFieldShape::Text,
+        indexed: true,
     },
     TypedMemoryFieldSpec {
         name: "rationale",
         shape: TypedMemoryFieldShape::Text,
+        indexed: false,
     },
     TypedMemoryFieldSpec {
         name: "supersedes",
         shape: TypedMemoryFieldShape::Text,
+        indexed: true,
+    },
+    TypedMemoryFieldSpec {
+        name: "revisit_by",
+        shape: TypedMemoryFieldShape::Rfc3339,
+        indexed: false,
     },
 ];
 
@@ -235,14 +252,17 @@ const COMMAND_TYPED_MEMORY_FIELDS: &[TypedMemoryFieldSpec] = &[
     TypedMemoryFieldSpec {
         name: "command",
         shape: TypedMemoryFieldShape::Text,
+        indexed: true,
     },
     TypedMemoryFieldSpec {
         name: "when_to_use",
         shape: TypedMemoryFieldShape::Text,
+        indexed: false,
     },
     TypedMemoryFieldSpec {
         name: "exit_meaning",
         shape: TypedMemoryFieldShape::Text,
+        indexed: false,
     },
 ];
 
@@ -250,28 +270,60 @@ const RISK_TYPED_MEMORY_FIELDS: &[TypedMemoryFieldSpec] = &[
     TypedMemoryFieldSpec {
         name: "trigger",
         shape: TypedMemoryFieldShape::Text,
+        indexed: false,
     },
     TypedMemoryFieldSpec {
         name: "blast_radius",
         shape: TypedMemoryFieldShape::Text,
+        indexed: false,
     },
     TypedMemoryFieldSpec {
         name: "safer_alternative",
         shape: TypedMemoryFieldShape::Text,
+        indexed: false,
+    },
+];
+
+const RULE_TYPED_MEMORY_FIELDS: &[TypedMemoryFieldSpec] = &[
+    TypedMemoryFieldSpec {
+        name: "condition",
+        shape: TypedMemoryFieldShape::Text,
+        indexed: true,
+    },
+    TypedMemoryFieldSpec {
+        name: "action",
+        shape: TypedMemoryFieldShape::Text,
+        indexed: false,
+    },
+    TypedMemoryFieldSpec {
+        name: "exceptions",
+        shape: TypedMemoryFieldShape::TextList,
+        indexed: false,
+    },
+];
+
+const CONVENTION_TYPED_MEMORY_FIELDS: &[TypedMemoryFieldSpec] = &[
+    TypedMemoryFieldSpec {
+        name: "scope",
+        shape: TypedMemoryFieldShape::Text,
+        indexed: true,
+    },
+    TypedMemoryFieldSpec {
+        name: "pattern",
+        shape: TypedMemoryFieldShape::Text,
+        indexed: false,
     },
 ];
 
 fn typed_memory_field_specs(kind: &MemoryKind) -> Option<&'static [TypedMemoryFieldSpec]> {
     match kind {
+        MemoryKind::Rule => Some(RULE_TYPED_MEMORY_FIELDS),
         MemoryKind::Failure => Some(FAILURE_TYPED_MEMORY_FIELDS),
         MemoryKind::Decision => Some(DECISION_TYPED_MEMORY_FIELDS),
         MemoryKind::Command => Some(COMMAND_TYPED_MEMORY_FIELDS),
+        MemoryKind::Convention => Some(CONVENTION_TYPED_MEMORY_FIELDS),
         MemoryKind::Risk | MemoryKind::AntiPattern => Some(RISK_TYPED_MEMORY_FIELDS),
-        MemoryKind::Rule
-        | MemoryKind::Fact
-        | MemoryKind::Convention
-        | MemoryKind::PlaybookStep
-        | MemoryKind::Custom(_) => None,
+        MemoryKind::Fact | MemoryKind::PlaybookStep | MemoryKind::Custom(_) => None,
     }
 }
 
@@ -280,6 +332,10 @@ fn typed_memory_field_spec(
     field: &str,
 ) -> Option<TypedMemoryFieldSpec> {
     specs.iter().copied().find(|spec| spec.name == field)
+}
+
+fn typed_memory_valid_field_names(specs: &[TypedMemoryFieldSpec]) -> Vec<String> {
+    specs.iter().map(|spec| spec.name.to_owned()).collect()
 }
 
 /// Canonicalize validated typed memory fields without changing values.
@@ -333,22 +389,26 @@ where
             return Err(MemoryValidationError::TypedFieldNotAllowed {
                 kind: kind.as_str().to_owned(),
                 field: field.to_owned(),
+                valid_fields: typed_memory_valid_field_names(specs),
             });
         };
         match spec.shape {
-            TypedMemoryFieldShape::Text => {
+            TypedMemoryFieldShape::Text | TypedMemoryFieldShape::Rfc3339 => {
                 let text =
                     value
                         .as_str()
                         .ok_or_else(|| MemoryValidationError::TypedFieldWrongType {
                             field: field.to_owned(),
-                            expected: "string",
+                            expected: spec.shape.expected_type(),
                         })?;
                 let text = redact(text).trim().to_owned();
                 if text.is_empty() {
                     continue;
                 }
                 validate_typed_memory_field_value_len(field, &text)?;
+                if spec.shape == TypedMemoryFieldShape::Rfc3339 {
+                    validate_typed_memory_field_rfc3339(field, &text)?;
+                }
                 canonical_fields.insert(field.to_owned(), JsonValue::String(text));
             }
             TypedMemoryFieldShape::TextList => {
@@ -399,7 +459,7 @@ where
     let mut envelope = JsonMap::new();
     envelope.insert(
         "schema".to_owned(),
-        JsonValue::String(TYPED_MEMORY_FIELDS_SCHEMA_V1.to_owned()),
+        JsonValue::String(TYPED_MEMORY_FIELDS_SCHEMA_V2.to_owned()),
     );
     envelope.insert(
         "kind".to_owned(),
@@ -433,7 +493,7 @@ fn typed_memory_fields_object<'a>(
                         field: "schema".to_owned(),
                         expected: "string",
                     })?;
-            if schema != TYPED_MEMORY_FIELDS_SCHEMA_V1 {
+            if schema != TYPED_MEMORY_FIELDS_SCHEMA_V1 && schema != TYPED_MEMORY_FIELDS_SCHEMA_V2 {
                 return Err(MemoryValidationError::InvalidTypedFieldsJson {
                     message: format!("typed fields schema `{schema}` is unsupported"),
                 });
@@ -466,6 +526,16 @@ fn typed_memory_fields_object<'a>(
     Ok(object)
 }
 
+impl TypedMemoryFieldShape {
+    const fn expected_type(self) -> &'static str {
+        match self {
+            Self::Text => "string",
+            Self::TextList => "array of strings",
+            Self::Rfc3339 => "RFC 3339 timestamp string",
+        }
+    }
+}
+
 fn validate_typed_memory_field_value_len(
     field: &str,
     value: &str,
@@ -478,6 +548,81 @@ fn validate_typed_memory_field_value_len(
         });
     }
     Ok(())
+}
+
+fn validate_typed_memory_field_rfc3339(
+    field: &str,
+    value: &str,
+) -> Result<(), MemoryValidationError> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|_| ())
+        .map_err(|error| MemoryValidationError::TypedFieldInvalid {
+            field: field.to_owned(),
+            reason: format!("expected RFC 3339 timestamp ({error})"),
+        })
+}
+
+/// Return a validated, canonical field map from raw or enveloped typed-field JSON.
+pub fn typed_memory_fields_from_json(
+    kind: &MemoryKind,
+    raw_json: &str,
+) -> Result<BTreeMap<String, JsonValue>, MemoryValidationError> {
+    let canonical = canonicalize_typed_memory_fields_json(kind, raw_json)?;
+    let parsed: JsonValue = serde_json::from_str(&canonical).map_err(|error| {
+        MemoryValidationError::InvalidTypedFieldsJson {
+            message: error.to_string(),
+        }
+    })?;
+    let fields = typed_memory_fields_object(kind, &parsed)?;
+    Ok(fields
+        .iter()
+        .map(|(field, value)| (field.clone(), value.clone()))
+        .collect())
+}
+
+/// Return the registry-indexed typed fields as canonical document metadata.
+pub fn typed_memory_index_metadata_from_json(
+    kind: &MemoryKind,
+    raw_json: &str,
+) -> Result<BTreeMap<String, String>, MemoryValidationError> {
+    let fields = typed_memory_fields_from_json(kind, raw_json)?;
+    let specs = typed_memory_field_specs(kind).ok_or_else(|| {
+        MemoryValidationError::TypedFieldsUnsupportedKind {
+            kind: kind.as_str().to_owned(),
+        }
+    })?;
+    let mut metadata = BTreeMap::new();
+    for (field, value) in fields {
+        let Some(spec) = typed_memory_field_spec(specs, &field) else {
+            continue;
+        };
+        if !spec.indexed {
+            continue;
+        }
+        let Some(value) = typed_memory_index_metadata_value(&value) else {
+            continue;
+        };
+        metadata.insert(
+            format!("{TYPED_MEMORY_FIELD_METADATA_PREFIX}{field}"),
+            value,
+        );
+    }
+    Ok(metadata)
+}
+
+fn typed_memory_index_metadata_value(value: &JsonValue) -> Option<String> {
+    match value {
+        JsonValue::String(value) => Some(value.clone()),
+        JsonValue::Array(values) => {
+            let joined = values
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!joined.is_empty()).then_some(joined)
+        }
+        _ => None,
+    }
 }
 
 /// Extract kind-specific typed fields from the freeform memory body.
@@ -499,12 +644,10 @@ where
         MemoryKind::Failure => extract_failure_typed_memory_fields(content),
         MemoryKind::Decision => extract_decision_typed_memory_fields(content),
         MemoryKind::Command => extract_command_typed_memory_fields(content),
+        MemoryKind::Rule => extract_rule_typed_memory_fields(content),
+        MemoryKind::Convention => extract_convention_typed_memory_fields(content),
         MemoryKind::Risk | MemoryKind::AntiPattern => extract_risk_typed_memory_fields(content),
-        MemoryKind::Rule
-        | MemoryKind::Fact
-        | MemoryKind::Convention
-        | MemoryKind::PlaybookStep
-        | MemoryKind::Custom(_) => return Ok(None),
+        MemoryKind::Fact | MemoryKind::PlaybookStep | MemoryKind::Custom(_) => return Ok(None),
     };
     if fields.is_empty() {
         return Ok(None);
@@ -574,6 +717,11 @@ fn extract_decision_typed_memory_fields(content: &str) -> BTreeMap<String, JsonV
         "supersedes",
         extract_labeled_value(content, &["supersedes:", "supersedes="]),
     );
+    insert_text_field(
+        &mut fields,
+        "revisit_by",
+        extract_labeled_value(content, &["revisit by:", "revisit_by:", "revisit-by:"]),
+    );
     fields
 }
 
@@ -619,6 +767,47 @@ fn extract_risk_typed_memory_fields(content: &str) -> BTreeMap<String, JsonValue
             content,
             &["safer alternative:", "safer:", "mitigation:", "instead:"],
         ),
+    );
+    fields
+}
+
+fn extract_rule_typed_memory_fields(content: &str) -> BTreeMap<String, JsonValue> {
+    let mut fields = BTreeMap::new();
+    insert_text_field(
+        &mut fields,
+        "condition",
+        extract_labeled_value(content, &["condition:", "condition=", "when:", "if:"]),
+    );
+    insert_text_field(
+        &mut fields,
+        "action",
+        extract_labeled_value(content, &["action:", "action=", "then:", "do:"]),
+    );
+    if let Some(exceptions) =
+        extract_labeled_value_allowing_commas(content, &["exceptions:", "except:"])
+    {
+        let exceptions = split_text_list(&exceptions);
+        if !exceptions.is_empty() {
+            fields.insert(
+                "exceptions".to_owned(),
+                JsonValue::Array(exceptions.into_iter().map(JsonValue::String).collect()),
+            );
+        }
+    }
+    fields
+}
+
+fn extract_convention_typed_memory_fields(content: &str) -> BTreeMap<String, JsonValue> {
+    let mut fields = BTreeMap::new();
+    insert_text_field(
+        &mut fields,
+        "scope",
+        extract_labeled_value(content, &["scope:", "scope=", "applies to:", "where:"]),
+    );
+    insert_text_field(
+        &mut fields,
+        "pattern",
+        extract_labeled_value(content, &["pattern:", "pattern=", "convention:", "style:"]),
     );
     fields
 }
@@ -1061,10 +1250,15 @@ pub enum MemoryValidationError {
     TypedFieldNotAllowed {
         kind: String,
         field: String,
+        valid_fields: Vec<String>,
     },
     TypedFieldWrongType {
         field: String,
         expected: &'static str,
+    },
+    TypedFieldInvalid {
+        field: String,
+        reason: String,
     },
     TypedFieldTooLong {
         field: String,
@@ -1128,12 +1322,23 @@ impl fmt::Display for MemoryValidationError {
             Self::InvalidTypedFieldsJson { message } => {
                 write!(formatter, "typed memory fields JSON is invalid: {message}")
             }
-            Self::TypedFieldNotAllowed { kind, field } => write!(
+            Self::TypedFieldNotAllowed {
+                kind,
+                field,
+                valid_fields,
+            } => write!(
                 formatter,
-                "typed memory field `{field}` is not allowed for kind `{kind}`"
+                "typed memory field `{field}` is not allowed for kind `{kind}`; valid fields: {}",
+                valid_fields.join(", ")
             ),
             Self::TypedFieldWrongType { field, expected } => {
                 write!(formatter, "typed memory field `{field}` must be {expected}")
+            }
+            Self::TypedFieldInvalid { field, reason } => {
+                write!(
+                    formatter,
+                    "typed memory field `{field}` is invalid: {reason}"
+                )
             }
             Self::TypedFieldTooLong {
                 field,
@@ -1212,11 +1417,11 @@ mod tests {
     use std::str::FromStr;
 
     use super::{
-        Confidence, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES, MemoryContent,
-        MemoryKind, MemoryLevel, MemoryValidationError, TYPED_MEMORY_FIELDS_SCHEMA_V1, Tag,
-        UnitScore, canonicalize_typed_memory_fields_json,
+        Confidence, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES, MAX_TYPED_MEMORY_FIELDS,
+        MemoryContent, MemoryKind, MemoryLevel, MemoryValidationError,
+        TYPED_MEMORY_FIELDS_SCHEMA_V2, Tag, UnitScore, canonicalize_typed_memory_fields_json,
         canonicalize_typed_memory_fields_json_with_redactor,
-        extract_typed_memory_fields_json_with_redactor,
+        extract_typed_memory_fields_json_with_redactor, typed_memory_index_metadata_from_json,
     };
 
     #[test]
@@ -1335,11 +1540,139 @@ mod tests {
         )
         .expect("failure fields canonicalize");
         let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("canonical JSON");
-        assert_eq!(parsed["schema"], TYPED_MEMORY_FIELDS_SCHEMA_V1);
+        assert_eq!(parsed["schema"], TYPED_MEMORY_FIELDS_SCHEMA_V2);
         assert_eq!(parsed["kind"], "failure");
         assert_eq!(parsed["fields"]["cause"], "stale cache");
         assert_eq!(parsed["fields"]["family"], "aggressive-prefetch");
         assert!(parsed["fields"].get("regression_surface").is_none());
+    }
+
+    #[test]
+    fn typed_memory_fields_accept_v1_sidecars_and_emit_v2() {
+        let canonical = canonicalize_typed_memory_fields_json(
+            &MemoryKind::Decision,
+            r#"{"schema":"ee.memory.typed_fields.v1","kind":"decision","fields":{"options":["local","remote"],"chosen":"remote","supersedes":"mem_old"}}"#,
+        )
+        .expect("v1 sidecar canonicalizes through v2 registry");
+        let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("canonical JSON");
+
+        assert_eq!(parsed["schema"], TYPED_MEMORY_FIELDS_SCHEMA_V2);
+        assert_eq!(parsed["kind"], "decision");
+        assert_eq!(parsed["fields"]["options"][0], "local");
+        assert_eq!(parsed["fields"]["chosen"], "remote");
+        assert_eq!(parsed["fields"]["supersedes"], "mem_old");
+    }
+
+    #[test]
+    fn typed_memory_fields_validate_decision_revisit_by_rfc3339() {
+        let canonical = canonicalize_typed_memory_fields_json(
+            &MemoryKind::Decision,
+            r#"{"chosen":"RCH remote","revisit_by":"2026-07-01T12:00:00Z"}"#,
+        )
+        .expect("decision revisit timestamp canonicalizes");
+        let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("canonical JSON");
+        assert_eq!(parsed["fields"]["revisit_by"], "2026-07-01T12:00:00Z");
+
+        let err = canonicalize_typed_memory_fields_json(
+            &MemoryKind::Decision,
+            r#"{"chosen":"RCH remote","revisit_by":"next Tuesday"}"#,
+        )
+        .expect_err("natural language revisit timestamp is invalid");
+        assert!(matches!(
+            err,
+            MemoryValidationError::TypedFieldInvalid { field, .. } if field == "revisit_by"
+        ));
+    }
+
+    #[test]
+    fn typed_memory_fields_canonicalize_rule_and_convention_fields() {
+        let rule = canonicalize_typed_memory_fields_json(
+            &MemoryKind::Rule,
+            r#"{"condition":"release prep","action":"run remote proof","exceptions":["docs only","read-only review"]}"#,
+        )
+        .expect("rule fields canonicalize");
+        let rule: serde_json::Value = serde_json::from_str(&rule).expect("rule JSON");
+        assert_eq!(rule["schema"], TYPED_MEMORY_FIELDS_SCHEMA_V2);
+        assert_eq!(rule["kind"], "rule");
+        assert_eq!(rule["fields"]["condition"], "release prep");
+        assert_eq!(rule["fields"]["action"], "run remote proof");
+        assert_eq!(rule["fields"]["exceptions"][1], "read-only review");
+
+        let convention = canonicalize_typed_memory_fields_json(
+            &MemoryKind::Convention,
+            r#"{"scope":"Rust CLI tests","pattern":"inline module tests near implementation"}"#,
+        )
+        .expect("convention fields canonicalize");
+        let convention: serde_json::Value =
+            serde_json::from_str(&convention).expect("convention JSON");
+        assert_eq!(convention["kind"], "convention");
+        assert_eq!(convention["fields"]["scope"], "Rust CLI tests");
+        assert_eq!(
+            convention["fields"]["pattern"],
+            "inline module tests near implementation"
+        );
+    }
+
+    #[test]
+    fn typed_memory_fields_reject_unknown_field_with_valid_field_list() {
+        let err = canonicalize_typed_memory_fields_json(
+            &MemoryKind::Rule,
+            r#"{"family":"wrong vocabulary"}"#,
+        )
+        .expect_err("unknown rule field rejected");
+        match err {
+            MemoryValidationError::TypedFieldNotAllowed {
+                field,
+                valid_fields,
+                ..
+            } => {
+                assert_eq!(field, "family");
+                assert_eq!(
+                    valid_fields,
+                    vec![
+                        "condition".to_owned(),
+                        "action".to_owned(),
+                        "exceptions".to_owned()
+                    ]
+                );
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_memory_fields_enforce_v2_field_count_bound() {
+        let canonical = canonicalize_typed_memory_fields_json(
+            &MemoryKind::Decision,
+            r#"{"options":["local","remote"],"chosen":"remote","rationale":"keeps SSD cold","supersedes":"mem_old","revisit_by":"2026-07-01T12:00:00Z"}"#,
+        )
+        .expect("decision with five fields fits v2 bound");
+        let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("canonical JSON");
+        assert_eq!(
+            parsed["fields"].as_object().expect("fields object").len(),
+            5
+        );
+        assert_eq!(MAX_TYPED_MEMORY_FIELDS, 8);
+    }
+
+    #[test]
+    fn typed_memory_fields_index_metadata_uses_registry_flags() {
+        let metadata = typed_memory_index_metadata_from_json(
+            &MemoryKind::Decision,
+            r#"{"chosen":"RCH remote","rationale":"avoid local cargo","supersedes":"mem_old","revisit_by":"2026-07-01T12:00:00Z"}"#,
+        )
+        .expect("index metadata extracts");
+
+        assert_eq!(
+            metadata.get("typed_field.chosen"),
+            Some(&"RCH remote".to_owned())
+        );
+        assert_eq!(
+            metadata.get("typed_field.supersedes"),
+            Some(&"mem_old".to_owned())
+        );
+        assert!(!metadata.contains_key("typed_field.rationale"));
+        assert!(!metadata.contains_key("typed_field.revisit_by"));
     }
 
     #[test]
@@ -1384,7 +1717,7 @@ mod tests {
         .expect("failure body has typed fields");
         let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("canonical JSON");
 
-        assert_eq!(parsed["schema"], TYPED_MEMORY_FIELDS_SCHEMA_V1);
+        assert_eq!(parsed["schema"], TYPED_MEMORY_FIELDS_SCHEMA_V2);
         assert_eq!(parsed["kind"], "failure");
         assert_eq!(parsed["fields"]["cause"], "cache pollution");
         assert_eq!(parsed["fields"]["family"], "aggressive prefetch");
@@ -1396,7 +1729,7 @@ mod tests {
     fn typed_memory_fields_extract_decision_options_from_body() {
         let canonical = extract_typed_memory_fields_json_with_redactor(
             &MemoryKind::Decision,
-            "Options: local cache, RCH remote or no-op. Chosen: RCH remote. Rationale: avoids local Cargo. Supersedes: bd-old.",
+            "Options: local cache, RCH remote or no-op. Chosen: RCH remote. Rationale: avoids local Cargo. Supersedes: bd-old. Revisit by: 2026-07-01T12:00:00Z.",
             str::to_owned,
         )
         .expect("decision body extracts")
@@ -1409,6 +1742,7 @@ mod tests {
         assert_eq!(parsed["fields"]["chosen"], "RCH remote");
         assert_eq!(parsed["fields"]["rationale"], "avoids local Cargo");
         assert_eq!(parsed["fields"]["supersedes"], "bd-old");
+        assert_eq!(parsed["fields"]["revisit_by"], "2026-07-01T12:00:00Z");
     }
 
     #[test]
@@ -1441,7 +1775,7 @@ mod tests {
         .expect("risk body has typed fields");
         let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("canonical JSON");
 
-        assert_eq!(parsed["schema"], TYPED_MEMORY_FIELDS_SCHEMA_V1);
+        assert_eq!(parsed["schema"], TYPED_MEMORY_FIELDS_SCHEMA_V2);
         assert_eq!(parsed["kind"], "risk");
         assert_eq!(
             parsed["fields"]["trigger"],
@@ -1455,11 +1789,44 @@ mod tests {
     }
 
     #[test]
+    fn typed_memory_fields_extract_rule_and_convention_patterns_from_body() {
+        let rule = extract_typed_memory_fields_json_with_redactor(
+            &MemoryKind::Rule,
+            "Condition: release prep. Action: run scripts/rch_verify.sh. Exceptions: docs only, read-only review.",
+            str::to_owned,
+        )
+        .expect("rule body extracts")
+        .expect("rule body has typed fields");
+        let rule: serde_json::Value = serde_json::from_str(&rule).expect("rule JSON");
+        assert_eq!(rule["fields"]["condition"], "release prep");
+        assert_eq!(rule["fields"]["action"], "run scripts/rch_verify");
+        assert_eq!(rule["fields"]["exceptions"][0], "docs only");
+        assert_eq!(rule["fields"]["exceptions"][1], "read-only review");
+
+        let convention = extract_typed_memory_fields_json_with_redactor(
+            &MemoryKind::Convention,
+            "Scope: Rust CLI tests. Pattern: keep typed-field tests next to registry code.",
+            str::to_owned,
+        )
+        .expect("convention body extracts")
+        .expect("convention body has typed fields");
+        let convention: serde_json::Value =
+            serde_json::from_str(&convention).expect("convention JSON");
+        assert_eq!(convention["fields"]["scope"], "Rust CLI tests");
+        assert_eq!(
+            convention["fields"]["pattern"],
+            "keep typed-field tests next to registry code"
+        );
+    }
+
+    #[test]
     fn typed_memory_fields_do_not_fabricate_from_bare_bodies() {
         for kind in [
             MemoryKind::Failure,
             MemoryKind::Decision,
             MemoryKind::Command,
+            MemoryKind::Rule,
+            MemoryKind::Convention,
             MemoryKind::Risk,
             MemoryKind::AntiPattern,
         ] {
