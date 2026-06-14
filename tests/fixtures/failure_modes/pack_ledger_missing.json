@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "pack_ledger_missing",
+  "introduced_by": {
+    "bead": "bd-1pi9m.5",
+    "epic_letter": "CAP"
+  },
+  "surfaces": [
+    "outcome"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "An agent records `ee outcome --pack <hash> --item <rank>` against a pack hash or id that has no persisted pack replay ledger in the selected workspace. This happens when the pack was assembled read-only/no-persist or when the agent copied a pack address from another workspace. The command fails honestly instead of guessing a memory id.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee pack 'journal capture replay fixture' --workspace . --read-only --json"
+    ],
+    "invocation": "ee outcome --workspace . --pack blake3:missing-pack-hash --item 1 --signal helpful --json"
+  },
+  "expected_emission": {
+    "code": "pack_ledger_missing",
+    "severity": "medium",
+    "message_contains": [
+      "no persisted replay ledger",
+      "--read-only/--no-persist",
+      "item-addressed"
+    ]
+  },
+  "notes": "The repair is to rerun `ee pack` without read-only/no-persist or pass the target memory id directly. The error protects item-addressed feedback from attaching to the wrong memory."
+}

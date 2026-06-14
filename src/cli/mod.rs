@@ -39872,6 +39872,8 @@ fn format_search_toon_with_mesh(report: &SearchReport, mesh_mode: MeshCommandMod
     output::render_toon_from_json(&format_search_json_with_mesh(report, mesh_mode))
 }
 
+const PACK_LEDGER_MISSING_CODE: &str = "pack_ledger_missing";
+
 /// bd-1pi9m.5: resolve `--pack <id> --item <n>` to the packed memory id
 /// through the persisted pack replay ledger, so an agent can grade item
 /// 3 of a pack it consumed without ever copying a memory id. Degrades
@@ -39916,7 +39918,7 @@ fn resolve_outcome_pack_item_target(
                 .map(|(candidate, _)| candidate.id)
                 .ok_or_else(|| DomainError::Usage {
                     message: format!(
-                        "pack_ledger_missing: no persisted pack with hash {pack_id} in this \
+                        "{PACK_LEDGER_MISSING_CODE}: no persisted pack with hash {pack_id} in this \
                          workspace — packs assembled with --read-only/--no-persist cannot be \
                          item-addressed"
                     ),
@@ -39929,7 +39931,7 @@ fn resolve_outcome_pack_item_target(
         None => {
             return Err(DomainError::Usage {
                 message: format!(
-                    "pack_ledger_missing: pack {pack_id} has no persisted replay ledger in this \
+                    "{PACK_LEDGER_MISSING_CODE}: pack {pack_id} has no persisted replay ledger in this \
                      workspace — packs assembled with --read-only/--no-persist cannot be \
                      item-addressed"
                 ),
