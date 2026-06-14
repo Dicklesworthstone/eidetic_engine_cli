@@ -1915,23 +1915,20 @@ fn find_secret_key_pattern(
     pattern_key: &str,
     mut search_start: usize,
 ) -> Option<(usize, usize)> {
-    let first = char::from(*pattern_key.as_bytes().first()?);
     while search_start < input_lower.len() {
-        let relative = input_lower[search_start..].find(first)?;
-        let key_start = search_start + relative;
-        if let Some(key_end) = secret_key_pattern_end(input_lower, pattern_key, key_start) {
-            return Some((key_start, key_end));
+        if let Some(key_end) = secret_key_pattern_end(input_lower, pattern_key, search_start) {
+            return Some((search_start, key_end));
         }
-        search_start = key_start + first.len_utf8();
+        let ch = input_lower[search_start..].chars().next()?;
+        search_start += ch.len_utf8();
     }
     None
 }
 
 fn secret_key_pattern_end(input_lower: &str, pattern_key: &str, key_start: usize) -> Option<usize> {
-    let bytes = input_lower.as_bytes();
     let mut cursor = key_start;
     for pattern_byte in pattern_key.bytes() {
-        let byte = *bytes.get(cursor)?;
+        let (byte, next_cursor) = next_secret_key_logical_byte(input_lower, cursor)?;
         if is_secret_key_separator(pattern_byte) {
             if !is_secret_key_separator(byte) {
                 return None;
@@ -1939,9 +1936,52 @@ fn secret_key_pattern_end(input_lower: &str, pattern_key: &str, key_start: usize
         } else if byte != pattern_byte {
             return None;
         }
-        cursor += 1;
+        cursor = next_cursor;
     }
     Some(cursor)
+}
+
+fn next_secret_key_logical_byte(input_lower: &str, cursor: usize) -> Option<(u8, usize)> {
+    if let Some(decoded) = decode_secret_key_escape(input_lower, cursor) {
+        return Some(decoded);
+    }
+    let ch = input_lower[cursor..].chars().next()?;
+    if ch.is_ascii() {
+        Some((ch as u8, cursor + ch.len_utf8()))
+    } else {
+        Some((0, cursor + ch.len_utf8()))
+    }
+}
+
+fn decode_secret_key_escape(input_lower: &str, cursor: usize) -> Option<(u8, usize)> {
+    let bytes = input_lower.as_bytes();
+    if matches!(bytes.get(cursor), Some(b'\\')) && matches!(bytes.get(cursor + 1), Some(b'u')) {
+        let mut value = 0_u32;
+        for offset in 2..6 {
+            value = (value << 4) | u32::from(hex_value(*bytes.get(cursor + offset)?)?);
+        }
+        if value <= 0x7f {
+            return Some(((value as u8).to_ascii_lowercase(), cursor + 6));
+        }
+    }
+    if matches!(bytes.get(cursor), Some(b'%')) {
+        let high = hex_value(*bytes.get(cursor + 1)?)?;
+        let low = hex_value(*bytes.get(cursor + 2)?)?;
+        let value = (high << 4) | low;
+        if value.is_ascii() {
+            return Some((value.to_ascii_lowercase(), cursor + 3));
+        }
+    }
+    None
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn is_secret_key_separator(byte: u8) -> bool {

@@ -34,8 +34,11 @@ fn adversarial_secret_shapes_are_redacted() {
     let backtick_secret = "shell-secret-value-123456";
     let url_password = "p@ss:word,more;end)";
     let odd_jwt = "eyAiYWxnIjoiSFMyNTYiLCJ0eXAiOiJKV1QifQ.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkphbmUgRG9lIiwiYWRtaW4iOnRydWV9.b2RkLXNpZ25hdHVyZS1ieXRlcw";
+    let unicode_key_secret = "unicode-key-secret-123456";
+    let escaped_letter_secret = "escaped-letter-secret-123456";
+    let percent_key_secret = "percent-key-secret-123456";
     let input = format!(
-        "credentials:\n  api_key: |-\n    {block_secret}\n  next: safe\npassword:\n  {phrase_secret}\nshell password=`{backtick_secret}`\nurl=https://agent:{url_password}@example.test/path\nopaque artifact {odd_jwt}\n"
+        "credentials:\n  api_key: |-\n    {block_secret}\n  next: safe\npassword:\n  {phrase_secret}\nshell password=`{backtick_secret}`\nurl=https://agent:{url_password}@example.test/path\nopaque artifact {odd_jwt}\nescaped={{\"api\\u005fkey\":\"{unicode_key_secret}\",\"p\\u0061ssword\":\"{escaped_letter_secret}\"}}\ncallback=https://example.test/hook?api%5Fkey={percent_key_secret}&next=1\n"
     );
 
     let report = redact_secret_like_content(&input);
@@ -47,6 +50,9 @@ fn adversarial_secret_shapes_are_redacted() {
         backtick_secret,
         url_password,
         odd_jwt,
+        unicode_key_secret,
+        escaped_letter_secret,
+        percent_key_secret,
     ] {
         assert!(!report.content.contains(leaked), "{leaked}");
     }
@@ -56,6 +62,7 @@ fn adversarial_secret_shapes_are_redacted() {
     assert!(report.content.contains("[REDACTED:password]"));
     assert!(report.content.contains("[REDACTED:url_password]"));
     assert!(report.content.contains("[REDACTED:jwt_token]"));
+    assert!(report.content.contains("next=1"));
 }
 
 #[test]
