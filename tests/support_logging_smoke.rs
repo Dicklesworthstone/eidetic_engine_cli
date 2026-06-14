@@ -187,6 +187,39 @@ fn rust_harness_emits_schema_valid_events() -> TestResult {
 }
 
 #[test]
+fn stderr_excerpt_redacts_secret_like_content_before_logging() -> TestResult {
+    let raw = "error: api_key=api-fixture-alpha password=password-fixture-beta bearer fake-curl-auth-header-token-0041";
+    let excerpt = ee::obs::test_log::excerpt_stderr(raw.as_bytes(), 4096);
+    for forbidden in [
+        "api-fixture-alpha",
+        "password-fixture-beta",
+        "fake-curl-auth-header-token-0041",
+    ] {
+        if excerpt.contains(forbidden) {
+            return Err(format!("stderr excerpt leaked {forbidden}: {excerpt}"));
+        }
+    }
+    for placeholder in [
+        "[REDACTED:api_key]",
+        "[REDACTED:password]",
+        "[REDACTED:bearer_token]",
+    ] {
+        if !excerpt.contains(placeholder) {
+            return Err(format!("stderr excerpt missing {placeholder}: {excerpt}"));
+        }
+    }
+
+    let capped = ee::obs::test_log::excerpt_stderr(raw.as_bytes(), 24);
+    if capped.len() > 24 {
+        return Err(format!("capped excerpt exceeded cap: {}", capped.len()));
+    }
+    if capped.contains("api-fixture-alpha") {
+        return Err(format!("capped excerpt leaked secret: {capped}"));
+    }
+    Ok(())
+}
+
+#[test]
 fn bash_harness_emits_schema_valid_events() -> TestResult {
     let tmp = TempDir::new().map_err(|e| e.to_string())?;
     let log_path = tmp.path().join("bash_run.jsonl");

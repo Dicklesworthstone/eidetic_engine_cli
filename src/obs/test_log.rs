@@ -30,6 +30,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::config::{EnvVar, read_env_var, read_env_var_os};
+use crate::policy::redact_secret_like_content;
 
 pub use crate::models::TEST_EVENT_SCHEMA_V1;
 
@@ -354,11 +355,26 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
 
-/// Truncate stderr to at most `cap` bytes (default cap is the spec's 4096).
+/// Redact and truncate stderr to at most `cap` bytes (default cap is the
+/// spec's 4096). Stderr often carries diagnostics plus copied command output,
+/// so redaction runs before truncation to avoid leaking partially capped secret
+/// values into structured logs.
 #[must_use]
 pub fn excerpt_stderr(stderr: &[u8], cap: usize) -> String {
-    let stop = stderr.len().min(cap);
-    String::from_utf8_lossy(&stderr[..stop]).into_owned()
+    let text = String::from_utf8_lossy(stderr);
+    let redacted = redact_secret_like_content(&text).content;
+    truncate_utf8_bytes(&redacted, cap)
+}
+
+fn truncate_utf8_bytes(value: &str, cap: usize) -> String {
+    if value.len() <= cap {
+        return value.to_string();
+    }
+    let mut end = cap;
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    value[..end].to_string()
 }
 
 /// Wraps `std::process::Command` so command-start/end events are emitted
@@ -772,6 +788,36 @@ mod tests {
         assert_eq!(excerpt_stderr(&huge, 4096).len(), 4096);
         let small = b"short stderr";
         assert_eq!(excerpt_stderr(small, 4096), "short stderr");
+    }
+
+    #[test]
+    fn excerpt_stderr_redacts_secret_like_values_before_capping() {
+        let raw = b"failed: api_key=api-fixture-alpha password=password-fixture-beta bearer fake-curl-auth-header-token-0041";
+        let excerpt = excerpt_stderr(raw, 4096);
+        for forbidden in [
+            "api-fixture-alpha",
+            "password-fixture-beta",
+            "fake-curl-auth-header-token-0041",
+        ] {
+            assert!(
+                !excerpt.contains(forbidden),
+                "stderr excerpt leaked {forbidden}: {excerpt}"
+            );
+        }
+        for placeholder in [
+            "[REDACTED:api_key]",
+            "[REDACTED:password]",
+            "[REDACTED:bearer_token]",
+        ] {
+            assert!(
+                excerpt.contains(placeholder),
+                "stderr excerpt missing {placeholder}: {excerpt}"
+            );
+        }
+
+        let capped = excerpt_stderr(raw, 24);
+        assert!(capped.len() <= 24);
+        assert!(!capped.contains("api-fixture-alpha"));
     }
 
     #[test]
