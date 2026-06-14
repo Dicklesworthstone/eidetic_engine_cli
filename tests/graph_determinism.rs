@@ -14,8 +14,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ee::config::GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY;
 use ee::db::{
-    CreateCausalEvidenceInput, CreateMemoryLinkInput, DatabaseConfig, DbConnection,
-    GraphSnapshotStatus, GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource,
+    CreateCausalEvidenceInput, CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput,
+    DatabaseConfig, DbConnection, GraphSnapshotStatus, GraphSnapshotType, MemoryLinkRelation,
+    MemoryLinkSource,
+};
+use ee::graph::{
+    FrontierProjectionOptions, ProjectionOptions, build_memory_graph,
+    build_memory_graph_for_frontier,
 };
 use ee::models::MemoryLinkId;
 use serde_json::Value;
@@ -52,6 +57,105 @@ fn unique_tmp_path(label: &str, extension: &str) -> Result<PathBuf, String> {
         "/tmp/ee-{label}-{}-{now}.{extension}",
         std::process::id()
     )))
+}
+
+#[test]
+fn graph_projection_frontier_typed_edges_are_workspace_scoped() -> TestResult {
+    const WORKSPACE_A: &str = "wsp_01234567890123456789012345";
+    const WORKSPACE_B: &str = "wsp_99999999999999999999999999";
+    const MEMORY_A1: &str = "mem_00000000000000000000000011";
+    const MEMORY_A2: &str = "mem_00000000000000000000000012";
+    const MEMORY_B1: &str = "mem_00000000000000000000000021";
+    const MEMORY_B2: &str = "mem_00000000000000000000000022";
+
+    let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+    connection.migrate().map_err(|error| error.to_string())?;
+    for (workspace_id, path) in [
+        (WORKSPACE_A, "/tmp/ee-graph-frontier-workspace-a"),
+        (WORKSPACE_B, "/tmp/ee-graph-frontier-workspace-b"),
+    ] {
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: path.to_string(),
+                    name: Some("graph frontier typed edge regression".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    for (workspace_id, memory_id, content) in [
+        (
+            WORKSPACE_A,
+            MEMORY_A1,
+            "Workspace A failure family cache churn.",
+        ),
+        (
+            WORKSPACE_A,
+            MEMORY_A2,
+            "Workspace A peer failure family cache churn.",
+        ),
+        (
+            WORKSPACE_B,
+            MEMORY_B1,
+            "Workspace B failure family cache churn.",
+        ),
+        (
+            WORKSPACE_B,
+            MEMORY_B2,
+            "Workspace B peer failure family cache churn.",
+        ),
+    ] {
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_string(),
+                    level: "semantic".to_string(),
+                    kind: "failure".to_string(),
+                    content: content.to_string(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.6,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_string(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .set_memory_typed_fields_json(memory_id, Some(r#"{"family":"cache churn"}"#))
+            .map_err(|error| error.to_string())?;
+    }
+
+    let projection = build_memory_graph_for_frontier(
+        &connection,
+        &[MEMORY_A1.to_string()],
+        &FrontierProjectionOptions {
+            max_depth: 1,
+            max_edges: 30,
+            min_weight: None,
+            min_confidence: None,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(projection.graph.has_edge(MEMORY_A1, MEMORY_A2));
+    assert!(projection.graph.has_edge(MEMORY_A2, MEMORY_A1));
+    assert!(!projection.graph.has_node(MEMORY_B1));
+    assert!(!projection.graph.has_node(MEMORY_B2));
+
+    let full_projection = build_memory_graph(&connection, &ProjectionOptions::default())
+        .map_err(|error| error.to_string())?;
+    assert!(full_projection.graph.has_edge(MEMORY_A1, MEMORY_A2));
+    assert!(full_projection.graph.has_edge(MEMORY_B1, MEMORY_B2));
+
+    connection.close().map_err(|error| error.to_string())
 }
 
 fn assert_graph_determinism_shell_log(log_path: &Path) -> TestResult {

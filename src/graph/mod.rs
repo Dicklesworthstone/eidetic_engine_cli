@@ -2252,7 +2252,11 @@ fn typed_memory_graph_edges(
     conn: &DbConnection,
     workspace_filter: Option<&BTreeSet<String>>,
 ) -> GraphResult<Vec<TypedMemoryGraphEdge>> {
-    let active_memory_workspaces = active_memory_workspace_ids(conn)?;
+    if workspace_filter.is_some_and(BTreeSet::is_empty) {
+        return Ok(Vec::new());
+    }
+
+    let active_memory_workspaces = active_memory_workspace_ids(conn, workspace_filter)?;
     let rows = typed_memory_graph_rows(conn, workspace_filter)?;
     Ok(build_typed_memory_graph_edges(
         &rows,
@@ -2260,60 +2264,110 @@ fn typed_memory_graph_edges(
     ))
 }
 
-fn active_memory_workspace_ids(conn: &DbConnection) -> GraphResult<BTreeMap<String, String>> {
-    conn.query(
+fn active_memory_workspace_ids(
+    conn: &DbConnection,
+    workspace_filter: Option<&BTreeSet<String>>,
+) -> GraphResult<BTreeMap<String, String>> {
+    let mut sql = String::from(
         "SELECT id, workspace_id
          FROM memories
-         WHERE tombstoned_at IS NULL
-         ORDER BY workspace_id ASC, id ASC",
-        &[],
-    )
-    .map_err(|error| GraphError::storage("query active memory workspace ids", error))?
-    .iter()
-    .map(|row| {
-        Ok((
-            graph_row_text(row, 0, "memories.id")?,
-            graph_row_text(row, 1, "memories.workspace_id")?,
-        ))
-    })
-    .collect()
+         WHERE tombstoned_at IS NULL",
+    );
+    let mut params = Vec::new();
+    append_workspace_filter(&mut sql, &mut params, workspace_filter);
+    sql.push_str(" ORDER BY workspace_id ASC, id ASC");
+
+    conn.query(&sql, &params)
+        .map_err(|error| GraphError::storage("query active memory workspace ids", error))?
+        .iter()
+        .map(|row| {
+            Ok((
+                graph_row_text(row, 0, "memories.id")?,
+                graph_row_text(row, 1, "memories.workspace_id")?,
+            ))
+        })
+        .collect()
 }
 
 fn workspace_ids_for_memory_ids(
     conn: &DbConnection,
     memory_ids: &BTreeSet<String>,
 ) -> GraphResult<BTreeSet<String>> {
-    let active_memory_workspaces = active_memory_workspace_ids(conn)?;
-    Ok(memory_ids
+    if memory_ids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    let mut sql = String::from(
+        "SELECT DISTINCT workspace_id
+         FROM memories
+         WHERE tombstoned_at IS NULL",
+    );
+    let mut params = Vec::new();
+    append_text_set_filter(&mut sql, &mut params, "id", memory_ids);
+    sql.push_str(" ORDER BY workspace_id ASC");
+
+    conn.query(&sql, &params)
+        .map_err(|error| GraphError::storage("query workspace ids for memory ids", error))?
         .iter()
-        .filter_map(|memory_id| active_memory_workspaces.get(memory_id).cloned())
-        .collect())
+        .map(|row| graph_row_text(row, 0, "memories.workspace_id"))
+        .collect()
 }
 
 fn typed_memory_graph_rows(
     conn: &DbConnection,
     workspace_filter: Option<&BTreeSet<String>>,
 ) -> GraphResult<Vec<TypedMemoryGraphRow>> {
+    let mut sql = String::from(
+        "SELECT id, workspace_id, kind, typed_fields_json
+         FROM memories
+         WHERE tombstoned_at IS NULL
+           AND typed_fields_json IS NOT NULL",
+    );
+    let mut params = Vec::new();
+    append_workspace_filter(&mut sql, &mut params, workspace_filter);
+    sql.push_str(" ORDER BY workspace_id ASC, kind ASC, id ASC");
+
     let rows = conn
-        .query(
-            "SELECT id, workspace_id, kind, typed_fields_json
-             FROM memories
-             WHERE tombstoned_at IS NULL
-               AND typed_fields_json IS NOT NULL
-             ORDER BY workspace_id ASC, kind ASC, id ASC",
-            &[],
-        )
+        .query(&sql, &params)
         .map_err(|error| GraphError::storage("query typed memory graph rows", error))?;
 
-    rows.iter()
-        .map(typed_memory_graph_row_from_row)
-        .filter(|row| match row {
-            Ok(row) => {
-                workspace_filter.is_none_or(|workspaces| workspaces.contains(&row.workspace_id))
-            }
-            Err(_) => true,
-        })
-        .collect()
+    rows.iter().map(typed_memory_graph_row_from_row).collect()
+}
+
+fn append_workspace_filter(
+    sql: &mut String,
+    params: &mut Vec<Value>,
+    workspace_filter: Option<&BTreeSet<String>>,
+) {
+    let Some(workspaces) = workspace_filter else {
+        return;
+    };
+    if workspaces.is_empty() {
+        sql.push_str(" AND 1 = 0");
+        return;
+    }
+
+    append_text_set_filter(sql, params, "workspace_id", workspaces);
+}
+
+fn append_text_set_filter(
+    sql: &mut String,
+    params: &mut Vec<Value>,
+    column: &'static str,
+    values: &BTreeSet<String>,
+) {
+    sql.push_str(" AND ");
+    sql.push_str(column);
+    sql.push_str(" IN (");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            sql.push_str(", ");
+        }
+        sql.push('?');
+        sql.push_str(&(params.len() + 1).to_string());
+        params.push(Value::Text(value.clone()));
+    }
+    sql.push(')');
 }
 
 fn typed_memory_graph_row_from_row(row: &Row) -> GraphResult<TypedMemoryGraphRow> {
@@ -6674,6 +6728,7 @@ mod tests {
     };
     use proptest::prelude::*;
     use proptest::test_runner::Config as ProptestConfig;
+    use std::collections::BTreeSet;
     use std::error::Error as _;
     #[cfg(feature = "graph")]
     use std::sync::Mutex;
@@ -6694,11 +6749,14 @@ mod tests {
     use crate::models::CapabilityStatus;
 
     const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
+    const OTHER_WORKSPACE_ID: &str = "wsp_99999999999999999999999999";
     const MEMORY_A: &str = "mem_00000000000000000000000011";
     const MEMORY_B: &str = "mem_00000000000000000000000012";
     const MEMORY_C: &str = "mem_00000000000000000000000013";
     const MEMORY_D: &str = "mem_00000000000000000000000014";
     const MEMORY_E: &str = "mem_00000000000000000000000015";
+    const OTHER_MEMORY_A: &str = "mem_00000000000000000000000021";
+    const OTHER_MEMORY_B: &str = "mem_00000000000000000000000022";
     const RULE_A: &str = "rule_00000000000000000000000011";
     const RULE_B: &str = "rule_00000000000000000000000012";
     const KARATE_SNAPSHOT_HASH: &str =
@@ -7594,11 +7652,21 @@ mod tests {
         kind: &str,
         content: &str,
     ) -> TestResult {
+        insert_memory_in_workspace_with_kind(connection, WORKSPACE_ID, id, kind, content)
+    }
+
+    fn insert_memory_in_workspace_with_kind(
+        connection: &DbConnection,
+        workspace_id: &str,
+        id: &str,
+        kind: &str,
+        content: &str,
+    ) -> TestResult {
         connection
             .insert_memory(
                 id,
                 &CreateMemoryInput {
-                    workspace_id: WORKSPACE_ID.to_string(),
+                    workspace_id: workspace_id.to_string(),
                     level: "semantic".to_string(),
                     kind: kind.to_string(),
                     content: content.to_string(),
@@ -8509,6 +8577,123 @@ mod tests {
                 .ok_or_else(|| "typed edge should feed Pack DNA dominator".to_string())?
                 .memory_id,
             MEMORY_A
+        );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn frontier_projection_pushes_typed_edge_workspace_filter_into_query() -> TestResult {
+        let connection = open_empty_projection_db()?;
+        connection
+            .insert_workspace(
+                OTHER_WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-graph-projection-other".to_string(),
+                    name: Some("graph projection other".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        insert_memory_in_workspace_with_kind(
+            &connection,
+            WORKSPACE_ID,
+            MEMORY_A,
+            "failure",
+            "Failure family: cache churn.",
+        )?;
+        insert_memory_in_workspace_with_kind(
+            &connection,
+            WORKSPACE_ID,
+            MEMORY_B,
+            "failure",
+            "Another failure family: cache churn.",
+        )?;
+        insert_memory_in_workspace_with_kind(
+            &connection,
+            OTHER_WORKSPACE_ID,
+            OTHER_MEMORY_A,
+            "failure",
+            "Other workspace failure family: cache churn.",
+        )?;
+        insert_memory_in_workspace_with_kind(
+            &connection,
+            OTHER_WORKSPACE_ID,
+            OTHER_MEMORY_B,
+            "failure",
+            "Other workspace peer failure family: cache churn.",
+        )?;
+
+        for memory_id in [MEMORY_A, MEMORY_B, OTHER_MEMORY_A, OTHER_MEMORY_B] {
+            connection
+                .set_memory_typed_fields_json(memory_id, Some(r#"{"family":"cache churn"}"#))
+                .map_err(|error| error.to_string())?;
+        }
+
+        let workspace_filter = BTreeSet::from([WORKSPACE_ID.to_string()]);
+        let mut sql = String::from("SELECT id FROM memories WHERE tombstoned_at IS NULL");
+        let mut params = Vec::new();
+        super::append_workspace_filter(&mut sql, &mut params, Some(&workspace_filter));
+        assert!(
+            sql.ends_with("AND workspace_id IN (?1)"),
+            "workspace filter should be pushed into SQL before row parsing: {sql}"
+        );
+        assert_eq!(params.len(), 1);
+
+        let memory_filter = BTreeSet::from([MEMORY_A.to_string(), MEMORY_B.to_string()]);
+        let mut memory_sql =
+            String::from("SELECT workspace_id FROM memories WHERE tombstoned_at IS NULL");
+        let mut memory_params = Vec::new();
+        super::append_text_set_filter(&mut memory_sql, &mut memory_params, "id", &memory_filter);
+        assert!(
+            memory_sql.ends_with("AND id IN (?1, ?2)"),
+            "seed workspace lookup should be pushed into SQL before row parsing: {memory_sql}"
+        );
+        assert_eq!(memory_params.len(), 2);
+
+        let seed_workspaces = graph_result(super::workspace_ids_for_memory_ids(
+            &connection,
+            &memory_filter,
+        ))?;
+        assert_eq!(seed_workspaces, BTreeSet::from([WORKSPACE_ID.to_string()]));
+
+        let scoped_rows = graph_result(super::typed_memory_graph_rows(
+            &connection,
+            Some(&workspace_filter),
+        ))?;
+        assert_eq!(
+            scoped_rows
+                .iter()
+                .map(|row| row.memory_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![MEMORY_A, MEMORY_B]
+        );
+
+        let projection = graph_result(super::build_memory_graph_for_frontier(
+            &connection,
+            &[MEMORY_A.to_string()],
+            &super::FrontierProjectionOptions {
+                max_depth: 1,
+                max_edges: 30,
+                min_weight: None,
+                min_confidence: None,
+            },
+        ))?;
+
+        assert!(projection.graph.has_edge(MEMORY_A, MEMORY_B));
+        assert!(projection.graph.has_edge(MEMORY_B, MEMORY_A));
+        assert!(!projection.graph.has_node(OTHER_MEMORY_A));
+        assert!(!projection.graph.has_node(OTHER_MEMORY_B));
+
+        let full_projection = graph_result(super::build_memory_graph(
+            &connection,
+            &super::ProjectionOptions::default(),
+        ))?;
+        assert!(
+            full_projection
+                .graph
+                .has_edge(OTHER_MEMORY_A, OTHER_MEMORY_B)
         );
 
         connection.close().map_err(|error| error.to_string())
