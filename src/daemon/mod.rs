@@ -81,13 +81,6 @@ pub const DAEMON_RESPONSE_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// catches stuck clients that opened a connection and stopped sending.
 pub const DAEMON_DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Historical degraded code emitted by the original `ee.daemon.context`
-/// stub path before bd-16pwc.1 replaced it with canonical pack
-/// execution. Kept as a stable catalog entry so older daemon clients and
-/// archived evidence remain decodable.
-pub const DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE: &str =
-    "daemon_ann_warmload_not_yet_implemented";
-
 /// Degraded code emitted by `ee daemon stop` when no daemon socket is
 /// present at the resolved path (the operator stopped a daemon that
 /// was not running). Informational so an operator who expected

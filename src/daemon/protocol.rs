@@ -627,24 +627,25 @@ mod tests {
 
     #[test]
     fn response_with_degraded_preserves_order_and_dedups() {
+        let archived_daemon_code = "archived_daemon_code";
         let response = DaemonResponse::err(
             "req-stub-001",
             "agent-protocol-test",
             None,
-            "daemon_ann_warmload_not_yet_implemented",
+            archived_daemon_code,
             "stub",
         )
         .with_degraded("alpha")
         .with_degraded("beta")
         .with_degraded("alpha")
-        .with_degraded(super::super::DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE)
-        .with_degraded(super::super::DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE);
+        .with_degraded(archived_daemon_code)
+        .with_degraded(archived_daemon_code);
         assert_eq!(
             response.degraded_codes,
             vec![
                 "alpha".to_owned(),
                 "beta".to_owned(),
-                super::super::DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE.to_owned(),
+                archived_daemon_code.to_owned(),
             ]
         );
     }

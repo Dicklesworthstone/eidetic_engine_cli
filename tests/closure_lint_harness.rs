@@ -280,11 +280,17 @@ fn closure_lint_reports_non_cli_sentinel_families() -> TestResult {
         temp.path(),
         &[
             r#"{"id":"closed-daemon-warmload","title":"[implements-surface:daemon-ann-warmload] closed with non-CLI sentinel","status":"closed","close_reason":"implemented with durable evidence","labels":["implements-surface:daemon-ann-warmload"]}"#,
+            r#"{"id":"closed-daemon-hot-mode","title":"[implements-surface:daemon_hot_mode] closed with historical warmload sentinel","status":"closed","close_reason":"implemented with durable evidence","labels":["implements-surface:daemon_hot_mode"]}"#,
             r#"{"id":"closed-numa-pin","title":"[implements-surface:numa-pin] closed with non-CLI sentinel","status":"closed","close_reason":"implemented with durable evidence","labels":["implements-surface:numa-pin"]}"#,
             r#"{"id":"closed-clean-non-cli","title":"[implements-surface:clean-non-cli] closed with no sentinel","status":"closed","close_reason":"implemented with durable evidence","labels":["implements-surface:clean-non-cli"]}"#,
         ],
         "",
-        &["daemon-ann-warmload", "numa-pin", "clean-non-cli"],
+        &[
+            "daemon-ann-warmload",
+            "daemon_hot_mode",
+            "numa-pin",
+            "clean-non-cli",
+        ],
     )?;
     write_text_file(
         temp.path(),
@@ -306,10 +312,16 @@ fn closure_lint_reports_non_cli_sentinel_families() -> TestResult {
         ),
     )?;
     ensure_eq(report_status(&report)?, "fail", "report status")?;
-    ensure_eq(report_count(&report)?, 2, "report count")?;
+    ensure_eq(report_count(&report)?, 3, "report count")?;
     ensure_eq(
         violation_keys(&report)?,
         vec![
+            (
+                "closed-daemon-hot-mode".to_owned(),
+                "daemon_hot_mode".to_owned(),
+                "DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE (src/daemon/mod.rs) sentinel still exists"
+                    .to_owned(),
+            ),
             (
                 "closed-daemon-warmload".to_owned(),
                 "daemon-ann-warmload".to_owned(),

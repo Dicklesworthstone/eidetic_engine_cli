@@ -509,6 +509,10 @@ surface_unavailable_constant() {
 # <SURFACE>_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE.
 surface_sentinel_regex() {
     local surface="$1"
+    if [ "$surface" = "daemon_hot_mode" ]; then
+        echo "DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE|DAEMON_HOT_MODE${SENTINEL_CODE_SUFFIX_REGEX}"
+        return 0
+    fi
     if [ "$surface" = "daemon" ]; then
         echo "DAEMON${SENTINEL_CODE_SUFFIX_REGEX}|DAEMON_JOBS_UNAVAILABLE_CODE|daemon_jobs_unavailable"
         return 0
