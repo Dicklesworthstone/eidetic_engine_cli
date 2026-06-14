@@ -2057,6 +2057,7 @@ impl PackDraft {
         self.selection_audit.omitted_count = self.omitted.len();
         self.selection_audit.budget_used = self.used_tokens;
         self.selection_audit.selected_items = selected_items_from_draft_items(&self.items);
+        refresh_selection_audit_objective_after_guard(&mut self.selection_audit, &self.items);
         self.hash = None;
         count
     }
@@ -6432,6 +6433,45 @@ fn selected_items_from_draft_items(items: &[PackDraftItem]) -> Vec<PackSelectedI
         .collect()
 }
 
+fn refresh_selection_audit_objective_after_guard(
+    audit: &mut PackSelectionAudit,
+    items: &[PackDraftItem],
+) {
+    let selected_phase_by_memory: std::collections::BTreeMap<String, PackSelectionPhase> = items
+        .iter()
+        .map(|item| (item.memory_id.to_string(), item.selected_in))
+        .collect();
+    let mut objective_value = 0.0_f32;
+    let mut steps = Vec::with_capacity(items.len());
+    for mut step in std::mem::take(&mut audit.steps) {
+        let Some(selection_phase) = selected_phase_by_memory
+            .get(&step.memory_id.to_string())
+            .copied()
+        else {
+            continue;
+        };
+        if selection_phase_contributes_to_objective(audit.objective, selection_phase) {
+            objective_value += step.marginal_gain.max(0.0);
+        }
+        step.objective_value = objective_value;
+        steps.push(step);
+    }
+    audit.total_objective_value = objective_value;
+    audit.steps = steps;
+}
+
+const fn selection_phase_contributes_to_objective(
+    objective: PackSelectionObjective,
+    phase: PackSelectionPhase,
+) -> bool {
+    match objective {
+        PackSelectionObjective::MmrRedundancy => matches!(phase, PackSelectionPhase::StrictMmr),
+        PackSelectionObjective::FacilityLocation => {
+            matches!(phase, PackSelectionPhase::FacilityLocation)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CandidateSignature {
     memory_id: MemoryId,
@@ -8588,6 +8628,8 @@ mod tests {
         .map_err(|error| format!("draft assembly failed: {error:?}"))?;
         ensure_equal(&draft.items.len(), &3, "fixture selected all candidates")?;
         draft.hash = Some("stale_hash_before_guard".to_owned());
+        let pre_guard_objective = draft.selection_audit.total_objective_value;
+        let pre_guard_step_count = draft.selection_audit.steps.len();
 
         let suppressed = draft.apply_contradiction_guard(
             &[(memory_id(1).to_string(), memory_id(2).to_string())],
@@ -8640,6 +8682,78 @@ mod tests {
             &draft.selection_audit.selected_items.len(),
             &draft.items.len(),
             "audit selected items",
+        )?;
+        ensure_equal(
+            &draft.selection_audit.steps.len(),
+            &draft.items.len(),
+            "audit steps mirror guarded item set",
+        )?;
+        ensure(
+            draft.selection_audit.steps.len() < pre_guard_step_count,
+            "guard should remove the suppressed memory's audit step",
+        )?;
+        let selected_memory_ids = draft
+            .items
+            .iter()
+            .map(|item| item.memory_id.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let step_memory_ids = draft
+            .selection_audit
+            .steps
+            .iter()
+            .map(|step| step.memory_id.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        ensure_equal(
+            &step_memory_ids,
+            &selected_memory_ids,
+            "audit steps should only reference guarded selected items",
+        )?;
+        let suppressed_memory_id = draft
+            .omitted
+            .first()
+            .map(|omission| omission.memory_id)
+            .ok_or_else(|| "expected suppressed omission".to_owned())?;
+        ensure(
+            !draft
+                .selection_audit
+                .steps
+                .iter()
+                .any(|step| step.memory_id == suppressed_memory_id),
+            "suppressed memory must not retain a stale audit step",
+        )?;
+        let phase_by_memory = draft
+            .items
+            .iter()
+            .map(|item| (item.memory_id.to_string(), item.selected_in))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut expected_objective = 0.0_f32;
+        for step in &draft.selection_audit.steps {
+            let selection_phase = phase_by_memory
+                .get(&step.memory_id.to_string())
+                .copied()
+                .ok_or_else(|| {
+                    format!("missing selected item for audit step {}", step.memory_id)
+                })?;
+            if super::selection_phase_contributes_to_objective(
+                draft.selection_audit.objective,
+                selection_phase,
+            ) {
+                expected_objective += step.marginal_gain.max(0.0);
+            }
+            ensure_close(
+                step.objective_value,
+                expected_objective,
+                "guarded audit step cumulative objective",
+            )?;
+        }
+        ensure_close(
+            draft.selection_audit.total_objective_value,
+            expected_objective,
+            "guarded audit total objective",
+        )?;
+        ensure(
+            draft.selection_audit.total_objective_value < pre_guard_objective,
+            "guard should remove the suppressed memory contribution from total objective",
         )?;
         ensure_equal(&draft.hash, &None, "guard clears stale pack hash")?;
         Ok(())
