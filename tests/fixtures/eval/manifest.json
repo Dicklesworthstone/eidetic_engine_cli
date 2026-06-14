@@ -8,6 +8,10 @@
   },
   "fixtures": [
     {
+      "id": "ask_v1",
+      "path": "tests/fixtures/eval/ask_v1"
+    },
+    {
       "id": "fx.async_migration.v1",
       "path": "tests/fixtures/eval/async_migration"
     },

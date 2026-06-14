@@ -18,17 +18,22 @@ pub mod runner;
 pub use crate::models::EVAL_FIXTURE_SCHEMA_V1;
 pub use redaction::{LeakDetection, LeakPattern, RedactionLeakDetector, RedactionLeakEvaluation};
 pub use runner::{
-    DEFAULT_FIXTURE_DIR, DiscoveredFixture, EVAL_REPORT_SCHEMA_V1, EvalRunReport, EvalRunStatus,
-    FixtureListEntry, FixtureMetrics, FixtureScenario, PACK_QUALITY_EXPECTATIONS_SCHEMA_V1,
+    ASK_QUALITY_EXPECTATIONS_SCHEMA_V1, ASK_REPORT_SCHEMA_V1, AskQualityActual,
+    AskQualityCase, AskQualityCaseScores, AskQualityCitationActual, AskQualityComparison,
+    AskQualityExpectedSide, AskQualityExpectations, AskQualityGateMode, AskQualityMetrics,
+    AskQualityReport, AskQualitySideActual, AskQualityThresholds, DEFAULT_FIXTURE_DIR,
+    DiscoveredFixture, EVAL_REPORT_SCHEMA_V1, EvalRunReport, EvalRunStatus, FixtureListEntry,
+    FixtureMetrics, FixtureScenario, PACK_QUALITY_EXPECTATIONS_SCHEMA_V1,
     PACK_QUALITY_OUTCOME_FEEDBACK_SCHEMA_V1, PACK_QUALITY_REPORT_SCHEMA_V1, PackQualityActual,
     PackQualityCase, PackQualityComparison, PackQualityCounterfactualCandidate,
     PackQualityOutcomeEvent, PackQualityOutcomeFeedbackReport, PackQualityOutcomeHypothesis,
     PackQualityOutcomeRateBucket, PackQualityReport, PackQualityVerdict, QueryMetrics,
     STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1, SourceMemory, SourceMemoryFile, StructuralEdge,
-    StructuralRecallExpectations, compare_pack_quality, compute_data_hash, compute_fixture_metrics,
-    compute_query_metrics, discover_fixtures, evaluate_pack_quality,
-    evaluate_pack_quality_with_outcomes, list_fixtures, load_scenario, load_source_memories,
-    materialize_source_memories, summarize_pack_quality_outcomes, validate_fixture_scenario,
+    StructuralRecallExpectations, compare_ask_quality, compare_pack_quality, compute_data_hash,
+    compute_fixture_metrics, compute_query_metrics, discover_fixtures, evaluate_ask_quality,
+    evaluate_pack_quality, evaluate_pack_quality_with_outcomes, list_fixtures, load_scenario,
+    load_source_memories, materialize_source_memories, summarize_pack_quality_outcomes,
+    validate_fixture_scenario,
 };
 
 /// Schema version for release gate checks.

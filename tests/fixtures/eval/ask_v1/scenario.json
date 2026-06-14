@@ -1,0 +1,310 @@
+{
+  "schema": "ee.eval_fixture.v1",
+  "fixture_id": "ask_v1",
+  "scenario_ids": [
+    "ask_direct_fact",
+    "ask_multi_memory_corroboration",
+    "ask_conflicting_evidence",
+    "ask_unanswerable_abstention",
+    "ask_version_sensitive_current"
+  ],
+  "fixture_family": "ask",
+  "coverage_state": "implemented",
+  "journey": "Ask answers are extractive, citation-backed, conflict-aware, and calibrated to abstain when the fixture corpus lacks evidence.",
+  "owning_bead_ids": [
+    "bd-169v0.4"
+  ],
+  "owning_gate_ids": [
+    "gate.ask_quality.v1"
+  ],
+  "deterministic": {
+    "fixed_clock": "2026-06-14T00:00:00Z",
+    "deterministic_seed": "seed.ask_v1.hash_embedder",
+    "stable_ids": [
+      "mem_ask_direct_toolchain",
+      "mem_ask_multi_release_primary",
+      "mem_ask_multi_release_support",
+      "mem_ask_conflict_affirm",
+      "mem_ask_conflict_negate",
+      "mem_ask_version_current"
+    ],
+    "workspace_fingerprints": [
+      "workspace.ask_v1"
+    ]
+  },
+  "source": {
+    "kind": "synthetic",
+    "path": "tests/fixtures/eval/ask_v1/source_memory.json",
+    "source_hash": "staged:bd-169v0.4",
+    "synthetic_secret_policy": "none"
+  },
+  "redaction": {
+    "classes_expected": [],
+    "secret_leak_assertions": [
+      "ask answers do not invent uncited secrets",
+      "abstention payload does not surface token-like values"
+    ]
+  },
+  "command_sequence": [
+    {
+      "step": 1,
+      "argv": [
+        "ee",
+        "ask",
+        "What Rust toolchain does Project Zephyr use?",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v2",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/ask_v1/<run-id>/01-direct.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/ask_v1/<run-id>/01-direct.stderr.txt"
+    },
+    {
+      "step": 2,
+      "argv": [
+        "ee",
+        "ask",
+        "Which release readiness gate must Project Zephyr pass before deploy?",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v2",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/ask_v1/<run-id>/02-corroboration.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/ask_v1/<run-id>/02-corroboration.stderr.txt"
+    },
+    {
+      "step": 3,
+      "argv": [
+        "ee",
+        "ask",
+        "Is remote cache delta enabled for Project Zephyr?",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v2",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/ask_v1/<run-id>/03-conflict.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/ask_v1/<run-id>/03-conflict.stderr.txt"
+    },
+    {
+      "step": 4,
+      "argv": [
+        "ee",
+        "ask",
+        "Who approved the lunar invoice for Project Zephyr?",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v2",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/ask_v1/<run-id>/04-abstain.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/ask_v1/<run-id>/04-abstain.stderr.txt"
+    },
+    {
+      "step": 5,
+      "argv": [
+        "ee",
+        "ask",
+        "What is the current retention window for Project Zephyr traces?",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v2",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/ask_v1/<run-id>/05-current.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/ask_v1/<run-id>/05-current.stderr.txt"
+    }
+  ],
+  "expected_outputs": [
+    {
+      "step": 1,
+      "schema": "ee.response.v2",
+      "required_fields": [
+        "data.answer.schema",
+        "data.answer.citations"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 2,
+      "schema": "ee.response.v2",
+      "required_fields": [
+        "data.answer.confidence",
+        "data.answer.citations"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 3,
+      "schema": "ee.response.v2",
+      "required_fields": [
+        "data.answer.sides",
+        "data.answer._conflictDetected"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 4,
+      "schema": "ee.response.v2",
+      "required_fields": [
+        "data.answer.abstained",
+        "data.answer.counterfactualHint"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 5,
+      "schema": "ee.response.v2",
+      "required_fields": [
+        "data.answer.answerText",
+        "data.answer.citations"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    }
+  ],
+  "ask_quality_expectations": {
+    "schema": "ee.eval.ask_quality_expectations.v1",
+    "thresholds": {
+      "citation_precision_min": 0.95,
+      "answer_exactness_min": 0.95,
+      "abstention_calibration_min": 1.0,
+      "conflict_recall_min": 1.0,
+      "gate_mode": "blocking"
+    },
+    "cases": [
+      {
+        "case_id": "ask.direct_toolchain",
+        "scenario_id": "ask_direct_fact",
+        "command_step": 1,
+        "question": "What Rust toolchain does Project Zephyr use?",
+        "expected_cited_memory_ids": [
+          "mem_ask_direct_toolchain"
+        ],
+        "expected_answer_terms": [
+          "Rust nightly 1.96.0",
+          "toolchain"
+        ],
+        "expect_abstention": false,
+        "expect_conflict": false
+      },
+      {
+        "case_id": "ask.multi_release_gate",
+        "scenario_id": "ask_multi_memory_corroboration",
+        "command_step": 2,
+        "question": "Which release readiness gate must Project Zephyr pass before deploy?",
+        "expected_cited_memory_ids": [
+          "mem_ask_multi_release_primary",
+          "mem_ask_multi_release_support"
+        ],
+        "expected_answer_terms": [
+          "smoke gate alpha",
+          "release readiness"
+        ],
+        "expect_abstention": false,
+        "expect_conflict": false
+      },
+      {
+        "case_id": "ask.conflict_remote_cache",
+        "scenario_id": "ask_conflicting_evidence",
+        "command_step": 3,
+        "question": "Is remote cache delta enabled for Project Zephyr?",
+        "expected_cited_memory_ids": [
+          "mem_ask_conflict_affirm",
+          "mem_ask_conflict_negate"
+        ],
+        "expected_answer_terms": [
+          "remote cache delta",
+          "enabled"
+        ],
+        "expect_abstention": false,
+        "expect_conflict": true,
+        "expected_sides": [
+          {
+            "label": "affirming",
+            "cited_memory_ids": [
+              "mem_ask_conflict_affirm"
+            ]
+          },
+          {
+            "label": "negating",
+            "cited_memory_ids": [
+              "mem_ask_conflict_negate"
+            ]
+          }
+        ]
+      },
+      {
+        "case_id": "ask.unanswerable_lunar_invoice",
+        "scenario_id": "ask_unanswerable_abstention",
+        "command_step": 4,
+        "question": "Who approved the lunar invoice for Project Zephyr?",
+        "expected_cited_memory_ids": [],
+        "expected_answer_terms": [],
+        "expect_abstention": true,
+        "expect_conflict": false
+      },
+      {
+        "case_id": "ask.version_current_retention",
+        "scenario_id": "ask_version_sensitive_current",
+        "command_step": 5,
+        "question": "What is the current retention window for Project Zephyr traces?",
+        "expected_cited_memory_ids": [
+          "mem_ask_version_current"
+        ],
+        "expected_answer_terms": [
+          "30 days",
+          "2026-06-01"
+        ],
+        "expect_abstention": false,
+        "expect_conflict": false
+      }
+    ]
+  },
+  "degraded_branches": [
+    {
+      "code": "ask_semantic_degraded",
+      "description": "Ask uses hash/lexical scoring in deterministic eval mode.",
+      "repair_action": "No repair required for deterministic eval fixtures.",
+      "preserves_success_signal": true
+    },
+    {
+      "code": "no_confident_answer",
+      "description": "Unanswerable questions must abstain instead of fabricating an answer.",
+      "repair_action": "Add grounded source memories if the question should be answerable.",
+      "preserves_success_signal": true
+    }
+  ],
+  "agent_success_signal": "ee ask outputs can be quality-gated for citation precision, exact cited evidence, calibrated abstention, and conflict recall."
+}

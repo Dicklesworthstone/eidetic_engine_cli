@@ -1223,6 +1223,11 @@ fi
 # NDCG@10 threshold before the optional full eval sweep runs.
 run_stage "Eval Regression Contract (bd-bife.18)" "./scripts/eval_regression.sh --self-test-misrank-top1"
 
+# Gate 8.76: Ask answer-quality fixture contract. Runs the discoverable ask_v1
+# fixture through the public eval surface so citation/abstention QA remains a
+# committed verification step instead of a manual inspection.
+run_stage "Ask Eval Quality Gate (bd-169v0.4)" "ee eval run ask_v1 --json"
+
 # Gate 8.8: Pack-quality eval regression sweep. Optional because it validates
 # committed report artifacts and intended eval thresholds after feature slices.
 if [ "$INCLUDE_EVAL" = "true" ]; then

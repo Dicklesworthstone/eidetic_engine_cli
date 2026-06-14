@@ -31,6 +31,12 @@ pub const PACK_QUALITY_OUTCOME_FEEDBACK_SCHEMA_V1: &str =
 pub const STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1: &str =
     "ee.eval.structural_recall_expectations.v1";
 
+/// Schema version for ask-quality expectations embedded in eval fixtures.
+pub const ASK_QUALITY_EXPECTATIONS_SCHEMA_V1: &str = "ee.eval.ask_quality_expectations.v1";
+
+/// Schema version for ask-quality reports emitted by the eval harness.
+pub const ASK_REPORT_SCHEMA_V1: &str = "ee.eval.ask_report.v1";
+
 /// Default fixture directory relative to project root.
 pub const DEFAULT_FIXTURE_DIR: &str = "tests/fixtures/eval";
 
@@ -73,6 +79,8 @@ pub struct FixtureScenario {
     pub expected_outputs: Vec<ExpectedOutput>,
     #[serde(default)]
     pub pack_quality_expectations: Option<PackQualityExpectations>,
+    #[serde(default)]
+    pub ask_quality_expectations: Option<AskQualityExpectations>,
     #[serde(default)]
     pub structural_recall_expectations: Option<StructuralRecallExpectations>,
     #[serde(default)]
@@ -237,6 +245,204 @@ pub struct StructuralRecallExpectations {
     pub structural_recall_at_10_min: f64,
     #[serde(default)]
     pub required_scenario_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AskQualityExpectations {
+    pub schema: String,
+    #[serde(default)]
+    pub thresholds: AskQualityThresholds,
+    #[serde(default)]
+    pub cases: Vec<AskQualityCase>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskQualityGateMode {
+    #[default]
+    Advisory,
+    Blocking,
+}
+
+impl AskQualityGateMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Advisory => "advisory",
+            Self::Blocking => "blocking",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AskQualityThresholds {
+    #[serde(default = "default_ask_quality_threshold")]
+    pub citation_precision_min: f64,
+    #[serde(default = "default_ask_quality_threshold")]
+    pub answer_exactness_min: f64,
+    #[serde(default = "default_ask_quality_threshold")]
+    pub abstention_calibration_min: f64,
+    #[serde(default = "default_ask_quality_threshold")]
+    pub conflict_recall_min: f64,
+    #[serde(default)]
+    pub gate_mode: AskQualityGateMode,
+}
+
+impl Default for AskQualityThresholds {
+    fn default() -> Self {
+        Self {
+            citation_precision_min: default_ask_quality_threshold(),
+            answer_exactness_min: default_ask_quality_threshold(),
+            abstention_calibration_min: default_ask_quality_threshold(),
+            conflict_recall_min: default_ask_quality_threshold(),
+            gate_mode: AskQualityGateMode::Advisory,
+        }
+    }
+}
+
+const fn default_ask_quality_threshold() -> f64 {
+    1.0
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AskQualityCase {
+    pub case_id: String,
+    pub scenario_id: String,
+    pub command_step: u32,
+    pub question: String,
+    #[serde(default)]
+    pub expected_cited_memory_ids: Vec<String>,
+    #[serde(default)]
+    pub expected_answer_terms: Vec<String>,
+    #[serde(default)]
+    pub expect_abstention: bool,
+    #[serde(default)]
+    pub expect_conflict: bool,
+    #[serde(default)]
+    pub expected_sides: Vec<AskQualityExpectedSide>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AskQualityExpectedSide {
+    pub label: String,
+    #[serde(default)]
+    pub cited_memory_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AskQualityActual {
+    pub case_id: String,
+    pub answer_text: Option<String>,
+    pub abstained: bool,
+    pub citations: Vec<AskQualityCitationActual>,
+    pub sides: Vec<AskQualitySideActual>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AskQualityCitationActual {
+    pub memory_id: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct AskQualitySideActual {
+    pub label: String,
+    pub cited_memory_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct AskQualityMetrics {
+    pub citation_precision: f64,
+    pub answer_exactness: f64,
+    pub abstention_calibration: f64,
+    pub conflict_recall: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AskQualityCaseScores {
+    pub citation_precision: f64,
+    pub answer_exactness: f64,
+    pub abstention_calibration: f64,
+    pub conflict_recall: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AskQualityComparison {
+    pub case_id: String,
+    pub scenario_id: String,
+    pub verdict: PackQualityVerdict,
+    pub scores: AskQualityCaseScores,
+    pub expected_cited_memory_ids: Vec<String>,
+    pub actual_cited_memory_ids: Vec<String>,
+    pub expected_answer_terms: Vec<String>,
+    pub actual_answer_text: Option<String>,
+    pub expected_abstention: bool,
+    pub actual_abstained: bool,
+    pub expected_conflict: bool,
+    pub actual_conflict: bool,
+    pub failure_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AskQualityReport {
+    pub schema: &'static str,
+    pub fixture_id: String,
+    pub aggregate_verdict: PackQualityVerdict,
+    pub gate_mode: AskQualityGateMode,
+    pub cases_total: usize,
+    pub cases_within: usize,
+    pub cases_drift: usize,
+    pub cases_regression: usize,
+    pub cases_inconclusive: usize,
+    pub metrics: AskQualityMetrics,
+    pub thresholds: AskQualityThresholds,
+    pub threshold_failures: Vec<String>,
+    pub comparisons: Vec<AskQualityComparison>,
+}
+
+impl AskQualityReport {
+    #[must_use]
+    pub fn new(fixture_id: String, thresholds: AskQualityThresholds) -> Self {
+        Self {
+            schema: ASK_REPORT_SCHEMA_V1,
+            fixture_id,
+            aggregate_verdict: PackQualityVerdict::Within,
+            gate_mode: thresholds.gate_mode,
+            cases_total: 0,
+            cases_within: 0,
+            cases_drift: 0,
+            cases_regression: 0,
+            cases_inconclusive: 0,
+            metrics: AskQualityMetrics::default(),
+            thresholds,
+            threshold_failures: Vec::new(),
+            comparisons: Vec::new(),
+        }
+    }
+
+    pub fn add_comparison(&mut self, comparison: AskQualityComparison) {
+        match comparison.verdict {
+            PackQualityVerdict::Within => self.cases_within += 1,
+            PackQualityVerdict::Drift => self.cases_drift += 1,
+            PackQualityVerdict::Regression => self.cases_regression += 1,
+            PackQualityVerdict::Inconclusive => self.cases_inconclusive += 1,
+        }
+        self.cases_total += 1;
+        self.comparisons.push(comparison);
+        self.recompute_case_aggregate();
+    }
+
+    fn recompute_case_aggregate(&mut self) {
+        if self.cases_regression > 0 {
+            self.aggregate_verdict = PackQualityVerdict::Regression;
+        } else if self.cases_inconclusive > 0 {
+            self.aggregate_verdict = PackQualityVerdict::Inconclusive;
+        } else if self.cases_drift > 0 {
+            self.aggregate_verdict = PackQualityVerdict::Drift;
+        } else {
+            self.aggregate_verdict = PackQualityVerdict::Within;
+        }
+    }
 }
 
 /// Source memory definition (parsed from source_memory.json).
@@ -613,6 +819,7 @@ pub fn validate_fixture_scenario(
 
     validate_structural_edges(source)?;
     validate_pack_quality_expectations(scenario, source)?;
+    validate_ask_quality_expectations(scenario, source)?;
     validate_structural_recall_expectations(scenario, source)
 }
 
@@ -955,6 +1162,181 @@ fn validate_pack_quality_expectations(
         validate_failure_label(case)?;
     }
 
+    Ok(())
+}
+
+fn validate_ask_quality_expectations(
+    scenario: &FixtureScenario,
+    source: &SourceMemoryFile,
+) -> Result<(), DomainError> {
+    let Some(expectations) = &scenario.ask_quality_expectations else {
+        return Ok(());
+    };
+
+    if expectations.schema != ASK_QUALITY_EXPECTATIONS_SCHEMA_V1 {
+        return Err(fixture_validation_error(format!(
+            "ask_quality_expectations schema `{}` must be `{}`",
+            expectations.schema, ASK_QUALITY_EXPECTATIONS_SCHEMA_V1
+        )));
+    }
+
+    if expectations.cases.is_empty() {
+        return Err(fixture_validation_error(
+            "ask_quality_expectations cases must not be empty",
+        ));
+    }
+
+    validate_score01(
+        expectations.thresholds.citation_precision_min,
+        "ask_quality_expectations.thresholds.citation_precision_min",
+    )?;
+    validate_score01(
+        expectations.thresholds.answer_exactness_min,
+        "ask_quality_expectations.thresholds.answer_exactness_min",
+    )?;
+    validate_score01(
+        expectations.thresholds.abstention_calibration_min,
+        "ask_quality_expectations.thresholds.abstention_calibration_min",
+    )?;
+    validate_score01(
+        expectations.thresholds.conflict_recall_min,
+        "ask_quality_expectations.thresholds.conflict_recall_min",
+    )?;
+
+    let source_ids = source_memory_ids(source)?;
+    let scenario_ids: HashSet<&str> = scenario.scenario_ids.iter().map(String::as_str).collect();
+    let command_steps: HashSet<u32> = scenario
+        .command_sequence
+        .iter()
+        .map(|command| command.step)
+        .collect();
+    let mut case_ids = HashSet::new();
+
+    for case in &expectations.cases {
+        validate_required_label(&case.case_id, "case_id", "<ask_quality>")?;
+        if !case_ids.insert(case.case_id.as_str()) {
+            return Err(fixture_validation_error(format!(
+                "duplicate ask-quality case_id `{}`",
+                case.case_id
+            )));
+        }
+
+        validate_required_label(&case.scenario_id, "scenario_id", &case.case_id)?;
+        if !scenario_ids.contains(case.scenario_id.as_str()) {
+            return Err(fixture_validation_error(format!(
+                "ask-quality case `{}` references unknown scenario_id `{}`",
+                case.case_id, case.scenario_id
+            )));
+        }
+
+        if !command_steps.contains(&case.command_step) {
+            return Err(fixture_validation_error(format!(
+                "ask-quality case `{}` references unknown command step {}",
+                case.case_id, case.command_step
+            )));
+        }
+
+        validate_required_label(&case.question, "question", &case.case_id)?;
+        validate_ask_memory_id_list(
+            &case.expected_cited_memory_ids,
+            "expected_cited_memory_ids",
+            &case.case_id,
+        )?;
+        validate_known_ask_memory_ids(
+            &case.expected_cited_memory_ids,
+            &source_ids,
+            "expected_cited_memory_ids",
+            &case.case_id,
+        )?;
+
+        if case.expect_abstention {
+            if !case.expected_cited_memory_ids.is_empty() {
+                return Err(fixture_validation_error(format!(
+                    "ask-quality case `{}` expects abstention but declares expected cited memories",
+                    case.case_id
+                )));
+            }
+        } else {
+            if case.expected_cited_memory_ids.is_empty() {
+                return Err(fixture_validation_error(format!(
+                    "ask-quality case `{}` must declare expected cited memories unless it expects abstention",
+                    case.case_id
+                )));
+            }
+            if case.expected_answer_terms.is_empty() {
+                return Err(fixture_validation_error(format!(
+                    "ask-quality case `{}` must declare expected_answer_terms unless it expects abstention",
+                    case.case_id
+                )));
+            }
+            for term in &case.expected_answer_terms {
+                validate_required_label(term, "expected_answer_terms", &case.case_id)?;
+            }
+        }
+
+        if case.expect_conflict {
+            if case.expected_sides.len() < 2 {
+                return Err(fixture_validation_error(format!(
+                    "ask-quality case `{}` expects conflict but declares fewer than two expected_sides",
+                    case.case_id
+                )));
+            }
+            for side in &case.expected_sides {
+                validate_required_label(&side.label, "expected_sides.label", &case.case_id)?;
+                if side.cited_memory_ids.is_empty() {
+                    return Err(fixture_validation_error(format!(
+                        "ask-quality case `{}` side `{}` must cite at least one memory",
+                        case.case_id, side.label
+                    )));
+                }
+                validate_known_ask_memory_ids(
+                    &side.cited_memory_ids,
+                    &source_ids,
+                    "expected_sides.cited_memory_ids",
+                    &case.case_id,
+                )?;
+            }
+        } else if !case.expected_sides.is_empty() {
+            return Err(fixture_validation_error(format!(
+                "ask-quality case `{}` declares expected_sides without expect_conflict",
+                case.case_id
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_ask_memory_id_list(
+    ids: &[String],
+    field: &str,
+    case_id: &str,
+) -> Result<(), DomainError> {
+    let mut seen = HashSet::new();
+    for id in ids {
+        validate_required_label(id, field, case_id)?;
+        if !seen.insert(id.as_str()) {
+            return Err(fixture_validation_error(format!(
+                "ask-quality case `{case_id}` has duplicate memory ID `{id}` in `{field}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_known_ask_memory_ids(
+    ids: &[String],
+    source_ids: &HashSet<String>,
+    field: &str,
+    case_id: &str,
+) -> Result<(), DomainError> {
+    for id in ids {
+        if !source_ids.contains(id) {
+            return Err(fixture_validation_error(format!(
+                "ask-quality case `{case_id}` has unknown memory ID `{id}` in `{field}`"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -1942,6 +2324,326 @@ pub fn evaluate_pack_quality_with_outcomes(
     let mut report = evaluate_pack_quality(fixture_id, cases, actuals);
     report.outcome_feedback = Some(summarize_pack_quality_outcomes(cases, outcome_events));
     report
+}
+
+/// Compare actual ask output against one ask-quality case.
+#[must_use]
+pub fn compare_ask_quality(
+    case: &AskQualityCase,
+    actual: &AskQualityActual,
+) -> AskQualityComparison {
+    let actual_cited_memory_ids = stable_actual_cited_memory_ids(actual);
+    let citation_precision = ask_citation_precision(case, actual);
+    let answer_exactness = ask_answer_exactness(case, &actual_cited_memory_ids, actual);
+    let abstention_calibration = if case.expect_abstention == actual.abstained {
+        1.0
+    } else {
+        0.0
+    };
+    let conflict_recall = ask_conflict_recall(case, actual);
+    let actual_conflict = !actual.sides.is_empty();
+
+    let mut failure_reasons = Vec::new();
+    if case.expect_abstention != actual.abstained {
+        failure_reasons.push(format!(
+            "abstention mismatch: expected {}, got {}",
+            case.expect_abstention, actual.abstained
+        ));
+    }
+    if case.expect_conflict != actual_conflict {
+        failure_reasons.push(format!(
+            "conflict mismatch: expected {}, got {}",
+            case.expect_conflict, actual_conflict
+        ));
+    }
+    if citation_precision < 1.0 {
+        failure_reasons.push(format!(
+            "citation precision {:.3} below perfect citation grounding",
+            citation_precision
+        ));
+    }
+    if answer_exactness < 1.0 {
+        failure_reasons.push(format!(
+            "answer exactness {:.3} below expected cited memory match",
+            answer_exactness
+        ));
+    }
+    if conflict_recall < 1.0 {
+        failure_reasons.push(format!(
+            "conflict recall {:.3} below expected side coverage",
+            conflict_recall
+        ));
+    }
+
+    let verdict = if actual.case_id != case.case_id {
+        failure_reasons.push(format!(
+            "actual case_id `{}` did not match expected `{}`",
+            actual.case_id, case.case_id
+        ));
+        PackQualityVerdict::Inconclusive
+    } else if abstention_calibration < 1.0 || conflict_recall < 1.0 {
+        PackQualityVerdict::Regression
+    } else if citation_precision < 1.0 || answer_exactness < 1.0 {
+        PackQualityVerdict::Drift
+    } else {
+        PackQualityVerdict::Within
+    };
+
+    AskQualityComparison {
+        case_id: case.case_id.clone(),
+        scenario_id: case.scenario_id.clone(),
+        verdict,
+        scores: AskQualityCaseScores {
+            citation_precision,
+            answer_exactness,
+            abstention_calibration,
+            conflict_recall,
+        },
+        expected_cited_memory_ids: case.expected_cited_memory_ids.clone(),
+        actual_cited_memory_ids,
+        expected_answer_terms: case.expected_answer_terms.clone(),
+        actual_answer_text: actual.answer_text.clone(),
+        expected_abstention: case.expect_abstention,
+        actual_abstained: actual.abstained,
+        expected_conflict: case.expect_conflict,
+        actual_conflict,
+        failure_reasons,
+    }
+}
+
+/// Evaluate all ask-quality cases and apply fixture thresholds.
+#[must_use]
+pub fn evaluate_ask_quality(
+    fixture_id: &str,
+    expectations: &AskQualityExpectations,
+    actuals: &[AskQualityActual],
+) -> AskQualityReport {
+    let mut report = AskQualityReport::new(
+        fixture_id.to_string(),
+        expectations.thresholds.clone(),
+    );
+    let actual_by_case: BTreeMap<&str, &AskQualityActual> = actuals
+        .iter()
+        .map(|actual| (actual.case_id.as_str(), actual))
+        .collect();
+
+    for case in &expectations.cases {
+        if let Some(actual) = actual_by_case.get(case.case_id.as_str()) {
+            report.add_comparison(compare_ask_quality(case, actual));
+        } else {
+            report.add_comparison(missing_ask_quality_actual(case));
+        }
+    }
+
+    recompute_ask_quality_metrics(&mut report);
+    apply_ask_quality_thresholds(&mut report);
+    report
+}
+
+fn missing_ask_quality_actual(case: &AskQualityCase) -> AskQualityComparison {
+    AskQualityComparison {
+        case_id: case.case_id.clone(),
+        scenario_id: case.scenario_id.clone(),
+        verdict: PackQualityVerdict::Inconclusive,
+        scores: AskQualityCaseScores {
+            citation_precision: 0.0,
+            answer_exactness: 0.0,
+            abstention_calibration: 0.0,
+            conflict_recall: 0.0,
+        },
+        expected_cited_memory_ids: case.expected_cited_memory_ids.clone(),
+        actual_cited_memory_ids: Vec::new(),
+        expected_answer_terms: case.expected_answer_terms.clone(),
+        actual_answer_text: None,
+        expected_abstention: case.expect_abstention,
+        actual_abstained: false,
+        expected_conflict: case.expect_conflict,
+        actual_conflict: false,
+        failure_reasons: vec!["No actual ask result provided for this case".to_string()],
+    }
+}
+
+fn stable_actual_cited_memory_ids(actual: &AskQualityActual) -> Vec<String> {
+    let mut ids = actual
+        .citations
+        .iter()
+        .map(|citation| citation.memory_id.clone())
+        .collect::<Vec<_>>();
+    for side in &actual.sides {
+        ids.extend(side.cited_memory_ids.iter().cloned());
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn ask_citation_precision(case: &AskQualityCase, actual: &AskQualityActual) -> f64 {
+    if case.expect_abstention {
+        return if actual.citations.is_empty() && actual.sides.is_empty() {
+            1.0
+        } else {
+            0.0
+        };
+    }
+
+    let citations = actual
+        .citations
+        .iter()
+        .map(|citation| (citation.memory_id.as_str(), citation.text.as_str()))
+        .collect::<Vec<_>>();
+    if citations.is_empty() {
+        return 0.0;
+    }
+
+    let matching = citations
+        .iter()
+        .filter(|(memory_id, text)| {
+            case.expected_cited_memory_ids
+                .iter()
+                .any(|expected| expected.as_str() == *memory_id)
+                && (case.expected_answer_terms.is_empty()
+                    || case
+                        .expected_answer_terms
+                        .iter()
+                        .any(|term| contains_case_insensitive(*text, term.as_str())))
+        })
+        .count();
+    rate(matching, citations.len())
+}
+
+fn ask_answer_exactness(
+    case: &AskQualityCase,
+    actual_cited_memory_ids: &[String],
+    actual: &AskQualityActual,
+) -> f64 {
+    if case.expect_abstention {
+        return if actual.abstained { 1.0 } else { 0.0 };
+    }
+
+    let expected: BTreeSet<_> = case.expected_cited_memory_ids.iter().collect();
+    let actual: BTreeSet<_> = actual_cited_memory_ids.iter().collect();
+    if expected == actual { 1.0 } else { 0.0 }
+}
+
+fn ask_conflict_recall(case: &AskQualityCase, actual: &AskQualityActual) -> f64 {
+    if !case.expect_conflict {
+        return if actual.sides.is_empty() { 1.0 } else { 0.0 };
+    }
+    if case.expected_sides.is_empty() {
+        return 0.0;
+    }
+
+    let matched = case
+        .expected_sides
+        .iter()
+        .filter(|expected_side| {
+            actual.sides.iter().any(|actual_side| {
+                actual_side.label == expected_side.label
+                    && expected_side
+                        .cited_memory_ids
+                        .iter()
+                        .all(|id| actual_side.cited_memory_ids.iter().any(|actual| actual == id))
+            })
+        })
+        .count();
+    rate(matched, case.expected_sides.len())
+}
+
+fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
+}
+
+fn recompute_ask_quality_metrics(report: &mut AskQualityReport) {
+    let total = report.comparisons.len();
+    if total == 0 {
+        report.metrics = AskQualityMetrics::default();
+        return;
+    }
+
+    let citation_precision = report
+        .comparisons
+        .iter()
+        .map(|comparison| comparison.scores.citation_precision)
+        .sum::<f64>();
+    let answer_exactness = report
+        .comparisons
+        .iter()
+        .map(|comparison| comparison.scores.answer_exactness)
+        .sum::<f64>();
+    let abstention_calibration = report
+        .comparisons
+        .iter()
+        .map(|comparison| comparison.scores.abstention_calibration)
+        .sum::<f64>();
+    let conflict_recall = report
+        .comparisons
+        .iter()
+        .map(|comparison| comparison.scores.conflict_recall)
+        .sum::<f64>();
+    let denominator = total as f64;
+
+    report.metrics = AskQualityMetrics {
+        citation_precision: citation_precision / denominator,
+        answer_exactness: answer_exactness / denominator,
+        abstention_calibration: abstention_calibration / denominator,
+        conflict_recall: conflict_recall / denominator,
+    };
+}
+
+fn apply_ask_quality_thresholds(report: &mut AskQualityReport) {
+    report.threshold_failures.clear();
+    push_threshold_failure(
+        &mut report.threshold_failures,
+        "citation_precision",
+        report.metrics.citation_precision,
+        report.thresholds.citation_precision_min,
+    );
+    push_threshold_failure(
+        &mut report.threshold_failures,
+        "answer_exactness",
+        report.metrics.answer_exactness,
+        report.thresholds.answer_exactness_min,
+    );
+    push_threshold_failure(
+        &mut report.threshold_failures,
+        "abstention_calibration",
+        report.metrics.abstention_calibration,
+        report.thresholds.abstention_calibration_min,
+    );
+    push_threshold_failure(
+        &mut report.threshold_failures,
+        "conflict_recall",
+        report.metrics.conflict_recall,
+        report.thresholds.conflict_recall_min,
+    );
+
+    if report.threshold_failures.is_empty() {
+        return;
+    }
+
+    report.aggregate_verdict = match report.thresholds.gate_mode {
+        AskQualityGateMode::Advisory => {
+            if matches!(report.aggregate_verdict, PackQualityVerdict::Within) {
+                PackQualityVerdict::Drift
+            } else {
+                report.aggregate_verdict
+            }
+        }
+        AskQualityGateMode::Blocking => PackQualityVerdict::Regression,
+    };
+}
+
+fn push_threshold_failure(
+    failures: &mut Vec<String>,
+    metric: &str,
+    actual: f64,
+    minimum: f64,
+) {
+    if actual < minimum {
+        failures.push(format!("{metric} {actual:.3} below threshold {minimum:.3}"));
+    }
 }
 
 /// Summarize observed outcome events without inferring success from pack presence alone.

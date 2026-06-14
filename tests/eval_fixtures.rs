@@ -1,7 +1,8 @@
 use ee::eval::{
-    CommandStep, DegradedBranch, EVAL_FIXTURE_SCHEMA_V1, EvaluationScenario, ExpectedOutput,
-    FixtureScenario, PACK_QUALITY_EXPECTATIONS_SCHEMA_V1, RedactionClass, RedactionLeakDetector,
-    STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1, SourceMemoryFile, validate_fixture_scenario,
+    ASK_QUALITY_EXPECTATIONS_SCHEMA_V1, CommandStep, DegradedBranch, EVAL_FIXTURE_SCHEMA_V1,
+    EvaluationScenario, ExpectedOutput, FixtureScenario, PACK_QUALITY_EXPECTATIONS_SCHEMA_V1,
+    RedactionClass, RedactionLeakDetector, STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1,
+    SourceMemoryFile, materialize_source_memories, validate_fixture_scenario,
 };
 use ee::models::model_registry::{
     EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
@@ -63,6 +64,8 @@ const EVAL_PPR_PRE_G1_BASELINE: &str =
     include_str!("snapshots/eval_ppr_pack_quality_pre_g1_baseline.snap");
 const EVAL_PPR_POST_G1_COMPARISON: &str =
     include_str!("snapshots/eval_ppr_pack_quality_post_g1_comparison.snap");
+const ASK_V1_SCENARIO: &str = include_str!("fixtures/eval/ask_v1/scenario.json");
+const ASK_V1_SOURCE: &str = include_str!("fixtures/eval/ask_v1/source_memory.json");
 
 type TestResult = Result<(), String>;
 
@@ -255,6 +258,44 @@ fn pack_quality_expectations_validate_required_fixture_set() -> TestResult {
         string_field(&query_file, "version")?,
         "ee.query.v1",
         "query-file schema",
+    )
+}
+
+#[test]
+fn ask_quality_expectations_validate_ask_v1_fixture() -> TestResult {
+    let scenario = parse_scenario_model(ASK_V1_SCENARIO, "ask_v1")?;
+    let source = parse_source_model(ASK_V1_SOURCE, "ask_v1")?;
+    validate_fixture_scenario(&scenario, &source).map_err(|error| error.to_string())?;
+
+    let expectations = scenario
+        .ask_quality_expectations
+        .ok_or_else(|| "ask_v1 must define ask-quality expectations".to_string())?;
+    ensure_equal(
+        expectations.schema,
+        ASK_QUALITY_EXPECTATIONS_SCHEMA_V1.to_string(),
+        "ask-quality schema",
+    )?;
+    ensure_equal(expectations.cases.len(), 5, "ask case count")?;
+    ensure(
+        expectations
+            .cases
+            .iter()
+            .any(|case| case.expect_abstention && case.expected_cited_memory_ids.is_empty()),
+        "ask_v1 must cover calibrated abstention",
+    )?;
+    ensure(
+        expectations
+            .cases
+            .iter()
+            .any(|case| case.expect_conflict && case.expected_sides.len() == 2),
+        "ask_v1 must cover conflicting evidence sides",
+    )?;
+    ensure_equal(
+        materialize_source_memories(&source)
+            .map_err(|error| error.to_string())?
+            .len(),
+        60,
+        "ask_v1 materialized corpus size",
     )
 }
 

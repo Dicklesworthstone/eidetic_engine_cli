@@ -1,0 +1,253 @@
+{
+  "schema": "ee.eval_source_memory.v1",
+  "fixture_id": "ask_v1",
+  "source_kind": "synthetic",
+  "fixed_clock": "2026-06-14T00:00:00Z",
+  "memories": [
+    {
+      "id": "mem_ask_direct_toolchain",
+      "level": "procedural",
+      "kind": "fact",
+      "trust_class": "human_explicit",
+      "confidence": 0.96,
+      "utility": 0.88,
+      "importance": 0.83,
+      "tags": [
+        "ask",
+        "toolchain",
+        "zephyr"
+      ],
+      "content": "Project Zephyr uses Rust nightly 1.96.0 as its active toolchain for all release verification.",
+      "provenance_uri": "fixture://ask_v1/mem_ask_direct_toolchain",
+      "expected_query_match": [
+        "What Rust toolchain does Project Zephyr use?"
+      ]
+    },
+    {
+      "id": "mem_ask_direct_database",
+      "level": "semantic",
+      "kind": "fact",
+      "trust_class": "agent_validated",
+      "confidence": 0.9,
+      "utility": 0.72,
+      "importance": 0.64,
+      "tags": [
+        "ask",
+        "database",
+        "zephyr"
+      ],
+      "content": "Project Zephyr stores durable trace metadata in FrankenSQLite through SQLModel, not in an HTTP service.",
+      "provenance_uri": "fixture://ask_v1/mem_ask_direct_database",
+      "expected_query_match": [
+        "Where does Project Zephyr store trace metadata?"
+      ]
+    },
+    {
+      "id": "mem_ask_multi_release_primary",
+      "level": "procedural",
+      "kind": "rule",
+      "trust_class": "human_explicit",
+      "confidence": 0.95,
+      "utility": 0.91,
+      "importance": 0.86,
+      "tags": [
+        "ask",
+        "release",
+        "gate"
+      ],
+      "content": "Project Zephyr release readiness requires smoke gate alpha before deploy.",
+      "provenance_uri": "fixture://ask_v1/mem_ask_multi_release_primary",
+      "expected_query_match": [
+        "Which release readiness gate must Project Zephyr pass before deploy?"
+      ]
+    },
+    {
+      "id": "mem_ask_multi_release_support",
+      "level": "episodic",
+      "kind": "decision",
+      "trust_class": "agent_validated",
+      "confidence": 0.91,
+      "utility": 0.85,
+      "importance": 0.77,
+      "tags": [
+        "ask",
+        "release",
+        "gate"
+      ],
+      "content": "The 2026-06-01 release review repeated that smoke gate alpha is the mandatory Project Zephyr release readiness gate before deploy.",
+      "provenance_uri": "fixture://ask_v1/mem_ask_multi_release_support",
+      "expected_query_match": [
+        "Which release readiness gate must Project Zephyr pass before deploy?"
+      ]
+    },
+    {
+      "id": "mem_ask_conflict_affirm",
+      "level": "episodic",
+      "kind": "observation",
+      "trust_class": "agent_assertion",
+      "confidence": 0.89,
+      "utility": 0.7,
+      "importance": 0.74,
+      "tags": [
+        "ask",
+        "remote-cache",
+        "conflict"
+      ],
+      "content": "Remote cache delta is enabled for Project Zephyr on the hz2 worker pool.",
+      "provenance_uri": "fixture://ask_v1/mem_ask_conflict_affirm",
+      "expected_query_match": [
+        "Is remote cache delta enabled for Project Zephyr?"
+      ]
+    },
+    {
+      "id": "mem_ask_conflict_negate",
+      "level": "episodic",
+      "kind": "observation",
+      "trust_class": "agent_assertion",
+      "confidence": 0.88,
+      "utility": 0.7,
+      "importance": 0.74,
+      "tags": [
+        "ask",
+        "remote-cache",
+        "conflict"
+      ],
+      "content": "Remote cache delta is not enabled for Project Zephyr on the hz2 worker pool.",
+      "provenance_uri": "fixture://ask_v1/mem_ask_conflict_negate",
+      "expected_query_match": [
+        "Is remote cache delta enabled for Project Zephyr?"
+      ]
+    },
+    {
+      "id": "mem_ask_version_current",
+      "level": "procedural",
+      "kind": "rule",
+      "trust_class": "human_explicit",
+      "confidence": 0.97,
+      "utility": 0.84,
+      "importance": 0.82,
+      "tags": [
+        "ask",
+        "retention",
+        "current"
+      ],
+      "content": "As of 2026-06-01, the current Project Zephyr trace retention window is 30 days.",
+      "provenance_uri": "fixture://ask_v1/mem_ask_version_current",
+      "expected_query_match": [
+        "What is the current retention window for Project Zephyr traces?"
+      ]
+    },
+    {
+      "id": "mem_ask_version_old",
+      "level": "episodic",
+      "kind": "decision",
+      "trust_class": "legacy_import",
+      "confidence": 0.62,
+      "utility": 0.35,
+      "importance": 0.31,
+      "tags": [
+        "ask",
+        "retention",
+        "deprecated"
+      ],
+      "content": "Before 2026-06-01, Project Zephyr trace retention used a deprecated 14 day window.",
+      "provenance_uri": "fixture://ask_v1/mem_ask_version_old",
+      "expected_query_match": [
+        "What was the old Project Zephyr trace retention window?"
+      ]
+    },
+    {
+      "id": "mem_ask_boundary_rule",
+      "level": "procedural",
+      "kind": "rule",
+      "trust_class": "human_explicit",
+      "confidence": 0.93,
+      "utility": 0.78,
+      "importance": 0.7,
+      "tags": [
+        "ask",
+        "boundary"
+      ],
+      "content": "Ask answers for Project Zephyr must quote stored evidence spans and must not synthesize claims outside citations.",
+      "provenance_uri": "fixture://ask_v1/mem_ask_boundary_rule",
+      "expected_query_match": [
+        "How should Project Zephyr ask answers cite evidence?"
+      ]
+    },
+    {
+      "id": "mem_ask_low_trust_noise",
+      "level": "episodic",
+      "kind": "note",
+      "trust_class": "legacy_import",
+      "confidence": 0.35,
+      "utility": 0.2,
+      "importance": 0.2,
+      "tags": [
+        "ask",
+        "noise"
+      ],
+      "content": "A stale note mentions a possible umbrella color for Project Zephyr demos but gives no operational fact.",
+      "provenance_uri": "fixture://ask_v1/mem_ask_low_trust_noise",
+      "expected_query_match": []
+    },
+    {
+      "id": "mem_ask_unrelated_billing",
+      "level": "semantic",
+      "kind": "fact",
+      "trust_class": "cass_evidence",
+      "confidence": 0.66,
+      "utility": 0.3,
+      "importance": 0.2,
+      "tags": [
+        "ask",
+        "distractor"
+      ],
+      "content": "The billing sandbox fixture uses invoice identifiers that are unrelated to Project Zephyr approval flows.",
+      "provenance_uri": "fixture://ask_v1/mem_ask_unrelated_billing",
+      "expected_query_match": []
+    },
+    {
+      "id": "mem_ask_unrelated_ui",
+      "level": "episodic",
+      "kind": "note",
+      "trust_class": "cass_evidence",
+      "confidence": 0.61,
+      "utility": 0.25,
+      "importance": 0.19,
+      "tags": [
+        "ask",
+        "distractor"
+      ],
+      "content": "A UI fixture checks sidebar contrast and does not describe Project Zephyr infrastructure policy.",
+      "provenance_uri": "fixture://ask_v1/mem_ask_unrelated_ui",
+      "expected_query_match": []
+    }
+  ],
+  "tiers": [
+    {
+      "name": "ask_noise",
+      "expected_memory_count": 48,
+      "id_range": {
+        "start": "mem_ask_noise_001",
+        "end": "mem_ask_noise_048"
+      },
+      "expected_query_match": [],
+      "generator": {
+        "profile": "deterministic_hash_embedder_noise",
+        "template": "Synthetic ask noise {n}: module {module} bucket {bucket} records unrelated maintenance note {id} without Project Zephyr answer evidence.",
+        "relevant_every": 0,
+        "distractor_every": 1
+      }
+    }
+  ],
+  "secret_policy": {
+    "synthetic_secret_policy": "none",
+    "secret_like_values_present": false,
+    "blocked_classes": [
+      "api_token",
+      "github_token",
+      "cloud_access_key",
+      "private_key"
+    ]
+  }
+}

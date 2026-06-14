@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 type TestResult = Result<(), String>;
 
 const EXPECTED_FIXTURE_IDS: &[&str] = &[
+    "ask_v1",
     "fx.async_migration.v1",
     "fx.dangerous_cleanup.v1",
     "fx.data_size_tiers.v1",
