@@ -1,0 +1,617 @@
+{
+  "schema": "ee.resource_admission.queue_pressure_conformance.v1",
+  "beadId": "bd-19bq8",
+  "clauses": [
+    {
+      "id": "MUST-QP-001",
+      "level": "MUST",
+      "requirement": "queue-pressure evaluation is side-effect-free and advisory-only",
+      "status": "tested",
+      "cases": ["healthy_idle_admit", "local_cargo_refused"]
+    },
+    {
+      "id": "MUST-QP-002",
+      "level": "MUST",
+      "requirement": "queue-pressure advice cannot authorize a Beads claim or override claim-gate source authority",
+      "status": "tested",
+      "cases": ["healthy_low_pressure_unsafe_claim_gate", "rch_slots_exhausted_wait"]
+    },
+    {
+      "id": "MUST-QP-003",
+      "level": "MUST",
+      "requirement": "queue-pressure levels are bounded to idle, low, moderate, saturated, and unknown",
+      "status": "tested",
+      "cases": [
+        "healthy_idle_admit",
+        "healthy_low_pressure_unsafe_claim_gate",
+        "output_budget_pressure_degrade",
+        "rch_slots_exhausted_wait",
+        "agent_mail_recovery_corrupt_read_failure"
+      ]
+    },
+    {
+      "id": "MUST-QP-004",
+      "level": "MUST",
+      "requirement": "reason-code taxonomy covers RCH, Agent Mail, Beads, dirty checkout, local Cargo, output budget, host calibration, and contradictory authority",
+      "status": "tested",
+      "cases": [
+        "rch_slots_exhausted_wait",
+        "rch_lane_busy_wait",
+        "stale_in_progress_queue",
+        "agent_mail_recovery_corrupt_read_failure",
+        "beads_external_changes_pending_import",
+        "dirty_checkout_standard_queue",
+        "local_cargo_refused",
+        "output_budget_pressure_degrade",
+        "missing_host_calibration_abstain"
+      ]
+    },
+    {
+      "id": "MUST-QP-005",
+      "level": "MUST",
+      "requirement": "source-kind and source-state combinations stay bounded and schema-aligned",
+      "status": "tested",
+      "cases": [
+        "healthy_idle_admit",
+        "healthy_low_pressure_unsafe_claim_gate",
+        "rch_slots_exhausted_wait",
+        "agent_mail_recovery_corrupt_read_failure",
+        "beads_external_changes_pending_import",
+        "stale_source_abstains"
+      ]
+    },
+    {
+      "id": "MUST-QP-006",
+      "level": "MUST",
+      "requirement": "redacted outputs omit raw mail bodies, raw command argv, host-private paths, and full dirty-path listings",
+      "status": "tested",
+      "cases": ["agent_mail_recovery_corrupt_read_failure", "dirty_checkout_standard_queue"]
+    },
+    {
+      "id": "MUST-QP-007",
+      "level": "MUST",
+      "requirement": "queue-pressure source refs and previews are bounded for work-packet, swarm brief, and support-bundle consumers",
+      "status": "tested",
+      "cases": ["dirty_checkout_standard_queue", "rch_slots_exhausted_wait"]
+    },
+    {
+      "id": "MUST-QP-008",
+      "level": "MUST",
+      "requirement": "remote_ready alone cannot admit when RCH slot accounting contradicts capacity",
+      "status": "tested",
+      "cases": ["rch_slots_exhausted_wait"]
+    },
+    {
+      "id": "MUST-QP-009",
+      "level": "MUST",
+      "requirement": "Agent Mail health green plus recovery corruption or read failure is untrusted evidence",
+      "status": "tested",
+      "cases": ["agent_mail_recovery_corrupt_read_failure"]
+    },
+    {
+      "id": "MUST-QP-010",
+      "level": "MUST",
+      "requirement": "Beads clean status plus external_changes_pending_import is contradictory source authority",
+      "status": "tested",
+      "cases": ["beads_external_changes_pending_import"]
+    },
+    {
+      "id": "MUST-QP-011",
+      "level": "MUST",
+      "requirement": "local Cargo refusal remains safety-dominant and never becomes a fallback",
+      "status": "tested",
+      "cases": ["local_cargo_refused"]
+    },
+    {
+      "id": "MUST-QP-012",
+      "level": "MUST",
+      "requirement": "deterministic advisory decisions cover admit, degrade_to_lean, queue, wait_for_rch, split_workload, refuse_local_cargo, and abstain",
+      "status": "tested",
+      "cases": [
+        "healthy_idle_admit",
+        "output_budget_pressure_degrade",
+        "dirty_checkout_standard_queue",
+        "rch_slots_exhausted_wait",
+        "dirty_checkout_swarm_split",
+        "local_cargo_refused",
+        "agent_mail_recovery_corrupt_read_failure"
+      ]
+    },
+    {
+      "id": "SHOULD-QP-013",
+      "level": "SHOULD",
+      "requirement": "support-bundle or handoff summaries include redacted queue-pressure evidence",
+      "status": "tested",
+      "cases": ["rch_slots_exhausted_wait", "agent_mail_recovery_corrupt_read_failure"]
+    },
+    {
+      "id": "SHOULD-QP-014",
+      "level": "SHOULD",
+      "requirement": "advice includes a next safe action and what-would-change counterfactual",
+      "status": "tested",
+      "cases": [
+        "output_budget_pressure_degrade",
+        "stale_in_progress_queue",
+        "rch_slots_exhausted_wait",
+        "local_cargo_refused"
+      ]
+    },
+    {
+      "id": "SHOULD-QP-015",
+      "level": "SHOULD",
+      "requirement": "live-style pressure evidence logs selected decisions and reason codes in JSONL",
+      "status": "tested",
+      "cases": ["rch_slots_exhausted_wait"]
+    }
+  ],
+  "requiredCoverage": {
+    "levels": ["idle", "low", "moderate", "saturated", "unknown"],
+    "reasonCodes": [
+      "rch_lane_busy",
+      "rch_telemetry_gap",
+      "active_build_slot_exhausted",
+      "stale_in_progress_bead",
+      "agent_mail_unavailable",
+      "agent_mail_recovery_corrupt",
+      "dirty_checkout_saturated",
+      "local_cargo_refused",
+      "output_budget_pressure",
+      "host_calibration_missing",
+      "contradictory_source_state"
+    ],
+    "sourceKinds": [
+      "rch_status",
+      "rch_selector_admission_probe",
+      "build_slot_lease",
+      "beads_in_progress_summary",
+      "agent_mail_health",
+      "agent_mail_recovery_probe",
+      "git_dirty_summary",
+      "local_cargo_tripwire",
+      "output_budget_governor",
+      "host_calibration_posture",
+      "source_authority_snapshot",
+      "manual_fixture"
+    ],
+    "sourceStates": [
+      "fresh",
+      "partial",
+      "degraded",
+      "unavailable",
+      "corrupt",
+      "stale",
+      "contradictory"
+    ],
+    "decisions": [
+      "admit",
+      "degrade_to_lean",
+      "queue",
+      "wait_for_rch",
+      "split_workload",
+      "refuse_local_cargo",
+      "abstain"
+    ],
+    "redactionChecks": [
+      "no_raw_mail_bodies",
+      "no_raw_command_argv",
+      "no_host_private_paths",
+      "no_full_dirty_path_listing"
+    ]
+  },
+  "cases": [
+    {
+      "id": "healthy_idle_admit",
+      "description": "Fresh RCH status and fixture source carry no pressure.",
+      "estimatedCostClass": "standard",
+      "claimGateSafeToClaim": true,
+      "sourceRefs": [
+        {
+          "kind": "rch_status",
+          "state": "fresh",
+          "sourceSchema": "ee.rch.status.v1",
+          "hash": "blake3:qp-healthy-rch",
+          "boundedPreview": "remote_ready slots_available=3 active_builds=0 queued_builds=0"
+        },
+        {
+          "kind": "manual_fixture",
+          "state": "fresh",
+          "sourceSchema": "ee.resource_admission.fixture.v1",
+          "hash": "blake3:qp-healthy-fixture",
+          "boundedPreview": "fixture=healthy_idle_admit"
+        }
+      ],
+      "expected": {
+        "level": "idle",
+        "reasonCodes": [],
+        "abstainedSources": [],
+        "decision": "admit",
+        "primaryReason": "queue_pressure_idle",
+        "contributingReasons": [],
+        "blockedBy": [],
+        "nextSafeAction": "continue_with_existing_claim_gate",
+        "whatWouldChange": "stronger_pressure_evidence_appears"
+      }
+    },
+    {
+      "id": "healthy_low_pressure_unsafe_claim_gate",
+      "description": "Partial host calibration creates low pressure but cannot make an unsafe claim gate safe.",
+      "estimatedCostClass": "standard",
+      "claimGateSafeToClaim": false,
+      "sourceRefs": [
+        {
+          "kind": "host_calibration_posture",
+          "state": "partial",
+          "sourceSchema": "ee.host_calibration.v1",
+          "hash": "blake3:qp-host-partial",
+          "boundedPreview": "host profile partial cpu=known memory_bucket=known io_bucket=missing"
+        }
+      ],
+      "expected": {
+        "level": "low",
+        "reasonCodes": [],
+        "abstainedSources": [],
+        "decision": "admit",
+        "primaryReason": "queue_pressure_low",
+        "contributingReasons": [],
+        "blockedBy": ["claim_gate_authority"],
+        "nextSafeAction": "continue_with_existing_claim_gate",
+        "whatWouldChange": "stronger_pressure_evidence_appears"
+      }
+    },
+    {
+      "id": "output_budget_pressure_degrade",
+      "description": "Output budget pressure recommends a leaner profile.",
+      "estimatedCostClass": "standard",
+      "claimGateSafeToClaim": true,
+      "sourceRefs": [
+        {
+          "kind": "output_budget_governor",
+          "state": "degraded",
+          "reasonCode": "output_budget_pressure",
+          "sourceSchema": "ee.output_budget.v1",
+          "hash": "blake3:qp-output-budget",
+          "boundedPreview": "budget_tokens=800 requested_tokens=1600 overflow_bucket=medium"
+        }
+      ],
+      "expected": {
+        "level": "moderate",
+        "reasonCodes": ["output_budget_pressure"],
+        "abstainedSources": [],
+        "decision": "degrade_to_lean",
+        "primaryReason": "output_budget_pressure",
+        "contributingReasons": ["output_budget_pressure"],
+        "blockedBy": [],
+        "nextSafeAction": "ee pack <task> --resource-profile constrained --json",
+        "whatWouldChange": "output_budget_or_checkout_pressure_clears"
+      }
+    },
+    {
+      "id": "dirty_checkout_standard_queue",
+      "description": "Dirty checkout saturation queues a standard workload.",
+      "estimatedCostClass": "standard",
+      "claimGateSafeToClaim": false,
+      "sourceRefs": [
+        {
+          "kind": "git_dirty_summary",
+          "state": "degraded",
+          "reasonCode": "dirty_checkout_saturated",
+          "sourceSchema": "ee.git.status_summary.v1",
+          "hash": "blake3:qp-dirty-standard",
+          "boundedPreview": "dirty_count_bucket=gt_10 peer_owned_paths_present=true"
+        }
+      ],
+      "expected": {
+        "level": "saturated",
+        "reasonCodes": ["dirty_checkout_saturated"],
+        "abstainedSources": [],
+        "decision": "queue",
+        "primaryReason": "dirty_checkout_saturated",
+        "contributingReasons": ["dirty_checkout_saturated"],
+        "blockedBy": ["claim_gate_authority"],
+        "nextSafeAction": "wait_for_lane_capacity_then_refresh_swarm_brief",
+        "whatWouldChange": "queue_pressure_drops_below_saturated"
+      }
+    },
+    {
+      "id": "dirty_checkout_swarm_split",
+      "description": "Dirty checkout saturation splits a swarm-heavy workload before claim.",
+      "estimatedCostClass": "swarm_heavy",
+      "claimGateSafeToClaim": true,
+      "sourceRefs": [
+        {
+          "kind": "git_dirty_summary",
+          "state": "degraded",
+          "reasonCode": "dirty_checkout_saturated",
+          "sourceSchema": "ee.git.status_summary.v1",
+          "hash": "blake3:qp-dirty-swarm",
+          "boundedPreview": "dirty_count_bucket=gt_10 peer_owned_paths_present=true"
+        }
+      ],
+      "expected": {
+        "level": "saturated",
+        "reasonCodes": ["dirty_checkout_saturated"],
+        "abstainedSources": [],
+        "decision": "split_workload",
+        "primaryReason": "dirty_checkout_saturated",
+        "contributingReasons": ["dirty_checkout_saturated"],
+        "blockedBy": [],
+        "nextSafeAction": "split_workload_or_create_narrower_bead_before_claim",
+        "whatWouldChange": "workload_becomes_standard_or_narrower"
+      }
+    },
+    {
+      "id": "rch_slots_exhausted_wait",
+      "description": "RCH reports remote_ready with empty build lists but exhausted slot accounting.",
+      "estimatedCostClass": "swarm_heavy",
+      "claimGateSafeToClaim": false,
+      "sourceRefs": [
+        {
+          "kind": "rch_status",
+          "state": "degraded",
+          "reasonCode": "rch_telemetry_gap",
+          "sourceSchema": "ee.rch.status.v1",
+          "hash": "blake3:qp-rch-telemetry-gap",
+          "boundedPreview": "remote_ready active_builds=0 queued_builds=0 telemetry_gap"
+        },
+        {
+          "kind": "build_slot_lease",
+          "state": "degraded",
+          "reasonCode": "active_build_slot_exhausted",
+          "sourceSchema": "ee.rch.build_slot_lease.v1",
+          "hash": "blake3:qp-slot-exhausted",
+          "boundedPreview": "slots_available=0 worker_used_slots=4/4"
+        }
+      ],
+      "expected": {
+        "level": "saturated",
+        "reasonCodes": ["rch_telemetry_gap", "active_build_slot_exhausted"],
+        "abstainedSources": [],
+        "decision": "wait_for_rch",
+        "primaryReason": "rch_telemetry_gap",
+        "contributingReasons": ["rch_telemetry_gap", "active_build_slot_exhausted"],
+        "blockedBy": ["rch_lane", "claim_gate_authority"],
+        "nextSafeAction": "rch status --json",
+        "whatWouldChange": "rch_lane_has_capacity_and_fresh_telemetry"
+      }
+    },
+    {
+      "id": "rch_lane_busy_wait",
+      "description": "Selector admission probe says the RCH lane is busy.",
+      "estimatedCostClass": "standard",
+      "claimGateSafeToClaim": true,
+      "sourceRefs": [
+        {
+          "kind": "rch_selector_admission_probe",
+          "state": "degraded",
+          "reasonCode": "rch_lane_busy",
+          "sourceSchema": "ee.rch.selector_admission_probe.v1",
+          "hash": "blake3:qp-rch-lane-busy",
+          "boundedPreview": "active_project_exclusion_count=1 selected_worker_hash=probe"
+        }
+      ],
+      "expected": {
+        "level": "saturated",
+        "reasonCodes": ["rch_lane_busy"],
+        "abstainedSources": [],
+        "decision": "wait_for_rch",
+        "primaryReason": "rch_lane_busy",
+        "contributingReasons": ["rch_lane_busy"],
+        "blockedBy": ["rch_lane"],
+        "nextSafeAction": "rch status --json",
+        "whatWouldChange": "rch_lane_has_capacity_and_fresh_telemetry"
+      }
+    },
+    {
+      "id": "stale_in_progress_queue",
+      "description": "Fresh Beads summary observes a stale in-progress claim and queues.",
+      "estimatedCostClass": "swarm_heavy",
+      "claimGateSafeToClaim": false,
+      "sourceRefs": [
+        {
+          "kind": "beads_in_progress_summary",
+          "state": "fresh",
+          "reasonCode": "stale_in_progress_bead",
+          "sourceSchema": "ee.br.status.v1",
+          "hash": "blake3:qp-stale-in-progress",
+          "boundedPreview": "in_progress_count=1 stale_age_bucket=gt_2h owner_hash=agent"
+        }
+      ],
+      "expected": {
+        "level": "moderate",
+        "reasonCodes": ["stale_in_progress_bead"],
+        "abstainedSources": [],
+        "decision": "queue",
+        "primaryReason": "stale_in_progress_bead",
+        "contributingReasons": ["stale_in_progress_bead"],
+        "blockedBy": ["beads_in_progress", "claim_gate_authority"],
+        "nextSafeAction": "message_in_progress_holder_then_refresh_swarm_brief",
+        "whatWouldChange": "stale_in_progress_owner_updates_or_releases_claim"
+      }
+    },
+    {
+      "id": "agent_mail_recovery_corrupt_read_failure",
+      "description": "Agent Mail health is not enough when recovery probe is corrupt and read health is unavailable.",
+      "estimatedCostClass": "standard",
+      "claimGateSafeToClaim": false,
+      "sourceRefs": [
+        {
+          "kind": "agent_mail_health",
+          "state": "fresh",
+          "sourceSchema": "ee.agent_mail.health.v1",
+          "hash": "blake3:qp-agent-mail-green",
+          "boundedPreview": "health=ready db_open=true"
+        },
+        {
+          "kind": "agent_mail_recovery_probe",
+          "state": "corrupt",
+          "reasonCode": "agent_mail_recovery_corrupt",
+          "sourceSchema": "ee.agent_mail.recovery.v1",
+          "hash": "blake3:qp-agent-mail-corrupt",
+          "boundedPreview": "recovery_mode=corrupt error_class=short_read"
+        },
+        {
+          "kind": "agent_mail_health",
+          "state": "unavailable",
+          "reasonCode": "agent_mail_unavailable",
+          "sourceSchema": "ee.agent_mail.health.v1",
+          "hash": "blake3:qp-agent-mail-read-failure",
+          "boundedPreview": "inbox_read_error=true error_class=database"
+        }
+      ],
+      "expected": {
+        "level": "unknown",
+        "reasonCodes": ["agent_mail_recovery_corrupt", "agent_mail_unavailable"],
+        "abstainedSources": ["agent_mail_recovery_probe", "agent_mail_health"],
+        "decision": "abstain",
+        "primaryReason": "agent_mail_recovery_corrupt",
+        "contributingReasons": ["agent_mail_recovery_corrupt", "agent_mail_unavailable"],
+        "blockedBy": ["agent_mail", "claim_gate_authority"],
+        "nextSafeAction": "collect_bounded_support_bundle_or_agent_mail_snapshot",
+        "whatWouldChange": "untrusted_source_becomes_fresh_and_consistent"
+      }
+    },
+    {
+      "id": "beads_external_changes_pending_import",
+      "description": "Beads status and source-authority snapshot disagree.",
+      "estimatedCostClass": "standard",
+      "claimGateSafeToClaim": false,
+      "sourceRefs": [
+        {
+          "kind": "beads_in_progress_summary",
+          "state": "fresh",
+          "sourceSchema": "ee.br.status.v1",
+          "hash": "blake3:qp-beads-clean",
+          "boundedPreview": "beads_status=clean in_progress_count=0"
+        },
+        {
+          "kind": "source_authority_snapshot",
+          "state": "contradictory",
+          "sourceSchema": "ee.br.doctor.v1",
+          "hash": "blake3:qp-external-changes",
+          "boundedPreview": "doctor_code=external_changes_pending_import tracker_authority=unsafe"
+        }
+      ],
+      "expected": {
+        "level": "unknown",
+        "reasonCodes": ["contradictory_source_state"],
+        "abstainedSources": ["source_authority_snapshot"],
+        "decision": "abstain",
+        "primaryReason": "contradictory_source_state",
+        "contributingReasons": ["contradictory_source_state"],
+        "blockedBy": ["source_authority", "claim_gate_authority"],
+        "nextSafeAction": "collect_bounded_support_bundle_or_agent_mail_snapshot",
+        "whatWouldChange": "untrusted_source_becomes_fresh_and_consistent"
+      }
+    },
+    {
+      "id": "local_cargo_refused",
+      "description": "Local Cargo tripwire remains safety-dominant.",
+      "estimatedCostClass": "standard",
+      "claimGateSafeToClaim": true,
+      "sourceRefs": [
+        {
+          "kind": "local_cargo_tripwire",
+          "state": "degraded",
+          "reasonCode": "local_cargo_refused",
+          "sourceSchema": "ee.local_cargo_tripwire.v1",
+          "hash": "blake3:qp-local-cargo",
+          "boundedPreview": "local_cargo_refused=true forbidden_process_count=0"
+        }
+      ],
+      "expected": {
+        "level": "moderate",
+        "reasonCodes": ["local_cargo_refused"],
+        "abstainedSources": [],
+        "decision": "refuse_local_cargo",
+        "primaryReason": "local_cargo_refused",
+        "contributingReasons": ["local_cargo_refused"],
+        "blockedBy": ["local_cargo_tripwire"],
+        "nextSafeAction": "scripts/check-local-cargo-tripwire.sh --probe-processes --json",
+        "whatWouldChange": "remote_proof_path_succeeds_without_local_cargo"
+      }
+    },
+    {
+      "id": "missing_host_calibration_abstain",
+      "description": "Unavailable host calibration abstains instead of inventing capacity.",
+      "estimatedCostClass": "standard",
+      "claimGateSafeToClaim": true,
+      "sourceRefs": [
+        {
+          "kind": "host_calibration_posture",
+          "state": "unavailable",
+          "reasonCode": "host_calibration_missing",
+          "sourceSchema": "ee.host_calibration.v1",
+          "hash": "blake3:qp-host-missing",
+          "boundedPreview": "host_calibration=unavailable"
+        }
+      ],
+      "expected": {
+        "level": "unknown",
+        "reasonCodes": ["host_calibration_missing"],
+        "abstainedSources": ["host_calibration_posture"],
+        "decision": "abstain",
+        "primaryReason": "host_calibration_missing",
+        "contributingReasons": ["host_calibration_missing"],
+        "blockedBy": ["source_authority"],
+        "nextSafeAction": "collect_bounded_support_bundle_or_agent_mail_snapshot",
+        "whatWouldChange": "untrusted_source_becomes_fresh_and_consistent"
+      }
+    },
+    {
+      "id": "stale_source_abstains",
+      "description": "A stale source with an observed stale in-progress reason abstains until authority is fresh.",
+      "estimatedCostClass": "standard",
+      "claimGateSafeToClaim": false,
+      "sourceRefs": [
+        {
+          "kind": "beads_in_progress_summary",
+          "state": "stale",
+          "reasonCode": "stale_in_progress_bead",
+          "sourceSchema": "ee.br.status.v1",
+          "hash": "blake3:qp-stale-source",
+          "boundedPreview": "summary_age_bucket=stale stale_in_progress_count=1"
+        }
+      ],
+      "expected": {
+        "level": "unknown",
+        "reasonCodes": ["stale_in_progress_bead"],
+        "abstainedSources": ["beads_in_progress_summary"],
+        "decision": "abstain",
+        "primaryReason": "stale_in_progress_bead",
+        "contributingReasons": ["stale_in_progress_bead"],
+        "blockedBy": ["beads_in_progress", "claim_gate_authority"],
+        "nextSafeAction": "collect_bounded_support_bundle_or_agent_mail_snapshot",
+        "whatWouldChange": "untrusted_source_becomes_fresh_and_consistent"
+      }
+    }
+  ],
+  "noMutation": {
+    "forbiddenSnippets": [
+      "std::process::Command",
+      "Command::new",
+      "file_reservation_paths",
+      "send_message(",
+      "acknowledge_message",
+      "br update",
+      "br close",
+      "git add",
+      "git commit",
+      "cargo test",
+      "cargo check",
+      "scripts/rch_verify.sh",
+      "std::fs::write",
+      "remove_file",
+      "remove_dir",
+      "cancel_active_build",
+      "local_cargo_fallback"
+    ],
+    "redactionForbiddenSubstrings": [
+      "/Users/",
+      "/data/projects/",
+      "mail_body",
+      "raw_argv",
+      "full_dirty_paths",
+      "secret="
+    ]
+  }
+}

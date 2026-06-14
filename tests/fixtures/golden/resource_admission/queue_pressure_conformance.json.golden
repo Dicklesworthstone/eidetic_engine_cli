@@ -1,0 +1,266 @@
+{
+  "schema": "ee.resource_admission.queue_pressure_conformance_report.v1",
+  "beadId": "bd-19bq8",
+  "matrix": {
+    "clauseCount": 15,
+    "testedClauseCount": 15,
+    "coverage": {
+      "levels": ["idle", "low", "moderate", "saturated", "unknown"],
+      "reasonCodes": [
+        "active_build_slot_exhausted",
+        "agent_mail_recovery_corrupt",
+        "agent_mail_unavailable",
+        "contradictory_source_state",
+        "dirty_checkout_saturated",
+        "host_calibration_missing",
+        "local_cargo_refused",
+        "output_budget_pressure",
+        "rch_lane_busy",
+        "rch_telemetry_gap",
+        "stale_in_progress_bead"
+      ],
+      "sourceKinds": [
+        "agent_mail_health",
+        "agent_mail_recovery_probe",
+        "beads_in_progress_summary",
+        "build_slot_lease",
+        "git_dirty_summary",
+        "host_calibration_posture",
+        "local_cargo_tripwire",
+        "manual_fixture",
+        "output_budget_governor",
+        "rch_selector_admission_probe",
+        "rch_status",
+        "source_authority_snapshot"
+      ],
+      "sourceStates": ["contradictory", "corrupt", "degraded", "fresh", "partial", "stale", "unavailable"],
+      "decisions": ["abstain", "admit", "degrade_to_lean", "queue", "refuse_local_cargo", "split_workload", "wait_for_rch"]
+    }
+  },
+  "cases": [
+    {
+      "id": "healthy_idle_admit",
+      "level": "idle",
+      "reasonCodes": [],
+      "abstainedSources": [],
+      "decision": "admit",
+      "primaryReason": "queue_pressure_idle",
+      "contributingReasons": [],
+      "blockedBy": [],
+      "nextSafeAction": "continue_with_existing_claim_gate",
+      "whatWouldChange": "stronger_pressure_evidence_appears",
+      "canAuthorizeClaim": false
+    },
+    {
+      "id": "healthy_low_pressure_unsafe_claim_gate",
+      "level": "low",
+      "reasonCodes": [],
+      "abstainedSources": [],
+      "decision": "admit",
+      "primaryReason": "queue_pressure_low",
+      "contributingReasons": [],
+      "blockedBy": ["claim_gate_authority"],
+      "nextSafeAction": "continue_with_existing_claim_gate",
+      "whatWouldChange": "stronger_pressure_evidence_appears",
+      "canAuthorizeClaim": false
+    },
+    {
+      "id": "output_budget_pressure_degrade",
+      "level": "moderate",
+      "reasonCodes": ["output_budget_pressure"],
+      "abstainedSources": [],
+      "decision": "degrade_to_lean",
+      "primaryReason": "output_budget_pressure",
+      "contributingReasons": ["output_budget_pressure"],
+      "blockedBy": [],
+      "nextSafeAction": "ee pack <task> --resource-profile constrained --json",
+      "whatWouldChange": "output_budget_or_checkout_pressure_clears",
+      "canAuthorizeClaim": false
+    },
+    {
+      "id": "dirty_checkout_standard_queue",
+      "level": "saturated",
+      "reasonCodes": ["dirty_checkout_saturated"],
+      "abstainedSources": [],
+      "decision": "queue",
+      "primaryReason": "dirty_checkout_saturated",
+      "contributingReasons": ["dirty_checkout_saturated"],
+      "blockedBy": ["claim_gate_authority"],
+      "nextSafeAction": "wait_for_lane_capacity_then_refresh_swarm_brief",
+      "whatWouldChange": "queue_pressure_drops_below_saturated",
+      "canAuthorizeClaim": false
+    },
+    {
+      "id": "dirty_checkout_swarm_split",
+      "level": "saturated",
+      "reasonCodes": ["dirty_checkout_saturated"],
+      "abstainedSources": [],
+      "decision": "split_workload",
+      "primaryReason": "dirty_checkout_saturated",
+      "contributingReasons": ["dirty_checkout_saturated"],
+      "blockedBy": [],
+      "nextSafeAction": "split_workload_or_create_narrower_bead_before_claim",
+      "whatWouldChange": "workload_becomes_standard_or_narrower",
+      "canAuthorizeClaim": false
+    },
+    {
+      "id": "rch_slots_exhausted_wait",
+      "level": "saturated",
+      "reasonCodes": ["rch_telemetry_gap", "active_build_slot_exhausted"],
+      "abstainedSources": [],
+      "decision": "wait_for_rch",
+      "primaryReason": "rch_telemetry_gap",
+      "contributingReasons": ["rch_telemetry_gap", "active_build_slot_exhausted"],
+      "blockedBy": ["rch_lane", "claim_gate_authority"],
+      "nextSafeAction": "rch status --json",
+      "whatWouldChange": "rch_lane_has_capacity_and_fresh_telemetry",
+      "canAuthorizeClaim": false
+    },
+    {
+      "id": "rch_lane_busy_wait",
+      "level": "saturated",
+      "reasonCodes": ["rch_lane_busy"],
+      "abstainedSources": [],
+      "decision": "wait_for_rch",
+      "primaryReason": "rch_lane_busy",
+      "contributingReasons": ["rch_lane_busy"],
+      "blockedBy": ["rch_lane"],
+      "nextSafeAction": "rch status --json",
+      "whatWouldChange": "rch_lane_has_capacity_and_fresh_telemetry",
+      "canAuthorizeClaim": false
+    },
+    {
+      "id": "stale_in_progress_queue",
+      "level": "moderate",
+      "reasonCodes": ["stale_in_progress_bead"],
+      "abstainedSources": [],
+      "decision": "queue",
+      "primaryReason": "stale_in_progress_bead",
+      "contributingReasons": ["stale_in_progress_bead"],
+      "blockedBy": ["beads_in_progress", "claim_gate_authority"],
+      "nextSafeAction": "message_in_progress_holder_then_refresh_swarm_brief",
+      "whatWouldChange": "stale_in_progress_owner_updates_or_releases_claim",
+      "canAuthorizeClaim": false
+    },
+    {
+      "id": "agent_mail_recovery_corrupt_read_failure",
+      "level": "unknown",
+      "reasonCodes": ["agent_mail_recovery_corrupt", "agent_mail_unavailable"],
+      "abstainedSources": ["agent_mail_recovery_probe", "agent_mail_health"],
+      "decision": "abstain",
+      "primaryReason": "agent_mail_recovery_corrupt",
+      "contributingReasons": ["agent_mail_recovery_corrupt", "agent_mail_unavailable"],
+      "blockedBy": ["agent_mail", "claim_gate_authority"],
+      "nextSafeAction": "collect_bounded_support_bundle_or_agent_mail_snapshot",
+      "whatWouldChange": "untrusted_source_becomes_fresh_and_consistent",
+      "canAuthorizeClaim": false
+    },
+    {
+      "id": "beads_external_changes_pending_import",
+      "level": "unknown",
+      "reasonCodes": ["contradictory_source_state"],
+      "abstainedSources": ["source_authority_snapshot"],
+      "decision": "abstain",
+      "primaryReason": "contradictory_source_state",
+      "contributingReasons": ["contradictory_source_state"],
+      "blockedBy": ["source_authority", "claim_gate_authority"],
+      "nextSafeAction": "collect_bounded_support_bundle_or_agent_mail_snapshot",
+      "whatWouldChange": "untrusted_source_becomes_fresh_and_consistent",
+      "canAuthorizeClaim": false
+    },
+    {
+      "id": "local_cargo_refused",
+      "level": "moderate",
+      "reasonCodes": ["local_cargo_refused"],
+      "abstainedSources": [],
+      "decision": "refuse_local_cargo",
+      "primaryReason": "local_cargo_refused",
+      "contributingReasons": ["local_cargo_refused"],
+      "blockedBy": ["local_cargo_tripwire"],
+      "nextSafeAction": "scripts/check-local-cargo-tripwire.sh --probe-processes --json",
+      "whatWouldChange": "remote_proof_path_succeeds_without_local_cargo",
+      "canAuthorizeClaim": false
+    },
+    {
+      "id": "missing_host_calibration_abstain",
+      "level": "unknown",
+      "reasonCodes": ["host_calibration_missing"],
+      "abstainedSources": ["host_calibration_posture"],
+      "decision": "abstain",
+      "primaryReason": "host_calibration_missing",
+      "contributingReasons": ["host_calibration_missing"],
+      "blockedBy": ["source_authority"],
+      "nextSafeAction": "collect_bounded_support_bundle_or_agent_mail_snapshot",
+      "whatWouldChange": "untrusted_source_becomes_fresh_and_consistent",
+      "canAuthorizeClaim": false
+    },
+    {
+      "id": "stale_source_abstains",
+      "level": "unknown",
+      "reasonCodes": ["stale_in_progress_bead"],
+      "abstainedSources": ["beads_in_progress_summary"],
+      "decision": "abstain",
+      "primaryReason": "stale_in_progress_bead",
+      "contributingReasons": ["stale_in_progress_bead"],
+      "blockedBy": ["beads_in_progress", "claim_gate_authority"],
+      "nextSafeAction": "collect_bounded_support_bundle_or_agent_mail_snapshot",
+      "whatWouldChange": "untrusted_source_becomes_fresh_and_consistent",
+      "canAuthorizeClaim": false
+    }
+  ],
+  "representativeOutputs": {
+    "diagResourceAdmission": {
+      "caseId": "rch_slots_exhausted_wait",
+      "queuePressure": {
+        "level": "saturated",
+        "canAuthorizeClaim": false,
+        "reasonCodes": ["rch_telemetry_gap", "active_build_slot_exhausted"],
+        "abstainedSources": [],
+        "redactionPosture": "counts_ids_statuses_hashes_only_no_mail_body_no_command_argv_no_absolute_paths",
+        "sourceRefCount": 2
+      },
+      "advice": {
+        "decision": "wait_for_rch",
+        "primaryReason": "rch_telemetry_gap",
+        "nextSafeAction": "rch status --json",
+        "whatWouldChange": "rch_lane_has_capacity_and_fresh_telemetry",
+        "canAuthorizeClaim": false
+      }
+    },
+    "workPacketClaimGateEmbedding": {
+      "caseId": "healthy_low_pressure_unsafe_claim_gate",
+      "safeToClaim": false,
+      "queuePressureAdvice": {
+        "decision": "admit",
+        "canAuthorizeClaim": false,
+        "blockedBy": ["claim_gate_authority"]
+      }
+    }
+  },
+  "supportBundleSummary": {
+    "redactionPosture": "counts_ids_statuses_hashes_only_no_mail_body_no_command_argv_no_absolute_paths",
+    "redactedQueuePressureEvidence": [
+      {
+        "caseId": "rch_slots_exhausted_wait",
+        "sourceKinds": ["rch_status", "build_slot_lease"],
+        "reasonCodes": ["rch_telemetry_gap", "active_build_slot_exhausted"]
+      },
+      {
+        "caseId": "agent_mail_recovery_corrupt_read_failure",
+        "sourceKinds": ["agent_mail_health", "agent_mail_recovery_probe", "agent_mail_health"],
+        "reasonCodes": ["agent_mail_recovery_corrupt", "agent_mail_unavailable"]
+      }
+    ]
+  },
+  "liveStyleLog": {
+    "lineCount": 3,
+    "selectedDecision": "wait_for_rch",
+    "reasonCodes": ["rch_telemetry_gap", "active_build_slot_exhausted"]
+  },
+  "noMutation": {
+    "sideEffectFree": true,
+    "advisoryOnly": true,
+    "canAuthorizeClaimEverTrue": false,
+    "forbiddenSnippetCount": 17
+  }
+}
