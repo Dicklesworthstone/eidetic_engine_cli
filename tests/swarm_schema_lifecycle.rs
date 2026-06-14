@@ -227,6 +227,13 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         shipped: true,
     },
     SchemaCase {
+        id: "ee.swarm.repair_plan.v1",
+        file_name: "ee.swarm.repair_plan.v1.json",
+        doc_path: "docs/swarm/repair_plan.md",
+        tracking_bead: "bd-22po3.1",
+        shipped: true,
+    },
+    SchemaCase {
         // bd-1zb7k.14.1 is closed in the beads tracker (the synthetic
         // incident scenario schema and fixture catalog landed), so the
         // schema is now shipped and available in build.
@@ -388,6 +395,12 @@ const DRIFT_CASES: &[DriftCase] = &[
         command: "planned unsafe-claim planner over ee.swarm.work_packet.claim_gate.v1",
         json_path: ".examples[\"ee.swarm.unsafe_claim_plan.v1\"]",
         fixture_manifest_key: "ee.swarm.unsafe_claim_plan.v1",
+    },
+    DriftCase {
+        schema_id: "ee.swarm.repair_plan.v1",
+        command: "ee swarm repair-plan --workspace . --include-rch --candidate <bead> --json",
+        json_path: ".data",
+        fixture_manifest_key: "ee.swarm.repair_plan.v1",
     },
     DriftCase {
         schema_id: "ee.swarm_incident.v1",
@@ -1668,6 +1681,164 @@ fn unsafe_claim_plan_contract_pins_reason_taxonomy_and_non_mutation() -> TestRes
                 "unsafe-claim plan fixture leaks forbidden marker {forbidden}"
             ));
         }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn repair_plan_contract_pins_action_vocabulary_and_stop_conditions() -> TestResult {
+    let schema_case = schema_case_by_id("ee.swarm.repair_plan.v1")?;
+    let schema = schema_doc(schema_case)?;
+
+    let required = string_array_at(&schema, "/required", schema_case.id)?;
+    let expected_required = [
+        "schema",
+        "planId",
+        "packetId",
+        "gateId",
+        "generatedAt",
+        "workspace",
+        "redactionStatus",
+        "ordering",
+        "sourceGate",
+        "sourceEvidence",
+        "actionVocabulary",
+        "actions",
+        "stopConditions",
+        "nonMutationPolicy",
+        "degraded",
+        "provenanceHash",
+    ];
+    if required != expected_required {
+        return Err(format!(
+            "{} required field order drifted\nactual: {required:?}\nexpected: {expected_required:?}",
+            schema_case.id
+        ));
+    }
+
+    let action_kinds = string_array_at(
+        &schema,
+        "/definitions/repairActionKind/enum",
+        schema_case.id,
+    )?;
+    let expected_action_kinds = [
+        "wait_for_rch_build",
+        "message_holder",
+        "repair_agent_mail_archive",
+        "rerun_snapshot",
+        "refresh_bv_bounded",
+        "inspect_beads_doctor",
+        "rerun_claim_gate",
+        "ask_human_for_destructive_repair",
+    ];
+    if action_kinds != expected_action_kinds {
+        return Err(format!(
+            "{} action vocabulary drifted\nactual: {action_kinds:?}\nexpected: {expected_action_kinds:?}",
+            schema_case.id
+        ));
+    }
+
+    let safety_classes = string_array_at(
+        &schema,
+        "/definitions/safetyClass/enum",
+        schema_case.id,
+    )?;
+    for required_class in [
+        "read_only_probe",
+        "coordination_mutation",
+        "external_repair",
+        "human_approval_required",
+        "forbidden_out_of_scope",
+    ] {
+        if !safety_classes.contains(&required_class.to_owned()) {
+            return Err(format!(
+                "{} missing repair safety class {required_class}",
+                schema_case.id
+            ));
+        }
+    }
+
+    let fixtures = fixture_examples()?;
+    let example = fixtures
+        .get(schema_case.id)
+        .ok_or_else(|| format!("fixture missing {}", schema_case.id))?;
+    let fixture_vocabulary = example
+        .pointer("/actionVocabulary")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "repair-plan fixture missing actionVocabulary".to_owned())?;
+    let fixture_kinds = fixture_vocabulary
+        .iter()
+        .map(|entry| string_field(entry, "/kind", schema_case.id).map(ToOwned::to_owned))
+        .collect::<Result<Vec<_>, _>>()?;
+    if fixture_kinds != expected_action_kinds {
+        return Err("repair-plan fixture actionVocabulary does not match schema enum".into());
+    }
+
+    for field in [
+        "/nonMutationPolicy/sideEffectFree",
+        "/nonMutationPolicy/claimsBeads",
+        "/nonMutationPolicy/reservesFiles",
+        "/nonMutationPolicy/sendsAgentMail",
+        "/nonMutationPolicy/mutatesTracker",
+        "/nonMutationPolicy/runsCargo",
+        "/nonMutationPolicy/stagesGit",
+        "/nonMutationPolicy/deletesFiles",
+        "/nonMutationPolicy/executesRepairs",
+    ] {
+        let value = bool_field(example, field, "repair-plan fixture")?;
+        if field == "/nonMutationPolicy/sideEffectFree" {
+            if !value {
+                return Err("repair-plan fixture must be side-effect-free".into());
+            }
+        } else if value {
+            return Err(format!("repair-plan fixture must not set {field}"));
+        }
+    }
+
+    let stop_ids = example
+        .pointer("/stopConditions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "repair-plan fixture missing stopConditions".to_owned())?
+        .iter()
+        .map(|entry| string_field(entry, "/id", "repair-plan stop condition").map(ToOwned::to_owned))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    for required_stop in [
+        "fresh_claim_gate_safe_to_claim",
+        "source_authority_fail_closed",
+        "no_source_verdict_without_rch_cargo",
+        "human_approval_required_before_destructive_repair",
+        "agent_mail_or_tracker_not_authoritative",
+    ] {
+        if !stop_ids.contains(required_stop) {
+            return Err(format!(
+                "repair-plan fixture missing stop condition {required_stop}"
+            ));
+        }
+    }
+
+    let external_repair = example
+        .pointer("/actions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "repair-plan fixture missing actions".to_owned())?
+        .iter()
+        .find(|entry| {
+            string_field(entry, "/kind", "repair-plan action").ok()
+                == Some("repair_agent_mail_archive")
+        })
+        .ok_or_else(|| "repair-plan fixture missing repair_agent_mail_archive action".to_owned())?;
+    if !bool_field(
+        external_repair,
+        "/safety/requiresHumanApproval",
+        "repair-plan external repair",
+    )? {
+        return Err("repair_agent_mail_archive must require human approval".into());
+    }
+    if external_repair
+        .pointer("/commandAction")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err("repair_agent_mail_archive must not expose an executable command".into());
     }
 
     Ok(())

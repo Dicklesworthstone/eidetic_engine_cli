@@ -1605,6 +1605,10 @@ impl EffectManifest {
                 "Recommend the next swarm action without claiming work",
             ),
             CommandEffect::read_only_db(
+                "swarm repair-plan",
+                "Render an advisory degraded-stack repair plan without executing repairs",
+            ),
+            CommandEffect::read_only_db(
                 "swarm work-packet",
                 "Render a swarm work packet without mutating coordination state",
             ),

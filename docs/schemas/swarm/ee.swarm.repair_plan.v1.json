@@ -1,0 +1,653 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.swarm.repair_plan.v1.json",
+  "title": "ee.swarm.repair_plan.v1",
+  "description": "Read-only degraded-stack repair plan derived from a swarm work-packet claim gate. The plan defines the allowed repair action vocabulary, safety classes, source evidence, and stop conditions without claiming work, reserving files, sending Agent Mail, running Cargo, staging Git, deleting files, or executing repairs.",
+  "type": "object",
+  "additionalProperties": false,
+  "x-ee-status": {
+    "shipped": true,
+    "available_in_build": true,
+    "tracking_bead": "bd-22po3.1",
+    "notes": "Shipped: `ee swarm repair-plan --json` emits this advisory contract from current work-packet and claim-gate evidence."
+  },
+  "x-ee-doc": "docs/swarm/repair_plan.md",
+  "required": [
+    "schema",
+    "planId",
+    "packetId",
+    "gateId",
+    "generatedAt",
+    "workspace",
+    "redactionStatus",
+    "ordering",
+    "sourceGate",
+    "sourceEvidence",
+    "actionVocabulary",
+    "actions",
+    "stopConditions",
+    "nonMutationPolicy",
+    "degraded",
+    "provenanceHash"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ee.swarm.repair_plan.v1" },
+    "planId": { "type": "string", "pattern": "^swarm_repair_plan_[a-f0-9]{24}$" },
+    "packetId": { "type": "string", "pattern": "^swarm_work_packet_[a-f0-9]{24}$" },
+    "gateId": { "type": "string", "pattern": "^swarm_work_packet_claim_gate_[a-f0-9]{24}$" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "workspace": { "$ref": "#/definitions/safeString" },
+    "redactionStatus": {
+      "type": "string",
+      "const": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content"
+    },
+    "ordering": { "$ref": "#/definitions/ordering" },
+    "sourceGate": { "$ref": "#/definitions/sourceGate" },
+    "sourceEvidence": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/sourceEvidence" }
+    },
+    "actionVocabulary": {
+      "type": "array",
+      "minItems": 8,
+      "items": { "$ref": "#/definitions/actionVocabularyEntry" }
+    },
+    "actions": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/action" }
+    },
+    "stopConditions": {
+      "type": "array",
+      "minItems": 5,
+      "items": { "$ref": "#/definitions/stopCondition" }
+    },
+    "nonMutationPolicy": { "$ref": "#/definitions/nonMutationPolicy" },
+    "degraded": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/degradation" }
+    },
+    "provenanceHash": { "type": "string", "pattern": "^blake3:[0-9a-f]{32,64}$" }
+  },
+  "definitions": {
+    "safeString": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "anyOf": [
+          { "pattern": "BEGIN PRIVATE KEY" },
+          { "pattern": "BEGIN OPENSSH PRIVATE KEY" },
+          { "pattern": "ghp_[A-Za-z0-9_]+" },
+          { "pattern": "Bearer [A-Za-z0-9._-]+" },
+          { "pattern": "DATABASE_URL=" },
+          { "pattern": "From: " },
+          { "pattern": "Subject: " },
+          { "pattern": "Message-ID:" },
+          { "pattern": "body:" },
+          { "pattern": "raw_inbox" },
+          { "pattern": "stdout:" },
+          { "pattern": "stderr:" },
+          { "pattern": "/Users/[^\\s]+" },
+          { "pattern": "/home/[^\\s]+" }
+        ]
+      }
+    },
+    "stringArray": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "repairActionKind": {
+      "type": "string",
+      "enum": [
+        "wait_for_rch_build",
+        "message_holder",
+        "repair_agent_mail_archive",
+        "rerun_snapshot",
+        "refresh_bv_bounded",
+        "inspect_beads_doctor",
+        "rerun_claim_gate",
+        "ask_human_for_destructive_repair"
+      ]
+    },
+    "safetyClass": {
+      "type": "string",
+      "enum": [
+        "read_only_probe",
+        "read_only_or_wait",
+        "coordination_mutation",
+        "tracker_mutation",
+        "external_repair",
+        "human_approval_required",
+        "forbidden_out_of_scope"
+      ]
+    },
+    "copySafety": {
+      "type": "string",
+      "enum": [
+        "safe_structured_argv",
+        "display_only",
+        "shell_required_review",
+        "forbidden_until_human_approval"
+      ]
+    },
+    "ordering": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceEvidence", "actionVocabulary", "actions", "stopConditions"],
+      "properties": {
+        "sourceEvidence": { "type": "string", "const": "sourceKind ascending byte order" },
+        "actionVocabulary": { "type": "string", "const": "action kind enum order" },
+        "actions": { "type": "string", "const": "priority ascending, then action kind enum order" },
+        "stopConditions": { "type": "string", "const": "stop condition id ascending byte order" }
+      }
+    },
+    "sourceGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gateId",
+        "packetId",
+        "requestedCandidateId",
+        "selectedCandidateId",
+        "verdict",
+        "safeToClaim",
+        "recommendedAction",
+        "recommendedSafeToClaim",
+        "unsafeReasonCount",
+        "staleReasonCount",
+        "degradedCodes",
+        "claimCommandActionPresent"
+      ],
+      "properties": {
+        "gateId": { "type": "string" },
+        "packetId": { "type": "string" },
+        "requestedCandidateId": { "type": ["string", "null"] },
+        "selectedCandidateId": { "type": ["string", "null"] },
+        "verdict": { "type": "string", "minLength": 1 },
+        "safeToClaim": { "type": "boolean" },
+        "recommendedAction": { "type": "string", "minLength": 1 },
+        "recommendedSafeToClaim": { "type": ["boolean", "null"] },
+        "unsafeReasonCount": { "type": "integer", "minimum": 0 },
+        "staleReasonCount": { "type": "integer", "minimum": 0 },
+        "degradedCodes": { "$ref": "#/definitions/stringArray" },
+        "claimCommandActionPresent": { "type": "boolean" }
+      }
+    },
+    "sourceEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceId",
+        "sourceKind",
+        "state",
+        "authoritative",
+        "freshnessState",
+        "timedOut",
+        "exitClass",
+        "detail",
+        "degradedCodes"
+      ],
+      "properties": {
+        "sourceId": { "type": "string", "pattern": "^source:[a-z0-9_:-]+$" },
+        "sourceKind": { "type": "string", "minLength": 1 },
+        "state": { "type": "string", "minLength": 1 },
+        "authoritative": { "type": "boolean" },
+        "freshnessState": { "type": "string", "minLength": 1 },
+        "timedOut": { "type": "boolean" },
+        "exitClass": { "type": "string", "minLength": 1 },
+        "detail": { "$ref": "#/definitions/safeString" },
+        "degradedCodes": { "$ref": "#/definitions/stringArray" }
+      }
+    },
+    "actionVocabularyEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "safetyClass",
+        "executionBoundary",
+        "description",
+        "requiresFreshAuthority"
+      ],
+      "properties": {
+        "kind": { "$ref": "#/definitions/repairActionKind" },
+        "safetyClass": { "$ref": "#/definitions/safetyClass" },
+        "executionBoundary": { "type": "string", "minLength": 1 },
+        "description": { "$ref": "#/definitions/safeString" },
+        "requiresFreshAuthority": { "type": "boolean" }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "priority",
+        "kind",
+        "title",
+        "safety",
+        "commandAction",
+        "manualStep",
+        "sourceRefs",
+        "rationale",
+        "stopConditionRefs"
+      ],
+      "properties": {
+        "priority": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "kind": { "$ref": "#/definitions/repairActionKind" },
+        "title": { "$ref": "#/definitions/safeString" },
+        "safety": { "$ref": "#/definitions/actionSafety" },
+        "commandAction": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/commandAction" }
+          ]
+        },
+        "manualStep": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/safeString" }
+          ]
+        },
+        "sourceRefs": { "$ref": "#/definitions/stringArray" },
+        "rationale": { "$ref": "#/definitions/safeString" },
+        "stopConditionRefs": { "$ref": "#/definitions/stringArray" }
+      }
+    },
+    "actionSafety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "safetyClass",
+        "copySafety",
+        "mutatesState",
+        "mutatesTrackerState",
+        "mutatesExternalState",
+        "requiresHumanApproval",
+        "preflightRequired",
+        "executionBoundary"
+      ],
+      "properties": {
+        "safetyClass": { "$ref": "#/definitions/safetyClass" },
+        "copySafety": { "$ref": "#/definitions/copySafety" },
+        "mutatesState": { "type": "boolean" },
+        "mutatesTrackerState": { "type": "boolean" },
+        "mutatesExternalState": { "type": "boolean" },
+        "requiresHumanApproval": { "type": "boolean" },
+        "preflightRequired": { "type": "boolean" },
+        "executionBoundary": { "type": "string", "minLength": 1 }
+      }
+    },
+    "commandAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commandId",
+        "displayCommand",
+        "argv",
+        "shellRequired",
+        "copySafety",
+        "mutatesState",
+        "requiredSubstrate",
+        "when",
+        "rationale"
+      ],
+      "properties": {
+        "commandId": { "type": "string", "minLength": 1 },
+        "displayCommand": { "$ref": "#/definitions/safeString" },
+        "argv": { "$ref": "#/definitions/stringArray" },
+        "shellRequired": { "type": "boolean" },
+        "copySafety": { "$ref": "#/definitions/copySafety" },
+        "mutatesState": { "type": "boolean" },
+        "requiredSubstrate": { "type": "string", "minLength": 1 },
+        "when": { "type": "string", "minLength": 1 },
+        "rationale": { "$ref": "#/definitions/safeString" }
+      }
+    },
+    "stopCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "terminal", "description"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "terminal": { "type": "boolean" },
+        "description": { "$ref": "#/definitions/safeString" }
+      }
+    },
+    "nonMutationPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sideEffectFree",
+        "claimsBeads",
+        "reservesFiles",
+        "sendsAgentMail",
+        "mutatesTracker",
+        "runsCargo",
+        "stagesGit",
+        "deletesFiles",
+        "executesRepairs"
+      ],
+      "properties": {
+        "sideEffectFree": { "type": "boolean", "const": true },
+        "claimsBeads": { "type": "boolean", "const": false },
+        "reservesFiles": { "type": "boolean", "const": false },
+        "sendsAgentMail": { "type": "boolean", "const": false },
+        "mutatesTracker": { "type": "boolean", "const": false },
+        "runsCargo": { "type": "boolean", "const": false },
+        "stagesGit": { "type": "boolean", "const": false },
+        "deletesFiles": { "type": "boolean", "const": false },
+        "executesRepairs": { "type": "boolean", "const": false }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "source", "severity", "message", "repair"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "severity": { "type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"] },
+        "message": { "$ref": "#/definitions/safeString" },
+        "repair": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/safeString" }
+          ]
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.swarm.repair_plan.v1",
+      "planId": "swarm_repair_plan_111111111111111111111111",
+      "packetId": "swarm_work_packet_222222222222222222222222",
+      "gateId": "swarm_work_packet_claim_gate_333333333333333333333333",
+      "generatedAt": "2026-06-14T22:50:00Z",
+      "workspace": "repo:25e38e130474e7f0292de2a3",
+      "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+      "ordering": {
+        "sourceEvidence": "sourceKind ascending byte order",
+        "actionVocabulary": "action kind enum order",
+        "actions": "priority ascending, then action kind enum order",
+        "stopConditions": "stop condition id ascending byte order"
+      },
+      "sourceGate": {
+        "gateId": "swarm_work_packet_claim_gate_333333333333333333333333",
+        "packetId": "swarm_work_packet_222222222222222222222222",
+        "requestedCandidateId": "bd-22po3.1",
+        "selectedCandidateId": null,
+        "verdict": "candidate_not_found",
+        "safeToClaim": false,
+        "recommendedAction": "coordinate_before_claim",
+        "recommendedSafeToClaim": null,
+        "unsafeReasonCount": 4,
+        "staleReasonCount": 0,
+        "degradedCodes": [
+          "agent_mail_unavailable",
+          "beads_tracker_metadata_drift",
+          "bv_advisory_contradiction"
+        ],
+        "claimCommandActionPresent": false
+      },
+      "sourceEvidence": [
+        {
+          "sourceId": "source:actionable_queue",
+          "sourceKind": "actionable_queue",
+          "state": "ready",
+          "authoritative": true,
+          "freshnessState": "fresh",
+          "timedOut": false,
+          "exitClass": "ok",
+          "detail": "actionable_queue source is ready; authoritative=true",
+          "degradedCodes": []
+        },
+        {
+          "sourceId": "source:agent_mail",
+          "sourceKind": "agent_mail",
+          "state": "degraded_read_only",
+          "authoritative": false,
+          "freshnessState": "fresh",
+          "timedOut": false,
+          "exitClass": "ok",
+          "detail": "agent_mail source is degraded_read_only; authoritative=false",
+          "degradedCodes": ["agent_mail_unavailable"]
+        },
+        {
+          "sourceId": "source:beads",
+          "sourceKind": "beads",
+          "state": "degraded_read_only",
+          "authoritative": false,
+          "freshnessState": "fresh",
+          "timedOut": false,
+          "exitClass": "ok",
+          "detail": "beads source is degraded_read_only; authoritative=false",
+          "degradedCodes": ["beads_tracker_metadata_drift"]
+        }
+      ],
+      "actionVocabulary": [
+        {
+          "kind": "wait_for_rch_build",
+          "safetyClass": "read_only_or_wait",
+          "executionBoundary": "agent_may_wait_or_probe",
+          "description": "Wait for remote proof capacity or run a read-only RCH lane/admission probe.",
+          "requiresFreshAuthority": false
+        },
+        {
+          "kind": "message_holder",
+          "safetyClass": "coordination_mutation",
+          "executionBoundary": "agent_after_review",
+          "description": "Contact the active reservation, claim, or proof holder; does not change source.",
+          "requiresFreshAuthority": true
+        },
+        {
+          "kind": "repair_agent_mail_archive",
+          "safetyClass": "external_repair",
+          "executionBoundary": "operator_or_human_after_review",
+          "description": "Repair Agent Mail storage or recovery metadata outside ee; ee only describes the need.",
+          "requiresFreshAuthority": true
+        },
+        {
+          "kind": "rerun_snapshot",
+          "safetyClass": "read_only_probe",
+          "executionBoundary": "agent_may_run",
+          "description": "Regenerate redacted coordination evidence such as an Agent Mail snapshot.",
+          "requiresFreshAuthority": false
+        },
+        {
+          "kind": "refresh_bv_bounded",
+          "safetyClass": "read_only_probe",
+          "executionBoundary": "agent_may_run",
+          "description": "Refresh graph triage with the robot-safe BV surface; BV remains advisory.",
+          "requiresFreshAuthority": false
+        },
+        {
+          "kind": "inspect_beads_doctor",
+          "safetyClass": "read_only_probe",
+          "executionBoundary": "agent_may_run",
+          "description": "Inspect tracker health before trusting Beads claim authority.",
+          "requiresFreshAuthority": false
+        },
+        {
+          "kind": "rerun_claim_gate",
+          "safetyClass": "read_only_probe",
+          "executionBoundary": "agent_may_run",
+          "description": "Recompute the read-only claim gate after evidence changes.",
+          "requiresFreshAuthority": false
+        },
+        {
+          "kind": "ask_human_for_destructive_repair",
+          "safetyClass": "human_approval_required",
+          "executionBoundary": "human_only",
+          "description": "Ask for explicit approval before any destructive or policy-suppressed repair.",
+          "requiresFreshAuthority": true
+        }
+      ],
+      "actions": [
+        {
+          "priority": 20,
+          "kind": "rerun_snapshot",
+          "title": "Regenerate Agent Mail evidence",
+          "safety": {
+            "safetyClass": "read_only_probe",
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "mutatesTrackerState": false,
+            "mutatesExternalState": false,
+            "requiresHumanApproval": false,
+            "preflightRequired": false,
+            "executionBoundary": "agent_may_run"
+          },
+          "commandAction": {
+            "commandId": "agent_mail_snapshot_refresh",
+            "displayCommand": "scripts/agent_mail_snapshot.sh --project . --agent <AGENT_NAME> --json --output /private/tmp/ee-agent-mail-snapshot.json",
+            "argv": ["scripts/agent_mail_snapshot.sh", "--project", ".", "--agent", "<AGENT_NAME>", "--json", "--output", "/private/tmp/ee-agent-mail-snapshot.json"],
+            "shellRequired": false,
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "requiredSubstrate": "agent-mail",
+            "when": "before_claim_gate_retry",
+            "rationale": "Refresh redacted Agent Mail evidence without sending, acknowledging, or reserving."
+          },
+          "manualStep": null,
+          "sourceRefs": ["source:agent_mail"],
+          "rationale": "Agent Mail evidence is missing, stale, corrupt, or non-authoritative; regenerate a redacted snapshot before trusting coordination state.",
+          "stopConditionRefs": ["agent_mail_or_tracker_not_authoritative", "source_authority_fail_closed"]
+        },
+        {
+          "priority": 30,
+          "kind": "repair_agent_mail_archive",
+          "title": "Repair Agent Mail archive outside ee",
+          "safety": {
+            "safetyClass": "external_repair",
+            "copySafety": "display_only",
+            "mutatesState": true,
+            "mutatesTrackerState": false,
+            "mutatesExternalState": true,
+            "requiresHumanApproval": true,
+            "preflightRequired": true,
+            "executionBoundary": "operator_or_human_after_review"
+          },
+          "commandAction": null,
+          "manualStep": "Have an operator inspect Agent Mail durability/recovery state; ee must not repair the archive itself.",
+          "sourceRefs": ["source:agent_mail"],
+          "rationale": "Archive repair can mutate coordination storage and is outside this read-only planner's authority.",
+          "stopConditionRefs": ["human_approval_required_before_destructive_repair"]
+        },
+        {
+          "priority": 50,
+          "kind": "inspect_beads_doctor",
+          "title": "Inspect Beads tracker authority",
+          "safety": {
+            "safetyClass": "read_only_probe",
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "mutatesTrackerState": false,
+            "mutatesExternalState": false,
+            "requiresHumanApproval": false,
+            "preflightRequired": false,
+            "executionBoundary": "agent_may_run"
+          },
+          "commandAction": {
+            "commandId": "beads_doctor_read_only",
+            "displayCommand": "br doctor --json --no-db",
+            "argv": ["br", "doctor", "--json", "--no-db"],
+            "shellRequired": false,
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "requiredSubstrate": "beads",
+            "when": "before_tracker_mutation",
+            "rationale": "Inspect Beads tracker health without importing or claiming."
+          },
+          "manualStep": null,
+          "sourceRefs": ["source:beads", "source:actionable_queue"],
+          "rationale": "Tracker or actionable-queue authority is degraded, contradictory, or absent; inspect tracker health before updating Beads state.",
+          "stopConditionRefs": ["agent_mail_or_tracker_not_authoritative", "source_authority_fail_closed"]
+        },
+        {
+          "priority": 60,
+          "kind": "rerun_claim_gate",
+          "title": "Rerun the claim gate after tracker evidence changes",
+          "safety": {
+            "safetyClass": "read_only_probe",
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "mutatesTrackerState": false,
+            "mutatesExternalState": false,
+            "requiresHumanApproval": false,
+            "preflightRequired": false,
+            "executionBoundary": "agent_may_run"
+          },
+          "commandAction": {
+            "commandId": "repair_plan_rerun_claim_gate",
+            "displayCommand": "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate bd-22po3.1 --json",
+            "argv": ["ee", "swarm", "work-packet", "--workspace", ".", "--include-rch", "--claim-gate", "--candidate", "bd-22po3.1", "--json"],
+            "shellRequired": false,
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "requiredSubstrate": "ee",
+            "when": "after_repair_before_claim",
+            "rationale": "Recompute claim authority after the repair-plan evidence changes."
+          },
+          "manualStep": null,
+          "sourceRefs": ["swarm_work_packet_claim_gate_333333333333333333333333"],
+          "rationale": "The only claim authority is a fresh claim gate over fresh evidence; rerun it after Beads/actionable-queue evidence is repaired.",
+          "stopConditionRefs": ["fresh_claim_gate_safe_to_claim", "source_authority_fail_closed"]
+        }
+      ],
+      "stopConditions": [
+        {
+          "id": "agent_mail_or_tracker_not_authoritative",
+          "kind": "authority_gap",
+          "terminal": false,
+          "description": "Do not claim while Agent Mail or tracker evidence is non-authoritative."
+        },
+        {
+          "id": "fresh_claim_gate_safe_to_claim",
+          "kind": "success",
+          "terminal": true,
+          "description": "Stop repairing and use the fresh claim gate when safeToClaim=true."
+        },
+        {
+          "id": "human_approval_required_before_destructive_repair",
+          "kind": "human_approval",
+          "terminal": true,
+          "description": "Stop before destructive or external repair unless the human approves the exact action."
+        },
+        {
+          "id": "no_source_verdict_without_rch_cargo",
+          "kind": "proof_gap",
+          "terminal": false,
+          "description": "Do not treat RCH admission failure as a source verdict unless RCH reached Cargo."
+        },
+        {
+          "id": "source_authority_fail_closed",
+          "kind": "fail_closed",
+          "terminal": false,
+          "description": "When source authority fails closed, repair evidence first instead of claiming through it."
+        }
+      ],
+      "nonMutationPolicy": {
+        "sideEffectFree": true,
+        "claimsBeads": false,
+        "reservesFiles": false,
+        "sendsAgentMail": false,
+        "mutatesTracker": false,
+        "runsCargo": false,
+        "stagesGit": false,
+        "deletesFiles": false,
+        "executesRepairs": false
+      },
+      "degraded": [
+        {
+          "code": "agent_mail_unavailable",
+          "source": "agent-mail",
+          "severity": "warning",
+          "message": "No redacted Agent Mail snapshot path was configured.",
+          "repair": "Generate a read-only redacted Agent Mail snapshot."
+        }
+      ],
+      "provenanceHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ]
+}

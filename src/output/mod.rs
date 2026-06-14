@@ -1546,6 +1546,9 @@ fn command_name_from_schema(schema: &str) -> String {
         "ee.swarm.next_action.v1" | "ee.swarm.next-action.v1" | "ee.swarm_next_action.v1" => {
             "swarm next-action".to_string()
         }
+        "ee.swarm.repair_plan.v1" | "ee.swarm.repair-plan.v1" | "ee.swarm_repair_plan.v1" => {
+            "swarm repair-plan".to_string()
+        }
         "ee.swarm.work_packet.v1" | "ee.swarm.work-packet.v1" | "ee.swarm_work_packet.v1" => {
             "swarm work-packet".to_string()
         }
@@ -1900,6 +1903,11 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
             FieldProfile::Standard | FieldProfile::Full => &["*"],
         },
         "swarm work-packet" => match preset {
+            FieldProfile::Minimal => &["schema", "workspace", "redactionStatus"],
+            FieldProfile::Summary => &["schema", "workspace", "redactionStatus", "degraded"],
+            FieldProfile::Standard | FieldProfile::Full => &["*"],
+        },
+        "swarm repair-plan" => match preset {
             FieldProfile::Minimal => &["schema", "workspace", "redactionStatus"],
             FieldProfile::Summary => &["schema", "workspace", "redactionStatus", "degraded"],
             FieldProfile::Standard | FieldProfile::Full => &["*"],
@@ -9307,6 +9315,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: swarm_next_action_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::swarm_next_action::SWARM_REPAIR_PLAN_SCHEMA_V1,
+            version: "1",
+            description: "Read-only degraded-stack repair plan for swarm coordination blockers",
+            category: "coordination",
+            definition: swarm_repair_plan_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::memory_drift::MEMORY_DRIFT_REPORT_SCHEMA_V1,
             version: "1",
             description: "Read-only memory provenance drift report and compact selection hints",
@@ -10495,6 +10510,10 @@ fn resource_admission_schema_definition() -> String {
 
 fn swarm_next_action_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.swarm_next_action.v1.json").to_string()
+}
+
+fn swarm_repair_plan_schema_definition() -> String {
+    include_str!("../../docs/schemas/swarm/ee.swarm.repair_plan.v1.json").to_string()
 }
 
 fn memory_drift_report_schema_definition() -> String {

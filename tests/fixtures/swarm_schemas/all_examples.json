@@ -1746,6 +1746,297 @@
       "degraded": [],
       "provenanceHash": "blake3:11111111111111111111111111111111"
     },
+    "ee.swarm.repair_plan.v1": {
+      "schema": "ee.swarm.repair_plan.v1",
+      "planId": "swarm_repair_plan_111111111111111111111111",
+      "packetId": "swarm_work_packet_222222222222222222222222",
+      "gateId": "swarm_work_packet_claim_gate_333333333333333333333333",
+      "generatedAt": "2026-06-14T22:50:00Z",
+      "workspace": "repo:25e38e130474e7f0292de2a3",
+      "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+      "ordering": {
+        "sourceEvidence": "sourceKind ascending byte order",
+        "actionVocabulary": "action kind enum order",
+        "actions": "priority ascending, then action kind enum order",
+        "stopConditions": "stop condition id ascending byte order"
+      },
+      "sourceGate": {
+        "gateId": "swarm_work_packet_claim_gate_333333333333333333333333",
+        "packetId": "swarm_work_packet_222222222222222222222222",
+        "requestedCandidateId": "bd-22po3.1",
+        "selectedCandidateId": null,
+        "verdict": "candidate_not_found",
+        "safeToClaim": false,
+        "recommendedAction": "coordinate_before_claim",
+        "recommendedSafeToClaim": null,
+        "unsafeReasonCount": 4,
+        "staleReasonCount": 0,
+        "degradedCodes": [
+          "agent_mail_unavailable",
+          "beads_tracker_metadata_drift",
+          "bv_advisory_contradiction"
+        ],
+        "claimCommandActionPresent": false
+      },
+      "sourceEvidence": [
+        {
+          "sourceId": "source:actionable_queue",
+          "sourceKind": "actionable_queue",
+          "state": "ready",
+          "authoritative": true,
+          "freshnessState": "fresh",
+          "timedOut": false,
+          "exitClass": "ok",
+          "detail": "actionable_queue source is ready; authoritative=true",
+          "degradedCodes": []
+        },
+        {
+          "sourceId": "source:agent_mail",
+          "sourceKind": "agent_mail",
+          "state": "degraded_read_only",
+          "authoritative": false,
+          "freshnessState": "fresh",
+          "timedOut": false,
+          "exitClass": "ok",
+          "detail": "agent_mail source is degraded_read_only; authoritative=false",
+          "degradedCodes": ["agent_mail_unavailable"]
+        },
+        {
+          "sourceId": "source:beads",
+          "sourceKind": "beads",
+          "state": "degraded_read_only",
+          "authoritative": false,
+          "freshnessState": "fresh",
+          "timedOut": false,
+          "exitClass": "ok",
+          "detail": "beads source is degraded_read_only; authoritative=false",
+          "degradedCodes": ["beads_tracker_metadata_drift"]
+        }
+      ],
+      "actionVocabulary": [
+        {
+          "kind": "wait_for_rch_build",
+          "safetyClass": "read_only_or_wait",
+          "executionBoundary": "agent_may_wait_or_probe",
+          "description": "Wait for remote proof capacity or run a read-only RCH lane/admission probe.",
+          "requiresFreshAuthority": false
+        },
+        {
+          "kind": "message_holder",
+          "safetyClass": "coordination_mutation",
+          "executionBoundary": "agent_after_review",
+          "description": "Contact the active reservation, claim, or proof holder; does not change source.",
+          "requiresFreshAuthority": true
+        },
+        {
+          "kind": "repair_agent_mail_archive",
+          "safetyClass": "external_repair",
+          "executionBoundary": "operator_or_human_after_review",
+          "description": "Repair Agent Mail storage or recovery metadata outside ee; ee only describes the need.",
+          "requiresFreshAuthority": true
+        },
+        {
+          "kind": "rerun_snapshot",
+          "safetyClass": "read_only_probe",
+          "executionBoundary": "agent_may_run",
+          "description": "Regenerate redacted coordination evidence such as an Agent Mail snapshot.",
+          "requiresFreshAuthority": false
+        },
+        {
+          "kind": "refresh_bv_bounded",
+          "safetyClass": "read_only_probe",
+          "executionBoundary": "agent_may_run",
+          "description": "Refresh graph triage with the robot-safe BV surface; BV remains advisory.",
+          "requiresFreshAuthority": false
+        },
+        {
+          "kind": "inspect_beads_doctor",
+          "safetyClass": "read_only_probe",
+          "executionBoundary": "agent_may_run",
+          "description": "Inspect tracker health before trusting Beads claim authority.",
+          "requiresFreshAuthority": false
+        },
+        {
+          "kind": "rerun_claim_gate",
+          "safetyClass": "read_only_probe",
+          "executionBoundary": "agent_may_run",
+          "description": "Recompute the read-only claim gate after evidence changes.",
+          "requiresFreshAuthority": false
+        },
+        {
+          "kind": "ask_human_for_destructive_repair",
+          "safetyClass": "human_approval_required",
+          "executionBoundary": "human_only",
+          "description": "Ask for explicit approval before any destructive or policy-suppressed repair.",
+          "requiresFreshAuthority": true
+        }
+      ],
+      "actions": [
+        {
+          "priority": 20,
+          "kind": "rerun_snapshot",
+          "title": "Regenerate Agent Mail evidence",
+          "safety": {
+            "safetyClass": "read_only_probe",
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "mutatesTrackerState": false,
+            "mutatesExternalState": false,
+            "requiresHumanApproval": false,
+            "preflightRequired": false,
+            "executionBoundary": "agent_may_run"
+          },
+          "commandAction": {
+            "commandId": "agent_mail_snapshot_refresh",
+            "displayCommand": "scripts/agent_mail_snapshot.sh --project . --agent <AGENT_NAME> --json --output /private/tmp/ee-agent-mail-snapshot.json",
+            "argv": ["scripts/agent_mail_snapshot.sh", "--project", ".", "--agent", "<AGENT_NAME>", "--json", "--output", "/private/tmp/ee-agent-mail-snapshot.json"],
+            "shellRequired": false,
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "requiredSubstrate": "agent-mail",
+            "when": "before_claim_gate_retry",
+            "rationale": "Refresh redacted Agent Mail evidence without sending, acknowledging, or reserving."
+          },
+          "manualStep": null,
+          "sourceRefs": ["source:agent_mail"],
+          "rationale": "Agent Mail evidence is missing, stale, corrupt, or non-authoritative; regenerate a redacted snapshot before trusting coordination state.",
+          "stopConditionRefs": ["agent_mail_or_tracker_not_authoritative", "source_authority_fail_closed"]
+        },
+        {
+          "priority": 30,
+          "kind": "repair_agent_mail_archive",
+          "title": "Repair Agent Mail archive outside ee",
+          "safety": {
+            "safetyClass": "external_repair",
+            "copySafety": "display_only",
+            "mutatesState": true,
+            "mutatesTrackerState": false,
+            "mutatesExternalState": true,
+            "requiresHumanApproval": true,
+            "preflightRequired": true,
+            "executionBoundary": "operator_or_human_after_review"
+          },
+          "commandAction": null,
+          "manualStep": "Have an operator inspect Agent Mail durability/recovery state; ee must not repair the archive itself.",
+          "sourceRefs": ["source:agent_mail"],
+          "rationale": "Archive repair can mutate coordination storage and is outside this read-only planner's authority.",
+          "stopConditionRefs": ["human_approval_required_before_destructive_repair"]
+        },
+        {
+          "priority": 50,
+          "kind": "inspect_beads_doctor",
+          "title": "Inspect Beads tracker authority",
+          "safety": {
+            "safetyClass": "read_only_probe",
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "mutatesTrackerState": false,
+            "mutatesExternalState": false,
+            "requiresHumanApproval": false,
+            "preflightRequired": false,
+            "executionBoundary": "agent_may_run"
+          },
+          "commandAction": {
+            "commandId": "beads_doctor_read_only",
+            "displayCommand": "br doctor --json --no-db",
+            "argv": ["br", "doctor", "--json", "--no-db"],
+            "shellRequired": false,
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "requiredSubstrate": "beads",
+            "when": "before_tracker_mutation",
+            "rationale": "Inspect Beads tracker health without importing or claiming."
+          },
+          "manualStep": null,
+          "sourceRefs": ["source:beads", "source:actionable_queue"],
+          "rationale": "Tracker or actionable-queue authority is degraded, contradictory, or absent; inspect tracker health before updating Beads state.",
+          "stopConditionRefs": ["agent_mail_or_tracker_not_authoritative", "source_authority_fail_closed"]
+        },
+        {
+          "priority": 60,
+          "kind": "rerun_claim_gate",
+          "title": "Rerun the claim gate after tracker evidence changes",
+          "safety": {
+            "safetyClass": "read_only_probe",
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "mutatesTrackerState": false,
+            "mutatesExternalState": false,
+            "requiresHumanApproval": false,
+            "preflightRequired": false,
+            "executionBoundary": "agent_may_run"
+          },
+          "commandAction": {
+            "commandId": "repair_plan_rerun_claim_gate",
+            "displayCommand": "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate bd-22po3.1 --json",
+            "argv": ["ee", "swarm", "work-packet", "--workspace", ".", "--include-rch", "--claim-gate", "--candidate", "bd-22po3.1", "--json"],
+            "shellRequired": false,
+            "copySafety": "safe_structured_argv",
+            "mutatesState": false,
+            "requiredSubstrate": "ee",
+            "when": "after_repair_before_claim",
+            "rationale": "Recompute claim authority after the repair-plan evidence changes."
+          },
+          "manualStep": null,
+          "sourceRefs": ["swarm_work_packet_claim_gate_333333333333333333333333"],
+          "rationale": "The only claim authority is a fresh claim gate over fresh evidence; rerun it after Beads/actionable-queue evidence is repaired.",
+          "stopConditionRefs": ["fresh_claim_gate_safe_to_claim", "source_authority_fail_closed"]
+        }
+      ],
+      "stopConditions": [
+        {
+          "id": "agent_mail_or_tracker_not_authoritative",
+          "kind": "authority_gap",
+          "terminal": false,
+          "description": "Do not claim while Agent Mail or tracker evidence is non-authoritative."
+        },
+        {
+          "id": "fresh_claim_gate_safe_to_claim",
+          "kind": "success",
+          "terminal": true,
+          "description": "Stop repairing and use the fresh claim gate when safeToClaim=true."
+        },
+        {
+          "id": "human_approval_required_before_destructive_repair",
+          "kind": "human_approval",
+          "terminal": true,
+          "description": "Stop before destructive or external repair unless the human approves the exact action."
+        },
+        {
+          "id": "no_source_verdict_without_rch_cargo",
+          "kind": "proof_gap",
+          "terminal": false,
+          "description": "Do not treat RCH admission failure as a source verdict unless RCH reached Cargo."
+        },
+        {
+          "id": "source_authority_fail_closed",
+          "kind": "fail_closed",
+          "terminal": false,
+          "description": "When source authority fails closed, repair evidence first instead of claiming through it."
+        }
+      ],
+      "nonMutationPolicy": {
+        "sideEffectFree": true,
+        "claimsBeads": false,
+        "reservesFiles": false,
+        "sendsAgentMail": false,
+        "mutatesTracker": false,
+        "runsCargo": false,
+        "stagesGit": false,
+        "deletesFiles": false,
+        "executesRepairs": false
+      },
+      "degraded": [
+        {
+          "code": "agent_mail_unavailable",
+          "source": "agent-mail",
+          "severity": "warning",
+          "message": "No redacted Agent Mail snapshot path was configured.",
+          "repair": "Generate a read-only redacted Agent Mail snapshot."
+        }
+      ],
+      "provenanceHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111"
+    },
     "ee.swarm_incident.v1": {
       "schema": "ee.swarm_incident.v1",
       "scenarioId": "rch_topology_blocked",

@@ -249,7 +249,8 @@ use crate::core::swarm_brief::{
     all_swarm_brief_sources, collect_swarm_brief, default_swarm_brief_sources,
 };
 use crate::core::swarm_next_action::{
-    SwarmNextActionSnapshot, SwarmWorkPacket, SwarmWorkPacketClaimGate,
+    SwarmNextActionSnapshot, SwarmRepairPlan, SwarmWorkPacket, SwarmWorkPacketClaimGate,
+    build_swarm_repair_plan_from_claim_gate,
     collect_swarm_next_action_snapshot_with_verifier_evidence,
     collect_swarm_work_packet_with_verifier_evidence, verifier_evidence_from_json,
 };
@@ -11460,6 +11461,8 @@ pub enum SwarmCommand {
     Brief(SwarmBriefArgs),
     /// Emit a read-only next-action input snapshot for work allocation.
     NextAction(SwarmNextActionArgs),
+    /// Emit a read-only degraded-stack repair plan for coordination blockers.
+    RepairPlan(SwarmRepairPlanArgs),
     /// Emit a deterministic read-only work packet for crowded agent checkouts.
     WorkPacket(SwarmWorkPacketArgs),
 }
@@ -11564,6 +11567,46 @@ pub struct SwarmWorkPacketArgs {
     /// next-action families, and read-only commands. Advisory only; never claims.
     #[arg(long, action = ArgAction::SetTrue)]
     pub unsafe_plan: bool,
+
+    /// Comma-separated agent connector slugs to inspect when agent-inventory is enabled.
+    #[arg(long, value_name = "SLUGS")]
+    pub agent_inventory_only: Option<String>,
+
+    /// Number of recent git commits to include when the git source is enabled.
+    #[arg(long, value_name = "N", default_value_t = 8)]
+    pub max_recent_commits: usize,
+
+    /// Per-source command timeout budget in milliseconds.
+    #[arg(long, value_name = "MS", default_value_t = DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS)]
+    pub command_timeout_ms: u64,
+
+    /// Fail with exit code 6 when any selected source is unavailable, not configured, or skipped.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub require_sources: bool,
+}
+
+/// Arguments for `ee swarm repair-plan`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SwarmRepairPlanArgs {
+    /// Comma-separated sources to collect: default, all, none, git, beads, bv, agent-mail, rch, host-profile, agent-inventory. Repair plans include rch by default.
+    #[arg(long, value_name = "LIST", default_value = "default")]
+    pub sources: String,
+
+    /// Include the optional RCH status probe. Equivalent to adding rch to --sources.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_rch: bool,
+
+    /// Redacted Agent Mail snapshot JSON to include. No live Agent Mail mutation is performed.
+    #[arg(long, value_name = "PATH")]
+    pub agent_mail_snapshot: Option<PathBuf>,
+
+    /// Recent ee.rch.verify.v1 proof JSON to include for compile-health preflight.
+    #[arg(long, value_name = "PATH")]
+    pub verifier_evidence: Option<PathBuf>,
+
+    /// Ask the repair plan about a specific Bead ID instead of the recommended candidate.
+    #[arg(long, value_name = "BEAD_ID")]
+    pub candidate: Option<String>,
 
     /// Comma-separated agent connector slugs to inspect when agent-inventory is enabled.
     #[arg(long, value_name = "SLUGS")]
@@ -13344,6 +13387,9 @@ where
         }
         Some(Command::Swarm(SwarmCommand::NextAction(ref args))) => {
             handle_swarm_next_action(&cli, args, stdout, stderr)
+        }
+        Some(Command::Swarm(SwarmCommand::RepairPlan(ref args))) => {
+            handle_swarm_repair_plan(&cli, args, stdout, stderr)
         }
         Some(Command::Swarm(SwarmCommand::WorkPacket(ref args))) => {
             handle_swarm_work_packet(&cli, args, stdout, stderr)
@@ -54902,6 +54948,73 @@ where
     }
 }
 
+fn handle_swarm_repair_plan<W, E>(
+    cli: &Cli,
+    args: &SwarmRepairPlanArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let enabled_sources = match parse_swarm_repair_plan_sources(&args.sources, args.include_rch) {
+        Ok(sources) => sources,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let mut options = SwarmBriefCollectOptions::for_workspace(cli.resolve_workspace());
+    options.max_recent_commits = args.max_recent_commits;
+    options.include_rch = enabled_sources.contains(&SwarmBriefSourceKind::Rch);
+    options.enabled_sources = enabled_sources;
+    options.agent_mail_snapshot_path = args.agent_mail_snapshot.clone();
+    options.agent_inventory_only_connectors = args
+        .agent_inventory_only
+        .as_deref()
+        .map(parse_comma_separated_values);
+    options.command_timeout_ms = args.command_timeout_ms;
+
+    let verifier_evidence = match read_swarm_repair_plan_verifier_evidence(args) {
+        Ok(evidence) => evidence,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let runner = SystemSwarmBriefCommandRunner;
+    let packet =
+        collect_swarm_work_packet_with_verifier_evidence(&options, &runner, &verifier_evidence);
+    let unavailable_sources = swarm_work_packet_unavailable_sources(&packet);
+    if args.require_sources && !unavailable_sources.is_empty() {
+        let error = DomainError::UnsatisfiedDegradedMode {
+            message: format!(
+                "Required swarm repair-plan sources are unavailable: {}.",
+                unavailable_sources.join(", ")
+            ),
+            repair: Some(
+                "Run without --require-sources, adjust --sources, or provide --agent-mail-snapshot."
+                    .to_string(),
+            ),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let gate = packet.claim_gate(args.candidate.as_deref());
+    let plan = build_swarm_repair_plan_from_claim_gate(&packet, &gate);
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_swarm_repair_plan_markdown(&plan))
+        }
+        output::Renderer::Toon => match render_swarm_repair_plan_json(&plan) {
+            Ok(json) => write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n")),
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        },
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => match render_swarm_repair_plan_json(&plan) {
+            Ok(json) => write_stdout(stdout, &(json + "\n")),
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        },
+    }
+}
+
 fn parse_swarm_brief_sources(
     raw: &str,
     include_rch: bool,
@@ -54921,6 +55034,13 @@ fn parse_swarm_work_packet_sources(
     include_rch: bool,
 ) -> Result<BTreeSet<SwarmBriefSourceKind>, DomainError> {
     parse_swarm_sources(raw, include_rch, true, "swarm work-packet")
+}
+
+fn parse_swarm_repair_plan_sources(
+    raw: &str,
+    include_rch: bool,
+) -> Result<BTreeSet<SwarmBriefSourceKind>, DomainError> {
+    parse_swarm_sources(raw, include_rch, true, "swarm repair-plan")
 }
 
 fn parse_swarm_sources(
@@ -55040,6 +55160,30 @@ fn read_swarm_work_packet_verifier_evidence(
         serde_json::from_str(&text).map_err(|error| DomainError::Usage {
             message: format!(
                 "Failed to parse swarm work-packet verifier evidence {} as JSON: {error}",
+                path.display()
+            ),
+            repair: Some("Pass a valid ee.rch.verify.v1 proof object or array.".to_string()),
+        })?;
+    Ok(verifier_evidence_from_json(&value))
+}
+
+fn read_swarm_repair_plan_verifier_evidence(
+    args: &SwarmRepairPlanArgs,
+) -> Result<Vec<crate::core::swarm_next_action::SwarmNextActionRecentFirstError>, DomainError> {
+    let Some(path) = &args.verifier_evidence else {
+        return Ok(Vec::new());
+    };
+    let text = std::fs::read_to_string(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to read swarm repair-plan verifier evidence {}: {error}",
+            path.display()
+        ),
+        repair: Some("Pass a readable ee.rch.verify.v1 JSON proof file.".to_string()),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| DomainError::Usage {
+            message: format!(
+                "Failed to parse swarm repair-plan verifier evidence {} as JSON: {error}",
                 path.display()
             ),
             repair: Some("Pass a valid ee.rch.verify.v1 proof object or array.".to_string()),
@@ -55220,6 +55364,63 @@ fn render_swarm_work_packet_json(
         message: format!("Failed to serialize swarm work-packet response: {error}."),
         repair: Some("Fix the swarm work-packet response serializer.".to_string()),
     })
+}
+
+fn render_swarm_repair_plan_json(plan: &SwarmRepairPlan) -> Result<String, DomainError> {
+    let data = serde_json::to_value(plan).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize swarm repair-plan: {error}."),
+        repair: Some("Fix the swarm repair-plan serializer before emitting JSON.".to_string()),
+    })?;
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": &plan.degraded,
+    });
+    serde_json::to_string_pretty(&response).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize swarm repair-plan response: {error}."),
+        repair: Some("Fix the swarm repair-plan response serializer.".to_string()),
+    })
+}
+
+fn render_swarm_repair_plan_markdown(plan: &SwarmRepairPlan) -> String {
+    let mut output = String::new();
+    output.push_str("# Swarm Repair Plan\n\n");
+    output.push_str(&format!(
+        "Workspace: `{}`\n\nGate: `{}` (`{}`, safeToClaim={})\n\n",
+        plan.workspace, plan.gate_id, plan.source_gate.verdict, plan.source_gate.safe_to_claim
+    ));
+    output.push_str(&format!(
+        "- Actions: {}\n- Source evidence: {}\n- Degraded codes: {}\n\n",
+        plan.actions.len(),
+        plan.source_evidence.len(),
+        plan.source_gate.degraded_codes.len()
+    ));
+    if plan.actions.is_empty() {
+        output.push_str("No repair actions were necessary.\n");
+        return output;
+    }
+    output.push_str("## Ordered Actions\n\n");
+    for action in &plan.actions {
+        output.push_str(&format!(
+            "{}. `{}` — {} [{}]\n",
+            action.priority, action.kind, action.title, action.safety.safety_class
+        ));
+        if let Some(command) = &action.command_action {
+            output.push_str(&format!("   - `{}`\n", command.display_command));
+        }
+        if let Some(manual_step) = &action.manual_step {
+            output.push_str(&format!("   - {manual_step}\n"));
+        }
+    }
+    output.push_str("\n## Stop Conditions\n\n");
+    for condition in &plan.stop_conditions {
+        output.push_str(&format!(
+            "- `{}`: {}\n",
+            condition.id, condition.description
+        ));
+    }
+    output
 }
 
 fn render_swarm_work_packet_claim_gate_json(
@@ -56140,7 +56341,7 @@ const SCHEMA_SUBCOMMANDS: &[&str] = &["list", "export"];
 const SHARE_SUBCOMMANDS: &[&str] = &["preview"];
 const SITUATION_SUBCOMMANDS: &[&str] = &["classify", "compare", "link", "show", "explain"];
 const SUPPORT_SUBCOMMANDS: &[&str] = &["bundle", "inspect"];
-const SWARM_SUBCOMMANDS: &[&str] = &["brief"];
+const SWARM_SUBCOMMANDS: &[&str] = &["brief", "next-action", "repair-plan", "work-packet"];
 const TASK_FRAME_SUBCOMMANDS: &[&str] = &["create", "show", "update", "close", "subgoal"];
 const TASK_FRAME_SUBGOAL_SUBCOMMANDS: &[&str] = &["add"];
 const TRIPWIRE_SUBCOMMANDS: &[&str] = &["list", "check"];
@@ -56710,6 +56911,7 @@ impl NormalizedInvocation {
                 Command::Swarm(swarm) => match swarm {
                     SwarmCommand::Brief(_) => "swarm brief".to_string(),
                     SwarmCommand::NextAction(_) => "swarm next-action".to_string(),
+                    SwarmCommand::RepairPlan(_) => "swarm repair-plan".to_string(),
                     SwarmCommand::WorkPacket(_) => "swarm work-packet".to_string(),
                 },
                 Command::TaskFrame(task_frame) => match task_frame {
@@ -58583,6 +58785,76 @@ mod tests {
                 ensure_equal(&unsafe_plan, &false, "unsafe plan default")
             }
             other => Err(format!("expected swarm work-packet command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_swarm_repair_plan_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "--workspace",
+            ".",
+            "swarm",
+            "repair-plan",
+            "--sources",
+            "git,beads,rch,agent-mail",
+            "--include-rch",
+            "--agent-mail-snapshot",
+            "agent-mail-snapshot.json",
+            "--verifier-evidence",
+            "rch-proof.json",
+            "--candidate",
+            "bd-22po3.1",
+            "--agent-inventory-only",
+            "codex,claude",
+            "--max-recent-commits",
+            "6",
+            "--command-timeout-ms",
+            "900",
+            "--require-sources",
+        ])
+        .map_err(|error| format!("failed to parse swarm repair-plan: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Swarm(SwarmCommand::RepairPlan(SwarmRepairPlanArgs {
+                sources,
+                include_rch,
+                agent_mail_snapshot,
+                verifier_evidence,
+                candidate,
+                agent_inventory_only,
+                max_recent_commits,
+                command_timeout_ms,
+                require_sources,
+            }))) => {
+                ensure_equal(&sources, &"git,beads,rch,agent-mail".to_string(), "sources")?;
+                ensure_equal(&include_rch, &true, "include rch")?;
+                ensure_equal(
+                    &agent_mail_snapshot,
+                    &Some(PathBuf::from("agent-mail-snapshot.json")),
+                    "agent mail snapshot path",
+                )?;
+                ensure_equal(
+                    &verifier_evidence,
+                    &Some(PathBuf::from("rch-proof.json")),
+                    "verifier evidence path",
+                )?;
+                ensure_equal(
+                    &candidate,
+                    &Some("bd-22po3.1".to_string()),
+                    "repair plan candidate",
+                )?;
+                ensure_equal(
+                    &agent_inventory_only,
+                    &Some("codex,claude".to_string()),
+                    "agent inventory connector filter",
+                )?;
+                ensure_equal(&max_recent_commits, &6, "max recent commits")?;
+                ensure_equal(&command_timeout_ms, &900, "command timeout")?;
+                ensure_equal(&require_sources, &true, "require sources")
+            }
+            other => Err(format!("expected swarm repair-plan command, got {other:?}")),
         }
     }
 

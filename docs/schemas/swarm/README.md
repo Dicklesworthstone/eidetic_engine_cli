@@ -125,6 +125,17 @@ retry-with-snapshot, wait/coordinate, alternate-candidate, decomposition, or
 stop. It is tracked by `bd-1n3x1.16.1` and remains marked unshipped until the
 planner implementation lands under the `bd-1n3x1.16` follow-up beads.
 
+The repair-plan contract is `ee.swarm.repair_plan.v1`. It is emitted by
+`ee swarm repair-plan --json` as a read-only degraded-stack recovery plan over
+the current work-packet claim gate. It defines the shared repair action
+vocabulary (`wait_for_rch_build`, `message_holder`,
+`repair_agent_mail_archive`, `rerun_snapshot`, `refresh_bv_bounded`,
+`inspect_beads_doctor`, `rerun_claim_gate`, and
+`ask_human_for_destructive_repair`), safety classes, source evidence, stop
+conditions, and non-mutation policy for coordination blockers. It is tracked by
+`bd-22po3.1` and is marked shipped once the CLI producer and lifecycle fixture
+are available in the build.
+
 The planned source-authority snapshot contract is
 `ee.source_authority.snapshot.v1`. It is the per-decision aggregate consumed by
 claim gates and unsafe-claim planners: one record per coordination source
