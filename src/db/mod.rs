@@ -6469,6 +6469,76 @@ CREATE UNIQUE INDEX IF NOT EXISTS situation_records_fingerprint
     "blake3:v079_situation_records_2026_06_11",
 );
 
+/// V080: Rebuild workspace generation floors from grouped source counts.
+///
+/// V071 originally seeded this table with correlated subqueries over source
+/// tables that may include pre-ALTER padded rows. This forward-only repair uses
+/// grouped, non-correlated scans and never lowers an existing generation, so it
+/// repairs under-counted or missing rows without invalidating databases that
+/// already advanced generations through live triggers.
+pub const V080_WORKSPACE_GENERATION_FLOOR_REBUILD: Migration = Migration::new(
+    80,
+    "workspace_generation_floor_rebuild",
+    r#"
+INSERT INTO workspace_generations (workspace_id, generation, updated_at)
+SELECT
+    w.id,
+    (
+        COALESCE(memory_counts.row_count, 0)
+        + COALESCE(candidate_counts.row_count, 0)
+        + COALESCE(tag_counts.row_count, 0)
+        + COALESCE(link_counts.row_count, 0)
+    ) AS generation,
+    w.updated_at
+FROM workspaces w
+LEFT JOIN (
+    SELECT workspace_id, COUNT(*) AS row_count
+    FROM memories
+    GROUP BY workspace_id
+) AS memory_counts
+    ON memory_counts.workspace_id = w.id
+LEFT JOIN (
+    SELECT workspace_id, COUNT(*) AS row_count
+    FROM curation_candidates
+    GROUP BY workspace_id
+) AS candidate_counts
+    ON candidate_counts.workspace_id = w.id
+LEFT JOIN (
+    SELECT m.workspace_id, COUNT(*) AS row_count
+    FROM memory_tags mt
+    JOIN memories m ON m.id = mt.memory_id
+    GROUP BY m.workspace_id
+) AS tag_counts
+    ON tag_counts.workspace_id = w.id
+LEFT JOIN (
+    SELECT workspace_id, COUNT(DISTINCT link_id) AS row_count
+    FROM (
+        SELECT src.workspace_id AS workspace_id, ml.id AS link_id
+        FROM memory_links ml
+        JOIN memories src ON src.id = ml.src_memory_id
+        UNION ALL
+        SELECT dst.workspace_id AS workspace_id, ml.id AS link_id
+        FROM memory_links ml
+        JOIN memories dst ON dst.id = ml.dst_memory_id
+    ) AS link_workspaces
+    GROUP BY workspace_id
+) AS link_counts
+    ON link_counts.workspace_id = w.id
+ON CONFLICT(workspace_id) DO UPDATE SET
+    generation = CASE
+        WHEN workspace_generations.generation < excluded.generation
+        THEN excluded.generation
+        ELSE workspace_generations.generation
+    END,
+    updated_at = CASE
+        WHEN workspace_generations.generation < excluded.generation
+        THEN excluded.updated_at
+        ELSE workspace_generations.updated_at
+    END;
+"#,
+    "blake3:v080_workspace_generation_floor_rebuild_2026_06_14",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -6550,6 +6620,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V077_PRIMER_CACHE,
     V078_PACK_BASELINES,
     V079_SITUATION_RECORDS,
+    V080_WORKSPACE_GENERATION_FLOOR_REBUILD,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -23874,6 +23945,24 @@ mod tests {
             })
     }
 
+    fn seed_migrations_through(connection: &DbConnection, through_version: u32) -> TestResult {
+        connection.ensure_migration_table()?;
+        for migration in super::MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version() <= through_version)
+        {
+            connection.execute_raw(migration.sql())?;
+            let record = MigrationRecord::new(
+                migration.version(),
+                migration.name(),
+                migration.checksum(),
+                "2026-06-14T00:00:00Z",
+            )?;
+            connection.record_migration(&record)?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn workspace_generation_triggers_track_interleaved_source_writes() -> TestResult {
         let connection = DbConnection::open_memory()?;
@@ -23971,6 +24060,117 @@ mod tests {
             "memory tombstone bumps generation",
         )?;
 
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_generation_floor_rebuild_repairs_under_count_without_rewind() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 79)?;
+        let low_workspace_id = "wsp_gen00000000000000000000000";
+        let high_workspace_id = "wsp_11111111111111111111111111";
+
+        connection.insert_workspace(
+            low_workspace_id,
+            &CreateWorkspaceInput {
+                path: "/tmp/workspace-generation-floor-low".to_owned(),
+                name: Some("workspace generation floor low".to_owned()),
+            },
+        )?;
+        connection.insert_workspace(
+            high_workspace_id,
+            &CreateWorkspaceInput {
+                path: "/tmp/workspace-generation-floor-high".to_owned(),
+                name: Some("workspace generation floor high".to_owned()),
+            },
+        )?;
+        connection.insert_memory(
+            "mem_gen00000000000000000000001",
+            &test_memory_input(
+                low_workspace_id,
+                "First source memory before floor rebuild.",
+            ),
+        )?;
+        connection.insert_memory(
+            "mem_gen00000000000000000000002",
+            &test_memory_input(
+                low_workspace_id,
+                "Second source memory before floor rebuild.",
+            ),
+        )?;
+        connection.insert_memory(
+            "mem_11111111111111111111111111",
+            &test_memory_input(high_workspace_id, "High generation source memory."),
+        )?;
+        connection.add_memory_tags(
+            "mem_gen00000000000000000000001",
+            &["floor-rebuild".to_owned()],
+        )?;
+        connection.insert_memory_link(
+            "link_gen00000000000000000000001",
+            &super::CreateMemoryLinkInput {
+                src_memory_id: "mem_gen00000000000000000000001".to_owned(),
+                dst_memory_id: "mem_gen00000000000000000000002".to_owned(),
+                relation: super::MemoryLinkRelation::Supports,
+                weight: 1.0,
+                confidence: 0.8,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: None,
+                source: super::MemoryLinkSource::Human,
+                created_by: Some("test".to_owned()),
+                metadata_json: None,
+            },
+        )?;
+        connection.insert_curation_candidate(
+            "curate_gen00000000000000000000001",
+            &CreateCurationCandidateInput {
+                workspace_id: low_workspace_id.to_owned(),
+                candidate_type: "promote".to_owned(),
+                target_memory_id: Some("mem_gen00000000000000000000001".to_owned()),
+                proposed_content: None,
+                proposed_confidence: Some(0.7),
+                proposed_trust_class: Some("agent_assertion".to_owned()),
+                source_type: "agent_inference".to_owned(),
+                source_id: Some("workspace_generation_floor_rebuild".to_owned()),
+                reason: "exercise workspace generation floor rebuild".to_owned(),
+                confidence: 0.7,
+                status: Some("pending".to_owned()),
+                created_at: Some("2026-06-14T00:00:00Z".to_owned()),
+                ttl_expires_at: None,
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
+            },
+        )?;
+
+        connection.execute_raw(
+            "UPDATE workspace_generations
+             SET generation = 1, updated_at = '2026-06-14T00:00:01Z'
+             WHERE workspace_id = 'wsp_gen00000000000000000000000'",
+        )?;
+        connection.execute_raw(
+            "UPDATE workspace_generations
+             SET generation = 99, updated_at = '2026-06-14T00:00:02Z'
+             WHERE workspace_id = 'wsp_11111111111111111111111111'",
+        )?;
+
+        connection.apply_migration(
+            &super::V080_WORKSPACE_GENERATION_FLOOR_REBUILD,
+            "2026-06-14T00:00:03Z",
+        )?;
+
+        ensure_equal(
+            &workspace_generation(&connection, low_workspace_id)?,
+            &5,
+            "V080 repairs low workspace generation to source-row floor",
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, high_workspace_id)?,
+            &99,
+            "V080 must not rewind an already higher live generation",
+        )?;
+
+        connection.close()?;
         Ok(())
     }
 

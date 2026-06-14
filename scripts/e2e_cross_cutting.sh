@@ -119,10 +119,10 @@ assert_jq_file "$MIGRATION_MANIFEST" \
     'all(.transitionMatrix[]; .proofPosture == "rch_only_no_local_fallback")' \
     "migration transition matrix keeps RCH-only proof posture"
 assert_jq_file "$MIGRATION_MANIFEST" \
-    '.currentLastCompiledMigration == 79 and .nextPlannedMigration == 80' \
+    '.currentLastCompiledMigration == 80 and .nextPlannedMigration == 81' \
     "migration registry pins compiled tail and next planned migration"
 assert_jq_file "$MIGRATION_MANIFEST" \
-    '([.transitionMatrix[].version] | sort) == [66,67,68,69,69,70,71,72,80,81,82] and ([.transitionMatrix[].id] | unique | length) == (.transitionMatrix | length) and ([.transitionMatrix[] | select(.status == "planned") | .version] | unique | length) == ([.transitionMatrix[] | select(.status == "planned")] | length)' \
+    '([.transitionMatrix[].version] | sort) == [66,67,68,69,69,70,71,72,81,82,83] and ([.transitionMatrix[].id] | unique | length) == (.transitionMatrix | length) and ([.transitionMatrix[] | select(.status == "planned") | .version] | unique | length) == ([.transitionMatrix[] | select(.status == "planned")] | length)' \
     "migration transition versions match the implemented/planned layout with unique ids and planned slots"
 assert_jq_file "$MIGRATION_MANIFEST" \
     '([.transitionMatrix[] | {id, version, status}] | sort_by(.id)) == ([.allocations[] | {id, version, status}] | sort_by(.id))' \
