@@ -2018,9 +2018,14 @@ fn secret_value_range(
         cursor = skip_ascii_spaces(input, cursor);
     }
     let separator = input.as_bytes().get(cursor).copied()?;
-    let explicit_separator = matches!(separator, b'=' | b':');
-    if explicit_separator {
-        cursor += 1;
+    let explicit_separator_end = if matches!(separator, b'=' | b':') {
+        Some(cursor + 1)
+    } else {
+        escaped_secret_value_separator(input, cursor)
+    };
+    let explicit_separator = explicit_separator_end.is_some();
+    if let Some(separator_end) = explicit_separator_end {
+        cursor = separator_end;
     } else if whitespace_value && cursor > separator_cursor {
     } else {
         return None;
@@ -2200,6 +2205,11 @@ fn escaped_secret_quote(input: &str, cursor: usize) -> Option<(u8, usize)> {
     let quote = input.as_bytes().get(cursor + 1).copied()?;
     (matches!(input.as_bytes().get(cursor), Some(b'\\')) && matches!(quote, b'"' | b'\''))
         .then_some((quote, cursor + 2))
+}
+
+fn escaped_secret_value_separator(input: &str, cursor: usize) -> Option<usize> {
+    let (byte, next_cursor) = decode_secret_key_escape(input, cursor)?;
+    matches!(byte, b'=' | b':').then_some(next_cursor)
 }
 
 fn escaped_quoted_secret_value_end(input: &str, value_start: usize, quote: u8) -> usize {

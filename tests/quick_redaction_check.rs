@@ -173,3 +173,24 @@ fn json_escaped_url_passwords_are_redacted() {
     );
     assert!(report.content.contains(r#"\"next\":\"safe\""#));
 }
+
+#[test]
+fn escaped_key_value_separators_are_redacted() {
+    let unicode_separator_secret = "unicode-separator-secret-123456";
+    let percent_separator_secret = "percent-separator-secret-123456";
+    let input = format!(
+        r#"payload=api_key\u003a\"{unicode_separator_secret}\" callback=https://example.test/hook?api_key%3D{percent_separator_secret}&next=1"#
+    );
+    let report = redact_secret_like_content(&input);
+
+    assert!(report.redacted);
+    assert!(report.redacted_reasons.contains(&"api_key"));
+    assert!(!report.content.contains(unicode_separator_secret));
+    assert!(!report.content.contains(percent_separator_secret));
+    assert!(
+        report
+            .content
+            .contains(r#"api_key\u003a\"[REDACTED:api_key]\""#)
+    );
+    assert!(report.content.contains("next=1"));
+}
