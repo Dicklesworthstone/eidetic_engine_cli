@@ -4,9 +4,9 @@
 //! Supports dry-run mode, idempotent re-installation, and preservation of existing hooks.
 
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use chrono::Utc;
@@ -33,9 +33,17 @@ pub const GIT_HOOK_AHEAD_RISK_SCHEMA_V1: &str = "ee.hooks.git_readiness.ahead_ri
 /// Schema for agent-harness hook generation/install reports.
 pub const HARNESS_HOOK_INSTALL_SCHEMA_V1: &str = "ee.hook.harness_install.v1";
 
+/// Schema for harness conformance simulation cases and reports.
+pub const HARNESS_CONFORMANCE_SCHEMA_V1: &str = "ee.harness_conformance.v1";
+
 const TRAUMA_GUARD_HOOK_HELPER_SURFACE: &str = "trauma_guard_hook_helper";
 const HARNESS_HOOK_MARKER: &str = "ee-managed-harness-hook:bd-u875s.4";
 const HARNESS_BACKUP_SUFFIX: &str = ".ee-backup";
+const HARNESS_CONFORMANCE_REDACTION_STATUS: &str = "redacted_bounded_no_secrets";
+const HARNESS_CONFORMANCE_MAX_TRANSCRIPT_BYTES: usize = 8 * 1024;
+const HARNESS_CONFORMANCE_MAX_TRANSCRIPT_LINES: usize = 64;
+const HARNESS_CONFORMANCE_MAX_LINE_BYTES: usize = 256;
+const DEFAULT_HARNESS_CONFORMANCE_TIMEOUT_SECONDS: u64 = 10;
 
 fn elapsed_ms_since(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -1189,6 +1197,192 @@ impl HarnessHookInstallReport {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct HarnessConformanceSimulationOptions {
+    pub fixture_path: PathBuf,
+    pub workspace: PathBuf,
+    pub hook_command: Option<String>,
+    pub ee_binary_path: Option<PathBuf>,
+    pub timeout_seconds: u64,
+}
+
+impl HarnessConformanceSimulationOptions {
+    #[must_use]
+    pub fn with_defaults(fixture_path: PathBuf, workspace: PathBuf) -> Self {
+        Self {
+            fixture_path,
+            workspace,
+            hook_command: None,
+            ee_binary_path: None,
+            timeout_seconds: DEFAULT_HARNESS_CONFORMANCE_TIMEOUT_SECONDS,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessConformanceSupport {
+    pub harness: String,
+    pub support_level: String,
+    pub transport: String,
+    pub events: Vec<String>,
+    pub install_surface: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessConformanceTranscript {
+    pub kind: String,
+    pub line_count: u64,
+    pub byte_count: u64,
+    pub max_line_bytes: u64,
+    pub lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessConformanceInput {
+    pub redaction_status: String,
+    pub payload_shape: String,
+    pub command_template: Option<String>,
+    pub transcript: HarnessConformanceTranscript,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessConformanceExpected {
+    pub conformance_verdict: String,
+    pub event_outcome: String,
+    pub exit_policy: String,
+    pub degraded_policy: String,
+    pub output_budget_bytes: u64,
+    pub local_cargo_fallback_allowed: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessConformanceAssertion {
+    pub kind: String,
+    pub expected_status: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessConformanceArtifactPolicy {
+    pub raw_transcript_allowed: bool,
+    pub secret_material_allowed: bool,
+    pub inline_transcript_max_bytes: u64,
+    pub max_artifact_bytes: u64,
+    pub allowed_artifact_kinds: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessConformanceCompatibility {
+    pub contract_major: u64,
+    pub fixture_version_policy: String,
+    pub compatible_with: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessConformanceCase {
+    pub schema: String,
+    pub fixture_version: String,
+    pub case_id: String,
+    pub harness: String,
+    pub fixture_kind: String,
+    pub event_name: String,
+    pub harness_support: HarnessConformanceSupport,
+    pub input: HarnessConformanceInput,
+    pub expected: HarnessConformanceExpected,
+    pub assertions: Vec<HarnessConformanceAssertion>,
+    pub artifact_policy: HarnessConformanceArtifactPolicy,
+    pub compatibility: HarnessConformanceCompatibility,
+}
+
+#[derive(Clone, Debug)]
+struct HarnessConformanceObserved {
+    command_invoked: bool,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    elapsed_ms: u64,
+}
+
+impl HarnessConformanceObserved {
+    fn output_bytes(&self) -> usize {
+        self.stdout.len().saturating_add(self.stderr.len())
+    }
+}
+
+pub fn simulate_harness_conformance(
+    options: &HarnessConformanceSimulationOptions,
+) -> Result<HarnessConformanceCase, DomainError> {
+    let fixture_text =
+        fs::read_to_string(&options.fixture_path).map_err(|error| DomainError::Usage {
+            message: format!(
+                "Failed to read harness conformance fixture '{}': {error}",
+                options.fixture_path.display()
+            ),
+            repair: Some(
+                "Pass --fixture with a readable ee.harness_conformance.v1 JSON file.".to_owned(),
+            ),
+        })?;
+    let mut case: HarnessConformanceCase =
+        serde_json::from_str(&fixture_text).map_err(|error| DomainError::Usage {
+            message: format!(
+                "Harness conformance fixture '{}' is not valid JSON: {error}",
+                options.fixture_path.display()
+            ),
+            repair: Some(
+                "Validate the fixture against docs/schemas/ee.harness_conformance.v1.json."
+                    .to_owned(),
+            ),
+        })?;
+    validate_harness_conformance_case(&case)?;
+
+    if let Some(command_template) = case.input.command_template.as_deref() {
+        if command_template_is_destructive(command_template) {
+            return Err(DomainError::PolicyDenied {
+                message: format!(
+                    "Harness conformance fixture '{}' contains a destructive command template.",
+                    case.case_id
+                ),
+                repair: Some(
+                    "Use a synthetic, non-destructive command template in fixtures.".to_owned(),
+                ),
+            });
+        }
+    }
+
+    let hook_command = match &options.hook_command {
+        Some(command) => command.clone(),
+        None => generated_harness_conformance_command(options, &case)?,
+    };
+    if hook_command_is_disallowed(&hook_command) {
+        return Err(DomainError::PolicyDenied {
+            message: "Harness conformance simulator refused to execute an unsafe hook command."
+                .to_owned(),
+            repair: Some(
+                "Use a generated ee hook command or an explicit non-destructive hook command."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    let event_payload = harness_conformance_event_payload(&case, &options.workspace);
+    let observed = run_harness_conformance_hook(
+        &hook_command,
+        &event_payload,
+        &options.workspace,
+        options.timeout_seconds,
+    )?;
+    apply_harness_conformance_observation(&mut case, &observed);
+    Ok(case)
+}
+
 pub fn generate_harness_hook_install(
     options: &HarnessHookInstallOptions,
 ) -> Result<HarnessHookInstallReport, DomainError> {
@@ -1700,6 +1894,481 @@ fn json_contains_marker(value: &serde_json::Value, marker: &str) -> bool {
             false
         }
     }
+}
+
+fn validate_harness_conformance_case(case: &HarnessConformanceCase) -> Result<(), DomainError> {
+    if case.schema != HARNESS_CONFORMANCE_SCHEMA_V1 {
+        return Err(DomainError::Usage {
+            message: format!(
+                "Harness conformance fixture '{}' has unsupported schema '{}'.",
+                case.case_id, case.schema
+            ),
+            repair: Some(format!("Use schema {HARNESS_CONFORMANCE_SCHEMA_V1}.")),
+        });
+    }
+    if case.input.redaction_status != HARNESS_CONFORMANCE_REDACTION_STATUS {
+        return Err(DomainError::Usage {
+            message: format!(
+                "Harness conformance fixture '{}' has redactionStatus '{}'.",
+                case.case_id, case.input.redaction_status
+            ),
+            repair: Some(format!(
+                "Use redactionStatus {HARNESS_CONFORMANCE_REDACTION_STATUS}."
+            )),
+        });
+    }
+    if case.expected.local_cargo_fallback_allowed {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "Harness conformance fixture '{}' permits local Cargo fallback.",
+                case.case_id
+            ),
+            repair: Some("Set expected.localCargoFallbackAllowed to false.".to_owned()),
+        });
+    }
+    if case.artifact_policy.raw_transcript_allowed || case.artifact_policy.secret_material_allowed {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "Harness conformance fixture '{}' permits raw transcript or secret artifacts.",
+                case.case_id
+            ),
+            repair: Some(
+                "Keep rawTranscriptAllowed and secretMaterialAllowed set to false.".to_owned(),
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn generated_harness_conformance_command(
+    options: &HarnessConformanceSimulationOptions,
+    case: &HarnessConformanceCase,
+) -> Result<String, DomainError> {
+    let target = match case.harness.as_str() {
+        "claude-code" => HarnessHookTarget::ClaudeCode,
+        "codex" => HarnessHookTarget::Codex,
+        other => {
+            return Err(DomainError::Usage {
+                message: format!(
+                    "Harness '{}' has no generated hook command for conformance case '{}'.",
+                    other, case.case_id
+                ),
+                repair: Some(
+                    "Pass an explicit non-destructive hook command for adapter harnesses."
+                        .to_owned(),
+                ),
+            });
+        }
+    };
+    let report = generate_harness_hook_install(&HarnessHookInstallOptions {
+        target,
+        workspace: options.workspace.clone(),
+        settings_path: None,
+        install: false,
+        undo: false,
+        ee_binary_path: options.ee_binary_path.clone(),
+    })?;
+    report
+        .snippets
+        .iter()
+        .find(|snippet| snippet_matches_conformance_case(snippet, case))
+        .map(|snippet| snippet.command.clone())
+        .ok_or_else(|| DomainError::Usage {
+            message: format!(
+                "No generated hook snippet matches {} {}.",
+                case.harness, case.fixture_kind
+            ),
+            repair: Some(
+                "Pass an explicit hook command or add generated hook support for this event."
+                    .to_owned(),
+            ),
+        })
+}
+
+fn snippet_matches_conformance_case(
+    snippet: &HarnessHookSnippet,
+    case: &HarnessConformanceCase,
+) -> bool {
+    if snippet.event != case.event_name {
+        return false;
+    }
+    match case.fixture_kind.as_str() {
+        "pre_tool_edit" => snippet
+            .matcher
+            .as_deref()
+            .is_some_and(|matcher| matcher.contains("Edit") || matcher.contains("Write")),
+        "pre_tool_shell" | "post_tool_success" | "post_tool_failure" => {
+            snippet.matcher.as_deref() == Some("Bash")
+        }
+        "session_start" | "compaction_resume" => true,
+        _ => false,
+    }
+}
+
+fn harness_conformance_event_payload(
+    case: &HarnessConformanceCase,
+    workspace: &Path,
+) -> serde_json::Value {
+    let command = case.input.command_template.clone().unwrap_or_default();
+    match case.fixture_kind.as_str() {
+        "pre_tool_edit" => serde_json::json!({
+            "hook_event_name": case.event_name,
+            "cwd": workspace.display().to_string(),
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": "src/lib.rs",
+                "old_string": "before",
+                "new_string": "after"
+            }
+        }),
+        "pre_tool_shell" => serde_json::json!({
+            "hook_event_name": case.event_name,
+            "cwd": workspace.display().to_string(),
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": command,
+                "synthetic": true
+            }
+        }),
+        "post_tool_success" => serde_json::json!({
+            "hook_event_name": case.event_name,
+            "cwd": workspace.display().to_string(),
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": command
+            },
+            "tool_response": {
+                "exit_code": 0,
+                "stdout": "synthetic success",
+                "stderr": ""
+            }
+        }),
+        "post_tool_failure" => serde_json::json!({
+            "hook_event_name": case.event_name,
+            "cwd": workspace.display().to_string(),
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": command
+            },
+            "tool_response": {
+                "exit_code": 2,
+                "stdout": "",
+                "stderr": "synthetic failure"
+            }
+        }),
+        "compaction_resume" => serde_json::json!({
+            "hook_event_name": case.event_name,
+            "cwd": workspace.display().to_string(),
+            "resume": {
+                "summary": "redacted bounded resume summary",
+                "compacted": true
+            }
+        }),
+        _ => serde_json::json!({
+            "hook_event_name": case.event_name,
+            "cwd": workspace.display().to_string()
+        }),
+    }
+}
+
+fn run_harness_conformance_hook(
+    hook_command: &str,
+    event_payload: &serde_json::Value,
+    workspace: &Path,
+    timeout_seconds: u64,
+) -> Result<HarnessConformanceObserved, DomainError> {
+    let started = Instant::now();
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(hook_command)
+        .current_dir(workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| DomainError::Usage {
+            message: format!("Failed to spawn harness conformance hook command: {error}"),
+            repair: Some("Verify the hook command is executable on this host.".to_owned()),
+        })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let payload = serde_json::to_vec(event_payload).map_err(|error| DomainError::Usage {
+            message: format!("Failed to serialize harness event payload: {error}"),
+            repair: Some("Check the fixture payload shape.".to_owned()),
+        })?;
+        stdin
+            .write_all(&payload)
+            .map_err(|error| DomainError::Usage {
+                message: format!("Failed to write harness event payload to hook stdin: {error}"),
+                repair: Some("Check the hook command stdin behavior.".to_owned()),
+            })?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| DomainError::Usage {
+            message: format!("Failed while waiting for harness conformance hook command: {error}"),
+            repair: Some(
+                "Retry with a bounded hook command that exits deterministically.".to_owned(),
+            ),
+        })?;
+    let elapsed_ms = elapsed_ms_since(started);
+    if elapsed_ms > timeout_seconds.saturating_mul(1000) {
+        tracing::warn!(
+            elapsed_ms,
+            timeout_seconds,
+            "harness conformance hook exceeded timeout budget"
+        );
+    }
+    Ok(HarnessConformanceObserved {
+        command_invoked: true,
+        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        elapsed_ms,
+    })
+}
+
+fn apply_harness_conformance_observation(
+    case: &mut HarnessConformanceCase,
+    observed: &HarnessConformanceObserved,
+) {
+    let mut failing = 0usize;
+    let statuses: Vec<(String, String)> = case
+        .assertions
+        .iter()
+        .map(|assertion| {
+            (
+                assertion.kind.clone(),
+                evaluate_harness_conformance_assertion(&assertion.kind, case, observed),
+            )
+        })
+        .collect();
+    for (assertion, (_, status)) in case.assertions.iter_mut().zip(statuses) {
+        if status == "fail" {
+            failing = failing.saturating_add(1);
+        }
+        assertion.expected_status = status;
+    }
+    case.expected.conformance_verdict = if failing == 0 {
+        "pass".to_owned()
+    } else {
+        "fail".to_owned()
+    };
+    case.input.transcript = observed_harness_conformance_transcript(case, observed);
+}
+
+fn evaluate_harness_conformance_assertion(
+    kind: &str,
+    case: &HarnessConformanceCase,
+    observed: &HarnessConformanceObserved,
+) -> String {
+    let pass = match kind {
+        "command_invoked" => observed.command_invoked,
+        "json_envelope_valid" => hook_stdout_is_json_envelope(&observed.stdout),
+        "output_budget_respected" => {
+            observed.output_bytes()
+                <= usize::try_from(case.expected.output_budget_bytes).unwrap_or(usize::MAX)
+        }
+        "degraded_handled" => degraded_policy_satisfied(case, observed),
+        "secret_redaction" => {
+            let transcript = format!("{}\n{}", observed.stdout, observed.stderr);
+            !redact_harness_conformance_text(&transcript).contains_unredacted_secret
+        }
+        "non_zero_exit_policy" => {
+            exit_policy_satisfied(case.expected.exit_policy.as_str(), observed.exit_code)
+        }
+        "no_local_cargo_fallback" => no_local_cargo_fallback_observed(case, observed),
+        _ => false,
+    };
+    if pass {
+        "pass".to_owned()
+    } else {
+        "fail".to_owned()
+    }
+}
+
+fn hook_stdout_is_json_envelope(stdout: &str) -> bool {
+    let Some(first_line) = stdout.lines().find(|line| !line.trim().is_empty()) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(first_line.trim()) else {
+        return false;
+    };
+    matches!(
+        value.pointer("/schema").and_then(serde_json::Value::as_str),
+        Some("ee.response.v2" | "ee.error.v2")
+    )
+}
+
+fn degraded_policy_satisfied(
+    case: &HarnessConformanceCase,
+    observed: &HarnessConformanceObserved,
+) -> bool {
+    match case.expected.degraded_policy.as_str() {
+        "not_applicable" => true,
+        "must_emit" => {
+            observed.stdout.contains("\"degraded\"")
+                || observed.stdout.contains("ee.error.v2")
+                || observed.stderr.to_ascii_lowercase().contains("degraded")
+        }
+        "must_absorb" => observed.exit_code == Some(0),
+        "must_fail_closed" => observed.exit_code.is_some_and(|code| code != 0),
+        _ => false,
+    }
+}
+
+fn exit_policy_satisfied(policy: &str, exit_code: Option<i32>) -> bool {
+    match policy {
+        "zero_required" => exit_code == Some(0),
+        "non_zero_allowed" => exit_code.is_some(),
+        "non_zero_required" => exit_code.is_some_and(|code| code != 0),
+        "not_applicable" => true,
+        _ => false,
+    }
+}
+
+fn no_local_cargo_fallback_observed(
+    case: &HarnessConformanceCase,
+    observed: &HarnessConformanceObserved,
+) -> bool {
+    if case.expected.local_cargo_fallback_allowed {
+        return false;
+    }
+    let combined = format!("{}\n{}", observed.stdout, observed.stderr).to_ascii_lowercase();
+    !(combined.contains("running cargo")
+        || combined.contains("compiling ")
+        || combined.contains("finished `test`")
+        || combined.contains("finished `dev`"))
+}
+
+struct HarnessConformanceRedaction {
+    text: String,
+    contains_unredacted_secret: bool,
+}
+
+fn redact_harness_conformance_text(input: &str) -> HarnessConformanceRedaction {
+    let redacted = crate::policy::redact_secret_like_content(input).content;
+    let redacted = redact_private_absolute_paths(&redacted);
+    let lower = redacted.to_ascii_lowercase();
+    let contains_unredacted_secret = lower.contains("sk-")
+        || lower.contains("bearer ")
+        || lower.contains("begin openssh")
+        || lower.contains("begin rsa")
+        || lower.contains("/users/")
+        || lower.contains("/home/");
+    HarnessConformanceRedaction {
+        text: redacted,
+        contains_unredacted_secret,
+    }
+}
+
+fn redact_private_absolute_paths(input: &str) -> String {
+    input
+        .split_whitespace()
+        .map(|segment| {
+            if segment.starts_with("/Users/") || segment.starts_with("/home/") {
+                "[REDACTED:path]".to_owned()
+            } else {
+                segment.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn observed_harness_conformance_transcript(
+    case: &HarnessConformanceCase,
+    observed: &HarnessConformanceObserved,
+) -> HarnessConformanceTranscript {
+    let transcript_byte_budget = case
+        .artifact_policy
+        .inline_transcript_max_bytes
+        .min(case.artifact_policy.max_artifact_bytes);
+    let max_bytes = usize::try_from(transcript_byte_budget)
+        .unwrap_or(HARNESS_CONFORMANCE_MAX_TRANSCRIPT_BYTES)
+        .min(HARNESS_CONFORMANCE_MAX_TRANSCRIPT_BYTES);
+    let max_line_bytes = usize::try_from(case.input.transcript.max_line_bytes)
+        .unwrap_or(HARNESS_CONFORMANCE_MAX_LINE_BYTES)
+        .min(HARNESS_CONFORMANCE_MAX_LINE_BYTES);
+    let mut raw_lines = Vec::new();
+    raw_lines.push(format!("exitCode={}", observed.exit_code.unwrap_or(-1)));
+    raw_lines.push(format!("elapsedMs={}", observed.elapsed_ms));
+    if !observed.stdout.trim().is_empty() {
+        raw_lines.push(format!("stdout={}", observed.stdout.trim()));
+    }
+    if !observed.stderr.trim().is_empty() {
+        raw_lines.push(format!("stderr={}", observed.stderr.trim()));
+    }
+    if case
+        .input
+        .command_template
+        .as_deref()
+        .is_some_and(|command| command.starts_with("cargo "))
+    {
+        raw_lines.push("fixtureCommandTemplate=cargo synthetic only; not executed".to_owned());
+    }
+
+    let mut lines = Vec::new();
+    let mut byte_count = 0usize;
+    for raw in raw_lines {
+        let redacted = redact_harness_conformance_text(&raw).text;
+        for line in redacted.lines() {
+            if lines.len() >= HARNESS_CONFORMANCE_MAX_TRANSCRIPT_LINES {
+                break;
+            }
+            let bounded = bound_utf8_prefix(line, max_line_bytes);
+            let next_count = byte_count.saturating_add(bounded.len());
+            if next_count > max_bytes {
+                break;
+            }
+            byte_count = next_count;
+            lines.push(bounded);
+        }
+    }
+    HarnessConformanceTranscript {
+        kind: "redacted_excerpt".to_owned(),
+        line_count: u64::try_from(lines.len()).unwrap_or(u64::MAX),
+        byte_count: u64::try_from(byte_count).unwrap_or(u64::MAX),
+        max_line_bytes: u64::try_from(max_line_bytes).unwrap_or(256),
+        lines,
+    }
+}
+
+fn bound_utf8_prefix(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
+        return input.to_owned();
+    }
+    if max_bytes == 0 {
+        return String::new();
+    }
+    const TRUNCATED_SUFFIX: &str = "...[truncated]";
+    if max_bytes <= TRUNCATED_SUFFIX.len() {
+        return TRUNCATED_SUFFIX[..max_bytes].to_owned();
+    }
+    let mut end = max_bytes - TRUNCATED_SUFFIX.len();
+    while !input.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    format!("{}{TRUNCATED_SUFFIX}", &input[..end])
+}
+
+fn command_template_is_destructive(command: &str) -> bool {
+    let normalized = command.to_ascii_lowercase();
+    normalized.contains("rm -rf")
+        || normalized.contains("git reset --hard")
+        || normalized.contains("git clean")
+        || normalized.contains("mkfs")
+        || normalized.contains("dd if=")
+        || normalized.contains(":(){")
+}
+
+fn hook_command_is_disallowed(command: &str) -> bool {
+    let normalized = command.to_ascii_lowercase();
+    command_template_is_destructive(command)
+        || normalized.contains("cargo test")
+        || normalized.contains("cargo build")
+        || normalized.contains("cargo check")
+        || normalized.contains("cargo clippy")
 }
 
 // ============================================================================
