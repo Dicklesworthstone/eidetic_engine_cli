@@ -2000,6 +2000,7 @@ pub struct ScoreDecayJobOptions {
     pub decay_half_lives: MemoryDecayHalfLives,
     pub dry_run: bool,
     pub actor: Option<String>,
+    pub cancellation_flag: Option<Arc<AtomicBool>>,
 }
 
 impl ScoreDecayJobOptions {
@@ -2018,7 +2019,14 @@ impl ScoreDecayJobOptions {
             decay_half_lives: MemoryDecayHalfLives::default(),
             dry_run: false,
             actor: None,
+            cancellation_flag: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_cancellation_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancellation_flag = Some(flag);
+        self
     }
 }
 
@@ -2243,15 +2251,18 @@ pub fn run_score_decay_job(
     options: &ScoreDecayJobOptions,
 ) -> Result<ScoreDecayJobReport, String> {
     validate_score_decay_options(options)?;
+    score_decay_check_cancelled(options)?;
     let as_of = options
         .as_of
         .clone()
         .unwrap_or_else(|| Utc::now().to_rfc3339());
     let as_of_timestamp = parse_score_decay_timestamp(&as_of, "as_of")?;
+    score_decay_check_cancelled(options)?;
 
     let mut memories = conn
         .list_memories(&options.workspace_id, None, false)
         .map_err(|error| format!("Failed to list memories for score decay: {error}"))?;
+    score_decay_check_cancelled(options)?;
     if let Some(limit) = options.item_limit {
         memories.truncate(
             usize::try_from(limit)
@@ -2272,9 +2283,11 @@ pub fn run_score_decay_job(
     let all_feedback_events = conn
         .list_feedback_events(&options.workspace_id)
         .map_err(|error| format!("Failed to list feedback events: {error}"))?;
+    score_decay_check_cancelled(options)?;
     let mut feedback_by_memory: std::collections::HashMap<String, Vec<StoredFeedbackEvent>> =
         std::collections::HashMap::new();
     for event in all_feedback_events {
+        score_decay_check_cancelled(options)?;
         if event.target_type == "memory" && event.applied_at.is_none() {
             feedback_by_memory
                 .entry(event.target_id.clone())
@@ -2288,6 +2301,7 @@ pub fn run_score_decay_job(
     let empty_feedback = Vec::new();
 
     for memory in memories {
+        score_decay_check_cancelled(options)?;
         scanned_count = scanned_count.saturating_add(1);
         let feedback_events = feedback_by_memory
             .get(&memory.id)
@@ -2307,6 +2321,7 @@ pub fn run_score_decay_job(
         };
 
         if !options.dry_run {
+            score_decay_check_cancelled(options)?;
             if change.confidence_changed(options.min_delta) {
                 let details = score_decay_audit_details(&change, &as_of);
                 change.audit_id = conn
@@ -2375,6 +2390,23 @@ pub fn run_score_decay_job(
     })
 }
 
+const SCORE_DECAY_CANCELLED_MESSAGE: &str = "Daemon shutdown requested during score decay";
+
+fn score_decay_check_cancelled(options: &ScoreDecayJobOptions) -> Result<(), String> {
+    if options
+        .cancellation_flag
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    {
+        return Err(SCORE_DECAY_CANCELLED_MESSAGE.to_owned());
+    }
+    Ok(())
+}
+
+fn score_decay_was_cancelled(message: &str) -> bool {
+    message == SCORE_DECAY_CANCELLED_MESSAGE
+}
+
 fn validate_score_decay_options(options: &ScoreDecayJobOptions) -> Result<(), String> {
     if options.workspace_id.trim().is_empty() {
         return Err("Score decay workspace_id must not be empty".to_owned());
@@ -2405,9 +2437,11 @@ fn structural_decay_adjustments(
     let links = conn
         .list_all_memory_links(None)
         .map_err(|error| format!("Failed to list memory links for structural decay: {error}"))?;
+    score_decay_check_cancelled(options)?;
     let graph = structural_decay_graph(&memory_ids, &links);
     let mut adjustments = BTreeMap::new();
     for memory in memories {
+        score_decay_check_cancelled(options)?;
         let reference =
             memory_decay_reference_time(memory, access_times.get(&memory.id).copied(), as_of)?;
         let half_life_days = f64::from(
@@ -2919,6 +2953,8 @@ pub struct RunnerOptions {
     pub continue_on_error: bool,
     /// Verbose diagnostics.
     pub verbose: bool,
+    /// Cooperative cancellation flag shared with daemon shutdown.
+    pub cancellation_flag: Option<Arc<AtomicBool>>,
 }
 
 impl RunnerOptions {
@@ -2939,6 +2975,12 @@ impl RunnerOptions {
     #[must_use]
     pub fn with_item_limit(mut self, limit: u64) -> Self {
         self.item_limit = Some(limit);
+        self
+    }
+
+    #[must_use]
+    pub fn with_cancellation_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancellation_flag = Some(flag);
         self
     }
 
@@ -3188,6 +3230,13 @@ impl ManualRunner {
         &mut self.ledger
     }
 
+    fn cancellation_requested(&self) -> bool {
+        self.options
+            .cancellation_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+
     /// Schedule a job for execution.
     pub fn schedule(
         &mut self,
@@ -3201,6 +3250,7 @@ impl ManualRunner {
 
     /// Run a single job by ID.
     pub fn run_job(&mut self, job_id: &str, now: &str) -> Option<JobRunResult> {
+        let cancellation_requested = self.cancellation_requested();
         let job = self.ledger.get_job_mut(job_id)?;
         let job_type = job.job_type;
 
@@ -3214,6 +3264,27 @@ impl ManualRunner {
                 error: Some("Job already completed".to_owned()),
                 budget_summary: None,
                 details: None,
+                dry_run: self.options.dry_run,
+            });
+        }
+        if cancellation_requested {
+            job.start(now);
+            let completion_time = chrono::Utc::now().to_rfc3339();
+            job.cancel(&completion_time);
+            return Some(JobRunResult {
+                job_id: job_id.to_owned(),
+                job_type,
+                outcome: RunOutcome::Cancelled,
+                duration_ms: job.duration_ms.unwrap_or(0),
+                items_processed: Some(0),
+                error: Some("Daemon shutdown requested before maintenance job".to_owned()),
+                budget_summary: None,
+                details: Some(json!({
+                    "schema": "ee.steward.job_cancelled.v1",
+                    "jobType": job_type.as_str(),
+                    "reason": "daemon_shutdown",
+                    "durableMutation": false,
+                })),
                 dry_run: self.options.dry_run,
             });
         }
@@ -3277,6 +3348,19 @@ impl ManualRunner {
         job_type: JobType,
         budget: &mut JobBudgetState,
     ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        if self.cancellation_requested() {
+            return (
+                RunOutcome::Cancelled,
+                Some(0),
+                Some("Daemon shutdown requested before maintenance job".to_owned()),
+                Some(json!({
+                    "schema": "ee.steward.job_cancelled.v1",
+                    "jobType": job_type.as_str(),
+                    "reason": "daemon_shutdown",
+                    "durableMutation": false,
+                })),
+            );
+        }
         match job_type {
             JobType::IndexRebuild => self.execute_index_rebuild(budget),
             JobType::IndexCoalesce => self.execute_index_coalesce(budget),
@@ -3981,11 +4065,26 @@ impl ManualRunner {
             .actor
             .clone()
             .or_else(|| Some("ee-steward".to_owned()));
+        options.cancellation_flag = self.options.cancellation_flag.clone();
 
         let mut preflight_options = options.clone();
         preflight_options.dry_run = true;
         let preflight_report = match run_score_decay_job(&connection, &preflight_options) {
             Ok(report) => report,
+            Err(message) if score_decay_was_cancelled(&message) => {
+                return (
+                    RunOutcome::Cancelled,
+                    Some(0),
+                    Some(message.clone()),
+                    Some(json!({
+                        "schema": "ee.steward.decay_sweep.cancelled.v1",
+                        "jobType": JobType::DecaySweep.as_str(),
+                        "reason": "daemon_shutdown",
+                        "durableMutation": false,
+                        "message": message,
+                    })),
+                );
+            }
             Err(message) => {
                 return (
                     RunOutcome::Failed,
@@ -4000,6 +4099,14 @@ impl ManualRunner {
                 );
             }
         };
+        if self.cancellation_requested() {
+            return (
+                RunOutcome::Cancelled,
+                Some(usize_to_u64(preflight_report.scanned_count)),
+                Some("Daemon shutdown requested before durable decay mutations".to_owned()),
+                Some(preflight_report.data_json()),
+            );
+        }
 
         let scanned_count = usize_to_u64(preflight_report.scanned_count);
         budget.record(ResourceType::Items, scanned_count);
@@ -4032,9 +4139,31 @@ impl ManualRunner {
                 Some(preflight_report.data_json()),
             );
         }
+        if self.cancellation_requested() {
+            return (
+                RunOutcome::Cancelled,
+                Some(scanned_count),
+                Some("Daemon shutdown requested before durable decay mutations".to_owned()),
+                Some(preflight_report.data_json()),
+            );
+        }
 
         let report = match run_score_decay_job(&connection, &options) {
             Ok(report) => report,
+            Err(message) if score_decay_was_cancelled(&message) => {
+                return (
+                    RunOutcome::Cancelled,
+                    Some(scanned_count),
+                    Some(message.clone()),
+                    Some(json!({
+                        "schema": "ee.steward.decay_sweep.cancelled.v1",
+                        "jobType": JobType::DecaySweep.as_str(),
+                        "reason": "daemon_shutdown",
+                        "durableMutation": true,
+                        "message": message,
+                    })),
+                );
+            }
             Err(message) => {
                 return (
                     RunOutcome::Failed,
@@ -4578,6 +4707,21 @@ impl ManualRunner {
         budget: &mut JobBudgetState,
     ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
         let started = Instant::now();
+        if self.cancellation_requested() {
+            return (
+                RunOutcome::Cancelled,
+                Some(0),
+                Some("Daemon shutdown requested before health check".to_owned()),
+                Some(json!({
+                    "schema": "ee.steward.health_check.v1",
+                    "jobType": JobType::HealthCheck.as_str(),
+                    "storageStatus": "cancelled",
+                    "checks": [],
+                    "dryRun": self.options.dry_run,
+                    "durableMutation": false,
+                })),
+            );
+        }
         let Some(database_path) = self.resolve_database_path() else {
             return (
                 RunOutcome::Success,
@@ -4624,6 +4768,22 @@ impl ManualRunner {
                 );
             }
         };
+        if self.cancellation_requested() {
+            return (
+                RunOutcome::Cancelled,
+                Some(0),
+                Some("Daemon shutdown requested during health check".to_owned()),
+                Some(json!({
+                    "schema": "ee.steward.health_check.v1",
+                    "jobType": JobType::HealthCheck.as_str(),
+                    "storageStatus": "cancelled",
+                    "databasePath": database_path.display().to_string(),
+                    "checks": [],
+                    "dryRun": self.options.dry_run,
+                    "durableMutation": false,
+                })),
+            );
+        }
         let workspaces = match connection.list_workspaces() {
             Ok(workspaces) => workspaces,
             Err(error) => {
@@ -4639,6 +4799,23 @@ impl ManualRunner {
             }
         };
         budget.record(ResourceType::TimeMs, millis_to_u64(started.elapsed()));
+        if self.cancellation_requested() {
+            return (
+                RunOutcome::Cancelled,
+                Some(usize_to_u64(workspaces.len())),
+                Some("Daemon shutdown requested after health check inspection".to_owned()),
+                Some(json!({
+                    "schema": "ee.steward.health_check.v1",
+                    "jobType": JobType::HealthCheck.as_str(),
+                    "storageStatus": "cancelled",
+                    "databasePath": database_path.display().to_string(),
+                    "workspaceRows": workspaces.len(),
+                    "checks": [],
+                    "dryRun": self.options.dry_run,
+                    "durableMutation": false,
+                })),
+            );
+        }
 
         (
             RunOutcome::Success,
@@ -6823,7 +7000,7 @@ pub fn run_daemon_background_scheduler(workspace: &str, shutdown: Arc<AtomicBool
             interval_ms: 0,
             dry_run: false,
             job_types: BACKGROUND_SCHEDULER_JOB_TYPES.to_vec(),
-            runner_options: RunnerOptions::new(),
+            runner_options: RunnerOptions::new().with_cancellation_flag(Arc::clone(&shutdown)),
         };
         let _ = run_daemon_foreground(&options);
     }

@@ -33329,6 +33329,12 @@ fn context_error_to_domain(error: &ContextPackError) -> DomainError {
             message: message.clone(),
             repair: Some("Use redaction.policy=respect or remove redaction bypass.".to_string()),
         },
+        ContextPackError::DeadlineExceeded(message) | ContextPackError::Cancelled(message) => {
+            DomainError::Usage {
+                message: message.clone(),
+                repair: error.repair_hint().map(str::to_string),
+            }
+        }
     }
 }
 

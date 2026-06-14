@@ -38,8 +38,9 @@ use rustix::fs::{FlockOperation, flock};
 
 use crate::config::env_registry::{self, EnvVar};
 use crate::core::context::{
-    ContextPackOptions, ContextPackOutputOptionOverrides, ContextPackOutputOptions,
-    attach_pack_dna_to_context_response, run_context_pack_with_performance,
+    ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
+    ContextPackOutputOptions, attach_pack_dna_to_context_response,
+    run_context_pack_with_performance_controlled,
 };
 use crate::core::search::SearchSourceMode;
 use crate::models::{MemoryScope, QueryFilters, RedactionLevel};
@@ -114,6 +115,7 @@ pub const DAEMON_HANDLER_PANIC_CODE: &str = "daemon_handler_panic";
 /// huge memory body) cannot blow out the journal.
 const DAEMON_PANIC_LOG_MAX_BYTES: usize = 512;
 const DAEMON_WORKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const DAEMON_SCHEDULER_JOIN_TIMEOUT: Duration = Duration::from_millis(750);
 
 /// Per-daemon dispatch policy that is resolved at daemon start and
 /// then shared by every accepted connection. Connection-level peer
@@ -249,6 +251,47 @@ impl InflightPool {
     }
 }
 
+#[derive(Debug)]
+enum SchedulerThreadExit {
+    Returned,
+    Panicked,
+}
+
+#[derive(Debug)]
+struct SchedulerThreadHandle {
+    join: JoinHandle<()>,
+    done_rx: mpsc::Receiver<SchedulerThreadExit>,
+}
+
+enum SchedulerJoinOutcome {
+    Joined(io::Result<()>),
+    StillRunning(SchedulerThreadHandle),
+}
+
+impl SchedulerThreadHandle {
+    fn join_with_timeout(self, timeout: Duration) -> SchedulerJoinOutcome {
+        match self.done_rx.recv_timeout(timeout) {
+            Ok(SchedulerThreadExit::Returned) => SchedulerJoinOutcome::Joined(
+                self.join
+                    .join()
+                    .map_err(|_| io::Error::other("daemon scheduler thread panicked")),
+            ),
+            Ok(SchedulerThreadExit::Panicked) => {
+                let _ = self.join.join();
+                SchedulerJoinOutcome::Joined(Err(io::Error::other(
+                    "daemon scheduler thread panicked",
+                )))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => SchedulerJoinOutcome::StillRunning(self),
+            Err(mpsc::RecvTimeoutError::Disconnected) => SchedulerJoinOutcome::Joined(
+                self.join
+                    .join()
+                    .map_err(|_| io::Error::other("daemon scheduler thread panicked")),
+            ),
+        }
+    }
+}
+
 /// Resolve the configured per-daemon worker cap. Reads
 /// `EE_DAEMON_MAX_INFLIGHT` through the central env registry so the
 /// override is reflected in `ee capabilities` alongside other tuning
@@ -290,7 +333,7 @@ pub struct DaemonServerHandle {
     /// Background steward scheduler thread (bd-2ohzq). `None` when the
     /// daemon was started without a bound workspace (e.g. via the bare
     /// `start_server` entry point). The thread runs until `shutdown` fires.
-    scheduler_thread: Option<JoinHandle<()>>,
+    scheduler_thread: Option<SchedulerThreadHandle>,
     /// Once-guard for accept-loop and socket teardown. The first
     /// shutdown call stops the listener and unlinks the socket; later
     /// calls skip that irreversible section but may still wait for a
@@ -331,13 +374,13 @@ impl DaemonServerHandle {
         &mut self,
         worker_drain_timeout: Duration,
     ) -> io::Result<()> {
-        if self.workers_drained.load(Ordering::Acquire) {
+        if self.workers_drained.load(Ordering::Acquire) && self.scheduler_thread.is_none() {
             return Ok(());
         }
 
+        self.shutdown.store(true, Ordering::SeqCst);
         let first_teardown = !self.shutdown_done.swap(true, Ordering::AcqRel);
         let unlink_result = if first_teardown {
-            self.shutdown.store(true, Ordering::SeqCst);
             // Wake the accept loop by connecting to the socket from the
             // current process; the loop checks the shutdown flag between
             // accepts but blocks inside `accept()` itself. The connect-
@@ -348,14 +391,6 @@ impl DaemonServerHandle {
                     .join()
                     .map_err(|_| io::Error::other("daemon accept thread panicked"))?;
             }
-            // Join the background steward scheduler thread (bd-2ohzq). The
-            // shutdown signal was already set above; the scheduler polls it
-            // every BACKGROUND_SCHEDULER_SLEEP_SLICE_MS and will exit
-            // promptly. Swallow panics — a panicking scheduler must not
-            // prevent the socket from being cleaned up.
-            if let Some(handle) = self.scheduler_thread.take() {
-                let _ = handle.join();
-            }
             // Idempotent guarded unlink (bd-wj6v9, bd-2z3e8): tolerate
             // `NotFound`, but do not let shutdown delete an arbitrary
             // regular file if the socket path was swapped underneath us.
@@ -363,12 +398,14 @@ impl DaemonServerHandle {
         } else {
             Ok(())
         };
+        let scheduler_result = self.join_scheduler_with_timeout();
 
         let workers_drained = self.pool.wait_until_idle(worker_drain_timeout);
         if workers_drained {
             self.workers_drained.store(true, Ordering::Release);
         }
         unlink_result?;
+        scheduler_result?;
         if !workers_drained {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -379,6 +416,25 @@ impl DaemonServerHandle {
             ));
         }
         Ok(())
+    }
+
+    fn join_scheduler_with_timeout(&mut self) -> io::Result<()> {
+        let Some(handle) = self.scheduler_thread.take() else {
+            return Ok(());
+        };
+        match handle.join_with_timeout(DAEMON_SCHEDULER_JOIN_TIMEOUT) {
+            SchedulerJoinOutcome::Joined(result) => result,
+            SchedulerJoinOutcome::StillRunning(handle) => {
+                self.scheduler_thread = Some(handle);
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "daemon scheduler thread did not stop within {}ms after shutdown",
+                        DAEMON_SCHEDULER_JOIN_TIMEOUT.as_millis()
+                    ),
+                ))
+            }
+        }
     }
 }
 
@@ -765,12 +821,23 @@ fn start_server_with_dispatch_policy(
         .and_then(|workspace| {
             let scheduler_shutdown = Arc::clone(&shutdown);
             let workspace = workspace.to_owned();
-            thread::Builder::new()
+            let (done_tx, done_rx) = mpsc::channel();
+            let join = thread::Builder::new()
                 .name("ee-daemon-steward".to_owned())
                 .spawn(move || {
-                    crate::steward::run_daemon_background_scheduler(&workspace, scheduler_shutdown);
+                    let exit = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        crate::steward::run_daemon_background_scheduler(
+                            &workspace,
+                            scheduler_shutdown,
+                        );
+                    })) {
+                        Ok(()) => SchedulerThreadExit::Returned,
+                        Err(_) => SchedulerThreadExit::Panicked,
+                    };
+                    let _ = done_tx.send(exit);
                 })
-                .ok()
+                .ok()?;
+            Some(SchedulerThreadHandle { join, done_rx })
         });
 
     Ok(DaemonServerHandle {
@@ -1744,6 +1811,7 @@ fn dispatch_context(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonRes
             );
         }
     };
+    let context_started = Instant::now();
     if matches!(params.timeout_ms, Some(0)) {
         return DaemonResponse::err(
             request.request_id.clone(),
@@ -1755,25 +1823,54 @@ fn dispatch_context(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonRes
     }
 
     let options = params.context_options();
-    let mut context_response =
-        match run_context_pack_with_performance(&options, "pack").map(|run| run.response) {
-            Ok(response) => response,
-            Err(error) => {
-                return DaemonResponse::err(
-                    request.request_id.clone(),
-                    request.agent_id.clone(),
-                    request.workspace_id.clone(),
-                    DAEMON_CONTEXT_EXECUTION_FAILED_CODE,
-                    format!("ee.daemon.context could not assemble the canonical pack: {error}"),
-                );
-            }
-        };
+    let deadline = params.timeout_ms.map(Duration::from_millis);
+    let mut context_response = match run_context_pack_with_performance_controlled(
+        &options,
+        "pack",
+        deadline,
+        Some(shutdown),
+    )
+    .map(|run| run.response)
+    {
+        Ok(response) => response,
+        Err(ContextPackError::DeadlineExceeded(error)) => {
+            return DaemonResponse::err(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                DAEMON_CONTEXT_DEADLINE_EXCEEDED_CODE,
+                format!("ee.daemon.context deadline expired: {error}"),
+            );
+        }
+        Err(ContextPackError::Cancelled(_)) => {
+            return daemon_shutting_down_response(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+            );
+        }
+        Err(error) => {
+            return DaemonResponse::err(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                DAEMON_CONTEXT_EXECUTION_FAILED_CODE,
+                format!("ee.daemon.context could not assemble the canonical pack: {error}"),
+            );
+        }
+    };
 
     if shutdown.load(Ordering::SeqCst) {
         return daemon_shutting_down_response(
             request.request_id.clone(),
             request.agent_id.clone(),
             request.workspace_id.clone(),
+        );
+    }
+    if daemon_context_deadline_expired(context_started, params.timeout_ms) {
+        return daemon_context_deadline_response(
+            request,
+            "ee.daemon.context deadline expired after pack execution.",
         );
     }
     if params.explain && !params.no_pack_dna {
@@ -1783,9 +1880,21 @@ fn dispatch_context(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonRes
             .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
         attach_pack_dna_to_context_response(&database_path, &mut context_response);
     }
+    if daemon_context_deadline_expired(context_started, params.timeout_ms) {
+        return daemon_context_deadline_response(
+            request,
+            "ee.daemon.context deadline expired while attaching pack DNA.",
+        );
+    }
 
     let render_options = ContextJsonRenderOptions::from(options.output_options);
     let rendered = render_context_response_json_with_options(&context_response, render_options);
+    if daemon_context_deadline_expired(context_started, params.timeout_ms) {
+        return daemon_context_deadline_response(
+            request,
+            "ee.daemon.context deadline expired while rendering the response.",
+        );
+    }
     if rendered.len() > super::DAEMON_RESPONSE_MAX_BYTES {
         return DaemonResponse::err(
             request.request_id.clone(),
@@ -1830,6 +1939,23 @@ fn dispatch_context(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonRes
         response = response.with_degraded(code);
     }
     response
+}
+
+fn daemon_context_deadline_expired(started: Instant, timeout_ms: Option<u64>) -> bool {
+    timeout_ms.is_some_and(|timeout_ms| started.elapsed() >= Duration::from_millis(timeout_ms))
+}
+
+fn daemon_context_deadline_response(
+    request: &DaemonRequest,
+    message: &'static str,
+) -> DaemonResponse {
+    DaemonResponse::err(
+        request.request_id.clone(),
+        request.agent_id.clone(),
+        request.workspace_id.clone(),
+        DAEMON_CONTEXT_DEADLINE_EXCEEDED_CODE,
+        message,
+    )
 }
 
 fn required_string_any(
@@ -2790,6 +2916,59 @@ mod tests {
         assert!(
             handle.workers_drained.load(Ordering::Acquire),
             "successful retry must latch drained worker state"
+        );
+    }
+
+    #[test]
+    fn daemon_scheduler_join_timeout_can_be_retried_after_busy_task_exits() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let join = thread::spawn(move || {
+            entered_tx.send(()).expect("notify scheduler entered");
+            release_rx.recv().expect("wait for busy scheduler release");
+            let _ = done_tx.send(SchedulerThreadExit::Returned);
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("scheduler test thread must enter busy section");
+
+        let mut handle = DaemonServerHandle {
+            socket_path: std::env::temp_dir().join(format!(
+                "ee-daemon-scheduler-timeout-test-{}-{}",
+                std::process::id(),
+                uuid::Uuid::now_v7()
+            )),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            pool: InflightPool::new(1),
+            accept_thread: None,
+            scheduler_thread: Some(SchedulerThreadHandle { join, done_rx }),
+            shutdown_done: AtomicBool::new(false),
+            workers_drained: AtomicBool::new(false),
+        };
+
+        let started = Instant::now();
+        let error = handle
+            .shutdown_with_worker_drain_timeout(Duration::from_millis(20))
+            .expect_err("busy scheduler must make shutdown return a bounded timeout");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < DAEMON_SCHEDULER_JOIN_TIMEOUT + Duration::from_millis(500),
+            "scheduler shutdown must be bounded; elapsed {:?}",
+            started.elapsed()
+        );
+        assert!(
+            handle.scheduler_thread.is_some(),
+            "timed-out scheduler join must remain retryable"
+        );
+
+        release_tx.send(()).expect("release busy scheduler");
+        handle
+            .shutdown_with_worker_drain_timeout(Duration::from_millis(50))
+            .expect("shutdown retry must join scheduler after busy task exits");
+        assert!(
+            handle.scheduler_thread.is_none(),
+            "successful retry must consume scheduler join handle"
         );
     }
 

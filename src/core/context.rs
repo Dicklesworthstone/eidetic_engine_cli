@@ -29,7 +29,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -1033,6 +1033,8 @@ pub enum ContextPackError {
     Search(SearchError),
     Pack(String),
     PolicyDenied(String),
+    DeadlineExceeded(String),
+    Cancelled(String),
 }
 
 impl ContextPackError {
@@ -1042,7 +1044,7 @@ impl ContextPackError {
             Self::Storage(_) => Some("ee init --workspace ."),
             Self::Search(error) => error.repair_hint(),
             Self::Pack(_) => Some("ee context --help"),
-            Self::PolicyDenied(_) => None,
+            Self::PolicyDenied(_) | Self::DeadlineExceeded(_) | Self::Cancelled(_) => None,
         }
     }
 
@@ -1055,9 +1057,11 @@ impl ContextPackError {
 impl std::fmt::Display for ContextPackError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Storage(message) | Self::Pack(message) | Self::PolicyDenied(message) => {
-                formatter.write_str(message)
-            }
+            Self::Storage(message)
+            | Self::Pack(message)
+            | Self::PolicyDenied(message)
+            | Self::DeadlineExceeded(message)
+            | Self::Cancelled(message) => formatter.write_str(message),
             Self::Search(error) => std::fmt::Display::fmt(error, formatter),
         }
     }
@@ -1502,6 +1506,23 @@ pub fn run_context_pack_with_performance(
         command,
         &determinism,
         PackRecordPersistence::Ambient,
+        ContextPackControl::unbounded(),
+    )
+}
+
+pub fn run_context_pack_with_performance_controlled(
+    options: &ContextPackOptions,
+    command: &'static str,
+    deadline: Option<Duration>,
+    cancellation_flag: Option<&AtomicBool>,
+) -> Result<ContextPackPerformanceRun, ContextPackError> {
+    let determinism = Deterministic::from_seed(0);
+    run_context_pack_with_performance_inner(
+        options,
+        command,
+        &determinism,
+        PackRecordPersistence::Ambient,
+        ContextPackControl::new(deadline, cancellation_flag),
     )
 }
 
@@ -1515,6 +1536,7 @@ pub fn run_context_pack_with_performance_seeded(
         command,
         determinism,
         PackRecordPersistence::Seeded(determinism),
+        ContextPackControl::unbounded(),
     )
 }
 
@@ -1522,6 +1544,47 @@ pub fn run_context_pack_with_performance_seeded(
 enum PackRecordPersistence<'a> {
     Ambient,
     Seeded(&'a Deterministic<Seed>),
+}
+
+#[derive(Clone, Copy)]
+struct ContextPackControl<'a> {
+    deadline: Option<Instant>,
+    cancellation_flag: Option<&'a AtomicBool>,
+}
+
+impl<'a> ContextPackControl<'a> {
+    fn unbounded() -> Self {
+        Self {
+            deadline: None,
+            cancellation_flag: None,
+        }
+    }
+
+    fn new(deadline: Option<Duration>, cancellation_flag: Option<&'a AtomicBool>) -> Self {
+        let now = Instant::now();
+        Self {
+            deadline: deadline.and_then(|duration| now.checked_add(duration)),
+            cancellation_flag,
+        }
+    }
+
+    fn check(self) -> Result<(), ContextPackError> {
+        if let Some(flag) = self.cancellation_flag
+            && flag.load(Ordering::SeqCst)
+        {
+            return Err(ContextPackError::Cancelled(
+                "context pack cancelled by caller shutdown signal".to_owned(),
+            ));
+        }
+        if let Some(deadline) = self.deadline
+            && Instant::now() >= deadline
+        {
+            return Err(ContextPackError::DeadlineExceeded(
+                "context pack deadline expired before the next execution checkpoint".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Explain why a target memory was (or was not) selected for a context pack.
@@ -1860,8 +1923,10 @@ fn run_context_pack_with_performance_inner(
     command: &'static str,
     determinism: &Deterministic<Seed>,
     pack_record_persistence: PackRecordPersistence<'_>,
+    control: ContextPackControl<'_>,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
     let total_start = Instant::now();
+    control.check()?;
     let mut trace = ContextPerformanceTrace::default();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
 
@@ -1890,6 +1955,7 @@ fn run_context_pack_with_performance_inner(
         })
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     }
+    control.check()?;
     trace.record_elapsed("requestValidate", request_start);
 
     let mut effective_filters = options.filters.clone();
@@ -1915,6 +1981,7 @@ fn run_context_pack_with_performance_inner(
             database_path.display()
         )));
     }
+    control.check()?;
 
     let mut degraded = Vec::new();
 
@@ -1933,6 +2000,7 @@ fn run_context_pack_with_performance_inner(
     .map_err(|error| ContextPackError::Storage(format!("Failed to open database: {error}")))?;
     trace.db_open_count = trace.db_open_count.saturating_add(1);
     trace.record_elapsed("dbOpen", snapshot_open_start);
+    control.check()?;
     let read_snapshot_generation = checked_context_read_snapshot(&read_pool, &read_snapshot)
         .ok()
         .and_then(|connection| context_read_snapshot_generation(connection).ok());
@@ -1975,6 +2043,7 @@ fn run_context_pack_with_performance_inner(
                 &mut degraded,
             )
         {
+            control.check()?;
             return Ok(cached_run);
         }
         l2_context
@@ -1982,6 +2051,7 @@ fn run_context_pack_with_performance_inner(
         None
     };
 
+    control.check()?;
     let search_start = Instant::now();
     let mut context_write_connection = if options.persist_pack {
         DbConnection::open_file(&database_path).ok()
@@ -2033,6 +2103,7 @@ fn run_context_pack_with_performance_inner(
     };
     trace.index_status_checks = trace.index_status_checks.saturating_add(1);
     trace.record_elapsed("search", search_start);
+    control.check()?;
 
     push_search_degradations(&mut degraded, &search_report.degraded);
     if matches!(
@@ -2069,6 +2140,7 @@ fn run_context_pack_with_performance_inner(
         } else {
             SearchStatus::Success
         };
+        control.check()?;
     }
 
     // Apply metadata query filters to search results. Tag filters are applied
@@ -2137,6 +2209,7 @@ fn run_context_pack_with_performance_inner(
             Some("Fix or remove .ee/config.toml.".to_string()),
         ),
     }
+    control.check()?;
 
     let candidate_start = Instant::now();
     let candidate_filter_input_count = search_report.results.len();
@@ -2212,6 +2285,7 @@ fn run_context_pack_with_performance_inner(
             ),
         );
     }
+    control.check()?;
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let graph_hint_start = Instant::now();
     let graph_metrics = apply_graph_hints(
@@ -2229,6 +2303,7 @@ fn run_context_pack_with_performance_inner(
     candidate_metrics.graph_missing_seeds = graph_metrics.missing_seeds;
     candidate_metrics.graph_traversed_edges = graph_metrics.traversed_edges;
     trace.record_elapsed("candidateResolution", candidate_start);
+    control.check()?;
 
     let focus_start = Instant::now();
     trace.focus_state_read_attempts = trace.focus_state_read_attempts.saturating_add(1);
@@ -2256,6 +2331,7 @@ fn run_context_pack_with_performance_inner(
         ),
     }
     trace.record_elapsed("focusState", focus_start);
+    control.check()?;
 
     let scope_filter_input_count =
         candidate_filter_input_count.saturating_add(trace.focus_candidate_count);
@@ -2354,6 +2430,7 @@ fn run_context_pack_with_performance_inner(
     } else {
         Vec::new()
     };
+    control.check()?;
 
     let ppr_rerank_start = Instant::now();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
@@ -2410,6 +2487,7 @@ fn run_context_pack_with_performance_inner(
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut agent_profile =
         apply_agent_context_profile_bias(read_connection, &options.workspace_path, &mut candidates);
+    control.check()?;
 
     let scoring_ordering_start = Instant::now();
     sort_context_candidates(&mut candidates);
@@ -2441,6 +2519,7 @@ fn run_context_pack_with_performance_inner(
     candidate_metrics.subspans.scoring_ordering = scoring_ordering_start.elapsed();
     trace.record_candidate_resolution_subspans(&candidate_metrics.subspans);
     trace.candidate_resolution = candidate_metrics;
+    control.check()?;
 
     let pack_slot_acquisition = try_acquire_pack_slot(
         &options.workspace_path,
@@ -2489,6 +2568,7 @@ fn run_context_pack_with_performance_inner(
         };
 
     let pack_start = Instant::now();
+    control.check()?;
     let pack_candidates = if concurrent_limit_retry_after_ms.is_some() {
         Vec::new()
     } else {
@@ -2625,6 +2705,7 @@ fn run_context_pack_with_performance_inner(
         set_agent_profile_base_pack_hash(profile, draft.hash.as_deref());
     }
     trace.record_elapsed("packAssembly", pack_start);
+    control.check()?;
     let slo = if let Some(retry_after_ms) = concurrent_limit_retry_after_ms {
         let actuals = PackAssemblySloActuals::from_pack_run(
             &draft,
@@ -2662,6 +2743,7 @@ fn run_context_pack_with_performance_inner(
     response_degraded.extend(slo.context_degradations());
 
     let persist_start = Instant::now();
+    control.check()?;
     if options.persist_pack {
         trace.pack_record_writes = trace.pack_record_writes.saturating_add(1);
     }

@@ -20,9 +20,18 @@ use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use ee::core::context::{
+    ContextPackError, ContextPackOptions, ContextPackOutputOptions,
+    run_context_pack_with_performance_controlled,
+};
+use ee::core::search::SearchSourceMode;
 use ee::daemon::{
     DAEMON_METHOD_UNAUTHORIZED_CODE, DAEMON_REQUEST_MAX_BYTES, DAEMON_REQUEST_SCHEMA_V1,
     DAEMON_RESPONSE_MAX_BYTES, DAEMON_RESPONSE_SCHEMA_V1, DAEMON_SHUTTING_DOWN_CODE,
@@ -35,6 +44,12 @@ use ee::daemon::{
     },
 };
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+use ee::models::{MemoryScope, QueryFilters, RedactionLevel};
+use ee::pack::{ContextPackProfile, DEFAULT_COORDINATION_STALE_AFTER_MS, PackResourceProfile};
+use ee::search::SpeedMode;
+use ee::steward::{
+    JobPriority, JobType, ManualRunner, RunnerOptions, ScoreDecayJobOptions, run_score_decay_job,
+};
 
 type TestResult = Result<(), String>;
 const TEST_AGENT_ID: &str = "agent-daemon-uds-test";
@@ -132,6 +147,45 @@ fn context_pack_params(workspace: &Path, database: &Path, task: &str) -> serde_j
         "maxTokens": 600,
         "readOnly": true
     })
+}
+
+fn context_pack_options(workspace: &Path, database: &Path, task: &str) -> ContextPackOptions {
+    ContextPackOptions {
+        workspace_path: workspace.to_path_buf(),
+        database_path: Some(database.to_path_buf()),
+        index_dir: None,
+        query: task.to_owned(),
+        speed: SpeedMode::Instant,
+        source_mode: SearchSourceMode::LexicalOnly,
+        strict_source_mode: false,
+        filters: QueryFilters::default(),
+        profile: Some(ContextPackProfile::Balanced),
+        max_tokens: Some(600),
+        candidate_pool: Some(20),
+        max_results: None,
+        include_tombstoned: false,
+        as_of: None,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
+        require_fresh_sentinels: false,
+        relevance_floor: None,
+        redaction_level: RedactionLevel::Minimal,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        ppr_weight: None,
+        changed_symbols: Vec::new(),
+        changed_symbols_from_git: false,
+        pagination: None,
+        coordination_snapshot_path: None,
+        coordination_stale_after_ms: DEFAULT_COORDINATION_STALE_AFTER_MS,
+        task_lens: None,
+        output_options: ContextPackOutputOptions::default()
+            .with_resource_profile(PackResourceProfile::Standard),
+        persist_pack: false,
+        baseline_write: None,
+        no_lod: false,
+    }
 }
 
 fn write_raw_frame(stream: &mut UnixStream, body: &[u8]) -> TestResult {
@@ -700,6 +754,141 @@ fn daemon_context_zero_timeout_refuses_before_pack_execution() -> TestResult {
         .shutdown()
         .map_err(|error| format!("shutdown: {error}"))?;
     Ok(())
+}
+
+#[test]
+fn daemon_context_controlled_runner_honors_deadline_and_cancellation_before_db_work() -> TestResult
+{
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = temp.path().join("workspace");
+    let database = workspace.join(".ee").join("missing.db");
+    let options = context_pack_options(
+        &workspace,
+        &database,
+        "deadline and cancellation should win before storage",
+    );
+
+    let deadline_error =
+        run_context_pack_with_performance_controlled(&options, "pack", Some(Duration::ZERO), None)
+            .expect_err("pre-expired deadline must stop before storage access");
+    match deadline_error {
+        ContextPackError::DeadlineExceeded(message) => ensure(
+            message.contains("deadline"),
+            format!("deadline error should name deadline, got: {message}"),
+        )?,
+        other => {
+            return Err(format!(
+                "pre-expired deadline must produce DeadlineExceeded, got {other:?}"
+            ));
+        }
+    }
+
+    let shutdown = AtomicBool::new(true);
+    let cancellation_error =
+        run_context_pack_with_performance_controlled(&options, "pack", None, Some(&shutdown))
+            .expect_err("pre-set cancellation flag must stop before storage access");
+    match cancellation_error {
+        ContextPackError::Cancelled(message) => ensure(
+            message.contains("shutdown"),
+            format!("cancellation error should name shutdown, got: {message}"),
+        )?,
+        other => {
+            return Err(format!(
+                "pre-set cancellation must produce Cancelled, got {other:?}"
+            ));
+        }
+    }
+    ensure(
+        shutdown.load(Ordering::SeqCst),
+        "test cancellation flag should remain set",
+    )
+}
+
+#[test]
+fn daemon_background_runner_cancellation_flag_cancels_pending_job_promptly() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let shutdown = Arc::new(AtomicBool::new(true));
+    let mut runner = ManualRunner::new(
+        RunnerOptions::new()
+            .with_workspace_path(temp.path().join("workspace"))
+            .with_cancellation_flag(Arc::clone(&shutdown)),
+    );
+    runner.schedule(
+        JobType::HealthCheck,
+        JobPriority::Normal,
+        Some("daemon shutdown cancellation test".to_owned()),
+    );
+
+    let started = Instant::now();
+    let report = runner.run_pending();
+
+    ensure(report.was_cancelled, "runner must report cancellation")?;
+    ensure(
+        report.failed == 1,
+        format!(
+            "cancelled job should count as failed; got {}",
+            report.failed
+        ),
+    )?;
+    ensure(
+        report.results.len() == 1,
+        format!(
+            "one pending job should produce one result; got {:?}",
+            report.results
+        ),
+    )?;
+    let result = &report.results[0];
+    ensure(
+        result.outcome.as_str() == "cancelled",
+        format!("pending job should be cancelled; got {}", result.outcome),
+    )?;
+    ensure(
+        result.items_processed == Some(0),
+        format!(
+            "cancelled job must not process items; got {:?}",
+            result.items_processed
+        ),
+    )?;
+    ensure(
+        started.elapsed() < Duration::from_millis(250),
+        format!(
+            "cooperative daemon cancellation should be prompt; elapsed {:?}",
+            started.elapsed()
+        ),
+    )?;
+    ensure(
+        shutdown.load(Ordering::SeqCst),
+        "test cancellation flag should remain set",
+    )
+}
+
+#[test]
+fn daemon_score_decay_job_honors_shutdown_before_background_work() -> TestResult {
+    let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+    connection.migrate().map_err(|error| error.to_string())?;
+    let shutdown = Arc::new(AtomicBool::new(true));
+    let options = ScoreDecayJobOptions::new("wsp-daemon-score-decay-cancel")
+        .with_cancellation_flag(Arc::clone(&shutdown));
+
+    let started = Instant::now();
+    let error = run_score_decay_job(&connection, &options)
+        .expect_err("pre-set daemon shutdown flag must cancel score decay");
+
+    ensure(
+        error.contains("shutdown"),
+        format!("score decay cancellation should name shutdown, got: {error}"),
+    )?;
+    ensure(
+        started.elapsed() < Duration::from_millis(250),
+        format!(
+            "score decay cancellation should be prompt; elapsed {:?}",
+            started.elapsed()
+        ),
+    )?;
+    ensure(
+        shutdown.load(Ordering::SeqCst),
+        "test cancellation flag should remain set",
+    )
 }
 
 #[test]
