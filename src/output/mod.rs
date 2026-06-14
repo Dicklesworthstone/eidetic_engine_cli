@@ -502,10 +502,10 @@ impl CardMath {
             b.field_str("formula", formula);
         }
         if let Some(value) = self.value {
-            b.field_raw("value", &format!("{:.6}", value));
+            b.field_raw("value", &json_number(value, 6));
         }
         if let Some(confidence) = self.confidence {
-            b.field_raw("confidence", &format!("{:.4}", confidence));
+            b.field_raw("confidence", &json_number(confidence, 4));
         }
         if let Some(ref unit) = self.unit {
             b.field_str("unit", unit);
@@ -654,10 +654,19 @@ pub fn pack_budget_card(
     item_count: u32,
     omitted_count: u32,
 ) -> Card {
-    let utilization = (used_tokens as f64 / max_tokens as f64) * 100.0;
+    let utilization = if max_tokens == 0 {
+        f64::NAN
+    } else {
+        (used_tokens as f64 / max_tokens as f64) * 100.0
+    };
+    let utilization_label = if utilization.is_finite() {
+        format!("{utilization:.1}%")
+    } else {
+        "unavailable".to_string()
+    };
     let formula = "utilization = used_tokens / max_tokens";
     let summary = format!(
-        "{used_tokens}/{max_tokens} tokens ({utilization:.1}%), \
+        "{used_tokens}/{max_tokens} tokens ({utilization_label}), \
          {item_count} items packed, {omitted_count} omitted"
     );
     let math = CardMath::new()
@@ -3576,8 +3585,16 @@ fn build_item_provenance(obj: &mut JsonBuilder, entry: &PackItemProvenance) {
     });
 }
 
+fn json_number(value: f64, precision: usize) -> String {
+    if value.is_finite() {
+        format!("{value:.precision$}")
+    } else {
+        "null".to_string()
+    }
+}
+
 fn score_json(score: f32) -> String {
-    format!("{score:.6}")
+    json_number(f64::from(score), 6)
 }
 
 fn string_array_json<I, S>(values: I) -> String
@@ -11556,10 +11573,15 @@ pub fn help_text() -> &'static str {
 
 #[must_use]
 pub fn schema_json() -> String {
-    format!(
-        "{{\"schema\":\"{}\",\"success\":true,\"data\":{{\"command\":\"schema\",\"schemas\":{{\"response\":\"{}\",\"error\":\"{}\"}}}}}}",
-        RESPONSE_SCHEMA_V2, RESPONSE_SCHEMA_V2, ERROR_SCHEMA_V2
-    )
+    let mut b = JsonBuilder::with_capacity(2048);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "schema");
+        d.field_str("schemaId", RESPONSE_SCHEMA_V2);
+        d.field_raw("definition", &response_schema_definition());
+    });
+    b.finish()
 }
 
 #[must_use]
@@ -17336,7 +17358,7 @@ mod tests {
         render_status_skyline_json, render_status_skyline_markdown, render_status_skyline_toon,
         render_status_toon, render_structural_health_json, render_structural_health_markdown,
         render_structural_health_toon, render_version_json, render_why_causal_json,
-        render_why_causal_markdown, render_why_causal_toon, status_response_json,
+        render_why_causal_markdown, render_why_causal_toon, schema_json, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::degraded_aggregation::AggregatedDegradation;
@@ -18739,6 +18761,48 @@ mod tests {
         let help = help_text();
         ensure_contains(help, "ee status [--json]", "help status command")?;
         ensure_contains(help, "ee --version", "help version command")
+    }
+
+    #[test]
+    fn schema_json_returns_response_json_schema_not_stub_catalog() -> TestResult {
+        let output = schema_json();
+        let parsed = serde_json::from_str::<serde_json::Value>(&output)
+            .map_err(|error| format!("schema_json must emit valid JSON: {error}"))?;
+        ensure_equal(
+            &parsed["schema"],
+            &serde_json::json!(RESPONSE_SCHEMA_V2),
+            "schema envelope id",
+        )?;
+        ensure_equal(
+            &parsed["data"]["command"],
+            &serde_json::json!("schema"),
+            "schema command",
+        )?;
+        ensure_equal(
+            &parsed["data"]["schemaId"],
+            &serde_json::json!(RESPONSE_SCHEMA_V2),
+            "exported schema id",
+        )?;
+        let definition = &parsed["data"]["definition"];
+        ensure_equal(
+            &definition["$schema"],
+            &serde_json::json!("https://json-schema.org/draft/2020-12/schema"),
+            "json schema dialect",
+        )?;
+        ensure_equal(
+            &definition["$id"],
+            &serde_json::json!("https://eidetic-engine/schemas/ee.response.v2.json"),
+            "response schema id",
+        )?;
+        ensure_equal(
+            &definition["title"],
+            &serde_json::json!(RESPONSE_SCHEMA_V2),
+            "response schema title",
+        )?;
+        ensure(
+            parsed["data"].get("schemas").is_none(),
+            "global --schema must not return the old schema-id catalog",
+        )
     }
 
     #[test]

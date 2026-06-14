@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use ee::curate::{
     CandidateType, OutcomeProbabilities, RISK_CALIBRATION_MIN_COUNT, RiskCertificate, RiskFactor,
 };
-use ee::output::{CardsProfile, render_cards_json, selection_score_card, trust_score_card};
+use ee::output::{
+    Card, CardKind, CardMath, CardsProfile, pack_budget_card, render_cards_json,
+    selection_score_card, trust_score_card,
+};
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -194,4 +197,43 @@ fn math_cards_carry_complete_decision_explanations_without_changing_curation() -
         "adding math cards does not change curation decision",
     )?;
     assert_golden("cards", "math_curation", &pretty(&value)?)
+}
+
+#[test]
+fn math_cards_emit_valid_json_for_non_finite_numbers() -> TestResult {
+    let cards = vec![
+        Card::new("card_non_finite", CardKind::Audit, "Non-finite math").with_math(
+            CardMath::new()
+                .with_value(f64::NAN)
+                .with_confidence(f64::INFINITY),
+        ),
+        pack_budget_card(0, 0, 0, 0),
+    ];
+    let rendered = render_cards_json(&cards, CardsProfile::Math);
+    let value: Value = serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+    let items = value
+        .as_array()
+        .ok_or_else(|| "cards should render as array".to_string())?;
+
+    let first_math = &items[0]["math"];
+    ensure(
+        first_math["value"].is_null(),
+        "NaN card value should render as JSON null",
+    )?;
+    ensure(
+        first_math["confidence"].is_null(),
+        "infinite card confidence should render as JSON null",
+    )?;
+
+    let budget_card = &items[1];
+    ensure(
+        budget_card["math"]["value"].is_null(),
+        "zero-token budget utilization should render as JSON null",
+    )?;
+    ensure(
+        budget_card["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("unavailable")),
+        "zero-token budget summary should not print inf or NaN",
+    )
 }
