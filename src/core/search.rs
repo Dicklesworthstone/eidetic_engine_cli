@@ -4178,13 +4178,18 @@ fn dedupe_hits_on_doc_id(hits: Vec<SearchHit>) -> (Vec<SearchHit>, usize) {
     for hit in hits {
         if let Some(&index) = seen.get(&hit.doc_id) {
             collapsed += 1;
-            // Upgrade only on strictly higher score so ties keep the
-            // first-seen entry (deterministic).
-            //
-            // Both `hit.score` and the stored score may be NaN if the
-            // upstream search ever produced them; for NaN we never
-            // upgrade — `NaN > x` is always false.
-            if hit.score > deduped[index].score {
+            // Upgrade only on strictly higher finite score so ties keep the
+            // first-seen entry (deterministic). A later finite score must
+            // still displace an earlier non-finite score; otherwise one
+            // malformed arm can cause the relevance floor to drop a valid
+            // duplicate result.
+            let existing_score = deduped[index].score;
+            let should_replace = match (existing_score.is_finite(), hit.score.is_finite()) {
+                (false, true) => true,
+                (true, true) => hit.score > existing_score,
+                _ => false,
+            };
+            if should_replace {
                 deduped[index] = hit;
             }
         } else {
@@ -12498,6 +12503,18 @@ mod tests {
         assert!(
             (deduped[0].score - 0.4).abs() < 1e-5,
             "NaN must not overwrite a finite higher score"
+        );
+    }
+
+    #[test]
+    fn dedupe_finite_score_replaces_prior_non_finite_score() {
+        let hits = vec![synthetic_hit("a", f32::NAN), synthetic_hit("a", 0.4)];
+        let (deduped, collapsed) = dedupe_hits_on_doc_id(hits);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(collapsed, 1);
+        assert!(
+            (deduped[0].score - 0.4).abs() < 1e-5,
+            "finite duplicate must survive a prior malformed non-finite score"
         );
     }
 
