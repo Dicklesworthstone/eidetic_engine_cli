@@ -16036,10 +16036,34 @@ fn push_audit_insert_params(
 impl DbConnection {
     /// Insert a new audit log entry.
     pub fn insert_audit(&self, id: &str, input: &CreateAuditInput) -> Result<()> {
+        // For file databases, the hash-read and row-insert must be atomic under the
+        // write-owner flock so concurrent callers cannot fork the audit chain.
+        // When already inside with_transaction() (depth > 0), the outer flock already
+        // covers both steps — proceed directly.  When at depth 0, start our own
+        // transaction to close the TOCTOU window between latest_audit_row_hash()
+        // and insert_prepared_audit_entry().  Memory databases are single-process so
+        // no cross-process race applies; fall through to the shared path below.
+        if matches!(&self.location, DatabaseLocation::File(_)) {
+            let in_gate = FILE_WRITE_OWNER_DEPTHS.with(|d| {
+                d.borrow()
+                    .get(&write_owner_key(&self.location))
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+            });
+            if !in_gate {
+                return self.with_transaction(|| {
+                    let prev_row_hash = self.latest_audit_row_hash()?;
+                    let entry =
+                        build_audit_entry(id, input, Utc::now().to_rfc3339(), prev_row_hash);
+                    self.insert_prepared_audit_entry(&entry)?;
+                    Ok(())
+                });
+            }
+        }
         let prev_row_hash = self.latest_audit_row_hash()?;
         let entry = build_audit_entry(id, input, Utc::now().to_rfc3339(), prev_row_hash);
         self.insert_prepared_audit_entry(&entry)?;
-
         Ok(())
     }
 
@@ -36626,6 +36650,93 @@ mod tests {
             &expected,
             "parallel file-backed writers serialize and persist every row",
         )
+    }
+
+    // bd-3mq1r: insert_audit() at depth-0 must start its own transaction so the
+    // prev-hash read and row insert are atomic.  Before the fix, concurrent callers
+    // at depth 0 could both read the same latest hash and produce two rows with
+    // identical prev_row_hash values (a forked chain).
+    #[test]
+    fn insert_audit_concurrent_maintains_linear_chain() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let db_path = tempdir.path().join("audit-chain-concurrent.db");
+        let setup =
+            DbConnection::open(DatabaseConfig::file(&db_path)).map_err(TestFailure::from)?;
+        setup.migrate().map_err(TestFailure::from)?;
+        setup.close().map_err(TestFailure::from)?;
+
+        // Four threads race to insert audit rows without holding any outer transaction.
+        const WRITER_COUNT: usize = 4;
+        let start = Arc::new(Barrier::new(WRITER_COUNT));
+        let mut handles = Vec::with_capacity(WRITER_COUNT);
+
+        for index in 0..WRITER_COUNT {
+            let db_path = db_path.clone();
+            let start = Arc::clone(&start);
+            handles.push(thread::spawn(move || -> std::result::Result<(), String> {
+                start.wait();
+                let connection = DbConnection::open(DatabaseConfig::file(&db_path))
+                    .map_err(|error| format!("audit writer {index} open: {error}"))?;
+                let audit_id = super::generate_audit_id();
+                connection
+                    .insert_audit(
+                        &audit_id,
+                        &super::CreateAuditInput {
+                            workspace_id: None,
+                            actor: Some(format!("writer-{index}")),
+                            action: "memory.create".to_owned(),
+                            target_type: Some("memory".to_owned()),
+                            target_id: Some(format!("mem_{index:0>38}")),
+                            details: None,
+                        },
+                    )
+                    .map_err(|error| format!("audit writer {index} insert: {error}"))?;
+                connection
+                    .close()
+                    .map_err(|error| format!("audit writer {index} close: {error}"))
+            }));
+        }
+
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| TestFailure::new("audit concurrent writer thread panicked"))?
+                .map_err(TestFailure::new)?;
+        }
+
+        // Verify the chain has no forks: no two rows may share the same prev_row_hash.
+        let verify =
+            DbConnection::open(DatabaseConfig::file(&db_path)).map_err(TestFailure::from)?;
+        let rows = verify
+            .list_audit_entries(None, None)
+            .map_err(TestFailure::from)?;
+
+        ensure_equal(
+            &rows.len(),
+            &WRITER_COUNT,
+            "all concurrent audit inserts were persisted",
+        )?;
+
+        let mut seen_prev: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for row in &rows {
+            if let Some(prev) = &row.prev_row_hash {
+                ensure(
+                    seen_prev.insert(prev.clone()),
+                    "no two audit rows share the same prev_row_hash (chain is linear)",
+                )?;
+            }
+            // Every row's this_row_hash must be internally consistent.
+            if let Some(stored_hash) = &row.this_row_hash {
+                ensure_equal(
+                    stored_hash,
+                    &super::compute_audit_row_hash(row),
+                    "stored this_row_hash matches recomputed hash",
+                )?;
+            }
+        }
+
+        verify.close().map_err(TestFailure::from)?;
+        Ok(())
     }
 
     #[test]
