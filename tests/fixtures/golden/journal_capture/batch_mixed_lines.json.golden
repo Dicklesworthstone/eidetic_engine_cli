@@ -1,0 +1,48 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "command": "journal append",
+    "version": "0.9.1",
+    "status": "stored",
+    "lineCount": 3,
+    "storedCount": 2,
+    "failedCount": 1,
+    "results": [
+      {
+        "line": 1,
+        "status": "stored",
+        "entryId": "jrn_018ff8dc-3d85-7cc0-a6fd-a2d479e6d402",
+        "errorCode": null,
+        "errorMessage": null,
+        "truncated": false,
+        "redactionApplied": false
+      },
+      {
+        "line": 2,
+        "status": "failed",
+        "entryId": null,
+        "errorCode": "journal_body_required",
+        "errorMessage": "journal entry body must not be empty",
+        "truncated": false,
+        "redactionApplied": false
+      },
+      {
+        "line": 3,
+        "status": "stored",
+        "entryId": "jrn_018ff8dc-3d85-7cc0-a6fd-a2d479e6d403",
+        "errorCode": null,
+        "errorMessage": null,
+        "truncated": false,
+        "redactionApplied": true
+      }
+    ],
+    "degraded": [
+      {
+        "code": "journal_redaction_applied",
+        "severity": "info",
+        "message": "Redaction screen replaced 1 secret-like span(s) [api_key] before persistence; the stored entry contains placeholders only."
+      }
+    ]
+  }
+}

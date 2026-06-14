@@ -497,6 +497,20 @@ pub const RULE_SCHEMAS: &[SchemaEntry] = &[
     SchemaEntry::new("rule_show", "ee.rule.show.v1", SchemaCategory::Memory),
 ];
 
+/// Journal capture and distillation schemas.
+pub const JOURNAL_SCHEMAS: &[SchemaEntry] = &[
+    SchemaEntry::new(
+        "journal_entry",
+        "ee.journal.entry.v1",
+        SchemaCategory::Memory,
+    ),
+    SchemaEntry::new(
+        "journal_distill",
+        "ee.journal.distill.v1",
+        SchemaCategory::Memory,
+    ),
+];
+
 /// Audit schemas.
 pub const AUDIT_SCHEMAS: &[SchemaEntry] = &[
     SchemaEntry::new(
@@ -604,6 +618,7 @@ pub fn all_schemas() -> Vec<&'static SchemaEntry> {
     schemas.extend(HOOKS_SCHEMAS.iter());
     schemas.extend(LEARN_SCHEMAS.iter());
     schemas.extend(RULE_SCHEMAS.iter());
+    schemas.extend(JOURNAL_SCHEMAS.iter());
     schemas.extend(AUDIT_SCHEMAS.iter());
     schemas.extend(EVAL_SCHEMAS.iter());
     schemas.extend(VERIFICATION_SCHEMAS.iter());

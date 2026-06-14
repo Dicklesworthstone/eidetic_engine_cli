@@ -1,0 +1,50 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "schema": "ee.journal.distill.v1",
+    "command": "journal distill",
+    "version": "0.9.1",
+    "status": "ok",
+    "workspaceId": "wsp_journal_capture_fixture",
+    "scannedCount": 4,
+    "scope": {
+      "session": "journal-capture-fixture",
+      "agent": null,
+      "since": null
+    },
+    "dryRun": true,
+    "proposals": [
+      {
+        "proposalId": "prop_journal_capture_fixture",
+        "action": "create_candidate",
+        "targetMemoryId": null,
+        "level": "episodic",
+        "kind": "failure",
+        "contentDraft": "Recurring command failure: cargo test --lib journal_capture failed with linker cache missing object.",
+        "typedFields": {
+          "family": "cargo test",
+          "cause": "linker cache missing"
+        },
+        "evidence": [
+          "journal://jrn_018ff8dc-3d85-7cc0-a6fd-a2d479e6d401",
+          "journal://jrn_018ff8dc-3d85-7cc0-a6fd-a2d479e6d402",
+          "journal://jrn_018ff8dc-3d85-7cc0-a6fd-a2d479e6d403"
+        ],
+        "clusterSize": 3,
+        "dedup": {
+          "nearestMemoryId": null,
+          "similarity": null
+        }
+      }
+    ],
+    "abstentions": [
+      {
+        "entryId": "jrn_018ff8dc-3d85-7cc0-a6fd-a2d479e6d404",
+        "reason": "instruction_risk_excluded"
+      }
+    ],
+    "applied": null,
+    "degraded": []
+  }
+}

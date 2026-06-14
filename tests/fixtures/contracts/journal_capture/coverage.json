@@ -1,0 +1,25 @@
+{
+  "schema": "ee.journal_capture.contract.v1",
+  "bead": "bd-1pi9m.6",
+  "e2eScript": "scripts/e2e_journal_capture.sh",
+  "schemas": [
+    "docs/schemas/ee.journal.entry.v1.json",
+    "docs/schemas/ee.journal.distill.v1.json"
+  ],
+  "goldens": [
+    "tests/fixtures/golden/journal_capture/append_command_failure.json.golden",
+    "tests/fixtures/golden/journal_capture/batch_mixed_lines.json.golden",
+    "tests/fixtures/golden/journal_capture/distill_dry_run.json.golden"
+  ],
+  "propertyAxes": [
+    "journal_jsonl_mixed_valid_invalid_lines",
+    "remember_idempotency_key_replay_same_memory_id"
+  ],
+  "failureModes": [
+    "journal_disabled",
+    "journal_entry_truncated",
+    "journal_redaction_applied",
+    "distill_no_candidates",
+    "pack_ledger_missing"
+  ]
+}

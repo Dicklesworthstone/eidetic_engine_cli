@@ -1,0 +1,39 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "command": "journal append",
+    "version": "0.9.1",
+    "status": "stored",
+    "entry": {
+      "schema": "ee.journal.entry.v1",
+      "entryId": "jrn_018ff8dc-3d85-7cc0-a6fd-a2d479e6d401",
+      "workspaceId": "wsp_journal_capture_fixture",
+      "agentName": "OrangePike",
+      "sessionKey": "journal-capture-fixture",
+      "kind": "command_failure",
+      "source": "hook",
+      "body": "cargo test journal capture failed: linker cache missing object after retry zero",
+      "structured": {
+        "cmd": "cargo test --lib journal_capture",
+        "cwd": "/workspace",
+        "exitCode": 101,
+        "paths": [
+          "src/core/journal.rs"
+        ],
+        "stderrTail": "error: linker cache missing object"
+      },
+      "redactionReport": {
+        "classesApplied": [],
+        "spanCount": 0
+      },
+      "instructionRisk": "low",
+      "createdAt": "2026-06-12T12:00:00Z",
+      "distilledAt": null,
+      "tombstonedAt": null
+    },
+    "truncated": false,
+    "redactionApplied": false,
+    "degraded": []
+  }
+}
