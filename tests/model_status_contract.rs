@@ -12,7 +12,7 @@ use ee::core::model::{
 };
 use ee::db::{CreateModelRegistryInput, CreateWorkspaceInput, DbConnection};
 use ee::models::model_registry::{
-    ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
+    EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
 };
 
 type TestResult = Result<(), String>;
@@ -57,27 +57,81 @@ fn insert_registry_entry(
     name: &str,
     status: ModelRegistryStatus,
 ) -> TestResult {
+    insert_embedding_registry_entry(
+        database_path,
+        workspace_id,
+        EmbeddingRegistryFixture {
+            id,
+            provider,
+            name,
+            status,
+            dimension: 384,
+            source_uri: None,
+            content_hash: None,
+            metadata_json: None,
+        },
+    )
+}
+
+struct EmbeddingRegistryFixture<'a> {
+    id: &'a str,
+    provider: ModelProvider,
+    name: &'a str,
+    status: ModelRegistryStatus,
+    dimension: u32,
+    source_uri: Option<String>,
+    content_hash: Option<String>,
+    metadata_json: Option<String>,
+}
+
+fn insert_embedding_registry_entry(
+    database_path: &Path,
+    workspace_id: &str,
+    fixture: EmbeddingRegistryFixture<'_>,
+) -> TestResult {
     let connection =
         DbConnection::open_file(database_path).map_err(|error| format!("reopen db: {error}"))?;
     connection
         .insert_model_registry_entry(
-            id,
+            fixture.id,
             &CreateModelRegistryInput {
                 workspace_id: workspace_id.to_string(),
-                provider,
-                model_name: name.to_string(),
+                provider: fixture.provider,
+                model_name: fixture.name.to_string(),
                 purpose: ModelPurpose::Embedding,
-                dimension: Some(384),
+                dimension: Some(fixture.dimension),
                 distance_metric: Some(ModelDistanceMetric::Cosine),
-                status,
+                status: fixture.status,
                 version: Some("v1".to_string()),
-                source_uri: None,
-                content_hash: None,
-                metadata_json: None,
+                source_uri: fixture.source_uri,
+                content_hash: fixture.content_hash,
+                metadata_json: fixture.metadata_json,
                 last_checked_at: None,
             },
         )
         .map_err(|error| format!("insert registry entry: {error}"))?;
+    Ok(())
+}
+
+fn embedding_metadata_json(dimension: u32) -> Result<String, String> {
+    let mut metadata = EmbeddingMetadataRecord::new(dimension, ModelDistanceMetric::Cosine);
+    metadata.deterministic = true;
+    metadata
+        .to_canonical_json()
+        .map_err(|error| format!("metadata json: {error}"))
+}
+
+fn valid_blake3_hash(content: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(content).to_hex())
+}
+
+fn write_index_metadata(workspace_path: &Path, metadata: serde_json::Value) -> TestResult {
+    let index_dir = workspace_path.join(".ee").join("index");
+    fs::create_dir_all(&index_dir).map_err(|error| format!("create index dir: {error}"))?;
+    let bytes = serde_json::to_vec_pretty(&metadata)
+        .map_err(|error| format!("encode metadata: {error}"))?;
+    fs::write(index_dir.join("meta.json"), bytes)
+        .map_err(|error| format!("write index metadata: {error}"))?;
     Ok(())
 }
 
@@ -171,6 +225,156 @@ fn model_status_empty_registry_emits_versioned_schema_and_degradation() -> TestR
         .and_then(|value| value.as_array())
         .ok_or("degradations array")?;
     ensure(degradations.len() == 1, "one degradation in JSON")?;
+    let lifecycle = json.get("modelLifecycle").ok_or("missing modelLifecycle")?;
+    ensure(
+        lifecycle
+            .pointer("/semanticReadiness/state")
+            .and_then(|value| value.as_str())
+            == Some("lexical_fallback"),
+        "empty registry should report lexical fallback readiness",
+    )?;
+    ensure(
+        lifecycle
+            .pointer("/models/0/modelId")
+            .and_then(|value| value.as_str())
+            == Some("frankensearch-hash-fallback"),
+        "empty registry should include an explicit hash fallback model row",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn model_lifecycle_reports_dimension_mismatch_with_repair_guidance() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace_path = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize: {error}"))?;
+    let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+    insert_embedding_registry_entry(
+        &database_path,
+        &workspace_id,
+        EmbeddingRegistryFixture {
+            id: "mdl_01HQ3K5Z000000000000000040",
+            provider: ModelProvider::Model2Vec,
+            name: "minilm",
+            status: ModelRegistryStatus::Available,
+            dimension: 384,
+            source_uri: None,
+            content_hash: None,
+            metadata_json: Some(embedding_metadata_json(384)?),
+        },
+    )?;
+    write_index_metadata(
+        &workspace_path,
+        serde_json::json!({
+            "sourceGeneration": 999999_u64,
+            "storedModelId": "mdl_01HQ3K5Z000000000000000040",
+            "storedModelRevision": "v1",
+            "storedModelHash": valid_blake3_hash(b"index-model"),
+            "storedDimension": 768,
+            "storedDistanceMetric": "cosine",
+            "storedVectorDtype": "float32",
+            "lastRebuildAt": "2026-06-14T00:00:00Z",
+            "derivedFrom": [".ee/ee.db"]
+        }),
+    )?;
+
+    let report = build_model_status_report(&ModelStatusOptions {
+        workspace_path: &workspace_path,
+        database_path: None,
+    })
+    .map_err(|error| format!("status report: {error:?}"))?;
+    let json = report.data_json();
+    let lifecycle = json.get("modelLifecycle").ok_or("missing modelLifecycle")?;
+    ensure(
+        lifecycle
+            .pointer("/semanticReadiness/state")
+            .and_then(|value| value.as_str())
+            == Some("dimension_mismatch"),
+        "readiness should surface the dimension mismatch",
+    )?;
+    ensure(
+        lifecycle
+            .pointer("/semanticReadiness/dimensionCompatibility/repair")
+            .and_then(|value| value.as_str())
+            == Some("ee index reembed --workspace ."),
+        "dimension mismatch should carry repair guidance",
+    )?;
+    ensure(
+        lifecycle
+            .pointer("/models/0/state")
+            .and_then(|value| value.as_str())
+            == Some("dimension_mismatch"),
+        "selected model row should be dimension_mismatch",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn model_lifecycle_reports_missing_and_corrupt_assets_without_panicking() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace_path = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize: {error}"))?;
+    let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+    insert_embedding_registry_entry(
+        &database_path,
+        &workspace_id,
+        EmbeddingRegistryFixture {
+            id: "mdl_01HQ3K5Z000000000000000050",
+            provider: ModelProvider::External,
+            name: "missing-model",
+            status: ModelRegistryStatus::Available,
+            dimension: 384,
+            source_uri: Some("models/missing.bin".to_string()),
+            content_hash: Some(valid_blake3_hash(b"expected")),
+            metadata_json: Some(embedding_metadata_json(384)?),
+        },
+    )?;
+    insert_embedding_registry_entry(
+        &database_path,
+        &workspace_id,
+        EmbeddingRegistryFixture {
+            id: "mdl_01HQ3K5Z000000000000000051",
+            provider: ModelProvider::External,
+            name: "bad-hash-model",
+            status: ModelRegistryStatus::Disabled,
+            dimension: 384,
+            source_uri: None,
+            content_hash: Some("blake3:not-a-valid-digest".to_string()),
+            metadata_json: Some(embedding_metadata_json(384)?),
+        },
+    )?;
+
+    let report = build_model_status_report(&ModelStatusOptions {
+        workspace_path: &workspace_path,
+        database_path: None,
+    })
+    .map_err(|error| format!("status report: {error:?}"))?;
+    let json = report.data_json();
+    let lifecycle = json.get("modelLifecycle").ok_or("missing modelLifecycle")?;
+    let model_states = lifecycle
+        .get("models")
+        .and_then(|value| value.as_array())
+        .ok_or("models array")?
+        .iter()
+        .map(|model| {
+            (
+                model.get("modelId").and_then(|value| value.as_str()),
+                model.get("state").and_then(|value| value.as_str()),
+            )
+        })
+        .collect::<Vec<_>>();
+    ensure(
+        model_states.contains(&(Some("mdl_01HQ3K5Z000000000000000050"), Some("missing"))),
+        "missing asset row should be reported as missing",
+    )?;
+    ensure(
+        model_states.contains(&(Some("mdl_01HQ3K5Z000000000000000051"), Some("corrupt"))),
+        "malformed content hash row should be reported as corrupt",
+    )?;
     Ok(())
 }
 

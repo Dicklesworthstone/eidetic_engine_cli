@@ -92,8 +92,15 @@ fn schema_identity_and_status_marker() -> TestResult {
         schema
             .pointer("/x-ee-status/shipped")
             .and_then(Value::as_bool)
-            == Some(false),
-        "x-ee-status.shipped must be false until bd-1iupc.2 lands collectors",
+            == Some(true),
+        "x-ee-status.shipped must be true once bd-1iupc.2 lands collectors",
+    )?;
+    ensure(
+        schema
+            .pointer("/x-ee-status/available_in_build")
+            .and_then(Value::as_bool)
+            == Some(true),
+        "x-ee-status.available_in_build must be true once the collector is emitted",
     )?;
     ensure(
         schema

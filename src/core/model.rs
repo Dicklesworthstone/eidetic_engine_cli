@@ -14,10 +14,14 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::config::workspace_fingerprint;
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
+use crate::core::index::{IndexHealth, IndexStatusOptions, get_index_status_with_connection};
 use crate::db::{CreateModelRegistryInput, DbConnection, DbError, StoredModelRegistryEntry};
 use crate::models::DomainError;
-use crate::models::model_registry::{ModelProvider, ModelPurpose, ModelRegistryStatus};
+use crate::models::model_registry::{
+    EmbeddingMetadataRecord, ModelProvider, ModelPurpose, ModelRegistryStatus,
+};
 use crate::search::HashEmbedder;
 use frankensearch::Embedder;
 
@@ -56,6 +60,13 @@ const DEFAULT_RERANK_MODEL_ARTIFACT_NAME: &str = "rerank-default-v1.tar.zst";
 
 pub const RERANK_MODEL_MANIFEST_SCHEMA_V1: &str = "ee.model_manifest.v1";
 pub const MODEL_FETCH_SCHEMA_V1: &str = "ee.model_fetch.v1";
+pub const MODEL_LIFECYCLE_SCHEMA_V1: &str = "ee.model_lifecycle.v1";
+
+const MODEL_LIFECYCLE_REDACTION_STATUS: &str = "paths_workspace_relative_or_hashed_no_content";
+const MODEL_LIFECYCLE_INDEX_ID: &str = "search-main";
+const MODEL_LIFECYCLE_INDEX_METADATA_FILE: &str = "meta.json";
+const MODEL_LIFECYCLE_INDEX_METADATA_LIMIT: u64 = 4 * 1024 * 1024;
+const HASH_FALLBACK_MODEL_ID: &str = "frankensearch-hash-fallback";
 
 #[derive(Debug)]
 struct VerifiedRerankArtifact {
@@ -363,6 +374,240 @@ const DEG_SEMANTIC_DIMENSION_EXCEEDS_BUDGET: ModelDegradation = ModelDegradation
     repair: "select a smaller local embedding model or run `ee index reembed --workspace .`",
 };
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelLifecycleReport {
+    pub generated_at: String,
+    pub workspace_fingerprint: String,
+    pub semantic_readiness: ModelLifecycleSemanticReadiness,
+    pub models: Vec<ModelLifecycleModelRow>,
+    pub indexes: Vec<ModelLifecycleIndexRow>,
+    pub degraded: Vec<ModelLifecycleDegradation>,
+}
+
+impl ModelLifecycleReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": MODEL_LIFECYCLE_SCHEMA_V1,
+            "generatedAt": self.generated_at,
+            "workspaceFingerprint": self.workspace_fingerprint,
+            "redactionStatus": MODEL_LIFECYCLE_REDACTION_STATUS,
+            "semanticReadiness": self.semantic_readiness.data_json(),
+            "models": self
+                .models
+                .iter()
+                .map(ModelLifecycleModelRow::data_json)
+                .collect::<Vec<_>>(),
+            "indexes": self
+                .indexes
+                .iter()
+                .map(ModelLifecycleIndexRow::data_json)
+                .collect::<Vec<_>>(),
+            "degraded": lifecycle_degraded_data_json(&self.degraded),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelLifecycleSemanticReadiness {
+    pub state: &'static str,
+    pub mode: &'static str,
+    pub selected_model_id: Option<String>,
+    pub selected_index_id: Option<String>,
+    pub dimension_compatibility: ModelLifecycleDimensionCompatibility,
+    pub degraded: Vec<ModelLifecycleDegradation>,
+}
+
+impl ModelLifecycleSemanticReadiness {
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "state": self.state,
+            "mode": self.mode,
+            "selectedModelId": self.selected_model_id,
+            "selectedIndexId": self.selected_index_id,
+            "dimensionCompatibility": self.dimension_compatibility.data_json(),
+            "degraded": lifecycle_degraded_data_json(&self.degraded),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelLifecycleModelRow {
+    pub model_id: String,
+    pub provider: String,
+    pub purpose: String,
+    pub registry_status: String,
+    pub state: &'static str,
+    pub asset_provenance: ModelLifecycleAssetProvenance,
+    pub embedding_metadata: Option<serde_json::Value>,
+    pub dimension_compatibility: ModelLifecycleDimensionCompatibility,
+    pub degraded: Vec<ModelLifecycleDegradation>,
+}
+
+impl ModelLifecycleModelRow {
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "modelId": self.model_id,
+            "provider": self.provider,
+            "purpose": self.purpose,
+            "registryStatus": self.registry_status,
+            "state": self.state,
+            "assetProvenance": self.asset_provenance.data_json(),
+            "embeddingMetadata": self.embedding_metadata,
+            "dimensionCompatibility": self.dimension_compatibility.data_json(),
+            "degraded": lifecycle_degraded_data_json(&self.degraded),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelLifecycleIndexRow {
+    pub index_id: String,
+    pub kind: &'static str,
+    pub state: &'static str,
+    pub stored_model_id: Option<String>,
+    pub stored_model_revision: Option<String>,
+    pub stored_model_hash: Option<String>,
+    pub stored_dimension: Option<u32>,
+    pub stored_distance_metric: Option<String>,
+    pub stored_vector_dtype: Option<String>,
+    pub last_rebuild_at: Option<String>,
+    pub derived_from: Vec<String>,
+    pub dimension_compatibility: ModelLifecycleDimensionCompatibility,
+    pub degraded: Vec<ModelLifecycleDegradation>,
+}
+
+impl ModelLifecycleIndexRow {
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "indexId": self.index_id,
+            "kind": self.kind,
+            "state": self.state,
+            "storedModelId": self.stored_model_id,
+            "storedModelRevision": self.stored_model_revision,
+            "storedModelHash": self.stored_model_hash,
+            "storedDimension": self.stored_dimension,
+            "storedDistanceMetric": self.stored_distance_metric,
+            "storedVectorDtype": self.stored_vector_dtype,
+            "lastRebuildAt": self.last_rebuild_at,
+            "derivedFrom": self.derived_from,
+            "dimensionCompatibility": self.dimension_compatibility.data_json(),
+            "degraded": lifecycle_degraded_data_json(&self.degraded),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelLifecycleAssetProvenance {
+    pub source_kind: &'static str,
+    pub source_uri: Option<String>,
+    pub registry_entry_id: Option<String>,
+    pub model_revision: Option<String>,
+    pub content_hash: Option<String>,
+    pub asset_hash: Option<String>,
+    pub manifest_hash: Option<String>,
+    pub checked_at: Option<String>,
+    pub provenance_complete: bool,
+}
+
+impl ModelLifecycleAssetProvenance {
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sourceKind": self.source_kind,
+            "sourceUri": self.source_uri,
+            "registryEntryId": self.registry_entry_id,
+            "modelRevision": self.model_revision,
+            "contentHash": self.content_hash,
+            "assetHash": self.asset_hash,
+            "manifestHash": self.manifest_hash,
+            "checkedAt": self.checked_at,
+            "provenanceComplete": self.provenance_complete,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelLifecycleDimensionCompatibility {
+    pub expected_dimension: Option<u32>,
+    pub actual_dimension: Option<u32>,
+    pub index_dimension: Option<u32>,
+    pub distance_metric: Option<String>,
+    pub vector_dtype: Option<String>,
+    pub compatible: Option<bool>,
+    pub rule: &'static str,
+    pub mismatch_reason: Option<String>,
+    pub repair: Option<String>,
+}
+
+impl ModelLifecycleDimensionCompatibility {
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "expectedDimension": self.expected_dimension,
+            "actualDimension": self.actual_dimension,
+            "indexDimension": self.index_dimension,
+            "distanceMetric": self.distance_metric,
+            "vectorDtype": self.vector_dtype,
+            "compatible": self.compatible,
+            "rule": self.rule,
+            "mismatchReason": self.mismatch_reason,
+            "repair": self.repair,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelLifecycleDegradation {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub message: String,
+    pub repair: Option<String>,
+}
+
+impl ModelLifecycleDegradation {
+    fn new(
+        code: &'static str,
+        severity: &'static str,
+        message: impl Into<String>,
+        repair: Option<&'static str>,
+    ) -> Self {
+        Self {
+            code,
+            severity,
+            message: message.into(),
+            repair: repair.map(str::to_owned),
+        }
+    }
+
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "code": self.code,
+            "severity": self.severity,
+            "message": self.message,
+            "repair": self.repair,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ModelLifecycleIndexMetadata {
+    stored_model_id: Option<String>,
+    stored_model_revision: Option<String>,
+    stored_model_hash: Option<String>,
+    stored_dimension: Option<u32>,
+    stored_distance_metric: Option<String>,
+    stored_vector_dtype: Option<String>,
+    derived_from: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ModelLifecycleAssetInspection {
+    state: &'static str,
+    content_hash: Option<String>,
+    asset_hash: Option<String>,
+    degraded: Vec<ModelLifecycleDegradation>,
+    provenance_complete: bool,
+}
+
 /// Report shape returned by `ee model status`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelStatusReport {
@@ -371,6 +616,7 @@ pub struct ModelStatusReport {
     pub database_path: PathBuf,
     pub active: ModelStatusActive,
     pub reranker: ModelStatusReranker,
+    pub model_lifecycle: ModelLifecycleReport,
     pub registered_count: usize,
     pub available_count: usize,
     pub degradations: Vec<ModelDegradation>,
@@ -385,6 +631,7 @@ impl ModelStatusReport {
             "databasePath": self.database_path.to_string_lossy(),
             "active": self.active.data_json(),
             "reranker": self.reranker.data_json(),
+            "modelLifecycle": self.model_lifecycle.data_json(),
             "registeredCount": self.registered_count,
             "availableCount": self.available_count,
             "degradations": model_degradations_data_json("model_status", &self.degradations),
@@ -573,6 +820,1064 @@ fn model_degradations_data_json(
         })
     })
     .collect()
+}
+
+fn lifecycle_degraded_data_json(
+    degradations: &[ModelLifecycleDegradation],
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for degradation in degradations {
+        if seen.insert(degradation.code) {
+            out.push(degradation.data_json());
+        }
+    }
+    out
+}
+
+fn build_model_lifecycle_report(
+    workspace_path: &Path,
+    database_path: &Path,
+    connection: &DbConnection,
+    entries: &[StoredModelRegistryEntry],
+    selected_embedding_entry: Option<&StoredModelRegistryEntry>,
+) -> ModelLifecycleReport {
+    let generated_at = Utc::now().to_rfc3339();
+    let fingerprint = workspace_fingerprint(workspace_path);
+    let index_status = get_index_status_with_connection(
+        &IndexStatusOptions {
+            workspace_path: workspace_path.to_path_buf(),
+            database_path: Some(database_path.to_path_buf()),
+            index_dir: None,
+        },
+        Some(connection),
+    );
+    let index_metadata = index_status
+        .as_ref()
+        .ok()
+        .and_then(|status| read_model_lifecycle_index_metadata(&status.index_dir).ok())
+        .unwrap_or_default();
+    let mut index_degraded = index_status.as_ref().map_or_else(
+        |error| index_status_error_degradation(error),
+        |status| index_health_degradations(status.health, status.last_check_error.as_deref()),
+    );
+    if index_status.is_ok()
+        && index_metadata == ModelLifecycleIndexMetadata::default()
+        && selected_embedding_entry.is_some()
+    {
+        index_degraded.push(ModelLifecycleDegradation::new(
+            "model_lifecycle_unknown",
+            "warning",
+            "Semantic index metadata did not record model dimension or hash evidence.",
+            Some("ee index rebuild --workspace ."),
+        ));
+    }
+
+    let selected_entry_id = selected_embedding_entry.map(|entry| entry.id.as_str());
+    let mut models = entries
+        .iter()
+        .map(|entry| {
+            model_lifecycle_row(
+                entry,
+                workspace_path,
+                &generated_at,
+                &index_metadata,
+                selected_entry_id == Some(entry.id.as_str()),
+            )
+        })
+        .collect::<Vec<_>>();
+    if selected_embedding_entry.is_none() {
+        models.push(hash_fallback_lifecycle_row(&generated_at));
+    }
+
+    let index_row = model_lifecycle_index_row(
+        workspace_path,
+        database_path,
+        index_status.as_ref().ok(),
+        &index_metadata,
+        selected_embedding_entry,
+        index_degraded,
+    );
+    let semantic_readiness =
+        semantic_readiness_from_lifecycle(selected_embedding_entry, &models, &index_row);
+
+    let mut degraded = semantic_readiness.degraded.clone();
+    for model in &models {
+        degraded.extend(model.degraded.clone());
+    }
+    degraded.extend(index_row.degraded.clone());
+    if entries.is_empty() {
+        degraded.push(ModelLifecycleDegradation::new(
+            "model_registry_empty",
+            "warning",
+            "No available semantic model registry row was found.",
+            Some("record or enable a local embedding model before semantic rebuild"),
+        ));
+    } else if selected_embedding_entry.is_none() {
+        degraded.push(ModelLifecycleDegradation::new(
+            "model_registry_no_available_entry",
+            "warning",
+            "Model registry has no available embedding model row.",
+            Some("enable a local embedding model or repair the model registry"),
+        ));
+    }
+
+    ModelLifecycleReport {
+        generated_at,
+        workspace_fingerprint: fingerprint,
+        semantic_readiness,
+        models,
+        indexes: vec![index_row],
+        degraded,
+    }
+}
+
+fn model_lifecycle_row(
+    entry: &StoredModelRegistryEntry,
+    workspace_path: &Path,
+    generated_at: &str,
+    index_metadata: &ModelLifecycleIndexMetadata,
+    selected: bool,
+) -> ModelLifecycleModelRow {
+    let parsed_metadata = entry
+        .metadata_json
+        .as_deref()
+        .map(EmbeddingMetadataRecord::from_json)
+        .transpose();
+    let mut degraded = Vec::new();
+    let metadata = match parsed_metadata {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            degraded.push(ModelLifecycleDegradation::new(
+                "model_asset_corrupt",
+                "high",
+                format!(
+                    "Embedding metadata for registry row {} is invalid: {error}",
+                    entry.id
+                ),
+                Some("repair the model registry row so embedding metadata validates"),
+            ));
+            None
+        }
+    };
+    let asset = inspect_model_lifecycle_asset(entry, workspace_path);
+    degraded.extend(asset.degraded.clone());
+
+    let dimension_compatibility =
+        model_dimension_compatibility(entry, metadata.as_ref(), index_metadata, selected);
+    if dimension_compatibility.compatible == Some(false) {
+        degraded.push(ModelLifecycleDegradation::new(
+            "model_dimension_mismatch",
+            "high",
+            dimension_compatibility
+                .mismatch_reason
+                .clone()
+                .unwrap_or_else(|| "Model and index vector metadata do not match.".to_string()),
+            Some("ee index reembed --workspace ."),
+        ));
+    }
+
+    let state = model_lifecycle_state(entry, asset.state, &dimension_compatibility);
+    let embedding_metadata = metadata
+        .as_ref()
+        .and_then(|metadata| serde_json::to_value(metadata).ok());
+
+    ModelLifecycleModelRow {
+        model_id: entry.id.clone(),
+        provider: entry.provider.as_str().to_string(),
+        purpose: entry.purpose.as_str().to_string(),
+        registry_status: entry.status.as_str().to_string(),
+        state,
+        asset_provenance: ModelLifecycleAssetProvenance {
+            source_kind: "model_registry",
+            source_uri: entry
+                .source_uri
+                .as_deref()
+                .map(|source| redact_lifecycle_source_uri(source, workspace_path)),
+            registry_entry_id: Some(entry.id.clone()),
+            model_revision: entry.version.clone(),
+            content_hash: asset.content_hash,
+            asset_hash: asset.asset_hash,
+            manifest_hash: None,
+            checked_at: entry
+                .last_checked_at
+                .clone()
+                .or_else(|| Some(generated_at.to_string())),
+            provenance_complete: asset.provenance_complete && metadata.is_some(),
+        },
+        embedding_metadata,
+        dimension_compatibility,
+        degraded,
+    }
+}
+
+fn hash_fallback_lifecycle_row(generated_at: &str) -> ModelLifecycleModelRow {
+    let degradation = ModelLifecycleDegradation::new(
+        "lexical_fallback",
+        "warning",
+        "Hash fallback can keep lexical search honest but cannot prove semantic readiness.",
+        None,
+    );
+    ModelLifecycleModelRow {
+        model_id: HASH_FALLBACK_MODEL_ID.to_string(),
+        provider: "hash".to_string(),
+        purpose: "embedding".to_string(),
+        registry_status: "unknown".to_string(),
+        state: "lexical_fallback",
+        asset_provenance: ModelLifecycleAssetProvenance {
+            source_kind: "hash_fallback",
+            source_uri: None,
+            registry_entry_id: None,
+            model_revision: None,
+            content_hash: None,
+            asset_hash: None,
+            manifest_hash: None,
+            checked_at: Some(generated_at.to_string()),
+            provenance_complete: false,
+        },
+        embedding_metadata: None,
+        dimension_compatibility: lexical_dimension_compatibility(
+            Some("hash fallback is not a semantic model"),
+            Some("enable a semantic embedding model before semantic indexing"),
+        ),
+        degraded: vec![degradation],
+    }
+}
+
+fn inspect_model_lifecycle_asset(
+    entry: &StoredModelRegistryEntry,
+    workspace_path: &Path,
+) -> ModelLifecycleAssetInspection {
+    let mut degraded = Vec::new();
+    let content_hash = match entry.content_hash.as_deref() {
+        Some(hash) => match normalize_blake3_hash(hash) {
+            Some(hash) => Some(hash),
+            None => {
+                degraded.push(ModelLifecycleDegradation::new(
+                    "model_asset_corrupt",
+                    "high",
+                    format!(
+                        "Registry row {} has an invalid content_hash shape; expected blake3:<64-hex>.",
+                        entry.id
+                    ),
+                    Some("repair the model registry content_hash and re-check the model asset"),
+                ));
+                None
+            }
+        },
+        None => None,
+    };
+
+    let Some(source_path) = entry
+        .source_uri
+        .as_deref()
+        .and_then(|source| model_lifecycle_local_source_path(source, workspace_path))
+    else {
+        let corrupt = degraded
+            .iter()
+            .any(|degradation| degradation.code == "model_asset_corrupt");
+        let provenance_complete = content_hash.is_some();
+        return ModelLifecycleAssetInspection {
+            state: if corrupt { "corrupt" } else { "available" },
+            content_hash,
+            asset_hash: None,
+            degraded,
+            provenance_complete,
+        };
+    };
+
+    let metadata = match fs::symlink_metadata(&source_path) {
+        Ok(metadata) => metadata,
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            degraded.push(ModelLifecycleDegradation::new(
+                "model_asset_missing",
+                "high",
+                format!("Model asset for registry row {} is missing.", entry.id),
+                Some("fetch or rebuild the configured local model asset"),
+            ));
+            return ModelLifecycleAssetInspection {
+                state: "missing",
+                content_hash,
+                asset_hash: None,
+                degraded,
+                provenance_complete: false,
+            };
+        }
+        Err(error) => {
+            degraded.push(ModelLifecycleDegradation::new(
+                "model_asset_corrupt",
+                "high",
+                format!(
+                    "Failed to inspect model asset for registry row {}: {error}",
+                    entry.id
+                ),
+                Some("check permissions or repair the configured local model asset"),
+            ));
+            return ModelLifecycleAssetInspection {
+                state: "corrupt",
+                content_hash,
+                asset_hash: None,
+                degraded,
+                provenance_complete: false,
+            };
+        }
+    };
+
+    if !metadata.file_type().is_file() {
+        degraded.push(ModelLifecycleDegradation::new(
+            "model_asset_corrupt",
+            "high",
+            format!(
+                "Model asset for registry row {} is not a regular file.",
+                entry.id
+            ),
+            Some("replace the configured model asset with a regular file"),
+        ));
+        return ModelLifecycleAssetInspection {
+            state: "corrupt",
+            content_hash,
+            asset_hash: None,
+            degraded,
+            provenance_complete: false,
+        };
+    }
+
+    let asset_hash = hash_model_asset(&source_path);
+    match (&content_hash, &asset_hash) {
+        (Some(expected), Ok(actual)) if expected != actual => {
+            degraded.push(ModelLifecycleDegradation::new(
+                "model_asset_corrupt",
+                "high",
+                format!(
+                    "Model asset hash for registry row {} does not match content_hash.",
+                    entry.id
+                ),
+                Some("replace the model asset or update the registry after a trusted rebuild"),
+            ));
+            ModelLifecycleAssetInspection {
+                state: "corrupt",
+                content_hash,
+                asset_hash: Some(actual.clone()),
+                degraded,
+                provenance_complete: false,
+            }
+        }
+        (_, Ok(actual)) => ModelLifecycleAssetInspection {
+            state: if degraded
+                .iter()
+                .any(|degradation| degradation.code == "model_asset_corrupt")
+            {
+                "corrupt"
+            } else {
+                "available"
+            },
+            provenance_complete: content_hash.is_some(),
+            content_hash,
+            asset_hash: Some(actual.clone()),
+            degraded,
+        },
+        (_, Err(error)) => {
+            degraded.push(ModelLifecycleDegradation::new(
+                "model_asset_corrupt",
+                "high",
+                format!(
+                    "Failed to hash model asset for registry row {}: {error}",
+                    entry.id
+                ),
+                Some("check permissions or repair the configured local model asset"),
+            ));
+            ModelLifecycleAssetInspection {
+                state: "corrupt",
+                content_hash,
+                asset_hash: None,
+                degraded,
+                provenance_complete: false,
+            }
+        }
+    }
+}
+
+fn model_lifecycle_state(
+    entry: &StoredModelRegistryEntry,
+    asset_state: &'static str,
+    dimension_compatibility: &ModelLifecycleDimensionCompatibility,
+) -> &'static str {
+    if asset_state == "missing" || asset_state == "corrupt" {
+        return asset_state;
+    }
+    if dimension_compatibility.compatible == Some(false) {
+        return "dimension_mismatch";
+    }
+    match entry.status {
+        ModelRegistryStatus::Available => "available",
+        ModelRegistryStatus::Unavailable => "cold",
+        ModelRegistryStatus::Disabled => "unsupported_feature",
+    }
+}
+
+fn model_dimension_compatibility(
+    entry: &StoredModelRegistryEntry,
+    metadata: Option<&EmbeddingMetadataRecord>,
+    index_metadata: &ModelLifecycleIndexMetadata,
+    selected: bool,
+) -> ModelLifecycleDimensionCompatibility {
+    if entry.purpose != ModelPurpose::Embedding {
+        return ModelLifecycleDimensionCompatibility {
+            expected_dimension: None,
+            actual_dimension: entry.dimension,
+            index_dimension: index_metadata.stored_dimension,
+            distance_metric: entry
+                .distance_metric
+                .map(|metric| metric.as_str().to_string()),
+            vector_dtype: metadata.map(|metadata| metadata.vector_dtype.as_str().to_string()),
+            compatible: None,
+            rule: "unsupported_feature",
+            mismatch_reason: Some("model purpose is not embedding".to_string()),
+            repair: None,
+        };
+    }
+
+    let actual_dimension = metadata.map_or(entry.dimension, |metadata| Some(metadata.dimension));
+    let distance_metric = metadata
+        .map(|metadata| metadata.distance_metric.as_str().to_string())
+        .or_else(|| {
+            entry
+                .distance_metric
+                .map(|metric| metric.as_str().to_string())
+        });
+    let vector_dtype = metadata.map(|metadata| metadata.vector_dtype.as_str().to_string());
+    let index_dimension = index_metadata.stored_dimension;
+
+    if !selected || entry.status != ModelRegistryStatus::Available {
+        return ModelLifecycleDimensionCompatibility {
+            expected_dimension: actual_dimension,
+            actual_dimension,
+            index_dimension,
+            distance_metric,
+            vector_dtype,
+            compatible: None,
+            rule: "unknown",
+            mismatch_reason: if selected {
+                Some("model is not available for semantic readiness".to_string())
+            } else {
+                None
+            },
+            repair: None,
+        };
+    }
+
+    if let (Some(actual), Some(index)) = (actual_dimension, index_dimension)
+        && actual != index
+    {
+        return ModelLifecycleDimensionCompatibility {
+            expected_dimension: Some(actual),
+            actual_dimension,
+            index_dimension,
+            distance_metric,
+            vector_dtype,
+            compatible: Some(false),
+            rule: "exact_dimension_metric_dtype",
+            mismatch_reason: Some(format!(
+                "selected embedding dimension {actual} does not match index dimension {index}"
+            )),
+            repair: Some("ee index reembed --workspace .".to_string()),
+        };
+    }
+
+    if let (Some(model_metric), Some(index_metric)) = (
+        distance_metric.as_deref(),
+        index_metadata.stored_distance_metric.as_deref(),
+    ) && model_metric != index_metric
+    {
+        return ModelLifecycleDimensionCompatibility {
+            expected_dimension: actual_dimension,
+            actual_dimension,
+            index_dimension,
+            distance_metric,
+            vector_dtype,
+            compatible: Some(false),
+            rule: "exact_dimension_metric_dtype",
+            mismatch_reason: Some(format!(
+                "selected embedding metric {model_metric} does not match index metric {index_metric}"
+            )),
+            repair: Some("ee index reembed --workspace .".to_string()),
+        };
+    }
+
+    if let (Some(model_dtype), Some(index_dtype)) = (
+        vector_dtype.as_deref(),
+        index_metadata.stored_vector_dtype.as_deref(),
+    ) && model_dtype != index_dtype
+    {
+        return ModelLifecycleDimensionCompatibility {
+            expected_dimension: actual_dimension,
+            actual_dimension,
+            index_dimension,
+            distance_metric,
+            vector_dtype,
+            compatible: Some(false),
+            rule: "exact_dimension_metric_dtype",
+            mismatch_reason: Some(format!(
+                "selected embedding vector dtype {model_dtype} does not match index dtype {index_dtype}"
+            )),
+            repair: Some("ee index reembed --workspace .".to_string()),
+        };
+    }
+
+    ModelLifecycleDimensionCompatibility {
+        expected_dimension: actual_dimension,
+        actual_dimension,
+        index_dimension,
+        distance_metric,
+        vector_dtype,
+        compatible: if actual_dimension.is_some() && index_dimension.is_some() {
+            Some(true)
+        } else {
+            None
+        },
+        rule: if actual_dimension.is_some() && index_dimension.is_some() {
+            "exact_dimension_metric_dtype"
+        } else {
+            "unknown"
+        },
+        mismatch_reason: if index_dimension.is_none() {
+            Some("semantic index metadata does not record a vector dimension".to_string())
+        } else {
+            None
+        },
+        repair: if index_dimension.is_none() {
+            Some("ee index rebuild --workspace .".to_string())
+        } else {
+            None
+        },
+    }
+}
+
+fn model_lifecycle_index_row(
+    workspace_path: &Path,
+    database_path: &Path,
+    index_status: Option<&crate::core::index::IndexStatusReport>,
+    metadata: &ModelLifecycleIndexMetadata,
+    selected_embedding_entry: Option<&StoredModelRegistryEntry>,
+    mut degraded: Vec<ModelLifecycleDegradation>,
+) -> ModelLifecycleIndexRow {
+    let selected_dimension = selected_embedding_entry.and_then(|entry| entry.dimension);
+    let dimension_compatibility = index_dimension_compatibility(selected_embedding_entry, metadata);
+    if dimension_compatibility.compatible == Some(false) {
+        degraded.push(ModelLifecycleDegradation::new(
+            "model_dimension_mismatch",
+            "high",
+            dimension_compatibility
+                .mismatch_reason
+                .clone()
+                .unwrap_or_else(|| {
+                    "Index and selected model vector metadata do not match.".to_string()
+                }),
+            Some("ee index reembed --workspace ."),
+        ));
+    }
+
+    let mut derived_from = metadata.derived_from.clone();
+    if derived_from.is_empty() {
+        derived_from.push(redact_lifecycle_path(database_path, workspace_path));
+    }
+
+    let state = if dimension_compatibility.compatible == Some(false) {
+        "dimension_mismatch"
+    } else {
+        match index_status.map(|status| status.health) {
+            Some(IndexHealth::Ready) if selected_embedding_entry.is_some() => "available",
+            Some(IndexHealth::Ready) => "lexical_fallback",
+            Some(IndexHealth::Stale) => "stale_index_model",
+            Some(IndexHealth::Missing) => "missing",
+            Some(IndexHealth::Corrupt) => "corrupt",
+            None => "unknown",
+        }
+    };
+    let kind = if metadata.stored_dimension.is_some() || selected_dimension.is_some() {
+        "semantic"
+    } else {
+        "lexical"
+    };
+
+    ModelLifecycleIndexRow {
+        index_id: MODEL_LIFECYCLE_INDEX_ID.to_string(),
+        kind,
+        state,
+        stored_model_id: metadata.stored_model_id.clone(),
+        stored_model_revision: metadata.stored_model_revision.clone(),
+        stored_model_hash: metadata.stored_model_hash.clone(),
+        stored_dimension: metadata.stored_dimension,
+        stored_distance_metric: metadata.stored_distance_metric.clone(),
+        stored_vector_dtype: metadata.stored_vector_dtype.clone(),
+        last_rebuild_at: index_status.and_then(|status| status.last_rebuild_at.clone()),
+        derived_from,
+        dimension_compatibility,
+        degraded,
+    }
+}
+
+fn index_dimension_compatibility(
+    selected_embedding_entry: Option<&StoredModelRegistryEntry>,
+    metadata: &ModelLifecycleIndexMetadata,
+) -> ModelLifecycleDimensionCompatibility {
+    let Some(entry) = selected_embedding_entry else {
+        return lexical_dimension_compatibility(
+            Some("lexical index has no semantic vector dimension"),
+            None,
+        );
+    };
+    let actual_dimension = entry.dimension;
+    let index_dimension = metadata.stored_dimension;
+    let distance_metric = entry
+        .distance_metric
+        .map(|metric| metric.as_str().to_string())
+        .or_else(|| metadata.stored_distance_metric.clone());
+    let vector_dtype = metadata.stored_vector_dtype.clone();
+    if let (Some(actual), Some(index)) = (actual_dimension, index_dimension)
+        && actual != index
+    {
+        return ModelLifecycleDimensionCompatibility {
+            expected_dimension: actual_dimension,
+            actual_dimension,
+            index_dimension,
+            distance_metric,
+            vector_dtype,
+            compatible: Some(false),
+            rule: "exact_dimension_metric_dtype",
+            mismatch_reason: Some(format!(
+                "selected embedding dimension {actual} does not match index dimension {index}"
+            )),
+            repair: Some("ee index reembed --workspace .".to_string()),
+        };
+    }
+    ModelLifecycleDimensionCompatibility {
+        expected_dimension: actual_dimension,
+        actual_dimension,
+        index_dimension,
+        distance_metric,
+        vector_dtype,
+        compatible: if actual_dimension.is_some() && index_dimension.is_some() {
+            Some(true)
+        } else {
+            None
+        },
+        rule: if actual_dimension.is_some() && index_dimension.is_some() {
+            "exact_dimension_metric_dtype"
+        } else {
+            "unknown"
+        },
+        mismatch_reason: if index_dimension.is_none() {
+            Some("semantic index metadata does not record a vector dimension".to_string())
+        } else {
+            None
+        },
+        repair: if index_dimension.is_none() {
+            Some("ee index rebuild --workspace .".to_string())
+        } else {
+            None
+        },
+    }
+}
+
+fn semantic_readiness_from_lifecycle(
+    selected_embedding_entry: Option<&StoredModelRegistryEntry>,
+    models: &[ModelLifecycleModelRow],
+    index_row: &ModelLifecycleIndexRow,
+) -> ModelLifecycleSemanticReadiness {
+    let Some(selected) = selected_embedding_entry else {
+        let degraded = vec![ModelLifecycleDegradation::new(
+            "lexical_fallback",
+            "warning",
+            "Semantic retrieval is unavailable; lexical retrieval remains available.",
+            Some("install or enable a local Frankensearch embedding model"),
+        )];
+        return ModelLifecycleSemanticReadiness {
+            state: "lexical_fallback",
+            mode: "lexical_fallback",
+            selected_model_id: None,
+            selected_index_id: Some(MODEL_LIFECYCLE_INDEX_ID.to_string()),
+            dimension_compatibility: lexical_dimension_compatibility(
+                Some("no available semantic embedding model"),
+                Some(
+                    "install or enable a local Frankensearch embedding model, then rebuild the semantic index",
+                ),
+            ),
+            degraded,
+        };
+    };
+
+    let Some(selected_model) = models.iter().find(|model| model.model_id == selected.id) else {
+        return ModelLifecycleSemanticReadiness {
+            state: "unknown",
+            mode: "unknown",
+            selected_model_id: Some(selected.id.clone()),
+            selected_index_id: Some(MODEL_LIFECYCLE_INDEX_ID.to_string()),
+            dimension_compatibility: index_row.dimension_compatibility.clone(),
+            degraded: vec![ModelLifecycleDegradation::new(
+                "model_lifecycle_unknown",
+                "high",
+                "Selected embedding registry row was not present in lifecycle model rows.",
+                Some("ee doctor --json"),
+            )],
+        };
+    };
+    if matches!(
+        selected_model.state,
+        "missing" | "corrupt" | "dimension_mismatch"
+    ) {
+        return ModelLifecycleSemanticReadiness {
+            state: selected_model.state,
+            mode: "blocked",
+            selected_model_id: Some(selected.id.clone()),
+            selected_index_id: Some(MODEL_LIFECYCLE_INDEX_ID.to_string()),
+            dimension_compatibility: selected_model.dimension_compatibility.clone(),
+            degraded: selected_model.degraded.clone(),
+        };
+    }
+    if index_row.state == "dimension_mismatch" {
+        return ModelLifecycleSemanticReadiness {
+            state: "dimension_mismatch",
+            mode: "blocked",
+            selected_model_id: Some(selected.id.clone()),
+            selected_index_id: Some(MODEL_LIFECYCLE_INDEX_ID.to_string()),
+            dimension_compatibility: index_row.dimension_compatibility.clone(),
+            degraded: index_row.degraded.clone(),
+        };
+    }
+    if matches!(index_row.state, "missing" | "corrupt" | "stale_index_model") {
+        let degraded = index_row.degraded.clone();
+        return ModelLifecycleSemanticReadiness {
+            state: "lexical_fallback",
+            mode: "lexical_fallback",
+            selected_model_id: Some(selected.id.clone()),
+            selected_index_id: Some(MODEL_LIFECYCLE_INDEX_ID.to_string()),
+            dimension_compatibility: index_row.dimension_compatibility.clone(),
+            degraded,
+        };
+    }
+    if selected_model.dimension_compatibility.compatible == Some(true)
+        && index_row.dimension_compatibility.compatible == Some(true)
+    {
+        return ModelLifecycleSemanticReadiness {
+            state: "available",
+            mode: "semantic",
+            selected_model_id: Some(selected.id.clone()),
+            selected_index_id: Some(MODEL_LIFECYCLE_INDEX_ID.to_string()),
+            dimension_compatibility: selected_model.dimension_compatibility.clone(),
+            degraded: Vec::new(),
+        };
+    }
+
+    ModelLifecycleSemanticReadiness {
+        state: "unknown",
+        mode: "unknown",
+        selected_model_id: Some(selected.id.clone()),
+        selected_index_id: Some(MODEL_LIFECYCLE_INDEX_ID.to_string()),
+        dimension_compatibility: selected_model.dimension_compatibility.clone(),
+        degraded: vec![ModelLifecycleDegradation::new(
+            "model_lifecycle_unknown",
+            "warning",
+            "Semantic model and index compatibility evidence is incomplete.",
+            Some("ee index rebuild --workspace ."),
+        )],
+    }
+}
+
+fn lexical_dimension_compatibility(
+    mismatch_reason: Option<&'static str>,
+    repair: Option<&'static str>,
+) -> ModelLifecycleDimensionCompatibility {
+    ModelLifecycleDimensionCompatibility {
+        expected_dimension: None,
+        actual_dimension: None,
+        index_dimension: None,
+        distance_metric: None,
+        vector_dtype: None,
+        compatible: None,
+        rule: "lexical_no_dimension",
+        mismatch_reason: mismatch_reason.map(str::to_string),
+        repair: repair.map(str::to_string),
+    }
+}
+
+fn index_health_degradations(
+    health: IndexHealth,
+    last_check_error: Option<&str>,
+) -> Vec<ModelLifecycleDegradation> {
+    match health {
+        IndexHealth::Ready => Vec::new(),
+        IndexHealth::Stale => vec![ModelLifecycleDegradation::new(
+            "index_stale",
+            "high",
+            "Search index is stale relative to database generation.",
+            Some("ee index rebuild --workspace ."),
+        )],
+        IndexHealth::Missing => vec![ModelLifecycleDegradation::new(
+            "index_missing",
+            "medium",
+            "Search index is missing.",
+            Some("ee index rebuild --workspace ."),
+        )],
+        IndexHealth::Corrupt => vec![ModelLifecycleDegradation::new(
+            "index_corrupt",
+            "high",
+            last_check_error.unwrap_or("Search index metadata is corrupt."),
+            Some("ee index rebuild --workspace ."),
+        )],
+    }
+}
+
+fn index_status_error_degradation(
+    error: &crate::core::index::IndexStatusError,
+) -> Vec<ModelLifecycleDegradation> {
+    vec![ModelLifecycleDegradation::new(
+        "search_index_degraded",
+        "high",
+        format!("Failed to inspect search index status: {error}"),
+        Some("ee doctor --json"),
+    )]
+}
+
+fn read_model_lifecycle_index_metadata(
+    index_dir: &Path,
+) -> Result<ModelLifecycleIndexMetadata, String> {
+    let meta_path = index_dir.join(MODEL_LIFECYCLE_INDEX_METADATA_FILE);
+    let Some(content) = read_model_lifecycle_index_metadata_contents(&meta_path)? else {
+        return Ok(ModelLifecycleIndexMetadata::default());
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+        format!(
+            "failed to parse model lifecycle index metadata '{}': {error}",
+            meta_path.display()
+        )
+    })?;
+    let object = parsed.as_object().ok_or_else(|| {
+        format!(
+            "model lifecycle index metadata '{}' must be a JSON object",
+            meta_path.display()
+        )
+    })?;
+    let stored_model_hash = first_string(
+        &parsed,
+        &[
+            "storedModelHash",
+            "stored_model_hash",
+            "modelHash",
+            "model_hash",
+            "contentHash",
+            "content_hash",
+        ],
+    )
+    .and_then(|hash| normalize_blake3_hash(&hash));
+    let derived_from = object
+        .get("derivedFrom")
+        .or_else(|| object.get("derived_from"))
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(redact_lifecycle_metadata_path)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(ModelLifecycleIndexMetadata {
+        stored_model_id: first_string(
+            &parsed,
+            &[
+                "storedModelId",
+                "stored_model_id",
+                "modelId",
+                "model_id",
+                "embeddingModelId",
+                "embedding_model_id",
+            ],
+        ),
+        stored_model_revision: first_string(
+            &parsed,
+            &[
+                "storedModelRevision",
+                "stored_model_revision",
+                "modelRevision",
+                "model_revision",
+            ],
+        ),
+        stored_model_hash,
+        stored_dimension: first_u32(
+            &parsed,
+            &[
+                "storedDimension",
+                "stored_dimension",
+                "dimension",
+                "embeddingDimension",
+                "embedding_dimension",
+            ],
+        ),
+        stored_distance_metric: first_string(
+            &parsed,
+            &[
+                "storedDistanceMetric",
+                "stored_distance_metric",
+                "distanceMetric",
+                "distance_metric",
+            ],
+        ),
+        stored_vector_dtype: first_string(
+            &parsed,
+            &[
+                "storedVectorDtype",
+                "stored_vector_dtype",
+                "vectorDtype",
+                "vector_dtype",
+            ],
+        ),
+        derived_from,
+    })
+}
+
+fn read_model_lifecycle_index_metadata_contents(
+    meta_path: &Path,
+) -> Result<Option<String>, String> {
+    let metadata = match fs::symlink_metadata(meta_path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => {
+            return Err(format!(
+                "index metadata '{}' is not a regular file",
+                meta_path.display()
+            ));
+        }
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect index metadata '{}': {error}",
+                meta_path.display()
+            ));
+        }
+    };
+    if metadata.len() > MODEL_LIFECYCLE_INDEX_METADATA_LIMIT {
+        return Err(format!(
+            "index metadata '{}' exceeds the {MODEL_LIFECYCLE_INDEX_METADATA_LIMIT} byte cap",
+            meta_path.display()
+        ));
+    }
+    let file = fs::File::open(meta_path).map_err(|error| {
+        format!(
+            "failed to read index metadata '{}': {error}",
+            meta_path.display()
+        )
+    })?;
+    let mut bytes = Vec::new();
+    file.take(MODEL_LIFECYCLE_INDEX_METADATA_LIMIT.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            format!(
+                "failed to read index metadata '{}': {error}",
+                meta_path.display()
+            )
+        })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MODEL_LIFECYCLE_INDEX_METADATA_LIMIT {
+        return Err(format!(
+            "index metadata '{}' exceeds the {MODEL_LIFECYCLE_INDEX_METADATA_LIMIT} byte cap during read",
+            meta_path.display()
+        ));
+    }
+    String::from_utf8(bytes).map(Some).map_err(|error| {
+        format!(
+            "index metadata '{}' is not valid UTF-8: {error}",
+            meta_path.display()
+        )
+    })
+}
+
+fn first_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn first_u32(value: &serde_json::Value, keys: &[&str]) -> Option<u32> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|value| value.as_u64()))
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn model_lifecycle_local_source_path(source: &str, workspace_path: &Path) -> Option<PathBuf> {
+    if source.contains("://") || source.starts_with("urn:") || source.starts_with("model:") {
+        return None;
+    }
+    let path = Path::new(source);
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_path.join(path)
+    })
+}
+
+fn redact_lifecycle_source_uri(source: &str, workspace_path: &Path) -> String {
+    if source.contains("://") || source.starts_with("urn:") || source.starts_with("model:") {
+        return short_hashed_path(source);
+    }
+    let path = Path::new(source);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_path.join(path)
+    };
+    redact_lifecycle_path(&absolute, workspace_path)
+}
+
+fn redact_lifecycle_metadata_path(value: &str) -> String {
+    if value.starts_with('/') || value.contains("://") {
+        short_hashed_path(value)
+    } else {
+        value.trim_start_matches("./").to_string()
+    }
+}
+
+fn redact_lifecycle_path(path: &Path, workspace_path: &Path) -> String {
+    if let Ok(relative) = path.strip_prefix(workspace_path) {
+        let rendered = relative.to_string_lossy();
+        let trimmed = rendered.trim_start_matches("./");
+        if trimmed.is_empty() {
+            ".".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    } else {
+        short_hashed_path(&path.to_string_lossy())
+    }
+}
+
+fn short_hashed_path(value: &str) -> String {
+    let digest = blake3::hash(value.as_bytes()).to_hex().to_string();
+    format!("hashed:{}", &digest[..12])
+}
+
+fn normalize_blake3_hash(value: &str) -> Option<String> {
+    let hex = value.strip_prefix("blake3:")?;
+    if hex.len() == 64 && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(format!("blake3:{}", hex.to_ascii_lowercase()))
+    } else {
+        None
+    }
+}
+
+fn hash_model_asset(path: &Path) -> Result<String, std::io::Error> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
 }
 
 fn redact_model_source_uri(value: &str) -> String {
@@ -777,10 +2082,12 @@ pub fn build_model_status_report(
         .filter(|entry| entry.status.as_str() == "available")
         .count();
 
-    let selected_registry_entry = entries
+    let selected_embedding_entry = entries
         .iter()
         .find(|entry| entry_is_available_embedding(entry))
-        .cloned()
+        .cloned();
+    let selected_registry_entry = selected_embedding_entry
+        .clone()
         .map(ModelRegistryEntryView::from_stored);
 
     let reranker_registered_count = entries
@@ -839,6 +2146,13 @@ pub fn build_model_status_report(
         reranker_registered_count,
         reranker_available_entries.len(),
     ));
+    let model_lifecycle = build_model_lifecycle_report(
+        &workspace_path,
+        &database_path,
+        &connection,
+        &entries,
+        selected_embedding_entry.as_ref(),
+    );
 
     Ok(ModelStatusReport {
         schema: MODEL_STATUS_SCHEMA_V2,
@@ -846,6 +2160,7 @@ pub fn build_model_status_report(
         database_path,
         active,
         reranker,
+        model_lifecycle,
         registered_count,
         available_count,
         degradations,

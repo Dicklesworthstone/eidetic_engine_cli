@@ -446,8 +446,8 @@
     }
   },
   "x-ee-status": {
-    "shipped": false,
-    "available_in_build": false,
+    "shipped": true,
+    "available_in_build": true,
     "tracking_bead": "bd-1iupc.2"
   }
 }
