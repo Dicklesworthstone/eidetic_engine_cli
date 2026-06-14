@@ -2283,7 +2283,7 @@ fn should_stop_stdio_loop_after_response(request: &Value, response: Option<&Valu
 fn read_limited_jsonl_line<R: BufRead>(
     reader: &mut R,
     max_bytes: usize,
-) -> Result<Option<Result<String, usize>>, String> {
+) -> Result<Option<StdioLineRead>, String> {
     let mut bytes = Vec::new();
     let mut bytes_seen = 0usize;
 
@@ -2320,15 +2320,22 @@ fn read_limited_jsonl_line<R: BufRead>(
     }
 
     if bytes_seen > max_bytes {
-        return Ok(Some(Err(bytes_seen)));
+        return Ok(Some(StdioLineRead::TooLarge(bytes_seen)));
     }
 
     if bytes.ends_with(b"\r") {
         bytes.pop();
     }
-    String::from_utf8(bytes)
-        .map(|line| Some(Ok(line)))
-        .map_err(|error| format!("stdin line is not valid UTF-8: {error}"))
+    match String::from_utf8(bytes) {
+        Ok(line) => Ok(Some(StdioLineRead::Line(line))),
+        Err(error) => Ok(Some(StdioLineRead::InvalidUtf8(error.to_string()))),
+    }
+}
+
+enum StdioLineRead {
+    Line(String),
+    TooLarge(usize),
+    InvalidUtf8(String),
 }
 
 struct StdioLineOutcome {
@@ -2423,9 +2430,14 @@ pub fn run_stdio_server() -> Result<(), String> {
 
     while let Some(line_result) = read_limited_jsonl_line(&mut reader, max_bytes)? {
         let line = match line_result {
-            Ok(line) => line,
-            Err(actual_bytes) => {
+            StdioLineRead::Line(line) => line,
+            StdioLineRead::TooLarge(actual_bytes) => {
                 let error = mcp_size_limit_exceeded_error(None, "request", actual_bytes, max_bytes);
+                write_json_rpc_response(&mut stdout, &error, max_bytes)?;
+                continue;
+            }
+            StdioLineRead::InvalidUtf8(message) => {
+                let error = json_rpc_error(None, -32700, &format!("Parse error: {message}"));
                 write_json_rpc_response(&mut stdout, &error, max_bytes)?;
                 continue;
             }

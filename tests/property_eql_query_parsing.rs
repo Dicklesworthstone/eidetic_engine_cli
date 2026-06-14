@@ -23,7 +23,11 @@
 //!   `limit`, `rerank`, `return_subgraph`, `explain` regardless of which
 //!   non-rejecting input shape produced it.
 
-use ee::models::query::{EqlSpeedMode, EqlTagsMode, parse_eql_query};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use ee::models::query::{
+    EqlSpeedMode, EqlTagsMode, PaginationCursor, PaginationCursorError, parse_eql_query,
+    parse_filters,
+};
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 use serde_json::{Map, Value, json};
@@ -243,4 +247,51 @@ fn parse_eql_query_rejects_non_object_root() -> TestResult {
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn pagination_cursor_rejects_offset_overflow() -> TestResult {
+    let token = URL_SAFE_NO_PAD.encode(r#"{"o":4294967296,"h":"query-shape"}"#);
+    let error = PaginationCursor::decode(&token).map_or_else(
+        |error| error,
+        |cursor| panic!("overflow cursor unexpectedly decoded: {cursor:?}"),
+    );
+    ensure(
+        error == PaginationCursorError::OffsetOutOfRange,
+        format!("overflow cursor should reject with OffsetOutOfRange; got {error:?}"),
+    )
+}
+
+#[test]
+fn query_filters_compare_large_json_integers_exactly() -> TestResult {
+    let filters = parse_filters(&json!({
+        "sequence": {"eq": 9007199254740993_u64}
+    }))
+    .ok_or_else(|| "large integer equality filter should parse".to_owned())?;
+
+    let adjacent = json!({"sequence": 9007199254740992_u64});
+    ensure(
+        !filters.matches(Some(&adjacent)),
+        "eq filter must not collapse adjacent integers above f64's precise range",
+    )?;
+
+    let exact = json!({"sequence": 9007199254740993_u64});
+    ensure(
+        filters.matches(Some(&exact)),
+        "eq filter should still match the exact large integer",
+    )?;
+
+    let range = parse_filters(&json!({
+        "sequence": {"gt": 9007199254740992_u64}
+    }))
+    .ok_or_else(|| "large integer range filter should parse".to_owned())?;
+
+    ensure(
+        !range.matches(Some(&adjacent)),
+        "gt filter should reject the threshold value exactly",
+    )?;
+    ensure(
+        range.matches(Some(&exact)),
+        "gt filter should accept the next large integer exactly",
+    )
 }

@@ -98,6 +98,39 @@ fn assert_error_envelope(
     Ok(())
 }
 
+fn assert_parse_error_envelope(response: &Value) -> TestResult {
+    if response["jsonrpc"].as_str() != Some("2.0") {
+        return Err(format!(
+            "parse-error response missing jsonrpc=2.0: {response}"
+        ));
+    }
+    if response["id"] != Value::Null {
+        return Err(format!(
+            "parse-error id must be null per JSON-RPC 2.0 (no id available): {response}"
+        ));
+    }
+    if response["error"]["code"].as_i64() != Some(-32700) {
+        return Err(format!(
+            "parse-error code drifted: expected -32700, got {} (full: {response})",
+            response["error"]["code"]
+        ));
+    }
+    let parse_message = response["error"]["message"]
+        .as_str()
+        .ok_or_else(|| format!("parse-error message missing: {response}"))?;
+    if !parse_message.starts_with("Parse error: ") {
+        return Err(format!(
+            "parse-error message must begin with \"Parse error: \", got {parse_message:?}"
+        ));
+    }
+    if !response["result"].is_null() {
+        return Err(format!(
+            "parse-error envelope must not include a result field: {response}"
+        ));
+    }
+    Ok(())
+}
+
 #[test]
 fn ee_mcp_serve_stdio_pins_top_level_error_envelopes_parse_unknown_method_and_cancelled()
 -> TestResult {
@@ -144,35 +177,18 @@ fn ee_mcp_serve_stdio_pins_top_level_error_envelopes_parse_unknown_method_and_ca
         .flush()
         .map_err(|error| format!("flush malformed json: {error}"))?;
     let parse_error_response = read_one_response_line(&mut stdout_reader)?;
-    if parse_error_response["jsonrpc"].as_str() != Some("2.0") {
-        return Err(format!(
-            "parse-error response missing jsonrpc=2.0: {parse_error_response}"
-        ));
-    }
-    if parse_error_response["id"] != Value::Null {
-        return Err(format!(
-            "parse-error id must be null per JSON-RPC 2.0 (no id available): {parse_error_response}"
-        ));
-    }
-    if parse_error_response["error"]["code"].as_i64() != Some(-32700) {
-        return Err(format!(
-            "parse-error code drifted: expected -32700, got {} (full: {parse_error_response})",
-            parse_error_response["error"]["code"]
-        ));
-    }
-    let parse_message = parse_error_response["error"]["message"]
-        .as_str()
-        .ok_or_else(|| format!("parse-error message missing: {parse_error_response}"))?;
-    if !parse_message.starts_with("Parse error: ") {
-        return Err(format!(
-            "parse-error message must begin with \"Parse error: \", got {parse_message:?}"
-        ));
-    }
-    if !parse_error_response["result"].is_null() {
-        return Err(format!(
-            "parse-error envelope must not include a result field: {parse_error_response}"
-        ));
-    }
+    assert_parse_error_envelope(&parse_error_response)?;
+
+    // Case 1b: invalid UTF-8 is malformed JSON-RPC input, but it must not
+    // terminate the stdio server before later requests can be processed.
+    stdin
+        .write_all(b"\xff\n")
+        .map_err(|error| format!("write invalid utf8: {error}"))?;
+    stdin
+        .flush()
+        .map_err(|error| format!("flush invalid utf8: {error}"))?;
+    let invalid_utf8_response = read_one_response_line(&mut stdout_reader)?;
+    assert_parse_error_envelope(&invalid_utf8_response)?;
 
     // Case 2: unknown method with id (id echoed) - reaches handle_request's
     // McpMethod::Unknown branch.

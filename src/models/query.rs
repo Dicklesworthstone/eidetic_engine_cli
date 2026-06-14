@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 
 use super::memory::Tag;
 
@@ -445,6 +446,8 @@ fn is_scalar_filter_value(value: &serde_json::Value) -> bool {
 pub enum FilterValue {
     String(String),
     Number(f64),
+    SignedInteger(i64),
+    UnsignedInteger(u64),
     Bool(bool),
     List(Vec<FilterValue>),
     Null,
@@ -455,7 +458,15 @@ impl FilterValue {
     pub fn from_json(value: &serde_json::Value) -> Self {
         match value {
             serde_json::Value::String(s) => Self::String(s.clone()),
-            serde_json::Value::Number(n) => Self::Number(n.as_f64().unwrap_or(0.0)),
+            serde_json::Value::Number(n) => {
+                if let Some(value) = n.as_i64() {
+                    Self::SignedInteger(value)
+                } else if let Some(value) = n.as_u64() {
+                    Self::UnsignedInteger(value)
+                } else {
+                    Self::Number(n.as_f64().unwrap_or(0.0))
+                }
+            }
             serde_json::Value::Bool(b) => Self::Bool(*b),
             serde_json::Value::Array(arr) => Self::List(arr.iter().map(Self::from_json).collect()),
             serde_json::Value::Null => Self::Null,
@@ -478,6 +489,10 @@ impl FilterValue {
             (Self::Number(n), serde_json::Value::Number(o)) => {
                 o.as_f64().is_some_and(|o| (*n - o).abs() < f64::EPSILON)
             }
+            (Self::SignedInteger(_), serde_json::Value::Number(o))
+            | (Self::UnsignedInteger(_), serde_json::Value::Number(o)) => self
+                .compare_actual_number(o)
+                .is_some_and(|ordering| ordering == Ordering::Equal),
             (Self::Bool(b), serde_json::Value::Bool(o)) => b == o,
             (Self::Null, serde_json::Value::Null) => true,
             _ => false,
@@ -498,6 +513,10 @@ impl FilterValue {
             (Self::Number(threshold), serde_json::Value::Number(n)) => {
                 n.as_f64().is_some_and(|n| n > *threshold)
             }
+            (Self::SignedInteger(_) | Self::UnsignedInteger(_), serde_json::Value::Number(n)) => {
+                self.compare_actual_number(n)
+                    .is_some_and(|ordering| ordering == Ordering::Greater)
+            }
             (Self::String(threshold), serde_json::Value::String(s)) => {
                 s.as_str() > threshold.as_str()
             }
@@ -510,6 +529,10 @@ impl FilterValue {
         match (self, actual) {
             (Self::Number(threshold), serde_json::Value::Number(n)) => {
                 n.as_f64().is_some_and(|n| n >= *threshold)
+            }
+            (Self::SignedInteger(_) | Self::UnsignedInteger(_), serde_json::Value::Number(n)) => {
+                self.compare_actual_number(n)
+                    .is_some_and(|ordering| ordering != Ordering::Less)
             }
             (Self::String(threshold), serde_json::Value::String(s)) => {
                 s.as_str() >= threshold.as_str()
@@ -524,6 +547,10 @@ impl FilterValue {
             (Self::Number(threshold), serde_json::Value::Number(n)) => {
                 n.as_f64().is_some_and(|n| n < *threshold)
             }
+            (Self::SignedInteger(_) | Self::UnsignedInteger(_), serde_json::Value::Number(n)) => {
+                self.compare_actual_number(n)
+                    .is_some_and(|ordering| ordering == Ordering::Less)
+            }
             (Self::String(threshold), serde_json::Value::String(s)) => {
                 s.as_str() < threshold.as_str()
             }
@@ -536,6 +563,10 @@ impl FilterValue {
         match (self, actual) {
             (Self::Number(threshold), serde_json::Value::Number(n)) => {
                 n.as_f64().is_some_and(|n| n <= *threshold)
+            }
+            (Self::SignedInteger(_) | Self::UnsignedInteger(_), serde_json::Value::Number(n)) => {
+                self.compare_actual_number(n)
+                    .is_some_and(|ordering| ordering != Ordering::Greater)
             }
             (Self::String(threshold), serde_json::Value::String(s)) => {
                 s.as_str() <= threshold.as_str()
@@ -567,6 +598,43 @@ impl FilterValue {
             _ => false,
         }
     }
+
+    fn compare_actual_number(&self, actual: &serde_json::Number) -> Option<Ordering> {
+        match self {
+            Self::SignedInteger(threshold) => compare_json_number_to_i64(actual, *threshold),
+            Self::UnsignedInteger(threshold) => compare_json_number_to_u64(actual, *threshold),
+            Self::Number(threshold) => actual.as_f64()?.partial_cmp(threshold),
+            _ => None,
+        }
+    }
+}
+
+fn compare_json_number_to_i64(actual: &serde_json::Number, threshold: i64) -> Option<Ordering> {
+    if let Some(actual) = actual.as_i64() {
+        return Some(actual.cmp(&threshold));
+    }
+    if let Some(actual) = actual.as_u64() {
+        return if threshold < 0 {
+            Some(Ordering::Greater)
+        } else {
+            Some(actual.cmp(&(threshold as u64)))
+        };
+    }
+    actual.as_f64()?.partial_cmp(&(threshold as f64))
+}
+
+fn compare_json_number_to_u64(actual: &serde_json::Number, threshold: u64) -> Option<Ordering> {
+    if let Some(actual) = actual.as_u64() {
+        return Some(actual.cmp(&threshold));
+    }
+    if let Some(actual) = actual.as_i64() {
+        return if actual < 0 {
+            Some(Ordering::Less)
+        } else {
+            Some((actual as u64).cmp(&threshold))
+        };
+    }
+    actual.as_f64()?.partial_cmp(&(threshold as f64))
 }
 
 fn get_nested_field<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
@@ -1519,10 +1587,8 @@ impl PaginationCursor {
             .and_then(|v| v.as_str())
             .ok_or(PaginationCursorError::MissingQueryHash)?
             .to_string();
-        Ok(Self {
-            offset: u32::try_from(offset).unwrap_or(u32::MAX),
-            query_hash,
-        })
+        let offset = u32::try_from(offset).map_err(|_| PaginationCursorError::OffsetOutOfRange)?;
+        Ok(Self { offset, query_hash })
     }
 }
 
@@ -1532,6 +1598,7 @@ pub enum PaginationCursorError {
     MalformedBase64,
     MalformedJson,
     MissingOffset,
+    OffsetOutOfRange,
     MissingQueryHash,
     QueryShapeMismatch,
 }
@@ -1542,6 +1609,7 @@ impl std::fmt::Display for PaginationCursorError {
             Self::MalformedBase64 => f.write_str("cursor is not valid base64"),
             Self::MalformedJson => f.write_str("cursor does not contain valid JSON"),
             Self::MissingOffset => f.write_str("cursor missing offset field"),
+            Self::OffsetOutOfRange => f.write_str("cursor offset exceeds supported range"),
             Self::MissingQueryHash => f.write_str("cursor missing query hash field"),
             Self::QueryShapeMismatch => {
                 f.write_str("cursor was generated for a different query shape")
