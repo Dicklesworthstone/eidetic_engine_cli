@@ -12,6 +12,11 @@
       "binaryHash": null,
       "sourceHint": "unknown",
       "freshness": "health_corrupt",
+      "probe": {
+        "commandId": "toolchain_agent_mail_health",
+        "exitClass": "ok",
+        "durationMs": 0
+      },
       "degraded": [
         {
           "code": "health_corrupt",
@@ -30,6 +35,11 @@
       "binaryHash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "sourceHint": "release_install",
       "freshness": "current",
+      "probe": {
+        "commandId": "toolchain_ee_version",
+        "exitClass": "ok",
+        "durationMs": 0
+      },
       "degraded": [],
       "checkedAt": "2026-06-10T21:10:00Z"
     }

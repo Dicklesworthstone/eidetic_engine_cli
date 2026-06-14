@@ -17,6 +17,7 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use blake3::Hasher;
 use chrono::{DateTime, Utc};
@@ -63,6 +64,9 @@ use super::write_owner::{WriteSpool, WriteSpoolConfig};
 pub const SUPPORT_BUNDLE_SCHEMA_V1: &str = "ee.support_bundle.v1";
 pub const SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1: &str = "ee.support_bundle.manifest.v1";
 pub const SUPPORT_BUNDLE_INSPECT_SCHEMA_V1: &str = "ee.support_bundle.inspect.v1";
+pub const TOOLCHAIN_PROVENANCE_SCHEMA_V1: &str = "ee.toolchain_provenance.v1";
+pub const TOOLCHAIN_PROVENANCE_REDACTION_STATUS: &str =
+    "paths_workspace_relative_or_hashed_no_content";
 
 const MANIFEST_FILE: &str = "manifest.json";
 const STATUS_FILE: &str = "status.json";
@@ -162,6 +166,9 @@ pub(crate) const SUPPORT_BUNDLE_SHADOW_POLICY_SUMMARY_SCHEMA_V1: &str =
     "ee.support_bundle.shadow_policy_summary.v1";
 const SHADOW_POLICY_ARTIFACT_DIR: &str = "shadow";
 const MAX_SHADOW_POLICY_ARTIFACTS: usize = 16;
+const TOOLCHAIN_PROVENANCE_DEFAULT_TIMEOUT_MS: u64 = 1_500;
+const TOOLCHAIN_PROVENANCE_MAX_HASH_BYTES: u64 = 64 * 1024 * 1024;
+const TOOLCHAIN_PROVENANCE_AGENT_MAIL_SNAPSHOT_MAX_BYTES: u64 = 1024 * 1024;
 const SUPPORT_BUNDLE_REQUIRED_REMOTE_WRAPPER: &str = "scripts/rch_verify.sh -- <cargo command>";
 const TAILSCALE_METADATA_FIELDS: &[&str] = &[
     "selfNodeKey",
@@ -336,6 +343,958 @@ impl InspectReport {
             "hashMismatches": self.hash_mismatches,
             "valid": self.valid
         })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolchainProvenanceOptions {
+    pub workspace: PathBuf,
+    pub command_timeout_ms: u64,
+    pub collected_at: Option<String>,
+    pub agent_mail_snapshot: Option<PathBuf>,
+    pub script_paths: Vec<PathBuf>,
+    pub probe_duration_override_ms: Option<u64>,
+}
+
+impl ToolchainProvenanceOptions {
+    #[must_use]
+    pub fn for_workspace(workspace: impl Into<PathBuf>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            command_timeout_ms: TOOLCHAIN_PROVENANCE_DEFAULT_TIMEOUT_MS,
+            collected_at: None,
+            agent_mail_snapshot: None,
+            script_paths: default_toolchain_script_paths(),
+            probe_duration_override_ms: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolchainToolId {
+    Ee,
+    Rch,
+    Br,
+    Bv,
+    AgentMail,
+    Cass,
+    Git,
+    Cargo,
+}
+
+impl ToolchainToolId {
+    #[must_use]
+    pub const fn program(self) -> Option<&'static str> {
+        match self {
+            Self::Ee => Some("ee"),
+            Self::Rch => Some("rch"),
+            Self::Br => Some("br"),
+            Self::Bv => Some("bv"),
+            Self::Cass => Some("cass"),
+            Self::Git => Some("git"),
+            Self::Cargo => Some("cargo"),
+            Self::AgentMail => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn version_args(self) -> &'static [&'static str] {
+        match self {
+            Self::AgentMail => &[],
+            _ => &["--version"],
+        }
+    }
+
+    #[must_use]
+    pub const fn critical(self) -> bool {
+        matches!(self, Self::Ee | Self::Br | Self::AgentMail)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolchainToolKind {
+    Binary,
+    Service,
+    ScriptSuite,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolchainSourceHint {
+    ReleaseInstall,
+    CargoTarget,
+    SystemPackage,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolchainFreshness {
+    Current,
+    StaleBinary,
+    SourceMismatch,
+    WrapperMissing,
+    HealthCorrupt,
+    CommandTimeout,
+    VersionUnknown,
+    UnsupportedPlatform,
+}
+
+impl ToolchainFreshness {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::StaleBinary => "stale_binary",
+            Self::SourceMismatch => "source_mismatch",
+            Self::WrapperMissing => "wrapper_missing",
+            Self::HealthCorrupt => "health_corrupt",
+            Self::CommandTimeout => "command_timeout",
+            Self::VersionUnknown => "version_unknown",
+            Self::UnsupportedPlatform => "unsupported_platform",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolchainProbeExitClass {
+    Ok,
+    Failed,
+    TimedOut,
+    Unresolved,
+}
+
+impl ToolchainProbeExitClass {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+            Self::Unresolved => "unresolved",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolchainProbeEvidence {
+    pub command_id: String,
+    pub exit_class: ToolchainProbeExitClass,
+    pub duration_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolchainProvenanceDegradation {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair: Option<String>,
+}
+
+impl ToolchainProvenanceDegradation {
+    #[must_use]
+    pub fn new(
+        code: impl Into<String>,
+        severity: impl Into<String>,
+        message: impl Into<String>,
+        repair: Option<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            severity: severity.into(),
+            message: message.into(),
+            repair,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolchainToolRow {
+    pub tool: ToolchainToolId,
+    pub kind: ToolchainToolKind,
+    pub resolved_path: Option<String>,
+    pub version: Option<String>,
+    pub binary_hash: Option<String>,
+    pub source_hint: ToolchainSourceHint,
+    pub freshness: ToolchainFreshness,
+    pub probe: ToolchainProbeEvidence,
+    pub degraded: Vec<ToolchainProvenanceDegradation>,
+    pub checked_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolchainScriptHashRow {
+    pub script: String,
+    pub blake3: String,
+    pub tracked: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolchainProvenanceReport {
+    pub schema: String,
+    pub collected_at: String,
+    pub workspace_fingerprint: String,
+    pub redaction_status: String,
+    pub tools: Vec<ToolchainToolRow>,
+    pub script_hashes: Vec<ToolchainScriptHashRow>,
+    pub degraded: Vec<ToolchainProvenanceDegradation>,
+}
+
+#[derive(Clone, Debug)]
+struct ToolchainProbeOutput {
+    evidence: ToolchainProbeEvidence,
+    stdout: Option<String>,
+    stderr: Option<String>,
+}
+
+#[must_use]
+pub fn collect_toolchain_provenance(
+    options: &ToolchainProvenanceOptions,
+) -> ToolchainProvenanceReport {
+    let runner = super::swarm_brief::SystemSwarmBriefCommandRunner;
+    collect_toolchain_provenance_with_runner(options, &runner)
+}
+
+#[must_use]
+pub fn collect_toolchain_provenance_with_runner<R>(
+    options: &ToolchainProvenanceOptions,
+    runner: &R,
+) -> ToolchainProvenanceReport
+where
+    R: super::swarm_brief::SwarmBriefCommandRunner,
+{
+    let workspace = options
+        .workspace
+        .canonicalize()
+        .unwrap_or_else(|_| options.workspace.clone());
+    let collected_at = options
+        .collected_at
+        .clone()
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let timeout_ms = options.command_timeout_ms.max(1);
+
+    let mut tools = Vec::new();
+    for tool in [
+        ToolchainToolId::Ee,
+        ToolchainToolId::Rch,
+        ToolchainToolId::Br,
+        ToolchainToolId::Bv,
+        ToolchainToolId::Cass,
+        ToolchainToolId::Git,
+        ToolchainToolId::Cargo,
+    ] {
+        tools.push(collect_binary_toolchain_row(
+            tool,
+            &workspace,
+            &collected_at,
+            timeout_ms,
+            options.probe_duration_override_ms,
+            runner,
+        ));
+    }
+    tools.push(collect_agent_mail_toolchain_row(
+        options.agent_mail_snapshot.as_deref(),
+        &workspace,
+        &collected_at,
+        timeout_ms,
+        options.probe_duration_override_ms,
+        runner,
+    ));
+    tools.sort_by_key(|row| toolchain_tool_sort_key(row.tool));
+
+    let (script_hashes, mut degraded) = collect_toolchain_script_hashes(
+        &workspace,
+        &options.script_paths,
+        timeout_ms,
+        options.probe_duration_override_ms,
+        runner,
+    );
+    degraded.extend(summarize_toolchain_degradations(&tools));
+    degraded.sort_by(|left, right| {
+        left.code
+            .cmp(&right.code)
+            .then_with(|| left.message.cmp(&right.message))
+    });
+    degraded.dedup_by(|left, right| left.code == right.code && left.message == right.message);
+
+    ToolchainProvenanceReport {
+        schema: TOOLCHAIN_PROVENANCE_SCHEMA_V1.to_owned(),
+        collected_at,
+        workspace_fingerprint: toolchain_workspace_fingerprint(&workspace),
+        redaction_status: TOOLCHAIN_PROVENANCE_REDACTION_STATUS.to_owned(),
+        tools,
+        script_hashes,
+        degraded,
+    }
+}
+
+fn collect_binary_toolchain_row<R>(
+    tool: ToolchainToolId,
+    workspace: &Path,
+    checked_at: &str,
+    timeout_ms: u64,
+    probe_duration_override_ms: Option<u64>,
+    runner: &R,
+) -> ToolchainToolRow
+where
+    R: super::swarm_brief::SwarmBriefCommandRunner,
+{
+    let Some(program) = tool.program() else {
+        return collect_agent_mail_toolchain_row(
+            None,
+            workspace,
+            checked_at,
+            timeout_ms,
+            probe_duration_override_ms,
+            runner,
+        );
+    };
+
+    let resolution = run_toolchain_probe(
+        &format!("toolchain_{program}_resolve"),
+        "which",
+        &["-a", program],
+        workspace,
+        timeout_ms,
+        probe_duration_override_ms,
+        runner,
+    );
+
+    let Some(resolved_path) = resolution
+        .stdout
+        .as_deref()
+        .and_then(first_non_empty_line)
+        .map(PathBuf::from)
+    else {
+        let freshness = if resolution.evidence.exit_class == ToolchainProbeExitClass::TimedOut {
+            ToolchainFreshness::CommandTimeout
+        } else {
+            ToolchainFreshness::WrapperMissing
+        };
+        return ToolchainToolRow {
+            tool,
+            kind: ToolchainToolKind::Binary,
+            resolved_path: None,
+            version: None,
+            binary_hash: None,
+            source_hint: ToolchainSourceHint::Unknown,
+            freshness,
+            probe: resolution.evidence,
+            degraded: vec![toolchain_tool_degradation(
+                freshness,
+                tool,
+                format!("{program} could not be resolved on PATH within the bounded probe."),
+            )],
+            checked_at: checked_at.to_owned(),
+        };
+    };
+
+    let version = run_toolchain_probe(
+        &format!("toolchain_{program}_version"),
+        program,
+        tool.version_args(),
+        workspace,
+        timeout_ms,
+        probe_duration_override_ms,
+        runner,
+    );
+    let mut degraded = Vec::new();
+    let version_text = match version.evidence.exit_class {
+        ToolchainProbeExitClass::Ok => version
+            .stdout
+            .as_deref()
+            .and_then(first_non_empty_line)
+            .map(sanitize_toolchain_version),
+        ToolchainProbeExitClass::TimedOut => {
+            degraded.push(toolchain_tool_degradation(
+                ToolchainFreshness::CommandTimeout,
+                tool,
+                format!("{program} --version exceeded the bounded probe window."),
+            ));
+            None
+        }
+        ToolchainProbeExitClass::Failed | ToolchainProbeExitClass::Unresolved => {
+            degraded.push(toolchain_tool_degradation(
+                ToolchainFreshness::VersionUnknown,
+                tool,
+                format!("{program} --version did not produce a usable version string."),
+            ));
+            None
+        }
+    };
+
+    let (binary_hash, hash_degradation) = hash_toolchain_binary(&resolved_path, tool);
+    if let Some(degradation) = hash_degradation {
+        degraded.push(degradation);
+    }
+
+    let mut freshness = match version.evidence.exit_class {
+        ToolchainProbeExitClass::TimedOut => ToolchainFreshness::CommandTimeout,
+        ToolchainProbeExitClass::Ok if version_text.is_some() => ToolchainFreshness::Current,
+        _ => ToolchainFreshness::VersionUnknown,
+    };
+    if tool == ToolchainToolId::Ee
+        && version_text
+            .as_deref()
+            .and_then(extract_first_version_token)
+            .is_some_and(|version| version != env!("CARGO_PKG_VERSION"))
+    {
+        freshness = ToolchainFreshness::StaleBinary;
+        degraded.push(toolchain_tool_degradation(
+            ToolchainFreshness::StaleBinary,
+            tool,
+            format!(
+                "Installed ee version does not match source package version {}.",
+                env!("CARGO_PKG_VERSION")
+            ),
+        ));
+    }
+
+    ToolchainToolRow {
+        tool,
+        kind: ToolchainToolKind::Binary,
+        resolved_path: Some(redact_toolchain_path(&resolved_path, workspace)),
+        version: version_text,
+        binary_hash,
+        source_hint: infer_toolchain_source_hint(&resolved_path),
+        freshness,
+        probe: version.evidence,
+        degraded,
+        checked_at: checked_at.to_owned(),
+    }
+}
+
+fn collect_agent_mail_toolchain_row<R>(
+    snapshot_path: Option<&Path>,
+    workspace: &Path,
+    checked_at: &str,
+    timeout_ms: u64,
+    probe_duration_override_ms: Option<u64>,
+    runner: &R,
+) -> ToolchainToolRow
+where
+    R: super::swarm_brief::SwarmBriefCommandRunner,
+{
+    if let Some(path) = snapshot_path {
+        let started = Instant::now();
+        let (freshness, degraded, exit_class) = match read_toolchain_agent_mail_snapshot(path) {
+            Ok(value) if agent_mail_snapshot_indicates_corruption(&value) => (
+                ToolchainFreshness::HealthCorrupt,
+                vec![toolchain_tool_degradation(
+                    ToolchainFreshness::HealthCorrupt,
+                    ToolchainToolId::AgentMail,
+                    "Agent Mail snapshot reports corrupt or degraded recovery state.",
+                )],
+                ToolchainProbeExitClass::Ok,
+            ),
+            Ok(_) => (
+                ToolchainFreshness::Current,
+                Vec::new(),
+                ToolchainProbeExitClass::Ok,
+            ),
+            Err(message) => (
+                ToolchainFreshness::VersionUnknown,
+                vec![ToolchainProvenanceDegradation::new(
+                    "toolchain_hash_unavailable",
+                    "info",
+                    format!("Agent Mail snapshot could not be read: {message}"),
+                    None,
+                )],
+                ToolchainProbeExitClass::Failed,
+            ),
+        };
+        return ToolchainToolRow {
+            tool: ToolchainToolId::AgentMail,
+            kind: ToolchainToolKind::Service,
+            resolved_path: None,
+            version: None,
+            binary_hash: None,
+            source_hint: ToolchainSourceHint::Unknown,
+            freshness,
+            probe: ToolchainProbeEvidence {
+                command_id: "toolchain_agent_mail_snapshot".to_owned(),
+                exit_class,
+                duration_ms: observed_probe_duration_ms(started, probe_duration_override_ms, 0),
+            },
+            degraded,
+            checked_at: checked_at.to_owned(),
+        };
+    }
+
+    let output = run_toolchain_probe(
+        "toolchain_agent_mail_health",
+        "am",
+        &["agents", "list", "--project", ".", "--json"],
+        workspace,
+        timeout_ms,
+        probe_duration_override_ms,
+        runner,
+    );
+    let mut degraded = Vec::new();
+    let freshness = match output.evidence.exit_class {
+        ToolchainProbeExitClass::Ok => ToolchainFreshness::Current,
+        ToolchainProbeExitClass::TimedOut => {
+            degraded.push(toolchain_tool_degradation(
+                ToolchainFreshness::CommandTimeout,
+                ToolchainToolId::AgentMail,
+                "Agent Mail read-only probe exceeded the bounded timeout.",
+            ));
+            ToolchainFreshness::CommandTimeout
+        }
+        ToolchainProbeExitClass::Failed | ToolchainProbeExitClass::Unresolved => {
+            let text = format!(
+                "{}\n{}",
+                output.stdout.as_deref().unwrap_or(""),
+                output.stderr.as_deref().unwrap_or("")
+            );
+            let freshness = if text.to_ascii_lowercase().contains("corrupt")
+                || text.to_ascii_lowercase().contains("malformed")
+                || text.to_ascii_lowercase().contains("database disk image")
+            {
+                ToolchainFreshness::HealthCorrupt
+            } else {
+                ToolchainFreshness::VersionUnknown
+            };
+            degraded.push(toolchain_tool_degradation(
+                freshness,
+                ToolchainToolId::AgentMail,
+                "Agent Mail read-only probe did not return a healthy result.",
+            ));
+            freshness
+        }
+    };
+
+    ToolchainToolRow {
+        tool: ToolchainToolId::AgentMail,
+        kind: ToolchainToolKind::Service,
+        resolved_path: None,
+        version: None,
+        binary_hash: None,
+        source_hint: ToolchainSourceHint::Unknown,
+        freshness,
+        probe: output.evidence,
+        degraded,
+        checked_at: checked_at.to_owned(),
+    }
+}
+
+fn collect_toolchain_script_hashes<R>(
+    workspace: &Path,
+    scripts: &[PathBuf],
+    timeout_ms: u64,
+    probe_duration_override_ms: Option<u64>,
+    runner: &R,
+) -> (
+    Vec<ToolchainScriptHashRow>,
+    Vec<ToolchainProvenanceDegradation>,
+)
+where
+    R: super::swarm_brief::SwarmBriefCommandRunner,
+{
+    let mut rows = Vec::new();
+    let mut degraded = Vec::new();
+    for script in scripts {
+        let relative = normalize_toolchain_script_path(script);
+        let path = workspace.join(&relative);
+        match hash_toolchain_file(&path) {
+            Ok(hash) => {
+                let tracked = toolchain_script_tracked(
+                    workspace,
+                    &relative,
+                    timeout_ms,
+                    probe_duration_override_ms,
+                    runner,
+                );
+                rows.push(ToolchainScriptHashRow {
+                    script: relative,
+                    blake3: hash,
+                    tracked,
+                });
+            }
+            Err(message) => degraded.push(ToolchainProvenanceDegradation::new(
+                "toolchain_hash_unavailable",
+                "info",
+                format!("{relative} could not be hashed: {message}"),
+                None,
+            )),
+        }
+    }
+    rows.sort_by(|left, right| left.script.cmp(&right.script));
+    (rows, degraded)
+}
+
+fn run_toolchain_probe<R>(
+    command_id: &str,
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    timeout_ms: u64,
+    probe_duration_override_ms: Option<u64>,
+    runner: &R,
+) -> ToolchainProbeOutput
+where
+    R: super::swarm_brief::SwarmBriefCommandRunner,
+{
+    let started = Instant::now();
+    match runner.run(program, args, cwd, timeout_ms) {
+        Ok(output) => ToolchainProbeOutput {
+            evidence: ToolchainProbeEvidence {
+                command_id: command_id.to_owned(),
+                exit_class: ToolchainProbeExitClass::Ok,
+                duration_ms: observed_probe_duration_ms(started, probe_duration_override_ms, 0),
+            },
+            stdout: Some(output.stdout),
+            stderr: Some(output.stderr),
+        },
+        Err(super::swarm_brief::SwarmBriefCommandError::TimedOut { .. }) => ToolchainProbeOutput {
+            evidence: ToolchainProbeEvidence {
+                command_id: command_id.to_owned(),
+                exit_class: ToolchainProbeExitClass::TimedOut,
+                duration_ms: observed_probe_duration_ms(
+                    started,
+                    probe_duration_override_ms,
+                    timeout_ms,
+                ),
+            },
+            stdout: None,
+            stderr: None,
+        },
+        Err(super::swarm_brief::SwarmBriefCommandError::Unavailable(message)) => {
+            ToolchainProbeOutput {
+                evidence: ToolchainProbeEvidence {
+                    command_id: command_id.to_owned(),
+                    exit_class: ToolchainProbeExitClass::Unresolved,
+                    duration_ms: observed_probe_duration_ms(started, probe_duration_override_ms, 0),
+                },
+                stdout: None,
+                stderr: Some(message),
+            }
+        }
+        Err(super::swarm_brief::SwarmBriefCommandError::InvalidUtf8(message)) => {
+            ToolchainProbeOutput {
+                evidence: ToolchainProbeEvidence {
+                    command_id: command_id.to_owned(),
+                    exit_class: ToolchainProbeExitClass::Failed,
+                    duration_ms: observed_probe_duration_ms(started, probe_duration_override_ms, 0),
+                },
+                stdout: None,
+                stderr: Some(message),
+            }
+        }
+        Err(super::swarm_brief::SwarmBriefCommandError::Failed { stdout, stderr, .. }) => {
+            ToolchainProbeOutput {
+                evidence: ToolchainProbeEvidence {
+                    command_id: command_id.to_owned(),
+                    exit_class: ToolchainProbeExitClass::Failed,
+                    duration_ms: observed_probe_duration_ms(started, probe_duration_override_ms, 0),
+                },
+                stdout: Some(stdout),
+                stderr: Some(stderr),
+            }
+        }
+    }
+}
+
+fn duration_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn observed_probe_duration_ms(started: Instant, override_ms: Option<u64>, minimum_ms: u64) -> u64 {
+    override_ms
+        .unwrap_or_else(|| duration_ms(started))
+        .max(minimum_ms)
+}
+
+fn first_non_empty_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+fn sanitize_toolchain_version(line: &str) -> String {
+    let redacted = redact_support_diagnostic_text(line);
+    redacted.chars().take(128).collect()
+}
+
+fn extract_first_version_token(text: &str) -> Option<&str> {
+    text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '+'))
+        .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+}
+
+fn hash_toolchain_binary(
+    path: &Path,
+    tool: ToolchainToolId,
+) -> (Option<String>, Option<ToolchainProvenanceDegradation>) {
+    match hash_toolchain_file(path) {
+        Ok(hash) => (Some(hash), None),
+        Err(message) => (
+            None,
+            Some(ToolchainProvenanceDegradation::new(
+                "toolchain_hash_unavailable",
+                "info",
+                format!(
+                    "{} binary could not be hashed: {message}",
+                    toolchain_tool_name(tool)
+                ),
+                None,
+            )),
+        ),
+    }
+}
+
+fn hash_toolchain_file(path: &Path) -> Result<String, String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("metadata unavailable: {error}"))?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err("not a regular non-symlink file".to_owned());
+    }
+    if metadata.len() > TOOLCHAIN_PROVENANCE_MAX_HASH_BYTES {
+        return Err(format!(
+            "file exceeds {} byte hash cap",
+            TOOLCHAIN_PROVENANCE_MAX_HASH_BYTES
+        ));
+    }
+    let bytes = fs::read(path).map_err(|error| format!("read failed: {error}"))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > TOOLCHAIN_PROVENANCE_MAX_HASH_BYTES {
+        return Err(format!(
+            "file exceeded {} byte hash cap while reading",
+            TOOLCHAIN_PROVENANCE_MAX_HASH_BYTES
+        ));
+    }
+    let mut hasher = Hasher::new();
+    hasher.update(&bytes);
+    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
+fn redact_toolchain_path(path: &Path, workspace: &Path) -> String {
+    if let Ok(relative) = path.strip_prefix(workspace) {
+        let relative = relative.to_string_lossy();
+        if relative.is_empty() {
+            ".".to_owned()
+        } else {
+            relative.replace('\\', "/")
+        }
+    } else {
+        format!("hashed:{}", short_hash(&path.display().to_string()))
+    }
+}
+
+fn short_hash(input: &str) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(input.as_bytes());
+    hasher.finalize().to_hex()[..12].to_owned()
+}
+
+fn toolchain_workspace_fingerprint(workspace: &Path) -> String {
+    short_hash(&workspace.display().to_string())
+}
+
+fn infer_toolchain_source_hint(path: &Path) -> ToolchainSourceHint {
+    let text = path.to_string_lossy();
+    if text.contains("/target/") || text.contains("\\target\\") {
+        ToolchainSourceHint::CargoTarget
+    } else if text.contains("/.cargo/bin/")
+        || text.contains("/.local/bin/")
+        || text.contains("\\.cargo\\bin\\")
+        || text.contains("\\.local\\bin\\")
+    {
+        ToolchainSourceHint::ReleaseInstall
+    } else if text.starts_with("/usr/")
+        || text.starts_with("/bin/")
+        || text.starts_with("/opt/homebrew/")
+        || text.starts_with("/nix/store/")
+    {
+        ToolchainSourceHint::SystemPackage
+    } else {
+        ToolchainSourceHint::Unknown
+    }
+}
+
+fn default_toolchain_script_paths() -> Vec<PathBuf> {
+    [
+        "scripts/agent_mail_snapshot.sh",
+        "scripts/br_retry.sh",
+        "scripts/commit-hygiene-classifier.sh",
+        "scripts/rch_lane_doctor.sh",
+        "scripts/rch_verify.sh",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect()
+}
+
+fn normalize_toolchain_script_path(script: &Path) -> String {
+    let normalized = script.to_string_lossy().replace('\\', "/");
+    normalized
+        .strip_prefix("./")
+        .unwrap_or(&normalized)
+        .to_owned()
+}
+
+fn toolchain_script_tracked<R>(
+    workspace: &Path,
+    relative: &str,
+    timeout_ms: u64,
+    probe_duration_override_ms: Option<u64>,
+    runner: &R,
+) -> bool
+where
+    R: super::swarm_brief::SwarmBriefCommandRunner,
+{
+    let output = run_toolchain_probe(
+        "toolchain_git_script_tracked",
+        "git",
+        &["ls-files", "--error-unmatch", relative],
+        workspace,
+        timeout_ms,
+        probe_duration_override_ms,
+        runner,
+    );
+    output.evidence.exit_class == ToolchainProbeExitClass::Ok
+}
+
+fn read_toolchain_agent_mail_snapshot(path: &Path) -> Result<Value, String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("metadata unavailable: {error}"))?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err("snapshot is not a regular non-symlink file".to_owned());
+    }
+    if metadata.len() > TOOLCHAIN_PROVENANCE_AGENT_MAIL_SNAPSHOT_MAX_BYTES {
+        return Err(format!(
+            "snapshot exceeds {} byte read cap",
+            TOOLCHAIN_PROVENANCE_AGENT_MAIL_SNAPSHOT_MAX_BYTES
+        ));
+    }
+    let text = fs::read_to_string(path).map_err(|error| format!("read failed: {error}"))?;
+    serde_json::from_str(&text).map_err(|error| format!("parse failed: {error}"))
+}
+
+fn agent_mail_snapshot_indicates_corruption(value: &Value) -> bool {
+    value
+        .pointer("/durability_state")
+        .and_then(Value::as_str)
+        .is_some_and(|state| state != "ok")
+        || value
+            .pointer("/recovery/mode")
+            .and_then(Value::as_str)
+            .is_some_and(|mode| mode == "corrupt")
+        || value
+            .get("degraded")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    let rendered = item.to_string().to_ascii_lowercase();
+                    rendered.contains("corrupt") || rendered.contains("database disk image")
+                })
+            })
+}
+
+fn toolchain_tool_degradation(
+    freshness: ToolchainFreshness,
+    tool: ToolchainToolId,
+    message: impl Into<String>,
+) -> ToolchainProvenanceDegradation {
+    let severity = match freshness {
+        ToolchainFreshness::StaleBinary | ToolchainFreshness::SourceMismatch => "medium",
+        ToolchainFreshness::HealthCorrupt if tool.critical() => "high",
+        ToolchainFreshness::CommandTimeout => "warning",
+        ToolchainFreshness::WrapperMissing
+        | ToolchainFreshness::VersionUnknown
+        | ToolchainFreshness::UnsupportedPlatform => "low",
+        ToolchainFreshness::Current | ToolchainFreshness::HealthCorrupt => "warning",
+    };
+    let repair = match freshness {
+        ToolchainFreshness::StaleBinary => {
+            Some("Use an approved release/RCH artifact path; do not install locally.".to_owned())
+        }
+        ToolchainFreshness::HealthCorrupt => {
+            Some("Coordinate an operator-run Agent Mail repair before relying on it.".to_owned())
+        }
+        ToolchainFreshness::WrapperMissing => Some(
+            "Install or expose the missing tool through the approved project toolchain.".to_owned(),
+        ),
+        ToolchainFreshness::CommandTimeout => Some(
+            "Retry the probe with the same bounded collector after pressure clears.".to_owned(),
+        ),
+        _ => None,
+    };
+    ToolchainProvenanceDegradation::new(freshness.code(), severity, message, repair)
+}
+
+fn summarize_toolchain_degradations(
+    tools: &[ToolchainToolRow],
+) -> Vec<ToolchainProvenanceDegradation> {
+    let timeout_count = tools
+        .iter()
+        .filter(|row| row.freshness == ToolchainFreshness::CommandTimeout)
+        .count();
+    let unresolved_count = tools
+        .iter()
+        .filter(|row| row.freshness == ToolchainFreshness::WrapperMissing)
+        .count();
+    let hash_unavailable_count = tools
+        .iter()
+        .flat_map(|row| &row.degraded)
+        .filter(|degradation| degradation.code == "toolchain_hash_unavailable")
+        .count();
+    let mut degraded = Vec::new();
+    if timeout_count > 0 {
+        degraded.push(ToolchainProvenanceDegradation::new(
+            "toolchain_probe_timeout",
+            "low",
+            format!("{timeout_count} toolchain probe(s) exceeded the bounded timeout."),
+            None,
+        ));
+    }
+    if unresolved_count > 0 {
+        degraded.push(ToolchainProvenanceDegradation::new(
+            "toolchain_tool_unresolved",
+            "low",
+            format!("{unresolved_count} toolchain binary probe(s) could not resolve a tool."),
+            None,
+        ));
+    }
+    if hash_unavailable_count > 0 {
+        degraded.push(ToolchainProvenanceDegradation::new(
+            "toolchain_hash_unavailable",
+            "info",
+            format!("{hash_unavailable_count} toolchain hash operation(s) could not complete."),
+            None,
+        ));
+    }
+    degraded
+}
+
+fn toolchain_tool_name(tool: ToolchainToolId) -> &'static str {
+    match tool {
+        ToolchainToolId::Ee => "ee",
+        ToolchainToolId::Rch => "rch",
+        ToolchainToolId::Br => "br",
+        ToolchainToolId::Bv => "bv",
+        ToolchainToolId::AgentMail => "agent_mail",
+        ToolchainToolId::Cass => "cass",
+        ToolchainToolId::Git => "git",
+        ToolchainToolId::Cargo => "cargo",
+    }
+}
+
+const fn toolchain_tool_sort_key(tool: ToolchainToolId) -> u8 {
+    match tool {
+        ToolchainToolId::Ee => 0,
+        ToolchainToolId::Rch => 1,
+        ToolchainToolId::Br => 2,
+        ToolchainToolId::Bv => 3,
+        ToolchainToolId::AgentMail => 4,
+        ToolchainToolId::Cass => 5,
+        ToolchainToolId::Git => 6,
+        ToolchainToolId::Cargo => 7,
     }
 }
 
@@ -5897,6 +6856,7 @@ mod tests {
         InstallFindingCode, InstallPathAnalysis, InstallPathStatus, InstallPermissionCheck,
         InstallPermissionStatus, InstallTarget, PathBinary, UpdateSourcePosture,
     };
+    use std::collections::BTreeMap;
 
     type TestResult = Result<(), String>;
     const SUPPORT_BUNDLE_ATTESTATION_SUMMARY_SCHEMA_TEXT: &str = include_str!(
@@ -5947,6 +6907,66 @@ mod tests {
         "/Volumes/",
         "/private/",
     ];
+
+    #[derive(Clone, Debug, Default)]
+    struct FakeToolchainRunner {
+        responses: BTreeMap<
+            String,
+            Result<
+                super::super::swarm_brief::SwarmBriefCommandOutput,
+                super::super::swarm_brief::SwarmBriefCommandError,
+            >,
+        >,
+    }
+
+    impl FakeToolchainRunner {
+        fn with_ok(mut self, program: &str, args: &[&str], stdout: impl Into<String>) -> Self {
+            self.responses.insert(
+                fake_toolchain_key(program, args),
+                Ok(super::super::swarm_brief::SwarmBriefCommandOutput {
+                    stdout: stdout.into(),
+                    stderr: String::new(),
+                }),
+            );
+            self
+        }
+
+        fn with_timeout(mut self, program: &str, args: &[&str], timeout_ms: u64) -> Self {
+            self.responses.insert(
+                fake_toolchain_key(program, args),
+                Err(super::super::swarm_brief::SwarmBriefCommandError::TimedOut { timeout_ms }),
+            );
+            self
+        }
+    }
+
+    impl super::super::swarm_brief::SwarmBriefCommandRunner for FakeToolchainRunner {
+        fn run(
+            &self,
+            program: &str,
+            args: &[&str],
+            _cwd: &Path,
+            _timeout_ms: u64,
+        ) -> Result<
+            super::super::swarm_brief::SwarmBriefCommandOutput,
+            super::super::swarm_brief::SwarmBriefCommandError,
+        > {
+            self.responses
+                .get(&fake_toolchain_key(program, args))
+                .cloned()
+                .unwrap_or_else(|| {
+                    Err(
+                        super::super::swarm_brief::SwarmBriefCommandError::Unavailable(format!(
+                            "{program} not configured in fake runner"
+                        )),
+                    )
+                })
+        }
+    }
+
+    fn fake_toolchain_key(program: &str, args: &[&str]) -> String {
+        format!("{program}\0{}", args.join("\0"))
+    }
 
     fn empty_qos_summary() -> QosLaneSummary {
         QosLaneSummary {
@@ -7389,6 +8409,169 @@ mod tests {
             "workspace-path redaction must be reflected in the redaction summary"
         );
         Ok(())
+    }
+
+    #[test]
+    fn toolchain_provenance_fake_tools_are_deterministic_and_redacted() -> TestResult {
+        let workspace = unique_test_path("toolchain-provenance-fake-tools");
+        let bin_dir = workspace.join("bin");
+        let scripts_dir = workspace.join("scripts");
+        fs::create_dir_all(&bin_dir)
+            .map_err(|error| format!("failed to create fake bin dir: {error}"))?;
+        fs::create_dir_all(&scripts_dir)
+            .map_err(|error| format!("failed to create fake scripts dir: {error}"))?;
+
+        let tool_names = ["ee", "rch", "br", "bv", "cass", "git", "cargo"];
+        for tool in tool_names {
+            fs::write(bin_dir.join(tool), format!("fake {tool} binary\n"))
+                .map_err(|error| format!("failed to write fake {tool}: {error}"))?;
+        }
+        for script in ["br_retry.sh", "rch_verify.sh"] {
+            fs::write(scripts_dir.join(script), format!("#!/bin/sh\n# {script}\n"))
+                .map_err(|error| format!("failed to write fake {script}: {error}"))?;
+        }
+
+        let path_for = |tool: &str| bin_dir.join(tool).display().to_string();
+        let runner = FakeToolchainRunner::default()
+            .with_ok("which", &["-a", "ee"], format!("{}\n", path_for("ee")))
+            .with_ok("which", &["-a", "rch"], format!("{}\n", path_for("rch")))
+            .with_ok("which", &["-a", "br"], format!("{}\n", path_for("br")))
+            .with_ok("which", &["-a", "bv"], format!("{}\n", path_for("bv")))
+            .with_ok("which", &["-a", "cass"], format!("{}\n", path_for("cass")))
+            .with_ok("which", &["-a", "git"], format!("{}\n", path_for("git")))
+            .with_ok(
+                "which",
+                &["-a", "cargo"],
+                format!("{}\n", path_for("cargo")),
+            )
+            .with_ok(
+                "ee",
+                &["--version"],
+                format!("ee {}\n", env!("CARGO_PKG_VERSION")),
+            )
+            .with_ok("rch", &["--version"], "rch 1.0.0\n")
+            .with_ok("br", &["--version"], "br 1.0.0\n")
+            .with_timeout("bv", &["--version"], 42)
+            .with_ok("cass", &["--version"], "cass 1.0.0\n")
+            .with_ok("git", &["--version"], "git version 2.45.0\n")
+            .with_ok("cargo", &["--version"], "cargo 1.92.0-nightly\n")
+            .with_ok(
+                "am",
+                &["agents", "list", "--project", ".", "--json"],
+                "[]\n",
+            )
+            .with_ok(
+                "git",
+                &["ls-files", "--error-unmatch", "scripts/br_retry.sh"],
+                "scripts/br_retry.sh\n",
+            )
+            .with_ok(
+                "git",
+                &["ls-files", "--error-unmatch", "scripts/rch_verify.sh"],
+                "scripts/rch_verify.sh\n",
+            );
+
+        let mut options = ToolchainProvenanceOptions::for_workspace(&workspace);
+        options.command_timeout_ms = 42;
+        options.collected_at = Some("2026-06-10T21:20:00Z".to_owned());
+        options.probe_duration_override_ms = Some(42);
+        options.script_paths = vec![
+            PathBuf::from("scripts/br_retry.sh"),
+            PathBuf::from("scripts/rch_verify.sh"),
+        ];
+
+        let first = collect_toolchain_provenance_with_runner(&options, &runner);
+        let second = collect_toolchain_provenance_with_runner(&options, &runner);
+        let first_json = serde_json::to_value(&first)
+            .map_err(|error| format!("serialize first report: {error}"))?;
+        let second_json = serde_json::to_value(&second)
+            .map_err(|error| format!("serialize second report: {error}"))?;
+        ensure(
+            first_json == second_json,
+            "fake collector output must be deterministic",
+        )?;
+
+        let rendered = first_json.to_string();
+        ensure(
+            !rendered.contains(&workspace.display().to_string()),
+            "toolchain provenance must not leak the absolute workspace path",
+        )?;
+        ensure(
+            first.script_hashes.len() == 2
+                && first
+                    .script_hashes
+                    .iter()
+                    .all(|row| row.script.starts_with("scripts/") && row.tracked),
+            "script hashes must be workspace-relative and tracked",
+        )?;
+        let bv = first
+            .tools
+            .iter()
+            .find(|row| row.tool == ToolchainToolId::Bv)
+            .ok_or_else(|| "missing bv row".to_owned())?;
+        ensure(
+            bv.freshness == ToolchainFreshness::CommandTimeout,
+            "bv timeout must be recorded as command_timeout freshness",
+        )?;
+        ensure(
+            bv.probe.exit_class == ToolchainProbeExitClass::TimedOut
+                && bv.probe.command_id == "toolchain_bv_version"
+                && bv.probe.duration_ms >= 42,
+            "bv row must record bounded probe evidence",
+        )?;
+        ensure(
+            first
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "toolchain_probe_timeout"),
+            "timeout must also be summarized at capsule level",
+        )
+    }
+
+    #[test]
+    fn toolchain_provenance_agent_mail_snapshot_reports_corruption() -> TestResult {
+        let workspace = unique_test_path("toolchain-provenance-agent-mail-corrupt");
+        fs::create_dir_all(&workspace)
+            .map_err(|error| format!("failed to create fake workspace: {error}"))?;
+        let snapshot_path = workspace.join("agent-mail-snapshot.json");
+        fs::write(
+            &snapshot_path,
+            serde_json::json!({
+                "schema": "ee.agent_mail.snapshot.v1",
+                "durability_state": "corrupt",
+                "degraded": [{"code": "database_corrupt"}]
+            })
+            .to_string(),
+        )
+        .map_err(|error| format!("failed to write fake Agent Mail snapshot: {error}"))?;
+
+        let mut options = ToolchainProvenanceOptions::for_workspace(&workspace);
+        options.collected_at = Some("2026-06-10T21:25:00Z".to_owned());
+        options.agent_mail_snapshot = Some(snapshot_path);
+        options.script_paths.clear();
+        let report =
+            collect_toolchain_provenance_with_runner(&options, &FakeToolchainRunner::default());
+        let agent_mail = report
+            .tools
+            .iter()
+            .find(|row| row.tool == ToolchainToolId::AgentMail)
+            .ok_or_else(|| "missing Agent Mail row".to_owned())?;
+        ensure(
+            agent_mail.freshness == ToolchainFreshness::HealthCorrupt,
+            "corrupt snapshot must produce health_corrupt freshness",
+        )?;
+        ensure(
+            agent_mail
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "health_corrupt" && entry.severity == "high"),
+            "Agent Mail corruption must carry a high-severity row degradation",
+        )?;
+        ensure(
+            agent_mail.probe.command_id == "toolchain_agent_mail_snapshot"
+                && agent_mail.probe.exit_class == ToolchainProbeExitClass::Ok,
+            "snapshot classification must record probe metadata",
+        )
     }
 
     #[test]

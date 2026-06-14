@@ -12,6 +12,11 @@
       "binaryHash": "blake3:4444444444444444444444444444444444444444444444444444444444444444",
       "sourceHint": "release_install",
       "freshness": "command_timeout",
+      "probe": {
+        "commandId": "toolchain_bv_version",
+        "exitClass": "timed_out",
+        "durationMs": 1500
+      },
       "degraded": [
         {
           "code": "command_timeout",
@@ -30,6 +35,11 @@
       "binaryHash": "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "sourceHint": "release_install",
       "freshness": "command_timeout",
+      "probe": {
+        "commandId": "toolchain_rch_version",
+        "exitClass": "timed_out",
+        "durationMs": 1500
+      },
       "degraded": [
         {
           "code": "command_timeout",
@@ -48,6 +58,11 @@
       "binaryHash": null,
       "sourceHint": "unknown",
       "freshness": "version_unknown",
+      "probe": {
+        "commandId": "toolchain_cass_version",
+        "exitClass": "failed",
+        "durationMs": 0
+      },
       "degraded": [
         {
           "code": "toolchain_hash_unavailable",

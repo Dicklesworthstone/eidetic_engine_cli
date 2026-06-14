@@ -199,6 +199,9 @@ in the same commit, keeping the catalog complete by construction.
 | `integrity_schema_check_unavailable` | diag integrity | medium | bd-17c65.10.6 (J6) |
 | `integrity_provenance_sample_unavailable` | diag integrity | medium | bd-17c65.10.6 (J6) |
 | `tripwire_inputs_incomplete` | tripwire check, preflight | warning | bd-17c65.10.6 (J6) |
+| `toolchain_hash_unavailable` | diag toolchain-provenance | info | bd-aunn3.2 |
+| `toolchain_probe_timeout` | diag toolchain-provenance | low | bd-aunn3.2 |
+| `toolchain_tool_unresolved` | diag toolchain-provenance | low | bd-aunn3.2 |
 | `unsupported_condition` | tripwire check, preflight | warning | bd-17c65.10.6 (J6) |
 | `unsupported_protocol_version` | mesh hello, mesh auto-enroll | medium | bd-97rgf.5 (SRR6.27) |
 | `tombstone_visibility_unavailable` | search | medium | bd-17c65.10.6 (J6) |

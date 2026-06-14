@@ -12,6 +12,11 @@
       "binaryHash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "sourceHint": "release_install",
       "freshness": "current",
+      "probe": {
+        "commandId": "toolchain_ee_version",
+        "exitClass": "ok",
+        "durationMs": 0
+      },
       "degraded": [],
       "checkedAt": "2026-06-10T21:00:00Z"
     },
@@ -23,6 +28,11 @@
       "binaryHash": "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "sourceHint": "release_install",
       "freshness": "current",
+      "probe": {
+        "commandId": "toolchain_rch_version",
+        "exitClass": "ok",
+        "durationMs": 0
+      },
       "degraded": [],
       "checkedAt": "2026-06-10T21:00:00Z"
     },
@@ -34,6 +44,11 @@
       "binaryHash": "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "sourceHint": "release_install",
       "freshness": "current",
+      "probe": {
+        "commandId": "toolchain_br_version",
+        "exitClass": "ok",
+        "durationMs": 0
+      },
       "degraded": [],
       "checkedAt": "2026-06-10T21:00:00Z"
     },
@@ -45,6 +60,11 @@
       "binaryHash": null,
       "sourceHint": "unknown",
       "freshness": "current",
+      "probe": {
+        "commandId": "toolchain_agent_mail_health",
+        "exitClass": "ok",
+        "durationMs": 0
+      },
       "degraded": [],
       "checkedAt": "2026-06-10T21:00:00Z"
     }

@@ -12,6 +12,11 @@
       "binaryHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
       "sourceHint": "release_install",
       "freshness": "stale_binary",
+      "probe": {
+        "commandId": "toolchain_ee_version",
+        "exitClass": "ok",
+        "durationMs": 0
+      },
       "degraded": [
         {
           "code": "stale_binary",
@@ -30,6 +35,11 @@
       "binaryHash": "blake3:2222222222222222222222222222222222222222222222222222222222222222",
       "sourceHint": "system_package",
       "freshness": "current",
+      "probe": {
+        "commandId": "toolchain_cargo_version",
+        "exitClass": "ok",
+        "durationMs": 0
+      },
       "degraded": [],
       "checkedAt": "2026-06-10T21:05:00Z"
     }

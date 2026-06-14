@@ -255,6 +255,13 @@ memory bodies in `sources[]`.
 
 ### `response_time` codes — stay in `degraded[]`
 
+#### Toolchain provenance (3)
+| Code | Severity (canonical) | Bead |
+|------|----------------------|------|
+| `toolchain_hash_unavailable` | info | bd-aunn3.2 |
+| `toolchain_probe_timeout` | low | bd-aunn3.2 |
+| `toolchain_tool_unresolved` | low | bd-aunn3.2 |
+
 #### External derivation and reflection (22)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|

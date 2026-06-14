@@ -1,7 +1,7 @@
-//! bd-aunn3.1 — schema unit test for `ee.toolchain_provenance.v1` (ADR 0072).
+//! bd-aunn3.2 — shipped contract tests for `ee.toolchain_provenance.v1` (ADR 0072).
 //!
-//! Pins the structural contract for the toolchain-provenance capsule before
-//! the collectors land (bd-aunn3.2; `x-ee-status.shipped = false`). Asserts:
+//! Pins the structural contract for the shipped toolchain-provenance capsule
+//! (bd-aunn3.2; `x-ee-status.shipped = true`). Asserts:
 //!
 //! 1. The schema file exists, parses, and `$id`/`title`/`const` agree.
 //! 2. The capsule and tool-row required-field sets match ADR 0072 §§1–2.
@@ -9,16 +9,18 @@
 //! 4. The redaction posture is pinned: `redactionStatus` is the const
 //!    `paths_workspace_relative_or_hashed_no_content` and `redactedPath`
 //!    forbids absolute paths.
-//! 5. `x-ee-status` marks the surface unshipped and tracks bd-aunn3.2.
-//! 6. The four round-trip fixtures (`fresh`, `stale_binary`,
+//! 5. `x-ee-status` marks the surface shipped and tracks bd-aunn3.2.
+//! 6. Tool rows record bounded probe evidence: command id, exit class,
+//!    and duration.
+//! 7. The four round-trip fixtures (`fresh`, `stale_binary`,
 //!    `agent_mail_corrupt`, `bv_rch_timeout`) validate structurally against
 //!    the schema's required sets, enums, and redaction rules, and
 //!    deterministically re-serialize (parse → serialize → parse is
 //!    identity).
 //!
 //! Like `bead_affinity_schema_unit.rs`, this reasons over the schema JSON
-//! directly; the live-response drift lane picks the surface up once
-//! bd-aunn3.2 ships an emitter.
+//! directly; the live-response drift lane can now exercise the shipped
+//! emitter.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -112,8 +114,15 @@ fn schema_identity_and_status_marker() -> TestResult {
         schema
             .pointer("/x-ee-status/shipped")
             .and_then(Value::as_bool)
-            == Some(false),
-        "x-ee-status.shipped must be false until bd-aunn3.2 lands collectors",
+            == Some(true),
+        "x-ee-status.shipped must be true once bd-aunn3.2 lands collectors",
+    )?;
+    ensure(
+        schema
+            .pointer("/x-ee-status/available_in_build")
+            .and_then(Value::as_bool)
+            == Some(true),
+        "x-ee-status.available_in_build must be true once the collector is wired",
     )?;
     ensure(
         schema
@@ -154,6 +163,7 @@ fn required_field_sets_match_adr() -> TestResult {
         "binaryHash",
         "sourceHint",
         "freshness",
+        "probe",
         "degraded",
         "checkedAt",
     ]
@@ -229,6 +239,7 @@ fn validate_capsule(schema: &Value, capsule: &Value, label: &str) -> TestResult 
     let tool_enum = string_set(schema, "/$defs/toolRow/properties/tool/enum")?;
     let kind_enum = string_set(schema, "/$defs/toolRow/properties/kind/enum")?;
     let hint_enum = string_set(schema, "/$defs/toolRow/properties/sourceHint/enum")?;
+    let probe_exit_enum = string_set(schema, "/$defs/probeEvidence/properties/exitClass/enum")?;
     let degraded_code_enum = string_set(schema, "/$defs/degradedEntry/properties/code/enum")?;
     let severity_enum = string_set(schema, "/$defs/degradedEntry/properties/severity/enum")?;
 
@@ -307,6 +318,32 @@ fn validate_capsule(schema: &Value, capsule: &Value, label: &str) -> TestResult 
                 format!("{label}: tools[{index}].binaryHash malformed"),
             )?;
         }
+        let probe = row
+            .pointer("/probe")
+            .ok_or_else(|| format!("{label}: tools[{index}].probe missing"))?;
+        let command_id = probe
+            .pointer("/commandId")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        ensure(
+            command_id.starts_with("toolchain_"),
+            format!("{label}: tools[{index}].probe.commandId must be stable toolchain_* id"),
+        )?;
+        let exit_class = probe
+            .pointer("/exitClass")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        ensure(
+            probe_exit_enum.contains(exit_class),
+            format!("{label}: tools[{index}].probe.exitClass {exit_class:?} not in enum"),
+        )?;
+        ensure(
+            probe
+                .pointer("/durationMs")
+                .and_then(Value::as_u64)
+                .is_some(),
+            format!("{label}: tools[{index}].probe.durationMs must be an integer"),
+        )?;
         validate_degraded(&row["degraded"], &format!("tools[{index}]"))?;
     }
 

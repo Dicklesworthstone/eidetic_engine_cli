@@ -75,6 +75,7 @@
         "binaryHash",
         "sourceHint",
         "freshness",
+        "probe",
         "degraded",
         "checkedAt"
       ],
@@ -109,6 +110,7 @@
           "enum": ["release_install", "cargo_target", "system_package", "unknown"]
         },
         "freshness": {"$ref": "#/$defs/freshnessState"},
+        "probe": {"$ref": "#/$defs/probeEvidence"},
         "degraded": {
           "type": "array",
           "items": {"$ref": "#/$defs/degradedEntry"}
@@ -116,6 +118,25 @@
         "checkedAt": {
           "type": "string",
           "format": "date-time"
+        }
+      }
+    },
+    "probeEvidence": {
+      "type": "object",
+      "required": ["commandId", "exitClass", "durationMs"],
+      "additionalProperties": false,
+      "properties": {
+        "commandId": {
+          "type": "string",
+          "pattern": "^toolchain_[a-z0-9_]+$"
+        },
+        "exitClass": {
+          "type": "string",
+          "enum": ["ok", "failed", "timed_out", "unresolved"]
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -175,8 +196,8 @@
     }
   },
   "x-ee-status": {
-    "shipped": false,
-    "available_in_build": false,
+    "shipped": true,
+    "available_in_build": true,
     "tracking_bead": "bd-aunn3.2"
   }
 }

@@ -3361,6 +3361,8 @@ pub enum DiagCommand {
     Streams,
     /// Report explicit read-fence and per-source write-immune store-integrity state.
     StoreIntegrity(DiagStoreIntegrityArgs),
+    /// Emit redaction-safe observed toolchain provenance without mutating tools.
+    ToolchainProvenance(DiagToolchainProvenanceArgs),
     /// Seed a deterministic tripwire row for diagnostic fixture replay.
     Tripwire(DiagTripwireArgs),
     /// Exercise write-owner queue capacity and busy diagnostics.
@@ -3615,6 +3617,18 @@ pub struct DiagResourceAdmissionArgs {
     /// Mark redaction posture as unknown/unsafe, forcing advisory abstention.
     #[arg(long = "redaction-posture-unknown", action = ArgAction::SetTrue)]
     pub redaction_posture_unknown: bool,
+}
+
+/// Arguments for `ee diag toolchain-provenance`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagToolchainProvenanceArgs {
+    /// Per-command probe timeout in milliseconds.
+    #[arg(long = "timeout-ms", default_value_t = 1_500, value_name = "MS")]
+    pub timeout_ms: u64,
+
+    /// Optional redacted Agent Mail snapshot to classify recovery/corruption state.
+    #[arg(long = "agent-mail-snapshot", value_name = "PATH")]
+    pub agent_mail_snapshot: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -12189,6 +12203,9 @@ where
                         write_stdout(stdout, &(output::render_streams_json(&report) + "\n"))
                     }
                 }
+            }
+            DiagCommand::ToolchainProvenance(args) => {
+                handle_diag_toolchain_provenance(&cli, args, stdout)
             }
             DiagCommand::Tripwire(args) => handle_diag_tripwire(&cli, args, stdout, stderr),
             DiagCommand::StoreIntegrity(args) => handle_diag_store_integrity(&cli, args, stdout),
@@ -29208,6 +29225,58 @@ fn diag_search_human_summary(json: &serde_json::Value) -> String {
 
     format!(
         "Search diagnostics for `{query}`\n\n  lexical hits: {lexical_count}\n  semantic_fast hits: {semantic_count}\n  fusion: {fusion_algorithm}\n  final results: {final_count}\n\nUse --json for per-arm ranks, scores, and fusion contributions.\n"
+    )
+}
+
+fn handle_diag_toolchain_provenance<W>(
+    cli: &Cli,
+    args: &DiagToolchainProvenanceArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let mut options = crate::core::support_bundle::ToolchainProvenanceOptions::for_workspace(
+        cli.resolve_workspace(),
+    );
+    options.command_timeout_ms = args.timeout_ms.max(1);
+    options.agent_mail_snapshot = args.agent_mail_snapshot.clone();
+    let report = crate::core::support_bundle::collect_toolchain_provenance(&options);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &diag_toolchain_provenance_human_summary(&report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&output::render_toolchain_provenance_json(&report))
+                + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_toolchain_provenance_json(&report) + "\n"),
+        ),
+    }
+}
+
+fn diag_toolchain_provenance_human_summary(
+    report: &crate::core::support_bundle::ToolchainProvenanceReport,
+) -> String {
+    let degraded_tools = report
+        .tools
+        .iter()
+        .filter(|tool| !tool.degraded.is_empty())
+        .count();
+    format!(
+        "ee diag toolchain-provenance\n\nworkspace fingerprint: {}\ntools: {}\nscript hashes: {}\ndegraded tools: {}\ncapsule degraded: {}\n\nNext:\n  ee diag toolchain-provenance --json\n",
+        report.workspace_fingerprint,
+        report.tools.len(),
+        report.script_hashes.len(),
+        degraded_tools,
+        report.degraded.len()
     )
 }
 
@@ -56767,6 +56836,7 @@ impl NormalizedInvocation {
                     DiagCommand::Search(_) => "diag search".to_string(),
                     DiagCommand::Streams => "diag streams".to_string(),
                     DiagCommand::StoreIntegrity(_) => "diag store-integrity".to_string(),
+                    DiagCommand::ToolchainProvenance(_) => "diag toolchain-provenance".to_string(),
                     DiagCommand::Tripwire(_) => "diag tripwire".to_string(),
                     DiagCommand::WriteOwner(_) => "diag write-owner".to_string(),
                     DiagCommand::WriteSpool(_) => "diag write-spool".to_string(),
@@ -57891,14 +57961,13 @@ mod tests {
         RedactionLevelSource, ReflectCommand, ReflectRequestLedgerCommand, RegressCommand,
         RegressExplainArgs, RegressionSurfaceArg, RuleCommand, ShadowMode, SituationCommand,
         StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmRepairPlanArgs,
-        SwarmWorkPacketArgs,
-        TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand, VerifyRchCommand,
-        WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode,
-        db_inspect_redact_source_uri, diag_environment_attestation_response_json,
-        environment_attestation_unavailable_sources, format_impact_json,
-        format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
-        init_report_exit_code, json_with_data_result_path, mesh, orient_next_commands,
-        parse_completion_audit_evidence_input, parse_context_profile,
+        SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand,
+        VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
+        WorkspaceHygieneMode, db_inspect_redact_source_uri,
+        diag_environment_attestation_response_json, environment_attestation_unavailable_sources,
+        format_impact_json, format_search_json_with_mesh_and_recalibration,
+        hook_git_readiness_response_json, init_report_exit_code, json_with_data_result_path, mesh,
+        orient_next_commands, parse_completion_audit_evidence_input, parse_context_profile,
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json,

@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "toolchain_tool_unresolved",
+  "introduced_by": {
+    "bead": "bd-aunn3.2",
+    "epic_letter": "AUNN3"
+  },
+  "surfaces": [
+    "diag toolchain-provenance"
+  ],
+  "severity": "low",
+  "repair_present": false,
+  "trigger": {
+    "description": "The read-only toolchain provenance collector cannot resolve one or more required coordination tools on PATH.",
+    "setup_commands": [
+      "# run diag toolchain-provenance with a PATH that omits one of ee, rch, br, bv, cass, git, or cargo"
+    ],
+    "invocation": "PATH=/usr/bin:/bin ee diag toolchain-provenance --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "toolchain_tool_unresolved",
+    "severity": "low",
+    "message_contains": [
+      "toolchain binary probe",
+      "could not resolve"
+    ]
+  }
+}

@@ -8444,6 +8444,12 @@ pub fn render_install_plan_json(report: &InstallPlanReport) -> String {
     render_serialized_report_response(report, "InstallPlanReport")
 }
 
+pub fn render_toolchain_provenance_json(
+    report: &crate::core::support_bundle::ToolchainProvenanceReport,
+) -> String {
+    render_serialized_report_response(report, "ToolchainProvenanceReport")
+}
+
 #[must_use]
 pub fn render_store_integrity_json(report: &StoreIntegrityReport) -> String {
     render_serialized_report_response(report, "StoreIntegrityReport")
@@ -10203,6 +10209,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: ask_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::support_bundle::TOOLCHAIN_PROVENANCE_SCHEMA_V1,
+            version: "1",
+            description: "Redaction-safe observed toolchain capsule for ee, rch, br, bv, Agent Mail, cass, git, cargo, and selected scripts.",
+            category: "diagnostics",
+            definition: toolchain_provenance_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::recall::RECALL_SCHEMA_V1,
             version: "1",
             description: "Code-anchored recall result emitted by ee recall (ADR 0064): reverse lookup from paths, symbols, or a git diff to anchored memories with deterministic freshness x confidence x level-tilt ranking.",
@@ -10259,6 +10272,10 @@ fn cursor_schema_definition() -> String {
 
 fn ask_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.ask.v1.json").to_string()
+}
+
+fn toolchain_provenance_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.toolchain_provenance.v1.json").to_string()
 }
 
 fn recall_schema_definition() -> String {

@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "toolchain_probe_timeout",
+  "introduced_by": {
+    "bead": "bd-aunn3.2",
+    "epic_letter": "AUNN3"
+  },
+  "surfaces": [
+    "diag toolchain-provenance"
+  ],
+  "severity": "low",
+  "repair_present": false,
+  "trigger": {
+    "description": "One or more read-only version or health probes exceeds the bounded toolchain provenance timeout.",
+    "setup_commands": [
+      "# run diag toolchain-provenance while a probed tool is blocked long enough to exceed --timeout-ms"
+    ],
+    "invocation": "ee diag toolchain-provenance --workspace . --timeout-ms 1 --json"
+  },
+  "expected_emission": {
+    "code": "toolchain_probe_timeout",
+    "severity": "low",
+    "message_contains": [
+      "toolchain probe",
+      "bounded timeout"
+    ]
+  }
+}

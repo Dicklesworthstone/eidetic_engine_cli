@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "toolchain_hash_unavailable",
+  "introduced_by": {
+    "bead": "bd-aunn3.2",
+    "epic_letter": "AUNN3"
+  },
+  "surfaces": [
+    "diag toolchain-provenance"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "The read-only toolchain provenance collector resolves a tool or script but cannot hash it within the bounded file policy.",
+    "setup_commands": [
+      "# run diag toolchain-provenance with an unreadable, oversized, or non-regular tool/script path in the observed toolchain"
+    ],
+    "invocation": "ee diag toolchain-provenance --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "toolchain_hash_unavailable",
+    "severity": "info",
+    "message_contains": [
+      "toolchain hash operation",
+      "could not complete"
+    ]
+  }
+}
