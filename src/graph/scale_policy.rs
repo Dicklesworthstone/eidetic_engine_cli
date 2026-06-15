@@ -8,6 +8,8 @@
 use serde::Serialize;
 
 pub const GRAPH_SCALE_POLICY_SCHEMA_V1: &str = "ee.graph.scale_policy.v1";
+pub const SCALE_LOCALITY_ADVISOR_SCHEMA_V1: &str = "ee.scale_envelope.locality_advisor.v1";
+pub const SCALE_LOCALITY_REDACTION_STATUS: &str = "counts_hashes_paths_no_content";
 pub const INSIGHTS_100K_BUDGET_MS: u64 = 5_000;
 
 pub const GOMORY_HU_SKIP_THRESHOLD_NODES: usize = 2_000;
@@ -237,6 +239,874 @@ pub fn graph_scale_total_budget_ms(node_count: usize, edge_count: usize) -> u64 
         .into_iter()
         .map(|decision| decision.target_budget_ms)
         .sum()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleLocalityPlatform {
+    Linux,
+    Macos,
+    Windows,
+    Other,
+    Unknown,
+}
+
+impl ScaleLocalityPlatform {
+    const fn has_measurable_numa(self) -> bool {
+        matches!(self, Self::Linux)
+    }
+
+    const fn fallback_name(self) -> &'static str {
+        match self {
+            Self::Linux => "linux",
+            Self::Macos => "macos_platform_fallback",
+            Self::Windows => "windows_platform_fallback",
+            Self::Other => "other_platform_fallback",
+            Self::Unknown => "unknown_platform_fallback",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleLocalityTopologyKind {
+    MultiSocketNuma,
+    SingleSocket,
+    PlatformFallback,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleLocalityReadPoolState {
+    Adequate,
+    Undersized,
+    Saturated,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleLocalityQueueState {
+    Idle,
+    Moderate,
+    Saturated,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleLocalityAffinity {
+    Strong,
+    Acceptable,
+    Weak,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleLocalityContention {
+    Low,
+    Moderate,
+    High,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleLocalityShardStrategy {
+    NumaShardGroups,
+    SingleSocketCoLocated,
+    PlatformFallbackRoundRobin,
+    ConservativeSingleShard,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleLocalitySurface {
+    Search,
+    Pack,
+    GraphProjection,
+    LargeCorpusMaintenance,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleLocalityPlanAction {
+    UseNumaShardGroups,
+    CoLocateShardGroups,
+    UsePlatformFallback,
+    IncreaseReadPool,
+    PrewarmHotset,
+    StaggerMaintenance,
+    ReduceCrossPoolConcurrency,
+    ConservativeSingleShard,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScaleLocalityAdvisorInput {
+    pub fixture_profile_id: String,
+    pub platform: ScaleLocalityPlatform,
+    pub logical_cpu_count: Option<u16>,
+    pub physical_core_count: Option<u16>,
+    pub numa_node_count: Option<u16>,
+    pub read_pool_size: u16,
+    pub shard_count: u16,
+    pub hotset_entry_count: u32,
+    pub hotset_bytes: u64,
+    pub resource_admission_queue_depth: u32,
+    pub read_pool_queue_depth: u32,
+    pub maintenance_queue_depth: u32,
+    pub search_worker_count: u16,
+    pub pack_worker_count: u16,
+    pub graph_worker_count: u16,
+    pub maintenance_worker_count: u16,
+}
+
+impl ScaleLocalityAdvisorInput {
+    #[must_use]
+    pub fn high_core_numa_fixture() -> Self {
+        Self {
+            fixture_profile_id: "scale_locality_high_core_numa".to_owned(),
+            platform: ScaleLocalityPlatform::Linux,
+            logical_cpu_count: Some(128),
+            physical_core_count: Some(64),
+            numa_node_count: Some(2),
+            read_pool_size: 12,
+            shard_count: 8,
+            hotset_entry_count: 8_192,
+            hotset_bytes: 512 * 1024 * 1024,
+            resource_admission_queue_depth: 8,
+            read_pool_queue_depth: 6,
+            maintenance_queue_depth: 2,
+            search_worker_count: 32,
+            pack_worker_count: 16,
+            graph_worker_count: 8,
+            maintenance_worker_count: 4,
+        }
+    }
+
+    #[must_use]
+    pub fn single_socket_fixture() -> Self {
+        Self {
+            fixture_profile_id: "scale_locality_single_socket".to_owned(),
+            platform: ScaleLocalityPlatform::Linux,
+            logical_cpu_count: Some(16),
+            physical_core_count: Some(8),
+            numa_node_count: Some(1),
+            read_pool_size: 4,
+            shard_count: 2,
+            hotset_entry_count: 1_024,
+            hotset_bytes: 64 * 1024 * 1024,
+            resource_admission_queue_depth: 1,
+            read_pool_queue_depth: 1,
+            maintenance_queue_depth: 0,
+            search_worker_count: 4,
+            pack_worker_count: 2,
+            graph_worker_count: 1,
+            maintenance_worker_count: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn macos_platform_fallback_fixture() -> Self {
+        Self {
+            fixture_profile_id: "scale_locality_macos_fallback".to_owned(),
+            platform: ScaleLocalityPlatform::Macos,
+            logical_cpu_count: Some(12),
+            physical_core_count: Some(8),
+            numa_node_count: None,
+            read_pool_size: 2,
+            shard_count: 2,
+            hotset_entry_count: 256,
+            hotset_bytes: 16 * 1024 * 1024,
+            resource_admission_queue_depth: 1,
+            read_pool_queue_depth: 2,
+            maintenance_queue_depth: 1,
+            search_worker_count: 4,
+            pack_worker_count: 2,
+            graph_worker_count: 1,
+            maintenance_worker_count: 1,
+        }
+    }
+
+    #[must_use]
+    pub fn unknown_topology_fixture() -> Self {
+        Self {
+            fixture_profile_id: "scale_locality_unknown_topology".to_owned(),
+            platform: ScaleLocalityPlatform::Unknown,
+            logical_cpu_count: None,
+            physical_core_count: None,
+            numa_node_count: None,
+            read_pool_size: 1,
+            shard_count: 1,
+            hotset_entry_count: 0,
+            hotset_bytes: 0,
+            resource_admission_queue_depth: 0,
+            read_pool_queue_depth: 0,
+            maintenance_queue_depth: 0,
+            search_worker_count: 1,
+            pack_worker_count: 1,
+            graph_worker_count: 0,
+            maintenance_worker_count: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleLocalityAdvisorReport {
+    pub schema: &'static str,
+    pub fixture_profile_id: String,
+    pub redaction_status: &'static str,
+    pub host: ScaleLocalityHostReport,
+    pub topology: ScaleLocalityTopologyReport,
+    pub read_pool: ScaleLocalityReadPoolReport,
+    pub shard_placement: ScaleLocalityShardPlacementReport,
+    pub queue_pressure: ScaleLocalityQueuePressureReport,
+    pub cache_affinity: ScaleLocalityCacheAffinityReport,
+    pub cross_pool_contention: ScaleLocalityCrossPoolContentionReport,
+    pub execution_plan: Vec<ScaleLocalityExecutionPlanStep>,
+    pub degraded: Vec<ScaleLocalityDegradedEntry>,
+    pub provenance: Vec<ScaleLocalityProvenanceRef>,
+}
+
+impl ScaleLocalityAdvisorReport {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        crate::core::serialize_or_error(self)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleLocalityHostReport {
+    pub platform: ScaleLocalityPlatform,
+    pub logical_cpu_count: Option<u16>,
+    pub physical_core_count: Option<u16>,
+    pub effective_cpu_capacity: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleLocalityTopologyReport {
+    pub kind: ScaleLocalityTopologyKind,
+    pub numa_node_count: Option<u16>,
+    pub measured: bool,
+    pub fallback: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleLocalityReadPoolReport {
+    pub state: ScaleLocalityReadPoolState,
+    pub current_size: u16,
+    pub recommended_size: u16,
+    pub active_queue_depth: u32,
+    pub rationale: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleLocalityShardPlacementReport {
+    pub strategy: ScaleLocalityShardStrategy,
+    pub shard_count: u16,
+    pub recommended_shard_groups: u16,
+    pub shards_per_group: u16,
+    pub rationale: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleLocalityQueuePressureReport {
+    pub state: ScaleLocalityQueueState,
+    pub resource_admission_queue_depth: u32,
+    pub read_pool_queue_depth: u32,
+    pub maintenance_queue_depth: u32,
+    pub combined_queue_depth: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleLocalityCacheAffinityReport {
+    pub affinity: ScaleLocalityAffinity,
+    pub hotset_entry_count: u32,
+    pub hotset_bytes: u64,
+    pub rationale: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleLocalityCrossPoolContentionReport {
+    pub state: ScaleLocalityContention,
+    pub total_worker_count: u16,
+    pub search_worker_count: u16,
+    pub pack_worker_count: u16,
+    pub graph_worker_count: u16,
+    pub maintenance_worker_count: u16,
+    pub rationale: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleLocalityExecutionPlanStep {
+    pub surface: ScaleLocalitySurface,
+    pub action: ScaleLocalityPlanAction,
+    pub recommended_workers: u16,
+    pub shard_group: Option<u16>,
+    pub cache_policy: &'static str,
+    pub rationale: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleLocalityDegradedEntry {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub message: &'static str,
+    pub repair: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleLocalityProvenanceRef {
+    pub kind: &'static str,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub hash: Option<String>,
+}
+
+#[must_use]
+pub fn advise_scale_locality(input: &ScaleLocalityAdvisorInput) -> ScaleLocalityAdvisorReport {
+    let effective_cpu_capacity = input.logical_cpu_count.unwrap_or(1).max(1);
+    let topology = scale_locality_topology(input);
+    let recommended_read_pool_size = recommended_scale_read_pool_size(input);
+    let queue_pressure = scale_locality_queue_pressure(input);
+    let read_pool =
+        scale_locality_read_pool(input, recommended_read_pool_size, queue_pressure.state);
+    let shard_placement = scale_locality_shard_placement(input, &topology);
+    let cache_affinity = scale_locality_cache_affinity(input, &topology);
+    let cross_pool_contention = scale_locality_cross_pool_contention(input, queue_pressure.state);
+    let execution_plan = scale_locality_execution_plan(
+        input,
+        &topology,
+        &read_pool,
+        &cache_affinity,
+        &cross_pool_contention,
+    );
+    let degraded = scale_locality_degraded_entries(
+        input,
+        &topology,
+        &read_pool,
+        &cache_affinity,
+        &cross_pool_contention,
+    );
+
+    ScaleLocalityAdvisorReport {
+        schema: SCALE_LOCALITY_ADVISOR_SCHEMA_V1,
+        fixture_profile_id: input.fixture_profile_id.clone(),
+        redaction_status: SCALE_LOCALITY_REDACTION_STATUS,
+        host: ScaleLocalityHostReport {
+            platform: input.platform,
+            logical_cpu_count: input.logical_cpu_count,
+            physical_core_count: input.physical_core_count,
+            effective_cpu_capacity,
+        },
+        topology,
+        read_pool,
+        shard_placement,
+        queue_pressure,
+        cache_affinity,
+        cross_pool_contention,
+        execution_plan,
+        degraded,
+        provenance: scale_locality_provenance(input),
+    }
+}
+
+fn scale_locality_topology(input: &ScaleLocalityAdvisorInput) -> ScaleLocalityTopologyReport {
+    if input.platform.has_measurable_numa() {
+        match input.numa_node_count {
+            Some(nodes) if nodes >= 2 => ScaleLocalityTopologyReport {
+                kind: ScaleLocalityTopologyKind::MultiSocketNuma,
+                numa_node_count: Some(nodes),
+                measured: true,
+                fallback: None,
+            },
+            Some(1) => ScaleLocalityTopologyReport {
+                kind: ScaleLocalityTopologyKind::SingleSocket,
+                numa_node_count: Some(1),
+                measured: true,
+                fallback: None,
+            },
+            _ => ScaleLocalityTopologyReport {
+                kind: ScaleLocalityTopologyKind::Unknown,
+                numa_node_count: input.numa_node_count,
+                measured: false,
+                fallback: Some("linux_topology_unavailable"),
+            },
+        }
+    } else if input.platform == ScaleLocalityPlatform::Unknown {
+        ScaleLocalityTopologyReport {
+            kind: ScaleLocalityTopologyKind::Unknown,
+            numa_node_count: input.numa_node_count,
+            measured: false,
+            fallback: Some(input.platform.fallback_name()),
+        }
+    } else {
+        ScaleLocalityTopologyReport {
+            kind: ScaleLocalityTopologyKind::PlatformFallback,
+            numa_node_count: input.numa_node_count,
+            measured: false,
+            fallback: Some(input.platform.fallback_name()),
+        }
+    }
+}
+
+fn recommended_scale_read_pool_size(input: &ScaleLocalityAdvisorInput) -> u16 {
+    let shard_floor = input.shard_count.max(1).saturating_mul(2);
+    let cpu_floor = input
+        .logical_cpu_count
+        .map_or(1, |logical| (logical / 8).max(1));
+    let numa_floor = input.numa_node_count.unwrap_or(1).max(1);
+    shard_floor.max(cpu_floor).max(numa_floor).min(32)
+}
+
+fn scale_locality_queue_pressure(
+    input: &ScaleLocalityAdvisorInput,
+) -> ScaleLocalityQueuePressureReport {
+    let combined_queue_depth = input
+        .resource_admission_queue_depth
+        .saturating_add(input.read_pool_queue_depth)
+        .saturating_add(input.maintenance_queue_depth);
+    let pool_capacity = u32::from(input.read_pool_size.max(1));
+    let cpu_capacity = input.logical_cpu_count.map(u32::from);
+    let state = if input.logical_cpu_count.is_none()
+        && input.resource_admission_queue_depth == 0
+        && input.read_pool_queue_depth == 0
+        && input.maintenance_queue_depth == 0
+    {
+        ScaleLocalityQueueState::Unknown
+    } else if combined_queue_depth >= pool_capacity.saturating_mul(2)
+        || cpu_capacity.is_some_and(|capacity| combined_queue_depth >= capacity)
+    {
+        ScaleLocalityQueueState::Saturated
+    } else if combined_queue_depth > pool_capacity {
+        ScaleLocalityQueueState::Moderate
+    } else {
+        ScaleLocalityQueueState::Idle
+    };
+
+    ScaleLocalityQueuePressureReport {
+        state,
+        resource_admission_queue_depth: input.resource_admission_queue_depth,
+        read_pool_queue_depth: input.read_pool_queue_depth,
+        maintenance_queue_depth: input.maintenance_queue_depth,
+        combined_queue_depth,
+    }
+}
+
+fn scale_locality_read_pool(
+    input: &ScaleLocalityAdvisorInput,
+    recommended_size: u16,
+    queue_state: ScaleLocalityQueueState,
+) -> ScaleLocalityReadPoolReport {
+    let state = if input.logical_cpu_count.is_none() && input.read_pool_size == 0 {
+        ScaleLocalityReadPoolState::Unknown
+    } else if queue_state == ScaleLocalityQueueState::Saturated {
+        ScaleLocalityReadPoolState::Saturated
+    } else if input.read_pool_size < recommended_size {
+        ScaleLocalityReadPoolState::Undersized
+    } else {
+        ScaleLocalityReadPoolState::Adequate
+    };
+    let rationale = match state {
+        ScaleLocalityReadPoolState::Adequate => {
+            "read pool is large enough for the shard and CPU envelope"
+        }
+        ScaleLocalityReadPoolState::Undersized => {
+            "read pool is below the deterministic shard and CPU floor"
+        }
+        ScaleLocalityReadPoolState::Saturated => {
+            "queue pressure exceeds the current read pool capacity envelope"
+        }
+        ScaleLocalityReadPoolState::Unknown => "host CPU and read-pool capacity are unavailable",
+    };
+
+    ScaleLocalityReadPoolReport {
+        state,
+        current_size: input.read_pool_size,
+        recommended_size,
+        active_queue_depth: input.read_pool_queue_depth,
+        rationale,
+    }
+}
+
+fn scale_locality_shard_placement(
+    input: &ScaleLocalityAdvisorInput,
+    topology: &ScaleLocalityTopologyReport,
+) -> ScaleLocalityShardPlacementReport {
+    let (strategy, recommended_shard_groups, rationale) = match topology.kind {
+        ScaleLocalityTopologyKind::MultiSocketNuma => (
+            ScaleLocalityShardStrategy::NumaShardGroups,
+            topology.numa_node_count.unwrap_or(2).max(2),
+            "place shard groups by NUMA node and keep read-pool workers local to their group",
+        ),
+        ScaleLocalityTopologyKind::SingleSocket => (
+            ScaleLocalityShardStrategy::SingleSocketCoLocated,
+            1,
+            "single-socket hosts should co-locate shard groups and avoid fake NUMA partitions",
+        ),
+        ScaleLocalityTopologyKind::PlatformFallback => (
+            ScaleLocalityShardStrategy::PlatformFallbackRoundRobin,
+            1,
+            "platform does not expose NUMA data, so use stable round-robin placement",
+        ),
+        ScaleLocalityTopologyKind::Unknown => (
+            ScaleLocalityShardStrategy::ConservativeSingleShard,
+            1,
+            "topology is unknown, so keep placement conservative until host data is available",
+        ),
+    };
+    let shards_per_group = ceil_div_u16(input.shard_count.max(1), recommended_shard_groups.max(1));
+
+    ScaleLocalityShardPlacementReport {
+        strategy,
+        shard_count: input.shard_count,
+        recommended_shard_groups,
+        shards_per_group,
+        rationale,
+    }
+}
+
+fn scale_locality_cache_affinity(
+    input: &ScaleLocalityAdvisorInput,
+    topology: &ScaleLocalityTopologyReport,
+) -> ScaleLocalityCacheAffinityReport {
+    let affinity = if input.hotset_entry_count == 0 {
+        ScaleLocalityAffinity::Weak
+    } else {
+        match topology.kind {
+            ScaleLocalityTopologyKind::MultiSocketNuma
+                if input.shard_count >= topology.numa_node_count.unwrap_or(2).saturating_mul(2) =>
+            {
+                ScaleLocalityAffinity::Strong
+            }
+            ScaleLocalityTopologyKind::MultiSocketNuma
+            | ScaleLocalityTopologyKind::SingleSocket => ScaleLocalityAffinity::Acceptable,
+            ScaleLocalityTopologyKind::PlatformFallback => ScaleLocalityAffinity::Weak,
+            ScaleLocalityTopologyKind::Unknown => ScaleLocalityAffinity::Unknown,
+        }
+    };
+    let rationale = match affinity {
+        ScaleLocalityAffinity::Strong => {
+            "hotset and shard counts are sufficient to prewarm cache by locality group"
+        }
+        ScaleLocalityAffinity::Acceptable => {
+            "hotset is present, but locality grouping is bounded by the host topology"
+        }
+        ScaleLocalityAffinity::Weak => {
+            "hotset data is absent or cannot be tied to measured locality groups"
+        }
+        ScaleLocalityAffinity::Unknown => {
+            "cache affinity cannot be classified without topology data"
+        }
+    };
+
+    ScaleLocalityCacheAffinityReport {
+        affinity,
+        hotset_entry_count: input.hotset_entry_count,
+        hotset_bytes: input.hotset_bytes,
+        rationale,
+    }
+}
+
+fn scale_locality_cross_pool_contention(
+    input: &ScaleLocalityAdvisorInput,
+    queue_state: ScaleLocalityQueueState,
+) -> ScaleLocalityCrossPoolContentionReport {
+    let total_worker_count = input
+        .search_worker_count
+        .saturating_add(input.pack_worker_count)
+        .saturating_add(input.graph_worker_count)
+        .saturating_add(input.maintenance_worker_count);
+    let state = match input.logical_cpu_count {
+        None => ScaleLocalityContention::Unknown,
+        Some(logical) if queue_state == ScaleLocalityQueueState::Saturated => {
+            let saturation_floor = logical.saturating_mul(3) / 2;
+            if total_worker_count > saturation_floor {
+                ScaleLocalityContention::High
+            } else {
+                ScaleLocalityContention::Moderate
+            }
+        }
+        Some(logical) if total_worker_count > logical => ScaleLocalityContention::High,
+        Some(_)
+            if queue_state == ScaleLocalityQueueState::Moderate
+                || (input.graph_worker_count > 0 && input.maintenance_worker_count > 0) =>
+        {
+            ScaleLocalityContention::Moderate
+        }
+        Some(_) => ScaleLocalityContention::Low,
+    };
+    let rationale = match state {
+        ScaleLocalityContention::Low => {
+            "worker pools fit under the host CPU envelope with low queue pressure"
+        }
+        ScaleLocalityContention::Moderate => {
+            "foreground and maintenance pools should be staggered to preserve read locality"
+        }
+        ScaleLocalityContention::High => {
+            "combined worker pools exceed the CPU envelope or saturated queue pressure"
+        }
+        ScaleLocalityContention::Unknown => {
+            "worker contention cannot be classified without CPU capacity"
+        }
+    };
+
+    ScaleLocalityCrossPoolContentionReport {
+        state,
+        total_worker_count,
+        search_worker_count: input.search_worker_count,
+        pack_worker_count: input.pack_worker_count,
+        graph_worker_count: input.graph_worker_count,
+        maintenance_worker_count: input.maintenance_worker_count,
+        rationale,
+    }
+}
+
+fn scale_locality_execution_plan(
+    input: &ScaleLocalityAdvisorInput,
+    topology: &ScaleLocalityTopologyReport,
+    read_pool: &ScaleLocalityReadPoolReport,
+    cache_affinity: &ScaleLocalityCacheAffinityReport,
+    contention: &ScaleLocalityCrossPoolContentionReport,
+) -> Vec<ScaleLocalityExecutionPlanStep> {
+    let preferred_group =
+        (topology.kind == ScaleLocalityTopologyKind::MultiSocketNuma).then_some(0);
+    let search_action = if read_pool.state == ScaleLocalityReadPoolState::Undersized {
+        ScaleLocalityPlanAction::IncreaseReadPool
+    } else {
+        placement_action(topology.kind)
+    };
+    let pack_action = if input.hotset_entry_count > 0 {
+        ScaleLocalityPlanAction::PrewarmHotset
+    } else {
+        placement_action(topology.kind)
+    };
+    let graph_action = placement_action(topology.kind);
+    let maintenance_action = match contention.state {
+        ScaleLocalityContention::High => ScaleLocalityPlanAction::ReduceCrossPoolConcurrency,
+        ScaleLocalityContention::Moderate => ScaleLocalityPlanAction::StaggerMaintenance,
+        _ => placement_action(topology.kind),
+    };
+
+    vec![
+        ScaleLocalityExecutionPlanStep {
+            surface: ScaleLocalitySurface::Search,
+            action: search_action,
+            recommended_workers: bounded_worker_count(
+                input.logical_cpu_count,
+                4,
+                read_pool.recommended_size,
+            ),
+            shard_group: preferred_group,
+            cache_policy: cache_policy(cache_affinity.affinity),
+            rationale: "search should acquire read-pool slots near the shard group that owns its hotset",
+        },
+        ScaleLocalityExecutionPlanStep {
+            surface: ScaleLocalitySurface::Pack,
+            action: pack_action,
+            recommended_workers: bounded_worker_count(
+                input.logical_cpu_count,
+                8,
+                read_pool.recommended_size,
+            ),
+            shard_group: preferred_group,
+            cache_policy: cache_policy(cache_affinity.affinity),
+            rationale: "pack assembly should reuse warmed search candidates before broad graph projection",
+        },
+        ScaleLocalityExecutionPlanStep {
+            surface: ScaleLocalitySurface::GraphProjection,
+            action: graph_action,
+            recommended_workers: topology.numa_node_count.unwrap_or(1).max(1),
+            shard_group: preferred_group,
+            cache_policy: "graph_snapshot_local_to_shard_group",
+            rationale: "graph projections should run beside their shard group and avoid cross-socket scans",
+        },
+        ScaleLocalityExecutionPlanStep {
+            surface: ScaleLocalitySurface::LargeCorpusMaintenance,
+            action: maintenance_action,
+            recommended_workers: if contention.state == ScaleLocalityContention::Low {
+                2
+            } else {
+                1
+            },
+            shard_group: None,
+            cache_policy: "maintenance_after_foreground_read_burst",
+            rationale: "maintenance should not compete with foreground read-pool and hotset work",
+        },
+    ]
+}
+
+fn scale_locality_degraded_entries(
+    input: &ScaleLocalityAdvisorInput,
+    topology: &ScaleLocalityTopologyReport,
+    read_pool: &ScaleLocalityReadPoolReport,
+    cache_affinity: &ScaleLocalityCacheAffinityReport,
+    contention: &ScaleLocalityCrossPoolContentionReport,
+) -> Vec<ScaleLocalityDegradedEntry> {
+    let mut entries = Vec::new();
+    if topology.kind == ScaleLocalityTopologyKind::PlatformFallback {
+        push_scale_locality_degraded(
+            &mut entries,
+            ScaleLocalityDegradedEntry {
+                code: "scale_locality_platform_fallback",
+                severity: "warning",
+                message: "Host platform does not expose NUMA topology to this advisor.",
+                repair: "Run the advisor on a Linux host with NUMA data for measured locality placement.",
+            },
+        );
+    }
+    if topology.kind == ScaleLocalityTopologyKind::Unknown {
+        push_scale_locality_degraded(
+            &mut entries,
+            ScaleLocalityDegradedEntry {
+                code: "scale_locality_topology_unknown",
+                severity: "warning",
+                message: "Host topology is unavailable, so placement is conservative.",
+                repair: "Provide CPU and NUMA topology evidence before tuning shard placement.",
+            },
+        );
+    }
+    if matches!(
+        read_pool.state,
+        ScaleLocalityReadPoolState::Undersized | ScaleLocalityReadPoolState::Saturated
+    ) {
+        push_scale_locality_degraded(
+            &mut entries,
+            ScaleLocalityDegradedEntry {
+                code: "read_pool_undersized",
+                severity: "warning",
+                message: "Read-pool capacity is below the locality advisor recommendation.",
+                repair: "Increase storage.read_pool.size or lower foreground read concurrency.",
+            },
+        );
+    }
+    if input.hotset_entry_count == 0 || cache_affinity.affinity == ScaleLocalityAffinity::Weak {
+        push_scale_locality_degraded(
+            &mut entries,
+            ScaleLocalityDegradedEntry {
+                code: "hotset_prewarm_no_signals",
+                severity: "low",
+                message: "Hotset input cannot anchor cache affinity to shard placement.",
+                repair: "Capture a current hotset manifest before measuring scale-envelope SLOs.",
+            },
+        );
+    }
+    if contention.state == ScaleLocalityContention::High {
+        push_scale_locality_degraded(
+            &mut entries,
+            ScaleLocalityDegradedEntry {
+                code: "scale_locality_cross_pool_contention",
+                severity: "medium",
+                message: "Search, pack, graph, and maintenance worker pools exceed the CPU envelope.",
+                repair: "Stagger maintenance or reduce background graph/index workers during foreground reads.",
+            },
+        );
+    }
+
+    entries
+}
+
+fn push_scale_locality_degraded(
+    entries: &mut Vec<ScaleLocalityDegradedEntry>,
+    entry: ScaleLocalityDegradedEntry,
+) {
+    if !entries.iter().any(|existing| existing.code == entry.code) {
+        entries.push(entry);
+    }
+}
+
+fn scale_locality_provenance(input: &ScaleLocalityAdvisorInput) -> Vec<ScaleLocalityProvenanceRef> {
+    vec![
+        ScaleLocalityProvenanceRef {
+            kind: "schema",
+            reference: "ee.scale_envelope.v1".to_owned(),
+            hash: Some(scale_locality_hash(input, "schema")),
+        },
+        ScaleLocalityProvenanceRef {
+            kind: "bead",
+            reference: "bd-ssoco.4".to_owned(),
+            hash: None,
+        },
+        ScaleLocalityProvenanceRef {
+            kind: "resource_admission",
+            reference: format!(
+                "queue_depths:{}/{}/{}",
+                input.resource_admission_queue_depth,
+                input.read_pool_queue_depth,
+                input.maintenance_queue_depth
+            ),
+            hash: Some(scale_locality_hash(input, "resource-admission")),
+        },
+        ScaleLocalityProvenanceRef {
+            kind: "hotset",
+            reference: format!(
+                "entries:{} bytes:{}",
+                input.hotset_entry_count, input.hotset_bytes
+            ),
+            hash: Some(scale_locality_hash(input, "hotset")),
+        },
+    ]
+}
+
+fn placement_action(kind: ScaleLocalityTopologyKind) -> ScaleLocalityPlanAction {
+    match kind {
+        ScaleLocalityTopologyKind::MultiSocketNuma => ScaleLocalityPlanAction::UseNumaShardGroups,
+        ScaleLocalityTopologyKind::SingleSocket => ScaleLocalityPlanAction::CoLocateShardGroups,
+        ScaleLocalityTopologyKind::PlatformFallback => ScaleLocalityPlanAction::UsePlatformFallback,
+        ScaleLocalityTopologyKind::Unknown => ScaleLocalityPlanAction::ConservativeSingleShard,
+    }
+}
+
+fn cache_policy(affinity: ScaleLocalityAffinity) -> &'static str {
+    match affinity {
+        ScaleLocalityAffinity::Strong => "prewarm_hotset_by_shard_group",
+        ScaleLocalityAffinity::Acceptable => "prewarm_hotset_before_foreground_reads",
+        ScaleLocalityAffinity::Weak => "recapture_hotset_before_tuning",
+        ScaleLocalityAffinity::Unknown => "measure_hotset_before_tuning",
+    }
+}
+
+fn bounded_worker_count(logical_cpu_count: Option<u16>, divisor: u16, read_pool_limit: u16) -> u16 {
+    let cpu_floor = logical_cpu_count.map_or(1, |logical| (logical / divisor.max(1)).max(1));
+    cpu_floor.min(read_pool_limit.max(1))
+}
+
+fn ceil_div_u16(value: u16, divisor: u16) -> u16 {
+    let value = u32::from(value);
+    let divisor = u32::from(divisor.max(1));
+    u16::try_from(value.div_ceil(divisor)).unwrap_or(u16::MAX)
+}
+
+fn scale_locality_hash(input: &ScaleLocalityAdvisorInput, suffix: &str) -> String {
+    format!(
+        "blake3:{}",
+        blake3::hash(
+            format!(
+                "{}:{}:{}:{}:{}:{}",
+                SCALE_LOCALITY_ADVISOR_SCHEMA_V1,
+                input.fixture_profile_id,
+                input.read_pool_size,
+                input.shard_count,
+                input.hotset_entry_count,
+                suffix
+            )
+            .as_bytes()
+        )
+        .to_hex()
+    )
 }
 
 #[cfg(test)]
