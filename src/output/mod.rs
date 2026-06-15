@@ -10216,6 +10216,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: toolchain_provenance_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::session_budget::SESSION_BUDGET_PLAN_SCHEMA_V1,
+            version: "1",
+            description: "Advisory, deterministic next-command plan emitted by ee session-budget plan (bd-1clqr.3): reads opt-in ledger and degraded-source posture to recommend cheapest useful next command with rationale and fallbacks.",
+            category: "coordination",
+            definition: session_budget_plan_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::recall::RECALL_SCHEMA_V1,
             version: "1",
             description: "Code-anchored recall result emitted by ee recall (ADR 0064): reverse lookup from paths, symbols, or a git diff to anchored memories with deterministic freshness x confidence x level-tilt ranking.",
@@ -10272,6 +10279,10 @@ fn cursor_schema_definition() -> String {
 
 fn ask_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.ask.v1.json").to_string()
+}
+
+fn session_budget_plan_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.session_budget.plan.v1.json").to_string()
 }
 
 fn toolchain_provenance_schema_definition() -> String {

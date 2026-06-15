@@ -243,6 +243,9 @@ use crate::core::status::{
 use crate::core::subscribe::{
     SubscribeFilter, SubscribePollOptions, parse_subscribe_filter, poll_memory_deltas,
 };
+use crate::core::session_budget::{
+    BudgetPlannerInput, SESSION_BUDGET_PLAN_SCHEMA_V1, plan_cheapest_next_command,
+};
 use crate::core::swarm_brief::{
     DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, SwarmBriefCollectOptions, SwarmBriefReport,
     SwarmBriefSourceKind, SwarmBriefSourceStatus, SystemSwarmBriefCommandRunner,
@@ -1023,6 +1026,9 @@ pub enum Command {
     /// Read-only coordination snapshot and preflight recommendations for agent swarms.
     #[command(subcommand)]
     Swarm(SwarmCommand),
+    /// Opt-in session-budget ledger planning and diagnostics.
+    #[command(name = "session-budget", subcommand)]
+    SessionBudget(SessionBudgetCommand),
     /// Durable passive task frames and goal stacks.
     #[command(name = "task-frame", subcommand)]
     TaskFrame(TaskFrameCommand),
@@ -11498,6 +11504,37 @@ pub struct SupportInspectArgs {
     pub check_versions: bool,
 }
 
+/// Subcommands for `ee session-budget`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum SessionBudgetCommand {
+    /// Emit a deterministic advisory plan for the cheapest useful next command.
+    Plan(SessionBudgetPlanArgs),
+}
+
+/// Arguments for `ee session-budget plan`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct SessionBudgetPlanArgs {
+    /// Path to the opt-in session-budget ledger JSONL file.
+    #[arg(long, value_name = "PATH")]
+    pub ledger_path: Option<std::path::PathBuf>,
+
+    /// Comma-separated degraded source names: db, rch, agent_mail, pack, bv, beads.
+    #[arg(long, value_name = "SOURCES", default_value = "")]
+    pub degraded_sources: String,
+
+    /// Whether RCH is currently healthy (true = verification may be in progress).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub rch_healthy: bool,
+
+    /// Optional free-text task description (used for cargo refusal check).
+    #[arg(long, value_name = "HINT")]
+    pub task_hint: Option<String>,
+
+    /// Hex workspace fingerprint (12 lowercase hex chars). Defaults to zeros.
+    #[arg(long, value_name = "FP", default_value = "000000000000")]
+    pub workspace_fingerprint: String,
+}
+
 /// Subcommands for `ee swarm`.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum SwarmCommand {
@@ -13441,6 +13478,9 @@ where
         }
         Some(Command::Swarm(SwarmCommand::WorkPacket(ref args))) => {
             handle_swarm_work_packet(&cli, args, stdout, stderr)
+        }
+        Some(Command::SessionBudget(SessionBudgetCommand::Plan(ref args))) => {
+            handle_session_budget_plan(&cli, args, stdout, stderr)
         }
         Some(Command::Workspace(ref cmd)) => handle_workspace_command(&cli, cmd, stdout, stderr),
         Some(Command::Tripwire(TripwireCommand::List(ref args))) => {
@@ -55284,6 +55324,68 @@ where
     }
 }
 
+fn handle_session_budget_plan<W, E>(
+    cli: &Cli,
+    args: &SessionBudgetPlanArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let degraded_sources: Vec<String> = args
+        .degraded_sources
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+
+    let input = BudgetPlannerInput {
+        ledger_path: args.ledger_path.clone(),
+        degraded_sources,
+        rch_healthy: args.rch_healthy,
+        task_hint: args.task_hint.clone(),
+        workspace_fingerprint: args.workspace_fingerprint.clone(),
+        generated_at: chrono::Utc::now(),
+    };
+    let plan = plan_cheapest_next_command(&input);
+
+    match serde_json::to_value(&plan) {
+        Ok(data) => {
+            let response = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": data,
+            });
+            match serde_json::to_string(&response) {
+                Ok(json) => write_stdout(stdout, &(json + "\n")),
+                Err(error) => write_domain_error(
+                    &DomainError::Storage {
+                        message: format!(
+                            "session-budget plan response serialization failed: {error}"
+                        ),
+                        repair: None,
+                    },
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                ),
+            }
+        }
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("session-budget plan serialization failed: {error}"),
+                repair: None,
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
 fn parse_swarm_brief_sources(
     raw: &str,
     include_rch: bool,
@@ -56614,6 +56716,7 @@ const SCHEMA_SUBCOMMANDS: &[&str] = &["list", "export"];
 const SHARE_SUBCOMMANDS: &[&str] = &["preview"];
 const SITUATION_SUBCOMMANDS: &[&str] = &["classify", "compare", "link", "show", "explain"];
 const SUPPORT_SUBCOMMANDS: &[&str] = &["bundle", "inspect"];
+const SESSION_BUDGET_SUBCOMMANDS: &[&str] = &["plan"];
 const SWARM_SUBCOMMANDS: &[&str] = &["brief", "next-action", "repair-plan", "work-packet"];
 const TASK_FRAME_SUBCOMMANDS: &[&str] = &["create", "show", "update", "close", "subgoal"];
 const TASK_FRAME_SUBGOAL_SUBCOMMANDS: &[&str] = &["add"];
@@ -57189,6 +57292,9 @@ impl NormalizedInvocation {
                     SwarmCommand::RepairPlan(_) => "swarm repair-plan".to_string(),
                     SwarmCommand::WorkPacket(_) => "swarm work-packet".to_string(),
                 },
+                Command::SessionBudget(sb) => match sb {
+                    SessionBudgetCommand::Plan(_) => "session-budget plan".to_string(),
+                },
                 Command::TaskFrame(task_frame) => match task_frame {
                     TaskFrameCommand::Create(_) => "task-frame create".to_string(),
                     TaskFrameCommand::Show(_) => "task-frame show".to_string(),
@@ -57388,6 +57494,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "review" => Some(REVIEW_SUBCOMMANDS),
         "rule" => Some(RULE_SUBCOMMANDS),
         "schema" => Some(SCHEMA_SUBCOMMANDS),
+        "session-budget" => Some(SESSION_BUDGET_SUBCOMMANDS),
         "share" => Some(SHARE_SUBCOMMANDS),
         "situation" => Some(SITUATION_SUBCOMMANDS),
         "support" => Some(SUPPORT_SUBCOMMANDS),
@@ -57964,8 +58071,9 @@ mod tests {
         MemoryCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
         RedactionLevelSource, ReflectCommand, ReflectRequestLedgerCommand, RegressCommand,
         RegressExplainArgs, RegressionSurfaceArg, RuleCommand, ShadowMode, SituationCommand,
-        StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmRepairPlanArgs,
-        SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand,
+        SessionBudgetCommand, SessionBudgetPlanArgs, StatusArgs, SupportCommand, SwarmBriefArgs,
+        SwarmCommand, SwarmRepairPlanArgs, SwarmWorkPacketArgs, TaskFrameCommand,
+        TaskFrameSubgoalCommand, VerifyCommand,
         VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
         WorkspaceHygieneMode, db_inspect_redact_source_uri,
         diag_environment_attestation_response_json, environment_attestation_unavailable_sources,

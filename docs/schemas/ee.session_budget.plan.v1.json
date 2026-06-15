@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.session_budget.plan.v1.json",
+  "title": "ee.session_budget.plan.v1",
+  "description": "Advisory, deterministic, explainable next-command plan emitted by `ee session-budget plan`. Reads the opt-in ledger and current degraded-source posture to recommend the cheapest useful next command (primer, recall, ask, search, swarm-brief, pack, proof-wait, proof-skip). Never recommends local cargo. Includes rationale and fallback commands for each degraded source.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "generatedAt",
+    "workspaceFingerprint",
+    "advisory",
+    "recommendation",
+    "fallbacks",
+    "refusals",
+    "ledgerSummary"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.session_budget.plan.v1"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "workspaceFingerprint": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{12}$"
+    },
+    "advisory": {
+      "type": "boolean",
+      "const": true,
+      "description": "Always true — the plan is advisory and never mandates actions."
+    },
+    "taskHint": {
+      "type": ["string", "null"],
+      "description": "Free-text task description passed by the caller (omitted if not provided)."
+    },
+    "recommendation": {
+      "$ref": "#/$defs/planEntry",
+      "description": "The single cheapest useful command given current posture."
+    },
+    "fallbacks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/planEntry" },
+      "maxItems": 3,
+      "description": "Up to three ordered alternatives (ascending effective cost)."
+    },
+    "refusals": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/planRefusal" },
+      "description": "Commands refused by the planner (e.g., local cargo) with alternatives."
+    },
+    "ledgerSummary": {
+      "$ref": "#/$defs/ledgerSummary",
+      "description": "Aggregate statistics from the opt-in session-budget ledger."
+    }
+  },
+  "$defs": {
+    "planEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rank",
+        "surface",
+        "command",
+        "rationale",
+        "estimatedCostMs",
+        "estimatedOutputTokens",
+        "degradedPenalty"
+      ],
+      "properties": {
+        "rank": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based rank (1 = cheapest/best)."
+        },
+        "surface": {
+          "type": "string",
+          "enum": [
+            "primer",
+            "recall",
+            "ask",
+            "search",
+            "swarm-brief",
+            "pack",
+            "proof-wait",
+            "proof-skip"
+          ]
+        },
+        "command": {
+          "type": "string",
+          "description": "Canonical shell command or advisory comment string."
+        },
+        "rationale": {
+          "type": "string",
+          "description": "Human-readable explanation for this ranking."
+        },
+        "estimatedCostMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Estimated wall-clock cost in milliseconds (includes degraded penalty when applicable)."
+        },
+        "estimatedOutputTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Estimated output token count (0 for advisory-only entries)."
+        },
+        "degradedPenalty": {
+          "type": "boolean",
+          "description": "True if a degraded-source penalty was added to this entry's cost."
+        }
+      }
+    },
+    "planRefusal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "reason"],
+      "properties": {
+        "input": {
+          "type": "string",
+          "description": "The input string or command that was refused."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Machine-readable refusal reason."
+        },
+        "alternative": {
+          "type": ["string", "null"],
+          "description": "Suggested safe alternative command."
+        }
+      }
+    },
+    "ledgerSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rowCount",
+        "totalWallClockMs",
+        "degradedEventCount"
+      ],
+      "properties": {
+        "rowCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of ledger rows read."
+        },
+        "totalWallClockMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Sum of wallClockMs across all ledger rows."
+        },
+        "mostRecentSurface": {
+          "type": ["string", "null"],
+          "description": "Surface name of the most recently recorded command."
+        },
+        "degradedEventCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of rows that had at least one degradedGroup entry."
+        }
+      }
+    }
+  },
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-1clqr.3",
+    "emitter": "core_session_budget_planner"
+  }
+}

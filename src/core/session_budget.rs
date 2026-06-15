@@ -566,6 +566,329 @@ impl fmt::Display for SessionBudgetRecordError {
 
 impl std::error::Error for SessionBudgetRecordError {}
 
+// ── Planner (bd-1clqr.3) ───────────────────────────────────────────────────
+
+pub const SESSION_BUDGET_PLAN_SCHEMA_V1: &str = "ee.session_budget.plan.v1";
+
+const CARGO_REFUSAL_REASON: &str = "local cargo is structurally forbidden; \
+    use `scripts/rch_verify.sh --skip-known-blocker -- cargo test <target>` for verification";
+const CARGO_REFUSAL_ALTERNATIVE: &str =
+    "scripts/rch_verify.sh --skip-known-blocker -- cargo test --lib";
+
+const DEGRADED_PENALTY_MS: u64 = 10_000;
+const PLAN_MAX_FALLBACKS: usize = 3;
+
+/// One scored command the planner might recommend.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetPlanEntry {
+    pub rank: u32,
+    pub surface: String,
+    pub command: String,
+    pub rationale: String,
+    pub estimated_cost_ms: u64,
+    pub estimated_output_tokens: u64,
+    pub degraded_penalty: bool,
+}
+
+/// A refused input with explanation and alternative.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetPlanRefusal {
+    pub input: String,
+    pub reason: String,
+    pub alternative: Option<String>,
+}
+
+/// Summary of ledger history surfaced alongside the plan.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetLedgerSummary {
+    pub row_count: usize,
+    pub total_wall_clock_ms: u64,
+    pub most_recent_surface: Option<String>,
+    pub degraded_event_count: u64,
+}
+
+/// The advisory plan emitted by `ee session-budget plan`.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetPlan {
+    pub schema: &'static str,
+    pub generated_at: DateTime<Utc>,
+    pub workspace_fingerprint: String,
+    pub advisory: bool,
+    pub task_hint: Option<String>,
+    pub recommendation: BudgetPlanEntry,
+    pub fallbacks: Vec<BudgetPlanEntry>,
+    pub refusals: Vec<BudgetPlanRefusal>,
+    pub ledger_summary: BudgetLedgerSummary,
+}
+
+/// Input to `plan_cheapest_next_command`.
+#[derive(Clone, Debug)]
+pub struct BudgetPlannerInput {
+    pub ledger_path: Option<PathBuf>,
+    /// Names of currently degraded sources: "db", "rch", "agent_mail", "pack", "bv", "beads".
+    pub degraded_sources: Vec<String>,
+    /// Whether RCH is healthy (true = active verifications may be in progress).
+    pub rch_healthy: bool,
+    /// Free-text task hint from the caller (used for cargo refusal check).
+    pub task_hint: Option<String>,
+    pub workspace_fingerprint: String,
+    pub generated_at: DateTime<Utc>,
+}
+
+// Internal row; never serialised.
+struct CandidateRow {
+    surface: &'static str,
+    command: &'static str,
+    base_cost_ms: u64,
+    base_tokens: u64,
+    rationale_clean: &'static str,
+    rationale_degraded: &'static str,
+    /// Source names that, if degraded, trigger a penalty.
+    penalised_by: &'static [&'static str],
+    /// true = only emit this row when rch_healthy is true.
+    only_when_rch_healthy: bool,
+    /// true = only emit this row when rch_healthy is false.
+    only_when_rch_unhealthy: bool,
+}
+
+const ALL_CANDIDATES: &[CandidateRow] = &[
+    CandidateRow {
+        surface: "primer",
+        command: "ee primer --json",
+        base_cost_ms: 50,
+        base_tokens: 2000,
+        rationale_clean: "cheapest read-only command; establishes workspace context with minimal token cost",
+        rationale_degraded: "db is degraded; primer may return cached or partial output",
+        penalised_by: &["db"],
+        only_when_rch_healthy: false,
+        only_when_rch_unhealthy: false,
+    },
+    CandidateRow {
+        surface: "recall",
+        command: "ee recall --json",
+        base_cost_ms: 100,
+        base_tokens: 500,
+        rationale_clean: "fast code-anchored reverse lookup; low token overhead for targeted queries",
+        rationale_degraded: "db is degraded; recall may return stale or partial results",
+        penalised_by: &["db"],
+        only_when_rch_healthy: false,
+        only_when_rch_unhealthy: false,
+    },
+    CandidateRow {
+        surface: "ask",
+        command: "ee ask --json",
+        base_cost_ms: 150,
+        base_tokens: 300,
+        rationale_clean: "deterministic extractive QA with citations; no generation cost",
+        rationale_degraded: "db is degraded; ask span retrieval may miss recent memories",
+        penalised_by: &["db"],
+        only_when_rch_healthy: false,
+        only_when_rch_unhealthy: false,
+    },
+    CandidateRow {
+        surface: "search",
+        command: "ee search --json",
+        base_cost_ms: 200,
+        base_tokens: 1000,
+        rationale_clean: "hybrid BM25+vector search; moderate cost for broad discovery",
+        rationale_degraded: "db is degraded; search index may be stale or unavailable",
+        penalised_by: &["db"],
+        only_when_rch_healthy: false,
+        only_when_rch_unhealthy: false,
+    },
+    CandidateRow {
+        surface: "swarm-brief",
+        command: "ee swarm brief --json",
+        base_cost_ms: 300,
+        base_tokens: 1500,
+        rationale_clean: "coordination snapshot; shows peer state, RCH posture, and bead queue",
+        rationale_degraded: "agent_mail or rch is degraded; swarm brief will have reduced signal",
+        penalised_by: &["agent_mail", "rch"],
+        only_when_rch_healthy: false,
+        only_when_rch_unhealthy: false,
+    },
+    CandidateRow {
+        surface: "pack",
+        command: "ee pack --json",
+        base_cost_ms: 500,
+        base_tokens: 4000,
+        rationale_clean: "full context pack assembly; highest token yield but highest cost",
+        rationale_degraded: "db or pack source is degraded; pack may be incomplete",
+        penalised_by: &["db", "pack"],
+        only_when_rch_healthy: false,
+        only_when_rch_unhealthy: false,
+    },
+    CandidateRow {
+        surface: "proof-wait",
+        command: "# wait for active RCH verification to complete before proceeding",
+        base_cost_ms: 0,
+        base_tokens: 0,
+        rationale_clean: "RCH is healthy; waiting for verification avoids retrying on a broken build",
+        rationale_degraded: "",
+        penalised_by: &[],
+        only_when_rch_healthy: true,
+        only_when_rch_unhealthy: false,
+    },
+    CandidateRow {
+        surface: "proof-skip",
+        command: "# skip RCH verification this round; proceed with cheaper read-only commands",
+        base_cost_ms: 0,
+        base_tokens: 0,
+        rationale_clean: "RCH is degraded; skipping verification prevents indefinite queue wait",
+        rationale_degraded: "",
+        penalised_by: &[],
+        only_when_rch_healthy: false,
+        only_when_rch_unhealthy: true,
+    },
+];
+
+/// Produce an advisory, deterministic, explainable plan for the cheapest useful
+/// next command given the current ledger and degraded-source posture.
+///
+/// This function is pure: it never writes to disk or opens network connections.
+pub fn plan_cheapest_next_command(input: &BudgetPlannerInput) -> BudgetPlan {
+    let ledger_summary = summarize_ledger(input.ledger_path.as_deref());
+    let refusals = collect_cargo_refusals(input);
+    let mut entries = score_all_candidates(input);
+
+    // Sort by effective cost ascending, then by surface name for determinism.
+    entries.sort_by(|a, b| {
+        a.estimated_cost_ms
+            .cmp(&b.estimated_cost_ms)
+            .then_with(|| a.surface.cmp(&b.surface))
+    });
+
+    // Assign final ranks (1-based).
+    for (i, entry) in entries.iter_mut().enumerate() {
+        entry.rank = u32::try_from(i + 1).unwrap_or(u32::MAX);
+    }
+
+    let mut iter = entries.into_iter();
+    let recommendation = iter.next().expect("always at least one candidate");
+    let fallbacks = iter.take(PLAN_MAX_FALLBACKS).collect();
+
+    BudgetPlan {
+        schema: SESSION_BUDGET_PLAN_SCHEMA_V1,
+        generated_at: input.generated_at,
+        workspace_fingerprint: input.workspace_fingerprint.clone(),
+        advisory: true,
+        task_hint: input.task_hint.clone(),
+        recommendation,
+        fallbacks,
+        refusals,
+        ledger_summary,
+    }
+}
+
+fn score_all_candidates(input: &BudgetPlannerInput) -> Vec<BudgetPlanEntry> {
+    let mut entries = Vec::with_capacity(ALL_CANDIDATES.len());
+    for row in ALL_CANDIDATES {
+        if row.only_when_rch_healthy && !input.rch_healthy {
+            continue;
+        }
+        if row.only_when_rch_unhealthy && input.rch_healthy {
+            continue;
+        }
+        let degraded = row
+            .penalised_by
+            .iter()
+            .any(|src| input.degraded_sources.iter().any(|d| d.as_str() == *src));
+        let effective_cost = if degraded {
+            row.base_cost_ms.saturating_add(DEGRADED_PENALTY_MS)
+        } else {
+            row.base_cost_ms
+        };
+        let rationale = if degraded && !row.rationale_degraded.is_empty() {
+            row.rationale_degraded.to_owned()
+        } else {
+            row.rationale_clean.to_owned()
+        };
+        entries.push(BudgetPlanEntry {
+            rank: 0,
+            surface: row.surface.to_owned(),
+            command: row.command.to_owned(),
+            rationale,
+            estimated_cost_ms: effective_cost,
+            estimated_output_tokens: row.base_tokens,
+            degraded_penalty: degraded,
+        });
+    }
+    entries
+}
+
+fn collect_cargo_refusals(input: &BudgetPlannerInput) -> Vec<BudgetPlanRefusal> {
+    let hint = match input.task_hint.as_deref() {
+        Some(h) if h.to_ascii_lowercase().contains("cargo") => h,
+        _ => return Vec::new(),
+    };
+    vec![BudgetPlanRefusal {
+        input: hint.to_owned(),
+        reason: CARGO_REFUSAL_REASON.to_owned(),
+        alternative: Some(CARGO_REFUSAL_ALTERNATIVE.to_owned()),
+    }]
+}
+
+fn summarize_ledger(path: Option<&Path>) -> BudgetLedgerSummary {
+    let path = match path {
+        Some(p) => p,
+        None => {
+            return BudgetLedgerSummary {
+                row_count: 0,
+                total_wall_clock_ms: 0,
+                most_recent_surface: None,
+                degraded_event_count: 0,
+            }
+        }
+    };
+    let rows = match load_ledger_rows(path) {
+        Ok(r) => r,
+        Err(_) => {
+            return BudgetLedgerSummary {
+                row_count: 0,
+                total_wall_clock_ms: 0,
+                most_recent_surface: None,
+                degraded_event_count: 0,
+            }
+        }
+    };
+    let mut total_wall_clock_ms: u64 = 0;
+    let mut degraded_event_count: u64 = 0;
+    let mut most_recent_surface: Option<String> = None;
+
+    for row in &rows {
+        if let Some(ms) = row
+            .get("cost")
+            .and_then(|c| c.get("wallClockMs"))
+            .and_then(Value::as_u64)
+        {
+            total_wall_clock_ms = total_wall_clock_ms.saturating_add(ms);
+        }
+        if let Some(groups) = row.get("degradedGroups").and_then(Value::as_array) {
+            if !groups.is_empty() {
+                degraded_event_count = degraded_event_count.saturating_add(1);
+            }
+        }
+        if let Some(surface) = row
+            .get("command")
+            .and_then(|c| c.get("surface"))
+            .and_then(Value::as_str)
+        {
+            most_recent_surface = Some(surface.to_owned());
+        }
+    }
+
+    BudgetLedgerSummary {
+        row_count: rows.len(),
+        total_wall_clock_ms,
+        most_recent_surface,
+        degraded_event_count,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -751,6 +1074,209 @@ mod tests {
             "cmd_session_budget_0002"
         );
         assert_eq!(rows[0]["retention"]["maxAgeDays"], 1);
+        Ok(())
+    }
+
+    // ── Planner tests ────────────────────────────────────────────────────────
+
+    fn plan_input_clean() -> BudgetPlannerInput {
+        BudgetPlannerInput {
+            ledger_path: None,
+            degraded_sources: Vec::new(),
+            rch_healthy: false,
+            task_hint: None,
+            workspace_fingerprint: "aabbccddeeff".to_owned(),
+            generated_at: Utc.with_ymd_and_hms(2026, 6, 14, 12, 0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn plan_no_degradation_recommends_primer_first() -> TestResult {
+        let plan = plan_cheapest_next_command(&plan_input_clean());
+
+        assert_eq!(plan.schema, SESSION_BUDGET_PLAN_SCHEMA_V1);
+        assert!(plan.advisory, "plan must be advisory");
+        assert_eq!(plan.recommendation.surface, "primer", "cheapest surface is primer");
+        assert_eq!(plan.recommendation.rank, 1);
+        assert!(!plan.recommendation.degraded_penalty, "no penalty without degraded sources");
+        assert!(plan.refusals.is_empty(), "no refusals without cargo hint");
+        Ok(())
+    }
+
+    #[test]
+    fn plan_db_degraded_adds_penalty_to_db_surfaces() -> TestResult {
+        let mut input = plan_input_clean();
+        input.degraded_sources = vec!["db".to_owned()];
+        let plan = plan_cheapest_next_command(&input);
+
+        // With db degraded: proof-skip (cost 0, rch_healthy=false) wins.
+        // proof-skip is zero-cost and not db-dependent.
+        assert_eq!(
+            plan.recommendation.surface, "proof-skip",
+            "zero-cost proof-skip should win when db is degraded and rch is unhealthy"
+        );
+        // All entries that ARE db-dependent should carry the penalty flag
+        let all_entries: Vec<&BudgetPlanEntry> = std::iter::once(&plan.recommendation)
+            .chain(plan.fallbacks.iter())
+            .collect();
+        for entry in all_entries {
+            let is_db_dependent = ["primer", "recall", "ask", "search", "pack"]
+                .contains(&entry.surface.as_str());
+            if is_db_dependent {
+                assert!(
+                    entry.degraded_penalty,
+                    "db-dependent surface '{}' must carry degraded_penalty=true",
+                    entry.surface
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn plan_cargo_hint_produces_refusal() -> TestResult {
+        let mut input = plan_input_clean();
+        input.task_hint = Some("cargo test --lib".to_owned());
+        let plan = plan_cheapest_next_command(&input);
+
+        assert_eq!(plan.refusals.len(), 1, "must produce exactly one refusal");
+        let refusal = &plan.refusals[0];
+        assert_eq!(refusal.input, "cargo test --lib");
+        assert!(
+            refusal.reason.contains("structurally forbidden"),
+            "reason must mention forbidden: {}",
+            refusal.reason
+        );
+        assert!(
+            refusal.alternative.as_deref().unwrap_or("").contains("rch_verify"),
+            "alternative must reference rch_verify: {:?}",
+            refusal.alternative
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_non_cargo_hint_no_refusal() -> TestResult {
+        let mut input = plan_input_clean();
+        input.task_hint = Some("search for memories about authentication".to_owned());
+        let plan = plan_cheapest_next_command(&input);
+
+        assert!(plan.refusals.is_empty(), "non-cargo hint must not produce refusals");
+        Ok(())
+    }
+
+    #[test]
+    fn plan_rch_healthy_includes_proof_wait_not_proof_skip() -> TestResult {
+        let mut input = plan_input_clean();
+        input.rch_healthy = true;
+        let plan = plan_cheapest_next_command(&input);
+
+        let all_surfaces: Vec<&str> = std::iter::once(&plan.recommendation)
+            .chain(plan.fallbacks.iter())
+            .map(|e| e.surface.as_str())
+            .collect();
+        assert!(all_surfaces.contains(&"proof-wait"), "rch_healthy=true must include proof-wait");
+        assert!(!all_surfaces.contains(&"proof-skip"), "rch_healthy=true must exclude proof-skip");
+        Ok(())
+    }
+
+    #[test]
+    fn plan_rch_unhealthy_includes_proof_skip_not_proof_wait() -> TestResult {
+        let input = plan_input_clean(); // rch_healthy=false by default
+        let plan = plan_cheapest_next_command(&input);
+
+        let all_surfaces: Vec<&str> = std::iter::once(&plan.recommendation)
+            .chain(plan.fallbacks.iter())
+            .map(|e| e.surface.as_str())
+            .collect();
+        assert!(all_surfaces.contains(&"proof-skip"), "rch_healthy=false must include proof-skip");
+        assert!(!all_surfaces.contains(&"proof-wait"), "rch_healthy=false must exclude proof-wait");
+        Ok(())
+    }
+
+    #[test]
+    fn plan_is_deterministic_across_calls() -> TestResult {
+        let input = plan_input_clean();
+        let plan_a = plan_cheapest_next_command(&input);
+        let plan_b = plan_cheapest_next_command(&input);
+
+        assert_eq!(
+            plan_a.recommendation.surface, plan_b.recommendation.surface,
+            "same input must produce same recommendation"
+        );
+        assert_eq!(
+            plan_a.fallbacks.len(), plan_b.fallbacks.len(),
+            "same input must produce same fallback count"
+        );
+        for (a, b) in plan_a.fallbacks.iter().zip(plan_b.fallbacks.iter()) {
+            assert_eq!(a.surface, b.surface, "fallback order must be deterministic");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn plan_ledger_summary_empty_when_no_path() -> TestResult {
+        let plan = plan_cheapest_next_command(&plan_input_clean());
+
+        assert_eq!(plan.ledger_summary.row_count, 0);
+        assert_eq!(plan.ledger_summary.total_wall_clock_ms, 0);
+        assert_eq!(plan.ledger_summary.most_recent_surface, None);
+        assert_eq!(plan.ledger_summary.degraded_event_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn plan_ledger_summary_reads_existing_ledger() -> TestResult {
+        let path = test_ledger_path("plan-ledger");
+        let config = test_config(path.clone(), 10, 30);
+        let recorder = SessionBudgetRecorder::enabled(config);
+        let base = Utc.with_ymd_and_hms(2026, 6, 14, 12, 0, 0).unwrap();
+
+        recorder
+            .record_with(|| Ok(observation(1, base)))
+            .map_err(|error| error.to_string())?;
+        recorder
+            .record_with(|| Ok(observation(2, base + ChronoDuration::seconds(1))))
+            .map_err(|error| error.to_string())?;
+
+        let mut input = plan_input_clean();
+        input.ledger_path = Some(path);
+        let plan = plan_cheapest_next_command(&input);
+
+        assert_eq!(plan.ledger_summary.row_count, 2, "must read both rows");
+        assert!(plan.ledger_summary.total_wall_clock_ms > 0, "must sum wall_clock_ms");
+        Ok(())
+    }
+
+    #[test]
+    fn plan_ranks_are_sequential_from_one() -> TestResult {
+        let plan = plan_cheapest_next_command(&plan_input_clean());
+
+        assert_eq!(plan.recommendation.rank, 1);
+        for (i, entry) in plan.fallbacks.iter().enumerate() {
+            assert_eq!(
+                entry.rank,
+                u32::try_from(i + 2).unwrap(),
+                "fallback ranks must be sequential: got {} at position {}",
+                entry.rank,
+                i
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn plan_serialises_to_valid_json() -> TestResult {
+        let plan = plan_cheapest_next_command(&plan_input_clean());
+        let json = serde_json::to_string(&plan).map_err(|e| e.to_string())?;
+        let parsed: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+
+        assert_eq!(parsed["schema"], SESSION_BUDGET_PLAN_SCHEMA_V1);
+        assert_eq!(parsed["advisory"], true);
+        assert!(parsed["recommendation"].is_object(), "recommendation must be object");
+        assert!(parsed["fallbacks"].is_array(), "fallbacks must be array");
+        assert!(parsed["refusals"].is_array(), "refusals must be array");
+        assert!(parsed["ledgerSummary"].is_object(), "ledgerSummary must be object");
         Ok(())
     }
 }

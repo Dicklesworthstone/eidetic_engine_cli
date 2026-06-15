@@ -1197,7 +1197,19 @@ impl EffectManifest {
             ),
             CommandEffect::read_only_db("context", "Assemble context pack (reads only)"),
             CommandEffect::read_only_db("context-show", "Show a persisted context pack"),
+            CommandEffect::read_only_db(
+                "decide list",
+                "List durable decision memories and supersede-chain heads",
+            ),
+            CommandEffect::read_only_db(
+                "decide revisit",
+                "List due or near-due decision revisit reminders",
+            ),
             CommandEffect::read_only_db("orient", "Assemble read-only agent orientation bundle"),
+            CommandEffect::read_only_db(
+                "orient decisions",
+                "Read due decision revisit reminders for orientation output",
+            ),
             CommandEffect::read_only("completion", "Generate shell completion scripts"),
             CommandEffect::read_only_db("db status", "Report database status"),
             CommandEffect::read_only_db("db check", "Check database integrity"),
@@ -1602,6 +1614,10 @@ impl EffectManifest {
             CommandEffect::read_only(
                 "support inspect",
                 "Verify and inspect a redacted support bundle manifest",
+            ),
+            CommandEffect::read_only(
+                "session-budget plan",
+                "Advisory deterministic plan for cheapest useful next command given ledger and posture",
             ),
             CommandEffect::read_only_db("swarm brief", "Report read-only swarm coordination brief"),
             CommandEffect::read_only_db(
@@ -2149,6 +2165,17 @@ impl EffectManifest {
                 "remember",
                 vec!["memories", "memory_tags", "audit_log"],
                 "Store a new memory with direct or audit-lane-backed audit_log provenance",
+            ),
+            CommandEffect::durable_write(
+                "decide record",
+                vec![
+                    "memories",
+                    "memory_tags",
+                    "memory_links",
+                    "search_index_jobs",
+                    "audit_log",
+                ],
+                "Record a durable decision memory and optionally supersede the prior decision head",
             ),
             CommandEffect::durable_write(
                 "memory revise",

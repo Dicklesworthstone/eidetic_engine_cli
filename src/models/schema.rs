@@ -46,6 +46,8 @@ use super::{
 
 /// Schema identifier for opt-in agent session budget ledger rows.
 pub const SESSION_BUDGET_SCHEMA_V1: &str = "ee.session_budget.v1";
+/// Schema identifier for the advisory session-budget planner output (bd-1clqr.3).
+pub const SESSION_BUDGET_PLAN_SCHEMA_V1: &str = "ee.session_budget.plan.v1";
 
 /// All known schema identifiers for validation.
 pub const KNOWN_SCHEMAS: &[&str] = &[
@@ -125,6 +127,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     ECONOMY_SIMULATION_SCHEMA_V1,
     ECONOMY_SCHEMA_CATALOG_V1,
     SESSION_BUDGET_SCHEMA_V1,
+    SESSION_BUDGET_PLAN_SCHEMA_V1,
     // Active learning agenda and experiment schemas (EE-440)
     LEARNING_QUESTION_SCHEMA_V1,
     UNCERTAINTY_ESTIMATE_SCHEMA_V1,
