@@ -1662,6 +1662,10 @@ impl EffectManifest {
             ),
             CommandEffect::read_only_db("verification rch runs", "List RCH verification runs"),
             CommandEffect::read_only_db(
+                "verification rch topology-audit",
+                "Audit RCH topology closure for path-dep and crate-graph gaps",
+            ),
+            CommandEffect::read_only_db(
                 "verify broker lookup",
                 "Look up verification broker state",
             ),
@@ -1676,6 +1680,10 @@ impl EffectManifest {
             CommandEffect::read_only_db("verify proofs", "List verification proofs"),
             CommandEffect::read_only_db("verify rch blockers", "List RCH verification blockers"),
             CommandEffect::read_only_db("verify rch runs", "List RCH verification runs"),
+            CommandEffect::read_only_db(
+                "verify rch topology-audit",
+                "Audit RCH topology closure for path-dep and crate-graph gaps",
+            ),
             CommandEffect::read_only("version", "Print version"),
             CommandEffect::read_only_db(
                 "workspace hygiene",
