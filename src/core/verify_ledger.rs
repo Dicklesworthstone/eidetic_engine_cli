@@ -895,11 +895,11 @@ fn classify_topology_root(
 }
 
 fn path_starts_with(path: &Path, root: &Path) -> bool {
-    let normalize_components = |path: &Path| {
+    fn normalize_components(path: &Path) -> Vec<Component<'_>> {
         path.components()
             .filter(|component| !matches!(component, Component::CurDir))
             .collect::<Vec<_>>()
-    };
+    }
     let path_components = normalize_components(path);
     let root_components = normalize_components(root);
     path_components.starts_with(&root_components)
@@ -908,13 +908,13 @@ fn path_starts_with(path: &Path, root: &Path) -> bool {
 fn franken_stack_sibling(normalized: &str) -> Option<&'static str> {
     let sibling = normalized.trim_start_matches("../").split('/').next()?;
     match sibling {
-        "asupersync"
-        | "franken_agent_detection"
-        | "franken_networkx"
-        | "frankensearch"
-        | "frankensqlite"
-        | "sqlmodel_rust"
-        | "toon_rust" => Some(sibling),
+        "asupersync" => Some("asupersync"),
+        "franken_agent_detection" => Some("franken_agent_detection"),
+        "franken_networkx" => Some("franken_networkx"),
+        "frankensearch" => Some("frankensearch"),
+        "frankensqlite" => Some("frankensqlite"),
+        "sqlmodel_rust" => Some("sqlmodel_rust"),
+        "toon_rust" => Some("toon_rust"),
         _ => None,
     }
 }

@@ -720,7 +720,7 @@ fn pretty_json(value: &Value) -> Result<String, String> {
 }
 
 fn join_repo_path(parts: &[&str]) -> PathBuf {
-    parts.iter().fold(repo_root(), Path::join)
+    parts.iter().fold(repo_root(), |acc, part| acc.join(part))
 }
 
 fn repo_root() -> PathBuf {

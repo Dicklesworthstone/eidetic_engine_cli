@@ -533,6 +533,14 @@ fn db_inspect_schema_documents_read_only_database_surfaces() -> TestResult {
     Ok(())
 }
 
+fn ensure_equal(actual: &Value, expected: &Value, label: &str) -> TestResult {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!("{label}: expected {expected}, got {actual}"))
+    }
+}
+
 fn ensure_field_presets(schema_id: &str, schema: &Value) -> TestResult {
     let presets = schema
         .get("field_presets")

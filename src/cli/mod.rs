@@ -47489,7 +47489,7 @@ where
             | output::Renderer::Hook => write_stdout(
                 stdout,
                 &(output::ResponseEnvelope::success()
-                    .data_raw(&report.data_json())
+                    .data_raw(&report.data_json().to_string())
                     .finish()
                     + "\n"),
             ),
@@ -47998,7 +47998,7 @@ where
             | output::Renderer::Hook => write_stdout(
                 stdout,
                 &(output::ResponseEnvelope::success()
-                    .data_raw(&report.data_json())
+                    .data_raw(&report.data_json().to_string())
                     .finish()
                     + "\n"),
             ),
@@ -48271,7 +48271,7 @@ where
             | output::Renderer::Hook => write_stdout(
                 stdout,
                 &(output::ResponseEnvelope::success()
-                    .data_raw(&report.data_json())
+                    .data_raw(&report.data_json().to_string())
                     .finish()
                     + "\n"),
             ),

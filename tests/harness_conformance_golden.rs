@@ -262,7 +262,7 @@ fn classify_transcript_line(line: &str) -> &'static str {
     }
 }
 
-fn pretty_json(summary: &GoldenSummary) -> TestResult {
+fn pretty_json(summary: &GoldenSummary) -> Result<String, String> {
     let body = serde_json::to_string_pretty(summary).map_err(|error| error.to_string())?;
     Ok(format!("{body}\n"))
 }
