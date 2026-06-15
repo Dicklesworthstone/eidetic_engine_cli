@@ -65,6 +65,7 @@ pub struct ConfigFile {
     pub curation: CurationConfig,
     pub journal: JournalConfig,
     pub primer: PrimerConfig,
+    pub decide: DecideConfig,
     pub learn: LearnConfig,
     pub feedback: FeedbackConfig,
     pub redaction: RedactionConfig,
@@ -123,6 +124,7 @@ impl ConfigFile {
             curation: CurationConfig::parse(&document)?,
             journal: JournalConfig::parse(&document)?,
             primer: PrimerConfig::parse(&document)?,
+            decide: DecideConfig::parse(&document)?,
             learn: LearnConfig::parse(&document)?,
             feedback: FeedbackConfig::parse(&document)?,
             redaction: RedactionConfig::parse(&document)?,
@@ -1048,6 +1050,22 @@ impl PrimerConfig {
     fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
         Ok(Self {
             default_tokens: optional_u64(document, "primer", "default_tokens")?,
+        })
+    }
+}
+
+/// `[decide]` — defaults for decision revisit surfacing.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DecideConfig {
+    /// Number of days ahead that `ee decide revisit` and orient should report
+    /// as near-due. The shipped default is defined by the decision core.
+    pub revisit_warning_days: Option<u64>,
+}
+
+impl DecideConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            revisit_warning_days: optional_u64(document, "decide", "revisit_warning_days")?,
         })
     }
 }
@@ -2502,6 +2520,9 @@ harmful_weight = 2.5
 decay_half_life_days = 60
 specificity_min = 0.45
 
+[decide]
+revisit_warning_days = 21
+
 [learn]
 cluster_coherence_threshold = 0.55
 
@@ -2846,6 +2867,11 @@ prompt_injection_guard = true
             &config.curation.specificity_min,
             &Some(0.45),
             "specificity min",
+        )?;
+        ensure_equal(
+            &config.decide.revisit_warning_days,
+            &Some(21),
+            "decide revisit warning days",
         )?;
         ensure_equal(
             &config.learn.decay.demote_threshold,

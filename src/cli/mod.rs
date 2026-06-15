@@ -88,6 +88,10 @@ use crate::core::curate::{
     run_curation_disposition, run_review_workspace, show_curation_candidate,
     validate_curation_candidate,
 };
+use crate::core::decide::{
+    DecideItem, DecideListOptions, DecideListReport, DecideRecordOptions, DecideRecordReport,
+    DecideRevisitOptions, DecideRevisitReport, decide_list, decide_record, decide_revisit,
+};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::disk_pressure::{
     ArtifactRetentionOptions, BuildAdmissionOptions, DiskPressureOptions, current_unix_seconds,
@@ -170,6 +174,7 @@ use crate::core::memory::{
     list_memories, remember_memory_batch_stdin, remember_memory_with_controls, revise_memory,
     update_memory_level, update_memory_link, update_memory_tags,
 };
+use crate::core::orient::{OrientDecisionOptions, orient_decisions};
 use crate::core::outcome::{
     DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
     OutcomeQuarantineListOptions, OutcomeQuarantineListReport, OutcomeQuarantineReviewOptions,
@@ -236,15 +241,15 @@ use crate::core::search::{
     run_search, run_search_with_performance,
 };
 use crate::core::sentinel::{SentinelCheckContext, observe_sentinel_explicit};
+use crate::core::session_budget::{
+    BudgetPlannerInput, SESSION_BUDGET_PLAN_SCHEMA_V1, plan_cheapest_next_command,
+};
 use crate::core::status::{
     StatusOptions, StatusReport, StatusSkylineReport, WalStatusReport,
     wal_checkpoint_bytes_threshold,
 };
 use crate::core::subscribe::{
     SubscribeFilter, SubscribePollOptions, parse_subscribe_filter, poll_memory_deltas,
-};
-use crate::core::session_budget::{
-    BudgetPlannerInput, SESSION_BUDGET_PLAN_SCHEMA_V1, plan_cheapest_next_command,
 };
 use crate::core::swarm_brief::{
     DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, SwarmBriefCollectOptions, SwarmBriefReport,
@@ -835,6 +840,9 @@ pub enum Command {
     /// Inspect database state without mutation.
     #[command(subcommand)]
     Db(DbCommand),
+    /// Record, list, and revisit durable typed decision memories.
+    #[command(subcommand)]
+    Decide(DecideCommand),
     /// Apply or inspect workspace schema migrations.
     ///
     /// `ee migrate status` reports the current schema version, the latest
@@ -1136,6 +1144,93 @@ pub struct StatusArgs {
     /// Mesh command mode for status posture: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
+}
+
+/// Subcommands for `ee decide`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum DecideCommand {
+    /// Record a durable decision memory with typed fields.
+    Record(DecideRecordArgs),
+    /// List current decision heads, optionally including superseded history.
+    List(DecideListArgs),
+    /// List decisions whose revisit time is due or inside the warning window.
+    Revisit(DecideRevisitArgs),
+}
+
+/// Arguments for `ee decide record`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct DecideRecordArgs {
+    /// Decision topic. The normalized topic is used to prevent accidental forks.
+    #[arg(value_name = "TOPIC")]
+    pub topic: String,
+
+    /// Chosen option.
+    #[arg(long, value_name = "CHOICE")]
+    pub chosen: String,
+
+    /// Rejected option. Repeat for each alternative considered.
+    #[arg(long = "alternative", value_name = "CHOICE", required = true)]
+    pub alternatives: Vec<String>,
+
+    /// Short rationale explaining why the chosen option won.
+    #[arg(long, value_name = "WHY")]
+    pub rationale: String,
+
+    /// RFC3339 timestamp or relative day interval such as +90d.
+    #[arg(long = "revisit-by", value_name = "RFC3339|+ND")]
+    pub revisit_by: Option<String>,
+
+    /// Prior decision memory id to supersede for the same normalized topic.
+    #[arg(long, value_name = "MEMORY_ID")]
+    pub supersedes: Option<String>,
+
+    /// Actor recorded in lifecycle/audit side effects.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Validate and render the would-be decision without durable mutation.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Explicit database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee decide list`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct DecideListArgs {
+    /// Case-insensitive substring to match against topic, options, or rationale.
+    #[arg(long, value_name = "TEXT")]
+    pub about: Option<String>,
+
+    /// Include superseded decisions instead of only current heads.
+    #[arg(long = "include-superseded", action = ArgAction::SetTrue)]
+    pub include_superseded: bool,
+
+    /// Maximum decisions to return.
+    #[arg(long, default_value_t = 100)]
+    pub limit: usize,
+
+    /// Explicit database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee decide revisit`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct DecideRevisitArgs {
+    /// Override the configured near-due warning window in days.
+    #[arg(long = "warning-days", value_name = "DAYS")]
+    pub warning_days: Option<u64>,
+
+    /// Maximum decisions to return.
+    #[arg(long, default_value_t = 100)]
+    pub limit: usize,
+
+    /// Explicit database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Subcommands for `ee subscribe`.
@@ -13365,6 +13460,7 @@ where
         Some(Command::Situation(SituationCommand::Explain(ref args))) => {
             handle_situation_explain(&cli, args, stdout, stderr)
         }
+        Some(Command::Decide(ref command)) => handle_decide(&cli, command, stdout, stderr),
         Some(Command::Status(ref args)) => {
             if let Some(exit_code) =
                 reject_unsupported_mermaid_format(&cli, "status", stdout, stderr)
@@ -17324,6 +17420,239 @@ where
                 "data": report.data_json(),
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+const DECIDE_SUBSCRIBE_FILTER: &str = "KIND=decision";
+
+fn handle_decide<W, E>(
+    cli: &Cli,
+    command: &DecideCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match command {
+        DecideCommand::Record(args) => handle_decide_record(cli, args, stdout, stderr),
+        DecideCommand::List(args) => handle_decide_list(cli, args, stdout, stderr),
+        DecideCommand::Revisit(args) => handle_decide_revisit(cli, args, stdout, stderr),
+    }
+}
+
+fn handle_decide_record<W, E>(
+    cli: &Cli,
+    args: &DecideRecordArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let options = DecideRecordOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        topic: &args.topic,
+        chosen: &args.chosen,
+        alternatives: args.alternatives.clone(),
+        rationale: &args.rationale,
+        revisit_by: args.revisit_by.as_deref(),
+        supersedes: args.supersedes.as_deref(),
+        dry_run: args.dry_run,
+        actor: args.actor.as_deref().or(Some("ee decide record")),
+        now: None,
+    };
+    match decide_record(&options) {
+        Ok(report) => write_decide_record_report(cli, &report, &workspace_path, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_decide_list<W, E>(
+    cli: &Cli,
+    args: &DecideListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let options = DecideListOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        about: args.about.as_deref(),
+        include_superseded: args.include_superseded,
+        limit: args.limit,
+        now: None,
+    };
+    match decide_list(&options) {
+        Ok(report) => write_decide_list_report(cli, &report, &workspace_path, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_decide_revisit<W, E>(
+    cli: &Cli,
+    args: &DecideRevisitArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let options = DecideRevisitOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        warning_days: args.warning_days,
+        limit: args.limit,
+        now: None,
+    };
+    match decide_revisit(&options) {
+        Ok(report) => write_decide_revisit_report(cli, &report, &workspace_path, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_decide_record_report<W>(
+    cli: &Cli,
+    report: &DecideRecordReport,
+    workspace_path: &Path,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let data = decide_data_with_subscribe(report.data_json(), workspace_path);
+    let status = if report.dry_run {
+        "Decision would be recorded"
+    } else {
+        "Decision recorded"
+    };
+    let human = format!(
+        "{status}: {}\n  Topic: {}\n  Chosen: {}\n  Revisit: {}\n",
+        report.decision.memory_id,
+        report.decision.topic,
+        report.decision.chosen,
+        report
+            .decision
+            .revisit_by
+            .as_deref()
+            .unwrap_or("not scheduled")
+    );
+    write_decide_data(cli, data, &human, stdout)
+}
+
+fn write_decide_list_report<W>(
+    cli: &Cli,
+    report: &DecideListReport,
+    workspace_path: &Path,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let data = decide_data_with_subscribe(report.data_json(), workspace_path);
+    let mut human = format!(
+        "Decisions: {} returned / {} total{}\n",
+        report.returned_count,
+        report.total_count,
+        if report.truncated { " (truncated)" } else { "" }
+    );
+    append_decision_rows(&mut human, &report.decisions);
+    write_decide_data(cli, data, &human, stdout)
+}
+
+fn write_decide_revisit_report<W>(
+    cli: &Cli,
+    report: &DecideRevisitReport,
+    workspace_path: &Path,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let data = decide_data_with_subscribe(report.data_json(), workspace_path);
+    let mut human = format!(
+        "Decision revisits: {} returned / {} due or near-due through {}{}\n",
+        report.returned_count,
+        report.due_count,
+        report.window_end,
+        if report.truncated { " (truncated)" } else { "" }
+    );
+    append_decision_rows(&mut human, &report.decisions);
+    write_decide_data(cli, data, &human, stdout)
+}
+
+fn append_decision_rows(output: &mut String, decisions: &[DecideItem]) {
+    for decision in decisions {
+        output.push_str(&format!(
+            "  {} [{}] {} -> {} ({})\n",
+            decision.memory_id,
+            decision.revisit_status,
+            decision.topic,
+            decision.chosen,
+            decision.normalized_topic
+        ));
+    }
+}
+
+fn decide_data_with_subscribe(
+    mut data: serde_json::Value,
+    workspace_path: &Path,
+) -> serde_json::Value {
+    if let Some(object) = data.as_object_mut() {
+        object.insert(
+            "subscribe".to_owned(),
+            serde_json::json!({
+                "schema": "ee.decide.subscribe.v1",
+                "filter": DECIDE_SUBSCRIBE_FILTER,
+                "pollCommand": decide_subscribe_poll_command(workspace_path),
+                "streamCommand": decide_subscribe_stream_command(workspace_path),
+            }),
+        );
+    }
+    data
+}
+
+fn decide_subscribe_poll_command(workspace_path: &Path) -> String {
+    let workspace = shell_quote_cli_arg(&workspace_path.display().to_string());
+    format!("ee subscribe poll --workspace {workspace} --filter {DECIDE_SUBSCRIBE_FILTER} --json")
+}
+
+fn decide_subscribe_stream_command(workspace_path: &Path) -> String {
+    let workspace = shell_quote_cli_arg(&workspace_path.display().to_string());
+    format!("ee subscribe stream --workspace {workspace} --filter {DECIDE_SUBSCRIBE_FILTER} --json")
+}
+
+fn write_decide_data<W>(
+    cli: &Cli,
+    data: serde_json::Value,
+    human_summary: &str,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, human_summary),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&workspace_response_json_v2(&data)) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(workspace_response_json_v2(&data) + "\n"))
         }
     }
 }
@@ -33897,6 +34226,25 @@ where
         serde_json::Value::Null
     };
 
+    let decisions = match orient_decisions(&OrientDecisionOptions {
+        workspace_path: &workspace_path,
+        database_path: None,
+        warning_days: None,
+        limit: 12,
+        now: None,
+    }) {
+        Ok(report) => report.data_json(),
+        Err(error) => {
+            degraded.push(orient_degradation_value(
+                "orient_decisions_unavailable",
+                "info",
+                format!("Decision revisit query could not be assembled: {error}"),
+                Some("Run `ee decide revisit --json` to isolate decision state.".to_string()),
+            ));
+            serde_json::Value::Null
+        }
+    };
+
     let data = serde_json::json!({
         "schema": "ee.orient.v1",
         "command": "orient",
@@ -33912,6 +34260,7 @@ where
         "workspaceHygiene": workspace_hygiene,
         "pack": pack,
         "primer": primer,
+        "decisions": decisions,
         "nextCommands": orient_next_commands(&workspace_path, &args.task, args.max_tokens),
     });
 
@@ -34085,6 +34434,7 @@ fn orient_next_commands(workspace: &Path, task: &str, max_tokens: u32) -> Vec<St
     vec![
         orient_pack_command(workspace, task, max_tokens),
         orient_search_command(workspace, task),
+        orient_decide_revisit_command(workspace),
         orient_workspace_hygiene_command(workspace),
         orient_doctor_command(workspace),
     ]
@@ -34107,6 +34457,11 @@ fn orient_search_command(workspace: &Path, task: &str) -> String {
 fn orient_workspace_hygiene_command(workspace: &Path) -> String {
     let workspace = shell_quote_cli_arg(&workspace.display().to_string());
     format!("ee workspace hygiene --workspace {workspace} --json")
+}
+
+fn orient_decide_revisit_command(workspace: &Path) -> String {
+    let workspace = shell_quote_cli_arg(&workspace.display().to_string());
+    format!("ee decide revisit --workspace {workspace} --json")
 }
 
 fn orient_doctor_command(workspace: &Path) -> String {
@@ -34152,8 +34507,12 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         .pointer("/pack/pack/items")
         .and_then(serde_json::Value::as_array)
         .map_or(0, Vec::len);
+    let decision_revisits = data
+        .pointer("/decisions/dueCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     let mut out = format!(
-        "Orientation: {task}\nWorkspace: {workspace}\nMode: {mode}\nDoctor posture: {posture}\nDirty paths: {dirty_paths}\nPack items: {pack_items}\n"
+        "Orientation: {task}\nWorkspace: {workspace}\nMode: {mode}\nDoctor posture: {posture}\nDirty paths: {dirty_paths}\nPack items: {pack_items}\nDecision revisits: {decision_revisits}\n"
     );
     if !degraded.is_empty() {
         out.push_str("\nDegraded:\n");
@@ -56890,6 +57249,11 @@ impl NormalizedInvocation {
                     DbCommand::Reindex(_) => "db reindex".to_string(),
                     DbCommand::Migrations(_) => "db migrations".to_string(),
                 },
+                Command::Decide(decide) => match decide {
+                    DecideCommand::Record(_) => "decide record".to_string(),
+                    DecideCommand::List(_) => "decide list".to_string(),
+                    DecideCommand::Revisit(_) => "decide revisit".to_string(),
+                },
                 Command::Migrate(migrate) => match migrate {
                     MigrateCommand::Status(_) => "migrate status".to_string(),
                     MigrateCommand::Run(_) => "migrate run".to_string(),
@@ -58070,12 +58434,11 @@ mod tests {
         MaintenanceCommand, MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode,
         MemoryCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
         RedactionLevelSource, ReflectCommand, ReflectRequestLedgerCommand, RegressCommand,
-        RegressExplainArgs, RegressionSurfaceArg, RuleCommand, ShadowMode, SituationCommand,
-        SessionBudgetCommand, SessionBudgetPlanArgs, StatusArgs, SupportCommand, SwarmBriefArgs,
-        SwarmCommand, SwarmRepairPlanArgs, SwarmWorkPacketArgs, TaskFrameCommand,
-        TaskFrameSubgoalCommand, VerifyCommand,
-        VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
-        WorkspaceHygieneMode, db_inspect_redact_source_uri,
+        RegressExplainArgs, RegressionSurfaceArg, RuleCommand, SessionBudgetCommand,
+        SessionBudgetPlanArgs, ShadowMode, SituationCommand, StatusArgs, SupportCommand,
+        SwarmBriefArgs, SwarmCommand, SwarmRepairPlanArgs, SwarmWorkPacketArgs, TaskFrameCommand,
+        TaskFrameSubgoalCommand, VerifyCommand, VerifyRchCommand, WorkflowCommand,
+        WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode, db_inspect_redact_source_uri,
         diag_environment_attestation_response_json, environment_attestation_unavailable_sources,
         format_impact_json, format_search_json_with_mesh_and_recalibration,
         hook_git_readiness_response_json, init_report_exit_code, json_with_data_result_path, mesh,
