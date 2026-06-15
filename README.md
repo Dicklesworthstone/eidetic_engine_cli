@@ -65,6 +65,7 @@ warnings. Each item carries an evidence pointer and a score breakdown.
 | **Typed memory fields** | Registry-backed sidecars for failures, decisions, commands, rules, conventions, risks, and anti-patterns; search filters use stable field names instead of prose parsing |
 | **Procedural rules with decay** | Confidence ages out, harmful feedback demotes faster than helpful feedback promotes |
 | **Anti-patterns first-class** | Trauma-guard surfaces matching risk, anti-pattern, and failure memories before destructive actions |
+| **Memory hygiene** | `ee curate doctor` ranks content debt, `ee learn gaps` turns missed demand into capture templates, and steward snapshots show whether hygiene is improving |
 | **Graph-aware** | PageRank, HITS, PPR, Gomory-Hu proximity, dominance, causal paths, structural health, Pack DNA, and skyline views |
 | **CASS session import** | Mines your existing `cass` corpus (Claude Code, Codex, Cursor, Gemini, ChatGPT) for evidence |
 | **Context profiles** | `compact`, `balanced`, `grounding`, `orientation`, `thorough`, and `submodular` quota/objective mixes |
@@ -1080,9 +1081,11 @@ Related docs:
 |---|---|
 | `ee review session <id> --propose [--dry-run]` | Distill imported CASS session evidence into proposed memories/rules |
 | `ee curate candidates [--workspace .]` | List pending curation candidates |
+| `ee curate doctor [--limit N] [--trend] [--json]` | Read-only memory-debt report with ranked suggested repairs for stale anchors, unresolved contradictions, never-retrieved or orphan memories, low-trust high-rank items, and decay-imminent high-utility rows |
 | `ee curate validate <id>` | Run validation (specificity, duplication, scope, evidence) |
 | `ee curate apply <id>` / `accept <id>` / `reject <id>` / `snooze <id>` / `merge <a> <b>` | Lifecycle transitions |
 | `ee curate disposition` | Evaluate TTL disposition policy without silent mutation (`--apply` is required to write) |
+| `ee learn gaps [--since <RFC3339>] [--limit N] [--json]` | Cluster retained search/ask miss demand into redacted representatives, nearest existing evidence, and remember templates |
 | `ee playbook extract [--since <RFC3339>] [--dry-run]` | Propose procedural-rule candidates from repeated semantic memories |
 | `ee playbook list [--limit N]` | List procedural rules in portable playbook form |
 | `ee playbook export --out <file> [--dry-run]` | Write a no-overwrite portable playbook artifact |
@@ -1195,6 +1198,7 @@ base retrieval signal dominant.
 | Command | Purpose |
 |---|---|
 | `ee doctor --quick\|--robot-triage\|--capabilities\|--gc-plan <days>` | Focused repair and operator triage surfaces |
+| `ee curate doctor --trend --json` / `ee learn gaps --json` | Content-health diagnostics: memory-debt queue, steward trend snapshots, and demand-driven gap templates |
 | `ee preflight run "<task>"` / `show` / `close` | Task risk assessment, tripwire context, and post-run feedback |
 | `ee preflight check --cmd "<command>" --json` | Command-facing policy guard for shell hooks; use `--stdin` or `--cmd-base64` when an outer harness may block risky argv text before `ee` can inspect it |
 | `ee tripwire list` / `check` | Inspect and check preflight tripwires |
@@ -1269,6 +1273,7 @@ lexical_weight  = 0.45
 semantic_weight = 0.45
 graph_weight    = 0.10
 query_plan_cache_entries = 1024
+query_miss_retention_days = 30        # retained hash-only miss demand for `ee learn gaps`
 
 [pack]
 default_profile  = "balanced"
@@ -1342,6 +1347,7 @@ Environment variable overrides:
 | `EE_HARMFUL_PER_SOURCE_PER_HOUR` | `[feedback].harmful_per_source_per_hour` |
 | `EE_HARMFUL_BURST_WINDOW_SECONDS` | `[feedback].harmful_burst_window_seconds` |
 | `EE_QUERY_PLAN_CACHE_ENTRIES` | query-plan cache size |
+| `EE_QUERY_MISS_RETENTION_DAYS` | `[search].query_miss_retention_days` for hash-only search/ask miss demand retained by `ee learn gaps` |
 | `EE_PPR_CACHE_ENTRIES` | PPR prefetch cache size |
 | `EE_L2_PACK_CACHE_BYTES` / `EE_L2_PACK_CACHE_DIR` / `EE_L2_PACK_CACHE_DISABLE` | pack L2 cache controls |
 | `EE_READ_POOL_SIZE` / `EE_READ_POOL_ACQUIRE_TIMEOUT_MS` / `EE_READ_POOL_MAX_PIN_SECONDS` | read-pool controls |
@@ -2161,6 +2167,7 @@ replacements, and tombstones each produce recorded entries visible via
 | [`docs/agent-ux/insights-onboarding.md`](docs/agent-ux/insights-onboarding.md) | Agent workflow for graph-derived insights, Pack DNA, skyline, and proximity surfaces |
 | [`docs/agent-ux/auto_enrollment_onboarding.md`](docs/agent-ux/auto_enrollment_onboarding.md) | Agent workflow and use/no-use checklist for optional Tailscale mesh, auto-enrollment, drift handling, and safety previews |
 | [`docs/agent-ux/ee-doctor-first-aid-precedence.md`](docs/agent-ux/ee-doctor-first-aid-precedence.md) | Doctor-first repair workflow for agents |
+| [`docs/agent-ux/memory-hygiene.md`](docs/agent-ux/memory-hygiene.md) | Weekly content-health workflow for curate doctor, learn gaps, and debt trends |
 | [`docs/agent-ux/flight-recorder.md`](docs/agent-ux/flight-recorder.md) | Redacted workload flight-recorder operator and agent reference |
 | [`docs/agent-ux/workspace-hygiene.md`](docs/agent-ux/workspace-hygiene.md) | Dirty-checkout and commit-readiness workflow |
 | [`docs/mesh/operator_onboarding.md`](docs/mesh/operator_onboarding.md) | Operator guide for optional mesh usage, trust/redaction posture, revision tokens, and troubleshooting |

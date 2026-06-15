@@ -286,6 +286,36 @@ ee learn experiment run --id exp_database_contract_fixture --dry-run --json
 
 ---
 
+### Memory Hygiene: `curate doctor`, `learn gaps`, `memory-debt-snapshot`
+
+`ee curate doctor` introduces the append-only `debt_snapshots` trend table.
+Snapshots are written only by the explicit steward job
+`memory-debt-snapshot`; normal doctor reports remain read-only. The table is
+retained as trend evidence, so migrations should treat it as durable telemetry,
+not as a rebuildable cache.
+
+`ee learn gaps` also raises the query-miss review window through
+`[search].query_miss_retention_days` / `EE_QUERY_MISS_RETENTION_DAYS`. The
+retained rows keep the existing privacy posture: hash-only/redacted miss demand
+used for clustering and remember-template suggestions. The change extends how
+long those redacted demand signals remain available for weekly review; it does
+not persist raw query text.
+
+Operational migration path:
+
+```bash
+ee migrate status --workspace . --json
+ee migrate run --workspace . --json
+ee curate doctor --workspace . --trend --json
+ee learn gaps --workspace . --json
+```
+
+If `learn_gaps_retention_short` appears, the requested `--since` predates the
+configured retention bound. Increase the retention value before the ledger is
+pruned when a longer review cadence is required.
+
+---
+
 ### Preflight & Tripwire: `preflight run`, `tripwire check`
 
 **Classification:** Split (mechanical checks + skill risk review)

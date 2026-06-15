@@ -179,6 +179,60 @@
       "forbiddenCurrentClaims": []
     },
     {
+      "schemaId": "ee.curate.doctor.v1",
+      "status": "current",
+      "surface": "memory_debt_doctor_report",
+      "owner": "src/output/mod.rs::public_schemas",
+      "schemaFile": "docs/schemas/ee.curate.doctor.v1.json",
+      "canonicalDocs": [
+        "docs/agent-ux/memory-hygiene.md",
+        "docs/schemas/ee.curate.doctor.v1.json"
+      ],
+      "currentFacingContexts": [
+        "README.md",
+        "docs/agent-ux/memory-hygiene.md",
+        "docs/schemas/ee.curate.doctor.v1.json"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.curate.debt_trend.v1",
+      "status": "current",
+      "surface": "memory_debt_trend_report",
+      "owner": "src/output/mod.rs::public_schemas",
+      "schemaFile": "docs/schemas/ee.curate.debt_trend.v1.json",
+      "canonicalDocs": [
+        "docs/agent-ux/memory-hygiene.md",
+        "docs/schemas/ee.curate.debt_trend.v1.json"
+      ],
+      "currentFacingContexts": [
+        "README.md",
+        "docs/agent-ux/memory-hygiene.md",
+        "docs/schemas/ee.curate.debt_trend.v1.json"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.learn.gaps.v1",
+      "status": "current",
+      "surface": "learn_gaps_report",
+      "owner": "src/output/mod.rs::public_schemas",
+      "schemaFile": "docs/schemas/ee.learn.gaps.v1.json",
+      "canonicalDocs": [
+        "docs/agent-ux/memory-hygiene.md",
+        "docs/schemas/ee.learn.gaps.v1.json"
+      ],
+      "currentFacingContexts": [
+        "README.md",
+        "docs/agent-ux/memory-hygiene.md",
+        "docs/schemas/ee.learn.gaps.v1.json"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
       "schemaId": "ee.daemon.request.v1",
       "status": "experimental",
       "surface": "daemon_uds_rpc_request_envelope",

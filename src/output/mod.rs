@@ -9233,6 +9233,20 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: learn_gaps_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::memory_debt::MEMORY_DEBT_DOCTOR_SCHEMA_V1,
+            version: "1",
+            description: "Read-only memory-debt doctor report with ranked curation repairs",
+            category: "curation",
+            definition: memory_debt_doctor_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::memory_debt::MEMORY_DEBT_TREND_SCHEMA_V1,
+            version: "1",
+            description: "Steward snapshot trend rows for memory-debt posture over time",
+            category: "curation",
+            definition: memory_debt_trend_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.memory.show.v1",
             version: "1",
             description: "Memory detail response envelope",
@@ -10514,6 +10528,14 @@ fn search_response_schema_definition() -> String {
 
 fn learn_gaps_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.learn.gaps.v1.json").to_string()
+}
+
+fn memory_debt_doctor_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.curate.doctor.v1.json").to_string()
+}
+
+fn memory_debt_trend_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.curate.debt_trend.v1.json").to_string()
 }
 
 fn memory_show_schema_definition() -> String {

@@ -1616,6 +1616,24 @@ pub const HOOK_HARNESS_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     },
 ];
 
+pub const MEMORY_HYGIENE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "doctor report is based on a partial audit window",
+        jq: r#".data.degraded[]? | select(.code == "memory_debt_audit_window_partial")"#,
+        next_action: "Keep the queue usable but treat older read evidence as unknown; rerun after audit retention or scan limits are widened.",
+    },
+    FailureBranchEntry {
+        condition: "learn gaps has no retained miss demand",
+        jq: r#".degraded[]? | select(.code == "learn_gaps_no_miss_data")"#,
+        next_action: "Treat this as an honest empty result, then record missing knowledge explicitly when an agent asks an unanswered question.",
+    },
+    FailureBranchEntry {
+        condition: "requested learn-gaps window predates retention",
+        jq: r#".degraded[]? | select(.code == "learn_gaps_retention_short")"#,
+        next_action: "Increase `[search].query_miss_retention_days` or `EE_QUERY_MISS_RETENTION_DAYS` before the ledger is pruned when longer review windows are required.",
+    },
+];
+
 pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
     AgentDocsRecipeEntry {
         id: "local-attestation",
@@ -1716,6 +1734,16 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#".data.checks[]? | select(.status != "ok") | {name, code, repair}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: DOCTOR_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "weekly-memory-hygiene",
+        title: "Run weekly memory hygiene",
+        description: "Review content rot, execute the top curation repairs deliberately, then inspect demand-driven learn gaps for memories to capture.",
+        category: "curation",
+        command: "ee curate doctor --workspace . --limit 5 --trend --json",
+        jq: r#".data | {summary, queue: [.queue[]? | {memoryId, class, severity, command: .suggestedAction.value}], trend}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.curate.doctor.v1""#,
+        failure_branches: MEMORY_HYGIENE_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
         id: "goal-to-recipe",
@@ -1855,8 +1883,8 @@ mod tests {
     use std::fmt::Debug;
 
     use super::{
-        AGENT_DOC_RECIPES, ASK_RECIPE_FAILURES, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, EXAMPLES,
-        DECIDE_LIST_SCHEMA_V1, DECIDE_RECORD_SCHEMA_V1, DECIDE_REVISIT_SCHEMA_V1, EXIT_CODES,
+        AGENT_DOC_RECIPES, ASK_RECIPE_FAILURES, AgentDocsTopic, CONTRACTS, DECIDE_LIST_SCHEMA_V1,
+        DECIDE_RECORD_SCHEMA_V1, DECIDE_REVISIT_SCHEMA_V1, DEFAULT_PATHS, EXAMPLES, EXIT_CODES,
         FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS, TASK_LENS_RECIPE_FAILURES, env_var_entries,
     };
     use crate::config::EnvVar;
