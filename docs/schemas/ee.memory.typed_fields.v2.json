@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.memory.typed_fields.v2.json",
+  "title": "ee.memory.typed_fields.v2",
+  "description": "Canonical typed sidecar envelope for registry-backed memory kinds. v1 sidecars remain accepted by the implementation and canonicalize to this v2 shape.",
+  "type": "object",
+  "required": ["schema", "kind", "fields"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.memory.typed_fields.v2"},
+    "kind": {
+      "type": "string",
+      "enum": ["failure", "decision", "command", "rule", "convention", "risk", "anti-pattern"]
+    },
+    "fields": {
+      "type": "object",
+      "maxProperties": 8
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "failure"}}},
+      "then": {"properties": {"fields": {"$ref": "#/$defs/failureFields"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "decision"}}},
+      "then": {"properties": {"fields": {"$ref": "#/$defs/decisionFields"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "command"}}},
+      "then": {"properties": {"fields": {"$ref": "#/$defs/commandFields"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "rule"}}},
+      "then": {"properties": {"fields": {"$ref": "#/$defs/ruleFields"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "convention"}}},
+      "then": {"properties": {"fields": {"$ref": "#/$defs/conventionFields"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"enum": ["risk", "anti-pattern"]}}},
+      "then": {"properties": {"fields": {"$ref": "#/$defs/riskFields"}}}
+    }
+  ],
+  "$defs": {
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "rfc3339": {
+      "allOf": [
+        {"$ref": "#/$defs/text"},
+        {"format": "date-time"}
+      ]
+    },
+    "textList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/text"}
+    },
+    "failureFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 8,
+      "properties": {
+        "cause": {"$ref": "#/$defs/text"},
+        "regression_surface": {"$ref": "#/$defs/text"},
+        "reverted_at_sha": {"$ref": "#/$defs/text"},
+        "family": {"$ref": "#/$defs/text"}
+      }
+    },
+    "decisionFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 8,
+      "properties": {
+        "options": {"$ref": "#/$defs/textList"},
+        "chosen": {"$ref": "#/$defs/text"},
+        "rationale": {"$ref": "#/$defs/text"},
+        "supersedes": {"$ref": "#/$defs/text"},
+        "revisit_by": {"$ref": "#/$defs/rfc3339"}
+      }
+    },
+    "commandFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 8,
+      "properties": {
+        "command": {"$ref": "#/$defs/text"},
+        "when_to_use": {"$ref": "#/$defs/text"},
+        "exit_meaning": {"$ref": "#/$defs/text"}
+      }
+    },
+    "ruleFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 8,
+      "properties": {
+        "condition": {"$ref": "#/$defs/text"},
+        "action": {"$ref": "#/$defs/text"},
+        "exceptions": {"$ref": "#/$defs/textList"}
+      }
+    },
+    "conventionFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 8,
+      "properties": {
+        "scope": {"$ref": "#/$defs/text"},
+        "pattern": {"$ref": "#/$defs/text"}
+      }
+    },
+    "riskFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 8,
+      "properties": {
+        "trigger": {"$ref": "#/$defs/text"},
+        "blast_radius": {"$ref": "#/$defs/text"},
+        "safer_alternative": {"$ref": "#/$defs/text"}
+      }
+    }
+  }
+}

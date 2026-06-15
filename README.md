@@ -62,6 +62,7 @@ warnings. Each item carries an evidence pointer and a score breakdown.
 |---|---|
 | **Hybrid retrieval** | BM25 + vector search via Frankensearch's `TwoTierSearcher`, with deterministic ranking and fusion; local RRF-shaped data is diagnostic-only and never owns final ordering |
 | **Explainable scores** | Every returned memory shows component scores, freshness, confidence, and which sources support it |
+| **Typed memory fields** | Registry-backed sidecars for failures, decisions, commands, rules, conventions, risks, and anti-patterns; search filters use stable field names instead of prose parsing |
 | **Procedural rules with decay** | Confidence ages out, harmful feedback demotes faster than helpful feedback promotes |
 | **Anti-patterns first-class** | Trauma-guard surfaces matching risk, anti-pattern, and failure memories before destructive actions |
 | **Graph-aware** | PageRank, HITS, PPR, Gomory-Hu proximity, dominance, causal paths, structural health, Pack DNA, and skyline views |
@@ -431,7 +432,7 @@ Current top-level groups:
 
 | Group | Commands |
 |---|---|
-| Core memory loop | `init`, `remember`, `search`, `ask`, `context`, `why`, `status`, `doctor`, `capabilities`, `check`, `health` |
+| Core memory loop | `init`, `remember`, `decide`, `search`, `ask`, `context`, `why`, `status`, `doctor`, `capabilities`, `check`, `health` |
 | Memory lifecycle | `memory`, `rule`, `curate`, `review`, `playbook`, `procedure`, `workflow`, `outcome`, `outcome-quarantine` |
 | Packing and retrieval | `pack`, `recall`, `lens`, `context-show`, `show`, `link`, `tag`, `history`, `proximity`, `insights`, `subscribe` |
 | Graph and structure | `graph`, `causal`, `economy`, `focus`, `learn`, `lab`, `rehearse`, `rationale`, `situation`, `task-frame` |
@@ -460,6 +461,9 @@ Current top-level groups:
 | `ee ask "<question>" [--require-confidence T] [--json]` | Direct extractive answer from stored memories, with citations, conflict sides, calibrated abstention, and exit 6 fail-closed mode |
 | `ee recall --path <glob>` / `--symbol <name>` / `--diff <ref>` | Fetch memories anchored to a code surface before editing; returns `ee.recall.v1` under the standard response envelope |
 | `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b]` | Capture a durable memory |
+| `ee decide record "<topic>" --chosen <x> --alternative <y> --rationale "<why>" [--revisit-by <RFC3339\|+ND>]` | Record a decision-kind memory with typed fields and fork protection |
+| `ee decide list [--about <text>] [--include-superseded] --json` | Review current decision heads or full supersede history before proposing architecture changes |
+| `ee decide revisit [--warning-days N] --json` | Find decisions whose revisit horizon is due or near due |
 | `ee outcome <id> --signal helpful\|harmful [--reason "<reason>"]` | Record feedback, updating utility/confidence |
 | `ee why <memory-id> [--json]` | Explain why a memory was selected, scored, or curated the way it was |
 | `ee why-not <memory-id> --task "<task>" [--json]` | Counterfactual reverse of `ee why`: explain why a memory was not selected for a task's context pack, with the minimal change that would include it (read-only) |
@@ -517,6 +521,7 @@ Machine readers should inspect the JSON contract before trusting a result:
 | Recoveries | `error.details.recovery[]`, which is structured for agents |
 | Posture | `ee status --json` uses `data.posture.overall`; `ee doctor --json` returns a doctor-specific posture view |
 | Provenance | `provenance[]`, `evidence_spans[]`, and `trustClass` on memory and pack items |
+| Typed fields | `data.memory.typedFields` on memory show, `typedFields`/`metadata.typed_field.*` on search-derived memory results when present |
 | Pack identity | `data.pack.hash` for batch packs; `packHash` on stream trailer frames |
 | Graph explanation | `data.pack.packDna` when `ee pack --explain --json` is used |
 | Feature gaps | `ee capabilities --json` at `data.unimplemented[]`, not command `degraded[]` |
@@ -1477,6 +1482,32 @@ Memory `kind` is orthogonal: `rule`, `fact`, `decision`, `failure`, `command`, `
 
 Every memory carries: `id`, `level`, `kind`, `content`, `content_hash`, `tags[]`, `confidence`, `utility`, `importance`, `created_at`, `last_seen_at`, `access_count`, `source_type`, `source_uri`, `evidence_spans[]`, `links[]`, `trust_class`.
 
+Registry-backed kinds can also carry a typed sidecar with schema
+`ee.memory.typed_fields.v2`. The sidecar is extraction-first: the memory body
+must contain explicit labels such as `Family:`, `Chosen:`, `Command:`,
+`Condition:`, or `Scope:`. Bare prose stays bare; `ee` does not fabricate
+machine fields.
+
+| Kind | Typed fields |
+|---|---|
+| `failure` | `cause`, `regression_surface`, `reverted_at_sha`, `family` |
+| `decision` | `options`, `chosen`, `rationale`, `supersedes`, `revisit_by` |
+| `command` | `command`, `when_to_use`, `exit_meaning` |
+| `rule` | `condition`, `action`, `exceptions` |
+| `convention` | `scope`, `pattern` |
+| `risk` / `anti-pattern` | `trigger`, `blast_radius`, `safer_alternative` |
+
+`ee search` filters typed fields with `--kind <kind>` plus repeatable `--field`
+operators: `name=value` for exact, `name~value` for contains, and `name^value`
+for prefix. The full registry, bounds, indexed-field status, and v1-to-v2
+compatibility notes live in
+[`docs/memory-typed-fields.md`](docs/memory-typed-fields.md).
+
+Decision memories have a dedicated micro-ADR workflow through `ee decide`.
+`record` creates or supersedes a decision chain head, `list` reviews current
+heads, and `revisit` surfaces due or near-due decisions. See
+[`docs/agent-ux/decide.md`](docs/agent-ux/decide.md).
+
 ---
 
 ## Context Profiles
@@ -1576,7 +1607,8 @@ memory fields as the formal machine-readable convention: write `Family:`,
 `Cause:`, and `Reverted at SHA ...` in the body so `ee remember --kind failure`
 can populate the typed sidecar. Legacy tags remain useful for broad grouping,
 but `ee search --kind failure --field family=<name> --json` is the precise
-filtering surface.
+filtering surface. The canonical v2 field table and bounds are documented in
+[`docs/memory-typed-fields.md`](docs/memory-typed-fields.md).
 
 | Loop step | `ee` surface |
 |---|---|

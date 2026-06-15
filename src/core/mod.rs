@@ -269,6 +269,13 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
     vec![
         SupportedSchema::new("response", RESPONSE_SCHEMA_V2),
         SupportedSchema::new("error", ERROR_SCHEMA_V2),
+        SupportedSchema::new(
+            "typed_memory_fields",
+            crate::models::memory::TYPED_MEMORY_FIELDS_SCHEMA_V2,
+        ),
+        SupportedSchema::new("decide_record", decide::DECIDE_RECORD_SCHEMA_V1),
+        SupportedSchema::new("decide_list", decide::DECIDE_LIST_SCHEMA_V1),
+        SupportedSchema::new("decide_revisit", decide::DECIDE_REVISIT_SCHEMA_V1),
         SupportedSchema::new("version_provenance", VERSION_PROVENANCE_SCHEMA_V1),
         SupportedSchema::new("symbol_snapshot", SYMBOL_SNAPSHOT_SCHEMA_V1),
         SupportedSchema::new("symbol_evidence_links", SYMBOL_EVIDENCE_LINKS_SCHEMA_V1),

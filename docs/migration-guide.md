@@ -153,15 +153,30 @@ and recall degraded codes stay honest.
 - `revise` internals no longer fabricate revision rationale
 - Revisions require explicit user input or skill handoff
 - Audit entries are always written for mutations
-- `ee remember --kind failure|decision|command|risk` can populate typed fields
-  from explicit body text. Bare or unstructured memories remain unchanged; the
-  extractor does not fabricate missing fields.
+- `ee remember --kind failure|decision|command|rule|convention|risk|anti-pattern`
+  can populate typed fields from explicit body text. Bare or unstructured
+  memories remain unchanged; the extractor does not fabricate missing fields.
+- The canonical typed sidecar is now `ee.memory.typed_fields.v2`. Existing v1
+  sidecars, including failure sidecars from the negative-evidence ledger, remain
+  valid input and canonicalize to v2 when revalidated. No data rewrite is
+  required for old memories.
+- `MAX_TYPED_MEMORY_FIELDS` increased from 4 to 8. This is an additive
+  validation change, not a migration hazard: decision memories now need five
+  fields (`options`, `chosen`, `rationale`, `supersedes`, `revisit_by`) and the
+  extra headroom stays bounded.
 - `ee search` accepts `--kind <kind>` plus repeatable `--field name=value`
-  filters for typed sidecar fields, for example
+  filters for typed sidecar fields, plus `name~value` contains and `name^value`
+  prefix operators. For example:
   `ee search "prefetch" --kind failure --field family=aggressive-prefetch --json`.
 - Negative-evidence ledger tag prefixes such as `family-*`, `cause-*`, and
   `reverted-at-*` are now documented compatibility tags. The canonical typed
   fields are `family`, `cause`, and `reverted_at_sha` when present in the body.
+- `ee decide record/list/revisit` is the public micro-ADR workflow over
+  decision-kind memories. `record` writes ordinary decision memories with typed
+  fields and supersede links; `list` and `revisit` are read-only.
+- See [`docs/memory-typed-fields.md`](memory-typed-fields.md) for the full
+  registry and [`docs/agent-ux/decide.md`](agent-ux/decide.md) for agent
+  workflow guidance.
 
 **Skill handoff:** None required — these are pure mechanical operations.
 

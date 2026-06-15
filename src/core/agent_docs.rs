@@ -1,7 +1,11 @@
 use crate::config::EnvVar;
+use crate::core::decide::{
+    DECIDE_LIST_SCHEMA_V1, DECIDE_RECORD_SCHEMA_V1, DECIDE_REVISIT_SCHEMA_V1,
+};
 use crate::core::docs_bootstrap::{DOCS_BOOTSTRAP_APPLY_SCHEMA_V1, DOCS_BOOTSTRAP_RUN_SCHEMA_V1};
 use crate::core::recall::RECALL_SCHEMA_V1;
 use crate::hooks::HARNESS_HOOK_INSTALL_SCHEMA_V1;
+use crate::models::memory::TYPED_MEMORY_FIELDS_SCHEMA_V2;
 use crate::models::{ERROR_SCHEMA_V2, PACK_SCHEMA_V2, RESPONSE_SCHEMA_V2};
 
 fn normalized_agent_docs_token(value: &str) -> String {
@@ -1109,6 +1113,30 @@ pub const CONTRACTS: &[ContractEntry] = &[
         stability: "stable",
     },
     ContractEntry {
+        name: "typed_memory_fields",
+        schema: TYPED_MEMORY_FIELDS_SCHEMA_V2,
+        description: "Canonical typed sidecar envelope for registry-backed memory kinds; v1 sidecars validate unchanged and canonicalize to v2",
+        stability: "stable",
+    },
+    ContractEntry {
+        name: "decide_record",
+        schema: DECIDE_RECORD_SCHEMA_V1,
+        description: "Decision recording payload for ee decide record; wraps a decision-kind memory plus optional supersede side effects",
+        stability: "stable",
+    },
+    ContractEntry {
+        name: "decide_list",
+        schema: DECIDE_LIST_SCHEMA_V1,
+        description: "Decision log payload for ee decide list; returns current heads by default and superseded history when requested",
+        stability: "stable",
+    },
+    ContractEntry {
+        name: "decide_revisit",
+        schema: DECIDE_REVISIT_SCHEMA_V1,
+        description: "Decision revisit payload for due and near-due decision-kind memories",
+        stability: "stable",
+    },
+    ContractEntry {
         name: "hook_harness_install",
         schema: HARNESS_HOOK_INSTALL_SCHEMA_V1,
         description: "Agent-harness hook generation, install, and undo report for Claude Code, Codex, and capability-gap targets",
@@ -1184,6 +1212,24 @@ pub const EXAMPLES: &[ExampleEntry] = &[
         description: "Filter memories by typed sidecar fields extracted from structured memory bodies",
         command: "ee search \"prefetch regression\" --kind failure --field family=aggressive-prefetch --json",
         category: "search",
+    },
+    ExampleEntry {
+        title: "Record a decision",
+        description: "Create a decision-kind memory with typed fields and fork protection",
+        command: "ee decide record \"storage engine\" --chosen FrankenSQLite --alternative rusqlite --rationale \"SQLModel integration and forbidden dependency policy\" --revisit-by +90d --json",
+        category: "memory",
+    },
+    ExampleEntry {
+        title: "List decision history",
+        description: "Check current decision heads before proposing architecture changes",
+        command: "ee decide list --about storage --json",
+        category: "memory",
+    },
+    ExampleEntry {
+        title: "Review due decisions",
+        description: "Find decisions whose revisit horizon is due or near due",
+        command: "ee decide revisit --warning-days 14 --json",
+        category: "memory",
     },
     ExampleEntry {
         title: "Impact lookup",
@@ -1424,6 +1470,24 @@ pub const TYPED_SEARCH_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     },
 ];
 
+pub const DECIDE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "a live decision already exists for the normalized topic",
+        jq: r#".error.details | select(.failureModeCode == "decision_topic_requires_supersedes") | {priorMemoryId, suggestedCommand}"#,
+        next_action: "Read the prior decision with `ee memory show <priorMemoryId> --json`; replace it only by rerunning record with the suggested --supersedes flag.",
+    },
+    FailureBranchEntry {
+        condition: "the superseded decision has a different normalized topic",
+        jq: r#".error.details | select(.failureModeCode == "decision_supersedes_topic_mismatch") | {supersedes, priorNormalizedTopic, newNormalizedTopic}"#,
+        next_action: "Use a predecessor from the same topic chain or record a new topic without pretending it replaces the prior one.",
+    },
+    FailureBranchEntry {
+        condition: "a revisit timestamp is malformed",
+        jq: r#".error | select(.code == "usage") | {message, repair}"#,
+        next_action: "Use RFC3339 or a relative day interval such as `+90d`, then rerun the same command.",
+    },
+];
+
 pub const DOCS_BOOTSTRAP_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
         condition: "dry-run reports degraded source handling",
@@ -1614,6 +1678,16 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         failure_branches: TYPED_SEARCH_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
+        id: "decide-before-rearchitecture",
+        title: "Stop re-litigating settled decisions",
+        description: "Query decision heads before proposing architecture changes; replace a decision only through an explicit supersede chain.",
+        category: "memory",
+        command: "ee decide list --about <topic> --workspace . --json",
+        jq: r#".data.decisions[]? | {memoryId, topic, chosen, supersedes, chainDepth, revisitStatus, superseded}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.decide.list.v1""#,
+        failure_branches: DECIDE_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
         id: "direct-answer",
         title: "Ask for a cited direct answer",
         description: "Use extractive ask when a narrow question needs answer text plus byte-addressed citations, conflict sides, or an honest abstention.",
@@ -1782,8 +1856,8 @@ mod tests {
 
     use super::{
         AGENT_DOC_RECIPES, ASK_RECIPE_FAILURES, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, EXAMPLES,
-        EXIT_CODES, FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS, TASK_LENS_RECIPE_FAILURES,
-        env_var_entries,
+        DECIDE_LIST_SCHEMA_V1, DECIDE_RECORD_SCHEMA_V1, DECIDE_REVISIT_SCHEMA_V1, EXIT_CODES,
+        FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS, TASK_LENS_RECIPE_FAILURES, env_var_entries,
     };
     use crate::config::EnvVar;
     use crate::models::ProcessExitCode;
@@ -2347,6 +2421,65 @@ mod tests {
         ensure(
             recipe.jq.contains("typedFields"),
             "typed search recipe extracts typed field output",
+        )
+    }
+
+    #[test]
+    fn typed_fields_and_decide_docs_are_registered_for_agents() -> TestResult {
+        let typed_contract = CONTRACTS
+            .iter()
+            .find(|contract| contract.name == "typed_memory_fields")
+            .ok_or_else(|| "typed memory fields contract is documented".to_string())?;
+        ensure_equal(
+            &typed_contract.schema,
+            &crate::models::memory::TYPED_MEMORY_FIELDS_SCHEMA_V2,
+            "typed memory fields schema",
+        )?;
+        ensure(
+            typed_contract.description.contains("v1 sidecars"),
+            "typed contract documents v1 compatibility",
+        )?;
+
+        for (name, schema) in [
+            ("decide_record", DECIDE_RECORD_SCHEMA_V1),
+            ("decide_list", DECIDE_LIST_SCHEMA_V1),
+            ("decide_revisit", DECIDE_REVISIT_SCHEMA_V1),
+        ] {
+            let contract = CONTRACTS
+                .iter()
+                .find(|contract| contract.name == name)
+                .ok_or_else(|| format!("{name} contract is documented"))?;
+            ensure_equal(&contract.schema, &schema, "decide contract schema")?;
+        }
+
+        let record_example = EXAMPLES
+            .iter()
+            .find(|example| example.title == "Record a decision")
+            .ok_or_else(|| "decide record example is documented".to_string())?;
+        ensure(
+            record_example.command.starts_with("ee decide record ")
+                && record_example.command.contains("--revisit-by +90d"),
+            "decide record example uses the public CLI surface",
+        )?;
+
+        let recipe = AGENT_DOC_RECIPES
+            .iter()
+            .find(|recipe| recipe.id == "decide-before-rearchitecture")
+            .ok_or_else(|| "decide recipe is documented".to_string())?;
+        ensure(
+            recipe.command.starts_with("ee decide list --about "),
+            "decide recipe checks the decision log",
+        )?;
+        ensure(
+            recipe.success_check.contains(DECIDE_LIST_SCHEMA_V1),
+            "decide recipe checks list schema",
+        )?;
+        ensure(
+            recipe
+                .failure_branches
+                .iter()
+                .any(|branch| branch.jq.contains("decision_topic_requires_supersedes")),
+            "decide recipe documents fork refusal recovery",
         )
     }
 

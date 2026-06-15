@@ -37,6 +37,20 @@ A degraded entry's `code` is classified into one of three buckets:
   build-time half is reported once (via capabilities); the
   response-time half stays per-call.
 
+## Usage errors are not degraded codes
+
+Some agent-facing failures are intentionally outside this taxonomy because the
+command cannot continue with a degraded result. Typed memory field validation is
+one of those surfaces. Unknown fields, wrong field shapes, invalid RFC3339
+`revisit_by` values, oversized values, and kind mismatches fail as usage or
+validation errors with actionable details. They must not be added to
+`data.degraded[]` merely to keep a command successful.
+
+For the typed-field registry and operator surface, see
+[`docs/memory-typed-fields.md`](memory-typed-fields.md). For decision fork
+refusal and revisit timestamp usage branches, see
+[`docs/agent-ux/decide.md`](agent-ux/decide.md).
+
 ## Repair Action Risk Classes
 
 Agent-facing recovery actions can include command strings. Those commands are

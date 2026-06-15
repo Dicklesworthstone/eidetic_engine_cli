@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.decide.list.v1.json",
+  "title": "ee.decide.list.v1",
+  "description": "Data payload emitted by ee decide list under the standard ee.response.v2 envelope.",
+  "type": "object",
+  "required": [
+    "schema",
+    "version",
+    "workspaceId",
+    "databasePath",
+    "about",
+    "includeSuperseded",
+    "totalCount",
+    "returnedCount",
+    "truncated",
+    "decisions"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.decide.list.v1"},
+    "version": {"type": "string"},
+    "workspaceId": {"type": "string"},
+    "databasePath": {"type": "string"},
+    "about": {"type": ["string", "null"]},
+    "includeSuperseded": {"type": "boolean"},
+    "totalCount": {"type": "integer", "minimum": 0},
+    "returnedCount": {"type": "integer", "minimum": 0},
+    "truncated": {"type": "boolean"},
+    "decisions": {"type": "array", "items": {"$ref": "#/$defs/decisionItem"}},
+    "subscribe": {"$ref": "#/$defs/subscribe"}
+  },
+  "$defs": {
+    "decisionItem": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "topic",
+        "normalizedTopic",
+        "chosen",
+        "alternatives",
+        "options",
+        "rationale",
+        "supersedes",
+        "chainDepth",
+        "revisitBy",
+        "revisitStatus",
+        "superseded",
+        "validTo",
+        "createdAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {"type": "string"},
+        "topic": {"type": "string"},
+        "normalizedTopic": {"type": "string"},
+        "chosen": {"type": "string"},
+        "alternatives": {"type": "array", "items": {"type": "string"}},
+        "options": {"type": "array", "items": {"type": "string"}},
+        "rationale": {"type": "string"},
+        "supersedes": {"type": ["string", "null"]},
+        "chainDepth": {"type": "integer", "minimum": 0},
+        "revisitBy": {"type": ["string", "null"], "format": "date-time"},
+        "revisitStatus": {"$ref": "#/$defs/revisitStatus"},
+        "superseded": {"type": "boolean"},
+        "validTo": {"type": ["string", "null"], "format": "date-time"},
+        "createdAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "revisitStatus": {
+      "type": "string",
+      "enum": ["none", "future", "near_due", "due", "overdue"]
+    },
+    "subscribe": {
+      "type": "object",
+      "required": ["schema", "filter", "pollCommand", "streamCommand"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.decide.subscribe.v1"},
+        "filter": {"type": "string"},
+        "pollCommand": {"type": "string"},
+        "streamCommand": {"type": "string"}
+      }
+    }
+  }
+}
