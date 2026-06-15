@@ -1273,8 +1273,8 @@ fn model_dimension_compatibility(
             expected_dimension: Some(actual),
             actual_dimension,
             index_dimension,
-            distance_metric,
-            vector_dtype,
+            distance_metric: distance_metric.clone(),
+            vector_dtype: vector_dtype.clone(),
             compatible: Some(false),
             rule: "exact_dimension_metric_dtype",
             mismatch_reason: Some(format!(
@@ -1293,8 +1293,8 @@ fn model_dimension_compatibility(
             expected_dimension: actual_dimension,
             actual_dimension,
             index_dimension,
-            distance_metric,
-            vector_dtype,
+            distance_metric: distance_metric.clone(),
+            vector_dtype: vector_dtype.clone(),
             compatible: Some(false),
             rule: "exact_dimension_metric_dtype",
             mismatch_reason: Some(format!(
@@ -1313,8 +1313,8 @@ fn model_dimension_compatibility(
             expected_dimension: actual_dimension,
             actual_dimension,
             index_dimension,
-            distance_metric,
-            vector_dtype,
+            distance_metric: distance_metric.clone(),
+            vector_dtype: vector_dtype.clone(),
             compatible: Some(false),
             rule: "exact_dimension_metric_dtype",
             mismatch_reason: Some(format!(
@@ -2904,6 +2904,45 @@ mod tests {
         }
     }
 
+    fn fixture_model_lifecycle_report(workspace_path: &Path) -> ModelLifecycleReport {
+        let generated_at = "2026-06-14T00:00:00Z".to_string();
+        ModelLifecycleReport {
+            generated_at: generated_at.clone(),
+            workspace_fingerprint: workspace_fingerprint(workspace_path),
+            semantic_readiness: ModelLifecycleSemanticReadiness {
+                state: "lexical_fallback",
+                mode: "lexical_fallback",
+                selected_model_id: None,
+                selected_index_id: Some(MODEL_LIFECYCLE_INDEX_ID.to_string()),
+                dimension_compatibility: lexical_dimension_compatibility(
+                    Some("unit fixture has no available semantic embedding model"),
+                    None,
+                ),
+                degraded: Vec::new(),
+            },
+            models: vec![hash_fallback_lifecycle_row(&generated_at)],
+            indexes: vec![ModelLifecycleIndexRow {
+                index_id: MODEL_LIFECYCLE_INDEX_ID.to_string(),
+                kind: "lexical",
+                state: "lexical_fallback",
+                stored_model_id: None,
+                stored_model_revision: None,
+                stored_model_hash: None,
+                stored_dimension: None,
+                stored_distance_metric: None,
+                stored_vector_dtype: None,
+                last_rebuild_at: None,
+                derived_from: vec![".ee/ee.db".to_string()],
+                dimension_compatibility: lexical_dimension_compatibility(
+                    Some("lexical index has no semantic vector dimension"),
+                    None,
+                ),
+                degraded: Vec::new(),
+            }],
+            degraded: Vec::new(),
+        }
+    }
+
     fn model_entry_with_source(source_uri: &str) -> ModelRegistryEntryView {
         ModelRegistryEntryView {
             id: "mdl_output_redaction".to_owned(),
@@ -3294,6 +3333,7 @@ mod tests {
                 selected_registry_entry: None,
             },
             reranker: empty_reranker_status(),
+            model_lifecycle: fixture_model_lifecycle_report(&workspace_path),
             registered_count: 2,
             available_count: 0,
             degradations: vec![
@@ -3382,6 +3422,7 @@ mod tests {
                 selected_registry_entry: Some(entry.clone()),
             },
             reranker: empty_reranker_status(),
+            model_lifecycle: fixture_model_lifecycle_report(&workspace_path),
             registered_count: 1,
             available_count: 1,
             degradations: Vec::new(),
