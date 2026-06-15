@@ -573,9 +573,11 @@ detect_platform() {
 
   case "${OS}-${ARCH}" in
     linux-x86_64)
-      # Release pipeline builds both gnu and musl; musl is statically linked
-      # and works on every glibc generation we care about. Prefer musl.
-      TARGET="x86_64-unknown-linux-musl"
+      # v0.10.0 ships the gnu artifact for x86_64-linux: the musl static build
+      # is temporarily unavailable (the Oniguruma C dependency fails the musl
+      # static link via cargo-zigbuild). gnu covers every glibc system; Alpine
+      # / musl-only hosts should build from source until musl is restored.
+      TARGET="x86_64-unknown-linux-gnu"
       ;;
     linux-aarch64)
       # Release pipeline ships only gnu for aarch64-linux.
