@@ -1161,7 +1161,19 @@ close_reason_contains_abstention() {
             sed -E 's/docs\/degraded_code(s|_taxonomy)\.md//Ig' |
             sed -E 's/degraded[[:space:]]+(case|code|mode|entry)s?//Ig' |
             sed -E 's/degraded_codes?(:?[[:space:]]+(none|\[\]|empty))?//Ig' |
-            sed -E 's/[a-z][a-z0-9_]*_unavailable//Ig'
+            sed -E 's/[a-z][a-z0-9_]*_unavailable//Ig' |
+            # bd-2pos6.3/.4/.5 false-positive scrubs: "placeholder" in a
+            # REMOVAL / negation / all-caps-code-symbol context is the OPPOSITE
+            # of an abstention close — the section USED to be placeholder-backed
+            # and no longer is. A genuine abstention ("returns a placeholder",
+            # "replaced with a placeholder", "added a placeholder") keeps no
+            # removal framing and still trips the rule. Order matters: scrub the
+            # all-caps code symbol (e.g. PLACEHOLDER_BACKED_SECTIONS) and the
+            # explicit "no placeholder" negation before the removal-verb forms.
+            sed -E 's/(PLACEHOLDER_[A-Z0-9_]+|[A-Z0-9_]+_PLACEHOLDER[A-Z0-9_]*)//g' |
+            sed -E 's/\bno[[:space:]]+placeholders?\b//Ig' |
+            sed -E 's/placeholders?[[:space:]]+((backed[- ]?)?(section|mechanism|item|entry|entries|impl|implementation)s?[[:space:]]+)?(retired|removed|deleted|replaced|eliminated|dropped|gone)//Ig' |
+            sed -E 's/(retired|removed|deleted|replaced|eliminated|dropped)[[:space:]]+(the[[:space:]]+)?placeholders?//Ig'
     )
 
     echo "$scrubbed" | grep -qiE "$ABSTENTION_REGEX"

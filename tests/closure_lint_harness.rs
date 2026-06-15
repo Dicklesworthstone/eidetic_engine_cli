@@ -266,7 +266,7 @@ fn closure_lint_reports_each_taxonomy_violation() -> TestResult {
             (
                 "closed-unavailable".to_owned(),
                 "demo-execution".to_owned(),
-                "DEMO_EXECUTION_UNAVAILABLE_CODE still exists in src/cli/mod.rs".to_owned(),
+                "DEMO_EXECUTION_UNAVAILABLE_CODE (src/cli/mod.rs) sentinel still exists".to_owned(),
             ),
         ],
         "violations should match one fixture per closure-lint rule",
@@ -486,8 +486,10 @@ fn closure_lint_scrubs_abstention_false_positives() -> TestResult {
         temp.path(),
         &[
             // Synthetic bead with close_reason carrying every documented
-            // false-positive trigger. The linter must NOT flag it.
-            r#"{"id":"closed-false-positive","title":"[implements-surface:false-positive-surface] real implementation with hygiene-noisy close_reason","status":"closed","close_reason":"Real implementation: returns non-abstention payloads. Documented degraded codes in docs/degraded_code_taxonomy.md and docs/degraded_codes.md, with named entries cass_unavailable and preflight_patterns_unavailable carrying full fixtures. Covered degraded cases and degraded modes in the integration suite. RCH remote proof: 9 tests passed, degraded_codes none. No *_UNAVAILABLE_CODE constant precedent existed for this surface.","labels":["implements-surface:false-positive-surface"]}"#,
+            // false-positive trigger, including the bd-2pos6.x "placeholder
+            // removed" shape (all-caps code symbol, "no placeholder" negation,
+            // and removal-verb forms). The linter must NOT flag it.
+            r#"{"id":"closed-false-positive","title":"[implements-surface:false-positive-surface] real implementation with hygiene-noisy close_reason","status":"closed","close_reason":"Real implementation: returns non-abstention payloads. Documented degraded codes in docs/degraded_code_taxonomy.md and docs/degraded_codes.md, with named entries cass_unavailable and preflight_patterns_unavailable carrying full fixtures. Covered degraded cases and degraded modes in the integration suite. RCH remote proof: 9 tests passed, degraded_codes none. No *_UNAVAILABLE_CODE constant precedent existed for this surface. PLACEHOLDER_BACKED_SECTIONS retired entirely; placeholder removed; no placeholder mechanism remains; replaced the placeholder section with real graph evidence.","labels":["implements-surface:false-positive-surface"]}"#,
             // Sibling that legitimately abstains; proves the scrub did not
             // disable the rule globally.
             r#"{"id":"closed-real-abstention","title":"[implements-surface:real-abstention-surface] closed with stub language","status":"closed","close_reason":"closed with a stub placeholder","labels":["implements-surface:real-abstention-surface"]}"#,
