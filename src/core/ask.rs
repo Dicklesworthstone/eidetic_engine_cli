@@ -55,6 +55,9 @@ pub const DEGRADED_SEMANTIC: &str = "ask_semantic_degraded";
 /// Warning: top clusters oppose each other; sides[] emitted.
 pub const DEGRADED_CONFLICT: &str = "ask_conflicting_evidence";
 
+/// Warning: extractiveness invariant violated; engine withheld the answer.
+pub const DEGRADED_EXTRACTIVENESS: &str = "ask_extractiveness_violated";
+
 // ─── request / candidate types ──────────────────────────────────────────────
 
 /// A single memory candidate with the fields the ask engine needs.
@@ -168,6 +171,8 @@ pub struct AskReport {
     pub counterfactual_hint: Option<String>,
     pub semantic_degraded: bool,
     pub conflict_detected: bool,
+    /// True when compose_answer returned an error (extractiveness invariant violation).
+    pub extractiveness_violated: bool,
     pub candidates_scanned: usize,
 }
 
@@ -315,7 +320,15 @@ fn advance_to_newline(bytes: &[u8], start: usize) -> usize {
 
 fn char_len_at(bytes: &[u8], i: usize) -> usize {
     let b = bytes[i];
-    if b < 0x80 { 1 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 }
+    if b < 0x80 {
+        1
+    } else if b < 0xE0 {
+        2
+    } else if b < 0xF0 {
+        3
+    } else {
+        4
+    }
 }
 
 /// Return true if the `.` at `pos` in `text` is the end of a known
@@ -334,12 +347,11 @@ fn is_abbreviation_end(text: &str, pos: usize) -> bool {
 // ─── lexical tokenizer ───────────────────────────────────────────────────────
 
 const STOPWORDS: &[&str] = &[
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "to", "of", "in", "for",
-    "on", "with", "at", "by", "from", "as", "or", "and", "but", "not",
-    "it", "its", "this", "that", "these", "those", "so", "if", "then",
-    "than", "also", "up", "into", "about", "such", "only", "each",
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall", "can", "to",
+    "of", "in", "for", "on", "with", "at", "by", "from", "as", "or", "and", "but", "not", "it",
+    "its", "this", "that", "these", "those", "so", "if", "then", "than", "also", "up", "into",
+    "about", "such", "only", "each",
 ];
 
 /// Tokenize text for ask scoring: lowercase, split on non-alphanumeric,
@@ -380,7 +392,11 @@ fn jaccard_similarity(a: &[String], b: &[String]) -> f32 {
     let set_b: BTreeSet<&str> = b.iter().map(String::as_str).collect();
     let intersection = set_a.intersection(&set_b).count();
     let union = set_a.union(&set_b).count();
-    if union == 0 { 0.0 } else { intersection as f32 / union as f32 }
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f32 / union as f32
+    }
 }
 
 /// Score one span against the question.
@@ -415,18 +431,23 @@ pub fn cluster_spans(spans: &[AskSpan]) -> Vec<AskSpan> {
         return Vec::new();
     }
 
-    let term_sets: Vec<Vec<String>> = spans
-        .iter()
-        .map(|s| tokenize_for_ask(&s.text))
-        .collect();
+    let term_sets: Vec<Vec<String>> = spans.iter().map(|s| tokenize_for_ask(&s.text)).collect();
 
     let n = spans.len();
     let mut assigned = vec![false; n];
     let mut representatives: Vec<AskSpan> = Vec::new();
 
     // Greedy single-linkage clustering, ordered by score descending.
+    // Full tiebreaker (memory_id then byte_start) guarantees deterministic seed selection.
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| spans[b].score.partial_cmp(&spans[a].score).unwrap_or(std::cmp::Ordering::Equal));
+    order.sort_by(|&a, &b| {
+        spans[b]
+            .score
+            .partial_cmp(&spans[a].score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| spans[a].memory_id.cmp(&spans[b].memory_id))
+            .then_with(|| spans[a].byte_start.cmp(&spans[b].byte_start))
+    });
 
     for &seed in &order {
         if assigned[seed] {
@@ -467,15 +488,33 @@ pub fn cluster_spans(spans: &[AskSpan]) -> Vec<AskSpan> {
 
 /// Negation words that flip the polarity of a statement.
 const NEGATION_WORDS: &[&str] = &[
-    "not", "never", "no", "neither", "nor", "cannot", "can't", "won't",
-    "doesn't", "isn't", "aren't", "wasn't", "weren't", "didn't", "don't",
-    "impossible", "incorrect", "wrong", "false", "invalid",
+    "not",
+    "never",
+    "no",
+    "neither",
+    "nor",
+    "cannot",
+    "can't",
+    "won't",
+    "doesn't",
+    "isn't",
+    "aren't",
+    "wasn't",
+    "weren't",
+    "didn't",
+    "don't",
+    "impossible",
+    "incorrect",
+    "wrong",
+    "false",
+    "invalid",
 ];
 
 fn has_negation(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     NEGATION_WORDS.iter().any(|&neg| {
-        lower.split(|c: char| !c.is_alphabetic() && c != '\'')
+        lower
+            .split(|c: char| !c.is_alphabetic() && c != '\'')
             .any(|token| token == neg)
     })
 }
@@ -508,7 +547,10 @@ fn compose_answer(
 
     for (idx, span) in clusters.iter().take(max_n).enumerate() {
         let index = idx + 1;
-        let original = content_map.get(span.memory_id.as_str()).copied().unwrap_or("");
+        let original = content_map
+            .get(span.memory_id.as_str())
+            .copied()
+            .unwrap_or("");
         let byte_range = span.byte_start..span.byte_end;
 
         if byte_range.end > original.len() {
@@ -580,18 +622,24 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
         }
     }
 
-    // Sort all spans by score desc for clustering
+    // Sort all spans by score desc for clustering; full tiebreaker for byte-identical output.
     all_spans.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.memory_id.cmp(&b.memory_id))
+            .then_with(|| a.byte_start.cmp(&b.byte_start))
     });
 
     let clusters = cluster_spans(&all_spans);
 
     let top_span_score = clusters.first().map(|s| s.score).unwrap_or(0.0);
     let conflict_detected = detect_contradiction(&clusters);
-    let contradiction_penalty_applied = if conflict_detected { CONTRADICTION_PENALTY } else { 0.0 };
+    let contradiction_penalty_applied = if conflict_detected {
+        CONTRADICTION_PENALTY
+    } else {
+        0.0
+    };
 
     // Corroboration factor is baked into cluster scores already (applied per cluster in cluster_spans).
     // For the confidence component report, use the ratio of top clustered to raw scores.
@@ -652,6 +700,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
             counterfactual_hint: Some(counterfactual_hint),
             semantic_degraded: true, // semantic always degraded in current impl
             conflict_detected,
+            extractiveness_violated: false,
             candidates_scanned: candidates.len(),
         };
     }
@@ -709,6 +758,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
             counterfactual_hint: None,
             semantic_degraded: true,
             conflict_detected: true,
+            extractiveness_violated: false,
             candidates_scanned: candidates.len(),
         };
     }
@@ -727,6 +777,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
             counterfactual_hint: None,
             semantic_degraded: true,
             conflict_detected: false,
+            extractiveness_violated: false,
             candidates_scanned: candidates.len(),
         },
         Err(_reason) => {
@@ -749,6 +800,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
                 ),
                 semantic_degraded: true,
                 conflict_detected: false,
+                extractiveness_violated: true,
                 candidates_scanned: candidates.len(),
             }
         }
@@ -850,12 +902,12 @@ pub fn render_ask_markdown(report: &AskReport) -> String {
         out.push_str("*Conflicting evidence found:*\n\n");
         if let Some(sides) = &report.sides {
             for side in sides {
-                out.push_str(&format!("**{} view:**\n{}\n\n", side.label, side.answer_text));
+                out.push_str(&format!(
+                    "**{} view:**\n{}\n\n",
+                    side.label, side.answer_text
+                ));
                 for c in &side.citations {
-                    out.push_str(&format!(
-                        "> [{}] *({})*\n",
-                        c.index, c.memory_id
-                    ));
+                    out.push_str(&format!("> [{}] *({})*\n", c.index, c.memory_id));
                 }
             }
         }
@@ -869,10 +921,7 @@ pub fn render_ask_markdown(report: &AskReport) -> String {
     if !report.citations.is_empty() {
         out.push_str("**Sources:**\n");
         for c in &report.citations {
-            let prov = c
-                .provenance_uri
-                .as_deref()
-                .unwrap_or(&c.memory_id);
+            let prov = c.provenance_uri.as_deref().unwrap_or(&c.memory_id);
             out.push_str(&format!(
                 "[{}] {} `{}` (conf: {:.2})\n",
                 c.index, prov, c.trust_class, c.confidence
@@ -916,6 +965,17 @@ impl AskDegradedEntry {
             class: "response_time".to_owned(),
             message: Some(
                 "hash-embedder fallback in play; w2 weight renormalized into w1".to_owned(),
+            ),
+        }
+    }
+
+    pub fn extractiveness_violated() -> Self {
+        Self {
+            code: DEGRADED_EXTRACTIVENESS.to_owned(),
+            severity: "warning".to_owned(),
+            class: "response_time".to_owned(),
+            message: Some(
+                "extractiveness invariant violated: emitted span did not byte-equal source; answer withheld".to_owned(),
             ),
         }
     }
@@ -997,7 +1057,10 @@ mod tests {
             0.9,
             "human_explicit",
         );
-        assert!(score > 0.15, "relevant span should score above 0.15: {score}");
+        assert!(
+            score > 0.15,
+            "relevant span should score above 0.15: {score}"
+        );
     }
 
     #[test]
@@ -1104,6 +1167,7 @@ mod tests {
             counterfactual_hint: None,
             semantic_degraded: true,
             conflict_detected: false,
+            extractiveness_violated: false,
             candidates_scanned: 1,
         };
         let json = ask_data_json(&report);
@@ -1134,6 +1198,7 @@ mod tests {
             counterfactual_hint: Some("no memory mentions X".into()),
             semantic_degraded: true,
             conflict_detected: false,
+            extractiveness_violated: false,
             candidates_scanned: 0,
         };
         let md = render_ask_markdown(&report);

@@ -41408,6 +41408,9 @@ where
     if report.conflict_detected {
         degraded.push(AskDegradedEntry::conflicting_evidence().to_json());
     }
+    if report.extractiveness_violated {
+        degraded.push(AskDegradedEntry::extractiveness_violated().to_json());
+    }
     if report.abstained {
         degraded.push(AskDegradedEntry::no_confident_answer().to_json());
     }

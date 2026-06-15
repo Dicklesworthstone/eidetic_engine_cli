@@ -5787,9 +5787,9 @@ fn push_model_lifecycle_search_degradation(
     ) {
         return;
     }
-    if degraded.iter().any(|existing| {
-        existing.code == degradation.code && existing.message == degradation.message
-    }) {
+    // Dedup by code only: resolve_source_mode may already have pushed the same
+    // code with a different message (different call path, same root cause).
+    if degraded.iter().any(|existing| existing.code == degradation.code) {
         return;
     }
     degraded.push(SearchDegradation::from_model_lifecycle(&degradation));
