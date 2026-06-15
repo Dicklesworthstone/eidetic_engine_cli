@@ -1,7 +1,8 @@
 //! bd-aunn3.2 — shipped contract tests for `ee.toolchain_provenance.v1` (ADR 0072).
 //!
 //! Pins the structural contract for the shipped toolchain-provenance capsule
-//! (bd-aunn3.2; `x-ee-status.shipped = true`). Asserts:
+//! (bd-aunn3.2; `x-ee-status.shipped = true`) and the bd-aunn3.4
+//! conformance closeout. Asserts:
 //!
 //! 1. The schema file exists, parses, and `$id`/`title`/`const` agree.
 //! 2. The capsule and tool-row required-field sets match ADR 0072 §§1–2.
@@ -17,6 +18,10 @@
 //!    the schema's required sets, enums, and redaction rules, and
 //!    deterministically re-serialize (parse → serialize → parse is
 //!    identity).
+//! 8. The toolchain degraded codes have matching failure-mode catalog
+//!    fixtures and README rows.
+//! 9. A no-mock smoke pass runs the live collector on the current machine
+//!    and proves the emitted capsule is still schema-valid and redacted.
 //!
 //! Like `bead_affinity_schema_unit.rs`, this reasons over the schema JSON
 //! directly; the live-response drift lane can now exercise the shipped
@@ -27,6 +32,10 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use ee::core::support_bundle::{
+    TOOLCHAIN_PROVENANCE_REDACTION_STATUS, TOOLCHAIN_PROVENANCE_SCHEMA_V1,
+    ToolchainProvenanceOptions, collect_toolchain_provenance,
+};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -40,6 +49,7 @@ const FIXTURE_NAMES: [&str; 4] = [
     "agent_mail_corrupt",
     "bv_rch_timeout",
 ];
+const FAILURE_MODES_REL: &str = "tests/fixtures/failure_modes";
 const REDACTION_CONST: &str = "paths_workspace_relative_or_hashed_no_content";
 const FRESHNESS_STATES: [&str; 8] = [
     "current",
@@ -50,6 +60,28 @@ const FRESHNESS_STATES: [&str; 8] = [
     "command_timeout",
     "version_unknown",
     "unsupported_platform",
+];
+const TOOLCHAIN_FAILURE_CODES: [(&str, &str); 3] = [
+    ("toolchain_hash_unavailable", "info"),
+    ("toolchain_probe_timeout", "low"),
+    ("toolchain_tool_unresolved", "low"),
+];
+const TOOLCHAIN_TOOL_NAMES: [&str; 8] = [
+    "agent_mail",
+    "br",
+    "bv",
+    "cargo",
+    "cass",
+    "ee",
+    "git",
+    "rch",
+];
+const TOOLCHAIN_SCRIPT_NAMES: [&str; 5] = [
+    "scripts/agent_mail_snapshot.sh",
+    "scripts/br_retry.sh",
+    "scripts/commit-hygiene-classifier.sh",
+    "scripts/rch_lane_doctor.sh",
+    "scripts/rch_verify.sh",
 ];
 
 fn manifest_path(relative: &str) -> PathBuf {
@@ -431,4 +463,145 @@ fn fixtures_cover_the_required_failure_modes() -> TestResult {
             }),
         "fresh fixture must be fully current",
     )
+}
+
+#[test]
+fn failure_catalog_entries_match_toolchain_schema_codes() -> TestResult {
+    let schema = load_json(SCHEMA_REL)?;
+    let degraded_code_enum = string_set(&schema, "/$defs/degradedEntry/properties/code/enum")?;
+    let readme_path = manifest_path(&format!("{FAILURE_MODES_REL}/README.md"));
+    let readme = std::fs::read_to_string(&readme_path)
+        .map_err(|error| format!("read {}: {error}", readme_path.display()))?;
+
+    for (code, severity) in TOOLCHAIN_FAILURE_CODES {
+        ensure(
+            degraded_code_enum.contains(code),
+            format!("{code}: schema degraded-code enum is missing the cataloged code"),
+        )?;
+        let fixture = load_json(&format!("{FAILURE_MODES_REL}/{code}.json"))?;
+        ensure(
+            fixture.pointer("/schema").and_then(Value::as_str)
+                == Some("ee.failure_mode_fixture.v1"),
+            format!("{code}: failure fixture schema drifted"),
+        )?;
+        ensure(
+            fixture.pointer("/code").and_then(Value::as_str) == Some(code),
+            format!("{code}: failure fixture code drifted"),
+        )?;
+        ensure(
+            fixture.pointer("/severity").and_then(Value::as_str) == Some(severity),
+            format!("{code}: failure fixture severity drifted"),
+        )?;
+        ensure(
+            fixture
+                .pointer("/introduced_by/bead")
+                .and_then(Value::as_str)
+                == Some("bd-aunn3.2"),
+            format!("{code}: failure fixture must keep the collector bead as introducer"),
+        )?;
+        ensure(
+            fixture
+                .pointer("/surfaces")
+                .and_then(Value::as_array)
+                .is_some_and(|surfaces| {
+                    surfaces
+                        .iter()
+                        .any(|surface| surface.as_str() == Some("diag toolchain-provenance"))
+                }),
+            format!("{code}: failure fixture must include diag toolchain-provenance surface"),
+        )?;
+        ensure(
+            fixture
+                .pointer("/expected_emission/code")
+                .and_then(Value::as_str)
+                == Some(code),
+            format!("{code}: expected emission code drifted"),
+        )?;
+        ensure(
+            fixture
+                .pointer("/expected_emission/severity")
+                .and_then(Value::as_str)
+                == Some(severity),
+            format!("{code}: expected emission severity drifted"),
+        )?;
+        let readme_row =
+            format!("| `{code}` | diag toolchain-provenance | {severity} | bd-aunn3.2 |");
+        ensure(
+            readme.contains(&readme_row),
+            format!("{code}: failure-mode README row missing or drifted"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn live_toolchain_collector_smoke_is_schema_valid_and_redacted() -> TestResult {
+    let workspace = std::env::current_dir().map_err(|error| format!("current_dir: {error}"))?;
+    let mut options = ToolchainProvenanceOptions::for_workspace(&workspace);
+    options.command_timeout_ms = 750;
+
+    let report = collect_toolchain_provenance(&options);
+    ensure(
+        report.schema == TOOLCHAIN_PROVENANCE_SCHEMA_V1,
+        "live smoke emitted the wrong schema",
+    )?;
+    ensure(
+        report.redaction_status == TOOLCHAIN_PROVENANCE_REDACTION_STATUS,
+        "live smoke emitted the wrong redaction posture",
+    )?;
+
+    let schema = load_json(SCHEMA_REL)?;
+    let capsule =
+        serde_json::to_value(&report).map_err(|error| format!("serialize live smoke: {error}"))?;
+    validate_capsule(&schema, &capsule, "live_smoke")?;
+
+    let tools = capsule
+        .pointer("/tools")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "live_smoke: tools must be an array".to_owned())?
+        .iter()
+        .map(|row| {
+            row.pointer("/tool")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    let expected_tools = TOOLCHAIN_TOOL_NAMES
+        .iter()
+        .map(|tool| (*tool).to_owned())
+        .collect::<BTreeSet<_>>();
+    ensure(
+        tools == expected_tools,
+        format!("live_smoke: tool inventory drifted: {tools:?}"),
+    )?;
+
+    let scripts = report
+        .script_hashes
+        .iter()
+        .map(|row| row.script.clone())
+        .collect::<BTreeSet<_>>();
+    let expected_scripts = TOOLCHAIN_SCRIPT_NAMES
+        .iter()
+        .map(|script| (*script).to_owned())
+        .collect::<BTreeSet<_>>();
+    ensure(
+        scripts == expected_scripts,
+        format!("live_smoke: default script hash inventory drifted: {scripts:?}"),
+    )?;
+    ensure(
+        report
+            .script_hashes
+            .iter()
+            .all(|row| row.tracked && row.blake3.starts_with("blake3:")),
+        "live_smoke: script hashes must be tracked blake3 rows",
+    )?;
+
+    let rendered = capsule.to_string();
+    let workspace_text = workspace.display().to_string();
+    ensure(
+        !rendered.contains(&workspace_text),
+        format!("live_smoke: capsule leaked the raw workspace path {workspace_text}"),
+    )?;
+    Ok(())
 }

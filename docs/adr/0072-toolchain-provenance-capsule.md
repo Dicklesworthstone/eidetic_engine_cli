@@ -116,6 +116,29 @@ codes where a row-level explanation is needed. Rows land in
 `docs/degraded_code_taxonomy.md` with the emitting commit (bd-aunn3.2),
 per the same-commit rule.
 
+### 7. Agent citation guidance
+
+Agents should cite toolchain evidence as a compact provenance summary, not as
+raw capsule JSON. In Beads comments, closeouts, and Agent Mail coordination,
+include:
+
+- the surface that produced the capsule, for example
+  `ee diag toolchain-provenance --workspace . --json`, a support-bundle
+  `toolchain_provenance.json`, or a swarm work-packet source-authority block;
+- `schema`, `collectedAt`, `workspaceFingerprint`, and `redactionStatus`;
+- the relevant tool rows by stable `tool` id, `freshness`, probe
+  `exitClass`, and degraded `code` values;
+- script evidence by workspace-relative `script` and BLAKE3 hash or short
+  hash preview when the exact hash is too noisy for the thread;
+- the exact RCH or claim-gate blocker string when a proof or claim was
+  stopped before source tests.
+
+Do not paste raw command stdout/stderr, home-directory paths, Agent Mail
+message metadata, or full support-bundle payloads into tracker comments or
+mail. A green capsule is still only supporting evidence: cite it alongside
+tracker state, live reservations, and RCH proof status; never present it as
+sufficient authority to claim or close work by itself.
+
 ## Consequences
 
 - Support bundles and attestations gain a deterministic answer to "what
