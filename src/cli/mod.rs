@@ -11607,7 +11607,7 @@ pub enum SessionBudgetCommand {
 }
 
 /// Arguments for `ee session-budget plan`.
-#[derive(Clone, Debug, Parser, PartialEq)]
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct SessionBudgetPlanArgs {
     /// Path to the opt-in session-budget ledger JSONL file.
     #[arg(long, value_name = "PATH")]

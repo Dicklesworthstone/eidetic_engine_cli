@@ -130,3 +130,10 @@ RCH-blocked proof, and Agent Mail degraded coordination.
   age.
 - bd-1clqr.3 adds planner tests proving deterministic recommendations,
   explainable fallbacks, and local-Cargo refusal.
+- bd-1clqr.4 adds `tests/session_budget_plan_golden.rs` and the
+  `plan_*.golden.json` fixtures to pin stable planner output, ledger-summary
+  determinism, costly-command prefix stability, RCH-blocked proof posture, and
+  local-Cargo refusal. `scripts/e2e_session_budget.sh` is the real-binary E2E:
+  it builds a ledger from fixture rows, runs `ee session-budget plan` before
+  and after a costly pack row, and verifies the RCH-degraded cargo-hint path
+  without running local Cargo.

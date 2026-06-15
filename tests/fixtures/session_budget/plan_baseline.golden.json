@@ -1,0 +1,52 @@
+{
+  "schema": "ee.session_budget.plan.v1",
+  "generatedAt": "2026-06-15T00:00:00Z",
+  "workspaceFingerprint": "d37f1e828e51",
+  "advisory": true,
+  "taskHint": "prepare release",
+  "recommendation": {
+    "rank": 1,
+    "surface": "primer",
+    "command": "ee primer --json",
+    "rationale": "cheapest read-only command; establishes workspace context with minimal token cost",
+    "estimatedCostMs": 50,
+    "estimatedOutputTokens": 2000,
+    "degradedPenalty": false
+  },
+  "fallbacks": [
+    {
+      "rank": 2,
+      "surface": "recall",
+      "command": "ee recall --json",
+      "rationale": "fast code-anchored reverse lookup; low token overhead for targeted queries",
+      "estimatedCostMs": 100,
+      "estimatedOutputTokens": 500,
+      "degradedPenalty": false
+    },
+    {
+      "rank": 3,
+      "surface": "ask",
+      "command": "ee ask --json",
+      "rationale": "deterministic extractive QA with citations; no generation cost",
+      "estimatedCostMs": 150,
+      "estimatedOutputTokens": 300,
+      "degradedPenalty": false
+    },
+    {
+      "rank": 4,
+      "surface": "proof-skip",
+      "command": "# skip RCH verification this round; proceed with cheaper read-only commands",
+      "rationale": "RCH is degraded; skipping verification prevents indefinite queue wait",
+      "estimatedCostMs": 175,
+      "estimatedOutputTokens": 0,
+      "degradedPenalty": false
+    }
+  ],
+  "refusals": [],
+  "ledgerSummary": {
+    "rowCount": 1,
+    "totalWallClockMs": 42,
+    "mostRecentSurface": "recall",
+    "degradedEventCount": 0
+  }
+}

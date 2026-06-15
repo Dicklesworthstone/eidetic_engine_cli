@@ -577,6 +577,7 @@ const CARGO_REFUSAL_ALTERNATIVE: &str =
 
 const DEGRADED_PENALTY_MS: u64 = 10_000;
 const PLAN_MAX_FALLBACKS: usize = 3;
+const PROOF_POSTURE_ADVISORY_COST_MS: u64 = 175;
 
 /// One scored command the planner might recommend.
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -725,7 +726,7 @@ const ALL_CANDIDATES: &[CandidateRow] = &[
     CandidateRow {
         surface: "proof-wait",
         command: "# wait for active RCH verification to complete before proceeding",
-        base_cost_ms: 0,
+        base_cost_ms: PROOF_POSTURE_ADVISORY_COST_MS,
         base_tokens: 0,
         rationale_clean: "RCH is healthy; waiting for verification avoids retrying on a broken build",
         rationale_degraded: "",
@@ -736,7 +737,7 @@ const ALL_CANDIDATES: &[CandidateRow] = &[
     CandidateRow {
         surface: "proof-skip",
         command: "# skip RCH verification this round; proceed with cheaper read-only commands",
-        base_cost_ms: 0,
+        base_cost_ms: PROOF_POSTURE_ADVISORY_COST_MS,
         base_tokens: 0,
         rationale_clean: "RCH is degraded; skipping verification prevents indefinite queue wait",
         rationale_degraded: "",
@@ -841,7 +842,7 @@ fn summarize_ledger(path: Option<&Path>) -> BudgetLedgerSummary {
                 total_wall_clock_ms: 0,
                 most_recent_surface: None,
                 degraded_event_count: 0,
-            }
+            };
         }
     };
     let rows = match load_ledger_rows(path) {
@@ -852,7 +853,7 @@ fn summarize_ledger(path: Option<&Path>) -> BudgetLedgerSummary {
                 total_wall_clock_ms: 0,
                 most_recent_surface: None,
                 degraded_event_count: 0,
-            }
+            };
         }
     };
     let mut total_wall_clock_ms: u64 = 0;
@@ -1096,9 +1097,15 @@ mod tests {
 
         assert_eq!(plan.schema, SESSION_BUDGET_PLAN_SCHEMA_V1);
         assert!(plan.advisory, "plan must be advisory");
-        assert_eq!(plan.recommendation.surface, "primer", "cheapest surface is primer");
+        assert_eq!(
+            plan.recommendation.surface, "primer",
+            "cheapest surface is primer"
+        );
         assert_eq!(plan.recommendation.rank, 1);
-        assert!(!plan.recommendation.degraded_penalty, "no penalty without degraded sources");
+        assert!(
+            !plan.recommendation.degraded_penalty,
+            "no penalty without degraded sources"
+        );
         assert!(plan.refusals.is_empty(), "no refusals without cargo hint");
         Ok(())
     }
@@ -1109,19 +1116,18 @@ mod tests {
         input.degraded_sources = vec!["db".to_owned()];
         let plan = plan_cheapest_next_command(&input);
 
-        // With db degraded: proof-skip (cost 0, rch_healthy=false) wins.
-        // proof-skip is zero-cost and not db-dependent.
+        // With db degraded: proof-skip wins because it is not db-dependent.
         assert_eq!(
             plan.recommendation.surface, "proof-skip",
-            "zero-cost proof-skip should win when db is degraded and rch is unhealthy"
+            "proof-skip should win when db is degraded and rch is unhealthy"
         );
         // All entries that ARE db-dependent should carry the penalty flag
         let all_entries: Vec<&BudgetPlanEntry> = std::iter::once(&plan.recommendation)
             .chain(plan.fallbacks.iter())
             .collect();
         for entry in all_entries {
-            let is_db_dependent = ["primer", "recall", "ask", "search", "pack"]
-                .contains(&entry.surface.as_str());
+            let is_db_dependent =
+                ["primer", "recall", "ask", "search", "pack"].contains(&entry.surface.as_str());
             if is_db_dependent {
                 assert!(
                     entry.degraded_penalty,
@@ -1148,7 +1154,11 @@ mod tests {
             refusal.reason
         );
         assert!(
-            refusal.alternative.as_deref().unwrap_or("").contains("rch_verify"),
+            refusal
+                .alternative
+                .as_deref()
+                .unwrap_or("")
+                .contains("rch_verify"),
             "alternative must reference rch_verify: {:?}",
             refusal.alternative
         );
@@ -1161,7 +1171,10 @@ mod tests {
         input.task_hint = Some("search for memories about authentication".to_owned());
         let plan = plan_cheapest_next_command(&input);
 
-        assert!(plan.refusals.is_empty(), "non-cargo hint must not produce refusals");
+        assert!(
+            plan.refusals.is_empty(),
+            "non-cargo hint must not produce refusals"
+        );
         Ok(())
     }
 
@@ -1175,8 +1188,14 @@ mod tests {
             .chain(plan.fallbacks.iter())
             .map(|e| e.surface.as_str())
             .collect();
-        assert!(all_surfaces.contains(&"proof-wait"), "rch_healthy=true must include proof-wait");
-        assert!(!all_surfaces.contains(&"proof-skip"), "rch_healthy=true must exclude proof-skip");
+        assert!(
+            all_surfaces.contains(&"proof-wait"),
+            "rch_healthy=true must include proof-wait"
+        );
+        assert!(
+            !all_surfaces.contains(&"proof-skip"),
+            "rch_healthy=true must exclude proof-skip"
+        );
         Ok(())
     }
 
@@ -1189,8 +1208,14 @@ mod tests {
             .chain(plan.fallbacks.iter())
             .map(|e| e.surface.as_str())
             .collect();
-        assert!(all_surfaces.contains(&"proof-skip"), "rch_healthy=false must include proof-skip");
-        assert!(!all_surfaces.contains(&"proof-wait"), "rch_healthy=false must exclude proof-wait");
+        assert!(
+            all_surfaces.contains(&"proof-skip"),
+            "rch_healthy=false must include proof-skip"
+        );
+        assert!(
+            !all_surfaces.contains(&"proof-wait"),
+            "rch_healthy=false must exclude proof-wait"
+        );
         Ok(())
     }
 
@@ -1205,7 +1230,8 @@ mod tests {
             "same input must produce same recommendation"
         );
         assert_eq!(
-            plan_a.fallbacks.len(), plan_b.fallbacks.len(),
+            plan_a.fallbacks.len(),
+            plan_b.fallbacks.len(),
             "same input must produce same fallback count"
         );
         for (a, b) in plan_a.fallbacks.iter().zip(plan_b.fallbacks.iter()) {
@@ -1244,7 +1270,10 @@ mod tests {
         let plan = plan_cheapest_next_command(&input);
 
         assert_eq!(plan.ledger_summary.row_count, 2, "must read both rows");
-        assert!(plan.ledger_summary.total_wall_clock_ms > 0, "must sum wall_clock_ms");
+        assert!(
+            plan.ledger_summary.total_wall_clock_ms > 0,
+            "must sum wall_clock_ms"
+        );
         Ok(())
     }
 
@@ -1273,10 +1302,16 @@ mod tests {
 
         assert_eq!(parsed["schema"], SESSION_BUDGET_PLAN_SCHEMA_V1);
         assert_eq!(parsed["advisory"], true);
-        assert!(parsed["recommendation"].is_object(), "recommendation must be object");
+        assert!(
+            parsed["recommendation"].is_object(),
+            "recommendation must be object"
+        );
         assert!(parsed["fallbacks"].is_array(), "fallbacks must be array");
         assert!(parsed["refusals"].is_array(), "refusals must be array");
-        assert!(parsed["ledgerSummary"].is_object(), "ledgerSummary must be object");
+        assert!(
+            parsed["ledgerSummary"].is_object(),
+            "ledgerSummary must be object"
+        );
         Ok(())
     }
 }

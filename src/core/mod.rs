@@ -87,6 +87,7 @@ pub mod memory_drift;
 pub mod memory_lifecycle;
 pub mod memory_scope;
 pub mod model;
+pub mod orient;
 pub mod outcome;
 pub mod ownership_snapshot;
 pub mod path_safety;
