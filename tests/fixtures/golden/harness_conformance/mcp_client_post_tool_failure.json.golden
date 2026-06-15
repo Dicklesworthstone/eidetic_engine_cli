@@ -1,0 +1,62 @@
+{
+  "schema": "ee.harness_conformance.golden_summary.v1",
+  "sourceSchema": "ee.harness_conformance.v1",
+  "caseId": "mcp_client.post_tool_failure.nonzero_policy",
+  "harness": "mcp-client",
+  "fixtureKind": "post_tool_failure",
+  "eventName": "PostToolUse",
+  "payloadShape": "mcp_json_rpc_notification",
+  "commandTemplate": "ee search \"missing dependency\" --json",
+  "expected": {
+    "conformanceVerdict": "pass",
+    "eventOutcome": "failure",
+    "exitPolicy": "non_zero_allowed",
+    "degradedPolicy": "must_emit",
+    "outputBudgetBytes": 4096,
+    "localCargoFallbackAllowed": false
+  },
+  "artifactPolicy": {
+    "rawTranscriptAllowed": false,
+    "secretMaterialAllowed": false,
+    "inlineTranscriptMaxBytes": 2048,
+    "maxArtifactBytes": 8192,
+    "allowedArtifactKinds": [
+      "redacted_json_event",
+      "redacted_transcript_excerpt"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "json_envelope_valid",
+      "status": "pass"
+    },
+    {
+      "kind": "non_zero_exit_policy",
+      "status": "pass"
+    },
+    {
+      "kind": "degraded_handled",
+      "status": "pass"
+    },
+    {
+      "kind": "output_budget_respected",
+      "status": "pass"
+    }
+  ],
+  "transcript": {
+    "kind": "redacted_excerpt",
+    "lineCount": 4,
+    "maxLineBytes": 96,
+    "lineClasses": [
+      "exit_code",
+      "elapsed_ms",
+      "stdout_error_envelope",
+      "stderr"
+    ],
+    "redactionMarkerLineCount": 0,
+    "privatePathPresent": false,
+    "secretLikePresent": false,
+    "containsCargoDenialMarker": false,
+    "containsTruncatedLine": true
+  }
+}

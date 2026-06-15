@@ -1,6 +1,6 @@
 # ADR 0075: Harness Conformance Contract
 
-Status: proposed
+Status: accepted
 Date: 2026-06-14
 Bead: bd-i0iiw.1 (epic bd-i0iiw, 2026-06 idea-wizard wave)
 
@@ -15,9 +15,9 @@ too easy for a test harness to pass by accepting unbounded transcripts,
 unredacted payloads, or forbidden local Cargo fallbacks.
 
 `ee.harness_conformance.v1` is a redaction-safe fixture contract for testing
-agent harness integration behavior. It is intentionally a fixture and report
-shape first; bd-i0iiw.2 and bd-i0iiw.3 can add the simulator and doctor
-integration without renegotiating vocabulary.
+agent harness integration behavior. It started as a fixture and report shape;
+bd-i0iiw.2, bd-i0iiw.3, and bd-i0iiw.4 then added the simulator, doctor/install
+audit surface, and committed golden proof without renegotiating vocabulary.
 
 ## Decision
 
@@ -40,9 +40,10 @@ One fixture describes one conformance case. A case records:
 - `artifactPolicy`: bounds for transcripts and generated artifacts.
 - `compatibility`: schema-major pinning and fixture-version policy.
 
-The schema carries `x-ee-status.shipped = false` until the simulator lands in
-bd-i0iiw.2. Consumers may read and validate fixtures now, but no live CLI
-surface is required to emit this schema in bd-i0iiw.1.
+The schema carries `x-ee-status.shipped = true` after the simulator,
+doctor/install audit surface, fixture provenance, documentation, and golden
+proof are present. Future hook changes must update the fixtures and committed
+goldens deliberately.
 
 ### 2. Supported harness matrix
 
@@ -135,8 +136,9 @@ swarm workflow, not something conformance tests can waive.
   defines redaction and artifact bounds.
 - Doctor/install-audit surfaces can reuse the same pass/fail vocabulary
   instead of inventing new degraded codes for each harness.
-- The contract deliberately starts unshipped; live schema registry wiring can
-  happen with the simulator rather than in this static ADR/schema slice.
+- The contract is shipped as a fixture/simulator contract, not a raw transcript
+  archive. Live schema registry changes remain separate and must not weaken the
+  bounded redaction policy.
 
 ## Rejected Alternatives
 
@@ -157,3 +159,8 @@ swarm workflow, not something conformance tests can waive.
 - bd-i0iiw.2: hook-event/transcript simulator consumes these fixtures.
 - bd-i0iiw.3: doctor/install-audit surfaces report conformance status using
   the same vocabulary.
+- bd-i0iiw.4: committed golden summaries pin real simulator output over every
+  fixture, `tests/fixtures/harness_conformance/PROVENANCE.md` documents fixture
+  origin and update policy, and
+  `docs/agent-ux/harness-conformance.md` documents RCH-only proof before hooks
+  are enabled in a real harness.

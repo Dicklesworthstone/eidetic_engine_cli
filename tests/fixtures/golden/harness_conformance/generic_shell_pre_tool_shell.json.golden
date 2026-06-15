@@ -1,0 +1,62 @@
+{
+  "schema": "ee.harness_conformance.golden_summary.v1",
+  "sourceSchema": "ee.harness_conformance.v1",
+  "caseId": "generic_shell.pre_tool_shell.no_local_cargo",
+  "harness": "generic-shell",
+  "fixtureKind": "pre_tool_shell",
+  "eventName": "PreToolUse",
+  "payloadShape": "generic_shell_event",
+  "commandTemplate": "cargo test --lib",
+  "expected": {
+    "conformanceVerdict": "pass",
+    "eventOutcome": "not_applicable",
+    "exitPolicy": "non_zero_required",
+    "degradedPolicy": "must_fail_closed",
+    "outputBudgetBytes": 2048,
+    "localCargoFallbackAllowed": false
+  },
+  "artifactPolicy": {
+    "rawTranscriptAllowed": false,
+    "secretMaterialAllowed": false,
+    "inlineTranscriptMaxBytes": 2048,
+    "maxArtifactBytes": 8192,
+    "allowedArtifactKinds": [
+      "redacted_transcript_excerpt",
+      "summary_only"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "command_invoked",
+      "status": "pass"
+    },
+    {
+      "kind": "no_local_cargo_fallback",
+      "status": "pass"
+    },
+    {
+      "kind": "non_zero_exit_policy",
+      "status": "pass"
+    },
+    {
+      "kind": "degraded_handled",
+      "status": "pass"
+    }
+  ],
+  "transcript": {
+    "kind": "redacted_excerpt",
+    "lineCount": 4,
+    "maxLineBytes": 96,
+    "lineClasses": [
+      "exit_code",
+      "elapsed_ms",
+      "stderr",
+      "fixture_command_template"
+    ],
+    "redactionMarkerLineCount": 0,
+    "privatePathPresent": false,
+    "secretLikePresent": false,
+    "containsCargoDenialMarker": true,
+    "containsTruncatedLine": false
+  }
+}

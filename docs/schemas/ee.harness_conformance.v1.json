@@ -350,8 +350,8 @@
     }
   },
   "x-ee-status": {
-    "shipped": false,
-    "available_in_build": false,
-    "tracking_bead": "bd-i0iiw.2"
+    "shipped": true,
+    "available_in_build": true,
+    "tracking_bead": "bd-i0iiw.4"
   }
 }

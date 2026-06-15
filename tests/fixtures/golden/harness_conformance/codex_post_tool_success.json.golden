@@ -1,0 +1,57 @@
+{
+  "schema": "ee.harness_conformance.golden_summary.v1",
+  "sourceSchema": "ee.harness_conformance.v1",
+  "caseId": "codex.post_tool_success.envelope",
+  "harness": "codex",
+  "fixtureKind": "post_tool_success",
+  "eventName": "PostToolUse",
+  "payloadShape": "codex_hook_json",
+  "commandTemplate": "ee pack \"release readiness\" --json",
+  "expected": {
+    "conformanceVerdict": "pass",
+    "eventOutcome": "success",
+    "exitPolicy": "zero_required",
+    "degradedPolicy": "not_applicable",
+    "outputBudgetBytes": 4096,
+    "localCargoFallbackAllowed": false
+  },
+  "artifactPolicy": {
+    "rawTranscriptAllowed": false,
+    "secretMaterialAllowed": false,
+    "inlineTranscriptMaxBytes": 2048,
+    "maxArtifactBytes": 8192,
+    "allowedArtifactKinds": [
+      "redacted_json_event",
+      "redacted_transcript_excerpt"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "json_envelope_valid",
+      "status": "pass"
+    },
+    {
+      "kind": "output_budget_respected",
+      "status": "pass"
+    },
+    {
+      "kind": "secret_redaction",
+      "status": "pass"
+    }
+  ],
+  "transcript": {
+    "kind": "redacted_excerpt",
+    "lineCount": 3,
+    "maxLineBytes": 96,
+    "lineClasses": [
+      "exit_code",
+      "elapsed_ms",
+      "stdout_response_envelope"
+    ],
+    "redactionMarkerLineCount": 0,
+    "privatePathPresent": false,
+    "secretLikePresent": false,
+    "containsCargoDenialMarker": false,
+    "containsTruncatedLine": false
+  }
+}

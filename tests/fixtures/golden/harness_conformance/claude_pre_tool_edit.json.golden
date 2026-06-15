@@ -1,0 +1,61 @@
+{
+  "schema": "ee.harness_conformance.golden_summary.v1",
+  "sourceSchema": "ee.harness_conformance.v1",
+  "caseId": "claude_code.pre_tool_edit.redaction",
+  "harness": "claude-code",
+  "fixtureKind": "pre_tool_edit",
+  "eventName": "PreToolUse",
+  "payloadShape": "claude_code_hook_json",
+  "commandTemplate": "edit src/lib.rs",
+  "expected": {
+    "conformanceVerdict": "pass",
+    "eventOutcome": "not_applicable",
+    "exitPolicy": "zero_required",
+    "degradedPolicy": "must_absorb",
+    "outputBudgetBytes": 2048,
+    "localCargoFallbackAllowed": false
+  },
+  "artifactPolicy": {
+    "rawTranscriptAllowed": false,
+    "secretMaterialAllowed": false,
+    "inlineTranscriptMaxBytes": 2048,
+    "maxArtifactBytes": 8192,
+    "allowedArtifactKinds": [
+      "redacted_json_event",
+      "redacted_transcript_excerpt"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "command_invoked",
+      "status": "pass"
+    },
+    {
+      "kind": "json_envelope_valid",
+      "status": "pass"
+    },
+    {
+      "kind": "secret_redaction",
+      "status": "pass"
+    },
+    {
+      "kind": "output_budget_respected",
+      "status": "pass"
+    }
+  ],
+  "transcript": {
+    "kind": "redacted_excerpt",
+    "lineCount": 3,
+    "maxLineBytes": 80,
+    "lineClasses": [
+      "exit_code",
+      "elapsed_ms",
+      "stdout_response_envelope"
+    ],
+    "redactionMarkerLineCount": 0,
+    "privatePathPresent": false,
+    "secretLikePresent": false,
+    "containsCargoDenialMarker": false,
+    "containsTruncatedLine": true
+  }
+}

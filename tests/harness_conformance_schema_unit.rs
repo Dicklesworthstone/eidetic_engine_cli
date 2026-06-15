@@ -1,9 +1,8 @@
 //! bd-i0iiw.1 - schema unit test for `ee.harness_conformance.v1` (ADR 0075).
 //!
-//! Pins the static harness-conformance fixture contract before the simulator
-//! and doctor surfaces land. This test intentionally validates the schema JSON
-//! and fixture examples directly instead of pulling in a general JSON Schema
-//! engine dependency.
+//! Pins the harness-conformance fixture contract. This test intentionally
+//! validates the schema JSON and fixture examples directly instead of pulling
+//! in a general JSON Schema engine dependency.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -119,15 +118,15 @@ fn schema_identity_status_and_required_fields() -> TestResult {
         schema
             .pointer("/x-ee-status/shipped")
             .and_then(Value::as_bool)
-            == Some(false),
-        "x-ee-status.shipped must stay false until bd-i0iiw.2 lands the simulator",
+            == Some(true),
+        "x-ee-status.shipped must stay true after simulator, audit, and golden proof landed",
     )?;
     ensure(
         schema
             .pointer("/x-ee-status/tracking_bead")
             .and_then(Value::as_str)
-            == Some("bd-i0iiw.2"),
-        "x-ee-status.tracking_bead must point at the simulator bead",
+            == Some("bd-i0iiw.4"),
+        "x-ee-status.tracking_bead must point at the fixture/golden proof bead",
     )?;
 
     let required = string_set(&schema, "/required")?;
