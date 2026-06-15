@@ -157,6 +157,8 @@ const SUPPORT_BUNDLE_REGRESSION_CAUSALITY_SUMMARY_SCHEMA_V1: &str =
     "ee.support_bundle.regression_causality_summary.v1";
 pub(crate) const SUPPORT_BUNDLE_PROOF_BROKER_SUMMARY_SCHEMA_V1: &str =
     "ee.support_bundle.proof_broker_summary.v1";
+const SUPPORT_BUNDLE_RCH_TOPOLOGY_RECURRENCE_SCHEMA_V1: &str =
+    "ee.support_bundle.rch_topology_recurrence.v1";
 const ENVIRONMENT_ATTESTATION_SUMMARY_FILE: &str = "environment_attestation_summary.json";
 pub(crate) const SUPPORT_BUNDLE_ENVIRONMENT_ATTESTATION_SUMMARY_SCHEMA_V1: &str =
     "ee.support_bundle.environment_attestation_summary.v1";
@@ -171,6 +173,9 @@ const TOOLCHAIN_PROVENANCE_DEFAULT_TIMEOUT_MS: u64 = 1_500;
 const TOOLCHAIN_PROVENANCE_MAX_HASH_BYTES: u64 = 64 * 1024 * 1024;
 const TOOLCHAIN_PROVENANCE_AGENT_MAIL_SNAPSHOT_MAX_BYTES: u64 = 1024 * 1024;
 const SUPPORT_BUNDLE_REQUIRED_REMOTE_WRAPPER: &str = "scripts/rch_verify.sh -- <cargo command>";
+const RCH_TOPOLOGY_AUDIT_COMMAND: &str =
+    "ee verify rch topology-audit --from-json <proof.json> --manifest Cargo.toml --json";
+const RCH_WORKER_ROOT_CANARY_COMMAND: &str = "scripts/rch_lane_doctor.sh --worker-canary";
 const TAILSCALE_METADATA_FIELDS: &[&str] = &[
     "selfNodeKey",
     "selfTailscaleIp",
@@ -3729,6 +3734,67 @@ pub(crate) fn render_proof_broker_summary_for_handoff(summary: &Value) -> String
             degraded_codes.join(", ")
         ));
     }
+    if let Some(topology) = summary.get("rchTopologyRecurrence") {
+        let topology_status = topology
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let classification = topology
+            .get("classification")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let active_count = topology
+            .get("activeTopologyBlockerCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let path_closure_hash = topology
+            .pointer("/pathClosure/hash")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let retry_after = topology
+            .get("newestRetryAfter")
+            .and_then(Value::as_str)
+            .or_else(|| topology.get("oldestRetryAfter").and_then(Value::as_str))
+            .unwrap_or("none");
+        let canary_status = topology
+            .pointer("/canaryPosture/status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let owner_route = topology
+            .pointer("/ownerRouting/primaryOwner")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let known_fingerprints = topology
+            .get("knownBlockers")
+            .and_then(Value::as_array)
+            .map(|blockers| {
+                blockers
+                    .iter()
+                    .filter_map(|blocker| {
+                        blocker
+                            .get("knownBlockerFingerprint")
+                            .and_then(Value::as_str)
+                    })
+                    .take(4)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let known_fingerprints = if known_fingerprints.is_empty() {
+            "none".to_owned()
+        } else {
+            known_fingerprints.join(", ")
+        };
+        lines.push(format!(
+            "RCH topology recurrence: status={topology_status}, classification={classification}, active_topology_blockers={active_count}, known_blocker_fingerprints={known_fingerprints}, path_closure_hash={path_closure_hash}, retry_after={retry_after}, canary_posture={canary_status}, owner_route={owner_route}."
+        ));
+        lines.push(format!(
+            "RCH topology next safe commands: {RCH_TOPOLOGY_AUDIT_COMMAND}; {RCH_WORKER_ROOT_CANARY_COMMAND}; retry the focused RCH wrapper only after topology evidence changes."
+        ));
+        lines.push(
+            "RCH topology comment template: RCH proof blocked before Cargo: code=<exact_code>; blocker=<exact_blocker_text>; known_blocker_fingerprint=<fingerprint>; path_closure_hash=<path_closure_hash>; retry_after=<retry_after>; canary=<canary_status>; no_local_cargo=true; no_worker_global_edits=true; no_destructive_cleanup=true; no_worktrees_stashes_resets_checkouts=true; raw_paths_or_mail_bodies=false."
+                .to_owned(),
+        );
+    }
     lines.join("\n")
 }
 
@@ -6072,11 +6138,15 @@ fn collect_proof_broker_summary_at(workspace: &Path, now: DateTime<Utc>) -> Valu
         "available_with_degraded_evidence"
     };
 
-    proof_broker_summary_value(
+    let rch_topology_recurrence =
+        rch_topology_recurrence_summary_for_workspace(workspace, &records);
+
+    proof_broker_summary_value_with_topology_recurrence(
         status,
         ledger,
         records,
         degraded_codes.into_iter().collect(),
+        rch_topology_recurrence,
     )
 }
 
@@ -6231,6 +6301,258 @@ fn proof_broker_summary_value(
             }
         ],
     })
+}
+
+fn proof_broker_summary_value_with_topology_recurrence(
+    status: &str,
+    ledger: Value,
+    records: Vec<Value>,
+    degraded_codes: Vec<String>,
+    rch_topology_recurrence: Value,
+) -> Value {
+    let mut summary = proof_broker_summary_value(status, ledger, records, degraded_codes);
+    if let Some(object) = summary.as_object_mut() {
+        object.insert("rchTopologyRecurrence".to_owned(), rch_topology_recurrence);
+    }
+    summary
+}
+
+fn rch_topology_recurrence_summary_for_workspace(workspace: &Path, records: &[Value]) -> Value {
+    let status =
+        super::verify_ledger::summarize_rch_verify_ledger_status_for_workspace(Some(workspace));
+    rch_topology_recurrence_summary_from_status(&status, records)
+}
+
+fn rch_topology_recurrence_summary_from_status(
+    status: &super::verify_ledger::RchVerifyLedgerStatusReport,
+    records: &[Value],
+) -> Value {
+    let topology_refs = status
+        .blocker_refs
+        .iter()
+        .filter(|reference| rch_topology_degraded_codes(&reference.degraded_codes))
+        .take(6)
+        .map(rch_topology_known_blocker_summary)
+        .collect::<Vec<_>>();
+    let record_hint_count = records
+        .iter()
+        .filter(|record| proof_broker_record_summary_has_topology_hint(record))
+        .count();
+    let recovery_actions = status
+        .recovery_actions
+        .iter()
+        .take(6)
+        .map(|action| {
+            json!({
+                "priority": action.priority,
+                "kind": action.kind,
+                "displayCommand": action.command,
+                "runsCargo": false,
+                "mutatesWorkers": false,
+                "mutatesState": false,
+                "message": action.message,
+            })
+        })
+        .collect::<Vec<_>>();
+    let next_commands = rch_topology_next_commands(&recovery_actions);
+    let remediation_beads = topology_refs
+        .iter()
+        .filter_map(|reference| {
+            reference
+                .get("remediationBead")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let topology_blocker_count = topology_refs.len();
+    let recurrence_status = if !status.ledger_available {
+        status.status
+    } else if topology_blocker_count > 0 {
+        "active_topology_recurrence"
+    } else if record_hint_count > 0 {
+        "historical_topology_recurrence"
+    } else if status.active_blocker_count > 0 {
+        "active_non_topology_blockers"
+    } else {
+        "clear"
+    };
+    let classification = match recurrence_status {
+        "active_topology_recurrence" | "historical_topology_recurrence" => {
+            "environment_blocked_before_source"
+        }
+        "active_non_topology_blockers" => "other_environment_blocker",
+        "clear" => "no_active_topology_recurrence",
+        _ => "ledger_unavailable",
+    };
+    let path_closure_hash = rch_topology_path_closure_hash(
+        recurrence_status,
+        classification,
+        status,
+        &topology_refs,
+        record_hint_count,
+    );
+
+    json!({
+        "schema": SUPPORT_BUNDLE_RCH_TOPOLOGY_RECURRENCE_SCHEMA_V1,
+        "sourceSchemas": [
+            super::verify_ledger::RCH_VERIFY_LEDGER_STATUS_SCHEMA_V1,
+            SUPPORT_BUNDLE_PROOF_BROKER_SUMMARY_SCHEMA_V1,
+        ],
+        "status": recurrence_status,
+        "classification": classification,
+        "activeBlockerCount": status.active_blocker_count,
+        "activeTopologyBlockerCount": topology_blocker_count,
+        "proofBrokerTopologyHintCount": record_hint_count,
+        "localFallbackRefused": status.local_fallback_refused,
+        "oldestRetryAfter": &status.oldest_retry_after,
+        "newestRetryAfter": &status.newest_retry_after,
+        "pathClosure": {
+            "hash": path_closure_hash,
+            "redaction": "hash_of_ledger_status_and_topology_refs_no_raw_paths",
+            "rawPathsIncluded": false,
+        },
+        "knownBlockers": topology_refs,
+        "canaryPosture": {
+            "status": "not_collected",
+            "displayCommand": RCH_WORKER_ROOT_CANARY_COMMAND,
+            "runsCargo": false,
+            "mutatesWorkers": false,
+            "mutatesState": false,
+        },
+        "recoveryActions": recovery_actions,
+        "nextCommands": next_commands,
+        "ownerRouting": {
+            "primaryOwner": "rch_owner",
+            "route": "coordinate_with_rch_owner_if_topology_audit_or_canary_requires_worker_mutation",
+            "remediationBeads": remediation_beads,
+            "beadsAgentMailThread": "current_bead_thread",
+            "preserveExactBlockerText": true,
+        },
+        "beadsAgentMailCommentTemplate": "RCH proof blocked before Cargo: code=<exact_code>; blocker=<exact_blocker_text>; known_blocker_fingerprint=<fingerprint>; path_closure_hash=<path_closure_hash>; retry_after=<retry_after>; canary=<canary_status>; no_local_cargo=true; no_worker_global_edits=true; no_destructive_cleanup=true; no_worktrees_stashes_resets_checkouts=true; next=run_read_only_topology_audit_and_worker_root_canary; raw_paths_or_mail_bodies=false.",
+        "forbiddenActions": [
+            "no_local_cargo_fallback",
+            "no_worker_global_edits_without_rch_owner",
+            "no_destructive_cleanup",
+            "no_worktrees_stashes_resets_checkouts"
+        ],
+        "redaction": {
+            "rawCommandsIncluded": false,
+            "rawLogsIncluded": false,
+            "rawMailBodiesIncluded": false,
+            "privatePathsIncluded": false,
+            "pathClosureStoredAsHashOnly": true,
+        },
+    })
+}
+
+fn rch_topology_known_blocker_summary(
+    reference: &super::verify_ledger::RchVerifyLedgerBlockerRef,
+) -> Value {
+    json!({
+        "commandHash": &reference.command_hash,
+        "status": &reference.status,
+        "knownBlockerFingerprint": &reference.blocker_fingerprint,
+        "remediationBead": &reference.remediation_bead,
+        "retryAfter": &reference.retry_after,
+        "degradedCodes": proof_broker_string_array(&reference.degraded_codes),
+        "verificationAttribution": &reference.verification_attribution,
+        "ownerRoute": "rch_owner",
+    })
+}
+
+fn rch_topology_next_commands(recovery_actions: &[Value]) -> Vec<Value> {
+    let mut commands = recovery_actions
+        .iter()
+        .filter_map(|action| {
+            let kind = action.get("kind").and_then(Value::as_str)?;
+            if kind != "run_topology_audit" && kind != "run_worker_root_canary" {
+                return None;
+            }
+            Some(json!({
+                "kind": kind,
+                "displayCommand": action.get("displayCommand").and_then(Value::as_str).unwrap_or(""),
+                "runsCargo": false,
+                "mutatesWorkers": false,
+                "mutatesState": false,
+            }))
+        })
+        .collect::<Vec<_>>();
+    if !commands
+        .iter()
+        .any(|command| command.get("kind").and_then(Value::as_str) == Some("run_topology_audit"))
+    {
+        commands.push(json!({
+            "kind": "run_topology_audit",
+            "displayCommand": RCH_TOPOLOGY_AUDIT_COMMAND,
+            "runsCargo": false,
+            "mutatesWorkers": false,
+            "mutatesState": false,
+        }));
+    }
+    if !commands.iter().any(|command| {
+        command.get("kind").and_then(Value::as_str) == Some("run_worker_root_canary")
+    }) {
+        commands.push(json!({
+            "kind": "run_worker_root_canary",
+            "displayCommand": RCH_WORKER_ROOT_CANARY_COMMAND,
+            "runsCargo": false,
+            "mutatesWorkers": false,
+            "mutatesState": false,
+        }));
+    }
+    commands
+}
+
+fn rch_topology_path_closure_hash(
+    recurrence_status: &str,
+    classification: &str,
+    status: &super::verify_ledger::RchVerifyLedgerStatusReport,
+    topology_refs: &[Value],
+    record_hint_count: usize,
+) -> String {
+    support_cache_key(&stable_json(&json!({
+        "schema": SUPPORT_BUNDLE_RCH_TOPOLOGY_RECURRENCE_SCHEMA_V1,
+        "status": recurrence_status,
+        "classification": classification,
+        "ledgerStatus": status.status,
+        "activeBlockerCount": status.active_blocker_count,
+        "localFallbackRefused": status.local_fallback_refused,
+        "oldestRetryAfter": &status.oldest_retry_after,
+        "newestRetryAfter": &status.newest_retry_after,
+        "topologyRefs": topology_refs,
+        "proofBrokerTopologyHintCount": record_hint_count,
+    })))
+}
+
+fn rch_topology_degraded_codes(codes: &[String]) -> bool {
+    codes.iter().any(|code| {
+        matches!(
+            code.as_str(),
+            "RCH-E327"
+                | "rch_verify_topology_blocked"
+                | "rch_verify_remote_marker_missing"
+                | "rch_verify_cargo_path_dependency_version_blocked"
+        ) || code.contains("topology")
+    })
+}
+
+fn proof_broker_record_summary_has_topology_hint(record: &Value) -> bool {
+    record
+        .get("reasonCodes")
+        .and_then(Value::as_array)
+        .is_some_and(|codes| {
+            codes.iter().filter_map(Value::as_str).any(|code| {
+                matches!(
+                    code,
+                    "RCH-E327"
+                        | "rch_verify_topology_blocked"
+                        | "rch_verify_remote_marker_missing"
+                        | "rch_verify_cargo_path_dependency_version_blocked"
+                ) || code.contains("topology")
+            })
+        })
 }
 
 fn summarize_proof_broker_ledger_record(
@@ -10373,6 +10695,135 @@ mod tests {
                 !rendered.contains(forbidden),
                 "proof broker handoff render leaked forbidden substring {forbidden:?}"
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn proof_broker_summary_exports_rch_topology_recurrence_runbook() -> TestResult {
+        let status = crate::core::verify_ledger::RchVerifyLedgerStatusReport {
+            schema: crate::core::verify_ledger::RCH_VERIFY_LEDGER_STATUS_SCHEMA_V1,
+            status: "active_blockers",
+            ledger_available: true,
+            active_blocker_count: 1,
+            local_fallback_refused: true,
+            local_fallback_refused_count: 1,
+            oldest_retry_after: Some("2026-06-09T20:24:29.320084Z".to_owned()),
+            newest_retry_after: Some("2026-06-09T20:24:29.320084Z".to_owned()),
+            blocker_refs: vec![crate::core::verify_ledger::RchVerifyLedgerBlockerRef {
+                command_hash: "sha256:command".to_owned(),
+                status: "blocked".to_owned(),
+                blocker_fingerprint:
+                    "sha256:2d65a1881c41fb5e52c8b3e7ed7ac95085c25dfab7ab1a302471938fed165fc4"
+                        .to_owned(),
+                remediation_bead: Some("bd-17c65.10.17.1.2".to_owned()),
+                retry_after: Some("2026-06-09T20:24:29.320084Z".to_owned()),
+                degraded_codes: vec![
+                    "rch_verify_topology_blocked".to_owned(),
+                    "rch_verify_local_fallback_refused".to_owned(),
+                ],
+                verification_attribution: "environment_blocked_before_source".to_owned(),
+            }],
+            recovery_actions: vec![
+                crate::core::verify_ledger::RchVerifyLedgerRecoveryAction {
+                    priority: 0,
+                    kind: "run_topology_audit",
+                    command: RCH_TOPOLOGY_AUDIT_COMMAND,
+                    message: "Run the bounded read-only topology closure audit before retrying RCH Cargo proof.",
+                },
+                crate::core::verify_ledger::RchVerifyLedgerRecoveryAction {
+                    priority: 1,
+                    kind: "run_worker_root_canary",
+                    command: RCH_WORKER_ROOT_CANARY_COMMAND,
+                    message: "Probe worker root topology without running Cargo or mutating workers.",
+                },
+            ],
+        };
+        let topology = rch_topology_recurrence_summary_from_status(&status, &[]);
+        let summary = proof_broker_summary_value_with_topology_recurrence(
+            "available_with_degraded_evidence",
+            json!({
+                "recordCount": 1,
+                "staleRecordCount": 0,
+                "redactionProblemCount": 0
+            }),
+            Vec::new(),
+            vec!["proof_broker_environment_blocked".to_owned()],
+            topology.clone(),
+        );
+        let encoded = stable_json(&summary);
+        let rendered = render_proof_broker_summary_for_handoff(&summary);
+
+        assert_eq!(
+            topology.pointer("/schema"),
+            Some(&json!(SUPPORT_BUNDLE_RCH_TOPOLOGY_RECURRENCE_SCHEMA_V1))
+        );
+        assert_eq!(
+            topology.pointer("/status"),
+            Some(&json!("active_topology_recurrence"))
+        );
+        assert_eq!(
+            topology.pointer("/classification"),
+            Some(&json!("environment_blocked_before_source"))
+        );
+        assert_eq!(
+            topology.pointer("/knownBlockers/0/knownBlockerFingerprint"),
+            Some(&json!(
+                "sha256:2d65a1881c41fb5e52c8b3e7ed7ac95085c25dfab7ab1a302471938fed165fc4"
+            ))
+        );
+        assert_eq!(
+            topology.pointer("/knownBlockers/0/retryAfter"),
+            Some(&json!("2026-06-09T20:24:29.320084Z"))
+        );
+        assert!(
+            topology
+                .pointer("/pathClosure/hash")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "topology recurrence must expose a path-closure hash: {encoded}"
+        );
+        assert_eq!(
+            topology.pointer("/canaryPosture/status"),
+            Some(&json!("not_collected"))
+        );
+        assert_eq!(
+            topology.pointer("/canaryPosture/runsCargo"),
+            Some(&json!(false))
+        );
+        assert!(
+            topology
+                .pointer("/nextCommands")
+                .and_then(Value::as_array)
+                .is_some_and(|commands| commands.iter().any(|command| {
+                    command.pointer("/displayCommand").and_then(Value::as_str)
+                        == Some(RCH_WORKER_ROOT_CANARY_COMMAND)
+                        && command.pointer("/runsCargo") == Some(&json!(false))
+                })),
+            "topology recurrence must preserve the worker canary command: {encoded}"
+        );
+        assert!(rendered.contains("RCH topology recurrence: status=active_topology_recurrence"));
+        assert!(rendered.contains("path_closure_hash=blake3:"));
+        assert!(rendered.contains("retry_after=2026-06-09T20:24:29.320084Z"));
+        assert!(rendered.contains("no_local_cargo=true"));
+        assert!(rendered.contains("blocker=<exact_blocker_text>"));
+        for forbidden in [
+            "/Users/",
+            "/private/",
+            "raw mail body",
+            "cargo test --lib",
+            "BEGIN PRIVATE KEY",
+            "sk-",
+            "ghp_",
+        ] {
+            ensure(
+                !encoded.contains(forbidden),
+                format!("topology recurrence summary leaked forbidden substring {forbidden:?}"),
+            )?;
+            ensure(
+                !rendered.contains(forbidden),
+                format!("topology recurrence handoff leaked forbidden substring {forbidden:?}"),
+            )?;
         }
         Ok(())
     }

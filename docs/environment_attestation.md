@@ -170,6 +170,57 @@ failure diagnosis. The bundle stores evidence-reference hashes and redacted
 metric values only; it does not copy artifacts, raw logs, local paths, mail
 bodies, or shell output.
 
+### RCH topology recurrence handoff
+
+When RCH reports `RCH-E327` or `rch_verify_topology_blocked` after the tracker
+shows the remediation bead closed, support bundles and handoffs summarize the
+condition under `proof_broker_summary.rchTopologyRecurrence`. Treat it as an
+environment blocker before source verification, not as a source test failure.
+
+The retained fields are deliberately compact: recurrence classification,
+topology blocker count, known-blocker fingerprint, command hash, retry-after
+bound, remediation bead, owner route, canary posture, and a `pathClosure.hash`.
+The path-closure value is a hash over the redaction-safe ledger posture and
+topology refs; raw path roots, proof logs, command argv, Agent Mail bodies, and
+worker filesystem details are not copied.
+
+Use this order:
+
+```bash
+ee verify rch topology-audit --from-json <proof.json> --manifest Cargo.toml --json
+scripts/rch_lane_doctor.sh --worker-canary
+```
+
+If either read-only command shows that worker mutation is required, coordinate
+with the RCH owner instead of editing worker-global state. Retry the focused
+`scripts/rch_verify.sh` wrapper only after the topology evidence changes.
+
+Forbidden actions for this state:
+
+- no local Cargo fallback
+- no worker-global edits without RCH-owner coordination
+- no destructive cleanup
+- no worktrees, stashes, resets, or checkouts
+
+Use this Beads or Agent Mail comment template. Keep the exact blocker text in
+the `blocker=` field, but do not paste raw verifier logs, raw paths, or mail
+bodies:
+
+```text
+RCH proof blocked before Cargo:
+- code: <exact_code>
+- blocker: <exact_blocker_text>
+- known_blocker_fingerprint: <fingerprint>
+- path_closure_hash: <path_closure_hash>
+- retry_after: <retry_after>
+- canary: <not_collected|missing_root|ok|...>
+- no_local_cargo: true
+- no_worker_global_edits: true
+- no_destructive_cleanup: true
+- no_worktrees_stashes_resets_checkouts: true
+- next: run read-only topology audit and worker root canary; coordinate with RCH owner if mutation is required
+```
+
 ## Recovery Actions
 
 `recoveryActions[]` is structured. Each action has a priority, kind, optional

@@ -283,6 +283,36 @@ Do not translate these states into "verified" or "failed" without the qualifier.
 They are attribution states, and they do not authorize local Cargo fallback,
 stash/reset/checkout/worktree operations, or cleanup of another agent's files.
 
+For active RCH topology recurrence, inspect
+`proof_broker_summary.rchTopologyRecurrence` in a support bundle or handoff.
+The compact handoff fields are `status`, `classification`,
+`knownBlockers[].knownBlockerFingerprint`, `knownBlockers[].retryAfter`,
+`pathClosure.hash`, `canaryPosture.status`, and
+`ownerRouting.primaryOwner`. They are enough to route the next step without
+copying raw verifier logs, command argv, private paths, or Agent Mail bodies.
+
+Use this compact blocked-state record in Agent Mail, Beads, or a handoff:
+
+```text
+rch topology recurrence blocked before Cargo:
+- code: <exact_code>
+- blocker: <exact_blocker_text>
+- known_blocker_fingerprint: <fingerprint>
+- path_closure_hash: <path_closure_hash>
+- retry_after: <retry_after>
+- canary: <not_collected|missing_root|ok|...>
+- owner_route: rch_owner
+- no_local_cargo: true
+- no_worker_global_edits: true
+- no_destructive_cleanup: true
+- no_worktrees_stashes_resets_checkouts: true
+- next: ee verify rch topology-audit --from-json <proof.json> --manifest Cargo.toml --json; scripts/rch_lane_doctor.sh --worker-canary
+```
+
+Run only those read-only topology commands first. If they show that worker
+mutation is required, coordinate with the RCH owner; retry the focused RCH
+wrapper only when topology evidence changes.
+
 ## Landing producer-derived memories
 
 When an external producer (reflection ingest, `ee review session --propose`,

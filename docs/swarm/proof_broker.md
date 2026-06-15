@@ -107,6 +107,22 @@ hashes, stale/redaction degraded codes, and next-command posture. It excludes
 raw commands, stdout/stderr, Agent Mail bodies, memory bodies, environment
 dumps, secrets, and host-private paths.
 
+When the verifier ledger reports an active RCH topology recurrence, the summary
+also includes `rchTopologyRecurrence`. That block keeps only recurrence
+classification, known-blocker fingerprints, command hash, retry-after,
+remediation bead, owner routing, canary posture, and a `pathClosure.hash`; it
+does not copy raw path roots or proof logs. The next safe commands are
+read-only:
+
+```bash
+ee verify rch topology-audit --from-json <proof.json> --manifest Cargo.toml --json
+scripts/rch_lane_doctor.sh --worker-canary
+```
+
+If those commands show that worker mutation is required, coordinate with the
+RCH owner before changing worker-global state. Do not replace the blocked proof
+with local Cargo output.
+
 The default ledger location for swarm handoffs is:
 
 ```bash
@@ -137,6 +153,12 @@ Use this Beads/Agent Mail citation shape:
 
 ```text
 proof_broker_summary=<summaryHash> verdict_counts=<admissionCounts> stale_records=<n>; refreshed with ee proof admit before closeout.
+```
+
+For topology recurrence, use the more specific blocked-state citation:
+
+```text
+rch_topology_recurrence code=<exact_code> blocker=<exact_blocker_text> known_blocker_fingerprint=<fingerprint> path_closure_hash=<path_closure_hash> retry_after=<retry_after> canary=<status> no_local_cargo=true no_worker_global_edits=true no_destructive_cleanup=true no_worktrees_stashes_resets_checkouts=true
 ```
 
 Do not paste raw RCH logs, raw mail bodies, or full command lines into Beads

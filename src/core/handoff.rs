@@ -3244,8 +3244,13 @@ fn add_proof_broker_summary_to_resume(report: &mut ResumeReport, summary: &serde
         .get("summaryHash")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
+    let topology_posture = summary
+        .get("rchTopologyRecurrence")
+        .and_then(proof_broker_topology_resume_posture)
+        .map(|posture| format!(" {posture}"))
+        .unwrap_or_default();
     let posture = format!(
-        "Embedded proof broker summary: status={status}, records={record_count}, stale_records={stale_count}, redaction_problems={redaction_problem_count}, admission_counts={admission_counts}, summary_hash={summary_hash}; raw_commands_included=false; raw_logs_included=false; raw_mail_bodies_included=false; raw_memory_bodies_included=false; private_paths_included=false; diagnostic_not_live=true."
+        "Embedded proof broker summary: status={status}, records={record_count}, stale_records={stale_count}, redaction_problems={redaction_problem_count}, admission_counts={admission_counts}, summary_hash={summary_hash}; raw_commands_included=false; raw_logs_included=false; raw_mail_bodies_included=false; raw_memory_bodies_included=false; private_paths_included=false; diagnostic_not_live=true.{topology_posture}"
     );
     report.status_summary = Some(match report.status_summary.take() {
         Some(existing) => format!("{existing}\n{posture}"),
@@ -3282,6 +3287,40 @@ fn add_proof_broker_summary_to_resume(report: &mut ResumeReport, summary: &serde
             "ee proof status --json --ledger-json .ee/derived/rch/proof_broker_ledger.json --fingerprint-id <id>",
         ),
     );
+    if summary
+        .get("rchTopologyRecurrence")
+        .is_some_and(proof_broker_topology_summary_needs_runbook)
+    {
+        report.next_actions.push(
+            NextAction::new(
+                0,
+                "Run the read-only RCH topology audit before retrying verifier proof.",
+            )
+            .with_reason("The embedded proof-broker summary reports RCH topology recurrence.")
+            .with_command(
+                "ee verify rch topology-audit --from-json <proof.json> --manifest Cargo.toml --json",
+            ),
+        );
+        report.next_actions.push(
+            NextAction::new(
+                0,
+                "Probe worker root topology without running Cargo or mutating workers.",
+            )
+            .with_reason(
+                "The support-bundle canary posture is diagnostic context, not fresh proof.",
+            )
+            .with_command("scripts/rch_lane_doctor.sh --worker-canary"),
+        );
+        report.degradations.push(
+            DegradationInfo::new(
+                "rch_topology_recurrence",
+                "Embedded proof broker summary reported RCH topology recurrence before source verification.",
+            )
+            .with_next_action(
+                "ee verify rch topology-audit --from-json <proof.json> --manifest Cargo.toml --json",
+            ),
+        );
+    }
 
     if let Some(codes) = summary
         .get("degradedCodes")
@@ -3304,6 +3343,70 @@ fn add_proof_broker_summary_to_resume(report: &mut ResumeReport, summary: &serde
             );
         }
     }
+}
+
+fn proof_broker_topology_resume_posture(topology: &serde_json::Value) -> Option<String> {
+    let status = topology.get("status").and_then(serde_json::Value::as_str)?;
+    let classification = topology
+        .get("classification")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let path_closure_hash = topology
+        .pointer("/pathClosure/hash")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let retry_after = topology
+        .get("newestRetryAfter")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            topology
+                .get("oldestRetryAfter")
+                .and_then(serde_json::Value::as_str)
+        })
+        .unwrap_or("none");
+    let canary_status = topology
+        .pointer("/canaryPosture/status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let owner_route = topology
+        .pointer("/ownerRouting/primaryOwner")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let known_blockers = topology
+        .get("knownBlockers")
+        .and_then(serde_json::Value::as_array)
+        .map(|blockers| {
+            blockers
+                .iter()
+                .filter_map(|blocker| {
+                    blocker
+                        .get("knownBlockerFingerprint")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .take(4)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let known_blockers = if known_blockers.is_empty() {
+        "none".to_owned()
+    } else {
+        known_blockers.join(",")
+    };
+
+    Some(format!(
+        "rch_topology_recurrence_status={status}; rch_topology_classification={classification}; known_blocker_fingerprints={known_blockers}; path_closure_hash={path_closure_hash}; retry_after={retry_after}; canary_posture={canary_status}; owner_route={owner_route}; no_local_cargo=true; no_worker_global_edits=true; no_destructive_cleanup=true; no_worktrees_stashes_resets_checkouts=true."
+    ))
+}
+
+fn proof_broker_topology_summary_needs_runbook(topology: &serde_json::Value) -> bool {
+    topology
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| status.contains("topology"))
+        || topology
+            .get("classification")
+            .and_then(serde_json::Value::as_str)
+            == Some("environment_blocked_before_source")
 }
 
 fn add_regression_causality_summary_to_resume(
@@ -7184,6 +7287,34 @@ memories_revised = 3
                 "class:rch_client_1_0_37_daemon_0_1_3": 2
             },
             "degradedCodes": ["proof_broker_evidence_stale"],
+            "rchTopologyRecurrence": {
+                "schema": "ee.support_bundle.rch_topology_recurrence.v1",
+                "status": "active_topology_recurrence",
+                "classification": "environment_blocked_before_source",
+                "activeTopologyBlockerCount": 1,
+                "oldestRetryAfter": "2026-06-09T20:24:29.320084Z",
+                "newestRetryAfter": "2026-06-09T20:24:29.320084Z",
+                "pathClosure": {
+                    "hash": "blake3:pathclosure",
+                    "rawPathsIncluded": false
+                },
+                "knownBlockers": [{
+                    "knownBlockerFingerprint": "sha256:2d65a1881c41fb5e52c8b3e7ed7ac95085c25dfab7ab1a302471938fed165fc4",
+                    "retryAfter": "2026-06-09T20:24:29.320084Z",
+                    "remediationBead": "bd-17c65.10.17.1.2",
+                    "degradedCodes": ["rch_verify_topology_blocked"],
+                    "ownerRoute": "rch_owner"
+                }],
+                "canaryPosture": {
+                    "status": "not_collected",
+                    "displayCommand": "scripts/rch_lane_doctor.sh --worker-canary",
+                    "runsCargo": false,
+                    "mutatesWorkers": false
+                },
+                "ownerRouting": {
+                    "primaryOwner": "rch_owner"
+                }
+            },
             "records": [{
                 "rowId": "prow_safe",
                 "owner": {
@@ -7229,7 +7360,11 @@ memories_revised = 3
                 && status.contains("wait_for_inflight")
                 && status.contains("raw_commands_included=false")
                 && status.contains("raw_mail_bodies_included=false")
-                && status.contains("diagnostic_not_live=true"),
+                && status.contains("diagnostic_not_live=true")
+                && status.contains("rch_topology_recurrence_status=active_topology_recurrence")
+                && status.contains("path_closure_hash=blake3:pathclosure")
+                && status.contains("canary_posture=not_collected")
+                && status.contains("no_local_cargo=true"),
             "resume status includes compact redaction-safe proof broker counts",
         )?;
         ensure(
@@ -7249,11 +7384,34 @@ memories_revised = 3
             "resume next actions include proof admit refresh command",
         )?;
         ensure(
+            report.next_actions.iter().any(|action| {
+                action.suggested_command.as_deref()
+                    == Some(
+                        "ee verify rch topology-audit --from-json <proof.json> --manifest Cargo.toml --json",
+                    )
+            }),
+            "resume next actions include topology audit command",
+        )?;
+        ensure(
+            report.next_actions.iter().any(|action| {
+                action.suggested_command.as_deref()
+                    == Some("scripts/rch_lane_doctor.sh --worker-canary")
+            }),
+            "resume next actions include worker root canary command",
+        )?;
+        ensure(
             report
                 .degradations
                 .iter()
                 .any(|degradation| degradation.code == "proof_broker_evidence_stale"),
             "resume degraded list includes proof broker degraded code",
+        )?;
+        ensure(
+            report
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "rch_topology_recurrence"),
+            "resume degraded list includes topology recurrence",
         )?;
         for forbidden in [
             "/Users/alice",
