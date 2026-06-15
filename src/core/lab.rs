@@ -1061,6 +1061,705 @@ fn stable_swarm_fixture_hex(
         .to_string()
 }
 
+/// Schema for deterministic scale-envelope fixture manifests.
+pub const SCALE_ENVELOPE_FIXTURE_MANIFEST_SCHEMA_V1: &str = "ee.scale_envelope.fixture_manifest.v1";
+
+/// Schema for redaction-safe scale-envelope fixture records.
+pub const SCALE_ENVELOPE_FIXTURE_RECORD_SCHEMA_V1: &str = "ee.scale_envelope.fixture_record.v1";
+
+const SCALE_ENVELOPE_FIXED_CLOCK: &str = "2026-06-15T00:00:00Z";
+const SCALE_ENVELOPE_QUERY_WEIGHTS_PER_MILLION: [u32; 8] = [
+    367_937, 183_969, 122_646, 91_984, 73_587, 61_323, 52_562, 45_992,
+];
+const SCALE_ENVELOPE_QUERY_KEYS: [&str; 8] = [
+    "release_verification",
+    "index_rebuild",
+    "pack_recall",
+    "wal_checkpoint",
+    "read_pool",
+    "graph_projection",
+    "model_readiness",
+    "coordination",
+];
+const SCALE_ENVELOPE_TOPICS: [&str; 6] = [
+    "release",
+    "search",
+    "pack",
+    "store",
+    "graph",
+    "coordination",
+];
+const SCALE_ENVELOPE_COMPONENTS: [&str; 4] = [
+    "frankensqlite_store",
+    "frankensearch_document",
+    "context_pack",
+    "graph_projection",
+];
+
+/// Built-in deterministic profiles for scale-envelope corpus fixtures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleEnvelopeFixtureProfile {
+    Small,
+    Medium,
+    Full,
+}
+
+impl Default for ScaleEnvelopeFixtureProfile {
+    fn default() -> Self {
+        Self::Small
+    }
+}
+
+impl ScaleEnvelopeFixtureProfile {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Full => "full",
+        }
+    }
+
+    const fn envelope_profile_name(self) -> &'static str {
+        match self {
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Full => "large",
+        }
+    }
+
+    const fn memory_count(self) -> u64 {
+        match self {
+            Self::Small => 512,
+            Self::Medium => 50_000,
+            Self::Full => 1_000_000,
+        }
+    }
+
+    const fn pack_count(self) -> u64 {
+        match self {
+            Self::Small => 32,
+            Self::Medium => 2_048,
+            Self::Full => 25_000,
+        }
+    }
+
+    const fn agent_count(self) -> u16 {
+        match self {
+            Self::Small => 8,
+            Self::Medium => 64,
+            Self::Full => 256,
+        }
+    }
+
+    const fn duplicate_stride(self) -> u64 {
+        match self {
+            Self::Small => 17,
+            Self::Medium => 19,
+            Self::Full => 23,
+        }
+    }
+
+    const fn contradiction_stride(self) -> u64 {
+        match self {
+            Self::Small => 11,
+            Self::Medium => 97,
+            Self::Full => 997,
+        }
+    }
+
+    const fn age_stride_days(self) -> u16 {
+        match self {
+            Self::Small => 3,
+            Self::Medium => 5,
+            Self::Full => 7,
+        }
+    }
+
+    const fn max_age_days(self) -> u16 {
+        match self {
+            Self::Small => 90,
+            Self::Medium => 540,
+            Self::Full => 1_825,
+        }
+    }
+
+    const fn sample_record_count(self) -> u16 {
+        match self {
+            Self::Small => 16,
+            Self::Medium => 32,
+            Self::Full => 64,
+        }
+    }
+
+    const fn materialized_in_ci(self) -> bool {
+        match self {
+            Self::Small => true,
+            Self::Medium | Self::Full => false,
+        }
+    }
+
+    const fn rch_required_for_full_materialization(self) -> bool {
+        match self {
+            Self::Small => false,
+            Self::Medium | Self::Full => true,
+        }
+    }
+
+    const fn id_width(self) -> usize {
+        match self {
+            Self::Small => 6,
+            Self::Medium => 6,
+            Self::Full => 7,
+        }
+    }
+
+    const fn id_prefix(self) -> &'static str {
+        match self {
+            Self::Small => "mem_scale_small_",
+            Self::Medium => "mem_scale_medium_",
+            Self::Full => "mem_scale_full_",
+        }
+    }
+
+    const fn doc_prefix(self) -> &'static str {
+        match self {
+            Self::Small => "doc_scale_small_",
+            Self::Medium => "doc_scale_medium_",
+            Self::Full => "doc_scale_full_",
+        }
+    }
+}
+
+/// Inputs for deterministic scale-envelope fixture generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScaleEnvelopeFixtureOptions {
+    pub fixture_seed: String,
+    pub profile: ScaleEnvelopeFixtureProfile,
+}
+
+impl ScaleEnvelopeFixtureOptions {
+    #[must_use]
+    pub fn new(profile: ScaleEnvelopeFixtureProfile, fixture_seed: impl Into<String>) -> Self {
+        Self {
+            fixture_seed: fixture_seed.into(),
+            profile,
+        }
+    }
+
+    #[must_use]
+    pub fn small(fixture_seed: impl Into<String>) -> Self {
+        Self::new(ScaleEnvelopeFixtureProfile::Small, fixture_seed)
+    }
+
+    #[must_use]
+    pub fn medium(fixture_seed: impl Into<String>) -> Self {
+        Self::new(ScaleEnvelopeFixtureProfile::Medium, fixture_seed)
+    }
+
+    #[must_use]
+    pub fn full(fixture_seed: impl Into<String>) -> Self {
+        Self::new(ScaleEnvelopeFixtureProfile::Full, fixture_seed)
+    }
+}
+
+/// Redaction-safe deterministic corpus manifest for scale-envelope probes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeFixtureManifest {
+    pub schema: String,
+    pub fixture_profile_id: String,
+    pub fixture_seed: String,
+    pub profile: ScaleEnvelopeFixtureProfile,
+    pub envelope_profile_name: String,
+    pub fixed_clock: String,
+    pub corpus_shape: ScaleEnvelopeCorpusShape,
+    pub query_distribution: Vec<ScaleEnvelopeQueryBucket>,
+    pub duplication: ScaleEnvelopeDuplicationPlan,
+    pub aging: ScaleEnvelopeAgingPlan,
+    pub contradiction_clusters: ScaleEnvelopeContradictionPlan,
+    pub output_policy: ScaleEnvelopeOutputPolicy,
+    pub pipeline_alignment: ScaleEnvelopePipelineAlignment,
+    pub hash_summary: ScaleEnvelopeHashSummary,
+    pub provenance: Vec<ScaleEnvelopeFixtureProvenanceRef>,
+}
+
+impl ScaleEnvelopeFixtureManifest {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        crate::core::serialize_or_error(self)
+    }
+
+    #[must_use]
+    pub fn to_json_pretty(&self) -> String {
+        crate::core::serialize_pretty_or_error(self)
+    }
+}
+
+/// Redaction-safe shape of a synthetic memory corpus.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeCorpusShape {
+    pub memory_count: u64,
+    pub link_count: u64,
+    pub pack_count: u64,
+    pub search_document_count: u64,
+    pub db_bytes: u64,
+    pub estimated_content_bytes: u64,
+    pub graph_node_count: u64,
+    pub graph_edge_count: u64,
+    pub agent_count: u16,
+    pub topic_count: u16,
+    pub expected_first_memory_id: String,
+    pub expected_last_memory_id: String,
+}
+
+/// One Zipfian query-distribution bucket.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeQueryBucket {
+    pub rank: u8,
+    pub query_key: String,
+    pub weight_per_million: u32,
+    pub expected_surface: String,
+}
+
+/// Duplicate-record controls for deterministic recall and dedup tests.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeDuplicationPlan {
+    pub duplicate_stride: u64,
+    pub expected_duplicate_count: u64,
+    pub duplicate_group_hash: String,
+}
+
+/// Aging controls for deterministic freshness and decay tests.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeAgingPlan {
+    pub fixed_clock: String,
+    pub max_age_days: u16,
+    pub age_stride_days: u16,
+    pub bucket_count: u16,
+}
+
+/// Contradiction-cluster controls for conflict-aware retrieval tests.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeContradictionPlan {
+    pub cluster_stride: u64,
+    pub cluster_size: u8,
+    pub expected_cluster_count: u64,
+    pub polarity_keys: Vec<String>,
+}
+
+/// Where generated corpora may be materialized.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeOutputPolicy {
+    pub generated_records_path_tail: String,
+    pub tracked_source_policy: String,
+    pub materialized_in_ci: bool,
+    pub rch_required_for_full_materialization: bool,
+}
+
+/// Cross-subsystem alignment that downstream probes can consume.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopePipelineAlignment {
+    pub store: String,
+    pub search: String,
+    pub pack: String,
+    pub graph: String,
+    pub components: Vec<String>,
+}
+
+/// Hashes that pin corpus shape without committing large generated corpora.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeHashSummary {
+    pub shape_hash: String,
+    pub query_distribution_hash: String,
+    pub sample_records_hash: String,
+    pub manifest_hash: String,
+}
+
+/// Bounded provenance reference for deterministic fixture manifests.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeFixtureProvenanceRef {
+    pub kind: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub hash: Option<String>,
+}
+
+/// One generated synthetic memory/search document row.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeFixtureRecord {
+    pub schema: String,
+    pub memory_id: String,
+    pub search_document_id: String,
+    pub ordinal: u64,
+    pub topic: String,
+    pub producer_agent: String,
+    pub age_days: u16,
+    pub query_rank: u8,
+    pub query_key: String,
+    pub content_template_hash: String,
+    pub duplicate_of: Option<String>,
+    pub contradiction_cluster_id: Option<String>,
+    pub link_targets: Vec<String>,
+    pub provenance: ScaleEnvelopeFixtureRecordProvenance,
+}
+
+impl ScaleEnvelopeFixtureRecord {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        crate::core::serialize_or_error(self)
+    }
+}
+
+/// Source details for one generated fixture record.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeFixtureRecordProvenance {
+    pub fixture_profile_id: String,
+    pub fixture_seed: String,
+    pub component: String,
+    pub row_hash: String,
+}
+
+/// Generate a deterministic scale-envelope manifest from a profile and seed.
+#[must_use]
+pub fn generate_scale_envelope_fixture_manifest(
+    options: &ScaleEnvelopeFixtureOptions,
+) -> ScaleEnvelopeFixtureManifest {
+    let profile = options.profile;
+    let seed = options.fixture_seed.as_str();
+    let fixture_profile_id = scale_fixture_profile_id(profile, seed);
+    let corpus_shape = scale_fixture_corpus_shape(profile);
+    let query_distribution = scale_fixture_query_distribution();
+    let sample_records = generate_scale_envelope_fixture_records(
+        options,
+        usize::from(profile.sample_record_count()),
+    );
+    let sample_records_hash = stable_scale_fixture_serialized_hash(&sample_records);
+    let shape_hash = stable_scale_fixture_serialized_hash(&corpus_shape);
+    let query_distribution_hash = stable_scale_fixture_serialized_hash(&query_distribution);
+    let manifest_hash = stable_scale_fixture_hash(
+        profile,
+        seed,
+        &format!(
+            "manifest:{}:{}:{}:{}",
+            corpus_shape.memory_count,
+            corpus_shape.search_document_count,
+            sample_records_hash,
+            query_distribution_hash
+        ),
+    );
+
+    ScaleEnvelopeFixtureManifest {
+        schema: SCALE_ENVELOPE_FIXTURE_MANIFEST_SCHEMA_V1.to_owned(),
+        fixture_profile_id: fixture_profile_id.clone(),
+        fixture_seed: options.fixture_seed.clone(),
+        profile,
+        envelope_profile_name: profile.envelope_profile_name().to_owned(),
+        fixed_clock: SCALE_ENVELOPE_FIXED_CLOCK.to_owned(),
+        corpus_shape,
+        query_distribution,
+        duplication: ScaleEnvelopeDuplicationPlan {
+            duplicate_stride: profile.duplicate_stride(),
+            expected_duplicate_count: profile.memory_count() / profile.duplicate_stride(),
+            duplicate_group_hash: stable_scale_fixture_hash(profile, seed, "duplicate-groups"),
+        },
+        aging: ScaleEnvelopeAgingPlan {
+            fixed_clock: SCALE_ENVELOPE_FIXED_CLOCK.to_owned(),
+            max_age_days: profile.max_age_days(),
+            age_stride_days: profile.age_stride_days(),
+            bucket_count: profile.max_age_days() / profile.age_stride_days(),
+        },
+        contradiction_clusters: ScaleEnvelopeContradictionPlan {
+            cluster_stride: profile.contradiction_stride(),
+            cluster_size: 2,
+            expected_cluster_count: profile.memory_count() / profile.contradiction_stride(),
+            polarity_keys: vec![
+                "asserts_remote_only_verification".to_owned(),
+                "asserts_local_only_verification".to_owned(),
+            ],
+        },
+        output_policy: ScaleEnvelopeOutputPolicy {
+            generated_records_path_tail: format!(
+                ".ee/lab/scale-envelope/{fixture_profile_id}/records.jsonl"
+            ),
+            tracked_source_policy: "commit_manifest_and_tiny_samples_only".to_owned(),
+            materialized_in_ci: profile.materialized_in_ci(),
+            rch_required_for_full_materialization: profile.rch_required_for_full_materialization(),
+        },
+        pipeline_alignment: ScaleEnvelopePipelineAlignment {
+            store: "frankensqlite_memory_rows_and_links".to_owned(),
+            search: "frankensearch_documents_with_hash_embeddings".to_owned(),
+            pack: "context_pack_candidate_and_pack_records".to_owned(),
+            graph: "memory_link_and_contradiction_projection".to_owned(),
+            components: SCALE_ENVELOPE_COMPONENTS
+                .iter()
+                .map(|component| (*component).to_owned())
+                .collect(),
+        },
+        hash_summary: ScaleEnvelopeHashSummary {
+            shape_hash,
+            query_distribution_hash,
+            sample_records_hash,
+            manifest_hash,
+        },
+        provenance: vec![
+            ScaleEnvelopeFixtureProvenanceRef {
+                kind: "schema".to_owned(),
+                reference: "ee.scale_envelope.v1".to_owned(),
+                hash: Some(stable_scale_fixture_hash(profile, seed, "schema-ref")),
+            },
+            ScaleEnvelopeFixtureProvenanceRef {
+                kind: "adr".to_owned(),
+                reference: "docs/adr/0076-scale-envelope-contract.md".to_owned(),
+                hash: Some(stable_scale_fixture_hash(profile, seed, "adr-0076")),
+            },
+            ScaleEnvelopeFixtureProvenanceRef {
+                kind: "bead".to_owned(),
+                reference: "bd-ssoco.2".to_owned(),
+                hash: None,
+            },
+        ],
+    }
+}
+
+/// Generate deterministic fixture records without writing them to tracked source.
+#[must_use]
+pub fn generate_scale_envelope_fixture_records(
+    options: &ScaleEnvelopeFixtureOptions,
+    limit: usize,
+) -> Vec<ScaleEnvelopeFixtureRecord> {
+    let profile = options.profile;
+    let seed = options.fixture_seed.as_str();
+    let memory_count = profile.memory_count();
+    let requested = u64::try_from(limit).unwrap_or(u64::MAX);
+    let record_count = requested.min(memory_count);
+
+    (1..=record_count)
+        .map(|ordinal| scale_fixture_record(profile, seed, ordinal))
+        .collect()
+}
+
+fn scale_fixture_corpus_shape(profile: ScaleEnvelopeFixtureProfile) -> ScaleEnvelopeCorpusShape {
+    let memory_count = profile.memory_count();
+    let link_count = memory_count.saturating_mul(3);
+    let pack_count = profile.pack_count();
+    let search_document_count = memory_count.saturating_add(pack_count);
+    let estimated_content_bytes = memory_count.saturating_mul(384);
+    let db_bytes = memory_count
+        .saturating_mul(640)
+        .saturating_add(link_count.saturating_mul(96))
+        .saturating_add(pack_count.saturating_mul(512));
+    let agent_count = profile.agent_count();
+
+    ScaleEnvelopeCorpusShape {
+        memory_count,
+        link_count,
+        pack_count,
+        search_document_count,
+        db_bytes,
+        estimated_content_bytes,
+        graph_node_count: memory_count
+            .saturating_add(pack_count)
+            .saturating_add(u64::from(agent_count)),
+        graph_edge_count: link_count.saturating_add(memory_count.saturating_mul(2)),
+        agent_count,
+        topic_count: SCALE_ENVELOPE_TOPICS.len() as u16,
+        expected_first_memory_id: scale_fixture_memory_id(profile, 1),
+        expected_last_memory_id: scale_fixture_memory_id(profile, memory_count),
+    }
+}
+
+fn scale_fixture_query_distribution() -> Vec<ScaleEnvelopeQueryBucket> {
+    SCALE_ENVELOPE_QUERY_KEYS
+        .iter()
+        .zip(SCALE_ENVELOPE_QUERY_WEIGHTS_PER_MILLION)
+        .enumerate()
+        .map(
+            |(index, (query_key, weight_per_million))| ScaleEnvelopeQueryBucket {
+                rank: u8::try_from(index + 1).unwrap_or(u8::MAX),
+                query_key: (*query_key).to_owned(),
+                weight_per_million,
+                expected_surface: match index {
+                    0 | 1 | 2 | 6 => "frankensearch_hybrid",
+                    3 | 4 => "frankensqlite_store",
+                    5 => "franken_networkx_graph",
+                    _ => "coordination_snapshot",
+                }
+                .to_owned(),
+            },
+        )
+        .collect()
+}
+
+fn scale_fixture_record(
+    profile: ScaleEnvelopeFixtureProfile,
+    seed: &str,
+    ordinal: u64,
+) -> ScaleEnvelopeFixtureRecord {
+    let fixture_profile_id = scale_fixture_profile_id(profile, seed);
+    let query_rank = u8::try_from(((ordinal - 1) % SCALE_ENVELOPE_QUERY_KEYS.len() as u64) + 1)
+        .unwrap_or(u8::MAX);
+    let query_key = SCALE_ENVELOPE_QUERY_KEYS[usize::from(query_rank - 1)].to_owned();
+    let topic_index =
+        usize::try_from((ordinal - 1) % SCALE_ENVELOPE_TOPICS.len() as u64).unwrap_or_default();
+    let topic = SCALE_ENVELOPE_TOPICS[topic_index].to_owned();
+    let component_index =
+        usize::try_from((ordinal - 1) % SCALE_ENVELOPE_COMPONENTS.len() as u64).unwrap_or_default();
+    let component = SCALE_ENVELOPE_COMPONENTS[component_index].to_owned();
+    let duplicate_of = if ordinal > 1 && ordinal % profile.duplicate_stride() == 0 {
+        Some(scale_fixture_memory_id(profile, ordinal - 1))
+    } else {
+        None
+    };
+    let contradiction_cluster_id = scale_fixture_contradiction_cluster(profile, ordinal);
+    let link_targets = scale_fixture_link_targets(profile, ordinal);
+    let content_template_hash = stable_scale_fixture_hash(
+        profile,
+        seed,
+        &format!("content-template:{ordinal}:{topic}:{query_key}:{component}"),
+    );
+    let row_hash = stable_scale_fixture_hash(
+        profile,
+        seed,
+        &format!(
+            "row:{ordinal}:{query_rank}:{topic}:{component}:{duplicate_of:?}:{contradiction_cluster_id:?}"
+        ),
+    );
+
+    ScaleEnvelopeFixtureRecord {
+        schema: SCALE_ENVELOPE_FIXTURE_RECORD_SCHEMA_V1.to_owned(),
+        memory_id: scale_fixture_memory_id(profile, ordinal),
+        search_document_id: scale_fixture_document_id(profile, ordinal),
+        ordinal,
+        topic,
+        producer_agent: format!(
+            "ScaleAgent{:02}",
+            (ordinal - 1) % u64::from(profile.agent_count())
+        ),
+        age_days: u16::try_from(
+            ordinal.saturating_mul(u64::from(profile.age_stride_days()))
+                % u64::from(profile.max_age_days()),
+        )
+        .unwrap_or(u16::MAX),
+        query_rank,
+        query_key,
+        content_template_hash,
+        duplicate_of,
+        contradiction_cluster_id,
+        link_targets,
+        provenance: ScaleEnvelopeFixtureRecordProvenance {
+            fixture_profile_id,
+            fixture_seed: seed.to_owned(),
+            component,
+            row_hash,
+        },
+    }
+}
+
+fn scale_fixture_link_targets(profile: ScaleEnvelopeFixtureProfile, ordinal: u64) -> Vec<String> {
+    let mut targets = BTreeSet::new();
+    if ordinal > 1 {
+        targets.insert(scale_fixture_memory_id(profile, ordinal - 1));
+    }
+    if ordinal > 2 {
+        targets.insert(scale_fixture_memory_id(profile, (ordinal / 2).max(1)));
+    }
+    let memory_count = profile.memory_count();
+    let forward = ordinal
+        .saturating_add(profile.duplicate_stride())
+        .min(memory_count);
+    if forward != ordinal {
+        targets.insert(scale_fixture_memory_id(profile, forward));
+    }
+    targets.into_iter().collect()
+}
+
+fn scale_fixture_contradiction_cluster(
+    profile: ScaleEnvelopeFixtureProfile,
+    ordinal: u64,
+) -> Option<String> {
+    let stride = profile.contradiction_stride();
+    let offset = ordinal % stride;
+    if offset == 1 || offset == 2 {
+        Some(format!("scale_contradiction_{:06}", (ordinal / stride) + 1))
+    } else {
+        None
+    }
+}
+
+fn scale_fixture_profile_id(profile: ScaleEnvelopeFixtureProfile, seed: &str) -> String {
+    let hex = stable_scale_fixture_hex(profile, seed, "profile-id");
+    format!("scale_{}_{}", profile.as_str(), &hex[..12])
+}
+
+fn scale_fixture_memory_id(profile: ScaleEnvelopeFixtureProfile, ordinal: u64) -> String {
+    format!(
+        "{}{:0width$}",
+        profile.id_prefix(),
+        ordinal,
+        width = profile.id_width()
+    )
+}
+
+fn scale_fixture_document_id(profile: ScaleEnvelopeFixtureProfile, ordinal: u64) -> String {
+    format!(
+        "{}{:0width$}",
+        profile.doc_prefix(),
+        ordinal,
+        width = profile.id_width()
+    )
+}
+
+fn stable_scale_fixture_serialized_hash<T: Serialize>(value: &T) -> String {
+    stable_scale_fixture_raw_hash(crate::core::serialize_or_error(value).as_bytes())
+}
+
+fn stable_scale_fixture_hash(
+    profile: ScaleEnvelopeFixtureProfile,
+    seed: &str,
+    suffix: &str,
+) -> String {
+    stable_scale_fixture_raw_hash(
+        format!(
+            "ee.scale_envelope.fixture.v1:{}:{seed}:{suffix}",
+            profile.as_str()
+        )
+        .as_bytes(),
+    )
+}
+
+fn stable_scale_fixture_hex(
+    profile: ScaleEnvelopeFixtureProfile,
+    seed: &str,
+    suffix: &str,
+) -> String {
+    blake3::hash(
+        format!(
+            "ee.scale_envelope.fixture.v1:{}:{seed}:{suffix}",
+            profile.as_str()
+        )
+        .as_bytes(),
+    )
+    .to_hex()
+    .to_string()
+}
+
+fn stable_scale_fixture_raw_hash(data: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(data).to_hex())
+}
+
 /// Compact deterministic ledger emitted by a future swarm replay runner.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

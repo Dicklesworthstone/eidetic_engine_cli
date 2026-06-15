@@ -1,0 +1,133 @@
+{
+  "schema": "ee.scale_envelope.fixture_manifest.v1",
+  "fixtureProfileId": "scale_small_801029aa7dff",
+  "fixtureSeed": "scale_small_seed_001",
+  "profile": "small",
+  "envelopeProfileName": "small",
+  "fixedClock": "2026-06-15T00:00:00Z",
+  "corpusShape": {
+    "memoryCount": 512,
+    "linkCount": 1536,
+    "packCount": 32,
+    "searchDocumentCount": 544,
+    "dbBytes": 491520,
+    "estimatedContentBytes": 196608,
+    "graphNodeCount": 552,
+    "graphEdgeCount": 2560,
+    "agentCount": 8,
+    "topicCount": 6,
+    "expectedFirstMemoryId": "mem_scale_small_000001",
+    "expectedLastMemoryId": "mem_scale_small_000512"
+  },
+  "queryDistribution": [
+    {
+      "rank": 1,
+      "queryKey": "release_verification",
+      "weightPerMillion": 367937,
+      "expectedSurface": "frankensearch_hybrid"
+    },
+    {
+      "rank": 2,
+      "queryKey": "index_rebuild",
+      "weightPerMillion": 183969,
+      "expectedSurface": "frankensearch_hybrid"
+    },
+    {
+      "rank": 3,
+      "queryKey": "pack_recall",
+      "weightPerMillion": 122646,
+      "expectedSurface": "frankensearch_hybrid"
+    },
+    {
+      "rank": 4,
+      "queryKey": "wal_checkpoint",
+      "weightPerMillion": 91984,
+      "expectedSurface": "frankensqlite_store"
+    },
+    {
+      "rank": 5,
+      "queryKey": "read_pool",
+      "weightPerMillion": 73587,
+      "expectedSurface": "frankensqlite_store"
+    },
+    {
+      "rank": 6,
+      "queryKey": "graph_projection",
+      "weightPerMillion": 61323,
+      "expectedSurface": "franken_networkx_graph"
+    },
+    {
+      "rank": 7,
+      "queryKey": "model_readiness",
+      "weightPerMillion": 52562,
+      "expectedSurface": "frankensearch_hybrid"
+    },
+    {
+      "rank": 8,
+      "queryKey": "coordination",
+      "weightPerMillion": 45992,
+      "expectedSurface": "coordination_snapshot"
+    }
+  ],
+  "duplication": {
+    "duplicateStride": 17,
+    "expectedDuplicateCount": 30,
+    "duplicateGroupHash": "blake3:4f70e8ef2a65e221af4c6854bd3d91e43207e34ee352110d7e58f7d35e8bb48e"
+  },
+  "aging": {
+    "fixedClock": "2026-06-15T00:00:00Z",
+    "maxAgeDays": 90,
+    "ageStrideDays": 3,
+    "bucketCount": 30
+  },
+  "contradictionClusters": {
+    "clusterStride": 11,
+    "clusterSize": 2,
+    "expectedClusterCount": 46,
+    "polarityKeys": [
+      "asserts_remote_only_verification",
+      "asserts_local_only_verification"
+    ]
+  },
+  "outputPolicy": {
+    "generatedRecordsPathTail": ".ee/lab/scale-envelope/scale_small_801029aa7dff/records.jsonl",
+    "trackedSourcePolicy": "commit_manifest_and_tiny_samples_only",
+    "materializedInCi": true,
+    "rchRequiredForFullMaterialization": false
+  },
+  "pipelineAlignment": {
+    "store": "frankensqlite_memory_rows_and_links",
+    "search": "frankensearch_documents_with_hash_embeddings",
+    "pack": "context_pack_candidate_and_pack_records",
+    "graph": "memory_link_and_contradiction_projection",
+    "components": [
+      "frankensqlite_store",
+      "frankensearch_document",
+      "context_pack",
+      "graph_projection"
+    ]
+  },
+  "hashSummary": {
+    "shapeHash": "blake3:0769fb1e2f5325ca67c873d05d96263a2e24b9ada8078721432e6836150e5921",
+    "queryDistributionHash": "blake3:0acf6fcdac98a878f5341044601f1a73f22861d35c20f92927c23fd21b55306f",
+    "sampleRecordsHash": "blake3:4d14f3bf459d73a05d59d36f74b0c41318df70ebfb8caa8f43198c0abf320000",
+    "manifestHash": "blake3:05fb303096e881e7ac37216a5186dfc108ec6488827b50cefe8f10fc1d144d2b"
+  },
+  "provenance": [
+    {
+      "kind": "schema",
+      "ref": "ee.scale_envelope.v1",
+      "hash": "blake3:78e09d231210b45c6c7cee0098c668cbe36186666627dfe1171b793c2f420737"
+    },
+    {
+      "kind": "adr",
+      "ref": "docs/adr/0076-scale-envelope-contract.md",
+      "hash": "blake3:071ec4e71741db8269ac1bd59678ea5925e9418aa8b1c30619eb74a20dd18b07"
+    },
+    {
+      "kind": "bead",
+      "ref": "bd-ssoco.2",
+      "hash": null
+    }
+  ]
+}
