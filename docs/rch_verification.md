@@ -702,6 +702,33 @@ keeps the bd-12ps0 sibling-relative convention, and nothing on the workers or
 in the repo changes. Reattaching the drive restores the default lane and the
 override becomes unnecessary.
 
+### Topology Recurrence Evidence Bundle
+
+When an RCH proof recurs as `RCH-E327`, collect the topology-family evidence
+with the lane doctor before spending another remote slot:
+
+```bash
+scripts/rch_lane_doctor.sh --recurrence-evidence \
+  --recurrence-proof tests/fixtures/verify_ledger/rch_e327_topology_recurrence.json \
+  --recurrence-manifest Cargo.toml
+```
+
+The report schema is `ee.rch.topology_recurrence_evidence.v1`. It combines the
+read-only worker-root canary, the `ee verify rch topology-audit` surface when
+available, `scripts/check-local-cargo-tripwire.sh --probe-processes --json`,
+and `br dep cycles --json`. The command never runs Cargo, never mutates workers,
+and never writes state.
+
+For blocked lanes, cite the compact fields rather than raw stderr:
+`status`, `proof.classifier.unresolvedTopologyEdge`, `topologyAudit.status`,
+`localCargoTripwire.status`, `beadsCycles.count`, and
+`proofDiscipline.sourceBeadClosePolicy`. A valid blocked bundle uses
+`sourceVerdict=no_rust_verdict`; topology evidence can route the RCH owner, but
+it is not Rust source verification. If the installed `ee` is stale and reports
+`topologyAudit.status=ee_surface_unavailable`, keep that in `surfaceGaps[]` and
+route the topology-audit surface separately instead of silently treating it as a
+passed path-closure audit.
+
 ## Beads and Agent Mail Templates
 
 For Beads comments, paste the summary plus the fields that make attribution

@@ -467,6 +467,21 @@ metadata did not include them as used packages.
 - Raise the daemon timeouts to 900s (`RCH_DAEMON_*_TIMEOUT_SECS=900`).
 - Disable compression (`RCH_COMPRESSION=0`).
 - Pin a known-good worker: `RCH_WORKERS=trj` (or css/csd).
+- Before retrying a recurrent topology proof, capture the read-only recurrence
+  bundle:
+
+  ```bash
+  scripts/rch_lane_doctor.sh --recurrence-evidence \
+    --recurrence-proof tests/fixtures/verify_ledger/rch_e327_topology_recurrence.json \
+    --recurrence-manifest Cargo.toml
+  ```
+
+  Cite `proof.classifier.unresolvedTopologyEdge`, `topologyAudit.status`,
+  `localCargoTripwire.status`, `beadsCycles.count`, and
+  `proofDiscipline.sourceBeadClosePolicy`. `sourceVerdict=no_rust_verdict`
+  means the bundle is environment-proof only; a stale installed `ee` that emits
+  `ee_surface_unavailable` for `topology-audit` is a surface gap to route, not a
+  passed path-closure audit.
 
 ### Selector health after a timed-out proof
 
