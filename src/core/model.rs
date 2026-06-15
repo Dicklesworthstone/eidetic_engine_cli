@@ -406,6 +406,15 @@ impl ModelLifecycleReport {
             "degraded": lifecycle_degraded_data_json(&self.degraded),
         })
     }
+
+    #[must_use]
+    pub fn semantic_surface_degradation(
+        &self,
+        surface: &'static str,
+    ) -> Option<ModelLifecycleDegradation> {
+        self.semantic_readiness
+            .semantic_surface_degradation(surface)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -427,6 +436,74 @@ impl ModelLifecycleSemanticReadiness {
             "selectedIndexId": self.selected_index_id,
             "dimensionCompatibility": self.dimension_compatibility.data_json(),
             "degraded": lifecycle_degraded_data_json(&self.degraded),
+        })
+    }
+
+    #[must_use]
+    pub fn semantic_surface_degradation(
+        &self,
+        surface: &'static str,
+    ) -> Option<ModelLifecycleDegradation> {
+        if self.state == "available" && self.mode == "semantic" {
+            return None;
+        }
+
+        let primary = self.degraded.first();
+        let repair = self
+            .dimension_compatibility
+            .repair
+            .clone()
+            .or_else(|| primary.and_then(|degradation| degradation.repair.clone()))
+            .or_else(|| Some("ee index reembed --workspace .".to_string()));
+        let reason = self
+            .dimension_compatibility
+            .mismatch_reason
+            .clone()
+            .or_else(|| primary.map(|degradation| degradation.message.clone()))
+            .unwrap_or_else(|| {
+                format!(
+                    "semantic readiness state `{}` is not available in mode `{}`",
+                    self.state, self.mode
+                )
+            });
+
+        if self.dimension_compatibility.compatible == Some(false)
+            || self.state == "dimension_mismatch"
+        {
+            return Some(ModelLifecycleDegradation {
+                code: "embed_model_unavailable",
+                severity: "high",
+                message: format!(
+                    "Model lifecycle reports {surface} semantic quality is dimension-incompatible: {reason}. Explicit memories remain available through lexical or anchored retrieval."
+                ),
+                repair,
+            });
+        }
+
+        if let Some(index_degradation) = self.degraded.iter().find(|degradation| {
+            matches!(
+                degradation.code,
+                "index_stale" | "index_missing" | "index_corrupt"
+            )
+        }) {
+            return Some(ModelLifecycleDegradation {
+                code: index_degradation.code,
+                severity: index_degradation.severity,
+                message: format!(
+                    "Model lifecycle reports {surface} semantic quality is stale or unavailable: {} Results remain available through lexical or anchored retrieval when those indexes are usable.",
+                    index_degradation.message
+                ),
+                repair: index_degradation.repair.clone().or(repair),
+            });
+        }
+
+        Some(ModelLifecycleDegradation {
+            code: "embed_model_unavailable",
+            severity: primary.map_or("warning", |degradation| degradation.severity),
+            message: format!(
+                "Model lifecycle reports {surface} semantic quality is lexical-only: {reason}. Explicit memories remain available through lexical or anchored retrieval."
+            ),
+            repair,
         })
     }
 }
@@ -2050,6 +2127,61 @@ fn resolve_workspace_id(
         })
 }
 
+/// Build the reusable model-lifecycle report for non-`ee model status`
+/// surfaces that already hold a DB connection.
+pub fn build_model_lifecycle_report_for_workspace(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+    connection: Option<&DbConnection>,
+) -> Result<ModelLifecycleReport, DomainError> {
+    let workspace_path = resolve_workspace_path(workspace_path)?;
+    let database_path = if connection.is_some() {
+        let path = database_path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| workspace_path.join(".ee").join(DEFAULT_DB_FILE));
+        ensure_no_model_database_symlink_components(&path)?;
+        path
+    } else {
+        resolved_database_path(&workspace_path, database_path)?
+    };
+
+    let owned_connection;
+    let connection = match connection {
+        Some(connection) => connection,
+        None => {
+            owned_connection = DbConnection::open_file(&database_path).map_err(|error| {
+                db_error_to_domain(
+                    error,
+                    "Failed to open database",
+                    Some("ee init --workspace .".to_string()),
+                )
+            })?;
+            &owned_connection
+        }
+    };
+    let workspace_id = resolve_workspace_id(connection, &workspace_path)?;
+    let entries = connection
+        .list_model_registry_entries(&workspace_id)
+        .map_err(|error| {
+            db_error_to_domain(
+                error,
+                "Failed to list model registry entries",
+                Some("ee doctor".to_string()),
+            )
+        })?;
+    let selected_embedding_entry = entries
+        .iter()
+        .find(|entry| entry_is_available_embedding(entry));
+
+    Ok(build_model_lifecycle_report(
+        &workspace_path,
+        &database_path,
+        connection,
+        &entries,
+        selected_embedding_entry,
+    ))
+}
+
 /// Build a `ee model status` report.
 pub fn build_model_status_report(
     options: &ModelStatusOptions<'_>,
@@ -2891,6 +3023,24 @@ mod tests {
             .map_err(|error| format!("insert registry entry: {error}"))
     }
 
+    fn write_index_metadata(workspace_path: &Path, source_generation: u64) -> TestResult {
+        let index_dir = workspace_path.join(".ee").join("index");
+        fs::create_dir_all(&index_dir).map_err(|error| format!("create index dir: {error}"))?;
+        fs::write(
+            index_dir.join("meta.json"),
+            serde_json::json!({
+                "schema": "ee.index_metadata.v1",
+                "sourceGeneration": source_generation,
+                "lastRebuildAt": "2026-01-01T00:00:00Z",
+                "storedDimension": 128,
+                "storedDistanceMetric": "cosine",
+                "storedVectorDtype": "f32"
+            })
+            .to_string(),
+        )
+        .map_err(|error| format!("write index metadata: {error}"))
+    }
+
     fn empty_reranker_status() -> ModelStatusReranker {
         let manifest =
             bundled_rerank_model_manifest().expect("bundled rerank model manifest should parse");
@@ -3158,6 +3308,68 @@ mod tests {
         ensure(
             report.degradations[0].code == "model_registry_empty",
             "degradation code",
+        )
+    }
+
+    #[test]
+    fn lifecycle_surface_degradation_reports_lexical_only_readiness() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, _workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+
+        let report =
+            build_model_lifecycle_report_for_workspace(&workspace_path, Some(&database_path), None)
+                .map_err(|error| format!("lifecycle report: {error:?}"))?;
+        let degradation = report
+            .semantic_surface_degradation("search")
+            .ok_or("missing search lifecycle degradation")?;
+
+        ensure(
+            degradation.code == "embed_model_unavailable",
+            "lexical-only readiness should use the established embedder code",
+        )?;
+        ensure(
+            degradation.message.contains("lexical-only"),
+            "message should tell agents the quality mode is lexical-only",
+        )
+    }
+
+    #[test]
+    fn lifecycle_surface_degradation_reports_dimension_incompatible_readiness() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+        insert_registry_entry_with_dimension(
+            &database_path,
+            &workspace_id,
+            "mdl_01HQ3K5Z000000000000000099",
+            ModelProvider::Hash,
+            "hash-384",
+            ModelRegistryStatus::Available,
+            384,
+        )?;
+        write_index_metadata(&workspace_path, 0)?;
+
+        let report =
+            build_model_lifecycle_report_for_workspace(&workspace_path, Some(&database_path), None)
+                .map_err(|error| format!("lifecycle report: {error:?}"))?;
+        let degradation = report
+            .semantic_surface_degradation("search")
+            .ok_or("missing search lifecycle degradation")?;
+
+        ensure(
+            degradation.code == "embed_model_unavailable",
+            "dimension mismatch should reuse semantic-unavailable code",
+        )?;
+        ensure(
+            degradation.severity == "high",
+            "dimension mismatch severity",
+        )?;
+        ensure(
+            degradation.message.contains("dimension-incompatible"),
+            "message should distinguish dimension-incompatible quality",
+        )?;
+        ensure(
+            degradation.repair.as_deref() == Some("ee index reembed --workspace ."),
+            "dimension mismatch repair",
         )
     }
 

@@ -1005,6 +1005,16 @@ impl SearchDegradation {
     }
 
     #[must_use]
+    fn from_model_lifecycle(degradation: &crate::core::model::ModelLifecycleDegradation) -> Self {
+        Self {
+            code: degradation.code.to_string(),
+            severity: degradation.severity.to_string(),
+            message: degradation.message.clone(),
+            repair: degradation.repair.clone(),
+        }
+    }
+
+    #[must_use]
     fn stale_index(db_generation: Option<u64>, index_generation: Option<u64>) -> Self {
         let generation_detail = match (db_generation, index_generation) {
             (Some(db_generation), Some(index_generation)) => format!(
@@ -5186,6 +5196,7 @@ fn run_search_inner_with_performance(
 
     let source_mode_start = Instant::now();
     let source_mode = resolve_source_mode(options, &index_dir, &mut degraded)?;
+    push_model_lifecycle_search_degradation(options, read_connection, &mut degraded);
     trace.record_elapsed("search::sourceModeResolve", source_mode_start);
     if source_mode.unavailable_no_results {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -5587,6 +5598,7 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
     }
 
     let mut degraded = search_degradations(options, &index_dir);
+    push_model_lifecycle_search_degradation(options, None, &mut degraded);
     if limit_capped {
         degraded.push(SearchDegradation::profile_search_limit_capped(
             options.limit,
@@ -5749,6 +5761,38 @@ fn search_degradations_with_connection(
             index_status.last_check_error.as_deref(),
         )],
     }
+}
+
+fn push_model_lifecycle_search_degradation(
+    options: &SearchOptions,
+    connection: Option<&DbConnection>,
+    degraded: &mut Vec<SearchDegradation>,
+) {
+    if options.source_mode == SearchSourceMode::LexicalOnly {
+        return;
+    }
+    let Ok(report) = crate::core::model::build_model_lifecycle_report_for_workspace(
+        &options.workspace_path,
+        options.database_path.as_deref(),
+        connection,
+    ) else {
+        return;
+    };
+    let Some(degradation) = report.semantic_surface_degradation("search") else {
+        return;
+    };
+    if matches!(
+        degradation.code,
+        "index_stale" | "index_missing" | "index_corrupt" | "search_index_degraded"
+    ) {
+        return;
+    }
+    if degraded.iter().any(|existing| {
+        existing.code == degradation.code && existing.message == degradation.message
+    }) {
+        return;
+    }
+    degraded.push(SearchDegradation::from_model_lifecycle(&degradation));
 }
 
 fn pin_lexical_ram_tier_for_search(

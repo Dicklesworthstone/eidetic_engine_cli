@@ -154,7 +154,19 @@ pub struct RecallDegradation {
     pub code: &'static str,
     pub severity: &'static str,
     pub message: String,
-    pub repair: Option<&'static str>,
+    pub repair: Option<String>,
+}
+
+impl RecallDegradation {
+    #[must_use]
+    fn from_model_lifecycle(degradation: &crate::core::model::ModelLifecycleDegradation) -> Self {
+        Self {
+            code: degradation.code,
+            severity: degradation.severity,
+            message: degradation.message.clone(),
+            repair: degradation.repair.clone(),
+        }
+    }
 }
 
 /// Deterministic recall result (`ee.recall.v1`).
@@ -541,7 +553,7 @@ pub fn evaluate_recall(
             severity: "info",
             message: "anchor reverse index has no rows for this workspace; nothing is anchored yet"
                 .to_owned(),
-            repair: Some(ANCHOR_INDEX_REPAIR),
+            repair: Some(ANCHOR_INDEX_REPAIR.to_owned()),
         }),
         Some(generation) if generation < db_generation => degraded.push(RecallDegradation {
             code: ANCHOR_INDEX_STALE_CODE,
@@ -549,7 +561,7 @@ pub fn evaluate_recall(
             message: format!(
                 "anchor reverse index generation {generation} is behind database generation {db_generation}; results may miss recent memories"
             ),
-            repair: Some(ANCHOR_INDEX_REPAIR),
+            repair: Some(ANCHOR_INDEX_REPAIR.to_owned()),
         }),
         Some(_) => {}
     }
@@ -842,12 +854,31 @@ pub fn run_recall(
         })
         .collect();
 
-    Ok(evaluate_recall(
-        query,
-        &rows,
-        index_generation,
-        db_generation,
-    ))
+    let mut report = evaluate_recall(query, &rows, index_generation, db_generation);
+    if let Some(degradation) = recall_model_lifecycle_degradation(connection, workspace_id)
+        && !report.degraded.iter().any(|existing| {
+            existing.code == degradation.code && existing.message == degradation.message
+        })
+    {
+        report.degraded.push(degradation);
+    }
+    Ok(report)
+}
+
+fn recall_model_lifecycle_degradation(
+    connection: &crate::db::DbConnection,
+    workspace_id: &str,
+) -> Option<RecallDegradation> {
+    let workspace = connection.get_workspace(workspace_id).ok().flatten()?;
+    let report = crate::core::model::build_model_lifecycle_report_for_workspace(
+        std::path::Path::new(&workspace.path),
+        None,
+        Some(connection),
+    )
+    .ok()?;
+    report
+        .semantic_surface_degradation("recall")
+        .map(|degradation| RecallDegradation::from_model_lifecycle(&degradation))
 }
 
 // ---------------------------------------------------------------------------
@@ -973,7 +1004,7 @@ impl RecallDegradedEntry {
             code: entry.code.to_owned(),
             severity: entry.severity.to_owned(),
             message: entry.message.clone(),
-            repair: entry.repair.map(str::to_owned),
+            repair: entry.repair.clone(),
             details: None,
         }
     }
@@ -1361,7 +1392,7 @@ mod cli_surface_tests {
             code: ANCHOR_INDEX_STALE_CODE,
             severity: "low",
             message: "behind".to_owned(),
-            repair: Some(ANCHOR_INDEX_REPAIR),
+            repair: Some(ANCHOR_INDEX_REPAIR.to_owned()),
         })];
         let markdown = render_recall_markdown(&report, &degraded);
         assert!(markdown.starts_with("## recall · 2 anchored memorie(s)\n"));
@@ -1808,6 +1839,26 @@ mod tests {
         (connection, workspace_id)
     }
 
+    fn wrapper_test_file_db() -> (tempfile::TempDir, crate::db::DbConnection, String) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_path = temp.path().canonicalize().expect("canonical workspace");
+        std::fs::create_dir_all(workspace_path.join(".ee")).expect("create .ee");
+        let database_path = workspace_path.join(".ee").join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database_path).expect("open file db");
+        connection.migrate().expect("migrate");
+        let workspace_id = format!("wsp_{:026}", 2);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: Some("recall-file-wrapper-test".to_owned()),
+                },
+            )
+            .expect("insert workspace");
+        (temp, connection, workspace_id)
+    }
+
     fn wrapper_insert_memory(
         connection: &crate::db::DbConnection,
         workspace_id: &str,
@@ -1878,6 +1929,40 @@ mod tests {
             );
             assert_eq!(report.index_generation, Some(report.db_generation));
         }
+    }
+
+    #[test]
+    fn run_recall_threads_model_lifecycle_lexical_only_degradation() {
+        let (_temp, connection, workspace_id) = wrapper_test_file_db();
+        let memory_id = format!("mem_{:026}", 9);
+        wrapper_insert_memory(
+            &connection,
+            &workspace_id,
+            &memory_id,
+            "Check `src/core/model.rs` when semantic lifecycle readiness changes.",
+        );
+
+        let report = run_recall(
+            &connection,
+            &workspace_id,
+            &RecallQuery {
+                paths: vec!["src/core/model.rs".to_owned()],
+                ..RecallQuery::default()
+            },
+        )
+        .expect("run recall");
+
+        assert_eq!(report.items.len(), 1);
+        let lifecycle = report
+            .degraded
+            .iter()
+            .find(|degradation| degradation.code == "embed_model_unavailable")
+            .expect("model lifecycle degraded entry");
+        assert!(
+            lifecycle.message.contains("lexical-only"),
+            "unexpected lifecycle message: {}",
+            lifecycle.message
+        );
     }
 
     #[test]
