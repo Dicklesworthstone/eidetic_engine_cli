@@ -6,14 +6,15 @@
 //! hashes are stripped of source-specific prefixes, and the canonical
 //! 64-character hex constraint is enforced before any database write.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+use toml_edit::{DocumentMut, Item, Table};
 
 use crate::db::{
     DbConnection, DbError, RchVerifyIngestOutcome, StoredRchVerifyRun, rch_verify_run_id,
@@ -25,6 +26,7 @@ pub const RCH_VERIFY_LEDGER_RUNS_REPORT_SCHEMA_V1: &str = "ee.rch.verify.runs.v1
 pub const RCH_VERIFY_LEDGER_BLOCKERS_REPORT_SCHEMA_V1: &str = "ee.rch.verify.blockers.v1";
 pub const RCH_VERIFY_LEDGER_STATUS_SCHEMA_V1: &str = "ee.rch.verify.ledger_status.v1";
 pub const RCH_VERIFY_LEDGER_RECURRENCE_REPORT_SCHEMA_V1: &str = "ee.rch.verify.recurrence.v1";
+pub const RCH_VERIFY_TOPOLOGY_CLOSURE_AUDIT_SCHEMA_V1: &str = "ee.rch.topology_closure_audit.v1";
 pub const RCH_VERIFY_LEDGER_TAIL_MAX_BYTES: usize = 8192;
 pub const RCH_VERIFY_LEDGER_COMMAND_TEXT_MAX_BYTES: usize = 4096;
 pub const RCH_VERIFY_LEDGER_DEGRADED_JSON_MAX_BYTES: usize = 4096;
@@ -153,6 +155,83 @@ pub struct RchVerifyRecurrenceReport {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RchTopologyClosureAuditReport {
+    pub schema: &'static str,
+    pub status: &'static str,
+    pub source_state_hash: String,
+    pub manifest_hash: String,
+    pub path_dependency_count: usize,
+    pub root_category_counts: Vec<RchTopologyRootCategoryCount>,
+    pub roots: Vec<RchTopologyPathRootAudit>,
+    pub unresolved_topology_edges: Vec<RchTopologyUnresolvedEdge>,
+    pub source_materialization: Option<String>,
+    pub remote_source_materialized: Option<bool>,
+    pub local_fallback_refused: bool,
+    pub rch_runtime: RchTopologyRuntimeSummary,
+    pub refusal: Option<RchTopologyClosureRefusal>,
+    pub recovery_actions: Vec<RchTopologyClosureRecoveryAction>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RchTopologyRootCategoryCount {
+    pub category: String,
+    pub count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RchTopologyPathRootAudit {
+    pub dependency: String,
+    pub section: String,
+    pub path_hash: String,
+    pub path_evidence: String,
+    pub root_category: String,
+    pub expected_worker_mapping: String,
+    pub local_path_exists: Option<bool>,
+    pub canonical_escapes_project_root: Option<bool>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RchTopologyUnresolvedEdge {
+    pub code: String,
+    pub severity: &'static str,
+    pub evidence: String,
+    pub recovery_hint: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RchTopologyRuntimeSummary {
+    pub status: Option<String>,
+    pub client_version: Option<String>,
+    pub client_compat: Option<String>,
+    pub daemon_version: Option<String>,
+    pub daemon_compat: Option<String>,
+    pub compatibility: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RchTopologyClosureRefusal {
+    pub code: &'static str,
+    pub message: String,
+    pub blocker_string: Option<String>,
+    pub refused_before_cargo: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RchTopologyClosureRecoveryAction {
+    pub priority: u8,
+    pub kind: &'static str,
+    pub command: &'static str,
+    pub message: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RchVerifyLedgerStatusReport {
     pub schema: &'static str,
     pub status: &'static str,
@@ -240,6 +319,12 @@ pub enum RchVerifyLedgerParseError {
     CommandTextTooLong { bytes: usize, max: usize },
 }
 
+#[derive(Debug)]
+pub enum RchTopologyClosureAuditError {
+    Proof(RchVerifyLedgerParseError),
+    ManifestParse(String),
+}
+
 impl fmt::Display for RchVerifyLedgerParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -271,6 +356,30 @@ impl fmt::Display for RchVerifyLedgerParseError {
 }
 
 impl Error for RchVerifyLedgerParseError {}
+
+impl fmt::Display for RchTopologyClosureAuditError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Proof(source) => write!(f, "{source}"),
+            Self::ManifestParse(source) => write!(f, "failed to parse Cargo manifest: {source}"),
+        }
+    }
+}
+
+impl Error for RchTopologyClosureAuditError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Proof(source) => Some(source),
+            Self::ManifestParse(_) => None,
+        }
+    }
+}
+
+impl From<RchVerifyLedgerParseError> for RchTopologyClosureAuditError {
+    fn from(source: RchVerifyLedgerParseError) -> Self {
+        Self::Proof(source)
+    }
+}
 
 #[derive(Debug)]
 pub enum RchVerifyLedgerError {
@@ -533,6 +642,105 @@ pub fn classify_rch_verify_recurrence(
     })
 }
 
+/// Build a bounded, read-only path topology audit for an existing RCH proof.
+///
+/// The audit never runs Cargo or RCH. It combines the proof's source-state and
+/// blocker evidence with path dependencies declared in the supplied manifest so
+/// a caller can see whether remote source materialization is blocked by a path
+/// root that needs explicit worker topology handling.
+pub fn audit_rch_topology_closure(
+    value: &JsonValue,
+    manifest_text: &str,
+    manifest_dir: &Path,
+    canonical_project_root: Option<&Path>,
+) -> Result<RchTopologyClosureAuditReport, RchTopologyClosureAuditError> {
+    let row = parse_rch_verify_v1(value)?;
+    let path_deps = manifest_path_dependencies(manifest_text)?;
+    let roots = path_deps
+        .into_iter()
+        .map(|dependency| {
+            topology_root_audit_for_dependency(&dependency, manifest_dir, canonical_project_root)
+        })
+        .collect::<Vec<_>>();
+    let root_category_counts = root_category_counts(&roots);
+    let source_state = value.get("source_state").and_then(JsonValue::as_object);
+    let source_materialization = source_state
+        .and_then(|obj| obj.get("source_materialization"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .map(str::to_owned);
+    let remote_source_materialized = source_state
+        .and_then(|obj| obj.get("remote_source_materialized"))
+        .and_then(JsonValue::as_bool);
+    let error_codes = error_codes_from(value);
+    let blocker_string = first_line_with_any_code(row.stderr_tail.as_deref(), &error_codes)
+        .or_else(|| first_line_with_any_code(row.stdout_tail.as_deref(), &error_codes));
+    let combined_tail = combined_tail(row.stdout_tail.as_deref(), row.stderr_tail.as_deref());
+    let local_fallback_refused = value
+        .get("selector_admission_probe")
+        .and_then(JsonValue::as_object)
+        .and_then(|obj| obj.get("local_fallback_refused"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false)
+        || row
+            .degraded_codes
+            .iter()
+            .any(|code| code == "rch_verify_local_fallback_refused");
+    let topology_blocked = row
+        .degraded_codes
+        .iter()
+        .any(|code| code == "rch_verify_topology_blocked")
+        || error_codes.iter().any(|code| code == "RCH-E327");
+    let unresolved_topology_edges =
+        topology_unresolved_edges(&row.degraded_codes, &error_codes, &combined_tail, &roots);
+    let risky_root_present = roots
+        .iter()
+        .any(|root| !matches!(root.root_category.as_str(), "primary_project" | "dp_root"));
+    let refused = topology_blocked || !unresolved_topology_edges.is_empty() || risky_root_present;
+    let status = if refused {
+        "refused_unproven"
+    } else {
+        "closure_proven"
+    };
+    let refusal = refused.then(|| RchTopologyClosureRefusal {
+        code: "rch_topology_closure_unproven",
+        message: "RCH path dependency closure cannot be proven safe from the supplied proof and manifest; do not launch or close source proof until the unresolved topology edge is cleared.".to_owned(),
+        blocker_string,
+        refused_before_cargo: row.status == "blocked" && remote_source_materialized != Some(true),
+    });
+
+    Ok(RchTopologyClosureAuditReport {
+        schema: RCH_VERIFY_TOPOLOGY_CLOSURE_AUDIT_SCHEMA_V1,
+        status,
+        source_state_hash: row.source_state_hash,
+        manifest_hash: blake3_hex(manifest_text.as_bytes()),
+        path_dependency_count: roots.len(),
+        root_category_counts,
+        roots,
+        unresolved_topology_edges,
+        source_materialization,
+        remote_source_materialized,
+        local_fallback_refused,
+        rch_runtime: rch_runtime_summary(value),
+        refusal,
+        recovery_actions: vec![
+            RchTopologyClosureRecoveryAction {
+                priority: 1,
+                kind: "read_only_topology_audit",
+                command: "ee verify rch topology-audit --from-json proof.json --manifest Cargo.toml --json",
+                message: "Re-run the bounded audit after RCH topology or manifest evidence changes.",
+            },
+            RchTopologyClosureRecoveryAction {
+                priority: 2,
+                kind: "lane_doctor",
+                command: "scripts/rch_lane_doctor.sh --json",
+                message: "Inspect local RCH root mapping hints without launching Cargo.",
+            },
+        ],
+    })
+}
+
 /// Return the first tail line that carries one of the proof's extracted
 /// error codes, preserving the line exactly (only the trailing newline is
 /// trimmed) so downstream consumers can match the blocker verbatim.
@@ -544,6 +752,361 @@ fn first_line_with_any_code(tail: Option<&str>, error_codes: &[String]) -> Optio
     tail.lines()
         .find(|line| error_codes.iter().any(|code| line.contains(code.as_str())))
         .map(|line| line.trim_end().to_owned())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManifestPathDependency {
+    name: String,
+    section: String,
+    path: String,
+}
+
+fn manifest_path_dependencies(
+    manifest_text: &str,
+) -> Result<Vec<ManifestPathDependency>, RchTopologyClosureAuditError> {
+    let document = manifest_text
+        .parse::<DocumentMut>()
+        .map_err(|source| RchTopologyClosureAuditError::ManifestParse(source.to_string()))?;
+    let mut deps = Vec::new();
+    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(table) = document.get(section).and_then(Item::as_table) {
+            collect_manifest_dependency_table(section, table, &mut deps);
+        }
+    }
+    if let Some(patch) = document.get("patch").and_then(Item::as_table) {
+        for (registry, item) in patch.iter() {
+            if let Some(table) = item.as_table() {
+                let section = format!("patch.{registry}");
+                collect_manifest_dependency_table(&section, table, &mut deps);
+            }
+        }
+    }
+    if let Some(targets) = document.get("target").and_then(Item::as_table) {
+        for (target, item) in targets.iter() {
+            if let Some(target_table) = item.as_table() {
+                for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                    if let Some(table) = target_table.get(section).and_then(Item::as_table) {
+                        let target_section = format!("target.{target}.{section}");
+                        collect_manifest_dependency_table(&target_section, table, &mut deps);
+                    }
+                }
+            }
+        }
+    }
+    deps.sort_by(|left, right| {
+        left.section
+            .cmp(&right.section)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    deps.dedup();
+    Ok(deps)
+}
+
+fn collect_manifest_dependency_table(
+    section: &str,
+    table: &Table,
+    deps: &mut Vec<ManifestPathDependency>,
+) {
+    for (name, item) in table.iter() {
+        if let Some(path) = dependency_path(item) {
+            deps.push(ManifestPathDependency {
+                name: name.to_owned(),
+                section: section.to_owned(),
+                path,
+            });
+        }
+    }
+}
+
+fn dependency_path(item: &Item) -> Option<String> {
+    item.as_table()
+        .and_then(|table| table.get("path"))
+        .and_then(Item::as_str)
+        .or_else(|| {
+            item.as_inline_table()
+                .and_then(|table| table.get("path"))
+                .and_then(|value| value.as_str())
+        })
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .map(str::to_owned)
+}
+
+fn topology_root_audit_for_dependency(
+    dependency: &ManifestPathDependency,
+    manifest_dir: &Path,
+    canonical_project_root: Option<&Path>,
+) -> RchTopologyPathRootAudit {
+    let raw_path = dependency.path.as_str();
+    let local_path = if Path::new(raw_path).is_absolute() {
+        PathBuf::from(raw_path)
+    } else {
+        manifest_dir.join(raw_path)
+    };
+    let canonical = std::fs::canonicalize(&local_path).ok();
+    let canonical_escapes_project_root = canonical_project_root.and_then(|root| {
+        canonical
+            .as_ref()
+            .map(|canonical| !path_starts_with(canonical, root))
+    });
+    let root_category =
+        classify_topology_root(raw_path, canonical.as_deref(), canonical_project_root);
+    RchTopologyPathRootAudit {
+        dependency: dependency.name.clone(),
+        section: dependency.section.clone(),
+        path_hash: blake3_hex(raw_path.as_bytes()),
+        path_evidence: redacted_path_evidence(raw_path),
+        expected_worker_mapping: expected_worker_mapping_for_category(root_category.as_str()),
+        root_category,
+        local_path_exists: Some(local_path.exists()),
+        canonical_escapes_project_root,
+    }
+}
+
+fn classify_topology_root(
+    raw_path: &str,
+    canonical: Option<&Path>,
+    canonical_project_root: Option<&Path>,
+) -> String {
+    let normalized = raw_path.replace('\\', "/");
+    if normalized.starts_with("/data/projects/") {
+        return "absolute_data_projects_root".to_owned();
+    }
+    if normalized == "/dp" || normalized.starts_with("/dp/") {
+        return "dp_root".to_owned();
+    }
+    if let (Some(canonical), Some(project_root)) = (canonical, canonical_project_root)
+        && !path_starts_with(canonical, project_root)
+        && normalized.starts_with("../")
+    {
+        return "symlinked_sibling_escaping_canonical_root".to_owned();
+    }
+    if normalized.starts_with("../") && franken_stack_sibling(&normalized).is_some() {
+        return "franken_stack_sibling".to_owned();
+    }
+    if normalized.starts_with("../") {
+        return "sibling_under_canonical_project_root".to_owned();
+    }
+    if Path::new(raw_path).is_absolute() {
+        return "external_unsupported_root".to_owned();
+    }
+    "primary_project".to_owned()
+}
+
+fn path_starts_with(path: &Path, root: &Path) -> bool {
+    let normalize_components = |path: &Path| {
+        path.components()
+            .filter(|component| !matches!(component, Component::CurDir))
+            .collect::<Vec<_>>()
+    };
+    let path_components = normalize_components(path);
+    let root_components = normalize_components(root);
+    path_components.starts_with(&root_components)
+}
+
+fn franken_stack_sibling(normalized: &str) -> Option<&'static str> {
+    let sibling = normalized.trim_start_matches("../").split('/').next()?;
+    match sibling {
+        "asupersync"
+        | "franken_agent_detection"
+        | "franken_networkx"
+        | "frankensearch"
+        | "frankensqlite"
+        | "sqlmodel_rust"
+        | "toon_rust" => Some(sibling),
+        _ => None,
+    }
+}
+
+fn redacted_path_evidence(raw_path: &str) -> String {
+    let normalized = raw_path.replace('\\', "/");
+    if normalized.starts_with("/data/projects/") {
+        return normalized;
+    }
+    if normalized == "/dp" || normalized.starts_with("/dp/") {
+        return normalized;
+    }
+    if let Some(sibling) = franken_stack_sibling(&normalized) {
+        return format!("relative_parent:{sibling}");
+    }
+    if normalized.starts_with("../") {
+        return "relative_parent:<hashed>".to_owned();
+    }
+    if Path::new(raw_path).is_absolute() {
+        return "absolute_external:<hashed>".to_owned();
+    }
+    normalized
+}
+
+fn expected_worker_mapping_for_category(category: &str) -> String {
+    match category {
+        "primary_project" => "sync_tree/project_root".to_owned(),
+        "dp_root" => "worker_global_dp_root".to_owned(),
+        "absolute_data_projects_root" => {
+            "worker_absolute_data_projects_or_alias_rewrite_required".to_owned()
+        }
+        "symlinked_sibling_escaping_canonical_root" => {
+            "recreate_link_or_sync_target_inside_worker_projects_root".to_owned()
+        }
+        "franken_stack_sibling" | "sibling_under_canonical_project_root" => {
+            "sibling_root_sync_under_worker_projects_root_required".to_owned()
+        }
+        _ => "unsupported_without_explicit_rch_topology_admission".to_owned(),
+    }
+}
+
+fn root_category_counts(roots: &[RchTopologyPathRootAudit]) -> Vec<RchTopologyRootCategoryCount> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for root in roots {
+        *counts.entry(root.root_category.clone()).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(category, count)| RchTopologyRootCategoryCount { category, count })
+        .collect()
+}
+
+fn error_codes_from(value: &JsonValue) -> Vec<String> {
+    let mut codes = value
+        .get("error_codes")
+        .and_then(JsonValue::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .map(str::trim)
+                .filter(|raw| !raw.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    codes.sort();
+    codes.dedup();
+    codes
+}
+
+fn combined_tail(stdout_tail: Option<&str>, stderr_tail: Option<&str>) -> String {
+    [
+        stdout_tail.unwrap_or_default(),
+        stderr_tail.unwrap_or_default(),
+    ]
+    .join("\n")
+}
+
+fn topology_unresolved_edges(
+    degraded_codes: &[String],
+    error_codes: &[String],
+    combined_tail: &str,
+    roots: &[RchTopologyPathRootAudit],
+) -> Vec<RchTopologyUnresolvedEdge> {
+    let lower_tail = combined_tail.to_ascii_lowercase();
+    let mut edges = BTreeMap::<String, RchTopologyUnresolvedEdge>::new();
+    let topology_blocked = degraded_codes
+        .iter()
+        .any(|code| code == "rch_verify_topology_blocked")
+        || error_codes.iter().any(|code| code == "RCH-E327");
+
+    if topology_blocked
+        && roots.iter().any(|root| {
+            matches!(
+                root.root_category.as_str(),
+                "symlinked_sibling_escaping_canonical_root" | "franken_stack_sibling"
+            )
+        })
+    {
+        edges.insert(
+            "symlinked_sibling_escaping_canonical_root".to_owned(),
+            RchTopologyUnresolvedEdge {
+                code: "symlinked_sibling_escaping_canonical_root".to_owned(),
+                severity: "high",
+                evidence: "RCH-E327 topology blocker with franken-stack parent path dependency roots".to_owned(),
+                recovery_hint: "Admit the symlink target into the RCH sync closure or recreate the link against worker-local /data/projects roots before running Cargo proof.".to_owned(),
+            },
+        );
+    }
+
+    if topology_blocked
+        && roots
+            .iter()
+            .any(|root| root.root_category == "absolute_data_projects_root")
+    {
+        edges.insert(
+            "absolute_data_projects_root_requires_worker_alias".to_owned(),
+            RchTopologyUnresolvedEdge {
+                code: "absolute_data_projects_root_requires_worker_alias".to_owned(),
+                severity: "high",
+                evidence: "Manifest includes an absolute /data/projects path dependency while the proof is topology-blocked".to_owned(),
+                recovery_hint: "Confirm worker /data/projects availability or rewrite the dependency through an admitted alias root.".to_owned(),
+            },
+        );
+    }
+
+    if lower_tail.contains("sun_len") || lower_tail.contains("path must be shorter than sun_len") {
+        edges.insert(
+            "tmpdir_rewrite_exceeds_sun_len".to_owned(),
+            RchTopologyUnresolvedEdge {
+                code: "tmpdir_rewrite_exceeds_sun_len".to_owned(),
+                severity: "high",
+                evidence: "Proof tail reports Unix socket path length overflow after TMPDIR rewrite".to_owned(),
+                recovery_hint: "Use a short worker TMPDIR for socket-binding tests before launching daemon proof.".to_owned(),
+            },
+        );
+    }
+
+    if lower_tail.contains("no space left on device") || lower_tail.contains("enospc") {
+        edges.insert(
+            "job_target_dir_accumulation".to_owned(),
+            RchTopologyUnresolvedEdge {
+                code: "job_target_dir_accumulation".to_owned(),
+                severity: "high",
+                evidence: "Proof tail reports worker disk exhaustion".to_owned(),
+                recovery_hint:
+                    "Prune or reuse worker job target directories before retrying RCH proof."
+                        .to_owned(),
+            },
+        );
+    }
+
+    edges.into_values().collect()
+}
+
+fn rch_runtime_summary(value: &JsonValue) -> RchTopologyRuntimeSummary {
+    let runtime = value.get("rch_runtime").and_then(JsonValue::as_object);
+    let status = runtime
+        .and_then(|obj| obj.get("status"))
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
+    let client_version = runtime
+        .and_then(|obj| obj.get("client_version"))
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
+    let client_compat = runtime
+        .and_then(|obj| obj.get("client_compat"))
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
+    let daemon_version = runtime
+        .and_then(|obj| obj.get("daemon_version"))
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
+    let daemon_compat = runtime
+        .and_then(|obj| obj.get("daemon_compat"))
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
+    let compatibility = match (client_compat.as_deref(), daemon_compat.as_deref()) {
+        (Some(client), Some(daemon)) if client == daemon => "matched",
+        (Some(_), Some(_)) => "mismatched",
+        (Some(_), None) | (None, Some(_)) => "partial",
+        (None, None) => "unknown",
+    };
+    RchTopologyRuntimeSummary {
+        status,
+        client_version,
+        client_compat,
+        daemon_version,
+        daemon_compat,
+        compatibility,
+    }
 }
 
 /// Parse and ingest one RCH verifier proof into the durable ledger.
@@ -1267,6 +1830,96 @@ mod tests {
                 "recurrence report must serialize stable field {key}"
             );
         }
+    }
+
+    #[test]
+    fn topology_closure_audit_refuses_franken_stack_topology_gap() {
+        let mut proof = blocked_topology_recurrence_proof();
+        proof["rch_runtime"] = json!({
+            "status": "checked",
+            "client_version": "0.9.1",
+            "client_compat": "0.9",
+            "daemon_version": "0.9.1",
+            "daemon_compat": "0.9"
+        });
+        let manifest = r#"
+[dependencies]
+fnx-runtime = { version = "0.1.0", path = "../franken_networkx/crates/fnx-runtime" }
+frankensearch = { version = "0.3.0", path = "../frankensearch/frankensearch" }
+asupersync = { version = "0.3.4", path = "/data/projects/asupersync" }
+
+[dev-dependencies]
+fsqlite = { path = "../frankensqlite/crates/fsqlite" }
+"#;
+
+        let report = audit_rch_topology_closure(
+            &proof,
+            manifest,
+            Path::new("/Users/jemanuel/projects/eidetic_engine_cli"),
+            Some(Path::new("/Users/jemanuel/projects")),
+        )
+        .expect("audit");
+
+        assert_eq!(report.schema, RCH_VERIFY_TOPOLOGY_CLOSURE_AUDIT_SCHEMA_V1);
+        assert_eq!(report.status, "refused_unproven");
+        assert_eq!(report.path_dependency_count, 4);
+        assert_eq!(report.source_state_hash.len(), 64);
+        assert_eq!(report.manifest_hash.len(), 64);
+        assert_eq!(report.source_materialization.as_deref(), Some("none"));
+        assert_eq!(report.remote_source_materialized, Some(false));
+        assert!(report.local_fallback_refused);
+        assert_eq!(report.rch_runtime.compatibility, "matched");
+        assert!(report.roots.iter().any(|root| root.path_evidence
+            == "relative_parent:franken_networkx"
+            && root.root_category == "franken_stack_sibling"));
+        assert!(report.roots.iter().any(|root| {
+            root.path_evidence == "/data/projects/asupersync"
+                && root.root_category == "absolute_data_projects_root"
+        }));
+        let edge_codes = report
+            .unresolved_topology_edges
+            .iter()
+            .map(|edge| edge.code.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(edge_codes.contains("symlinked_sibling_escaping_canonical_root"));
+        assert!(edge_codes.contains("absolute_data_projects_root_requires_worker_alias"));
+        let refusal = report.refusal.expect("refusal");
+        assert_eq!(refusal.code, "rch_topology_closure_unproven");
+        assert!(refusal.refused_before_cargo);
+        assert!(
+            refusal
+                .blocker_string
+                .as_deref()
+                .is_some_and(|line| line.contains("RCH-E327"))
+        );
+    }
+
+    #[test]
+    fn topology_closure_audit_accepts_primary_project_path_roots() {
+        let mut proof = baseline_success();
+        proof["source_state"]["remote_source_materialized"] = json!(true);
+        proof["source_state"]["source_materialization"] = json!("git_archive");
+        let manifest = r#"
+[dependencies]
+determinism = { version = "0.1.0", path = "crates/determinism" }
+"#;
+
+        let report = audit_rch_topology_closure(
+            &proof,
+            manifest,
+            Path::new("/repo/eidetic_engine_cli"),
+            Some(Path::new("/repo")),
+        )
+        .expect("audit");
+
+        assert_eq!(report.status, "closure_proven");
+        assert_eq!(report.path_dependency_count, 1);
+        assert_eq!(
+            report.roots[0].expected_worker_mapping,
+            "sync_tree/project_root"
+        );
+        assert!(report.unresolved_topology_edges.is_empty());
+        assert!(report.refusal.is_none());
     }
 
     #[test]

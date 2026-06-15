@@ -281,8 +281,9 @@ use crate::core::verify::{
     verify_bounded_provenance,
 };
 use crate::core::verify_ledger::{
-    RchVerifyBlockersReport, RchVerifyIngestReport, RchVerifyLedgerError,
-    RchVerifyLedgerParseError, RchVerifyRunsReport, ingest_rch_verify_v1, list_rch_verify_blockers,
+    RchTopologyClosureAuditError, RchTopologyClosureAuditReport, RchVerifyBlockersReport,
+    RchVerifyIngestReport, RchVerifyLedgerError, RchVerifyLedgerParseError, RchVerifyRunsReport,
+    audit_rch_topology_closure, ingest_rch_verify_v1, list_rch_verify_blockers,
     list_rch_verify_runs,
 };
 use crate::core::why::{WhyOptions, explain_memory};
@@ -6362,6 +6363,8 @@ pub enum VerifyRchCommand {
     Blockers(VerifyRchBlockersArgs),
     /// List stored RCH verification runs without running Cargo or rch.
     Runs(VerifyRchRunsArgs),
+    /// Audit RCH path-dependency topology closure without running Cargo or rch.
+    TopologyAudit(VerifyRchTopologyAuditArgs),
 }
 
 /// Subcommands for `ee verify closeout`.
@@ -6579,6 +6582,25 @@ pub struct VerifyRchBlockersArgs {
     /// Explicit database path.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee verify rch topology-audit`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct VerifyRchTopologyAuditArgs {
+    /// Path to an `ee.rch.verify.v1` proof JSON file, or `-` for stdin.
+    #[arg(
+        long = "from-json",
+        alias = "input",
+        alias = "file",
+        value_name = "PATH|-"
+    )]
+    pub from_json: String,
+    /// Cargo manifest to inspect. Relative paths resolve against --workspace.
+    #[arg(long = "manifest", value_name = "PATH", default_value = "Cargo.toml")]
+    pub manifest: PathBuf,
+    /// Canonical project root used by RCH topology admission.
+    #[arg(long = "canonical-project-root", value_name = "PATH")]
+    pub canonical_project_root: Option<PathBuf>,
 }
 
 /// Arguments for `ee verification ingest`.
@@ -13651,6 +13673,9 @@ where
         Some(Command::Verify(VerifyCommand::Rch(VerifyRchCommand::Blockers(ref args)))) => {
             handle_verify_rch_blockers(&cli, args, stdout, stderr)
         }
+        Some(Command::Verify(VerifyCommand::Rch(VerifyRchCommand::TopologyAudit(ref args)))) => {
+            handle_verify_rch_topology_audit(&cli, args, stdout, stderr)
+        }
         Some(Command::Verify(VerifyCommand::Proofs(ref args))) => {
             handle_verify_proofs(&cli, args, stdout, stderr)
         }
@@ -13681,6 +13706,9 @@ where
         Some(Command::Verification(VerifyCommand::Rch(VerifyRchCommand::Blockers(ref args)))) => {
             handle_verify_rch_blockers(&cli, args, stdout, stderr)
         }
+        Some(Command::Verification(VerifyCommand::Rch(VerifyRchCommand::TopologyAudit(
+            ref args,
+        )))) => handle_verify_rch_topology_audit(&cli, args, stdout, stderr),
         Some(Command::Verification(VerifyCommand::Proofs(ref args))) => {
             handle_verify_proofs(&cli, args, stdout, stderr)
         }
@@ -42361,6 +42389,79 @@ where
     }
 }
 
+fn handle_verify_rch_topology_audit<W, E>(
+    cli: &Cli,
+    args: &VerifyRchTopologyAuditArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let input = match read_rch_verify_json_input(&args.from_json) {
+        Ok(input) => input,
+        Err(error) => {
+            let domain_error = rch_verify_usage_error(
+                "rch_verify_input_unreadable",
+                error,
+                "pass --from-json <path> or --from-json -",
+            );
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let value = match serde_json::from_str::<serde_json::Value>(&input) {
+        Ok(value) => value,
+        Err(error) => {
+            let domain_error = rch_verify_usage_error(
+                "rch_verify_json_malformed",
+                format!("RCH verifier proof input is not valid JSON: {error}"),
+                "provide one ee.rch.verify.v1 JSON object",
+            );
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let workspace = cli.resolve_workspace();
+    let manifest_path = if args.manifest.is_absolute() {
+        args.manifest.clone()
+    } else {
+        workspace.join(&args.manifest)
+    };
+    let manifest_text = match fs::read_to_string(&manifest_path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            let domain_error = rch_verify_usage_error(
+                "rch_topology_manifest_unreadable",
+                format!(
+                    "Failed to read Cargo manifest '{}': {error}",
+                    manifest_path.display()
+                ),
+                "pass --manifest <Cargo.toml>",
+            );
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let manifest_dir = manifest_path.parent().unwrap_or(workspace.as_path());
+    let canonical_project_root = args
+        .canonical_project_root
+        .as_deref()
+        .or_else(|| workspace.parent());
+
+    match audit_rch_topology_closure(&value, &manifest_text, manifest_dir, canonical_project_root) {
+        Ok(report) => write_verify_rch_report(
+            cli,
+            "verify rch topology-audit",
+            &report,
+            render_verify_rch_topology_audit_human(&report),
+            stdout,
+        ),
+        Err(error) => {
+            let domain_error = rch_topology_audit_error_to_domain(error);
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
 fn read_rch_verify_json_input(from_json: &str) -> Result<String, String> {
     if from_json == "-" {
         let mut input = String::new();
@@ -42446,6 +42547,15 @@ fn render_verify_rch_blockers_human(report: &RchVerifyBlockersReport) -> String 
     )
 }
 
+fn render_verify_rch_topology_audit_human(report: &RchTopologyClosureAuditReport) -> String {
+    format!(
+        "verify rch topology-audit\n  Status: {}\n  Path dependencies: {}\n  Unresolved topology edges: {}\n",
+        report.status,
+        report.path_dependency_count,
+        report.unresolved_topology_edges.len()
+    )
+}
+
 fn rch_verify_usage_error(
     code: &'static str,
     message: impl Into<String>,
@@ -42502,6 +42612,17 @@ fn rch_verify_parse_error_to_domain(error: RchVerifyLedgerParseError) -> DomainE
             ]
         })
         .to_string(),
+    }
+}
+
+fn rch_topology_audit_error_to_domain(error: RchTopologyClosureAuditError) -> DomainError {
+    match error {
+        RchTopologyClosureAuditError::Proof(source) => rch_verify_parse_error_to_domain(source),
+        RchTopologyClosureAuditError::ManifestParse(source) => rch_verify_usage_error(
+            "rch_topology_manifest_malformed",
+            source,
+            "fix the Cargo.toml syntax or pass --manifest <path>",
+        ),
     }
 }
 
@@ -57880,6 +58001,9 @@ impl NormalizedInvocation {
                     VerifyCommand::Rch(VerifyRchCommand::Blockers(_)) => {
                         "verify rch blockers".to_string()
                     }
+                    VerifyCommand::Rch(VerifyRchCommand::TopologyAudit(_)) => {
+                        "verify rch topology-audit".to_string()
+                    }
                     VerifyCommand::Proofs(_) => "verify proofs".to_string(),
                     VerifyCommand::Provenance(_) => "verify provenance".to_string(),
                     VerifyCommand::Broker(VerifyBrokerCommand::Lookup(_)) => {
@@ -57901,6 +58025,9 @@ impl NormalizedInvocation {
                     }
                     VerifyCommand::Rch(VerifyRchCommand::Blockers(_)) => {
                         "verification rch blockers".to_string()
+                    }
+                    VerifyCommand::Rch(VerifyRchCommand::TopologyAudit(_)) => {
+                        "verification rch topology-audit".to_string()
                     }
                     VerifyCommand::Proofs(_) => "verification proofs".to_string(),
                     VerifyCommand::Provenance(_) => "verification provenance".to_string(),
@@ -62978,9 +63105,41 @@ mod tests {
         })?;
         match blockers {
             Some(Command::Verification(VerifyCommand::Rch(VerifyRchCommand::Blockers(args)))) => {
-                ensure_equal(&args.bead_id, &Some("bd-17awb".to_owned()), "bead id")
+                ensure_equal(&args.bead_id, &Some("bd-17awb".to_owned()), "bead id")?;
             }
-            other => Err(format!("expected verification rch blockers, got {other:?}")),
+            other => return Err(format!("expected verification rch blockers, got {other:?}")),
+        }
+
+        let topology_audit = Cli::try_parse_from([
+            "ee",
+            "verify",
+            "rch",
+            "topology-audit",
+            "--from-json",
+            "proof.json",
+            "--manifest",
+            "Cargo.toml",
+            "--canonical-project-root",
+            "/Users/jemanuel/projects",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| {
+            format!(
+                "failed to parse verify rch topology-audit: {:?}",
+                error.kind()
+            )
+        })?;
+        match topology_audit {
+            Some(Command::Verify(VerifyCommand::Rch(VerifyRchCommand::TopologyAudit(args)))) => {
+                ensure_equal(&args.from_json, &"proof.json".to_owned(), "from-json")?;
+                ensure_equal(&args.manifest, &PathBuf::from("Cargo.toml"), "manifest")?;
+                ensure_equal(
+                    &args.canonical_project_root,
+                    &Some(PathBuf::from("/Users/jemanuel/projects")),
+                    "canonical project root",
+                )
+            }
+            other => Err(format!("expected verify rch topology-audit, got {other:?}")),
         }
     }
 
