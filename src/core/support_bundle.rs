@@ -6857,6 +6857,7 @@ mod tests {
         InstallPermissionStatus, InstallTarget, PathBinary, UpdateSourcePosture,
     };
     use std::collections::BTreeMap;
+    use crate::testing::ensure;
 
     type TestResult = Result<(), String>;
     const SUPPORT_BUNDLE_ATTESTATION_SUMMARY_SCHEMA_TEXT: &str = include_str!(
