@@ -922,6 +922,170 @@ run_ask_fixture_smoke() {
     echo "[+] ask v1 smoke: answerable=${answerable_ms}ms abstention=${abstention_ms}ms status=$abstention_status artifacts=$ask_root" >&2
 }
 
+run_journal_capture_smoke() {
+    echo "" >&2
+    echo "[*] Journal capture smoke (bd-1pi9m.6: append, batch, distill)..." >&2
+
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[-] jq is required for journal capture smoke measurement" >&2
+        append_smoke_failure "ee_journal_append_single"
+        append_smoke_failure "ee_journal_append_batch_50"
+        append_smoke_failure "ee_journal_distill_200"
+        FAILED=true
+        return
+    fi
+
+    if [ ! -x "$EE_BIN" ]; then
+        echo "[*] Building ee binary for journal capture smoke workload..." >&2
+        if ! cargo build --release --bin ee >&2; then
+            echo "[-] ee binary build failed" >&2
+            append_smoke_failure "ee_journal_append_single"
+            append_smoke_failure "ee_journal_append_batch_50"
+            append_smoke_failure "ee_journal_distill_200"
+            FAILED=true
+            return
+        fi
+    fi
+
+    journal_root="$ARTIFACT_DIR/journal-capture-smoke-$$-$(date -u +%Y%m%dT%H%M%SZ)"
+    journal_workspace="$journal_root/workspace"
+    journal_artifacts="$journal_root/artifacts"
+    journal_cmd="cargo test --lib journal_capture"
+    mkdir -p "$journal_workspace" "$journal_artifacts"
+
+    run_journal_smoke_command() {
+        step="$1"
+        shift
+        step_slug=$(printf '%s' "$step" | sed 's/[^A-Za-z0-9_]/_/g')
+        LAST_STDOUT_FILE="$journal_artifacts/$step_slug.stdout.json"
+        LAST_STDERR_FILE="$journal_artifacts/$step_slug.stderr.log"
+        start_ns=$(now_ns)
+        if "$EE_BIN" "$@" >"$LAST_STDOUT_FILE" 2>"$LAST_STDERR_FILE"; then
+            LAST_EXIT_CODE=0
+        else
+            LAST_EXIT_CODE=$?
+        fi
+        end_ns=$(now_ns)
+        LAST_ELAPSED_MS=$(elapsed_ms "$start_ns" "$end_ns")
+        if [ "$LAST_EXIT_CODE" -ne 0 ]; then
+            echo "[-] $step failed with exit $LAST_EXIT_CODE; stdout=$LAST_STDOUT_FILE stderr=$LAST_STDERR_FILE" >&2
+            return 1
+        fi
+        if ! jq -e . "$LAST_STDOUT_FILE" >/dev/null 2>&1; then
+            echo "[-] $step stdout is not JSON; stdout=$LAST_STDOUT_FILE" >&2
+            return 1
+        fi
+        return 0
+    }
+
+    if ! run_journal_smoke_command init --workspace "$journal_workspace" --json init; then
+        append_smoke_failure "ee_journal_append_single"
+        append_smoke_failure "ee_journal_append_batch_50"
+        append_smoke_failure "ee_journal_distill_200"
+        FAILED=true
+        return
+    fi
+
+    single_session="journal-bench-single-$$"
+    if ! run_journal_smoke_command append-single \
+        --workspace "$journal_workspace" journal append \
+        "journal benchmark single command failure: linker cache missing object" \
+        --kind command_failure \
+        --source hook \
+        --cmd "$journal_cmd" \
+        --exit-code 101 \
+        --cwd "$journal_workspace" \
+        --stderr-tail "error: linker cache missing object" \
+        --session "$single_session" \
+        --json; then
+        append_smoke_failure "ee_journal_append_single"
+        FAILED=true
+        return
+    fi
+    if ! jq -e '.success == true and .data.status == "stored" and (.data.entry.entryId // "" | startswith("jrn_"))' \
+        "$LAST_STDOUT_FILE" >/dev/null 2>&1; then
+        echo "[-] journal append smoke did not store one entry; stdout=$LAST_STDOUT_FILE" >&2
+        append_smoke_failure "ee_journal_append_single"
+        FAILED=true
+        return
+    fi
+    append_result "ee_journal_append_single" "measured" "$LAST_ELAPSED_MS" "$LAST_ELAPSED_MS" "$LAST_ELAPSED_MS" "$LAST_ELAPSED_MS" null "advisory_fixture_smoke"
+
+    batch_rows="$journal_artifacts/batch_50.jsonl"
+    batch_session="journal-bench-batch-$$"
+    i=1
+    while [ "$i" -le 50 ]; do
+        jq -nc \
+            --arg session "$batch_session" \
+            --arg cwd "$journal_workspace" \
+            --arg cmd "$journal_cmd" \
+            --arg body "journal benchmark batch command failure $i: linker cache missing object" \
+            '{body:$body,kind:"command_failure",sessionKey:$session,cmd:$cmd,exitCode:101,cwd:$cwd,paths:["src/core/journal.rs"],stderrTail:"error: linker cache missing object"}'
+        i=$((i + 1))
+    done >"$batch_rows"
+
+    LAST_STDOUT_FILE="$journal_artifacts/append_batch_50.stdout.json"
+    LAST_STDERR_FILE="$journal_artifacts/append_batch_50.stderr.log"
+    start_ns=$(now_ns)
+    if "$EE_BIN" --workspace "$journal_workspace" journal append --stdin --source stdin --json \
+        <"$batch_rows" >"$LAST_STDOUT_FILE" 2>"$LAST_STDERR_FILE"; then
+        LAST_EXIT_CODE=0
+    else
+        LAST_EXIT_CODE=$?
+    fi
+    end_ns=$(now_ns)
+    LAST_ELAPSED_MS=$(elapsed_ms "$start_ns" "$end_ns")
+    if [ "$LAST_EXIT_CODE" -ne 0 ] \
+        || ! jq -e '.success == true and .data.lineCount == 50 and .data.storedCount == 50 and .data.failedCount == 0' \
+            "$LAST_STDOUT_FILE" >/dev/null 2>&1; then
+        echo "[-] journal batch smoke failed; stdout=$LAST_STDOUT_FILE stderr=$LAST_STDERR_FILE" >&2
+        append_smoke_failure "ee_journal_append_batch_50"
+        FAILED=true
+        return
+    fi
+    append_result "ee_journal_append_batch_50" "measured" "$LAST_ELAPSED_MS" "$LAST_ELAPSED_MS" "$LAST_ELAPSED_MS" "$LAST_ELAPSED_MS" null "advisory_fixture_smoke"
+
+    distill_rows="$journal_artifacts/distill_200.jsonl"
+    distill_session="journal-bench-distill-$$"
+    i=1
+    while [ "$i" -le 200 ]; do
+        jq -nc \
+            --arg session "$distill_session" \
+            --arg cwd "$journal_workspace" \
+            --arg cmd "$journal_cmd" \
+            --arg body "journal benchmark distill repeated cargo failure $i: linker cache missing object after retry" \
+            '{body:$body,kind:"command_failure",sessionKey:$session,cmd:$cmd,exitCode:101,cwd:$cwd,paths:["src/core/journal.rs"],stderrTail:"error: linker cache missing object"}'
+        i=$((i + 1))
+    done >"$distill_rows"
+
+    if ! "$EE_BIN" --workspace "$journal_workspace" journal append --stdin --source stdin --json \
+        <"$distill_rows" >"$journal_artifacts/distill_seed.stdout.json" 2>"$journal_artifacts/distill_seed.stderr.log"; then
+        echo "[-] journal distill seed failed; stdout=$journal_artifacts/distill_seed.stdout.json stderr=$journal_artifacts/distill_seed.stderr.log" >&2
+        append_smoke_failure "ee_journal_distill_200"
+        FAILED=true
+        return
+    fi
+
+    if ! run_journal_smoke_command distill-200 \
+        --workspace "$journal_workspace" journal distill \
+        --session "$distill_session" \
+        --dry-run \
+        --json; then
+        append_smoke_failure "ee_journal_distill_200"
+        FAILED=true
+        return
+    fi
+    if ! jq -e '.success == true and .data.schema == "ee.journal.distill.v1" and .data.scannedCount == 200 and ((.data.proposals // []) | length) >= 1' \
+        "$LAST_STDOUT_FILE" >/dev/null 2>&1; then
+        echo "[-] journal distill smoke did not produce a 200-entry proposal report; stdout=$LAST_STDOUT_FILE" >&2
+        append_smoke_failure "ee_journal_distill_200"
+        FAILED=true
+        return
+    fi
+    append_result "ee_journal_distill_200" "measured" "$LAST_ELAPSED_MS" "$LAST_ELAPSED_MS" "$LAST_ELAPSED_MS" "$LAST_ELAPSED_MS" null "advisory_fixture_smoke"
+    echo "[+] journal capture smoke: single append, 50-line batch, distill-200 artifacts=$journal_root" >&2
+}
+
 append_auto_enroll_baseline_rows() {
     if ! command -v jq >/dev/null 2>&1; then
         echo "[-] jq is required for auto-enroll baseline profile" >&2
@@ -982,6 +1146,7 @@ fi
 if [ "$PROFILE" = "ci-smoke" ]; then
     run_pack_replay_freshness_smoke
     run_ask_fixture_smoke
+    run_journal_capture_smoke
     run_primer_smoke
 fi
 

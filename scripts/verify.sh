@@ -1127,6 +1127,13 @@ run_stage "Dueling Wizards Typed Kinds E2E" "./scripts/e2e_typed_kinds.sh"
 # ee.test_event.v1 evidence artifacts.
 run_stage "Ask E2E (bd-169v0.5)" "./scripts/e2e_ask.sh"
 
+# Gate 6.126: Journal capture/distillation real-binary E2E (bd-1pi9m.6).
+# No-Cargo: appends hook/stdin journal entries, proves redaction before
+# persistence, distills repeated failures, applies the candidate, then checks
+# search, pack-item outcome feedback, and outcome trace with ee.test_event.v1
+# evidence.
+run_stage "Journal Capture E2E (bd-1pi9m.6)" "./scripts/e2e_journal_capture.sh"
+
 # Gate 6.13: Dueling Wizards docs-bootstrap real-binary E2E (bd-1n0np.11.5).
 # Proves ee bootstrap docs --dry-run structural candidates (spans/hashes/anchors/
 # specificity), determinism, guard-rail rejection (oversize/symlink/missing as

@@ -24,6 +24,7 @@ benches = [
   "daemon_dispatch",
   "daemon_round_trip",
   "pack_replay_freshness_smoke",
+  "journal_capture_smoke",
 ]
 sample_size = 10
 measurement_time_secs = 0.5
@@ -173,6 +174,21 @@ description = "Render worst-case ee why TOON and enforce the compact graph-badge
 p50_ms_max = 8.0
 p99_ms_max = 30.0
 description = "Record helpful/harmful feedback"
+
+[operations.ee_journal_append_single]
+p50_ms_max = 10.0
+p99_ms_max = 30.0
+description = "Append one redaction-screened agent journal entry on the hook path"
+
+[operations.ee_journal_append_batch_50]
+p50_ms_max = 150.0
+p99_ms_max = 600.0
+description = "Append a 50-line JSONL journal batch while preserving per-line isolation"
+
+[operations.ee_journal_distill_200]
+p50_ms_max = 1200.0
+p99_ms_max = 4000.0
+description = "Run journal distill --dry-run over a deterministic 200-entry repeated-failure fixture"
 
 [operations.ee_status]
 p50_ms_max = 30.0
