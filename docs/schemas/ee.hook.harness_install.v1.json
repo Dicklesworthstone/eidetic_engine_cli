@@ -19,6 +19,7 @@
     "snippets",
     "plan",
     "capabilityGaps",
+    "installAudit",
     "generatedAt"
   ],
   "properties": {
@@ -117,6 +118,125 @@
         },
         "additionalProperties": false
       }
+    },
+    "installAudit": {
+      "type": "object",
+      "required": [
+        "status",
+        "readOnly",
+        "configPresent",
+        "configWritable",
+        "hookPresentCount",
+        "hookFreshCount",
+        "hookStaleCount",
+        "hookMissingCount",
+        "findings",
+        "repairPlan",
+        "docs"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "missing_hook",
+            "stale_hook",
+            "unsupported_harness_version",
+            "config_not_writable",
+            "fresh"
+          ]
+        },
+        "readOnly": { "const": true },
+        "configPresent": { "type": "boolean" },
+        "configWritable": { "type": "boolean" },
+        "hookPresentCount": { "type": "integer", "minimum": 0 },
+        "hookFreshCount": { "type": "integer", "minimum": 0 },
+        "hookStaleCount": { "type": "integer", "minimum": 0 },
+        "hookMissingCount": { "type": "integer", "minimum": 0 },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "code",
+              "status",
+              "event",
+              "matcher",
+              "targetPath",
+              "message",
+              "repair"
+            ],
+            "properties": {
+              "code": {
+                "enum": [
+                  "missing_hook",
+                  "stale_hook",
+                  "hook_present_fresh",
+                  "unsupported_harness_version",
+                  "config_not_writable",
+                  "harness_config_path_unavailable",
+                  "harness_config_unreadable",
+                  "harness_config_invalid"
+                ]
+              },
+              "status": {
+                "enum": [
+                  "missing_hook",
+                  "stale_hook",
+                  "unsupported_harness_version",
+                  "config_not_writable",
+                  "fresh"
+                ]
+              },
+              "event": { "type": ["string", "null"] },
+              "matcher": { "type": ["string", "null"] },
+              "targetPath": { "type": ["string", "null"] },
+              "message": { "type": "string", "minLength": 1 },
+              "repair": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "repairPlan": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["action", "commandDisplay", "argv", "mutatesState", "reason"],
+            "properties": {
+              "action": {
+                "enum": [
+                  "install_or_refresh_hooks",
+                  "make_config_writable"
+                ]
+              },
+              "commandDisplay": { "type": ["string", "null"] },
+              "argv": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "mutatesState": { "type": "boolean" },
+              "reason": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "docs": {
+          "type": "array",
+          "minItems": 3,
+          "items": {
+            "type": "object",
+            "required": ["id", "title", "path", "hookSurface"],
+            "properties": {
+              "id": {
+                "enum": ["recall_hooks", "primer_hooks", "journal_hooks"]
+              },
+              "title": { "type": "string", "minLength": 1 },
+              "path": { "type": "string", "minLength": 1 },
+              "hookSurface": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "generatedAt": {
       "type": "string",
