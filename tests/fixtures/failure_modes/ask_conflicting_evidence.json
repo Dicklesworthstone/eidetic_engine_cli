@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "ask_conflicting_evidence",
+  "introduced_by": { "bead": "bd-169v0.5", "epic_letter": "QA" },
+  "surfaces": ["ask"],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "ee ask finds opposing top evidence clusters for a question and emits sides[] instead of flattening the conflict into one answer.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Remote cache delta enabled Project Zephyr hz2 worker pool.' --workspace . --level episodic --kind observation --confidence 0.99",
+      "ee remember 'Zephyr hz2 workers cannot use cache delta.' --workspace . --level episodic --kind observation --confidence 0.99"
+    ],
+    "invocation": "ee ask 'Remote cache delta enabled Project Zephyr hz2 worker pool' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "ask_conflicting_evidence",
+    "severity": "warning",
+    "message_contains": [
+      "top evidence clusters oppose each other",
+      "sides[] emitted"
+    ]
+  }
+}

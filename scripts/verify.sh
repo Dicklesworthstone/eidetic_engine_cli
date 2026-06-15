@@ -83,6 +83,7 @@ set -euo pipefail
 #   6.09 Evidence Harvester E2E - scripts/e2e_evidence_harvester.sh
 #   6.10 LOD Packing E2E       - scripts/e2e_lod_packing.sh
 #   6.11 House Rules E2E       - scripts/e2e_house_rules.sh
+#   6.12 Ask E2E               - scripts/e2e_ask.sh
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
@@ -1119,6 +1120,12 @@ run_stage "Dueling Wizards House Rules E2E" "./scripts/e2e_house_rules.sh"
 # proves extraction-first failure fields through --kind/--field searches, typed
 # decision supersedes graph projection, and unchanged bare --kind behavior.
 run_stage "Dueling Wizards Typed Kinds E2E" "./scripts/e2e_typed_kinds.sh"
+
+# Gate 6.125: Ask direct-answer real-binary E2E (bd-169v0.5). No-Cargo:
+# proves extractive answer citations, corroboration confidence lift, conflict
+# sides, calibrated abstention, fail-closed --require-confidence, and retained
+# ee.test_event.v1 evidence artifacts.
+run_stage "Ask E2E (bd-169v0.5)" "./scripts/e2e_ask.sh"
 
 # Gate 6.13: Dueling Wizards docs-bootstrap real-binary E2E (bd-1n0np.11.5).
 # Proves ee bootstrap docs --dry-run structural candidates (spans/hashes/anchors/

@@ -1,0 +1,24 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "ask_semantic_degraded",
+  "introduced_by": { "bead": "bd-169v0.5", "epic_letter": "QA" },
+  "surfaces": ["ask"],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "ee ask runs in the deterministic hash/lexical scoring path while semantic span scoring is unavailable, then renormalizes the semantic weight into lexical scoring.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Zephyr toolchain Rust nightly 1.96.0 active toolchain release verification.' --workspace . --level procedural --kind fact --confidence 0.99"
+    ],
+    "invocation": "ee ask 'Zephyr toolchain Rust nightly 1.96.0 active toolchain release verification' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "ask_semantic_degraded",
+    "severity": "info",
+    "message_contains": [
+      "hash-embedder fallback in play",
+      "w2 weight renormalized into w1"
+    ]
+  }
+}

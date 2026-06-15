@@ -1,0 +1,24 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "no_confident_answer",
+  "introduced_by": { "bead": "bd-169v0.5", "epic_letter": "QA" },
+  "surfaces": ["ask"],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "ee ask scans available memory spans but none reaches the confidence threshold, so it returns an abstention payload with nearestEvidence instead of fabricating an answer.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Project Zephyr billing sandbox invoice identifiers are unrelated to approval flows.' --workspace . --level semantic --kind fact"
+    ],
+    "invocation": "ee ask 'Who approved the lunar invoice for Project Zephyr?' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "no_confident_answer",
+    "severity": "info",
+    "message_contains": [
+      "confidence below threshold",
+      "abstention payload returned"
+    ]
+  }
+}

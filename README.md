@@ -85,6 +85,7 @@ ee swarm brief --workspace . --json
 ee pack "<task>" --workspace . --read-only --source-mode lexical_only --max-tokens 4000 --format markdown
 ee recall --path <path> --workspace . --budget-tokens 400 --format markdown
 ee search "<specific question>" --workspace . --limit 20 --explain --json
+ee ask "<direct question>" --workspace . --json
 ee why <memory-id> --workspace . --json
 ee preflight check --cmd "<risky shell command>" --workspace . --json
 ee remember "<durable lesson>" --workspace . --level procedural --kind rule --json
@@ -101,6 +102,7 @@ ee outcome <memory-id> --workspace . --signal helpful --reason "<what it changed
 | Joining a crowded checkout | `ee swarm brief --workspace . --json` |
 | Learning a durable rule | `ee remember "<text>" --workspace . --level procedural --kind rule --json` |
 | A memory helped or misled you | `ee outcome <id> --signal helpful\|harmful --reason "<one sentence>"` |
+| Need a direct cited answer | `ee ask "<question>" --workspace . --json` |
 | A high-ranked memory looks suspicious | `ee why <id> --workspace . --json` |
 | A context pack looks odd | `ee pack "<task>" --workspace . --explain --json` |
 | About to run a destructive command | `ee preflight check --cmd "<exact command>" --workspace . --json` |
@@ -429,7 +431,7 @@ Current top-level groups:
 
 | Group | Commands |
 |---|---|
-| Core memory loop | `init`, `remember`, `search`, `context`, `why`, `status`, `doctor`, `capabilities`, `check`, `health` |
+| Core memory loop | `init`, `remember`, `search`, `ask`, `context`, `why`, `status`, `doctor`, `capabilities`, `check`, `health` |
 | Memory lifecycle | `memory`, `rule`, `curate`, `review`, `playbook`, `procedure`, `workflow`, `outcome`, `outcome-quarantine` |
 | Packing and retrieval | `pack`, `recall`, `lens`, `context-show`, `show`, `link`, `tag`, `history`, `proximity`, `insights`, `subscribe` |
 | Graph and structure | `graph`, `causal`, `economy`, `focus`, `learn`, `lab`, `rehearse`, `rationale`, `situation`, `task-frame` |
@@ -455,6 +457,7 @@ Current top-level groups:
 | `ee pack "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the headline command) |
 | `ee lens list --json` / `ee lens explain <id> --json` | Inspect named task lenses such as `bugfix`, `code-review`, and `release-readiness` before applying them |
 | `ee search "<query>" [--limit N] [--explain] [--json]` | Hybrid retrieval over memories, sessions, rules, evidence |
+| `ee ask "<question>" [--require-confidence T] [--json]` | Direct extractive answer from stored memories, with citations, conflict sides, calibrated abstention, and exit 6 fail-closed mode |
 | `ee recall --path <glob>` / `--symbol <name>` / `--diff <ref>` | Fetch memories anchored to a code surface before editing; returns `ee.recall.v1` under the standard response envelope |
 | `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b]` | Capture a durable memory |
 | `ee outcome <id> --signal helpful\|harmful [--reason "<reason>"]` | Record feedback, updating utility/confidence |
@@ -1201,6 +1204,7 @@ base retrieval signal dominant.
 | `ee eval run` / `list` | Run or list retrieval-quality evaluation fixtures |
 | `ee eval report [fixture]` | Summarize fixture IDs, data hashes, aggregate retrieval metrics, and the first failing query |
 | `ee eval run <fixture> --pack-quality --json` | Check whether deterministic fixtures still select required context-pack evidence |
+| `ee ask "<question>" --workspace . --json` | Answer a narrow question extractively from stored memories, with citations, conflict sides, and calibrated abstention |
 | `ee perf compare --baseline <baseline.json> --candidate <candidate.json> --json` | Compare normalized performance artifact summaries without mutating state |
 | `ee perf budget check --profile <name> --report <artifact.json> --json` | Check one normalized performance artifact against a profile budget |
 | `ee perf explain-latency --surface search\|context --report <artifact.json> [--log <j1.jsonl>] --json` | Explain deterministic latency stages and cache posture from normalized search/context artifacts and optional J1 timing evidence |
@@ -1215,6 +1219,12 @@ degradation posture, redaction status, artifact paths, and stable failure
 reasons for fixture triage. See
 [`docs/pack-replay.md`](docs/pack-replay.md) for operator and fixture-authoring
 guidance.
+
+Use ask-quality evaluation for direct answers that must stay extractive and
+citation-backed. `ee eval run ask_v1 --json` gates citation precision, answer
+exactness, calibrated abstention, and conflict recall against the committed
+Project Zephyr fixture corpus; `scripts/e2e_ask.sh` exercises the same public
+CLI path end to end.
 
 ---
 

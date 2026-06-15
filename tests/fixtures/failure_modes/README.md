@@ -42,6 +42,8 @@ in the same commit, keeping the catalog complete by construction.
 | `redaction_pattern_matched` | export, handoff create, context, support bundle | medium | bd-17c65.11.6 (K6) |
 | `redaction_round_trip_marker_preserved` | import jsonl | info | bd-17c65.11.6 (K6) |
 | `adaptive_backoff_applied` | daemon, swarm brief | low | bd-16pwc.2 (SRR5) |
+| `ask_conflicting_evidence` | ask | warning | bd-169v0.5 |
+| `ask_semantic_degraded` | ask | info | bd-169v0.5 |
 | `cass_prefetch_budget_exceeded` | daemon, swarm brief | info | bd-16pwc.2 (SRR5) |
 | `handoff_snapshot_stale` | handoff resume | medium | bd-17c65.13.5 (M4) |
 | `profile_search_limit_capped` | search, diag search | low | bd-17c65.2.4 (B7) |
@@ -174,6 +176,7 @@ in the same commit, keeping the catalog complete by construction.
 | `wal_growth_exceeds_threshold` | status, doctor | warning | bd-2caru.8 |
 | `wal_growth_no_writer` | status, doctor | medium | bd-2caru.8 |
 | `agent_contract_source_unavailable` | agent operating contract | warning | bd-3d6ko.1 (AOP1) |
+| `no_confident_answer` | ask | info | bd-169v0.5 |
 | `no_risk_memories` | preflight check | info | bd-3usjw.6 |
 | `preflight_evidence_unavailable` | preflight | medium | bd-17c65.10.6 (J6) |
 | `preflight_evidence_stale` | preflight | warning | bd-17c65.10.6 (J6) |

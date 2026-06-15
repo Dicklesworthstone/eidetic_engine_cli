@@ -13107,7 +13107,8 @@ pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
             d.field_array_of_strs(
                 "coreCommands",
                 &[
-                    "init", "remember", "search", "pack", "lens", "orient", "why", "status",
+                    "init", "remember", "search", "ask", "pack", "lens", "orient", "why",
+                    "status",
                 ],
             );
             d.field_str("recipeCatalogCommand", "ee agent-docs recipes --json");
@@ -13126,6 +13127,10 @@ pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
             // (not a universal `hits`), so spell them out explicitly.
             d.field_object("responseFieldMap", |m| {
                 m.field_str("search", "data.results (count: data.resultCount)");
+                m.field_str(
+                    "ask",
+                    "data.answerText/data.citations or data.sides/data.nearestEvidence",
+                );
                 m.field_str("pack", "data.pack.items (omitted: data.pack.omitted)");
                 m.field_str(
                     "orient",

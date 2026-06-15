@@ -172,6 +172,10 @@ pub const GUIDE_SECTIONS: &[GuideSection] = &[
         content: "Run `ee recall --path <path> --workspace . --budget-tokens 400 --format markdown` before editing known files, or `ee recall --diff HEAD --workspace . --json` before reviewing a diff. Recall is a narrow anchor lookup; use `ee search` for free-text discovery and `ee pack` for task context.",
     },
     GuideSection {
+        title: "Direct Answers",
+        content: "Use `ee ask \"<question>\" --workspace . --json` for narrow, citation-backed extractive answers. Inspect `data.citations[]`, `data.sides[]`, and `data.nearestEvidence[]`; add `--require-confidence <threshold>` when hooks must fail closed instead of accepting an abstention.",
+    },
+    GuideSection {
         title: "Machine Output",
         content: "Always use --json, --robot, or --format=json for machine-parseable output. stdout is data, stderr is diagnostics. Check exit codes for error conditions.",
     },
@@ -1164,6 +1168,12 @@ pub const EXAMPLES: &[ExampleEntry] = &[
         category: "search",
     },
     ExampleEntry {
+        title: "Ask a direct question",
+        description: "Return an extractive answer with citations, conflict sides, or calibrated abstention",
+        command: "ee ask \"what runtime does this project use\" --workspace . --json",
+        category: "search",
+    },
+    ExampleEntry {
         title: "Store typed failure evidence",
         description: "Record a failure body that ee can parse into typed fields such as family, cause, and reverted_at_sha",
         command: "ee remember \"Reverted at SHA 9af3c21. Family: aggressive-prefetch. Cause: cache pollution.\" --level episodic --kind failure --json",
@@ -1284,6 +1294,24 @@ pub const CONTEXT_RECIPE_FAILURES: &[FailureBranchEntry] = &[
         condition: "semantic retrieval is degraded",
         jq: r#".data.degraded[]? | select(.code == "semantic_unavailable")"#,
         next_action: "Continue with lexical results when acceptable, or run `ee index reembed --workspace .`.",
+    },
+];
+
+pub const ASK_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "ask returns a calibrated abstention",
+        jq: r#".degraded[]? | select(.code == "no_confident_answer")"#,
+        next_action: "Inspect `data.nearestEvidence[]`; add or import grounded source memories when the question should be answerable.",
+    },
+    FailureBranchEntry {
+        condition: "ask finds conflicting evidence",
+        jq: r#".degraded[]? | select(.code == "ask_conflicting_evidence")"#,
+        next_action: "Read `data.sides[]` and use `ee conflict explain <memory-id> --json` before choosing a side.",
+    },
+    FailureBranchEntry {
+        condition: "fail-closed confidence mode trips",
+        jq: r#".error | select(.code == "unsatisfied_degraded_mode") | {message, repair}"#,
+        next_action: "Treat exit 6 as a real gate failure; lower the threshold only with an explicit caller policy.",
     },
 ];
 
@@ -1586,6 +1614,16 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         failure_branches: TYPED_SEARCH_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
+        id: "direct-answer",
+        title: "Ask for a cited direct answer",
+        description: "Use extractive ask when a narrow question needs answer text plus byte-addressed citations, conflict sides, or an honest abstention.",
+        category: "search",
+        command: "ee ask \"<question>\" --workspace . --json",
+        jq: r#"{answer: .data.answerText, confidence: .data.confidence, citations: [.data.citations[]? | {memoryId, span, text}], sides: (.data.sides // []), nearestEvidence: (.data.nearestEvidence // [])}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.ask.v1""#,
+        failure_branches: ASK_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
         id: "workspace-health",
         title: "Check workspace health",
         description: "Inspect storage, index, and degraded capability state before relying on memory output.",
@@ -1743,8 +1781,9 @@ mod tests {
     use std::fmt::Debug;
 
     use super::{
-        AGENT_DOC_RECIPES, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, EXAMPLES, EXIT_CODES,
-        FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS, TASK_LENS_RECIPE_FAILURES, env_var_entries,
+        AGENT_DOC_RECIPES, ASK_RECIPE_FAILURES, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, EXAMPLES,
+        EXIT_CODES, FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS, TASK_LENS_RECIPE_FAILURES,
+        env_var_entries,
     };
     use crate::config::EnvVar;
     use crate::models::ProcessExitCode;
@@ -2201,6 +2240,50 @@ mod tests {
                 .success_check
                 .contains(crate::core::impact::IMPACT_SCHEMA_V1),
             "impact recipe checks the impact data schema",
+        )
+    }
+
+    #[test]
+    fn ask_docs_are_registered_for_agents() -> TestResult {
+        let guide = GUIDE_SECTIONS
+            .iter()
+            .find(|section| section.title == "Direct Answers")
+            .ok_or_else(|| "ask guide section is documented".to_string())?;
+        ensure(
+            guide.content.contains("ee ask") && guide.content.contains("--require-confidence"),
+            "ask guide points to direct answer and fail-closed mode",
+        )?;
+
+        let example = EXAMPLES
+            .iter()
+            .find(|example| example.title == "Ask a direct question")
+            .ok_or_else(|| "ask example is documented".to_string())?;
+        ensure(
+            example.command.starts_with("ee ask ") && example.command.contains("--json"),
+            "ask example uses the public JSON surface",
+        )?;
+
+        let recipe = AGENT_DOC_RECIPES
+            .iter()
+            .find(|recipe| recipe.id == "direct-answer")
+            .ok_or_else(|| "ask recipe is documented".to_string())?;
+        ensure(
+            recipe
+                .success_check
+                .contains(crate::core::ask::ASK_SCHEMA_V1),
+            "ask recipe checks ee.ask.v1",
+        )?;
+        ensure_equal(
+            &recipe.failure_branches.len(),
+            &ASK_RECIPE_FAILURES.len(),
+            "ask recipe carries dedicated failure branch count",
+        )?;
+        ensure(
+            recipe
+                .failure_branches
+                .iter()
+                .any(|branch| branch.jq.contains("no_confident_answer")),
+            "ask recipe documents abstention branch",
         )
     }
 

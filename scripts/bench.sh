@@ -787,6 +787,141 @@ EOF
     echo "[+] pack replay/freshness smoke artifacts: $smoke_root" >&2
 }
 
+run_ask_fixture_smoke() {
+    echo "" >&2
+    echo "[*] Ask v1 fixture latency smoke (bd-169v0.5: answerable + abstention)..." >&2
+
+    ask_fixture="$PROJECT_ROOT/tests/fixtures/eval/ask_v1/source_memory.json"
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[-] jq is required for ask fixture smoke measurement" >&2
+        append_smoke_failure "ee_ask_v1_answerable"
+        append_smoke_failure "ee_ask_v1_abstention"
+        FAILED=true
+        return
+    fi
+    if [ ! -f "$ask_fixture" ]; then
+        echo "[-] ask fixture source memory missing: $ask_fixture" >&2
+        append_smoke_failure "ee_ask_v1_answerable"
+        append_smoke_failure "ee_ask_v1_abstention"
+        FAILED=true
+        return
+    fi
+
+    if [ ! -x "$EE_BIN" ]; then
+        echo "[*] Building ee binary for ask smoke workload..." >&2
+        if ! cargo build --release --bin ee >&2; then
+            echo "[-] ee binary build failed" >&2
+            append_smoke_failure "ee_ask_v1_answerable"
+            append_smoke_failure "ee_ask_v1_abstention"
+            FAILED=true
+            return
+        fi
+    fi
+
+    ask_root="$ARTIFACT_DIR/ask-v1-smoke-$$-$(date -u +%Y%m%dT%H%M%SZ)"
+    ask_workspace="$ask_root/workspace"
+    ask_artifacts="$ask_root/artifacts"
+    ask_rows="$ask_artifacts/source_memories.jsonl"
+    mkdir -p "$ask_workspace" "$ask_artifacts"
+
+    run_ask_smoke_command() {
+        step="$1"
+        shift
+        step_slug=$(printf '%s' "$step" | sed 's/[^A-Za-z0-9_]/_/g')
+        LAST_STDOUT_FILE="$ask_artifacts/$step_slug.stdout.json"
+        LAST_STDERR_FILE="$ask_artifacts/$step_slug.stderr.log"
+        start_ns=$(now_ns)
+        if "$EE_BIN" "$@" >"$LAST_STDOUT_FILE" 2>"$LAST_STDERR_FILE"; then
+            LAST_EXIT_CODE=0
+        else
+            LAST_EXIT_CODE=$?
+        fi
+        end_ns=$(now_ns)
+        LAST_ELAPSED_MS=$(elapsed_ms "$start_ns" "$end_ns")
+        if [ "$LAST_EXIT_CODE" -ne 0 ]; then
+            echo "[-] $step failed with exit $LAST_EXIT_CODE; stdout=$LAST_STDOUT_FILE stderr=$LAST_STDERR_FILE" >&2
+            return 1
+        fi
+        if ! jq -e . "$LAST_STDOUT_FILE" >/dev/null 2>&1; then
+            echo "[-] $step stdout is not JSON; stdout=$LAST_STDOUT_FILE" >&2
+            return 1
+        fi
+        return 0
+    }
+
+    if ! run_ask_smoke_command init --workspace "$ask_workspace" --json init; then
+        append_smoke_failure "ee_ask_v1_answerable"
+        append_smoke_failure "ee_ask_v1_abstention"
+        FAILED=true
+        return
+    fi
+
+    jq -c '.memories[]' "$ask_fixture" >"$ask_rows"
+    while IFS= read -r memory_row; do
+        content=$(printf '%s' "$memory_row" | jq -r '.content')
+        level=$(printf '%s' "$memory_row" | jq -r '.level // "episodic"')
+        kind=$(printf '%s' "$memory_row" | jq -r '.kind // "fact"')
+        confidence=$(printf '%s' "$memory_row" | jq -r '.confidence // 0.8')
+        source=$(printf '%s' "$memory_row" | jq -r '.provenance_uri // "fixture://ask_v1/unknown"')
+        if ! run_ask_smoke_command "remember-$(printf '%s' "$source" | sed 's/[^A-Za-z0-9_]/_/g')" \
+            --workspace "$ask_workspace" --json remember \
+            --level "$level" --kind "$kind" --confidence "$confidence" \
+            --source "$source" --no-auto-link --no-propose-candidates \
+            "$content"; then
+            append_smoke_failure "ee_ask_v1_answerable"
+            append_smoke_failure "ee_ask_v1_abstention"
+            FAILED=true
+            return
+        fi
+    done <"$ask_rows"
+
+    answerable_query="Project Zephyr Rust nightly 1.96.0 active toolchain release verification"
+    if ! run_ask_smoke_command ask-answerable \
+        --workspace "$ask_workspace" --json ask "$answerable_query"; then
+        append_smoke_failure "ee_ask_v1_answerable"
+        append_smoke_failure "ee_ask_v1_abstention"
+        FAILED=true
+        return
+    fi
+    if ! jq -e '.success == true and .data.schema == "ee.ask.v1" and .data.abstained == false' \
+        "$LAST_STDOUT_FILE" >/dev/null 2>&1; then
+        echo "[-] ask answerable smoke did not return a confident ee.ask.v1 answer; stdout=$LAST_STDOUT_FILE" >&2
+        append_smoke_failure "ee_ask_v1_answerable"
+        append_smoke_failure "ee_ask_v1_abstention"
+        FAILED=true
+        return
+    fi
+    answerable_ms="$LAST_ELAPSED_MS"
+    append_result "ee_ask_v1_answerable" "measured" "$answerable_ms" "$answerable_ms" "$answerable_ms" "$answerable_ms" null "advisory_fixture_smoke"
+
+    abstention_query="Who approved the lunar invoice for Project Zephyr?"
+    if ! run_ask_smoke_command ask-abstention \
+        --workspace "$ask_workspace" --json ask "$abstention_query" --min-confidence 0.95; then
+        append_smoke_failure "ee_ask_v1_abstention"
+        FAILED=true
+        return
+    fi
+    if ! jq -e '.success == true and .data.schema == "ee.ask.v1" and .data.abstained == true' \
+        "$LAST_STDOUT_FILE" >/dev/null 2>&1; then
+        echo "[-] ask abstention smoke did not return an abstention payload; stdout=$LAST_STDOUT_FILE" >&2
+        append_smoke_failure "ee_ask_v1_abstention"
+        FAILED=true
+        return
+    fi
+    abstention_ms="$LAST_ELAPSED_MS"
+    if awk -v answerable="$answerable_ms" -v abstention="$abstention_ms" 'BEGIN {
+        limit = (answerable * 1.5) + 5.0;
+        exit !(abstention <= limit);
+    }'; then
+        abstention_status="advisory_abstention_not_slow_path"
+    else
+        abstention_status="advisory_abstention_slower"
+        echo "[!] ask abstention smoke was slower than answerable path: answerable=${answerable_ms}ms abstention=${abstention_ms}ms" >&2
+    fi
+    append_result "ee_ask_v1_abstention" "measured" "$abstention_ms" "$abstention_ms" "$abstention_ms" "$abstention_ms" null "$abstention_status"
+    echo "[+] ask v1 smoke: answerable=${answerable_ms}ms abstention=${abstention_ms}ms status=$abstention_status artifacts=$ask_root" >&2
+}
+
 append_auto_enroll_baseline_rows() {
     if ! command -v jq >/dev/null 2>&1; then
         echo "[-] jq is required for auto-enroll baseline profile" >&2
@@ -846,6 +981,7 @@ fi
 
 if [ "$PROFILE" = "ci-smoke" ]; then
     run_pack_replay_freshness_smoke
+    run_ask_fixture_smoke
     run_primer_smoke
 fi
 
