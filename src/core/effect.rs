@@ -1438,6 +1438,10 @@ impl EffectManifest {
                 "learn cluster",
                 "Cluster learning evidence without durable mutation",
             ),
+            CommandEffect::read_only_db(
+                "learn gaps",
+                "Mine query-miss demand into learning gap templates",
+            ),
             CommandEffect::read_only_db("learn summary", "Show learning summary statistics"),
             CommandEffect::read_only_db("learn uncertainty", "Show uncertainty estimates"),
             CommandEffect::read_only_db("lens explain", "Explain a persisted lens projection"),

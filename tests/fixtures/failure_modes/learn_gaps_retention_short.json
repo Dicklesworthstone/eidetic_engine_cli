@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "learn_gaps_retention_short",
+  "introduced_by": { "bead": "bd-3ap2m.3", "epic_letter": "M" },
+  "surfaces": ["learn gaps"],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee learn gaps receives --since older than the configured query-miss retention window and clamps the scan to retained hash-only rows.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee search 'missing fact' --workspace . --json"
+    ],
+    "invocation": "ee learn gaps --workspace . --since 2020-01-01T00:00:00Z --json"
+  },
+  "expected_emission": {
+    "code": "learn_gaps_retention_short",
+    "severity": "info",
+    "message_contains": [
+      "predates the configured query-miss retention window",
+      "scanning from"
+    ],
+    "repair_contains": "Increase [search].query_miss_retention_days"
+  }
+}

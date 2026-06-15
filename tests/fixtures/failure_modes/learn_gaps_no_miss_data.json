@@ -1,0 +1,22 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "learn_gaps_no_miss_data",
+  "introduced_by": { "bead": "bd-3ap2m.3", "epic_letter": "M" },
+  "surfaces": ["learn gaps"],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee learn gaps runs against a workspace with no query-miss audit rows inside the effective retention window.",
+    "setup_commands": ["ee init --workspace ."],
+    "invocation": "ee learn gaps --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "learn_gaps_no_miss_data",
+    "severity": "info",
+    "message_contains": [
+      "No query-miss audit rows",
+      "effective window"
+    ],
+    "repair_contains": "low-utility searches will populate the miss ledger"
+  }
+}

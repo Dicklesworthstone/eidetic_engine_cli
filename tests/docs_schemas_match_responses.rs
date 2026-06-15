@@ -31,6 +31,10 @@ use ee::core::curate::{
     ReflectionRequestLedgerMigrationSafety, ReflectionRequestLedgerRetentionReport,
 };
 use ee::core::lab::{SWARM_REPLAY_RESULT_SCHEMA_V1, SWARM_WORKLOAD_SCHEMA_V1};
+use ee::core::learn::{
+    LEARN_GAPS_SCHEMA_V1, LearnGapCluster, LearnGapOriginDemand, LearnGapRememberTemplate,
+    LearnGapsDegradation, LearnGapsReport,
+};
 use ee::core::memory::{
     MemoryDetails, MemoryListFilter, MemoryListReport, MemoryShowReport, MemorySummary,
 };
@@ -49,9 +53,9 @@ use ee::models::{
     DomainError, IMPORT_CASS_SCHEMA_V1, ProducerMetadata, QUERY_SCHEMA_V1, RESPONSE_SCHEMA_V2,
 };
 use ee::output::{
-    error_response_json, render_curate_candidates_json, render_mcp_manifest_json,
-    render_memory_list_json, render_memory_show_json, render_reflect_propose_json,
-    render_schema_export_json,
+    error_response_json, render_curate_candidates_json, render_learn_gaps_json,
+    render_mcp_manifest_json, render_memory_list_json, render_memory_show_json,
+    render_reflect_propose_json, render_schema_export_json,
 };
 use ee::policy::{
     SWARM_SLO_COORDINATION_EVENT_SCHEMA_V1, SWARM_SLO_RESOURCE_USAGE_EVENT_SCHEMA_V1,
@@ -72,6 +76,10 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     ),
     (QUERY_SCHEMA_V1, "ee.query.v1.json"),
     ("ee.search.v1", "ee.search.v1.json"),
+    (
+        ee::core::learn::LEARN_GAPS_SCHEMA_V1,
+        "ee.learn.gaps.v1.json",
+    ),
     ("ee.memory.show.v1", "ee.memory.show.v1.json"),
     ("ee.memory.list.v1", "ee.memory.list.v1.json"),
     ("ee.status.v1", "ee.status.v1.json"),
@@ -525,6 +533,71 @@ fn public_schema_exports_match_docs_schema_files() -> TestResult {
         }
     }
     Ok(())
+}
+
+#[test]
+fn learn_gaps_renderer_matches_public_payload_shape() -> TestResult {
+    let report = LearnGapsReport {
+        schema: LEARN_GAPS_SCHEMA_V1.to_string(),
+        workspace_id: "wsp_example".to_string(),
+        retention_days: 30,
+        requested_since: None,
+        effective_since: "2026-06-01T00:00:00+00:00".to_string(),
+        scanned_miss_count: 2,
+        cluster_count: 1,
+        gaps: vec![LearnGapCluster {
+            cluster_id: "gap_example".to_string(),
+            query_hash: "hash_example".to_string(),
+            query_hashes: vec!["hash_example".to_string()],
+            demand_score: 2.0,
+            miss_count: 2,
+            first_seen_at: "2026-06-01T00:00:00+00:00".to_string(),
+            last_seen_at: "2026-06-02T00:00:00+00:00".to_string(),
+            origins: vec![LearnGapOriginDemand {
+                origin: "search".to_string(),
+                miss_count: 2,
+            }],
+            reasons: vec!["weak_query_recall".to_string()],
+            representative_redacted_queries: vec!["how to test".to_string()],
+            nearest_existing_evidence: Vec::new(),
+            nearest_existing_evidence_status: "unavailable_raw_query_not_persisted".to_string(),
+            remember_template: LearnGapRememberTemplate {
+                suggested_level: "procedural".to_string(),
+                suggested_kind: "rule".to_string(),
+                suggested_tags: vec!["knowledge-gap".to_string()],
+                content_skeleton: "When asked, record the procedure.".to_string(),
+            },
+            matching_agenda_item: None,
+            suggested_command: "ee remember --workspace . --level procedural --kind rule 'When asked, record the procedure.' --json".to_string(),
+        }],
+        degraded: vec![LearnGapsDegradation {
+            code: "learn_gaps_retention_short".to_string(),
+            severity: "info".to_string(),
+            message: "Requested window was clamped.".to_string(),
+            repair: "Increase retention.".to_string(),
+        }],
+        generated_at: "2026-06-02T00:00:00+00:00".to_string(),
+    };
+
+    let payload: Value = serde_json::from_str(&render_learn_gaps_json(&report))
+        .map_err(|error| format!("learn gaps JSON did not parse: {error}"))?;
+    ensure_equal(&payload["schema"], &json!(LEARN_GAPS_SCHEMA_V1), "schema")?;
+    ensure_equal(&payload["success"], &json!(true), "success")?;
+    ensure_equal(
+        &payload["workspaceId"],
+        &json!("wsp_example"),
+        "workspaceId",
+    )?;
+    ensure_equal(
+        &payload["gaps"][0]["rememberTemplate"]["suggestedLevel"],
+        &json!("procedural"),
+        "remember template casing",
+    )?;
+    ensure_equal(
+        &payload["gaps"][0]["nearestExistingEvidenceStatus"],
+        &json!("unavailable_raw_query_not_persisted"),
+        "nearest evidence status",
+    )
 }
 
 #[test]

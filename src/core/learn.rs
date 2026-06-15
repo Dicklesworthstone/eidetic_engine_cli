@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::core::curate::{
@@ -23,13 +23,15 @@ use crate::models::{
     DomainError, ExperimentOutcome, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
     LearningObservation, LearningObservationSignal, LearningTargetKind, WorkspaceId,
 };
-use crate::search::HashEmbedder;
+use crate::search::{HashEmbedder, simhash::cosine_similarity};
 
 const DEFAULT_LEARN_CLUSTER_COHERENCE_THRESHOLD: f32 =
     crate::curate::cluster_coherence::DEFAULT_CLUSTER_COHERENCE_THRESHOLD as f32;
 const DEFAULT_LEARN_CLUSTER_SILHOUETTE_CUTOFF: f32 =
     crate::curate::cluster_coherence::DEFAULT_CLUSTER_SILHOUETTE_CUTOFF as f32;
 const LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY: &str = "learn.cluster_coherence_threshold";
+pub const DEFAULT_QUERY_MISS_RETENTION_DAYS: u64 = 30;
+const DEFAULT_LEARN_GAPS_LIMIT: u32 = 10;
 
 /// Schema for learning agenda report.
 pub const LEARN_AGENDA_SCHEMA_V1: &str = "ee.learn.agenda.v1";
@@ -39,6 +41,15 @@ pub const LEARN_UNCERTAINTY_SCHEMA_V1: &str = "ee.learn.uncertainty.v1";
 
 /// Schema for learning summary report.
 pub const LEARN_SUMMARY_SCHEMA_V1: &str = "ee.learn.summary.v1";
+
+/// Schema for query-miss learning gap reports.
+pub const LEARN_GAPS_SCHEMA_V1: &str = "ee.learn.gaps.v1";
+
+/// Empty query-miss ledger code for `ee learn gaps`.
+pub const LEARN_GAPS_NO_MISS_DATA: &str = "learn_gaps_no_miss_data";
+
+/// Retention-window clamp code for `ee learn gaps`.
+pub const LEARN_GAPS_RETENTION_SHORT: &str = "learn_gaps_retention_short";
 
 /// Schema for deterministic learning cluster coherence reports.
 pub const LEARN_CLUSTER_SCHEMA_V1: &str = "ee.learn.cluster.v1";
@@ -425,6 +436,830 @@ pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport,
         events: learning_events,
         generated_at: stable_learning_generated_at(),
     })
+}
+
+// ============================================================================
+// Query-Miss Gap Operation
+// ============================================================================
+
+/// Options for mining learning gaps from the query-miss ledger.
+#[derive(Clone, Debug)]
+pub struct LearnGapsOptions {
+    pub workspace: PathBuf,
+    pub since: Option<String>,
+    pub limit: u32,
+}
+
+impl Default for LearnGapsOptions {
+    fn default() -> Self {
+        Self {
+            workspace: PathBuf::from("."),
+            since: None,
+            limit: DEFAULT_LEARN_GAPS_LIMIT,
+        }
+    }
+}
+
+/// Per-origin demand statistics for one gap cluster.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearnGapOriginDemand {
+    pub origin: String,
+    pub miss_count: u32,
+}
+
+/// Nearest current evidence for a missed query, when redacted query text is
+/// available. Legacy miss rows are hash-only, so this is often empty.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearnGapNearestEvidence {
+    pub memory_id: String,
+    pub content_preview: String,
+    pub reason: String,
+}
+
+/// Paste-ready memory skeleton for closing one query-miss gap.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearnGapRememberTemplate {
+    pub suggested_level: String,
+    pub suggested_kind: String,
+    pub suggested_tags: Vec<String>,
+    pub content_skeleton: String,
+}
+
+/// One query-miss gap cluster.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearnGapCluster {
+    pub cluster_id: String,
+    pub query_hash: String,
+    pub query_hashes: Vec<String>,
+    pub demand_score: f64,
+    pub miss_count: u32,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub origins: Vec<LearnGapOriginDemand>,
+    pub reasons: Vec<String>,
+    pub representative_redacted_queries: Vec<String>,
+    pub nearest_existing_evidence: Vec<LearnGapNearestEvidence>,
+    pub nearest_existing_evidence_status: String,
+    pub remember_template: LearnGapRememberTemplate,
+    pub matching_agenda_item: Option<String>,
+    pub suggested_command: String,
+}
+
+/// A degraded entry emitted by `ee learn gaps`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearnGapsDegradation {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    pub repair: String,
+}
+
+/// Report from mining query-miss learning gaps.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearnGapsReport {
+    pub schema: String,
+    pub workspace_id: String,
+    pub retention_days: u64,
+    pub requested_since: Option<String>,
+    pub effective_since: String,
+    pub scanned_miss_count: u32,
+    pub cluster_count: u32,
+    pub gaps: Vec<LearnGapCluster>,
+    pub degraded: Vec<LearnGapsDegradation>,
+    pub generated_at: String,
+}
+
+impl LearnGapsReport {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        crate::core::serialize_or_error(self)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ParsedQueryMiss {
+    query_hash: String,
+    cluster_key: String,
+    reason: String,
+    origin: String,
+    timestamp: DateTime<Utc>,
+    timestamp_raw: String,
+    representative_redacted_queries: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct QueryMissAccumulator {
+    cluster_key: String,
+    query_hashes: BTreeSet<String>,
+    miss_count: u32,
+    origins: BTreeMap<String, u32>,
+    reasons: BTreeSet<String>,
+    representative_redacted_queries: BTreeSet<String>,
+    first_seen_at: DateTime<Utc>,
+    first_seen_raw: String,
+    last_seen_at: DateTime<Utc>,
+    last_seen_raw: String,
+}
+
+impl QueryMissAccumulator {
+    fn new(cluster_key: &str, miss: &ParsedQueryMiss) -> Self {
+        let mut origins = BTreeMap::new();
+        origins.insert(miss.origin.clone(), 1);
+        let mut reasons = BTreeSet::new();
+        if !miss.reason.trim().is_empty() {
+            reasons.insert(miss.reason.clone());
+        }
+        let representative_redacted_queries = miss
+            .representative_redacted_queries
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        Self {
+            cluster_key: cluster_key.to_string(),
+            query_hashes: BTreeSet::from([miss.query_hash.clone()]),
+            miss_count: 1,
+            origins,
+            reasons,
+            representative_redacted_queries,
+            first_seen_at: miss.timestamp,
+            first_seen_raw: miss.timestamp_raw.clone(),
+            last_seen_at: miss.timestamp,
+            last_seen_raw: miss.timestamp_raw.clone(),
+        }
+    }
+
+    fn record(&mut self, miss: &ParsedQueryMiss) {
+        self.miss_count = self.miss_count.saturating_add(1);
+        self.query_hashes.insert(miss.query_hash.clone());
+        *self.origins.entry(miss.origin.clone()).or_insert(0) += 1;
+        if !miss.reason.trim().is_empty() {
+            self.reasons.insert(miss.reason.clone());
+        }
+        self.representative_redacted_queries
+            .extend(miss.representative_redacted_queries.iter().cloned());
+        if miss.timestamp < self.first_seen_at {
+            self.first_seen_at = miss.timestamp;
+            self.first_seen_raw = miss.timestamp_raw.clone();
+        }
+        if miss.timestamp > self.last_seen_at {
+            self.last_seen_at = miss.timestamp;
+            self.last_seen_raw = miss.timestamp_raw.clone();
+        }
+    }
+
+    fn origin_demand(&self) -> Vec<LearnGapOriginDemand> {
+        let mut origins = self
+            .origins
+            .iter()
+            .map(|(origin, miss_count)| LearnGapOriginDemand {
+                origin: origin.clone(),
+                miss_count: *miss_count,
+            })
+            .collect::<Vec<_>>();
+        origins.sort_by(|left, right| {
+            right
+                .miss_count
+                .cmp(&left.miss_count)
+                .then_with(|| left.origin.cmp(&right.origin))
+        });
+        origins
+    }
+
+    fn query_hashes(&self) -> Vec<String> {
+        self.query_hashes.iter().cloned().collect()
+    }
+}
+
+/// Mine query-miss audit rows into prioritized learning gaps.
+pub fn show_gaps(options: &LearnGapsOptions) -> Result<LearnGapsReport, DomainError> {
+    let snapshot = load_learning_snapshot(&options.workspace)?;
+    let retention_days = resolve_query_miss_retention_days(&options.workspace)?;
+    let requested_since = options
+        .since
+        .as_deref()
+        .map(parse_learn_gaps_since)
+        .transpose()?;
+    let parsed_misses = snapshot
+        .audit_entries
+        .iter()
+        .filter_map(parse_query_miss_audit_entry)
+        .collect::<Vec<_>>();
+    let newest_miss = parsed_misses
+        .iter()
+        .map(|miss| miss.timestamp)
+        .max()
+        .unwrap_or_else(Utc::now);
+    let retention_cutoff = query_miss_retention_cutoff(newest_miss, retention_days)?;
+    let (effective_since, mut degraded) =
+        learn_gaps_effective_since(requested_since, retention_cutoff);
+
+    let filtered = parsed_misses
+        .iter()
+        .filter(|miss| miss.timestamp >= effective_since)
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        degraded.push(learn_gaps_no_miss_data_degradation());
+    }
+
+    let mut by_cluster: BTreeMap<String, QueryMissAccumulator> = BTreeMap::new();
+    for (cluster_key, miss) in query_miss_cluster_assignments(&filtered) {
+        by_cluster
+            .entry(cluster_key.clone())
+            .and_modify(|accumulator| accumulator.record(miss))
+            .or_insert_with(|| QueryMissAccumulator::new(&cluster_key, miss));
+    }
+
+    let newest_cluster_ts = by_cluster
+        .values()
+        .map(|cluster| cluster.last_seen_at)
+        .max()
+        .unwrap_or(newest_miss);
+    let mut gaps = by_cluster
+        .values()
+        .map(|cluster| {
+            learn_gap_cluster(
+                cluster,
+                newest_cluster_ts,
+                retention_days,
+                &snapshot.curation_candidates,
+                &snapshot.memories,
+                &options.workspace,
+            )
+        })
+        .collect::<Vec<_>>();
+    gaps.sort_by(|left, right| {
+        right
+            .demand_score
+            .total_cmp(&left.demand_score)
+            .then_with(|| right.miss_count.cmp(&left.miss_count))
+            .then_with(|| left.query_hash.cmp(&right.query_hash))
+    });
+    let cluster_count = gaps.len() as u32;
+    let limit = options.limit.max(1) as usize;
+    gaps.truncate(limit);
+
+    Ok(LearnGapsReport {
+        schema: LEARN_GAPS_SCHEMA_V1.to_string(),
+        workspace_id: snapshot.workspace_id,
+        retention_days,
+        requested_since: options.since.clone(),
+        effective_since: effective_since.to_rfc3339(),
+        scanned_miss_count: filtered.len() as u32,
+        cluster_count,
+        gaps,
+        degraded,
+        generated_at: stable_learning_generated_at(),
+    })
+}
+
+fn parse_learn_gaps_since(raw: &str) -> Result<DateTime<Utc>, DomainError> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|error| DomainError::Usage {
+            message: format!("Invalid --since `{raw}`: expected RFC3339 timestamp ({error})"),
+            repair: Some("Use --since 2026-01-31T00:00:00Z.".to_string()),
+        })
+}
+
+fn learn_gaps_effective_since(
+    requested_since: Option<DateTime<Utc>>,
+    retention_cutoff: DateTime<Utc>,
+) -> (DateTime<Utc>, Vec<LearnGapsDegradation>) {
+    match requested_since {
+        Some(since) if since < retention_cutoff => (
+            retention_cutoff,
+            vec![learn_gaps_retention_short_degradation(
+                since,
+                retention_cutoff,
+            )],
+        ),
+        Some(since) => (since, Vec::new()),
+        None => (retention_cutoff, Vec::new()),
+    }
+}
+
+fn query_miss_retention_cutoff(
+    newest_miss: DateTime<Utc>,
+    retention_days: u64,
+) -> Result<DateTime<Utc>, DomainError> {
+    let retention_seconds =
+        retention_days
+            .checked_mul(24 * 60 * 60)
+            .ok_or_else(|| DomainError::Configuration {
+                message: "Query-miss retention exceeds supported duration range.".to_string(),
+                repair: Some("Use a smaller [search].query_miss_retention_days value.".to_string()),
+            })?;
+    let retention_seconds =
+        i64::try_from(retention_seconds).map_err(|_| DomainError::Configuration {
+            message: "Query-miss retention exceeds supported duration range.".to_string(),
+            repair: Some("Use a smaller [search].query_miss_retention_days value.".to_string()),
+        })?;
+    let retention_duration = chrono::Duration::try_seconds(retention_seconds).ok_or_else(|| {
+        DomainError::Configuration {
+            message: "Query-miss retention exceeds supported duration range.".to_string(),
+            repair: Some("Use a smaller [search].query_miss_retention_days value.".to_string()),
+        }
+    })?;
+    newest_miss
+        .checked_sub_signed(retention_duration)
+        .ok_or_else(|| DomainError::Configuration {
+            message: "Query-miss retention cutoff is outside supported time range.".to_string(),
+            repair: Some("Use a smaller [search].query_miss_retention_days value.".to_string()),
+        })
+}
+
+fn parse_query_miss_audit_entry(entry: &StoredAuditEntry) -> Option<ParsedQueryMiss> {
+    if entry.action != audit_actions::SEARCH_MISS_RECORDED {
+        return None;
+    }
+    let details = entry.details.as_deref()?;
+    let value: serde_json::Value = serde_json::from_str(details).ok()?;
+    let query_hash = value.get("queryHash")?.as_str()?.trim().to_string();
+    if query_hash.is_empty() {
+        return None;
+    }
+    let timestamp = DateTime::parse_from_rfc3339(&entry.timestamp)
+        .ok()?
+        .with_timezone(&Utc);
+    let reason = value
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or("unknown")
+        .to_string();
+    let origin = query_miss_origin(&value);
+    let representative_redacted_queries = query_miss_representative_queries(&value);
+    let cluster_key = query_miss_cluster_key(&query_hash, &representative_redacted_queries);
+    Some(ParsedQueryMiss {
+        query_hash,
+        cluster_key,
+        reason,
+        origin,
+        timestamp,
+        timestamp_raw: entry.timestamp.clone(),
+        representative_redacted_queries,
+    })
+}
+
+fn query_miss_origin(value: &serde_json::Value) -> String {
+    let origin = value
+        .get("origin")
+        .or_else(|| value.get("source"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .unwrap_or("search");
+    match origin {
+        "ask" => "ask".to_string(),
+        "search" => "search".to_string(),
+        other => normalize_topic(other),
+    }
+}
+
+fn query_miss_representative_queries(value: &serde_json::Value) -> Vec<String> {
+    let mut queries = BTreeSet::new();
+    for key in [
+        "redactedQuery",
+        "queryPreview",
+        "representativeRedactedQuery",
+        "representativeQuery",
+    ] {
+        if let Some(query) = value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+        {
+            queries.insert(redact_learning_public_ref(query));
+        }
+    }
+    for key in ["redactedQueries", "representativeRedactedQueries"] {
+        if let Some(values) = value.get(key).and_then(serde_json::Value::as_array) {
+            for value in values {
+                if let Some(query) = value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|query| !query.is_empty())
+                {
+                    queries.insert(redact_learning_public_ref(query));
+                }
+            }
+        }
+    }
+    queries.into_iter().collect()
+}
+
+fn query_miss_cluster_assignments<'a>(
+    misses: &[&'a ParsedQueryMiss],
+) -> Vec<(String, &'a ParsedQueryMiss)> {
+    let mut assignments = Vec::with_capacity(misses.len());
+    let mut redacted_inputs = Vec::new();
+    let mut redacted_by_id: BTreeMap<String, &'a ParsedQueryMiss> = BTreeMap::new();
+    let embedder = HashEmbedder::default_256();
+
+    for (index, miss) in misses.iter().enumerate() {
+        let Some(query) = miss.representative_redacted_queries.first() else {
+            assignments.push((miss.cluster_key.clone(), *miss));
+            continue;
+        };
+        let normalized = normalized_query_cluster_key(query);
+        if normalized.is_empty() {
+            assignments.push((miss.cluster_key.clone(), *miss));
+            continue;
+        }
+        let member_id = format!(
+            "query_miss_{}_{}",
+            stable_suffix(
+                "learn_gap_query_miss",
+                &format!("{}:{}:{}", miss.query_hash, miss.timestamp_raw, normalized),
+                16
+            ),
+            index
+        );
+        redacted_by_id.insert(member_id.clone(), *miss);
+        redacted_inputs.push(ClusterCoherenceInput {
+            memory_id: member_id,
+            embedding: embedder.embed_sync(&normalized),
+        });
+    }
+
+    if redacted_inputs.is_empty() {
+        return assignments;
+    }
+
+    let report = silhouette_agglomerative_clusters(
+        &redacted_inputs,
+        DEFAULT_LEARN_CLUSTER_COHERENCE_THRESHOLD,
+    );
+    let mut assigned_redacted = BTreeSet::new();
+    for cluster in report.clusters {
+        let mut member_ids = cluster.member_memory_ids;
+        member_ids.sort();
+        let cluster_key = format!(
+            "query_agglomerative:{}",
+            stable_suffix("learn_gap_agglomerative", &member_ids.join("|"), 20)
+        );
+        for member_id in member_ids {
+            if let Some(miss) = redacted_by_id.get(&member_id).copied() {
+                assigned_redacted.insert(member_id);
+                assignments.push((cluster_key.clone(), miss));
+            }
+        }
+    }
+
+    for (member_id, miss) in redacted_by_id {
+        if !assigned_redacted.contains(&member_id) {
+            assignments.push((miss.cluster_key.clone(), miss));
+        }
+    }
+    assignments
+}
+
+fn query_miss_cluster_key(query_hash: &str, representative_queries: &[String]) -> String {
+    representative_queries
+        .first()
+        .map(|query| normalized_query_cluster_key(query))
+        .filter(|key| !key.is_empty())
+        .map(|key| format!("query:{key}"))
+        .unwrap_or_else(|| format!("hash:{query_hash}"))
+}
+
+fn normalized_query_cluster_key(query: &str) -> String {
+    let mut tokens = query
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+        .filter(|token| !is_query_cluster_stopword(token))
+        .collect::<Vec<_>>();
+    tokens.sort();
+    tokens.dedup();
+    tokens.join(" ")
+}
+
+fn is_query_cluster_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "a" | "an"
+            | "and"
+            | "are"
+            | "do"
+            | "does"
+            | "for"
+            | "how"
+            | "i"
+            | "in"
+            | "is"
+            | "of"
+            | "on"
+            | "or"
+            | "the"
+            | "to"
+            | "what"
+            | "with"
+    )
+}
+
+fn learn_gap_cluster(
+    cluster: &QueryMissAccumulator,
+    newest_cluster_ts: DateTime<Utc>,
+    retention_days: u64,
+    candidates: &[StoredCurationCandidate],
+    memories: &BTreeMap<String, StoredMemory>,
+    workspace: &Path,
+) -> LearnGapCluster {
+    let representative_redacted_queries = cluster
+        .representative_redacted_queries
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>();
+    let remember_template = infer_remember_template(
+        &cluster.cluster_key,
+        representative_redacted_queries.first(),
+    );
+    let (nearest_existing_evidence, nearest_existing_evidence_status) =
+        nearest_gap_evidence(&representative_redacted_queries, memories);
+    let suggested_command = format!(
+        "ee remember --workspace {} --level {} --kind {} {} --json",
+        shell_quote(&workspace.display().to_string()),
+        remember_template.suggested_level,
+        remember_template.suggested_kind,
+        shell_quote(&remember_template.content_skeleton)
+    );
+
+    LearnGapCluster {
+        cluster_id: format!(
+            "gap_{}",
+            stable_suffix("learn_gap", &cluster.cluster_key, 20)
+        ),
+        query_hash: cluster
+            .query_hashes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| cluster.cluster_key.clone()),
+        query_hashes: cluster.query_hashes(),
+        demand_score: query_miss_demand_score(cluster, newest_cluster_ts, retention_days),
+        miss_count: cluster.miss_count,
+        first_seen_at: cluster.first_seen_raw.clone(),
+        last_seen_at: cluster.last_seen_raw.clone(),
+        origins: cluster.origin_demand(),
+        reasons: cluster.reasons.iter().cloned().collect(),
+        representative_redacted_queries,
+        nearest_existing_evidence,
+        nearest_existing_evidence_status,
+        remember_template,
+        matching_agenda_item: matching_open_agenda_item(candidates, &cluster.query_hashes),
+        suggested_command,
+    }
+}
+
+fn nearest_gap_evidence(
+    representative_queries: &[String],
+    memories: &BTreeMap<String, StoredMemory>,
+) -> (Vec<LearnGapNearestEvidence>, String) {
+    let Some(query) = representative_queries.first() else {
+        return (
+            Vec::new(),
+            "unavailable_raw_query_not_persisted".to_string(),
+        );
+    };
+    let live_memories = memories
+        .values()
+        .filter(|memory| memory.tombstoned_at.is_none())
+        .collect::<Vec<_>>();
+    if live_memories.is_empty() {
+        return (Vec::new(), "unavailable_no_live_memories".to_string());
+    }
+
+    let embedder = HashEmbedder::default_256();
+    let query_embedding = embedder.embed_sync(query);
+    let mut scored = live_memories
+        .into_iter()
+        .filter_map(|memory| {
+            let memory_embedding = embedder.embed_sync(&memory.content);
+            cosine_similarity(&query_embedding, &memory_embedding)
+                .map(|similarity| (memory, similarity))
+        })
+        .collect::<Vec<_>>();
+    if scored.is_empty() {
+        return (
+            Vec::new(),
+            "unavailable_no_comparable_embeddings".to_string(),
+        );
+    }
+    scored.sort_by(
+        |(left_memory, left_similarity), (right_memory, right_similarity)| {
+            right_similarity
+                .total_cmp(left_similarity)
+                .then_with(|| left_memory.id.cmp(&right_memory.id))
+        },
+    );
+    let evidence = scored
+        .into_iter()
+        .take(3)
+        .map(|(memory, similarity)| LearnGapNearestEvidence {
+            memory_id: memory.id.clone(),
+            content_preview: preview_text(&memory.content, 160),
+            reason: format!("hash_embedder_cosine_similarity={similarity:.3}"),
+        })
+        .collect();
+    (evidence, "hash_embedder_scan".to_string())
+}
+
+fn query_miss_demand_score(
+    cluster: &QueryMissAccumulator,
+    newest_cluster_ts: DateTime<Utc>,
+    retention_days: u64,
+) -> f64 {
+    let age_seconds = newest_cluster_ts
+        .signed_duration_since(cluster.last_seen_at)
+        .num_seconds()
+        .max(0) as f64;
+    let age_days = age_seconds / 86_400.0;
+    let decay = 0.5_f64.powf(age_days / retention_days.max(1) as f64);
+    rounded_metric(f64::from(cluster.miss_count) * decay)
+}
+
+fn matching_open_agenda_item(
+    candidates: &[StoredCurationCandidate],
+    query_hashes: &BTreeSet<String>,
+) -> Option<String> {
+    candidates
+        .iter()
+        .filter(|candidate| curation_candidate_is_open(candidate))
+        .find(|candidate| {
+            query_hashes
+                .iter()
+                .any(|query_hash| curation_candidate_mentions(candidate, query_hash))
+        })
+        .map(|candidate| candidate.id.clone())
+}
+
+fn curation_candidate_is_open(candidate: &StoredCurationCandidate) -> bool {
+    !matches!(
+        candidate.status.as_str(),
+        "applied" | "approved" | "rejected" | "dismissed" | "retired" | "tombstoned"
+    ) && candidate.applied_at.is_none()
+}
+
+fn curation_candidate_mentions(candidate: &StoredCurationCandidate, query_hash: &str) -> bool {
+    [
+        Some(candidate.id.as_str()),
+        Some(candidate.reason.as_str()),
+        candidate.proposed_content.as_deref(),
+        candidate.source_id.as_deref(),
+        candidate.derivation_source_refs_json.as_deref(),
+        candidate.derivation_metadata_json.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value.contains(query_hash))
+}
+
+fn infer_remember_template(
+    query_hash: &str,
+    representative_query: Option<&String>,
+) -> LearnGapRememberTemplate {
+    let Some(query) = representative_query.map(String::as_str) else {
+        return LearnGapRememberTemplate {
+            suggested_level: "semantic".to_string(),
+            suggested_kind: "fact".to_string(),
+            suggested_tags: vec!["knowledge-gap".to_string(), "query-miss".to_string()],
+            content_skeleton: format!(
+                "Record the missing fact behind repeated query-miss hash {}: <fact, source, and evidence>.",
+                query_hash_preview(query_hash)
+            ),
+        };
+    };
+    let normalized = normalize_query_template_text(query);
+    let padded = format!(" {normalized} ");
+    if normalized.starts_with("how do i ")
+        || normalized.starts_with("how to ")
+        || padded.contains(" command ")
+        || padded.contains(" run ")
+    {
+        LearnGapRememberTemplate {
+            suggested_level: "procedural".to_string(),
+            suggested_kind: "rule".to_string(),
+            suggested_tags: vec!["knowledge-gap".to_string(), "command".to_string()],
+            content_skeleton: format!(
+                "When asked `{query}`, record the command/procedure: <steps, prerequisites, and verification>."
+            ),
+        }
+    } else if normalized.contains("what broke")
+        || padded.contains(" failure ")
+        || padded.contains(" incident ")
+        || padded.contains(" regression ")
+    {
+        LearnGapRememberTemplate {
+            suggested_level: "episodic".to_string(),
+            suggested_kind: "failure".to_string(),
+            suggested_tags: vec!["knowledge-gap".to_string(), "failure".to_string()],
+            content_skeleton: format!(
+                "For `{query}`, record the failure episode: <symptom, cause, fix, and proof>."
+            ),
+        }
+    } else {
+        LearnGapRememberTemplate {
+            suggested_level: "semantic".to_string(),
+            suggested_kind: "fact".to_string(),
+            suggested_tags: vec!["knowledge-gap".to_string(), "fact".to_string()],
+            content_skeleton: format!(
+                "For `{query}`, record the missing fact: <answer, scope, source, and caveats>."
+            ),
+        }
+    }
+}
+
+fn normalize_query_template_text(query: &str) -> String {
+    query
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn query_hash_preview(query_hash: &str) -> String {
+    query_hash.chars().take(12).collect()
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn learn_gaps_no_miss_data_degradation() -> LearnGapsDegradation {
+    LearnGapsDegradation {
+        code: LEARN_GAPS_NO_MISS_DATA.to_string(),
+        severity: "info".to_string(),
+        message: "No query-miss audit rows were found inside the effective window.".to_string(),
+        repair: "Run ee search or ee ask normally; low-utility searches will populate the miss ledger without storing raw query text.".to_string(),
+    }
+}
+
+fn learn_gaps_retention_short_degradation(
+    requested_since: DateTime<Utc>,
+    retention_cutoff: DateTime<Utc>,
+) -> LearnGapsDegradation {
+    LearnGapsDegradation {
+        code: LEARN_GAPS_RETENTION_SHORT.to_string(),
+        severity: "info".to_string(),
+        message: format!(
+            "Requested --since {} predates the configured query-miss retention window; scanning from {}.",
+            requested_since.to_rfc3339(),
+            retention_cutoff.to_rfc3339()
+        ),
+        repair: "Increase [search].query_miss_retention_days or EE_QUERY_MISS_RETENTION_DAYS before the ledger is pruned if a longer window is required.".to_string(),
+    }
+}
+
+fn resolve_query_miss_retention_days(workspace: &Path) -> Result<u64, DomainError> {
+    let config_path = workspace.join(".ee").join("config.toml");
+    let configured = match crate::config::read_workspace_config_contents(workspace) {
+        Ok(Some(contents)) => {
+            let config = crate::config::ConfigFile::parse(&contents).map_err(|error| {
+                DomainError::Configuration {
+                    message: format!(
+                        "Failed to parse workspace query-miss retention config {}: {error}",
+                        config_path.display()
+                    ),
+                    repair: Some(
+                        "Fix [search].query_miss_retention_days in .ee/config.toml and rerun ee learn gaps --json.".to_owned(),
+                    ),
+                }
+            })?;
+            config.search.query_miss_retention_days
+        }
+        Ok(None) => None,
+        Err(error) => {
+            return Err(DomainError::Configuration {
+                message: format!(
+                    "Failed to read workspace query-miss retention config {}: {error}",
+                    config_path.display()
+                ),
+                repair: Some("Check .ee/config.toml and rerun ee learn gaps --json.".to_owned()),
+            });
+        }
+    };
+    if let Some(raw) = crate::config::read_env_var(crate::config::EnvVar::QueryMissRetentionDays) {
+        return raw
+            .parse::<u64>()
+            .map_err(|error| DomainError::Configuration {
+                message: format!("Invalid EE_QUERY_MISS_RETENTION_DAYS `{raw}`: {error}"),
+                repair: Some(
+                    "Set EE_QUERY_MISS_RETENTION_DAYS to a non-negative integer.".to_owned(),
+                ),
+            });
+    }
+    Ok(configured.unwrap_or(DEFAULT_QUERY_MISS_RETENTION_DAYS))
 }
 
 // ============================================================================
@@ -3295,7 +4130,8 @@ fn safety_plan(boundary: ExperimentSafetyBoundary) -> ExperimentSafetyPlan {
 mod tests {
     use super::*;
     use crate::db::{
-        CreateFeedbackEventInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
+        CreateAuditInput, CreateCurationCandidateInput, CreateFeedbackEventInput,
+        CreateMemoryInput, CreateWorkspaceInput, DbConnection,
     };
     use std::fs;
 
@@ -3344,6 +4180,108 @@ mod tests {
         }
     }
 
+    fn insert_query_miss_audit(
+        database: &Path,
+        workspace_id: &str,
+        id: &str,
+        query_hash: &str,
+        reason: &str,
+        origin: Option<&str>,
+        redacted_query: Option<&str>,
+    ) -> TestResult {
+        let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+        let mut details = serde_json::json!({
+            "schema": "ee.search.query_miss.v1",
+            "queryHash": query_hash,
+            "reason": reason,
+            "queryTextStored": false,
+            "queryVectorStored": false,
+        });
+        if let Some(origin) = origin {
+            details["origin"] = serde_json::Value::String(origin.to_string());
+        }
+        if let Some(redacted_query) = redacted_query {
+            details["redactedQuery"] = serde_json::Value::String(redacted_query.to_string());
+        }
+        connection
+            .insert_audit(
+                id,
+                &CreateAuditInput {
+                    workspace_id: Some(workspace_id.to_string()),
+                    actor: None,
+                    action: audit_actions::SEARCH_MISS_RECORDED.to_string(),
+                    target_type: Some("query_hash".to_string()),
+                    target_id: Some(query_hash.to_string()),
+                    details: Some(details.to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    fn insert_memory_for_gap_candidate(
+        database: &Path,
+        workspace_id: &str,
+        memory_id: &str,
+    ) -> TestResult {
+        let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_string(),
+                    level: "semantic".to_string(),
+                    kind: "fact".to_string(),
+                    content: "Seed memory for a query-miss gap candidate.".to_string(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("test://learn-gaps".to_string()),
+                    trust_class: "human_explicit".to_string(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    fn insert_pending_gap_candidate(
+        database: &Path,
+        workspace_id: &str,
+        candidate_id: &str,
+        memory_id: &str,
+        query_hash: &str,
+    ) -> TestResult {
+        let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+        connection
+            .insert_curation_candidate(
+                candidate_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.to_string(),
+                    candidate_type: "rule".to_string(),
+                    target_memory_id: Some(memory_id.to_string()),
+                    proposed_content: Some(format!("Close query gap for {query_hash}.")),
+                    proposed_confidence: Some(0.7),
+                    proposed_trust_class: Some("derived".to_string()),
+                    source_type: "learn_gaps".to_string(),
+                    source_id: Some(query_hash.to_string()),
+                    reason: format!("Repeated query miss for {query_hash}."),
+                    confidence: 0.7,
+                    status: Some("pending".to_string()),
+                    created_at: None,
+                    ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
     #[test]
     fn learn_cluster_threshold_reads_workspace_config() -> TestResult {
         let workspace = tempfile::Builder::new()
@@ -3362,6 +4300,314 @@ mod tests {
             0.42,
             "workspace learn cluster threshold",
         )
+    }
+
+    #[test]
+    fn learn_gaps_no_miss_data_is_honest_degradation() -> TestResult {
+        let (workspace, _database, _workspace_id) = seed_learning_workspace("ee-learn-gaps-empty")?;
+        let report = show_gaps(&LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: None,
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+
+        if report.cluster_count != 0 || !report.gaps.is_empty() {
+            return Err(format!("expected no gaps, got {:?}", report.gaps));
+        }
+        if !report
+            .degraded
+            .iter()
+            .any(|entry| entry.code == LEARN_GAPS_NO_MISS_DATA)
+        {
+            return Err(format!(
+                "expected {LEARN_GAPS_NO_MISS_DATA}, got {:?}",
+                report.degraded
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn learn_gaps_groups_ranks_and_splits_origin_demand() -> TestResult {
+        let (workspace, database, workspace_id) = seed_learning_workspace("ee-learn-gaps-ranking")?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000001",
+            "hash_alpha",
+            "no_relevant_results",
+            Some("search"),
+            None,
+        )?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000002",
+            "hash_alpha",
+            "weak_query_recall",
+            Some("ask"),
+            None,
+        )?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000003",
+            "hash_beta",
+            "weak_query_recall",
+            None,
+            None,
+        )?;
+
+        let first = show_gaps(&LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: None,
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+        let second = show_gaps(&LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: None,
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+
+        let gap = first
+            .gaps
+            .first()
+            .ok_or_else(|| "expected ranked gap".to_string())?;
+        if gap.query_hash != "hash_alpha" {
+            return Err(format!("expected hash_alpha first, got {}", gap.query_hash));
+        }
+        if gap.miss_count != 2 {
+            return Err(format!("expected 2 misses, got {}", gap.miss_count));
+        }
+        let origins = gap
+            .origins
+            .iter()
+            .map(|origin| (origin.origin.as_str(), origin.miss_count))
+            .collect::<Vec<_>>();
+        if origins != vec![("ask", 1), ("search", 1)] {
+            return Err(format!("unexpected origins: {origins:?}"));
+        }
+        if gap.reasons.iter().map(String::as_str).collect::<Vec<_>>()
+            != vec!["no_relevant_results", "weak_query_recall"]
+        {
+            return Err(format!("unexpected reasons: {:?}", gap.reasons));
+        }
+        if first
+            .gaps
+            .iter()
+            .map(|gap| gap.query_hash.as_str())
+            .collect::<Vec<_>>()
+            != second
+                .gaps
+                .iter()
+                .map(|gap| gap.query_hash.as_str())
+                .collect::<Vec<_>>()
+        {
+            return Err("learn gaps ordering changed between identical reads".to_string());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn learn_gaps_clusters_redacted_query_paraphrases_deterministically() -> TestResult {
+        let (workspace, database, workspace_id) =
+            seed_learning_workspace("ee-learn-gaps-text-cluster")?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000004",
+            "hash_text_a",
+            "weak_query_recall",
+            Some("search"),
+            Some("how do I rotate release logs"),
+        )?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000005",
+            "hash_text_b",
+            "weak_query_recall",
+            Some("search"),
+            Some("rotate logs for release"),
+        )?;
+
+        let report = show_gaps(&LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: None,
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+        if report.cluster_count != 1 {
+            return Err(format!(
+                "expected one text cluster, got {}",
+                report.cluster_count
+            ));
+        }
+        let gap = report
+            .gaps
+            .first()
+            .ok_or_else(|| "expected text-clustered gap".to_string())?;
+        if gap.query_hashes != vec!["hash_text_a".to_string(), "hash_text_b".to_string()] {
+            return Err(format!(
+                "unexpected clustered hashes: {:?}",
+                gap.query_hashes
+            ));
+        }
+        if gap.miss_count != 2 {
+            return Err(format!(
+                "expected two clustered misses, got {}",
+                gap.miss_count
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn learn_gaps_templates_redact_and_cross_link_agenda_item() -> TestResult {
+        let (workspace, database, workspace_id) =
+            seed_learning_workspace("ee-learn-gaps-template")?;
+        insert_memory_for_gap_candidate(
+            &database,
+            &workspace_id,
+            "mem_gaptemplate000000000000001",
+        )?;
+        insert_pending_gap_candidate(
+            &database,
+            &workspace_id,
+            "curate_gggggggggggggggggggggggggg",
+            "mem_gaptemplate000000000000001",
+            "hash_template",
+        )?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000004",
+            "hash_template",
+            "no_relevant_results",
+            Some("ask"),
+            Some("how do I rotate ghp_0123456789abcdef0123456789abcdef01234567"),
+        )?;
+
+        let report = show_gaps(&LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: None,
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+        let gap = report
+            .gaps
+            .first()
+            .ok_or_else(|| "expected template gap".to_string())?;
+        if gap.remember_template.suggested_level != "procedural"
+            || gap.remember_template.suggested_kind != "rule"
+        {
+            return Err(format!(
+                "expected procedural rule template, got {:?}",
+                gap.remember_template
+            ));
+        }
+        let preview = gap
+            .representative_redacted_queries
+            .first()
+            .ok_or_else(|| "expected redacted query preview".to_string())?;
+        if preview.contains("ghp_0123456789abcdef") {
+            return Err(format!(
+                "secret-like query material was not redacted: {preview}"
+            ));
+        }
+        if gap.nearest_existing_evidence_status != "hash_embedder_scan" {
+            return Err(format!(
+                "expected real nearest-evidence scan, got {}",
+                gap.nearest_existing_evidence_status
+            ));
+        }
+        if !gap
+            .nearest_existing_evidence
+            .iter()
+            .any(|evidence| evidence.memory_id == "mem_gaptemplate000000000000001")
+        {
+            return Err(format!(
+                "expected seeded memory in nearest evidence, got {:?}",
+                gap.nearest_existing_evidence
+            ));
+        }
+        if gap.matching_agenda_item.as_deref() != Some("curate_gggggggggggggggggggggggggg") {
+            return Err(format!(
+                "expected agenda cross-link, got {:?}",
+                gap.matching_agenda_item
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn learn_gaps_retention_short_clamps_effective_since() -> TestResult {
+        let (workspace, database, workspace_id) =
+            seed_learning_workspace("ee-learn-gaps-retention")?;
+        fs::create_dir_all(workspace.path().join(".ee")).map_err(|error| error.to_string())?;
+        fs::write(
+            workspace.path().join(".ee").join("config.toml"),
+            "[search]\nquery_miss_retention_days = 1\n",
+        )
+        .map_err(|error| error.to_string())?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000005",
+            "hash_retention",
+            "weak_query_recall",
+            Some("search"),
+            None,
+        )?;
+
+        let report = show_gaps(&LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: Some("2020-01-01T00:00:00Z".to_string()),
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+        if report.retention_days != 1 {
+            return Err(format!(
+                "expected retention 1, got {}",
+                report.retention_days
+            ));
+        }
+        if report.effective_since == "2020-01-01T00:00:00+00:00" {
+            return Err("effective since was not clamped to retention cutoff".to_string());
+        }
+        if !report
+            .degraded
+            .iter()
+            .any(|entry| entry.code == LEARN_GAPS_RETENTION_SHORT)
+        {
+            return Err(format!(
+                "expected {LEARN_GAPS_RETENTION_SHORT}, got {:?}",
+                report.degraded
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn learn_gaps_rejects_retention_duration_overflow() -> TestResult {
+        let newest = DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+        let error = query_miss_retention_cutoff(newest, u64::MAX)
+            .expect_err("oversized query-miss retention must fail closed");
+        if error.code() != "configuration" {
+            return Err(format!(
+                "expected configuration error, got {}",
+                error.code()
+            ));
+        }
+        if !error.message().contains("exceeds supported duration range") {
+            return Err(format!("unexpected error message: {}", error.message()));
+        }
+        Ok(())
     }
 
     #[cfg(unix)]

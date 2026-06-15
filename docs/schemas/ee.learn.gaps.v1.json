@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.learn.gaps.v1.json",
+  "title": "ee.learn.gaps.v1",
+  "description": "Query-miss demand clusters and remember templates emitted by ee learn gaps.",
+  "type": "object",
+  "required": [
+    "schema",
+    "success",
+    "workspaceId",
+    "retentionDays",
+    "requestedSince",
+    "effectiveSince",
+    "scannedMissCount",
+    "clusterCount",
+    "gaps",
+    "degraded",
+    "generatedAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "type": "string", "const": "ee.learn.gaps.v1" },
+    "success": { "type": "boolean", "const": true },
+    "workspaceId": { "type": "string" },
+    "retentionDays": { "type": "integer", "minimum": 0 },
+    "requestedSince": { "type": ["string", "null"] },
+    "effectiveSince": { "type": "string" },
+    "scannedMissCount": { "type": "integer", "minimum": 0 },
+    "clusterCount": { "type": "integer", "minimum": 0 },
+    "gaps": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/gap" }
+    },
+    "degraded": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/degradation" }
+    },
+    "generatedAt": { "type": "string" }
+  },
+  "$defs": {
+    "gap": {
+      "type": "object",
+      "required": [
+        "clusterId",
+        "queryHash",
+        "queryHashes",
+        "demandScore",
+        "missCount",
+        "firstSeenAt",
+        "lastSeenAt",
+        "origins",
+        "reasons",
+        "representativeRedactedQueries",
+        "nearestExistingEvidence",
+        "nearestExistingEvidenceStatus",
+        "rememberTemplate",
+        "matchingAgendaItem",
+        "suggestedCommand"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "clusterId": { "type": "string" },
+        "queryHash": { "type": "string" },
+        "queryHashes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "demandScore": { "type": "number" },
+        "missCount": { "type": "integer", "minimum": 0 },
+        "firstSeenAt": { "type": "string" },
+        "lastSeenAt": { "type": "string" },
+        "origins": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/originDemand" }
+        },
+        "reasons": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "representativeRedactedQueries": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "nearestExistingEvidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nearestEvidence" }
+        },
+        "nearestExistingEvidenceStatus": { "type": "string" },
+        "rememberTemplate": { "$ref": "#/$defs/rememberTemplate" },
+        "matchingAgendaItem": { "type": ["string", "null"] },
+        "suggestedCommand": { "type": "string" }
+      }
+    },
+    "originDemand": {
+      "type": "object",
+      "required": ["origin", "missCount"],
+      "additionalProperties": false,
+      "properties": {
+        "origin": { "type": "string" },
+        "missCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "nearestEvidence": {
+      "type": "object",
+      "required": ["memoryId", "contentPreview", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": { "type": "string" },
+        "contentPreview": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    },
+    "rememberTemplate": {
+      "type": "object",
+      "required": ["suggestedLevel", "suggestedKind", "suggestedTags", "contentSkeleton"],
+      "additionalProperties": false,
+      "properties": {
+        "suggestedLevel": { "type": "string" },
+        "suggestedKind": { "type": "string" },
+        "suggestedTags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "contentSkeleton": { "type": "string" }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string" },
+        "severity": { "type": "string" },
+        "message": { "type": "string" },
+        "repair": { "type": "string" }
+      }
+    }
+  }
+}

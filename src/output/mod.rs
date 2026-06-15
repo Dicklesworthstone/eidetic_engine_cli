@@ -9226,6 +9226,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: search_response_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::learn::LEARN_GAPS_SCHEMA_V1,
+            version: "1",
+            description: "Query-miss demand clusters and remember templates for learning gaps",
+            category: "learn",
+            definition: learn_gaps_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.memory.show.v1",
             version: "1",
             description: "Memory detail response envelope",
@@ -10503,6 +10510,10 @@ fn query_request_schema_definition() -> String {
 
 fn search_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.search.v1.json").to_string()
+}
+
+fn learn_gaps_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.learn.gaps.v1.json").to_string()
 }
 
 fn memory_show_schema_definition() -> String {
@@ -16231,7 +16242,8 @@ pub fn render_procedure_drift_toon(report: &ProcedureDriftReport) -> String {
 
 use crate::core::learn::{
     LearnAgendaReport, LearnCloseReport, LearnClusterReport, LearnExperimentProposalReport,
-    LearnExperimentRunReport, LearnObserveReport, LearnSummaryReport, LearnUncertaintyReport,
+    LearnExperimentRunReport, LearnGapsReport, LearnObserveReport, LearnSummaryReport,
+    LearnUncertaintyReport,
 };
 
 /// Render a learn agenda report as JSON.
@@ -16510,6 +16522,94 @@ pub fn render_learn_summary_toon(report: &LearnSummaryReport) -> String {
         report.summary.period,
         report.summary.net_knowledge_delta,
         report.events.len()
+    )
+}
+
+/// Render a query-miss learning gap report as JSON.
+#[must_use]
+pub fn render_learn_gaps_json(report: &LearnGapsReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "success": true,
+        "workspaceId": report.workspace_id,
+        "retentionDays": report.retention_days,
+        "requestedSince": report.requested_since,
+        "effectiveSince": report.effective_since,
+        "scannedMissCount": report.scanned_miss_count,
+        "clusterCount": report.cluster_count,
+        "gaps": report.gaps,
+        "degraded": report.degraded,
+        "generatedAt": report.generated_at,
+    })
+    .to_string()
+}
+
+/// Render a query-miss learning gap report as human-readable text.
+#[must_use]
+pub fn render_learn_gaps_human(report: &LearnGapsReport) -> String {
+    let mut out = String::with_capacity(1536);
+    out.push_str("Learning Gaps\n\n");
+    out.push_str(&format!(
+        "Clusters: {} from {} miss row(s) (retention: {} days, since: {})\n\n",
+        report.cluster_count,
+        report.scanned_miss_count,
+        report.retention_days,
+        report.effective_since
+    ));
+
+    for gap in &report.gaps {
+        out.push_str(&format!(
+            "[{}] {} miss(es), demand {:.3}, hash {}\n",
+            gap.cluster_id, gap.miss_count, gap.demand_score, gap.query_hash
+        ));
+        let origins = gap
+            .origins
+            .iter()
+            .map(|origin| format!("{}={}", origin.origin, origin.miss_count))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !origins.is_empty() {
+            out.push_str(&format!("    Origins: {origins}\n"));
+        }
+        if !gap.reasons.is_empty() {
+            out.push_str(&format!("    Reasons: {}\n", gap.reasons.join(", ")));
+        }
+        if let Some(query) = gap.representative_redacted_queries.first() {
+            out.push_str(&format!("    Query: {query}\n"));
+        }
+        if let Some(agenda) = &gap.matching_agenda_item {
+            out.push_str(&format!("    Agenda: {agenda}\n"));
+        }
+        out.push_str(&format!(
+            "    Template: {} / {} - {}\n",
+            gap.remember_template.suggested_level,
+            gap.remember_template.suggested_kind,
+            gap.remember_template.content_skeleton
+        ));
+        out.push_str(&format!("    Next: {}\n\n", gap.suggested_command));
+    }
+
+    if !report.degraded.is_empty() {
+        out.push_str("Degraded:\n");
+        for degradation in &report.degraded {
+            out.push_str(&format!(
+                "  {}: {} (repair: {})\n",
+                degradation.code, degradation.message, degradation.repair
+            ));
+        }
+    }
+    out
+}
+
+/// Render a query-miss learning gap report as TOON.
+#[must_use]
+pub fn render_learn_gaps_toon(report: &LearnGapsReport) -> String {
+    format!(
+        "LEARN_GAPS|clusters={}|misses={}|retention_days={}|degraded={}",
+        report.cluster_count,
+        report.scanned_miss_count,
+        report.retention_days,
+        report.degraded.len()
     )
 }
 

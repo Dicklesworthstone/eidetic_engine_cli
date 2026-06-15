@@ -566,7 +566,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `duplicate_rule_insufficient_signal` | low | bd-17c65.7.4 (G4) |
 | `review_queue_invalid_transition` | medium | bd-17c65.7.4 (G4) |
 
-#### Maintenance + steward (16)
+#### Maintenance + steward (18)
 | Code | Severity | Bead |
 |------|----------|------|
 | `cusum_baseline_underpowered` | info | bd-17c65.14.13 (N13) |
@@ -580,6 +580,8 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `decay_sweep_workspace_unresolved` | medium | bd-17c65.12.4 (L3) |
 | `learn_decay_config_invalid` | medium | bd-17c65.12.4 (L3) |
 | `learn_decay_config_read_failed` | medium | bd-17c65.12.4 (L3) |
+| `learn_gaps_no_miss_data` | info | bd-3ap2m.3 (M) |
+| `learn_gaps_retention_short` | info | bd-3ap2m.3 (M) |
 | `maintenance_job_history_read_failed` | medium | bd-17c65.10.6 (J6) |
 | `maintenance_job_history_write_failed` | medium | bd-17c65.10.6 (J6) |
 | `maintenance_job_lock_busy` | warning | bd-17c65.10.6 (J6) |

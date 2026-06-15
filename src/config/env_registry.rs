@@ -148,6 +148,8 @@ pub enum EnvVar {
     PprCacheEntries,
     /// `EE_QUERY_PLAN_CACHE_ENTRIES`
     QueryPlanCacheEntries,
+    /// `EE_QUERY_MISS_RETENTION_DAYS`
+    QueryMissRetentionDays,
     /// `EE_READ_POOL_DISABLE_PIN`
     ReadPoolDisablePin,
     /// `EE_READ_POOL_ACQUIRE_TIMEOUT_MS`
@@ -300,6 +302,7 @@ impl EnvVar {
             Self::Profile,
             Self::PprCacheEntries,
             Self::QueryPlanCacheEntries,
+            Self::QueryMissRetentionDays,
             Self::ReadPoolDisablePin,
             Self::ReadPoolAcquireTimeoutMs,
             Self::ReadPoolIdleTimeoutSeconds,
@@ -416,6 +419,7 @@ impl EnvVar {
             Self::Profile => "EE_PROFILE",
             Self::PprCacheEntries => "EE_PPR_CACHE_ENTRIES",
             Self::QueryPlanCacheEntries => "EE_QUERY_PLAN_CACHE_ENTRIES",
+            Self::QueryMissRetentionDays => "EE_QUERY_MISS_RETENTION_DAYS",
             Self::ReadPoolDisablePin => "EE_READ_POOL_DISABLE_PIN",
             Self::ReadPoolAcquireTimeoutMs => "EE_READ_POOL_ACQUIRE_TIMEOUT_MS",
             Self::ReadPoolIdleTimeoutSeconds => "EE_READ_POOL_IDLE_TIMEOUT_S",
@@ -617,6 +621,9 @@ impl EnvVar {
             Self::QueryPlanCacheEntries => {
                 "Override the in-process EQL query plan cache entry cap."
             }
+            Self::QueryMissRetentionDays => {
+                "Override the query-miss ledger retention window used by ee learn gaps."
+            }
             Self::ReadPoolDisablePin => "Disable read-side snapshot pinning.",
             Self::ReadPoolAcquireTimeoutMs => {
                 "Override the read-side connection pool acquire timeout in milliseconds."
@@ -744,6 +751,7 @@ impl EnvVar {
             Self::LexicalIndexPinRam => Some("false"),
             Self::PprCacheEntries => Some("4096"),
             Self::QueryPlanCacheEntries => Some("1024"),
+            Self::QueryMissRetentionDays => Some("30"),
             Self::GraphMemoryDegradedBelowPct => Some("80"),
             Self::GraphMemoryGrowthMultiplierBasisPoints => Some("15000"),
             Self::GraphMemoryPerAlgorithmCapMb => Some("100"),
@@ -876,6 +884,7 @@ impl EnvVar {
             | Self::Profile
             | Self::PprCacheEntries
             | Self::QueryPlanCacheEntries
+            | Self::QueryMissRetentionDays
             | Self::ReadPoolDisablePin
             | Self::ReadPoolAcquireTimeoutMs
             | Self::ReadPoolIdleTimeoutSeconds

@@ -245,6 +245,8 @@ in the same commit, keeping the catalog complete by construction.
 | `decay_sweep_handler_failed` | job run | high | bd-17c65.10.6 (J6) |
 | `learn_decay_config_invalid` | maintenance run | medium | bd-17c65.10.6 (J6) |
 | `learn_decay_config_read_failed` | maintenance run | medium | bd-17c65.10.6 (J6) |
+| `learn_gaps_no_miss_data` | learn gaps | info | bd-3ap2m.3 (M) |
+| `learn_gaps_retention_short` | learn gaps | info | bd-3ap2m.3 (M) |
 | `graph_feature_disabled` | graph, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
 | `insights_section_unavailable` | insights | info | bd-113r0 (retired by bd-2pos6.4) |
 | `graph_algorithm_unavailable` | graph centrality | medium | bd-3usjw.2 |

@@ -224,6 +224,7 @@ pub struct SearchConfig {
     pub lexical_weight: Option<f64>,
     pub semantic_weight: Option<f64>,
     pub graph_weight: Option<f64>,
+    pub query_miss_retention_days: Option<u64>,
     pub lexical_ram_tier: SearchLexicalRamTierConfig,
 }
 
@@ -234,6 +235,11 @@ impl SearchConfig {
             lexical_weight: optional_unit_float(document, "search", "lexical_weight")?,
             semantic_weight: optional_unit_float(document, "search", "semantic_weight")?,
             graph_weight: optional_unit_float(document, "search", "graph_weight")?,
+            query_miss_retention_days: optional_u64(
+                document,
+                "search",
+                "query_miss_retention_days",
+            )?,
             lexical_ram_tier: SearchLexicalRamTierConfig::parse(document)?,
         })
     }
@@ -3244,6 +3250,17 @@ source_mode = "random"
             &config.search.default_speed,
             &Some(SearchSpeed::Thorough),
             "normalized search speed",
+        )
+    }
+
+    #[test]
+    fn search_query_miss_retention_days_parses() -> TestResult {
+        let config = ConfigFile::parse("[search]\nquery_miss_retention_days = 30\n")
+            .map_err(|error| format!("query miss retention should parse: {error}"))?;
+        ensure_equal(
+            &config.search.query_miss_retention_days,
+            &Some(30),
+            "query miss retention days",
         )
     }
 

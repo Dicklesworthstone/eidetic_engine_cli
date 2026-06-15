@@ -49,6 +49,7 @@ pub const SEARCH_DEFAULT_SPEED_KEY: &str = "search.default_speed";
 pub const SEARCH_LEXICAL_WEIGHT_KEY: &str = "search.lexical_weight";
 pub const SEARCH_SEMANTIC_WEIGHT_KEY: &str = "search.semantic_weight";
 pub const SEARCH_GRAPH_WEIGHT_KEY: &str = "search.graph_weight";
+pub const SEARCH_QUERY_MISS_RETENTION_DAYS_KEY: &str = "search.query_miss_retention_days";
 pub const SEARCH_LEXICAL_RAM_TIER_ENABLED_KEY: &str = "search.lexical_ram_tier.enabled";
 pub const SEARCH_LEXICAL_RAM_TIER_REQUEST_HUGEPAGES_KEY: &str =
     "search.lexical_ram_tier.request_hugepages";
@@ -1026,6 +1027,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             lexical_weight: Some(0.45),
             semantic_weight: Some(0.45),
             graph_weight: Some(0.10),
+            query_miss_retention_days: Some(30),
             lexical_ram_tier: SearchLexicalRamTierConfig {
                 enabled: Some(false),
                 request_hugepages: Some(false),
@@ -1234,6 +1236,10 @@ pub fn config_from_env(
         runtime: RuntimeConfig::default(),
         cass: CassConfig::default(),
         search: SearchConfig {
+            query_miss_retention_days: optional_env_u64(
+                env,
+                EnvVar::QueryMissRetentionDays.name(),
+            )?,
             lexical_ram_tier: SearchLexicalRamTierConfig {
                 enabled: optional_env_bool_flag(env, EnvVar::LexicalIndexPinRam.name())?,
                 request_hugepages: optional_env_bool_flag(
@@ -1571,6 +1577,15 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.search.graph_weight,
                 &layers.user.search.graph_weight,
                 &layers.defaults.search.graph_weight,
+            ),
+            query_miss_retention_days: pick_field(
+                &mut sources,
+                SEARCH_QUERY_MISS_RETENTION_DAYS_KEY,
+                &layers.cli.search.query_miss_retention_days,
+                &layers.environment.search.query_miss_retention_days,
+                &layers.project.search.query_miss_retention_days,
+                &layers.user.search.query_miss_retention_days,
+                &layers.defaults.search.query_miss_retention_days,
             ),
             lexical_ram_tier: SearchLexicalRamTierConfig {
                 enabled: pick_field(
@@ -3148,6 +3163,7 @@ mod tests {
             },
             search: SearchConfig {
                 default_speed: Some(SearchSpeed::Fast),
+                query_miss_retention_days: Some(14),
                 ..SearchConfig::default()
             },
             task_lens: TaskLensConfig {
@@ -3162,6 +3178,7 @@ mod tests {
             },
             search: SearchConfig {
                 default_speed: Some(SearchSpeed::Thorough),
+                query_miss_retention_days: Some(21),
                 lexical_ram_tier: SearchLexicalRamTierConfig {
                     enabled: Some(false),
                     request_hugepages: Some(false),
@@ -3274,6 +3291,7 @@ mod tests {
                 ..GraphConfig::default()
             },
             search: SearchConfig {
+                query_miss_retention_days: Some(45),
                 lexical_ram_tier: SearchLexicalRamTierConfig {
                     enabled: Some(true),
                     request_hugepages: Some(true),
@@ -3381,6 +3399,16 @@ mod tests {
             &merged.source(SEARCH_DEFAULT_SPEED_KEY),
             &Some(ConfigValueSource::Project),
             "search speed source",
+        )?;
+        ensure_equal(
+            &merged.values.search.query_miss_retention_days,
+            &Some(45),
+            "env query-miss retention",
+        )?;
+        ensure_equal(
+            &merged.source(SEARCH_QUERY_MISS_RETENTION_DAYS_KEY),
+            &Some(ConfigValueSource::Environment),
+            "query-miss retention source",
         )?;
         ensure_equal(
             &merged.values.search.lexical_ram_tier.enabled,

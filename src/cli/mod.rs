@@ -161,7 +161,7 @@ use crate::core::lab::{
     replay_swarm_workload_trace, run_counterfactual,
 };
 use crate::core::learn::{
-    LearnCloseOptions, LearnExperimentProposeOptions, LearnExperimentRunOptions,
+    LearnCloseOptions, LearnExperimentProposeOptions, LearnExperimentRunOptions, LearnGapsOptions,
     LearnObserveOptions, close_experiment, observe_experiment, propose_experiments, run_experiment,
 };
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
@@ -5883,6 +5883,8 @@ pub enum LearnCommand {
     Uncertainty(LearnUncertaintyArgs),
     /// Analyze deterministic memory clusters for curation coherence.
     Cluster(LearnClusterArgs),
+    /// Mine query-miss demand into memory capture gaps.
+    Gaps(LearnGapsArgs),
     /// Propose and inspect safe active learning experiments.
     #[command(subcommand)]
     Experiment(LearnExperimentCommand),
@@ -5977,6 +5979,18 @@ pub struct LearnClusterArgs {
     /// Filter by memory kind.
     #[arg(long)]
     pub kind: Option<String>,
+}
+
+/// Arguments for `ee learn gaps`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct LearnGapsArgs {
+    /// Start from this RFC3339 timestamp, clamped to query-miss retention.
+    #[arg(long, value_name = "RFC3339")]
+    pub since: Option<String>,
+
+    /// Maximum gap clusters to show.
+    #[arg(long, short = 'n', default_value_t = 10)]
+    pub limit: u32,
 }
 
 /// Subcommands for `ee learn experiment`.
@@ -13058,6 +13072,9 @@ where
         }
         Some(Command::Learn(LearnCommand::Cluster(ref args))) => {
             handle_learn_cluster(&cli, args, stdout, stderr)
+        }
+        Some(Command::Learn(LearnCommand::Gaps(ref args))) => {
+            handle_learn_gaps(&cli, args, stdout, stderr)
         }
         Some(Command::Learn(LearnCommand::Experiment(LearnExperimentCommand::Propose(
             ref args,
@@ -20616,6 +20633,40 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 write_stdout(stdout, &(output::render_learn_cluster_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_learn_gaps<W, E>(
+    cli: &Cli,
+    args: &LearnGapsArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = LearnGapsOptions {
+        workspace: cli.resolve_workspace(),
+        since: args.since.clone(),
+        limit: args.limit,
+    };
+    match crate::core::learn::show_gaps(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_learn_gaps_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_learn_gaps_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_learn_gaps_json(&report) + "\n"))
             }
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
@@ -34273,6 +34324,8 @@ where
         }
     };
 
+    let learn_gaps = orient_learn_gaps_value(&workspace_path, &mut degraded);
+
     let data = serde_json::json!({
         "schema": "ee.orient.v1",
         "command": "orient",
@@ -34289,6 +34342,7 @@ where
         "pack": pack,
         "primer": primer,
         "decisions": decisions,
+        "learnGaps": learn_gaps,
         "nextCommands": orient_next_commands(&workspace_path, &args.task, args.max_tokens),
     });
 
@@ -34328,6 +34382,54 @@ fn orient_component_data_from_envelope(raw: &str) -> serde_json::Value {
         .ok()
         .and_then(|value| value.get("data").cloned())
         .unwrap_or(serde_json::Value::Null)
+}
+
+fn orient_learn_gaps_value(
+    workspace_path: &Path,
+    degraded: &mut Vec<serde_json::Value>,
+) -> serde_json::Value {
+    let options = LearnGapsOptions {
+        workspace: workspace_path.to_path_buf(),
+        since: None,
+        limit: 3,
+    };
+    match crate::core::learn::show_gaps(&options) {
+        Ok(report) => {
+            let top_gaps = report
+                .gaps
+                .iter()
+                .map(|gap| {
+                    serde_json::json!({
+                        "clusterId": &gap.cluster_id,
+                        "queryHash": &gap.query_hash,
+                        "missCount": gap.miss_count,
+                        "demandScore": gap.demand_score,
+                        "suggestedCommand": &gap.suggested_command,
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "schema": "ee.orient.learn_gaps.v1",
+                "status": if report.cluster_count > 0 { "present" } else { "empty" },
+                "clusterCount": report.cluster_count,
+                "returned": report.gaps.len(),
+                "scannedMissCount": report.scanned_miss_count,
+                "retentionDays": report.retention_days,
+                "degraded": report.degraded,
+                "topGaps": top_gaps,
+                "nextCommand": orient_learn_gaps_command(workspace_path),
+            })
+        }
+        Err(error) => {
+            degraded.push(orient_degradation_value(
+                "orient_learn_gaps_unavailable",
+                "info",
+                format!("Learning-gap demand summary could not be assembled: {error}"),
+                Some("Run `ee learn gaps --json` to isolate query-miss ledger state.".to_string()),
+            ));
+            serde_json::Value::Null
+        }
+    }
 }
 
 /// Assemble the embedded primer for `ee orient --include-primer`.
@@ -34462,6 +34564,7 @@ fn orient_next_commands(workspace: &Path, task: &str, max_tokens: u32) -> Vec<St
     vec![
         orient_pack_command(workspace, task, max_tokens),
         orient_search_command(workspace, task),
+        orient_learn_gaps_command(workspace),
         orient_decide_revisit_command(workspace),
         orient_workspace_hygiene_command(workspace),
         orient_doctor_command(workspace),
@@ -34480,6 +34583,11 @@ fn orient_search_command(workspace: &Path, task: &str) -> String {
     let workspace = shell_quote_cli_arg(&workspace.display().to_string());
     let task = shell_quote_cli_arg(task);
     format!("ee search --workspace {workspace} --json -- {task}")
+}
+
+fn orient_learn_gaps_command(workspace: &Path) -> String {
+    let workspace = shell_quote_cli_arg(&workspace.display().to_string());
+    format!("ee learn gaps --workspace {workspace} --limit 5 --json")
 }
 
 fn orient_workspace_hygiene_command(workspace: &Path) -> String {
@@ -57497,6 +57605,7 @@ impl NormalizedInvocation {
                     LearnCommand::Agenda(_) => "learn agenda".to_string(),
                     LearnCommand::Uncertainty(_) => "learn uncertainty".to_string(),
                     LearnCommand::Cluster(_) => "learn cluster".to_string(),
+                    LearnCommand::Gaps(_) => "learn gaps".to_string(),
                     LearnCommand::Experiment(experiment) => match experiment {
                         LearnExperimentCommand::Propose(_) => {
                             "learn experiment propose".to_string()
