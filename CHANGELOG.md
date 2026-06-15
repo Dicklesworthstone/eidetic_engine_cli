@@ -24,6 +24,35 @@ Evidence scale:
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-15
+
+Captures the work since v0.10.0 (101 commits: 25 features, 16 fixes), cut from a
+build-green `main` after clearing accumulated born-red compile errors.
+
+### Added
+- `ee decide`: typed decision workflow (record / list / revisit).
+- `ee ask`: deterministic extractive question answering with citations and
+  explicit abstention (bd-169v0.2/.3); ask-quality fixture gate (bd-169v0.4).
+- Session budget advisory planner, recorder, and schema contract
+  (bd-1clqr.1/.2/.3).
+- `ee curate` memory-debt doctor; `learn` query-miss gap mining.
+- Scale-envelope collectors, locality advisor, deterministic fixtures, and an
+  RCH SLO harness; conformance harness (schema + golden proof + simulator).
+- RCH topology-recurrence evidence in claim gates + worker root canary;
+  toolchain provenance authority; model lifecycle readiness collector;
+  typed-field registry v2.
+
+### Fixed
+- Build-green: cleared born-red compile errors on `main` (verify_ledger
+  closure/`'static` lifetimes, envelope `data_raw(Value)` serialization,
+  anchored-recall `Option<String>` assertions, a missing config-key test import,
+  the harness-conformance golden return type, the resource-admission fold
+  closure, and a wrong crate-name `eidetic_engine_cli` -> `ee` in the
+  typed-fields integration test).
+- Carries the v0.10.0 audit/curate-apply nested-transaction fix
+  (`insert_audit` no longer double-`BEGIN`s inside a caller-held transaction;
+  bd-3mq1r atomicity preserved).
+
 ## [0.3.9] - 2026-06-01
 
 ### Added
