@@ -1,0 +1,99 @@
+{
+  "schema": "ee.model_lifecycle.v1",
+  "generatedAt": "2026-06-15T00:00:01Z",
+  "workspaceFingerprint": "0123456789ab",
+  "redactionStatus": "paths_workspace_relative_or_hashed_no_content",
+  "semanticReadiness": {
+    "state": "available",
+    "mode": "semantic",
+    "selectedModelId": "mdl_01HQ3K5Z000000000000000060",
+    "selectedIndexId": "search-main",
+    "dimensionCompatibility": {
+      "expectedDimension": 384,
+      "actualDimension": 384,
+      "indexDimension": 384,
+      "distanceMetric": "cosine",
+      "vectorDtype": "float32",
+      "compatible": true,
+      "rule": "exact_dimension_metric_dtype",
+      "mismatchReason": null,
+      "repair": null
+    },
+    "degraded": []
+  },
+  "models": [
+    {
+      "modelId": "mdl_01HQ3K5Z000000000000000060",
+      "provider": "hash",
+      "purpose": "embedding",
+      "registryStatus": "available",
+      "state": "available",
+      "assetProvenance": {
+        "sourceKind": "model_registry",
+        "sourceUri": "models/hash-embedder-fixture.json",
+        "registryEntryId": "mdl_01HQ3K5Z000000000000000060",
+        "modelRevision": "hash-fixture-v1",
+        "contentHash": "blake3:dc039a1ccb1138c5a7f287ac5591206d3d7526cda0a25d200fa6730c311bd95e",
+        "assetHash": "blake3:dc039a1ccb1138c5a7f287ac5591206d3d7526cda0a25d200fa6730c311bd95e",
+        "manifestHash": null,
+        "checkedAt": "2026-06-15T00:00:00Z",
+        "provenanceComplete": true
+      },
+      "embeddingMetadata": {
+        "schema": "ee.embedding.metadata.v1",
+        "dimension": 384,
+        "distanceMetric": "cosine",
+        "vectorDtype": "float32",
+        "normalized": true,
+        "pooling": "mean",
+        "maxInputTokens": null,
+        "tokenizer": null,
+        "modelRevision": "hash-fixture-v1",
+        "deterministic": true
+      },
+      "dimensionCompatibility": {
+        "expectedDimension": 384,
+        "actualDimension": 384,
+        "indexDimension": 384,
+        "distanceMetric": "cosine",
+        "vectorDtype": "float32",
+        "compatible": true,
+        "rule": "exact_dimension_metric_dtype",
+        "mismatchReason": null,
+        "repair": null
+      },
+      "degraded": []
+    }
+  ],
+  "indexes": [
+    {
+      "indexId": "search-main",
+      "kind": "semantic",
+      "state": "available",
+      "storedModelId": "mdl_01HQ3K5Z000000000000000060",
+      "storedModelRevision": "hash-fixture-v1",
+      "storedModelHash": "blake3:dc039a1ccb1138c5a7f287ac5591206d3d7526cda0a25d200fa6730c311bd95e",
+      "storedDimension": 384,
+      "storedDistanceMetric": "cosine",
+      "storedVectorDtype": "float32",
+      "lastRebuildAt": "2026-06-15T00:00:01Z",
+      "derivedFrom": [
+        ".ee/ee.db",
+        "models/hash-embedder-fixture.json"
+      ],
+      "dimensionCompatibility": {
+        "expectedDimension": 384,
+        "actualDimension": 384,
+        "indexDimension": 384,
+        "distanceMetric": "cosine",
+        "vectorDtype": "float32",
+        "compatible": true,
+        "rule": "exact_dimension_metric_dtype",
+        "mismatchReason": null,
+        "repair": null
+      },
+      "degraded": []
+    }
+  ],
+  "degraded": []
+}
