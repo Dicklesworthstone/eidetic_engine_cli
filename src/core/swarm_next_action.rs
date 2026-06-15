@@ -2136,7 +2136,7 @@ fn work_packet_source_authority_snapshot_from_gate(
     }
 }
 
-fn source_authority_source_kinds() -> [&'static str; 11] {
+fn source_authority_source_kinds() -> [&'static str; 12] {
     [
         "actionable_queue",
         "agent_mail",
@@ -2148,6 +2148,7 @@ fn source_authority_source_kinds() -> [&'static str; 11] {
         "memory_drift",
         "rch",
         "support_bundle",
+        "toolchain",
         "workspace_hygiene",
     ]
 }
@@ -2620,6 +2621,9 @@ fn source_authority_default_repair(source_kind: &str, state: &str) -> Option<Str
         ("memory_drift", "unavailable" | "timed_out" | "degraded_read_only") => {
             Some("ee doctor --json".to_owned())
         }
+        ("toolchain", "unavailable" | "timed_out" | "degraded_read_only") => {
+            Some("ee diag toolchain-provenance --json".to_owned())
+        }
         ("agent_mail", "unavailable" | "corrupt_recovery" | "degraded_read_only") => {
             Some(agent_mail_snapshot_producer_command_template().to_owned())
         }
@@ -2790,6 +2794,13 @@ fn source_authority_overall(
             "actionable_queue" | "agent_mail" | "beads" | "git" | "installed_binary" | "rch"
         ) && matches!(source.state, "unavailable")
     });
+    let required_degraded = sources.iter().any(|source| {
+        source.source_kind == "toolchain"
+            && matches!(
+                source.state,
+                "degraded_read_only" | "stale_fallback" | "corrupt_recovery" | "contradicted"
+            )
+    });
     let any_timeout = sources.iter().any(|source| source.state == "timed_out");
     let candidate_blocks = candidate_evidence.is_some_and(|evidence| {
         matches!(
@@ -2804,7 +2815,7 @@ fn source_authority_overall(
         "fail_closed_contradiction"
     } else if any_timeout {
         "fail_closed_timeout"
-    } else if required_unavailable || candidate_blocks {
+    } else if required_unavailable || required_degraded || candidate_blocks {
         "fail_closed_insufficient_authority"
     } else if degraded_source_count > 0 || unavailable_source_count > 0 {
         "degraded_but_decidable"
@@ -4236,6 +4247,9 @@ fn work_packet_claim_gate_verdict(
     if install_freshness.blocks_claim {
         return "blocked_by_verification";
     }
+    if work_packet_toolchain_blocks_claim(packet) {
+        return "blocked_by_verification";
+    }
     if candidate.decision != "safe_to_claim" {
         return candidate.decision;
     }
@@ -4332,6 +4346,11 @@ fn work_packet_claim_gate_unsafe_reasons(
         reasons.push(format!("install_freshness:{}", install_freshness.verdict));
         reasons.push("claim_gate_install_freshness_not_authoritative".to_owned());
     }
+    reasons.extend(
+        work_packet_toolchain_claim_blockers(packet)
+            .into_iter()
+            .map(|code| format!("toolchain_authority:{code}")),
+    );
     if packet.recommended_action.safe_to_claim != Some(true) {
         reasons.push(format!(
             "packet_recommendation_not_claim_safe:{}",
@@ -4354,6 +4373,33 @@ fn work_packet_claim_gate_unsafe_reasons(
         reasons.push(format!("gate_verdict:{verdict}"));
     }
     reasons
+}
+
+fn work_packet_toolchain_blocks_claim(packet: &SwarmWorkPacket) -> bool {
+    !work_packet_toolchain_claim_blockers(packet).is_empty()
+}
+
+fn work_packet_toolchain_claim_blockers(packet: &SwarmWorkPacket) -> Vec<String> {
+    let mut blockers = packet
+        .degraded
+        .iter()
+        .filter(|degradation| degradation.source == "toolchain")
+        .filter(|degradation| {
+            matches!(
+                degradation.code.as_str(),
+                "agent_mail_semantic_readiness_failed"
+                    | "agent_mail_unavailable"
+                    | "beads_command_timeout"
+                    | "beads_unavailable"
+                    | "missing_required_surface"
+                    | "stale_binary_suspected"
+            )
+        })
+        .map(|degradation| degradation.code.clone())
+        .collect::<Vec<_>>();
+    blockers.sort();
+    blockers.dedup();
+    blockers
 }
 
 /// Build the claim-gate actionable-queue block (bd-3w4pv.7) from the
@@ -11548,6 +11594,11 @@ mod tests {
                 ),
                 1,
             ),
+            crate::core::swarm_brief::SwarmBriefSourceSnapshot::ready(
+                SwarmBriefSourceKind::Toolchain,
+                crate::core::swarm_brief::SwarmBriefSourceProvenance::local_probe(),
+                9,
+            ),
         ];
         brief.beads.ready = vec![SwarmBriefBead {
             id: "bd-safe".to_owned(),
@@ -11848,6 +11899,78 @@ mod tests {
         assert!(gate.recovery_actions[0].command_action.is_some());
         assert!(gate.recovery_actions[1].command_action.is_some());
         assert!(gate.recovery_actions[2].command_action.is_none());
+    }
+
+    #[test]
+    fn work_packet_claim_gate_blocks_critical_toolchain_stale_ee() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let toolchain_degradation = crate::core::swarm_brief::SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Toolchain,
+            "stale_binary_suspected",
+            "ee toolchain provenance reports a stale installed binary.",
+            Some("ee install check --json --offline".to_owned()),
+        );
+        brief.sources = vec![crate::core::swarm_brief::SwarmBriefSourceSnapshot {
+            source: SwarmBriefSourceKind::Toolchain,
+            status: crate::core::swarm_brief::SwarmBriefSourceStatus::Degraded,
+            freshness: crate::core::swarm_brief::SwarmBriefSourceFreshness::current(),
+            provenance: crate::core::swarm_brief::SwarmBriefSourceProvenance::local_probe(),
+            item_count: 9,
+            degraded: vec![toolchain_degradation.clone()],
+        }];
+
+        let mut snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Gate stale toolchain candidate",
+            "beads_ready",
+            Some(2),
+        )]);
+        snapshot.degraded = vec![SwarmNextActionDegradation {
+            code: toolchain_degradation.code.clone(),
+            source: toolchain_degradation.source.as_str().to_owned(),
+            severity: toolchain_degradation.severity,
+            message: toolchain_degradation.message.clone(),
+            repair: toolchain_degradation.repair.clone(),
+        }];
+
+        let mut packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        packet
+            .apply_claim_gate_install_freshness(SwarmWorkPacketClaimGateInstallFreshness::fresh());
+        packet.apply_claim_gate_actionable_queue(SwarmWorkPacketActionableQueueEvidence {
+            collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+            queue_state: ACTIONABLE_QUEUE_STATE_READY,
+            exit_class: "ok",
+            row_count: Some(1),
+            candidate_ids: vec!["bd-safe".to_owned()],
+            exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+        });
+
+        let gate = packet.claim_gate(Some("bd-safe"));
+
+        assert_eq!(gate.verdict, "blocked_by_verification");
+        assert!(!gate.safe_to_claim);
+        assert!(gate.claim_command_action.is_none());
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"toolchain_authority:stale_binary_suspected".to_owned())
+        );
+        assert!(
+            gate.degraded_codes
+                .contains(&"stale_binary_suspected".to_owned())
+        );
+        let toolchain = gate
+            .source_authority_snapshot
+            .source_states
+            .iter()
+            .find(|source| source.source_kind == "toolchain")
+            .expect("toolchain source authority row");
+        assert_eq!(toolchain.state, "degraded_read_only");
+        assert!(!toolchain.authoritative);
+        assert!(gate.source_authority_snapshot.overall.fail_closed);
+        assert_eq!(
+            gate.source_authority_snapshot.overall.verdict,
+            "fail_closed_insufficient_authority"
+        );
     }
 
     #[test]

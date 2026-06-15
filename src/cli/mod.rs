@@ -55357,11 +55357,14 @@ fn parse_swarm_sources(
             "rch" => {
                 sources.insert(SwarmBriefSourceKind::Rch);
             }
+            "toolchain" => {
+                sources.insert(SwarmBriefSourceKind::Toolchain);
+            }
             _ => {
                 return Err(DomainError::Usage {
                     message: format!("Unknown {surface_name} source `{token}`."),
                     repair: Some(
-                        "Use --sources default, all, none, git, beads, bv, agent-mail, rch, host-profile, or agent-inventory."
+                        "Use --sources default, all, none, git, beads, bv, agent-mail, rch, host-profile, agent-inventory, or toolchain."
                             .to_string(),
                     ),
                 });
@@ -56002,6 +56005,7 @@ fn swarm_brief_summary_json(report: &SwarmBriefReport) -> Result<serde_json::Val
         )?,
         "hostProfile": &report.host_profile,
         "agentInventory": &report.agent_inventory,
+        "toolchainProvenance": &report.toolchain_provenance,
         "recommendations": swarm_brief_summary_array(&report.recommendations, 5, "recommendations")?,
         "degraded": aggregate_swarm_brief_degraded_json(&report.degraded),
     }))
@@ -59171,6 +59175,13 @@ mod tests {
         ensure(
             !default_sources.contains(&crate::core::swarm_brief::SwarmBriefSourceKind::Rch),
             "default leaves rch optional",
+        )?;
+
+        let toolchain_sources = super::parse_swarm_brief_sources("toolchain", false)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            toolchain_sources.contains(&crate::core::swarm_brief::SwarmBriefSourceKind::Toolchain),
+            "explicit toolchain source selected",
         )?;
 
         ensure(
@@ -64656,7 +64667,7 @@ mod tests {
                 .as_array()
                 .map(std::vec::Vec::len)
                 .unwrap_or_default(),
-            &8,
+            &9,
             "swarm brief source count",
         )
     }

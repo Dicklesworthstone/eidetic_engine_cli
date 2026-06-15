@@ -31,6 +31,11 @@ use crate::core::query_miss_cluster::{
     KNOWLEDGE_GAP_MIN_CLUSTER_MISSES, MissAuditObservation, cluster_repeated_misses,
 };
 use crate::core::singleflight::singleflight_posture_report;
+use crate::core::support_bundle::{
+    TOOLCHAIN_PROVENANCE_REDACTION_STATUS, TOOLCHAIN_PROVENANCE_SCHEMA_V1, ToolchainFreshness,
+    ToolchainProvenanceOptions, ToolchainProvenanceReport, ToolchainSourceHint, ToolchainToolId,
+    ToolchainToolKind, collect_toolchain_provenance_with_runner,
+};
 use crate::core::verify::{
     VerificationPostureAdvisoryCounts, VerificationPostureEvidenceHealth,
     VerificationPostureRecoveryAction, VerificationPostureReport, gather_verification_posture,
@@ -148,6 +153,7 @@ pub fn default_swarm_brief_sources() -> BTreeSet<SwarmBriefSourceKind> {
         SwarmBriefSourceKind::Git,
         SwarmBriefSourceKind::HostProfile,
         SwarmBriefSourceKind::MemoryDrift,
+        SwarmBriefSourceKind::Toolchain,
     ]
     .into_iter()
     .collect()
@@ -164,6 +170,7 @@ pub fn all_swarm_brief_sources() -> BTreeSet<SwarmBriefSourceKind> {
         SwarmBriefSourceKind::HostProfile,
         SwarmBriefSourceKind::MemoryDrift,
         SwarmBriefSourceKind::Rch,
+        SwarmBriefSourceKind::Toolchain,
     ]
     .into_iter()
     .collect()
@@ -199,6 +206,8 @@ pub struct SwarmBriefReport {
     pub agent_inventory: Option<SwarmBriefAgentInventorySummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_drift: Option<SwarmBriefMemoryDriftSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolchain_provenance: Option<SwarmBriefToolchainProvenanceSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification_broker: Option<SwarmBriefVerificationBrokerSummary>,
     pub recommendations: Vec<SwarmBriefRecommendation>,
@@ -262,6 +271,7 @@ impl SwarmBriefReport {
             host_profile: None,
             agent_inventory: None,
             memory_drift: None,
+            toolchain_provenance: None,
             verification_broker: None,
             recommendations: Vec::new(),
             degraded: Vec::new(),
@@ -336,6 +346,7 @@ pub enum SwarmBriefSourceKind {
     MemoryDrift,
     Qos,
     Rch,
+    Toolchain,
 }
 
 impl SwarmBriefSourceKind {
@@ -351,6 +362,7 @@ impl SwarmBriefSourceKind {
             Self::MemoryDrift => "memory_drift",
             Self::Qos => "qos",
             Self::Rch => "rch",
+            Self::Toolchain => "toolchain",
         }
     }
 }
@@ -779,6 +791,44 @@ pub struct SwarmBriefMemoryDriftSummary {
     pub top_affected_memory_ids: Vec<String>,
     pub degraded_codes: Vec<String>,
     pub source_kind_counts: BTreeMap<String, u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmBriefToolchainProvenanceSummary {
+    pub schema: String,
+    pub redaction_status: String,
+    pub workspace_fingerprint: String,
+    pub tool_count: usize,
+    pub script_hash_count: usize,
+    pub critical_blocker_count: usize,
+    pub advisory_unknown_count: usize,
+    pub tools: Vec<SwarmBriefToolchainToolSummary>,
+    pub script_hashes: Vec<SwarmBriefToolchainScriptSummary>,
+    pub degraded_codes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmBriefToolchainToolSummary {
+    pub tool: &'static str,
+    pub kind: &'static str,
+    pub state: &'static str,
+    pub critical: bool,
+    pub version: Option<String>,
+    pub binary_hash_preview: Option<String>,
+    pub source_hint: &'static str,
+    pub source_command_id: String,
+    pub exit_class: &'static str,
+    pub repair: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmBriefToolchainScriptSummary {
+    pub script: String,
+    pub blake3_preview: String,
+    pub tracked: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1352,6 +1402,7 @@ pub enum SwarmBriefContribution {
     HostProfile(SwarmBriefHostProfileSummary),
     AgentInventory(SwarmBriefAgentInventorySummary),
     MemoryDrift(SwarmBriefMemoryDriftSummary),
+    Toolchain(SwarmBriefToolchainProvenanceSummary),
 }
 
 /// Source adapter contract. Implementations must be read-only.
@@ -2456,6 +2507,253 @@ impl SwarmBriefSourceAdapter for MemoryDriftSourceAdapter {
     }
 }
 
+pub struct ToolchainSourceAdapter<'a, R> {
+    pub runner: &'a R,
+}
+
+impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for ToolchainSourceAdapter<'_, R> {
+    fn collect(&self, options: &SwarmBriefCollectOptions) -> SwarmBriefSourceOutput {
+        let mut toolchain_options =
+            ToolchainProvenanceOptions::for_workspace(options.workspace.clone());
+        toolchain_options.command_timeout_ms = options.command_timeout_ms;
+        toolchain_options.agent_mail_snapshot = options.agent_mail_snapshot_path.clone();
+
+        let report = collect_toolchain_provenance_with_runner(&toolchain_options, self.runner);
+        let degraded = toolchain_claim_gate_degradations(&report);
+        let summary = toolchain_brief_summary_from_report(&report);
+        let item_count = summary.tool_count.saturating_add(summary.script_hash_count);
+
+        SwarmBriefSourceOutput {
+            snapshot: SwarmBriefSourceSnapshot::ready(
+                SwarmBriefSourceKind::Toolchain,
+                SwarmBriefSourceProvenance::local_probe(),
+                item_count,
+            )
+            .with_degraded(degraded),
+            contribution: SwarmBriefContribution::Toolchain(summary),
+        }
+    }
+}
+
+fn toolchain_brief_summary_from_report(
+    report: &ToolchainProvenanceReport,
+) -> SwarmBriefToolchainProvenanceSummary {
+    let mut tools = report
+        .tools
+        .iter()
+        .map(toolchain_tool_summary)
+        .collect::<Vec<_>>();
+    tools.sort();
+    tools.dedup();
+
+    let mut script_hashes = report
+        .script_hashes
+        .iter()
+        .map(|row| SwarmBriefToolchainScriptSummary {
+            script: row.script.clone(),
+            blake3_preview: hash_preview(&row.blake3),
+            tracked: row.tracked,
+        })
+        .collect::<Vec<_>>();
+    script_hashes.sort();
+    script_hashes.dedup();
+
+    let critical_blocker_count = report
+        .tools
+        .iter()
+        .filter(|row| toolchain_claim_gate_degradation_code(row.tool, row.freshness).is_some())
+        .count();
+    let advisory_unknown_count = report
+        .tools
+        .iter()
+        .filter(|row| {
+            !row.tool.critical()
+                && row.freshness != ToolchainFreshness::Current
+                && toolchain_claim_gate_degradation_code(row.tool, row.freshness).is_none()
+        })
+        .count();
+    let mut degraded_codes = report
+        .degraded
+        .iter()
+        .map(|entry| entry.code.clone())
+        .chain(
+            report
+                .tools
+                .iter()
+                .flat_map(|row| row.degraded.iter().map(|entry| entry.code.clone())),
+        )
+        .collect::<Vec<_>>();
+    degraded_codes.sort();
+    degraded_codes.dedup();
+
+    SwarmBriefToolchainProvenanceSummary {
+        schema: TOOLCHAIN_PROVENANCE_SCHEMA_V1.to_owned(),
+        redaction_status: TOOLCHAIN_PROVENANCE_REDACTION_STATUS.to_owned(),
+        workspace_fingerprint: report.workspace_fingerprint.clone(),
+        tool_count: report.tools.len(),
+        script_hash_count: report.script_hashes.len(),
+        critical_blocker_count,
+        advisory_unknown_count,
+        tools,
+        script_hashes,
+        degraded_codes,
+    }
+}
+
+fn toolchain_tool_summary(
+    row: &crate::core::support_bundle::ToolchainToolRow,
+) -> SwarmBriefToolchainToolSummary {
+    SwarmBriefToolchainToolSummary {
+        tool: toolchain_tool_label(row.tool),
+        kind: toolchain_tool_kind_label(row.kind),
+        state: row.freshness.code(),
+        critical: row.tool.critical(),
+        version: row.version.clone(),
+        binary_hash_preview: row.binary_hash.as_deref().map(hash_preview),
+        source_hint: toolchain_source_hint_label(row.source_hint),
+        source_command_id: row.probe.command_id.clone(),
+        exit_class: row.probe.exit_class.as_str(),
+        repair: row.degraded.iter().find_map(|entry| entry.repair.clone()),
+    }
+}
+
+fn toolchain_claim_gate_degradations(
+    report: &ToolchainProvenanceReport,
+) -> Vec<SwarmBriefDegradation> {
+    let mut degraded = report
+        .tools
+        .iter()
+        .filter_map(|row| {
+            let code = toolchain_claim_gate_degradation_code(row.tool, row.freshness)?;
+            let source = row.degraded.first();
+            Some(SwarmBriefDegradation {
+                code: code.to_owned(),
+                source: SwarmBriefSourceKind::Toolchain,
+                severity: toolchain_claim_gate_degradation_severity(row.tool, row.freshness),
+                message: source.map_or_else(
+                    || {
+                        format!(
+                            "{} toolchain state {} is not authoritative for claim-gate work.",
+                            toolchain_tool_label(row.tool),
+                            row.freshness.code()
+                        )
+                    },
+                    |entry| entry.message.clone(),
+                ),
+                repair: source
+                    .and_then(|entry| entry.repair.clone())
+                    .or_else(|| toolchain_claim_gate_repair(row.tool).map(str::to_owned)),
+            })
+        })
+        .collect::<Vec<_>>();
+    degraded.sort();
+    degraded.dedup();
+    degraded
+}
+
+fn toolchain_claim_gate_degradation_code(
+    tool: ToolchainToolId,
+    freshness: ToolchainFreshness,
+) -> Option<&'static str> {
+    match (tool, freshness) {
+        (
+            ToolchainToolId::Ee,
+            ToolchainFreshness::StaleBinary | ToolchainFreshness::SourceMismatch,
+        ) => Some("stale_binary_suspected"),
+        (
+            ToolchainToolId::Ee,
+            ToolchainFreshness::WrapperMissing
+            | ToolchainFreshness::CommandTimeout
+            | ToolchainFreshness::VersionUnknown
+            | ToolchainFreshness::UnsupportedPlatform,
+        ) => Some("missing_required_surface"),
+        (ToolchainToolId::AgentMail, ToolchainFreshness::HealthCorrupt) => {
+            Some("agent_mail_semantic_readiness_failed")
+        }
+        (
+            ToolchainToolId::AgentMail,
+            ToolchainFreshness::CommandTimeout
+            | ToolchainFreshness::WrapperMissing
+            | ToolchainFreshness::VersionUnknown
+            | ToolchainFreshness::UnsupportedPlatform,
+        ) => Some("agent_mail_unavailable"),
+        (ToolchainToolId::Br, ToolchainFreshness::CommandTimeout) => Some("beads_command_timeout"),
+        (
+            ToolchainToolId::Br,
+            ToolchainFreshness::WrapperMissing
+            | ToolchainFreshness::VersionUnknown
+            | ToolchainFreshness::UnsupportedPlatform,
+        ) => Some("beads_unavailable"),
+        _ => None,
+    }
+}
+
+fn toolchain_claim_gate_degradation_severity(
+    tool: ToolchainToolId,
+    freshness: ToolchainFreshness,
+) -> &'static str {
+    match (tool, freshness) {
+        (ToolchainToolId::AgentMail, ToolchainFreshness::HealthCorrupt) => "high",
+        (
+            ToolchainToolId::Ee,
+            ToolchainFreshness::StaleBinary | ToolchainFreshness::SourceMismatch,
+        ) => "medium",
+        _ => "warning",
+    }
+}
+
+fn toolchain_claim_gate_repair(tool: ToolchainToolId) -> Option<&'static str> {
+    match tool {
+        ToolchainToolId::Ee => Some("ee install check --json --offline"),
+        ToolchainToolId::AgentMail => Some(agent_mail_snapshot_producer_command_template()),
+        ToolchainToolId::Br => Some("scripts/br_retry.sh actionable --json"),
+        _ => None,
+    }
+}
+
+fn toolchain_tool_label(tool: ToolchainToolId) -> &'static str {
+    match tool {
+        ToolchainToolId::Ee => "ee",
+        ToolchainToolId::Rch => "rch",
+        ToolchainToolId::Br => "br",
+        ToolchainToolId::Bv => "bv",
+        ToolchainToolId::AgentMail => "agent_mail",
+        ToolchainToolId::Cass => "cass",
+        ToolchainToolId::Git => "git",
+        ToolchainToolId::Cargo => "cargo",
+    }
+}
+
+fn toolchain_tool_kind_label(kind: ToolchainToolKind) -> &'static str {
+    match kind {
+        ToolchainToolKind::Binary => "binary",
+        ToolchainToolKind::Service => "service",
+        ToolchainToolKind::ScriptSuite => "script_suite",
+    }
+}
+
+fn toolchain_source_hint_label(hint: ToolchainSourceHint) -> &'static str {
+    match hint {
+        ToolchainSourceHint::ReleaseInstall => "release_install",
+        ToolchainSourceHint::CargoTarget => "cargo_target",
+        ToolchainSourceHint::SystemPackage => "system_package",
+        ToolchainSourceHint::Unknown => "unknown",
+    }
+}
+
+fn hash_preview(value: &str) -> String {
+    const MAX_HASH_PREVIEW_CHARS: usize = 24;
+    if value.chars().count() <= MAX_HASH_PREVIEW_CHARS {
+        return value.to_owned();
+    }
+    let mut preview = value
+        .chars()
+        .take(MAX_HASH_PREVIEW_CHARS.saturating_sub(3))
+        .collect::<String>();
+    preview.push_str("...");
+    preview
+}
+
 fn memory_drift_database_path(workspace: &Path) -> PathBuf {
     workspace.join(".ee").join("ee.db")
 }
@@ -2669,6 +2967,13 @@ pub fn collect_swarm_brief(
         SwarmBriefSourceKind::MemoryDrift,
         SwarmBriefSourceProvenance::local_probe(),
         || MemoryDriftSourceAdapter.collect(options),
+    );
+    collect_selected_source(
+        &mut report,
+        options,
+        SwarmBriefSourceKind::Toolchain,
+        SwarmBriefSourceProvenance::local_probe(),
+        || ToolchainSourceAdapter { runner }.collect(options),
     );
     attach_qos_resource_pressure(&mut report, &options.workspace);
     attach_knowledge_gaps(&mut report, &options.workspace);
@@ -2950,6 +3255,9 @@ fn apply_source_output(report: &mut SwarmBriefReport, output: SwarmBriefSourceOu
         }
         SwarmBriefContribution::MemoryDrift(summary) => {
             report.memory_drift = Some(summary);
+        }
+        SwarmBriefContribution::Toolchain(summary) => {
+            report.toolchain_provenance = Some(summary);
         }
     }
 }
@@ -6716,7 +7024,7 @@ fn severity_for_score(score: u16) -> &'static str {
     }
 }
 
-fn expected_sources() -> [SwarmBriefSourceKind; 8] {
+fn expected_sources() -> [SwarmBriefSourceKind; 9] {
     [
         SwarmBriefSourceKind::AgentInventory,
         SwarmBriefSourceKind::AgentMail,
@@ -6726,6 +7034,7 @@ fn expected_sources() -> [SwarmBriefSourceKind; 8] {
         SwarmBriefSourceKind::HostProfile,
         SwarmBriefSourceKind::MemoryDrift,
         SwarmBriefSourceKind::Rch,
+        SwarmBriefSourceKind::Toolchain,
     ]
 }
 
@@ -6753,6 +7062,7 @@ fn default_source_repair(source: SwarmBriefSourceKind) -> &'static str {
         SwarmBriefSourceKind::MemoryDrift => "ee memory drift --mode recent-pack-items --json",
         SwarmBriefSourceKind::Qos => "ee status --json | jq .data.qos",
         SwarmBriefSourceKind::Rch => "rch status --json",
+        SwarmBriefSourceKind::Toolchain => "ee diag toolchain-provenance --json",
     }
 }
 
@@ -6767,6 +7077,7 @@ fn missing_source_knowledge(source: SwarmBriefSourceKind) -> &'static str {
         SwarmBriefSourceKind::MemoryDrift => "recent pack memory drift posture",
         SwarmBriefSourceKind::Qos => "foreground/background active-lane pressure",
         SwarmBriefSourceKind::Rch => "remote build queue and active build pressure",
+        SwarmBriefSourceKind::Toolchain => "local toolchain provenance and freshness",
     }
 }
 

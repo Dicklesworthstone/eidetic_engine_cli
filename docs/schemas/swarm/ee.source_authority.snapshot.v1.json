@@ -164,6 +164,7 @@
         "memory_drift",
         "rch",
         "support_bundle",
+        "toolchain",
         "workspace_hygiene"
       ]
     },

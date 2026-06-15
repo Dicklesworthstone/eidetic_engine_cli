@@ -443,7 +443,8 @@ fn source_entry_from_snapshot(
     let source = match snapshot.source {
         SwarmBriefSourceKind::AgentInventory
         | SwarmBriefSourceKind::MemoryDrift
-        | SwarmBriefSourceKind::Qos => return None,
+        | SwarmBriefSourceKind::Qos
+        | SwarmBriefSourceKind::Toolchain => return None,
         SwarmBriefSourceKind::AgentMail => EnvironmentAttestationSourceKind::AgentMailProbe,
         SwarmBriefSourceKind::Beads => EnvironmentAttestationSourceKind::BeadsTracker,
         SwarmBriefSourceKind::Bv => EnvironmentAttestationSourceKind::BvRecommendation,

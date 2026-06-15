@@ -81,6 +81,7 @@ const PROFILE_EVIDENCE_FILE: &str = "profile_evidence.json";
 const AGENT_PROFILE_EVIDENCE_FILE: &str = "agent_profile_evidence.json";
 const SCALE_BENCHMARK_SUMMARY_FILE: &str = "scale_benchmark_summary.json";
 const SCALE_FIXTURE_MANIFEST_FILE: &str = "scale_fixture_manifest.json";
+const TOOLCHAIN_PROVENANCE_FILE: &str = "toolchain_provenance.json";
 const CACHE_REPORTS_FILE: &str = "scale_cache_reports.json";
 const WRITE_QUEUE_REPORT_FILE: &str = "scale_write_queue_report.json";
 const PERFORMANCE_EXPLAIN_SAMPLES_FILE: &str = "scale_performance_explain_samples.json";
@@ -1324,6 +1325,7 @@ struct CollectedDiagnostics {
     qos_lane_summary_json: String,
     triage_summary_json: String,
     local_cargo_tripwire_json: String,
+    toolchain_provenance_json: String,
     install_freshness_summary_json: String,
     regression_causality_summary_json: String,
     environment_attestation_summary_json: String,
@@ -1467,6 +1469,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (
             LOCAL_CARGO_TRIPWIRE_FILE,
             &diagnostics.local_cargo_tripwire_json,
+        ),
+        (
+            TOOLCHAIN_PROVENANCE_FILE,
+            &diagnostics.toolchain_provenance_json,
         ),
         (
             INSTALL_FRESHNESS_SUMMARY_FILE,
@@ -2016,6 +2022,7 @@ fn collect_diagnostics(
     let qos_lane_summary_json = qos_lane_summary_json(workspace);
     let triage_summary_json = triage_summary_json(&status, &swarm_reports);
     let local_cargo_tripwire_json = local_cargo_tripwire_json(workspace);
+    let toolchain_provenance_json = toolchain_provenance_json(workspace);
     let install_freshness_summary_json = install_freshness_summary_json();
     let environment_attestation_summary_json = environment_attestation_summary_json(workspace);
     let shadow_policy_summary_json = shadow_policy_summary_json(workspace);
@@ -2062,6 +2069,7 @@ fn collect_diagnostics(
         qos_lane_summary_json,
         triage_summary_json,
         local_cargo_tripwire_json,
+        toolchain_provenance_json,
         install_freshness_summary_json,
         regression_causality_summary_json,
         environment_attestation_summary_json,
@@ -4120,6 +4128,13 @@ fn qos_lane_summary_json(workspace: &Path) -> String {
         })
     });
     stable_json(&value)
+}
+
+fn toolchain_provenance_json(workspace: &Path) -> String {
+    let report = collect_toolchain_provenance(&ToolchainProvenanceOptions::for_workspace(
+        workspace.to_path_buf(),
+    ));
+    output::render_toolchain_provenance_json(&report)
 }
 
 fn install_freshness_summary_json() -> String {
@@ -6402,6 +6417,7 @@ fn planned_files() -> Vec<String> {
         QOS_LANE_SUMMARY_FILE.to_owned(),
         TRIAGE_SUMMARY_FILE.to_owned(),
         LOCAL_CARGO_TRIPWIRE_FILE.to_owned(),
+        TOOLCHAIN_PROVENANCE_FILE.to_owned(),
         INSTALL_FRESHNESS_SUMMARY_FILE.to_owned(),
         REGRESSION_CAUSALITY_SUMMARY_FILE.to_owned(),
         ENVIRONMENT_ATTESTATION_SUMMARY_FILE.to_owned(),
@@ -6856,8 +6872,8 @@ mod tests {
         InstallFindingCode, InstallPathAnalysis, InstallPathStatus, InstallPermissionCheck,
         InstallPermissionStatus, InstallTarget, PathBinary, UpdateSourcePosture,
     };
-    use std::collections::BTreeMap;
     use crate::testing::ensure;
+    use std::collections::BTreeMap;
 
     type TestResult = Result<(), String>;
     const SUPPORT_BUNDLE_ATTESTATION_SUMMARY_SCHEMA_TEXT: &str = include_str!(
@@ -11512,7 +11528,7 @@ mod tests {
     }
 
     #[test]
-    fn create_bundle_includes_redaction_safe_pack_replay_summary() -> TestResult {
+    fn create_bundle_includes_redaction_safe_pack_replay_and_toolchain_provenance() -> TestResult {
         let root = unique_test_path("pack-replay-summary");
         let workspace = root.join("workspace");
         fs::create_dir_all(workspace.join(".ee"))
@@ -11651,10 +11667,42 @@ mod tests {
                 .contains(&SWARM_INCIDENT_SUMMARY_FILE.to_owned()),
             "support bundle must include swarm incident summary"
         );
+        assert!(
+            report
+                .files_collected
+                .contains(&TOOLCHAIN_PROVENANCE_FILE.to_owned()),
+            "support bundle must include toolchain provenance"
+        );
         let bundle_dir = report
             .output_path
             .clone()
             .ok_or_else(|| "created bundle must report output path".to_owned())?;
+        let toolchain_text = fs::read_to_string(bundle_dir.join(TOOLCHAIN_PROVENANCE_FILE))
+            .map_err(|error| format!("failed to read toolchain provenance: {error}"))?;
+        let toolchain: Value = serde_json::from_str(&toolchain_text)
+            .map_err(|error| format!("toolchain provenance must parse: {error}"))?;
+        assert_eq!(
+            toolchain.pointer("/schema"),
+            Some(&json!(TOOLCHAIN_PROVENANCE_SCHEMA_V1))
+        );
+        assert_eq!(
+            toolchain.pointer("/redactionStatus"),
+            Some(&json!(TOOLCHAIN_PROVENANCE_REDACTION_STATUS))
+        );
+        assert!(
+            toolchain
+                .pointer("/tools")
+                .and_then(Value::as_array)
+                .is_some_and(|tools| !tools.is_empty()),
+            "toolchain provenance must include bounded tool rows"
+        );
+        assert!(
+            toolchain
+                .pointer("/scriptHashes")
+                .and_then(Value::as_array)
+                .is_some(),
+            "toolchain provenance must include the script hash section"
+        );
         let summary_text = fs::read_to_string(bundle_dir.join(PACK_REPLAY_SUMMARY_FILE))
             .map_err(|error| format!("failed to read pack replay summary: {error}"))?;
         assert!(
