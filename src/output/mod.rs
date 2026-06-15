@@ -9855,6 +9855,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: hook_harness_install_schema_definition,
         },
         SchemaEntry {
+            id: crate::hooks::HARNESS_CONFORMANCE_SCHEMA_V1,
+            version: "1",
+            description: "Redaction-safe harness conformance fixture contract for hook-event and transcript simulation. ADR 0075.",
+            category: "ops",
+            definition: harness_conformance_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.host_calibration.host_class.v1",
             version: "1",
             description: "Pure host-class classification derived from a caller-provided host profile probe.",
@@ -11208,6 +11215,10 @@ fn hooks_git_readiness_schema_definition() -> String {
 
 fn hook_harness_install_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.hook.harness_install.v1.json").to_string()
+}
+
+fn harness_conformance_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.harness_conformance.v1.json").to_string()
 }
 
 fn host_calibration_host_class_schema_definition() -> String {

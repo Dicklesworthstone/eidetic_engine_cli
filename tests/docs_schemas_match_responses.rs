@@ -198,6 +198,10 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     ),
     ("ee.ask.v1", "ee.ask.v1.json"),
     ("ee.recall.v1", "ee.recall.v1.json"),
+    (
+        "ee.harness_conformance.v1",
+        "ee.harness_conformance.v1.json",
+    ),
 ];
 
 fn repo_root() -> PathBuf {
