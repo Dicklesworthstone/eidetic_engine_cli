@@ -1925,6 +1925,22 @@ fn database_open_error_is_retryable(error: &DbError) -> bool {
     sqlmodel_error_is_transient_sqlite_contention(source.as_ref())
 }
 
+/// Detect the "cannot start a transaction within a transaction" error returned
+/// when a BEGIN is issued while a transaction is already open on the connection.
+/// `insert_audit` uses this to fall back to the direct (non-owning) path when a
+/// caller already holds a transaction opened via `begin()`/`begin_transaction()`
+/// directly — those do not register in `FILE_WRITE_OWNER_DEPTHS`, but the outer
+/// transaction already provides atomicity for the audit hash-read + insert.
+fn db_error_is_nested_transaction(error: &DbError) -> bool {
+    let DbError::SqlModel { source, .. } = error else {
+        return false;
+    };
+    source
+        .as_ref()
+        .to_string()
+        .contains("cannot start a transaction within a transaction")
+}
+
 fn db_error_is_transient_sqlite_contention(error: &DbError) -> bool {
     let DbError::SqlModel { source, .. } = error else {
         return false;
@@ -16169,13 +16185,22 @@ impl DbConnection {
                     > 0
             });
             if !in_gate {
-                return self.with_transaction(|| {
+                // Own the transaction so the hash-read and row-insert are atomic
+                // under the write-owner flock. If a caller already opened a
+                // transaction via begin()/begin_transaction() directly (which does
+                // not register in FILE_WRITE_OWNER_DEPTHS), with_transaction's BEGIN
+                // fails with a nested-transaction error; that outer transaction
+                // already provides atomicity, so fall through to the direct path.
+                match self.with_transaction(|| {
                     let prev_row_hash = self.latest_audit_row_hash()?;
                     let entry =
                         build_audit_entry(id, input, Utc::now().to_rfc3339(), prev_row_hash);
                     self.insert_prepared_audit_entry(&entry)?;
                     Ok(())
-                });
+                }) {
+                    Err(error) if db_error_is_nested_transaction(&error) => {}
+                    other => return other,
+                }
             }
         }
         let prev_row_hash = self.latest_audit_row_hash()?;
