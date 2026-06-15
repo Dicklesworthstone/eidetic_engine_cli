@@ -10254,6 +10254,27 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: session_budget_plan_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::decide::DECIDE_RECORD_SCHEMA_V1,
+            version: "1",
+            description: "Data payload emitted by ee decide record under the standard ee.response.v2 envelope.",
+            category: "coordination",
+            definition: decide_record_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::decide::DECIDE_LIST_SCHEMA_V1,
+            version: "1",
+            description: "Data payload emitted by ee decide list under the standard ee.response.v2 envelope.",
+            category: "coordination",
+            definition: decide_list_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::decide::DECIDE_REVISIT_SCHEMA_V1,
+            version: "1",
+            description: "Data payload emitted by ee decide revisit under the standard ee.response.v2 envelope.",
+            category: "coordination",
+            definition: decide_revisit_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::recall::RECALL_SCHEMA_V1,
             version: "1",
             description: "Code-anchored recall result emitted by ee recall (ADR 0064): reverse lookup from paths, symbols, or a git diff to anchored memories with deterministic freshness x confidence x level-tilt ranking.",
@@ -10314,6 +10335,18 @@ fn ask_schema_definition() -> String {
 
 fn session_budget_plan_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.session_budget.plan.v1.json").to_string()
+}
+
+fn decide_record_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.decide.record.v1.json").to_string()
+}
+
+fn decide_list_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.decide.list.v1.json").to_string()
+}
+
+fn decide_revisit_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.decide.revisit.v1.json").to_string()
 }
 
 fn toolchain_provenance_schema_definition() -> String {
