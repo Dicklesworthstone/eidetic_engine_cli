@@ -1416,13 +1416,44 @@ fn is_valid_kind_identifier(name: &str) -> bool {
 mod tests {
     use std::str::FromStr;
 
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config as ProptestConfig, TestCaseError};
+
     use super::{
-        Confidence, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES, MAX_TYPED_MEMORY_FIELDS,
-        MemoryContent, MemoryKind, MemoryLevel, MemoryValidationError,
+        Confidence, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES,
+        MAX_TYPED_MEMORY_FIELD_LIST_ITEMS, MAX_TYPED_MEMORY_FIELD_VALUE_BYTES,
+        MAX_TYPED_MEMORY_FIELDS, MemoryContent, MemoryKind, MemoryLevel, MemoryValidationError,
         TYPED_MEMORY_FIELDS_SCHEMA_V2, Tag, UnitScore, canonicalize_typed_memory_fields_json,
         canonicalize_typed_memory_fields_json_with_redactor,
-        extract_typed_memory_fields_json_with_redactor, typed_memory_index_metadata_from_json,
+        extract_typed_memory_fields_json_with_redactor, typed_memory_fields_from_json,
+        typed_memory_index_metadata_from_json,
     };
+
+    fn decision_field_text_strategy() -> impl Strategy<Value = String> {
+        let ascii_chunk = proptest::string::string_regex("[A-Za-z0-9][A-Za-z0-9_-]{0,7}")
+            .expect("test regex is valid");
+        let atom = prop_oneof![
+            ascii_chunk,
+            prop::sample::select(vec![
+                "=", "~", "^", "/", ".", ":", " ", "delta", "tokyo", "cafe", "RCH", "remote",
+                "local", "cargo", "東京", "δ", "é"
+            ])
+            .prop_map(str::to_owned),
+        ];
+        prop::collection::vec(atom, 1..16).prop_filter_map(
+            "non-empty, bounded text value without trimming loss",
+            |parts| {
+                let value = parts.concat();
+                if value.trim() != value || value.is_empty() {
+                    return None;
+                }
+                if value.len() > MAX_TYPED_MEMORY_FIELD_VALUE_BYTES {
+                    return None;
+                }
+                Some(value)
+            },
+        )
+    }
 
     #[test]
     fn level_round_trip_for_every_variant() {
@@ -1673,6 +1704,105 @@ mod tests {
         );
         assert!(!metadata.contains_key("typed_field.rationale"));
         assert!(!metadata.contains_key("typed_field.revisit_by"));
+    }
+
+    #[test]
+    fn typed_memory_fields_preserve_operator_and_max_byte_values() {
+        let max_value = "x".repeat(MAX_TYPED_MEMORY_FIELD_VALUE_BYTES);
+        let canonical = canonicalize_typed_memory_fields_json(
+            &MemoryKind::Decision,
+            &serde_json::json!({
+                "chosen": "RCH=remote/worker~hz2^prefix|safe",
+                "rationale": max_value,
+                "supersedes": "mem_01234567890123456789012345",
+                "options": ["local Cargo", "RCH=remote/worker~hz2^prefix|safe"]
+            })
+            .to_string(),
+        )
+        .expect("operator and max-byte decision fields canonicalize");
+        let fields = typed_memory_fields_from_json(&MemoryKind::Decision, &canonical)
+            .expect("canonical sidecar parses");
+
+        assert_eq!(
+            fields.get("chosen").and_then(serde_json::Value::as_str),
+            Some("RCH=remote/worker~hz2^prefix|safe")
+        );
+        assert_eq!(
+            fields.get("rationale").and_then(serde_json::Value::as_str),
+            Some(max_value.as_str())
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(96))]
+
+        #[test]
+        fn typed_memory_fields_property_decision_values_round_trip_byte_identically(
+            chosen in decision_field_text_strategy(),
+            rationale in decision_field_text_strategy(),
+            supersedes in decision_field_text_strategy(),
+            options in prop::collection::vec(
+                decision_field_text_strategy(),
+                1..=MAX_TYPED_MEMORY_FIELD_LIST_ITEMS,
+            ),
+        ) {
+            let raw = serde_json::json!({
+                "chosen": chosen,
+                "rationale": rationale,
+                "supersedes": supersedes,
+                "options": options,
+            });
+            let canonical = canonicalize_typed_memory_fields_json(
+                &MemoryKind::Decision,
+                &raw.to_string(),
+            )
+            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+            let fields = typed_memory_fields_from_json(&MemoryKind::Decision, &canonical)
+                .map_err(|error| TestCaseError::fail(error.to_string()))?;
+
+            prop_assert_eq!(
+                fields.get("chosen").and_then(serde_json::Value::as_str),
+                raw["chosen"].as_str()
+            );
+            prop_assert_eq!(
+                fields.get("rationale").and_then(serde_json::Value::as_str),
+                raw["rationale"].as_str()
+            );
+            prop_assert_eq!(
+                fields.get("supersedes").and_then(serde_json::Value::as_str),
+                raw["supersedes"].as_str()
+            );
+
+            let actual_options = fields
+                .get("options")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| TestCaseError::fail("options must round-trip as an array"))?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or_else(|| TestCaseError::fail("option must round-trip as text"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let expected_options = raw["options"]
+                .as_array()
+                .ok_or_else(|| TestCaseError::fail("raw options must be an array"))?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or_else(|| TestCaseError::fail("raw option must be text"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            prop_assert_eq!(actual_options, expected_options);
+
+            let recanonicalized = canonicalize_typed_memory_fields_json(
+                &MemoryKind::Decision,
+                &canonical,
+            )
+            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+            prop_assert_eq!(recanonicalized, canonical);
+        }
     }
 
     #[test]

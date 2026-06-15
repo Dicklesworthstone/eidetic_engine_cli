@@ -7480,6 +7480,9 @@ fn render_memory_fields(b: &mut JsonBuilder, details: &MemoryDetails) {
     field_optional_str(b, "valid_to", validity.valid_to.as_deref());
     b.field_str("validity_status", &validity.status);
     b.field_str("validity_window_kind", &validity.window_kind);
+    if let Some(ref typed_fields) = details.typed_fields {
+        b.field_raw("typedFields", &typed_fields.to_string());
+    }
     b.field_array_of_objects("tags", &details.tags, |obj, tag| {
         obj.field_str("name", tag);
     });
@@ -18111,6 +18114,7 @@ mod tests {
                 "file:///Users/alice/private/logs/build.log?api_key=redaction-fixture".to_owned(),
             )),
             tags: Vec::new(),
+            typed_fields: None,
         });
 
         let json = render_memory_show_json(&report);

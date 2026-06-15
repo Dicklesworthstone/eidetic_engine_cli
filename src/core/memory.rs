@@ -60,6 +60,9 @@ pub struct MemoryDetails {
     pub memory: StoredMemory,
     /// Tags associated with this memory.
     pub tags: Vec<String>,
+    /// Canonical typed memory fields, when the memory kind supports them and
+    /// this record has a sidecar.
+    pub typed_fields: Option<serde_json::Value>,
 }
 
 /// Options for creating a manual memory through `ee remember`.
@@ -5642,6 +5645,32 @@ pub fn get_memory_details(options: &GetMemoryOptions<'_>) -> MemoryShowReport {
         Ok(t) => t,
         Err(e) => return MemoryShowReport::error(format!("Failed to query tags: {e}")),
     };
+    let typed_fields = match conn.get_memory_typed_fields_json(options.memory_id) {
+        Ok(Some(raw)) => {
+            let kind = match MemoryKind::from_str(&memory.kind) {
+                Ok(kind) => kind,
+                Err(error) => {
+                    return MemoryShowReport::error(format!(
+                        "Failed to parse memory kind for typed fields: {error}"
+                    ));
+                }
+            };
+            match crate::models::memory::typed_memory_fields_from_json(&kind, &raw) {
+                Ok(fields) => Some(serde_json::json!(fields)),
+                Err(error) => {
+                    return MemoryShowReport::error(format!(
+                        "Invalid typed memory fields: {error}"
+                    ));
+                }
+            }
+        }
+        Ok(None) => None,
+        Err(e) => {
+            return MemoryShowReport::error(format!(
+                "Failed to query typed memory fields: {e}"
+            ));
+        }
+    };
 
     // Bead bd-17c65.7.7 (G8): best-effort audit row so L3 has a
     // last_accessed signal for `ee memory show` / `ee show <mem_id>`
@@ -5658,7 +5687,11 @@ pub fn get_memory_details(options: &GetMemoryOptions<'_>) -> MemoryShowReport {
     };
     let _ = conn.insert_audit(&crate::db::generate_audit_id(), &audit_input);
 
-    MemoryShowReport::found(MemoryDetails { memory, tags })
+    MemoryShowReport::found(MemoryDetails {
+        memory,
+        tags,
+        typed_fields,
+    })
 }
 
 /// Options for listing memories.

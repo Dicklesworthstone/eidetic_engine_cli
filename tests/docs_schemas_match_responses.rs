@@ -2436,6 +2436,7 @@ fn memory_show_sample() -> Result<Value, String> {
     let report = MemoryShowReport::found(MemoryDetails {
         memory: stored_memory_sample(),
         tags: vec!["release".to_string(), "formatting".to_string()],
+        typed_fields: None,
     });
     serde_json::from_str(&render_memory_show_json(&report)).map_err(|error| error.to_string())
 }

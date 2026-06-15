@@ -227,3 +227,245 @@ fn decide_cli_record_list_revisit_exposes_subscribe_query() -> TestResult {
         "revisit near-due status",
     )
 }
+
+#[test]
+fn decide_cli_supersedes_refuses_forks_and_filters_typed_fields() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = temp.path().to_string_lossy().into_owned();
+
+    let (exit, _stdout, stderr) = invoke(&["ee", "--json", "--workspace", &workspace, "init"]);
+    ensure_equal(&exit, &ProcessExitCode::Success, "init exit")?;
+    ensure_equal(&stderr, &String::new(), "init stderr")?;
+
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--json",
+        "--workspace",
+        &workspace,
+        "decide",
+        "record",
+        "Storage layer topic",
+        "--chosen",
+        "FrankenSQLite",
+        "--alternative",
+        "SQLx",
+        "--rationale",
+        "Keep the source of truth in FrankenSQLite.",
+        "--revisit-by",
+        "2026-06-14T12:00:00Z",
+    ]);
+    ensure_equal(&exit, &ProcessExitCode::Success, "first record exit")?;
+    ensure_equal(&stderr, &String::new(), "first record stderr")?;
+    let first: Value = serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+    ensure_equal(
+        &first["data"]["decision"]["chosen"],
+        &json!("FrankenSQLite"),
+        "first chosen field",
+    )?;
+    let first_id = first["data"]["decision"]["memoryId"]
+        .as_str()
+        .ok_or_else(|| format!("first decision missing memoryId: {first}"))?
+        .to_owned();
+
+    let (exit, stdout, _stderr) = invoke(&[
+        "ee",
+        "--json",
+        "--workspace",
+        &workspace,
+        "decide",
+        "record",
+        "Storage layer topic",
+        "--chosen",
+        "SQLx",
+        "--alternative",
+        "FrankenSQLite",
+        "--rationale",
+        "A fork should be rejected unless it supersedes the live decision.",
+    ]);
+    ensure_equal(
+        &exit,
+        &ProcessExitCode::Usage,
+        "same-topic fork exit code",
+    )?;
+    let fork: Value = serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+    ensure_equal(
+        &fork["error"]["code"],
+        &json!("decision_topic_requires_supersedes"),
+        "same-topic fork error code",
+    )?;
+
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--json",
+        "--workspace",
+        &workspace,
+        "decide",
+        "record",
+        "Storage layer topic",
+        "--chosen",
+        "RCH remote",
+        "--alternative",
+        "local Cargo",
+        "--rationale",
+        "Remote proof keeps build output off the shared Mac checkout.",
+        "--supersedes",
+        &first_id,
+        "--revisit-by",
+        "2026-06-14T12:00:00Z",
+    ]);
+    ensure_equal(&exit, &ProcessExitCode::Success, "superseding record exit")?;
+    ensure_equal(&stderr, &String::new(), "superseding record stderr")?;
+    let second: Value = serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+    ensure_equal(
+        &second["data"]["superseded"]["memoryId"],
+        &json!(first_id.as_str()),
+        "superseded memory id",
+    )?;
+    ensure_equal(
+        &second["data"]["decision"]["chainDepth"],
+        &json!(1),
+        "superseding chain depth",
+    )?;
+    let second_id = second["data"]["decision"]["memoryId"]
+        .as_str()
+        .ok_or_else(|| format!("second decision missing memoryId: {second}"))?
+        .to_owned();
+
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--json",
+        "--workspace",
+        &workspace,
+        "decide",
+        "list",
+    ]);
+    ensure_equal(&exit, &ProcessExitCode::Success, "head list exit")?;
+    ensure_equal(&stderr, &String::new(), "head list stderr")?;
+    let head_list: Value = serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+    ensure_equal(
+        &head_list["data"]["returnedCount"],
+        &json!(1),
+        "head list returned count",
+    )?;
+    ensure_equal(
+        &head_list["data"]["decisions"][0]["memoryId"],
+        &json!(second_id.as_str()),
+        "head list returns superseding decision",
+    )?;
+
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--json",
+        "--workspace",
+        &workspace,
+        "decide",
+        "list",
+        "--include-superseded",
+    ]);
+    ensure_equal(&exit, &ProcessExitCode::Success, "history list exit")?;
+    ensure_equal(&stderr, &String::new(), "history list stderr")?;
+    let history: Value = serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+    ensure_equal(
+        &history["data"]["returnedCount"],
+        &json!(2),
+        "history list returned count",
+    )?;
+    let prior = history["data"]["decisions"]
+        .as_array()
+        .and_then(|decisions| {
+            decisions
+                .iter()
+                .find(|decision| decision["memoryId"] == json!(first_id.as_str()))
+        })
+        .ok_or_else(|| format!("history missing superseded decision: {history}"))?;
+    ensure_equal(
+        &prior["superseded"],
+        &json!(true),
+        "prior decision superseded flag",
+    )?;
+    ensure_equal(
+        &prior["validTo"].is_string(),
+        &true,
+        "prior decision validTo is set",
+    )?;
+
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--json",
+        "--workspace",
+        &workspace,
+        "decide",
+        "revisit",
+        "--warning-days",
+        "30",
+    ]);
+    ensure_equal(&exit, &ProcessExitCode::Success, "revisit exit")?;
+    ensure_equal(&stderr, &String::new(), "revisit stderr")?;
+    let revisit: Value = serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+    ensure_equal(&revisit["data"]["dueCount"], &json!(1), "revisit due count")?;
+    ensure_equal(
+        &revisit["data"]["decisions"][0]["memoryId"],
+        &json!(second_id.as_str()),
+        "revisit returns live decision",
+    )?;
+    ensure_equal(
+        &revisit["data"]["decisions"][0]["revisitStatus"],
+        &json!("overdue"),
+        "revisit overdue status",
+    )?;
+
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--json",
+        "--workspace",
+        &workspace,
+        "memory",
+        "show",
+        &second_id,
+    ]);
+    ensure_equal(&exit, &ProcessExitCode::Success, "memory show exit")?;
+    ensure_equal(&stderr, &String::new(), "memory show stderr")?;
+    let show: Value = serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+    ensure_equal(
+        &show["data"]["memory"]["typedFields"]["chosen"],
+        &json!("RCH remote"),
+        "memory show chosen typed field",
+    )?;
+    ensure_equal(
+        &show["data"]["memory"]["typedFields"]["supersedes"],
+        &json!(first_id.as_str()),
+        "memory show supersedes typed field",
+    )?;
+
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--json",
+        "--workspace",
+        &workspace,
+        "search",
+        "remote proof",
+        "--kind",
+        "decision",
+        "--field",
+        "chosen=RCH remote",
+    ]);
+    ensure_equal(&exit, &ProcessExitCode::Success, "field search exit")?;
+    ensure_equal(&stderr, &String::new(), "field search stderr")?;
+    let search: Value = serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+    let result_ids = search["data"]["results"]
+        .as_array()
+        .ok_or_else(|| format!("search results missing array: {search}"))?
+        .iter()
+        .filter_map(|result| result["memoryId"].as_str().or_else(|| result["docId"].as_str()))
+        .collect::<Vec<_>>();
+    ensure_equal(
+        &result_ids.contains(&second_id.as_str()),
+        &true,
+        "field search contains superseding decision",
+    )?;
+    ensure_equal(
+        &result_ids.contains(&first_id.as_str()),
+        &false,
+        "field search omits superseded non-matching decision",
+    )
+}
