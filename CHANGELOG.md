@@ -24,6 +24,61 @@ Evidence scale:
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-15
+
+Cut from the last fully-green, RCH-triaged commit on `main`
+(`02f04781`) plus the audit-transaction regression fix below. Spans the
+`v0.9.1..02f04781` range (15 features, ~53 fixes, ~28 new test/contract
+suites). Newer in-flight `main` work rolls into the next release.
+
+### Added
+- Background steward scheduler thread for the optional supervised daemon
+  (bd-2ohzq), retiring the `daemon_background_mode_unimplemented` honesty-only
+  constant (bd-20kdq).
+- `ee.swarm.unsafe_claim_plan.v1` emission from work-packet claim gating
+  (bd-1n3x1.16); source-authority snapshot collectors and an embedded
+  source-authority snapshot in the claim gate; unsafe-claim alternate ranking.
+- Resource queue-pressure backoff evaluator and normalized queue-pressure
+  signals for the shadow resource-admission path, with a conformance harness.
+- Recall harness generators for agent hooks and a recall-hooks E2E gate.
+- RCH lane doctor for the USB-detached dual blocker (bd-2qpgn); verify-ledger
+  recurrence detector for closed-remediation RCH blockers (bd-b1e4v.1).
+- Memory-drift lock-contention handoff evidence (bd-1rem0).
+- Surface goldens: insights kCore / kTruss / revisionFrontiers (bd-2ojgz,
+  bd-2q5c7, bd-xn5nf) and daemon-background (bd-3bbb9); journal-capture and
+  resource-admission contract/property/conformance test suites.
+
+### Changed
+- `ee schema` now exports the canonical `ee.response.v2` JSON Schema definition
+  instead of a stub schema-id catalog.
+- Daemon scheduler shutdown is bounded and honors foreground `Cx` cancellation;
+  the detached scheduler stops cleanly.
+
+### Fixed
+- **Audit / curate regression**: `insert_audit()` no longer issues a nested
+  `BEGIN` when a caller (curate validate/apply, playbook apply) already holds a
+  transaction opened via `begin()` directly; it falls back to the direct path,
+  fixing `ee curate`/`ee playbook` apply on file databases while preserving the
+  bd-3mq1r audit-chain atomicity.
+- Security/redaction hardening: escaped secret separators and keys, escaped URL
+  passwords, escaped JSON secrets, padded JWT segments, invisible instruction
+  separators, zero-width sequences, and stderr excerpts in test logs are now
+  redacted; several redaction-leak gaps closed.
+- Audit: `insert_audit()` is atomic under the write-owner flock for file-backed
+  DBs (TOCTOU fix, bd-3mq1r).
+- Pack: no duplicate memory ids during MMR fill; selection-audit objective is
+  refreshed after the contradiction guard.
+- Search: finite duplicate scores preserved; embedding config content hashed
+  (bd-3rp7x); real prewarm evidence reported.
+- Graph: pack-DNA frontier depth bounded; stale PPR snapshot generations
+  skipped; feature enrichment uses the snapshot.
+- Output: non-finite card math renders as JSON `null`.
+- Steward: curation review gated before apply; manual maintenance gates
+  hardened; manual maintenance jobs run.
+- DB: workspace generation floor repaired.
+- Context `Cx` cancellation, models/mcp malformed-input hardening, config
+  empty-salt-path handling, and the relative `../asupersync` patch path restored.
+
 ## [0.3.9] - 2026-06-01
 
 ### Added
