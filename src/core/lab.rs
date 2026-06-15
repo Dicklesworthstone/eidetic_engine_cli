@@ -1760,6 +1760,699 @@ fn stable_scale_fixture_raw_hash(data: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(data).to_hex())
 }
 
+/// Schema for the scale-envelope SLO harness report.
+pub const SCALE_ENVELOPE_SLO_HARNESS_SCHEMA_V1: &str = "ee.scale_envelope.slo_harness.v1";
+
+const SCALE_ENVELOPE_SLO_SURFACES: [&str; 4] = ["ingest", "search", "pack", "maintain"];
+
+/// Options for assembling a deterministic scale-envelope SLO harness report.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScaleEnvelopeSloHarnessOptions {
+    pub fixture_options: ScaleEnvelopeFixtureOptions,
+    pub proof_lane: ScaleEnvelopeSloProofLane,
+    pub observations: Vec<ScaleEnvelopeSloCommandObservation>,
+    pub missing_evidence: Vec<String>,
+}
+
+impl ScaleEnvelopeSloHarnessOptions {
+    #[must_use]
+    pub fn small(fixture_seed: impl Into<String>) -> Self {
+        let fixture_options = ScaleEnvelopeFixtureOptions::small(fixture_seed);
+        let observations = deterministic_scale_slo_observations(
+            fixture_options.profile,
+            &fixture_options.fixture_seed,
+        );
+        Self {
+            fixture_options,
+            proof_lane: ScaleEnvelopeSloProofLane::OrdinarySmallProfile,
+            observations,
+            missing_evidence: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn full_rch(fixture_seed: impl Into<String>) -> Self {
+        Self {
+            fixture_options: ScaleEnvelopeFixtureOptions::full(fixture_seed),
+            proof_lane: ScaleEnvelopeSloProofLane::RchOnlyFullProfile,
+            observations: Vec::new(),
+            missing_evidence: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_observations(
+        mut self,
+        observations: Vec<ScaleEnvelopeSloCommandObservation>,
+    ) -> Self {
+        self.observations = observations;
+        self
+    }
+
+    #[must_use]
+    pub fn with_missing_evidence(mut self, evidence: impl Into<String>) -> Self {
+        self.missing_evidence.push(evidence.into());
+        self
+    }
+}
+
+/// Proof lane used by the SLO harness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleEnvelopeSloProofLane {
+    OrdinarySmallProfile,
+    RchOnlyFullProfile,
+}
+
+impl ScaleEnvelopeSloProofLane {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::OrdinarySmallProfile => "ordinary_small_profile",
+            Self::RchOnlyFullProfile => "rch_only_full_profile",
+        }
+    }
+
+    const fn requires_rch(self) -> bool {
+        matches!(self, Self::RchOnlyFullProfile)
+    }
+}
+
+/// End-state for the SLO harness report.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleEnvelopeSloHarnessStatus {
+    Pass,
+    Fail,
+    Blocked,
+}
+
+/// Latency percentile summary for one command surface.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeSloLatencyMs {
+    pub p50: u32,
+    pub p95: u32,
+    pub p99: u32,
+}
+
+/// Evidence describing one scale-envelope command surface observation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeSloCommandObservation {
+    pub surface: String,
+    pub command: Vec<String>,
+    pub sample_count: u32,
+    pub latency_ms: ScaleEnvelopeSloLatencyMs,
+    pub rss_estimate_bytes: u64,
+    pub page_faults_delta: u64,
+    pub checkpoint_posture: String,
+    pub index_posture: String,
+    pub output_hash: String,
+    pub evidence: ScaleEnvelopeSloEvidenceRef,
+}
+
+impl ScaleEnvelopeSloCommandObservation {
+    #[must_use]
+    pub fn rch_evidence(
+        surface: impl Into<String>,
+        command: Vec<String>,
+        sample_count: u32,
+        latency_ms: ScaleEnvelopeSloLatencyMs,
+        rss_estimate_bytes: u64,
+        page_faults_delta: u64,
+        output_hash: impl Into<String>,
+    ) -> Self {
+        let surface = surface.into();
+        Self {
+            checkpoint_posture: "clean".to_owned(),
+            index_posture: "fresh".to_owned(),
+            output_hash: output_hash.into(),
+            evidence: ScaleEnvelopeSloEvidenceRef::rch_remote(&surface),
+            surface,
+            command,
+            sample_count,
+            latency_ms,
+            rss_estimate_bytes,
+            page_faults_delta,
+        }
+    }
+}
+
+/// Redaction-safe evidence reference for one SLO observation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeSloEvidenceRef {
+    pub substrate: String,
+    pub event_schema: String,
+    pub event_log_hash: String,
+    pub support_bundle_ref: String,
+    pub provenance: Vec<ScaleEnvelopeFixtureProvenanceRef>,
+}
+
+impl ScaleEnvelopeSloEvidenceRef {
+    #[must_use]
+    pub fn rch_remote(surface: &str) -> Self {
+        Self {
+            substrate: "rch_remote".to_owned(),
+            event_schema: crate::models::TEST_EVENT_SCHEMA_V1.to_owned(),
+            event_log_hash: stable_scale_slo_hash("rch-event-log", surface),
+            support_bundle_ref: format!(".ee/support/scale-envelope/{surface}/rch-event-log.jsonl"),
+            provenance: vec![
+                ScaleEnvelopeFixtureProvenanceRef {
+                    kind: "schema".to_owned(),
+                    reference: crate::models::TEST_EVENT_SCHEMA_V1.to_owned(),
+                    hash: Some(stable_scale_slo_hash("test-event-schema", surface)),
+                },
+                ScaleEnvelopeFixtureProvenanceRef {
+                    kind: "bead".to_owned(),
+                    reference: "bd-ssoco.5".to_owned(),
+                    hash: None,
+                },
+            ],
+        }
+    }
+
+    #[must_use]
+    pub fn ordinary_small(surface: &str) -> Self {
+        Self {
+            substrate: "ordinary_test".to_owned(),
+            event_schema: crate::models::TEST_EVENT_SCHEMA_V1.to_owned(),
+            event_log_hash: stable_scale_slo_hash("ordinary-event-log", surface),
+            support_bundle_ref: format!(
+                ".ee/support/scale-envelope/{surface}/small-event-log.jsonl"
+            ),
+            provenance: vec![
+                ScaleEnvelopeFixtureProvenanceRef {
+                    kind: "schema".to_owned(),
+                    reference: crate::models::TEST_EVENT_SCHEMA_V1.to_owned(),
+                    hash: Some(stable_scale_slo_hash("test-event-schema", surface)),
+                },
+                ScaleEnvelopeFixtureProvenanceRef {
+                    kind: "bead".to_owned(),
+                    reference: "bd-ssoco.5".to_owned(),
+                    hash: None,
+                },
+            ],
+        }
+    }
+}
+
+/// Regression threshold for one command surface.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeSloThreshold {
+    pub surface: String,
+    pub p95_budget_ms: u32,
+    pub p99_budget_ms: u32,
+    pub max_rss_estimate_bytes: u64,
+    pub max_page_faults_delta: u64,
+    pub required_checkpoint_posture: String,
+    pub required_index_posture: String,
+    pub missing_evidence_failure: String,
+}
+
+/// Representative degraded state that the small profile must keep visible.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeRepresentativeDegradedState {
+    pub state: String,
+    pub degraded_code: String,
+    pub recovery_kind: String,
+    pub sample_surface: String,
+}
+
+/// Fail-closed regression policy for the SLO harness.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeSloRegressionPolicy {
+    pub fail_closed_when_evidence_missing: bool,
+    pub local_cargo_allowed_for_full_profile: bool,
+    pub local_large_corpus_generation_allowed: bool,
+    pub threshold_source: String,
+    pub missing_evidence_status: ScaleEnvelopeSloHarnessStatus,
+}
+
+/// One event row that can be written as `ee.test_event.v1` JSONL.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeSloTestEvent {
+    pub schema: String,
+    pub ts: String,
+    pub test_id: String,
+    pub kind: String,
+    pub fields: BTreeMap<String, String>,
+}
+
+/// Stable hashes for the harness report.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeSloHarnessHashSummary {
+    pub fixture_manifest_hash: String,
+    pub thresholds_hash: String,
+    pub command_slos_hash: String,
+    pub event_log_hash: String,
+    pub report_hash: String,
+}
+
+/// Deterministic SLO harness report for scale-envelope proof lanes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleEnvelopeSloHarnessReport {
+    pub schema: String,
+    pub fixture_profile_id: String,
+    pub fixture_seed: String,
+    pub profile: ScaleEnvelopeFixtureProfile,
+    pub envelope_schema: String,
+    pub proof_lane: ScaleEnvelopeSloProofLane,
+    pub status: ScaleEnvelopeSloHarnessStatus,
+    pub small_profile_gate: String,
+    pub full_profile_gate: String,
+    pub local_cargo_allowed_for_full_profile: bool,
+    pub local_large_corpus_generation_allowed: bool,
+    pub rch_command: Vec<String>,
+    pub thresholds: Vec<ScaleEnvelopeSloThreshold>,
+    pub command_slos: Vec<ScaleEnvelopeSloCommandObservation>,
+    pub representative_degraded_states: Vec<ScaleEnvelopeRepresentativeDegradedState>,
+    pub degraded_codes: Vec<String>,
+    pub missing_evidence: Vec<String>,
+    pub regression_policy: ScaleEnvelopeSloRegressionPolicy,
+    pub event_log_rows: Vec<ScaleEnvelopeSloTestEvent>,
+    pub hash_summary: ScaleEnvelopeSloHarnessHashSummary,
+    pub provenance: Vec<ScaleEnvelopeFixtureProvenanceRef>,
+}
+
+impl ScaleEnvelopeSloHarnessReport {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        crate::core::serialize_or_error(self)
+    }
+
+    #[must_use]
+    pub fn to_json_pretty(&self) -> String {
+        crate::core::serialize_pretty_or_error(self)
+    }
+}
+
+/// Generate a deterministic SLO harness report from fixture and evidence inputs.
+#[must_use]
+pub fn generate_scale_envelope_slo_harness_report(
+    options: &ScaleEnvelopeSloHarnessOptions,
+) -> ScaleEnvelopeSloHarnessReport {
+    let manifest = generate_scale_envelope_fixture_manifest(&options.fixture_options);
+    let thresholds = scale_slo_thresholds(options.fixture_options.profile);
+    let mut missing_evidence = options.missing_evidence.clone();
+    missing_evidence.extend(scale_slo_missing_evidence(
+        &thresholds,
+        &options.observations,
+        options.proof_lane,
+    ));
+    missing_evidence.sort();
+    missing_evidence.dedup();
+
+    let status = scale_slo_status(&thresholds, &options.observations, &missing_evidence);
+    let degraded_codes = scale_slo_degraded_codes(status, &missing_evidence);
+    let representative_degraded_states = scale_slo_representative_degraded_states();
+    let rch_command = scale_slo_rch_command(&options.fixture_options);
+    let regression_policy = ScaleEnvelopeSloRegressionPolicy {
+        fail_closed_when_evidence_missing: true,
+        local_cargo_allowed_for_full_profile: false,
+        local_large_corpus_generation_allowed: false,
+        threshold_source: "docs/adr/0076-scale-envelope-contract.md#slo-thresholds".to_owned(),
+        missing_evidence_status: ScaleEnvelopeSloHarnessStatus::Blocked,
+    };
+    let event_log_rows = scale_slo_test_events(
+        &manifest,
+        options.proof_lane,
+        status,
+        &degraded_codes,
+        &missing_evidence,
+        &rch_command,
+    );
+    let hash_summary = ScaleEnvelopeSloHarnessHashSummary {
+        fixture_manifest_hash: manifest.hash_summary.manifest_hash.clone(),
+        thresholds_hash: stable_scale_slo_serialized_hash(&thresholds),
+        command_slos_hash: stable_scale_slo_serialized_hash(&options.observations),
+        event_log_hash: stable_scale_slo_serialized_hash(&event_log_rows),
+        report_hash: stable_scale_slo_hash(
+            "report",
+            &format!(
+                "{}:{}:{}:{}",
+                manifest.fixture_profile_id,
+                options.proof_lane.as_str(),
+                stable_scale_slo_serialized_hash(&options.observations),
+                missing_evidence.join("|")
+            ),
+        ),
+    };
+
+    ScaleEnvelopeSloHarnessReport {
+        schema: SCALE_ENVELOPE_SLO_HARNESS_SCHEMA_V1.to_owned(),
+        fixture_profile_id: manifest.fixture_profile_id,
+        fixture_seed: options.fixture_options.fixture_seed.clone(),
+        profile: options.fixture_options.profile,
+        envelope_schema: crate::models::SCALE_ENVELOPE_SCHEMA_V1.to_owned(),
+        proof_lane: options.proof_lane,
+        status,
+        small_profile_gate: "ordinary_test_contract_and_golden".to_owned(),
+        full_profile_gate: "rch_only_ingest_search_pack_maintain".to_owned(),
+        local_cargo_allowed_for_full_profile: false,
+        local_large_corpus_generation_allowed: false,
+        rch_command,
+        thresholds,
+        command_slos: options.observations.clone(),
+        representative_degraded_states,
+        degraded_codes,
+        missing_evidence,
+        regression_policy,
+        event_log_rows,
+        hash_summary,
+        provenance: vec![
+            ScaleEnvelopeFixtureProvenanceRef {
+                kind: "schema".to_owned(),
+                reference: crate::models::SCALE_ENVELOPE_SCHEMA_V1.to_owned(),
+                hash: Some(stable_scale_slo_hash("scale-envelope-schema", "v1")),
+            },
+            ScaleEnvelopeFixtureProvenanceRef {
+                kind: "schema".to_owned(),
+                reference: SCALE_ENVELOPE_SLO_HARNESS_SCHEMA_V1.to_owned(),
+                hash: Some(stable_scale_slo_hash("slo-harness-schema", "v1")),
+            },
+            ScaleEnvelopeFixtureProvenanceRef {
+                kind: "bead".to_owned(),
+                reference: "bd-ssoco.5".to_owned(),
+                hash: None,
+            },
+        ],
+    }
+}
+
+fn scale_slo_thresholds(profile: ScaleEnvelopeFixtureProfile) -> Vec<ScaleEnvelopeSloThreshold> {
+    let scale = match profile {
+        ScaleEnvelopeFixtureProfile::Small => 1,
+        ScaleEnvelopeFixtureProfile::Medium => 40,
+        ScaleEnvelopeFixtureProfile::Full => 120,
+    };
+    SCALE_ENVELOPE_SLO_SURFACES
+        .iter()
+        .enumerate()
+        .map(|(index, surface)| {
+            let ordinal = u32::try_from(index + 1).unwrap_or(u32::MAX);
+            ScaleEnvelopeSloThreshold {
+                surface: (*surface).to_owned(),
+                p95_budget_ms: scale * (80 + ordinal * 20),
+                p99_budget_ms: scale * (120 + ordinal * 30),
+                max_rss_estimate_bytes: u64::from(scale) * (96 * 1024 * 1024),
+                max_page_faults_delta: u64::from(scale) * (256 + u64::from(ordinal) * 32),
+                required_checkpoint_posture: "clean".to_owned(),
+                required_index_posture: "fresh".to_owned(),
+                missing_evidence_failure: "blocked_missing_evidence".to_owned(),
+            }
+        })
+        .collect()
+}
+
+fn deterministic_scale_slo_observations(
+    profile: ScaleEnvelopeFixtureProfile,
+    seed: &str,
+) -> Vec<ScaleEnvelopeSloCommandObservation> {
+    let multiplier = match profile {
+        ScaleEnvelopeFixtureProfile::Small => 1,
+        ScaleEnvelopeFixtureProfile::Medium => 40,
+        ScaleEnvelopeFixtureProfile::Full => 120,
+    };
+    SCALE_ENVELOPE_SLO_SURFACES
+        .iter()
+        .enumerate()
+        .map(|(index, surface)| {
+            let ordinal = u32::try_from(index + 1).unwrap_or(u32::MAX);
+            let p50 = multiplier * (18 + ordinal * 3);
+            let p95 = multiplier * (42 + ordinal * 4);
+            let p99 = multiplier * (72 + ordinal * 5);
+            let rss_estimate_bytes =
+                u64::from(multiplier) * (32 * 1024 * 1024 + u64::from(ordinal) * 1024 * 1024);
+            let page_faults_delta = u64::from(multiplier) * (32 + u64::from(ordinal) * 4);
+            ScaleEnvelopeSloCommandObservation {
+                surface: (*surface).to_owned(),
+                command: scale_slo_surface_command(surface),
+                sample_count: 21,
+                latency_ms: ScaleEnvelopeSloLatencyMs { p50, p95, p99 },
+                rss_estimate_bytes,
+                page_faults_delta,
+                checkpoint_posture: "clean".to_owned(),
+                index_posture: "fresh".to_owned(),
+                output_hash: stable_scale_slo_hash(
+                    "command-output",
+                    &format!("{}:{}:{seed}", profile.as_str(), surface),
+                ),
+                evidence: match profile {
+                    ScaleEnvelopeFixtureProfile::Full => {
+                        ScaleEnvelopeSloEvidenceRef::rch_remote(surface)
+                    }
+                    ScaleEnvelopeFixtureProfile::Small | ScaleEnvelopeFixtureProfile::Medium => {
+                        ScaleEnvelopeSloEvidenceRef::ordinary_small(surface)
+                    }
+                },
+            }
+        })
+        .collect()
+}
+
+fn scale_slo_surface_command(surface: &str) -> Vec<String> {
+    match surface {
+        "ingest" => vec!["ee", "remember", "--workspace", ".", "--json"],
+        "search" => vec!["ee", "search", "--workspace", ".", "--json"],
+        "pack" => vec!["ee", "pack", "--workspace", ".", "--json"],
+        "maintain" => vec![
+            "ee",
+            "status",
+            "--workspace",
+            ".",
+            "--scale-envelope",
+            "--json",
+        ],
+        _ => vec!["ee", surface, "--workspace", ".", "--json"],
+    }
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn scale_slo_missing_evidence(
+    thresholds: &[ScaleEnvelopeSloThreshold],
+    observations: &[ScaleEnvelopeSloCommandObservation],
+    proof_lane: ScaleEnvelopeSloProofLane,
+) -> Vec<String> {
+    thresholds
+        .iter()
+        .filter_map(|threshold| {
+            let observation = observations
+                .iter()
+                .find(|candidate| candidate.surface == threshold.surface);
+            match observation {
+                None => Some(format!(
+                    "surface:{}:missing_{}_event_log",
+                    threshold.surface,
+                    crate::models::TEST_EVENT_SCHEMA_V1
+                )),
+                Some(observation)
+                    if proof_lane.requires_rch()
+                        && observation.evidence.substrate != "rch_remote" =>
+                {
+                    Some(format!(
+                        "surface:{}:missing_rch_remote_evidence",
+                        threshold.surface
+                    ))
+                }
+                Some(_) => None,
+            }
+        })
+        .collect()
+}
+
+fn scale_slo_status(
+    thresholds: &[ScaleEnvelopeSloThreshold],
+    observations: &[ScaleEnvelopeSloCommandObservation],
+    missing_evidence: &[String],
+) -> ScaleEnvelopeSloHarnessStatus {
+    if !missing_evidence.is_empty() {
+        return ScaleEnvelopeSloHarnessStatus::Blocked;
+    }
+
+    let failed = thresholds.iter().any(|threshold| {
+        observations
+            .iter()
+            .find(|candidate| candidate.surface == threshold.surface)
+            .is_none_or(|observation| {
+                observation.latency_ms.p95 > threshold.p95_budget_ms
+                    || observation.latency_ms.p99 > threshold.p99_budget_ms
+                    || observation.rss_estimate_bytes > threshold.max_rss_estimate_bytes
+                    || observation.page_faults_delta > threshold.max_page_faults_delta
+                    || observation.checkpoint_posture != threshold.required_checkpoint_posture
+                    || observation.index_posture != threshold.required_index_posture
+            })
+    });
+
+    if failed {
+        ScaleEnvelopeSloHarnessStatus::Fail
+    } else {
+        ScaleEnvelopeSloHarnessStatus::Pass
+    }
+}
+
+fn scale_slo_degraded_codes(
+    status: ScaleEnvelopeSloHarnessStatus,
+    missing_evidence: &[String],
+) -> Vec<String> {
+    match status {
+        ScaleEnvelopeSloHarnessStatus::Blocked if !missing_evidence.is_empty() => {
+            vec![crate::models::SCALE_PROBE_BUDGET_EXCEEDED_CODE.to_owned()]
+        }
+        ScaleEnvelopeSloHarnessStatus::Fail => {
+            vec![crate::models::SCALE_POSTURE_THRASHING_CODE.to_owned()]
+        }
+        ScaleEnvelopeSloHarnessStatus::Pass | ScaleEnvelopeSloHarnessStatus::Blocked => Vec::new(),
+    }
+}
+
+fn scale_slo_representative_degraded_states() -> Vec<ScaleEnvelopeRepresentativeDegradedState> {
+    vec![
+        ScaleEnvelopeRepresentativeDegradedState {
+            state: "warming".to_owned(),
+            degraded_code: crate::models::SCALE_POSTURE_WARMING_CODE.to_owned(),
+            recovery_kind: "warm_cache".to_owned(),
+            sample_surface: "search".to_owned(),
+        },
+        ScaleEnvelopeRepresentativeDegradedState {
+            state: "thrashing".to_owned(),
+            degraded_code: crate::models::SCALE_POSTURE_THRASHING_CODE.to_owned(),
+            recovery_kind: "checkpoint_wal".to_owned(),
+            sample_surface: "maintain".to_owned(),
+        },
+        ScaleEnvelopeRepresentativeDegradedState {
+            state: "partial_evidence".to_owned(),
+            degraded_code: crate::models::SCALE_PROBE_BUDGET_EXCEEDED_CODE.to_owned(),
+            recovery_kind: "inspect_support_bundle".to_owned(),
+            sample_surface: "ingest".to_owned(),
+        },
+    ]
+}
+
+fn scale_slo_rch_command(_options: &ScaleEnvelopeFixtureOptions) -> Vec<String> {
+    vec![
+        "scripts/rch_verify.sh".to_owned(),
+        "--bead-id".to_owned(),
+        "bd-ssoco.5".to_owned(),
+        "--".to_owned(),
+        "cargo".to_owned(),
+        "test".to_owned(),
+        "--test".to_owned(),
+        "scale_envelope_slo_harness".to_owned(),
+        "full_profile_rch_slo_gate".to_owned(),
+        "--".to_owned(),
+        "--ignored".to_owned(),
+        "--exact".to_owned(),
+    ]
+}
+
+fn scale_slo_test_events(
+    manifest: &ScaleEnvelopeFixtureManifest,
+    proof_lane: ScaleEnvelopeSloProofLane,
+    status: ScaleEnvelopeSloHarnessStatus,
+    degraded_codes: &[String],
+    missing_evidence: &[String],
+    rch_command: &[String],
+) -> Vec<ScaleEnvelopeSloTestEvent> {
+    vec![
+        ScaleEnvelopeSloTestEvent {
+            schema: crate::models::TEST_EVENT_SCHEMA_V1.to_owned(),
+            ts: SCALE_ENVELOPE_FIXED_CLOCK.to_owned(),
+            test_id: "bd-ssoco.5.scale_envelope_slo".to_owned(),
+            kind: "schema_gate".to_owned(),
+            fields: BTreeMap::from([
+                (
+                    "target_schema".to_owned(),
+                    crate::models::SCALE_ENVELOPE_SCHEMA_V1.to_owned(),
+                ),
+                (
+                    "harness_schema".to_owned(),
+                    SCALE_ENVELOPE_SLO_HARNESS_SCHEMA_V1.to_owned(),
+                ),
+                (
+                    "fixture_profile_id".to_owned(),
+                    manifest.fixture_profile_id.clone(),
+                ),
+                (
+                    "representative_degraded_codes".to_owned(),
+                    degraded_codes.join(","),
+                ),
+            ]),
+        },
+        ScaleEnvelopeSloTestEvent {
+            schema: crate::models::TEST_EVENT_SCHEMA_V1.to_owned(),
+            ts: SCALE_ENVELOPE_FIXED_CLOCK.to_owned(),
+            test_id: "bd-ssoco.5.scale_envelope_slo".to_owned(),
+            kind: "artifact_manifest".to_owned(),
+            fields: BTreeMap::from([
+                ("profile".to_owned(), manifest.profile.as_str().to_owned()),
+                ("proof_lane".to_owned(), proof_lane.as_str().to_owned()),
+                ("status".to_owned(), format!("{status:?}").to_lowercase()),
+                (
+                    "event_schema".to_owned(),
+                    crate::models::TEST_EVENT_SCHEMA_V1.to_owned(),
+                ),
+                (
+                    "rch_command_hash".to_owned(),
+                    stable_scale_slo_serialized_hash(&rch_command),
+                ),
+                (
+                    "support_bundle_ref".to_owned(),
+                    ".ee/support/scale-envelope".to_owned(),
+                ),
+            ]),
+        },
+        ScaleEnvelopeSloTestEvent {
+            schema: crate::models::TEST_EVENT_SCHEMA_V1.to_owned(),
+            ts: SCALE_ENVELOPE_FIXED_CLOCK.to_owned(),
+            test_id: "bd-ssoco.5.scale_envelope_slo".to_owned(),
+            kind: match status {
+                ScaleEnvelopeSloHarnessStatus::Pass => "assert_ok",
+                ScaleEnvelopeSloHarnessStatus::Fail | ScaleEnvelopeSloHarnessStatus::Blocked => {
+                    "assert_fail"
+                }
+            }
+            .to_owned(),
+            fields: BTreeMap::from([
+                (
+                    "label".to_owned(),
+                    "scale_envelope_slo_evidence_gate".to_owned(),
+                ),
+                (
+                    "expected".to_owned(),
+                    "all_surfaces_have_required_evidence".to_owned(),
+                ),
+                (
+                    "actual".to_owned(),
+                    if missing_evidence.is_empty() {
+                        "all_required_evidence_present".to_owned()
+                    } else {
+                        missing_evidence.join(",")
+                    },
+                ),
+            ]),
+        },
+    ]
+}
+
+fn stable_scale_slo_serialized_hash<T: Serialize>(value: &T) -> String {
+    stable_scale_fixture_raw_hash(crate::core::serialize_or_error(value).as_bytes())
+}
+
+fn stable_scale_slo_hash(prefix: &str, suffix: &str) -> String {
+    stable_scale_fixture_raw_hash(
+        format!("ee.scale_envelope.slo_harness.v1:{prefix}:{suffix}").as_bytes(),
+    )
+}
+
 /// Compact deterministic ledger emitted by a future swarm replay runner.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
