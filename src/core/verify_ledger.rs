@@ -1215,16 +1215,7 @@ pub fn summarize_rch_verify_ledger_status(
         .take(RCH_VERIFY_LEDGER_STATUS_MAX_BLOCKER_REFS)
         .filter_map(RchVerifyLedgerBlockerRef::from_run)
         .collect::<Vec<_>>();
-    let recovery_actions = if blockers.is_empty() {
-        Vec::new()
-    } else {
-        vec![RchVerifyLedgerRecoveryAction {
-            priority: 1,
-            kind: "avoid_duplicate_rch_attempt",
-            command: "ee verify rch blockers --workspace . --json",
-            message: "Respect retry_after and use static checks or wait before launching duplicate RCH proof.",
-        }]
-    };
+    let recovery_actions = rch_verify_ledger_recovery_actions(&blockers);
 
     Ok(RchVerifyLedgerStatusReport {
         schema: RCH_VERIFY_LEDGER_STATUS_SCHEMA_V1,
@@ -1438,6 +1429,50 @@ fn rch_verify_run_local_fallback_refused(run: &RchVerifyRunView) -> bool {
     run.degraded_codes
         .iter()
         .any(|code| code == "rch_verify_local_fallback_refused")
+}
+
+fn rch_verify_run_topology_blocked(run: &RchVerifyRunView) -> bool {
+    run.degraded_codes.iter().any(|code| {
+        matches!(
+            code.as_str(),
+            "rch_verify_topology_blocked"
+                | "rch_verify_remote_marker_missing"
+                | "rch_verify_cargo_path_dependency_version_blocked"
+        )
+    })
+}
+
+fn rch_verify_ledger_recovery_actions(
+    blockers: &[RchVerifyRunView],
+) -> Vec<RchVerifyLedgerRecoveryAction> {
+    if blockers.is_empty() {
+        return Vec::new();
+    }
+
+    let mut actions = Vec::new();
+    if blockers.iter().any(rch_verify_run_topology_blocked) {
+        actions.extend([
+            RchVerifyLedgerRecoveryAction {
+                priority: 0,
+                kind: "run_topology_audit",
+                command: "ee verify rch topology-audit --from-json proof.json --manifest Cargo.toml --json",
+                message: "Run the bounded read-only topology closure audit before retrying RCH Cargo proof.",
+            },
+            RchVerifyLedgerRecoveryAction {
+                priority: 1,
+                kind: "run_worker_root_canary",
+                command: "scripts/rch_lane_doctor.sh --worker-canary",
+                message: "Probe worker root topology without running Cargo or mutating workers.",
+            },
+        ]);
+    }
+    actions.push(RchVerifyLedgerRecoveryAction {
+        priority: 2,
+        kind: "avoid_duplicate_rch_attempt",
+        command: "ee verify rch blockers --workspace . --json",
+        message: "Respect retry_after and use static checks or wait before launching duplicate RCH proof.",
+    });
+    actions
 }
 
 fn classify_status(
@@ -2102,6 +2137,27 @@ determinism = { version = "0.1.0", path = "crates/determinism" }
             Some("2026-05-23T06:00:00Z")
         );
         assert_eq!(status.blocker_refs.len(), 1);
+        assert_eq!(
+            status
+                .recovery_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                "run_topology_audit",
+                "run_worker_root_canary",
+                "avoid_duplicate_rch_attempt"
+            ]
+        );
+        assert!(
+            status.recovery_actions[0]
+                .command
+                .contains("ee verify rch topology-audit")
+        );
+        assert_eq!(
+            status.recovery_actions[1].command,
+            "scripts/rch_lane_doctor.sh --worker-canary"
+        );
     }
 
     #[test]

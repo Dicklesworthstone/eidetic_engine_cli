@@ -3204,6 +3204,9 @@ impl SwarmWorkPacket {
             .map(|degradation| degradation.code.clone())
             .collect::<Vec<_>>();
         degraded_codes.extend(actionable_queue_degraded_codes(&actionable_queue));
+        degraded_codes.extend(work_packet_rch_claim_gate_degraded_codes(
+            &self.rch_proof_posture,
+        ));
         unsafe_reasons.sort();
         unsafe_reasons.dedup();
         stale_reasons.sort();
@@ -3219,7 +3222,8 @@ impl SwarmWorkPacket {
             verdict,
             safe_to_claim,
         );
-        let recovery_actions = work_packet_claim_gate_recovery_actions(install_freshness);
+        let recovery_actions =
+            work_packet_claim_gate_recovery_actions(install_freshness, &self.rch_proof_posture);
 
         SwarmWorkPacketClaimGate {
             schema: SWARM_WORK_PACKET_CLAIM_GATE_SCHEMA_V1,
@@ -4339,6 +4343,9 @@ fn work_packet_claim_gate_unsafe_reasons(
     }
     if let Some(reason) = work_packet_rch_remote_verification_reason(&packet.rch_proof_posture) {
         reasons.push(reason.to_owned());
+        reasons.extend(work_packet_rch_claim_gate_unsafe_reasons(
+            &packet.rch_proof_posture,
+        ));
     }
     reasons.extend(work_packet_coordination_degradation_codes(packet));
     let install_freshness = work_packet_claim_gate_install_freshness(packet);
@@ -4373,6 +4380,42 @@ fn work_packet_claim_gate_unsafe_reasons(
         reasons.push(format!("gate_verdict:{verdict}"));
     }
     reasons
+}
+
+fn work_packet_rch_claim_gate_degraded_codes(rch: &SwarmWorkPacketRchProofPosture) -> Vec<String> {
+    let mut codes = rch.blocker_codes.iter().cloned().collect::<BTreeSet<_>>();
+    for blocker in &rch.known_blockers {
+        codes.insert(blocker.code.clone());
+        codes.extend(blocker.degraded_codes.iter().cloned());
+    }
+    codes.into_iter().collect()
+}
+
+fn work_packet_rch_claim_gate_unsafe_reasons(rch: &SwarmWorkPacketRchProofPosture) -> Vec<String> {
+    let mut reasons = BTreeSet::new();
+    for code in &rch.blocker_codes {
+        reasons.insert(format!("rch_blocker_code:{code}"));
+    }
+    if let Some(retry_after) = &rch.retry_after {
+        reasons.insert(format!("rch_retry_after:{retry_after}"));
+    }
+    for blocker in &rch.known_blockers {
+        reasons.insert(format!("rch_known_blocker_code:{}", blocker.code));
+        reasons.insert(format!(
+            "rch_known_blocker_fingerprint:{}",
+            blocker.fingerprint
+        ));
+        if let Some(command_hash) = &blocker.command_hash {
+            reasons.insert(format!("rch_known_blocker_command_hash:{command_hash}"));
+        }
+        if let Some(remediation_bead) = &blocker.remediation_bead {
+            reasons.insert(format!("rch_known_blocker_remediation:{remediation_bead}"));
+        }
+        if let Some(retry_after) = &blocker.retry_after {
+            reasons.insert(format!("rch_known_blocker_retry_after:{retry_after}"));
+        }
+    }
+    reasons.into_iter().collect()
 }
 
 fn work_packet_toolchain_blocks_claim(packet: &SwarmWorkPacket) -> bool {
@@ -5045,62 +5088,140 @@ fn work_packet_claim_gate_install_freshness_degradation(
 
 fn work_packet_claim_gate_recovery_actions(
     install_freshness: SwarmWorkPacketClaimGateInstallFreshness,
+    rch: &SwarmWorkPacketRchProofPosture,
 ) -> Vec<SwarmWorkPacketClaimGateRecoveryAction> {
-    if !install_freshness.blocks_claim {
-        return Vec::new();
-    }
-    vec![
-        SwarmWorkPacketClaimGateRecoveryAction {
+    let mut actions = Vec::new();
+    if work_packet_rch_topology_recurrence_active(rch) {
+        actions.push(SwarmWorkPacketClaimGateRecoveryAction {
             priority: 0,
-            kind: "verify_source_version",
-            command_action: Some(work_packet_command_action(
-                "install_check_offline",
-                "ee install check --json --offline",
-                &["ee", "install", "check", "--json", "--offline"],
-                false,
-                "ee",
-                "before_claim_gate_retry",
-                "Verify installed binary freshness against the source checkout before trusting claim-gate authority.",
-            )),
+            kind: "run_rch_topology_audit",
+            command_action: Some(rch_topology_audit_command_action()),
             mutates_state: false,
             required_substrate: "ee",
-            rationale: "Confirm whether the installed ee binary is fresh enough for the current claim-gate contract.",
-        },
-        SwarmWorkPacketClaimGateRecoveryAction {
+            rationale: "Run the bounded read-only topology audit before retrying RCH Cargo proof.",
+        });
+        actions.push(SwarmWorkPacketClaimGateRecoveryAction {
             priority: 1,
-            kind: "plan_current_artifact_adoption",
-            command_action: Some(work_packet_command_action(
-                "install_plan_offline",
-                "ee install plan --json --offline --manifest <release-manifest.json> --artifact-root <release-artifact-dir>",
-                &[
-                    "ee",
-                    "install",
-                    "plan",
-                    "--json",
-                    "--offline",
-                    "--manifest",
-                    "<release-manifest.json>",
-                    "--artifact-root",
-                    "<release-artifact-dir>",
-                ],
-                false,
-                "ee",
-                "after_stale_install_check",
-                "Plan adoption from a verified current artifact without running local Cargo.",
-            )),
+            kind: "run_rch_worker_root_canary",
+            command_action: Some(rch_worker_root_canary_command_action()),
             mutates_state: false,
-            required_substrate: "ee",
-            rationale: "Find a verified current artifact path before any operator-approved install action.",
-        },
-        SwarmWorkPacketClaimGateRecoveryAction {
-            priority: 2,
-            kind: "request_operator_exception",
-            command_action: None,
-            mutates_state: true,
-            required_substrate: "human",
-            rationale: "Adopting or overwriting an installed binary is an operator action and needs explicit approval.",
-        },
+            required_substrate: "rch",
+            rationale: "Check worker root topology with the read-only canary before launching another verifier.",
+        });
+    }
+    if install_freshness.blocks_claim {
+        actions.extend([
+            SwarmWorkPacketClaimGateRecoveryAction {
+                priority: 10,
+                kind: "verify_source_version",
+                command_action: Some(work_packet_command_action(
+                    "install_check_offline",
+                    "ee install check --json --offline",
+                    &["ee", "install", "check", "--json", "--offline"],
+                    false,
+                    "ee",
+                    "before_claim_gate_retry",
+                    "Verify installed binary freshness against the source checkout before trusting claim-gate authority.",
+                )),
+                mutates_state: false,
+                required_substrate: "ee",
+                rationale: "Confirm whether the installed ee binary is fresh enough for the current claim-gate contract.",
+            },
+            SwarmWorkPacketClaimGateRecoveryAction {
+                priority: 11,
+                kind: "plan_current_artifact_adoption",
+                command_action: Some(work_packet_command_action(
+                    "install_plan_offline",
+                    "ee install plan --json --offline --manifest <release-manifest.json> --artifact-root <release-artifact-dir>",
+                    &[
+                        "ee",
+                        "install",
+                        "plan",
+                        "--json",
+                        "--offline",
+                        "--manifest",
+                        "<release-manifest.json>",
+                        "--artifact-root",
+                        "<release-artifact-dir>",
+                    ],
+                    false,
+                    "ee",
+                    "after_stale_install_check",
+                    "Plan adoption from a verified current artifact without running local Cargo.",
+                )),
+                mutates_state: false,
+                required_substrate: "ee",
+                rationale: "Find a verified current artifact path before any operator-approved install action.",
+            },
+            SwarmWorkPacketClaimGateRecoveryAction {
+                priority: 12,
+                kind: "request_operator_exception",
+                command_action: None,
+                mutates_state: true,
+                required_substrate: "human",
+                rationale: "Adopting or overwriting an installed binary is an operator action and needs explicit approval.",
+            },
+        ]);
+    }
+    actions.sort();
+    actions.dedup();
+    actions
+}
+
+fn work_packet_rch_topology_recurrence_active(rch: &SwarmWorkPacketRchProofPosture) -> bool {
+    rch.posture == "topology_blocked"
+        || rch
+            .blocker_codes
+            .iter()
+            .any(|code| code == "rch_worker_topology_blocked")
+        || rch.known_blockers.iter().any(|blocker| {
+            blocker.code == "RCH-E327"
+                || blocker
+                    .degraded_codes
+                    .iter()
+                    .any(|code| code == "rch_verify_topology_blocked")
+        })
+}
+
+fn work_packet_rch_topology_recurrence_command_actions() -> Vec<SwarmWorkPacketCommandAction> {
+    vec![
+        rch_topology_audit_command_action(),
+        rch_worker_root_canary_command_action(),
     ]
+}
+
+fn rch_topology_audit_command_action() -> SwarmWorkPacketCommandAction {
+    work_packet_command_action(
+        "rch_topology_audit",
+        "ee verify rch topology-audit --from-json <proof.json> --manifest Cargo.toml --json",
+        &[
+            "ee",
+            "verify",
+            "rch",
+            "topology-audit",
+            "--from-json",
+            "<proof.json>",
+            "--manifest",
+            "Cargo.toml",
+            "--json",
+        ],
+        false,
+        "ee",
+        "before_rch_verification_retry",
+        "Run the bounded read-only topology closure audit before retrying RCH Cargo proof.",
+    )
+}
+
+fn rch_worker_root_canary_command_action() -> SwarmWorkPacketCommandAction {
+    work_packet_command_action(
+        "rch_worker_root_canary",
+        "scripts/rch_lane_doctor.sh --worker-canary",
+        &["scripts/rch_lane_doctor.sh", "--worker-canary"],
+        false,
+        "rch",
+        "before_rch_verification_retry",
+        "Probe worker root topology without running Cargo or mutating workers.",
+    )
 }
 
 fn work_packet_claim_gate_attestation_summary(
@@ -7163,6 +7284,9 @@ fn work_packet_suggested_command_actions(
             ));
         }
     }
+    if work_packet_rch_topology_recurrence_active(rch) {
+        actions.extend(work_packet_rch_topology_recurrence_command_actions());
+    }
     if agent_mail
         .degraded_codes
         .iter()
@@ -7797,7 +7921,12 @@ fn synthesized_known_blocker_fingerprint(
     hasher.update(degraded_codes.join(",").as_bytes());
     hasher.update(b"\0");
     hasher.update(error_codes.join(",").as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("sha256:{hex}")
 }
 
 fn normalize_remote_repo_path(path: &str) -> String {
@@ -11149,6 +11278,67 @@ mod tests {
                 .recommended_action
                 .proof_obligations
                 .contains(&"do_not_run_local_cargo_fallback".to_owned())
+        );
+
+        let gate = packet.claim_gate(Some("bd-proof"));
+        assert_eq!(gate.verdict, "blocked_by_verification");
+        assert!(!gate.safe_to_claim);
+        assert!(gate.claim_command_action.is_none());
+        assert_eq!(
+            gate.source_authority.environment_verdict,
+            "proof_environment_blocked"
+        );
+        assert_eq!(
+            gate.source_authority.source_test_verdict,
+            "environment_blocked_before_source"
+        );
+        assert_eq!(
+            gate.source_authority.remote_verification_admitted,
+            Some(false)
+        );
+        assert_eq!(
+            gate.source_authority.local_cargo_fallback_observed,
+            Some(false)
+        );
+        assert!(gate.degraded_codes.contains(&"RCH-E327".to_owned()));
+        assert!(
+            gate.degraded_codes
+                .contains(&"rch_verify_topology_blocked".to_owned())
+        );
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"rch_blocker_code:rch_worker_topology_blocked".to_owned())
+        );
+        assert!(gate.unsafe_reasons.contains(&format!(
+            "rch_known_blocker_fingerprint:{}",
+            packet.rch_proof_posture.known_blockers[0].fingerprint
+        )));
+        assert!(
+            gate.next_command_actions
+                .iter()
+                .all(|action| !action.mutates_state)
+        );
+        assert!(
+            gate.next_command_actions
+                .iter()
+                .all(|action| !action.argv.iter().any(|arg| arg == "cargo"))
+        );
+        assert!(gate.next_command_actions.iter().any(|action| {
+            action.command_id == "rch_topology_audit"
+                && action.display_command.contains("topology-audit")
+                && !action.mutates_state
+        }));
+        assert!(gate.next_command_actions.iter().any(|action| {
+            action.command_id == "rch_worker_root_canary"
+                && action.display_command == "scripts/rch_lane_doctor.sh --worker-canary"
+                && !action.mutates_state
+        }));
+        assert_eq!(
+            gate.recovery_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            vec!["run_rch_topology_audit", "run_rch_worker_root_canary"]
         );
     }
 
