@@ -9,7 +9,7 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 
 use crate::config::{
     EnvVar, GRAPH_FEATURE_SKYLINE_ENABLED_KEY, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity,
@@ -1808,6 +1808,283 @@ pub struct StatusReport {
     pub degradations: Vec<DegradationReport>,
 }
 
+/// Redaction posture required by `ee.scale_envelope.v1`.
+pub const SCALE_ENVELOPE_REDACTION_STATUS: &str = "counts_hashes_paths_no_content";
+/// Source marker for live, read-only scale-envelope probes.
+pub const SCALE_ENVELOPE_SOURCE_LIVE_PROBE: &str = "live_probe";
+/// Source marker for deterministic fixture-backed scale-envelope reports.
+pub const SCALE_ENVELOPE_SOURCE_FIXTURE_PROFILE: &str = "fixture_profile";
+
+/// Storage facts measured for the scale-envelope collector.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ScaleEnvelopeStoreProbe {
+    pub db_bytes: u64,
+    pub page_count: u64,
+    pub page_size_bytes: u32,
+    pub free_list_pages: u64,
+}
+
+impl ScaleEnvelopeStoreProbe {
+    #[must_use]
+    pub const fn from_parts(
+        db_bytes: u64,
+        page_count: u64,
+        page_size_bytes: u32,
+        free_list_pages: u64,
+    ) -> Self {
+        Self {
+            db_bytes,
+            page_count,
+            page_size_bytes,
+            free_list_pages,
+        }
+    }
+
+    #[must_use]
+    pub fn gather(workspace_path: Option<&Path>, connection: Option<&DbConnection>) -> Self {
+        let Some(workspace_path) = workspace_path else {
+            return Self::default();
+        };
+        let database_path = workspace_database_path(workspace_path);
+        let db_bytes = fs::symlink_metadata(&database_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+
+        let owned_connection;
+        let connection = if let Some(connection) = connection {
+            Some(connection)
+        } else if database_path.exists() {
+            match DbConnection::open_file(&database_path) {
+                Ok(connection) => {
+                    owned_connection = connection;
+                    Some(&owned_connection)
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        let page_size_bytes = connection
+            .and_then(|connection| connection.page_size().ok())
+            .unwrap_or(0);
+        let page_count = connection
+            .and_then(|connection| connection.page_count().ok())
+            .unwrap_or(0);
+        let free_list_pages = connection
+            .and_then(scale_envelope_free_list_pages)
+            .unwrap_or(0);
+
+        Self {
+            db_bytes,
+            page_count,
+            page_size_bytes,
+            free_list_pages,
+        }
+    }
+}
+
+/// One subsystem row inside `ee.scale_envelope.v1.indexPosture`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScaleEnvelopeIndexSubsystem {
+    pub state: &'static str,
+    pub generation: Option<u64>,
+    pub lag_records: u64,
+    pub last_built_at: Option<String>,
+}
+
+impl ScaleEnvelopeIndexSubsystem {
+    #[must_use]
+    pub fn new(
+        state: &'static str,
+        generation: Option<u64>,
+        lag_records: u64,
+        last_built_at: Option<String>,
+    ) -> Self {
+        Self {
+            state,
+            generation,
+            lag_records,
+            last_built_at,
+        }
+    }
+}
+
+/// The three derived-index subsystems required by the scale-envelope schema.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScaleEnvelopeIndexPosture {
+    pub lexical: ScaleEnvelopeIndexSubsystem,
+    pub semantic: ScaleEnvelopeIndexSubsystem,
+    pub graph: ScaleEnvelopeIndexSubsystem,
+}
+
+impl ScaleEnvelopeIndexPosture {
+    #[must_use]
+    pub fn new(
+        lexical: ScaleEnvelopeIndexSubsystem,
+        semantic: ScaleEnvelopeIndexSubsystem,
+        graph: ScaleEnvelopeIndexSubsystem,
+    ) -> Self {
+        Self {
+            lexical,
+            semantic,
+            graph,
+        }
+    }
+
+    fn states(&self) -> [&'static str; 3] {
+        [self.lexical.state, self.semantic.state, self.graph.state]
+    }
+
+    fn any_state(&self, state: &str) -> bool {
+        self.states().iter().any(|candidate| *candidate == state)
+    }
+}
+
+/// Deterministic inputs used to assemble an `ee.scale_envelope.v1` report.
+#[derive(Clone, Debug)]
+pub struct ScaleEnvelopeCollectorInput {
+    pub generated_at: String,
+    pub workspace_fingerprint: String,
+    pub source: &'static str,
+    pub fixture_profile_id: Option<String>,
+    pub memory_count: u32,
+    pub link_count: u32,
+    pub pack_count: u32,
+    pub search_document_count: u32,
+    pub storage_state: &'static str,
+    pub store_probe: ScaleEnvelopeStoreProbe,
+    pub read_pool: ReadPoolStatusReport,
+    pub wal: WalStatusReport,
+    pub index_posture: ScaleEnvelopeIndexPosture,
+    pub page_cache_bytes: u64,
+    pub page_faults_pre: u64,
+    pub page_faults_post: u64,
+}
+
+/// Read-only scale-envelope posture report for large-corpus stewardship.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScaleEnvelopeReport {
+    data: serde_json::Value,
+}
+
+impl ScaleEnvelopeReport {
+    #[must_use]
+    pub fn gather_for_workspace(workspace_path: &Path) -> Self {
+        let status_report = StatusReport::gather_for_workspace(workspace_path);
+        let status_connection = open_status_connection(Some(workspace_path));
+        let store_probe =
+            ScaleEnvelopeStoreProbe::gather(Some(workspace_path), status_connection.as_ref());
+        Self::from_status_report(&status_report, &store_probe, Utc::now())
+    }
+
+    #[must_use]
+    pub fn from_status_report(
+        report: &StatusReport,
+        store_probe: &ScaleEnvelopeStoreProbe,
+        generated_at: DateTime<Utc>,
+    ) -> Self {
+        let input = scale_envelope_input_from_status(report, store_probe, generated_at);
+        Self::from_collector_input(input)
+    }
+
+    #[must_use]
+    pub fn from_collector_input(input: ScaleEnvelopeCollectorInput) -> Self {
+        let read_pool_state = scale_envelope_read_pool_state(&input.read_pool);
+        let write_spool_state = scale_envelope_write_spool_state(&input.wal);
+        let wal_state = scale_envelope_wal_state(&input.wal);
+        let cache_state = scale_envelope_cache_state(&input);
+        let read_amplification = scale_envelope_read_amplification(&input.read_pool);
+        let write_amplification = scale_envelope_write_amplification(&input.wal);
+        let degraded_codes =
+            scale_envelope_degraded_codes(&input, cache_state, wal_state, read_pool_state);
+        let recovery_actions =
+            scale_envelope_recovery_actions(&input.index_posture, cache_state, wal_state);
+
+        Self {
+            data: serde_json::json!({
+                "schema": crate::models::SCALE_ENVELOPE_SCHEMA_V1,
+                "generatedAt": input.generated_at.clone(),
+                "workspaceFingerprint": scale_envelope_workspace_fingerprint(&input.workspace_fingerprint),
+                "source": input.source,
+                "redactionStatus": SCALE_ENVELOPE_REDACTION_STATUS,
+                "corpusProfile": {
+                    "profileName": scale_envelope_profile_name(input.memory_count),
+                    "memoryCount": input.memory_count,
+                    "linkCount": input.link_count,
+                    "packCount": input.pack_count,
+                    "searchDocumentCount": input.search_document_count,
+                    "dbBytes": input.store_probe.db_bytes,
+                    "estimatedContentBytes": input.store_probe.db_bytes,
+                    "fixtureProfileId": input.fixture_profile_id.clone(),
+                },
+                "storePosture": {
+                    "storageState": input.storage_state,
+                    "dbBytes": input.store_probe.db_bytes,
+                    "pageCount": input.store_probe.page_count,
+                    "pageSizeBytes": input.store_probe.page_size_bytes,
+                    "freeListPages": input.store_probe.free_list_pages,
+                    "readPoolState": read_pool_state,
+                    "writeSpoolState": write_spool_state,
+                },
+                "pageCacheWalPosture": {
+                    "cacheState": cache_state,
+                    "walState": wal_state,
+                    "pageCacheBytes": input.page_cache_bytes,
+                    "walBytes": input.wal.bytes,
+                    "checkpointAgeMs": serde_json::Value::Null,
+                    "readAmplification": read_amplification,
+                    "writeAmplification": write_amplification,
+                },
+                "indexPosture": {
+                    "lexical": scale_envelope_index_json(&input.index_posture.lexical),
+                    "semantic": scale_envelope_index_json(&input.index_posture.semantic),
+                    "graph": scale_envelope_index_json(&input.index_posture.graph),
+                },
+                "commandSlos": [{
+                    "surface": "ee status",
+                    "budgetMs": 1500,
+                    "p50Ms": serde_json::Value::Null,
+                    "p95Ms": serde_json::Value::Null,
+                    "p99Ms": serde_json::Value::Null,
+                    "sampleCount": 0,
+                    "status": scale_envelope_slo_status(cache_state, wal_state),
+                    "degradedCode": scale_envelope_slo_degraded_code(cache_state, wal_state),
+                }],
+                "degradedCodes": degraded_codes,
+                "recoveryActions": recovery_actions,
+                "provenance": [
+                    {
+                        "kind": "schema",
+                        "ref": "docs/schemas/ee.scale_envelope.v1.json",
+                        "hash": serde_json::Value::Null,
+                    },
+                    {
+                        "kind": "probe",
+                        "ref": "src/core/status.rs::ScaleEnvelopeReport",
+                        "hash": serde_json::Value::Null,
+                    },
+                    {
+                        "kind": "bead",
+                        "ref": "bd-ssoco.3",
+                        "hash": serde_json::Value::Null,
+                    }
+                ],
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> &serde_json::Value {
+        &self.data
+    }
+
+    #[must_use]
+    pub fn into_json(self) -> serde_json::Value {
+        self.data
+    }
+}
+
 /// Last-24h context-pack token-budget bucket counts for tuning adaptive packs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackBudgetBucketReport {
@@ -2015,6 +2292,397 @@ impl StatusReport {
             degradations,
         }
     }
+}
+
+fn scale_envelope_input_from_status(
+    report: &StatusReport,
+    store_probe: &ScaleEnvelopeStoreProbe,
+    generated_at: DateTime<Utc>,
+) -> ScaleEnvelopeCollectorInput {
+    let search_asset = report
+        .derived_assets
+        .iter()
+        .find(|asset| asset.name == SEARCH_INDEX_ASSET_NAME);
+    let graph_asset = report
+        .derived_assets
+        .iter()
+        .find(|asset| asset.name == GRAPH_SNAPSHOT_ASSET_NAME);
+    let search_document_count = search_asset
+        .and_then(|asset| asset.asset_high_watermark.or(asset.source_high_watermark))
+        .map(u32_saturating_from_u64)
+        .unwrap_or(report.memory_health.total_count);
+    let workspace_fingerprint = report
+        .workspace
+        .as_ref()
+        .map(|workspace| workspace.fingerprint.clone())
+        .unwrap_or_else(|| "workspace_unknown".to_owned());
+    let graph_memory = &report.graph_snapshot_artifact.memory_graph;
+    let page_cache_bytes = report
+        .lexical_ram_tier
+        .bytes_warmloaded
+        .saturating_add(report.lexical_ram_tier.bytes_mmapped);
+
+    ScaleEnvelopeCollectorInput {
+        generated_at: generated_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+        workspace_fingerprint,
+        source: SCALE_ENVELOPE_SOURCE_LIVE_PROBE,
+        fixture_profile_id: None,
+        memory_count: report.memory_health.total_count,
+        link_count: graph_memory.edge_count,
+        pack_count: report.pack_budget_buckets.total_invocations,
+        search_document_count,
+        storage_state: scale_envelope_storage_state(report.capabilities.storage, &report.wal),
+        store_probe: *store_probe,
+        read_pool: report.read_pool.clone(),
+        wal: report.wal.clone(),
+        index_posture: ScaleEnvelopeIndexPosture::new(
+            scale_envelope_subsystem_from_asset(search_asset, Some(report.capabilities.search)),
+            scale_envelope_subsystem_from_asset(search_asset, Some(report.capabilities.search)),
+            scale_envelope_subsystem_from_asset(graph_asset, None),
+        ),
+        page_cache_bytes,
+        page_faults_pre: report.lexical_ram_tier.page_faults_pre,
+        page_faults_post: report.lexical_ram_tier.page_faults_post,
+    }
+}
+
+fn scale_envelope_free_list_pages(connection: &DbConnection) -> Option<u64> {
+    let rows = connection.query("PRAGMA freelist_count", &[]).ok()?;
+    let value = rows.first()?.get(0)?.as_i64()?;
+    u64::try_from(value).ok()
+}
+
+fn scale_envelope_workspace_fingerprint(raw: &str) -> String {
+    let hex = raw
+        .chars()
+        .filter(|candidate| candidate.is_ascii_hexdigit())
+        .collect::<String>();
+    if hex.len() >= 12 {
+        return hex
+            .chars()
+            .take(12)
+            .collect::<String>()
+            .to_ascii_lowercase();
+    }
+    blake3::hash(raw.as_bytes())
+        .to_hex()
+        .chars()
+        .take(12)
+        .collect()
+}
+
+fn scale_envelope_profile_name(memory_count: u32) -> &'static str {
+    match memory_count {
+        0..=999 => "tiny",
+        1_000..=19_999 => "small",
+        20_000..=199_999 => "medium",
+        200_000..=999_999 => "large",
+        _ => "swarm_scale",
+    }
+}
+
+fn scale_envelope_storage_state(
+    capability: CapabilityStatus,
+    wal: &WalStatusReport,
+) -> &'static str {
+    match capability {
+        CapabilityStatus::Ready if wal.exceeds_threshold() => "degraded",
+        CapabilityStatus::Ready => "healthy",
+        CapabilityStatus::Pending => "warming",
+        CapabilityStatus::Degraded => "degraded",
+        CapabilityStatus::Unimplemented => "unknown",
+    }
+}
+
+fn scale_envelope_read_pool_state(read_pool: &ReadPoolStatusReport) -> &'static str {
+    if read_pool.active_pins > 0 && read_pool.active_pins >= read_pool.active.max(1) {
+        return "saturated";
+    }
+    if read_pool.ad_hoc_bypass_count > 0
+        || (read_pool.acquire_wait.samples >= READ_POOL_UNDERSIZED_SAMPLE_FLOOR
+            && read_pool.acquire_wait.p99_ns >= READ_POOL_UNDERSIZED_P99_THRESHOLD.as_nanos())
+    {
+        return "undersized";
+    }
+    if read_pool.max_seen == 0 && read_pool.active == 0 && read_pool.idle == 0 {
+        return "unknown";
+    }
+    "adequate"
+}
+
+fn scale_envelope_write_spool_state(wal: &WalStatusReport) -> &'static str {
+    if wal.exceeds_threshold() {
+        "backlogged"
+    } else if wal.bytes > 0 {
+        "draining"
+    } else {
+        "idle"
+    }
+}
+
+fn scale_envelope_wal_state(wal: &WalStatusReport) -> &'static str {
+    if wal.exceeds_threshold() {
+        "checkpoint_recommended"
+    } else if wal.bytes > 0 {
+        "growing"
+    } else if wal.page_size == 0 {
+        "unknown"
+    } else {
+        "clean"
+    }
+}
+
+fn scale_envelope_cache_state(input: &ScaleEnvelopeCollectorInput) -> &'static str {
+    let read_pool_state = scale_envelope_read_pool_state(&input.read_pool);
+    if read_pool_state == "saturated"
+        || scale_envelope_page_fault_delta(input) > 10_000
+        || input.wal.exceeds_threshold()
+    {
+        return "thrashing";
+    }
+    if input.page_cache_bytes > 0 {
+        return "warm";
+    }
+    if input.index_posture.any_state("stale") || input.index_posture.any_state("rebuilding") {
+        return "warming";
+    }
+    if input.index_posture.any_state("unknown") || input.index_posture.any_state("unavailable") {
+        return "unknown";
+    }
+    "cold"
+}
+
+fn scale_envelope_page_fault_delta(input: &ScaleEnvelopeCollectorInput) -> u64 {
+    input.page_faults_post.saturating_sub(input.page_faults_pre)
+}
+
+fn scale_envelope_read_amplification(read_pool: &ReadPoolStatusReport) -> f64 {
+    let wait_component = if read_pool.acquire_wait.samples == 0 {
+        0.0
+    } else {
+        read_pool.acquire_wait.p99_ns as f64 / 1_000_000.0
+    };
+    let pin_component = read_pool.active_pins as f64;
+    1.0 + wait_component.min(99.0) + pin_component
+}
+
+fn scale_envelope_write_amplification(wal: &WalStatusReport) -> f64 {
+    if wal.bytes == 0 || wal.frames == 0 || wal.page_size == 0 {
+        return 1.0;
+    }
+    let logical_bytes = wal.frames.saturating_mul(u64::from(wal.page_size));
+    if logical_bytes == 0 {
+        1.0
+    } else {
+        (wal.bytes as f64 / logical_bytes as f64).max(1.0)
+    }
+}
+
+fn scale_envelope_subsystem_from_asset(
+    asset: Option<&DerivedAssetReport>,
+    capability: Option<CapabilityStatus>,
+) -> ScaleEnvelopeIndexSubsystem {
+    let Some(asset) = asset else {
+        let state = match capability {
+            Some(CapabilityStatus::Pending) => "unavailable",
+            Some(CapabilityStatus::Unimplemented) => "unknown",
+            Some(CapabilityStatus::Degraded) => "unavailable",
+            Some(CapabilityStatus::Ready) | None => "unknown",
+        };
+        return ScaleEnvelopeIndexSubsystem::new(state, None, 0, None);
+    };
+
+    ScaleEnvelopeIndexSubsystem::new(
+        scale_envelope_index_state(asset.status),
+        asset.asset_high_watermark.or(asset.source_high_watermark),
+        asset.high_watermark_lag.unwrap_or(0),
+        asset.last_built_at.clone(),
+    )
+}
+
+fn scale_envelope_index_state(status: DerivedAssetStatus) -> &'static str {
+    match status {
+        DerivedAssetStatus::Current => "fresh",
+        DerivedAssetStatus::Stale | DerivedAssetStatus::Corrupt => "stale",
+        DerivedAssetStatus::Empty
+        | DerivedAssetStatus::Missing
+        | DerivedAssetStatus::Unavailable
+        | DerivedAssetStatus::Unimplemented => "unavailable",
+        DerivedAssetStatus::NotInspected => "unknown",
+    }
+}
+
+fn scale_envelope_index_json(subsystem: &ScaleEnvelopeIndexSubsystem) -> serde_json::Value {
+    serde_json::json!({
+        "state": subsystem.state,
+        "generation": subsystem.generation,
+        "lagRecords": subsystem.lag_records,
+        "lastBuiltAt": subsystem.last_built_at.as_deref(),
+    })
+}
+
+fn scale_envelope_slo_status(cache_state: &str, wal_state: &str) -> &'static str {
+    if cache_state == "thrashing" || wal_state == "checkpoint_recommended" {
+        "thrashing"
+    } else if cache_state == "warming" {
+        "warming"
+    } else if cache_state == "unknown" || wal_state == "unknown" {
+        "unknown"
+    } else {
+        "ok"
+    }
+}
+
+fn scale_envelope_slo_degraded_code(cache_state: &str, wal_state: &str) -> Option<&'static str> {
+    if cache_state == "thrashing" || wal_state == "checkpoint_recommended" {
+        Some(crate::models::SCALE_POSTURE_THRASHING_CODE)
+    } else if cache_state == "warming" {
+        Some(crate::models::SCALE_POSTURE_WARMING_CODE)
+    } else if cache_state == "unknown" || wal_state == "unknown" {
+        Some(crate::models::SCALE_PROBE_BUDGET_EXCEEDED_CODE)
+    } else {
+        None
+    }
+}
+
+fn scale_envelope_degraded_codes(
+    input: &ScaleEnvelopeCollectorInput,
+    cache_state: &'static str,
+    wal_state: &'static str,
+    read_pool_state: &'static str,
+) -> Vec<serde_json::Value> {
+    let mut codes = Vec::new();
+    if input.source == SCALE_ENVELOPE_SOURCE_FIXTURE_PROFILE && input.fixture_profile_id.is_none() {
+        codes.push(scale_envelope_degraded_code_json(
+            crate::models::SCALE_FIXTURE_UNAVAILABLE_CODE,
+            "medium",
+            "Requested fixture-backed scale-envelope profile is unavailable.",
+            Some("Regenerate or recapture the deterministic scale fixture manifest."),
+        ));
+    }
+    if cache_state == "warming" {
+        codes.push(scale_envelope_degraded_code_json(
+            crate::models::SCALE_POSTURE_WARMING_CODE,
+            "low",
+            "Scale-envelope collector observed cold or rebuilding derived assets.",
+            Some("Warm cache or rebuild stale derived assets before trusting latency SLOs."),
+        ));
+    }
+    if cache_state == "thrashing"
+        || wal_state == "checkpoint_recommended"
+        || read_pool_state == "saturated"
+    {
+        codes.push(scale_envelope_degraded_code_json(
+            crate::models::SCALE_POSTURE_THRASHING_CODE,
+            "high",
+            "Scale-envelope collector observed cache, WAL, or read-pool pressure that can invalidate ordinary SLOs.",
+            Some("Reduce concurrent pressure, checkpoint WAL if recommended, and retry the scale probe."),
+        ));
+    }
+    if cache_state == "unknown"
+        || wal_state == "unknown"
+        || input.storage_state == "unknown"
+        || input.index_posture.any_state("unknown")
+        || input.index_posture.any_state("unavailable")
+    {
+        codes.push(scale_envelope_degraded_code_json(
+            crate::models::SCALE_PROBE_BUDGET_EXCEEDED_CODE,
+            "warning",
+            "Scale-envelope collector returned partial posture because one or more probe sources were unavailable.",
+            Some("Inspect storage/index status or narrow the scale probe scope before treating missing evidence as healthy."),
+        ));
+    }
+    codes
+}
+
+fn scale_envelope_degraded_code_json(
+    code: &'static str,
+    severity: &'static str,
+    message: &'static str,
+    repair: Option<&'static str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "code": code,
+        "severity": severity,
+        "message": message,
+        "repair": repair,
+    })
+}
+
+fn scale_envelope_recovery_actions(
+    index_posture: &ScaleEnvelopeIndexPosture,
+    cache_state: &str,
+    wal_state: &str,
+) -> Vec<serde_json::Value> {
+    let mut actions = Vec::new();
+    let mut priority = 0_u32;
+    if wal_state == "checkpoint_recommended" {
+        actions.push(scale_envelope_recovery_action_json(
+            priority,
+            "checkpoint_wal",
+            Some("ee maintenance wal-checkpoint --workspace ."),
+            "Drain a large WAL before trusting write-amplification and checkpoint posture.",
+        ));
+        priority = priority.saturating_add(1);
+    }
+    if index_posture.lexical.state == "stale"
+        || index_posture.semantic.state == "stale"
+        || index_posture.lexical.state == "unavailable"
+        || index_posture.semantic.state == "unavailable"
+    {
+        actions.push(scale_envelope_recovery_action_json(
+            priority,
+            "rebuild_index",
+            Some("ee index rebuild --workspace ."),
+            "Refresh stale or unavailable search index evidence before scale SLO checks.",
+        ));
+        priority = priority.saturating_add(1);
+    }
+    if index_posture.graph.state == "stale" || index_posture.graph.state == "unavailable" {
+        actions.push(scale_envelope_recovery_action_json(
+            priority,
+            "rebuild_index",
+            Some("ee graph centrality-refresh --workspace ."),
+            "Refresh graph snapshot evidence before graph-aware scale checks.",
+        ));
+        priority = priority.saturating_add(1);
+    }
+    if matches!(cache_state, "cold" | "warming") {
+        actions.push(scale_envelope_recovery_action_json(
+            priority,
+            "warm_cache",
+            None,
+            "Run a representative read-only search or pack workload to warm derived assets before measuring SLOs.",
+        ));
+        priority = priority.saturating_add(1);
+    }
+    if matches!(cache_state, "unknown") || index_posture.any_state("unknown") {
+        actions.push(scale_envelope_recovery_action_json(
+            priority,
+            "inspect_support_bundle",
+            Some("ee support bundle --out <dir> --workspace . --json"),
+            "Collect redaction-safe diagnostics when a scale-envelope source is unavailable.",
+        ));
+    }
+    actions
+}
+
+fn scale_envelope_recovery_action_json(
+    priority: u32,
+    kind: &'static str,
+    command: Option<&'static str>,
+    rationale: &'static str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "priority": priority,
+        "kind": kind,
+        "command": command,
+        "rationale": rationale,
+    })
+}
+
+fn u32_saturating_from_u64(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 #[must_use]
