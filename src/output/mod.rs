@@ -9715,6 +9715,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: cache_hotset_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::SCALE_ENVELOPE_SCHEMA_V1,
+            version: "1",
+            description: "Redaction-safe scale-envelope posture covering corpus, store, WAL, index, SLO, degraded-code, and recovery-action evidence.",
+            category: "ops",
+            definition: scale_envelope_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.closeout_audit.v1",
             version: "1",
             description: "Closeout audit envelope emitted by scripts/closeout_audit.sh before marking a bead closed.",
@@ -11052,6 +11059,10 @@ fn audit_lane_schema_definition() -> String {
 
 fn cache_hotset_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.cache.hotset.v1.json").to_string()
+}
+
+fn scale_envelope_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.scale_envelope.v1.json").to_string()
 }
 
 fn closeout_audit_schema_definition() -> String {
@@ -13110,8 +13121,7 @@ pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
             d.field_array_of_strs(
                 "coreCommands",
                 &[
-                    "init", "remember", "search", "ask", "pack", "lens", "orient", "why",
-                    "status",
+                    "init", "remember", "search", "ask", "pack", "lens", "orient", "why", "status",
                 ],
             );
             d.field_str("recipeCatalogCommand", "ee agent-docs recipes --json");

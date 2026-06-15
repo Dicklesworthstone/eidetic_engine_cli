@@ -1,0 +1,26 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "scale_posture_thrashing",
+  "introduced_by": {"bead": "bd-ssoco.1", "epic_letter": "scale-envelope"},
+  "surfaces": ["scale envelope", "swarm scale", "resource admission"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The scale envelope observes cache, WAL, or index churn that exceeds ordinary command SLO assumptions. The response must surface the posture instead of treating slow command observations as normal steady state.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee support bundle --include resource-admission --json"
+    ],
+    "invocation": "Emit ee.scale_envelope.v1 with pageCacheWalPosture.cacheState=thrashing, walState=checkpoint_recommended, or commandSlos[].status=thrashing."
+  },
+  "expected_emission": {
+    "code": "scale_posture_thrashing",
+    "severity": "high",
+    "message_contains": [
+      "Scale posture is thrashing",
+      "ordinary SLO assumptions are unsafe"
+    ],
+    "repair_contains": "Reduce concurrent pressure",
+    "repair_string": "Reduce concurrent pressure, checkpoint WAL if recommended, rebuild stale indexes, and retry the scale probe before trusting command SLOs."
+  }
+}

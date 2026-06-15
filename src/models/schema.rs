@@ -48,6 +48,16 @@ use super::{
 pub const SESSION_BUDGET_SCHEMA_V1: &str = "ee.session_budget.v1";
 /// Schema identifier for the advisory session-budget planner output (bd-1clqr.3).
 pub const SESSION_BUDGET_PLAN_SCHEMA_V1: &str = "ee.session_budget.plan.v1";
+/// Schema identifier for the scale-envelope posture contract (bd-ssoco.1).
+pub const SCALE_ENVELOPE_SCHEMA_V1: &str = "ee.scale_envelope.v1";
+/// Scale-envelope degraded code for cold-but-progressing cache/index posture.
+pub const SCALE_POSTURE_WARMING_CODE: &str = "scale_posture_warming";
+/// Scale-envelope degraded code for cache/WAL/index churn that exceeds SLOs.
+pub const SCALE_POSTURE_THRASHING_CODE: &str = "scale_posture_thrashing";
+/// Scale-envelope degraded code for missing deterministic large-corpus fixtures.
+pub const SCALE_FIXTURE_UNAVAILABLE_CODE: &str = "scale_fixture_unavailable";
+/// Scale-envelope degraded code for bounded probes that stop before full coverage.
+pub const SCALE_PROBE_BUDGET_EXCEEDED_CODE: &str = "scale_probe_budget_exceeded";
 
 /// All known schema identifiers for validation.
 pub const KNOWN_SCHEMAS: &[&str] = &[
@@ -128,6 +138,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     ECONOMY_SCHEMA_CATALOG_V1,
     SESSION_BUDGET_SCHEMA_V1,
     SESSION_BUDGET_PLAN_SCHEMA_V1,
+    SCALE_ENVELOPE_SCHEMA_V1,
     // Active learning agenda and experiment schemas (EE-440)
     LEARNING_QUESTION_SCHEMA_V1,
     UNCERTAINTY_ESTIMATE_SCHEMA_V1,

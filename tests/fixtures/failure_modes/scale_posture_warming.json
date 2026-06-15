@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "scale_posture_warming",
+  "introduced_by": {"bead": "bd-ssoco.1", "epic_letter": "scale-envelope"},
+  "surfaces": ["scale envelope", "swarm scale", "cache prewarm"],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "The scale envelope observes a cold or partially rebuilt cache/index posture that is moving toward a warm state. Command SLOs may be temporarily slower, but the posture is not yet thrashing or blocked.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'scale warmup rule' --workspace . --level procedural --kind rule",
+      "ee cache prewarm --from-hotset latest --workspace . --json"
+    ],
+    "invocation": "Emit ee.scale_envelope.v1 with pageCacheWalPosture.cacheState=warming or an index subsystem state=rebuilding while command SLOs remain within the warming budget."
+  },
+  "expected_emission": {
+    "code": "scale_posture_warming",
+    "severity": "low",
+    "message_contains": [
+      "Scale posture is warming",
+      "derived assets are still warming"
+    ],
+    "repair_contains": "Allow the warmup to complete or prewarm",
+    "repair_string": "Allow the warmup to complete, or run the recommended cache/index prewarm action before measuring steady-state SLOs."
+  }
+}

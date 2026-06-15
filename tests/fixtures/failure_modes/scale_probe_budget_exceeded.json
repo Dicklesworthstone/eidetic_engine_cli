@@ -1,0 +1,26 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "scale_probe_budget_exceeded",
+  "introduced_by": {"bead": "bd-ssoco.1", "epic_letter": "scale-envelope"},
+  "surfaces": ["scale envelope", "swarm scale", "status"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A bounded scale-envelope probe exhausts its configured time or row budget before observing every requested posture source. The envelope returns known fields plus an explicit degraded code rather than blocking indefinitely.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee status --json"
+    ],
+    "invocation": "Run a scale envelope probe with a budget smaller than the source set requires, such as a large corpus with store, WAL, index, and command-SLO probes enabled."
+  },
+  "expected_emission": {
+    "code": "scale_probe_budget_exceeded",
+    "severity": "warning",
+    "message_contains": [
+      "Scale probe budget exceeded",
+      "partial scale posture"
+    ],
+    "repair_contains": "Increase the probe budget",
+    "repair_string": "Increase the probe budget or reduce the requested posture sections, then rerun the scale envelope probe."
+  }
+}

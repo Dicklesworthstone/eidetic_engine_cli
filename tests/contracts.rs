@@ -460,6 +460,9 @@ mod mesh_auto_status_schema;
 #[path = "contracts/closeout_audit_schema.rs"]
 mod closeout_audit_schema;
 
+#[path = "contracts/scale_envelope_schema.rs"]
+mod scale_envelope_schema;
+
 #[path = "contracts/mcp_parity_required_coverage.rs"]
 mod mcp_parity_required_coverage;
 

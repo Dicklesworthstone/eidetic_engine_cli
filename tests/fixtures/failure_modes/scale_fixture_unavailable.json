@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "scale_fixture_unavailable",
+  "introduced_by": {"bead": "bd-ssoco.1", "epic_letter": "scale-envelope"},
+  "surfaces": ["scale envelope", "swarm scale", "fixture generator"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A deterministic large-corpus fixture profile requested by the scale envelope is missing, unreadable, or incompatible with the current schema version. The caller receives a partial envelope instead of fabricated scale posture.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "Request a fixture-backed ee.scale_envelope.v1 profile whose fixtureProfileId is not present in the fixture registry."
+  },
+  "expected_emission": {
+    "code": "scale_fixture_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "Scale fixture unavailable",
+      "fixture profile could not be loaded"
+    ],
+    "repair_contains": "Regenerate or restore the fixture profile",
+    "repair_string": "Regenerate or restore the requested deterministic scale fixture profile, then rerun the scale envelope probe."
+  }
+}

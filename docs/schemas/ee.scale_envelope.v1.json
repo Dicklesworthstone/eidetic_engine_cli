@@ -1,0 +1,309 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.scale_envelope.v1.json",
+  "title": "ee.scale_envelope.v1",
+  "description": "Redaction-safe scale-envelope posture for deciding whether a workspace is cold, warming, warm, or thrashing at the current corpus size. The envelope combines corpus profile, store posture, page-cache/WAL posture, derived-index posture, command SLO observations, degraded codes, and recovery actions without requiring daemon mode or storing raw memory/session content.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "generatedAt",
+    "workspaceFingerprint",
+    "source",
+    "redactionStatus",
+    "corpusProfile",
+    "storePosture",
+    "pageCacheWalPosture",
+    "indexPosture",
+    "commandSlos",
+    "degradedCodes",
+    "recoveryActions",
+    "provenance"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.scale_envelope.v1"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "workspaceFingerprint": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{12}$"
+    },
+    "source": {
+      "type": "string",
+      "enum": ["live_probe", "fixture_profile", "recorded_observation", "synthetic_budget"]
+    },
+    "redactionStatus": {
+      "type": "string",
+      "const": "counts_hashes_paths_no_content"
+    },
+    "corpusProfile": {
+      "$ref": "#/$defs/corpusProfile"
+    },
+    "storePosture": {
+      "$ref": "#/$defs/storePosture"
+    },
+    "pageCacheWalPosture": {
+      "$ref": "#/$defs/pageCacheWalPosture"
+    },
+    "indexPosture": {
+      "$ref": "#/$defs/indexPosture"
+    },
+    "commandSlos": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/commandSlo"
+      },
+      "minItems": 1,
+      "maxItems": 64
+    },
+    "degradedCodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degradedCode"
+      },
+      "maxItems": 16
+    },
+    "recoveryActions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/recoveryAction"
+      },
+      "maxItems": 16
+    },
+    "provenance": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/provenanceRef"
+      },
+      "minItems": 1,
+      "maxItems": 32
+    }
+  },
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-ssoco.1",
+    "emitter": "scale_envelope_contract",
+    "daemon_required": false,
+    "local_cargo_required": false
+  },
+  "$defs": {
+    "corpusProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profileName",
+        "memoryCount",
+        "linkCount",
+        "packCount",
+        "searchDocumentCount",
+        "dbBytes",
+        "estimatedContentBytes",
+        "fixtureProfileId"
+      ],
+      "properties": {
+        "profileName": {
+          "type": "string",
+          "enum": ["tiny", "small", "medium", "large", "swarm_scale", "custom"]
+        },
+        "memoryCount": {"type": "integer", "minimum": 0},
+        "linkCount": {"type": "integer", "minimum": 0},
+        "packCount": {"type": "integer", "minimum": 0},
+        "searchDocumentCount": {"type": "integer", "minimum": 0},
+        "dbBytes": {"type": "integer", "minimum": 0},
+        "estimatedContentBytes": {"type": "integer", "minimum": 0},
+        "fixtureProfileId": {
+          "type": ["string", "null"],
+          "pattern": "^scale_[A-Za-z0-9_.-]{1,80}$"
+        }
+      }
+    },
+    "storePosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "storageState",
+        "dbBytes",
+        "pageCount",
+        "pageSizeBytes",
+        "freeListPages",
+        "readPoolState",
+        "writeSpoolState"
+      ],
+      "properties": {
+        "storageState": {
+          "type": "string",
+          "enum": ["healthy", "warming", "degraded", "blocked", "unknown"]
+        },
+        "dbBytes": {"type": "integer", "minimum": 0},
+        "pageCount": {"type": "integer", "minimum": 0},
+        "pageSizeBytes": {"type": "integer", "minimum": 0},
+        "freeListPages": {"type": "integer", "minimum": 0},
+        "readPoolState": {
+          "type": "string",
+          "enum": ["adequate", "undersized", "saturated", "unknown"]
+        },
+        "writeSpoolState": {
+          "type": "string",
+          "enum": ["idle", "draining", "backlogged", "unknown"]
+        }
+      }
+    },
+    "pageCacheWalPosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cacheState",
+        "walState",
+        "pageCacheBytes",
+        "walBytes",
+        "checkpointAgeMs",
+        "readAmplification",
+        "writeAmplification"
+      ],
+      "properties": {
+        "cacheState": {
+          "type": "string",
+          "enum": ["cold", "warming", "warm", "thrashing", "unknown"]
+        },
+        "walState": {
+          "type": "string",
+          "enum": ["clean", "growing", "checkpoint_recommended", "stale_orphaned", "unknown"]
+        },
+        "pageCacheBytes": {"type": "integer", "minimum": 0},
+        "walBytes": {"type": "integer", "minimum": 0},
+        "checkpointAgeMs": {"type": ["integer", "null"], "minimum": 0},
+        "readAmplification": {"type": "number", "minimum": 0.0},
+        "writeAmplification": {"type": "number", "minimum": 0.0}
+      }
+    },
+    "indexPosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lexical", "semantic", "graph"],
+      "properties": {
+        "lexical": {"$ref": "#/$defs/indexSubsystem"},
+        "semantic": {"$ref": "#/$defs/indexSubsystem"},
+        "graph": {"$ref": "#/$defs/indexSubsystem"}
+      }
+    },
+    "indexSubsystem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "generation", "lagRecords", "lastBuiltAt"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["fresh", "stale", "rebuilding", "unavailable", "unknown"]
+        },
+        "generation": {"type": ["integer", "null"], "minimum": 0},
+        "lagRecords": {"type": "integer", "minimum": 0},
+        "lastBuiltAt": {"type": ["string", "null"], "format": "date-time"}
+      }
+    },
+    "commandSlo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "surface",
+        "budgetMs",
+        "p50Ms",
+        "p95Ms",
+        "p99Ms",
+        "sampleCount",
+        "status",
+        "degradedCode"
+      ],
+      "properties": {
+        "surface": {
+          "type": "string",
+          "enum": [
+            "ee remember",
+            "ee search",
+            "ee pack",
+            "ee why",
+            "ee status",
+            "ee swarm work-packet",
+            "ee cache prewarm",
+            "other"
+          ]
+        },
+        "budgetMs": {"type": "integer", "minimum": 0},
+        "p50Ms": {"type": ["integer", "null"], "minimum": 0},
+        "p95Ms": {"type": ["integer", "null"], "minimum": 0},
+        "p99Ms": {"type": ["integer", "null"], "minimum": 0},
+        "sampleCount": {"type": "integer", "minimum": 0},
+        "status": {
+          "type": "string",
+          "enum": ["ok", "warming", "thrashing", "exceeded", "unknown"]
+        },
+        "degradedCode": {
+          "type": ["string", "null"],
+          "enum": [
+            "scale_posture_warming",
+            "scale_posture_thrashing",
+            "scale_fixture_unavailable",
+            "scale_probe_budget_exceeded",
+            null
+          ]
+        }
+      }
+    },
+    "degradedCode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "repair"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "scale_posture_warming",
+            "scale_posture_thrashing",
+            "scale_fixture_unavailable",
+            "scale_probe_budget_exceeded"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string", "minLength": 1},
+        "repair": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
+    "recoveryAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["priority", "kind", "command", "rationale"],
+      "properties": {
+        "priority": {"type": "integer", "minimum": 0},
+        "kind": {
+          "type": "string",
+          "enum": ["recapture_fixture", "warm_cache", "checkpoint_wal", "rebuild_index", "reduce_probe_scope", "inspect_support_bundle"]
+        },
+        "command": {"type": ["string", "null"], "minLength": 1},
+        "rationale": {"type": "string", "minLength": 1}
+      }
+    },
+    "provenanceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ref", "hash"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["schema", "fixture", "probe", "bead", "adr"]
+        },
+        "ref": {"type": "string", "minLength": 1, "maxLength": 240},
+        "hash": {
+          "type": ["string", "null"],
+          "pattern": "^blake3:[A-Fa-f0-9]{32,64}$"
+        }
+      }
+    }
+  }
+}

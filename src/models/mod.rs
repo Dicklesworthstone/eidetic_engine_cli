@@ -302,8 +302,10 @@ pub use rule::{
     RuleLifecycleTrigger, RuleMaturity, RuleScope,
 };
 pub use schema::{
-    KNOWN_SCHEMAS, SESSION_BUDGET_SCHEMA_V1, SchemaValidationError, is_known_schema,
-    parse_schema_parts, validate_schema, validate_schema_match,
+    KNOWN_SCHEMAS, SCALE_ENVELOPE_SCHEMA_V1, SCALE_FIXTURE_UNAVAILABLE_CODE,
+    SCALE_POSTURE_THRASHING_CODE, SCALE_POSTURE_WARMING_CODE, SCALE_PROBE_BUDGET_EXCEEDED_CODE,
+    SESSION_BUDGET_SCHEMA_V1, SchemaValidationError, is_known_schema, parse_schema_parts,
+    validate_schema, validate_schema_match,
 };
 pub use singleflight::{
     SINGLEFLIGHT_KEY_CANONICAL_VERSION, SINGLEFLIGHT_KEY_SCHEMA_V1, SINGLEFLIGHT_POSTURE_SCHEMA_V1,
