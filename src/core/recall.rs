@@ -1624,14 +1624,14 @@ mod tests {
         assert_eq!(empty.degraded.len(), 1);
         assert_eq!(empty.degraded[0].code, ANCHOR_INDEX_EMPTY_CODE);
         assert_eq!(empty.degraded[0].severity, "info");
-        assert_eq!(empty.degraded[0].repair, Some(ANCHOR_INDEX_REPAIR));
+        assert_eq!(empty.degraded[0].repair, Some(ANCHOR_INDEX_REPAIR.to_owned()));
 
         let rows = vec![row("mem_a", Some("src/a.rs"), None)];
         let stale = evaluate_recall(&path_query(&["src/*.rs"]), &rows, Some(3), 5);
         assert_eq!(stale.degraded.len(), 1);
         assert_eq!(stale.degraded[0].code, ANCHOR_INDEX_STALE_CODE);
         assert_eq!(stale.degraded[0].severity, "low");
-        assert_eq!(stale.degraded[0].repair, Some(ANCHOR_INDEX_REPAIR));
+        assert_eq!(stale.degraded[0].repair, Some(ANCHOR_INDEX_REPAIR.to_owned()));
         // Stale detection never blocks results.
         assert_eq!(stale.items.len(), 1);
 

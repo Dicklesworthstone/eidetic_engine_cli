@@ -1,11 +1,11 @@
-use eidetic_engine_cli::core::search::{TypedMemoryFieldFilter, TypedMemoryFieldOperator};
-use eidetic_engine_cli::db::StoredMemory;
-use eidetic_engine_cli::models::MemoryKind;
-use eidetic_engine_cli::models::memory::{
+use ee::core::search::{TypedMemoryFieldFilter, TypedMemoryFieldOperator};
+use ee::db::StoredMemory;
+use ee::models::MemoryKind;
+use ee::models::memory::{
     TYPED_MEMORY_FIELDS_SCHEMA_V2, canonicalize_typed_memory_fields_json,
     typed_memory_index_metadata_from_json,
 };
-use eidetic_engine_cli::search::MemoryDocumentBuilder;
+use ee::search::MemoryDocumentBuilder;
 
 #[test]
 fn typed_fields_registry_v2_validates_new_fields_and_v1_sidecars() {
@@ -68,9 +68,9 @@ fn typed_fields_registry_document_builder_attaches_indexed_metadata() {
         trust_class: "human_explicit".to_string(),
         trust_subclass: None,
         provenance_chain_hash: None,
-        provenance_chain_hash_version: eidetic_engine_cli::db::PROVENANCE_CHAIN_HASH_VERSION
+        provenance_chain_hash_version: ee::db::PROVENANCE_CHAIN_HASH_VERSION
             .to_string(),
-        provenance_verification_status: eidetic_engine_cli::db::PROVENANCE_STATUS_UNVERIFIED
+        provenance_verification_status: ee::db::PROVENANCE_STATUS_UNVERIFIED
             .to_string(),
         provenance_verified_at: None,
         provenance_verification_note: None,
