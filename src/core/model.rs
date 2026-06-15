@@ -2888,7 +2888,11 @@ fn blake3_hash_hex(bytes: &[u8]) -> String {
 fn sha256_hash_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn is_hex_hash_64(value: &str) -> bool {

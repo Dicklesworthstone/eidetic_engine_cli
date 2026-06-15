@@ -438,7 +438,12 @@ fn redacted_hash(label: &str, value: &str) -> String {
     hasher.update(label.as_bytes());
     hasher.update([0]);
     hasher.update(value.as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("sha256:{hex}")
 }
 
 fn normalized(value: Option<&str>) -> Option<String> {
