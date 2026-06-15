@@ -1224,6 +1224,10 @@ impl EffectManifest {
             CommandEffect::read_only_db("db migrations", "List database migrations"),
             CommandEffect::read_only_db("curate candidates", "List curation candidates"),
             CommandEffect::read_only_db(
+                "curate doctor",
+                "Diagnose memory debt from persisted memory state",
+            ),
+            CommandEffect::read_only_db(
                 "curate show",
                 "Inspect a single curation candidate read-only with apply preview",
             ),

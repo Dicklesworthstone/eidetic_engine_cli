@@ -6604,6 +6604,29 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_workspace_timeline
     "blake3:v081_audit_log_workspace_timeline_index_2026_06_14",
 );
 
+/// V082: Memory-debt trend snapshots for `ee curate doctor --trend`.
+pub const V082_MEMORY_DEBT_SNAPSHOTS: Migration = Migration::new(
+    82,
+    "memory_debt_snapshots",
+    r#"
+CREATE TABLE IF NOT EXISTS debt_snapshots (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    snapshot_day TEXT NOT NULL CHECK (length(snapshot_day) = 10),
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    report_hash TEXT NOT NULL CHECK (length(trim(report_hash)) > 0),
+    report_json TEXT NOT NULL CHECK (json_valid(report_json)),
+    item_count INTEGER NOT NULL CHECK (item_count >= 0),
+    total_score REAL NOT NULL CHECK (total_score >= 0.0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    PRIMARY KEY (workspace_id, snapshot_day, generation)
+);
+
+CREATE INDEX IF NOT EXISTS idx_debt_snapshots_workspace_created
+    ON debt_snapshots(workspace_id, created_at DESC, generation DESC);
+"#,
+    "blake3:v082_memory_debt_snapshots_2026_06_15",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -6687,6 +6710,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V079_SITUATION_RECORDS,
     V080_WORKSPACE_GENERATION_FLOOR_REBUILD,
     V081_AUDIT_LOG_WORKSPACE_TIMELINE_INDEX,
+    V082_MEMORY_DEBT_SNAPSHOTS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -17671,6 +17695,94 @@ fn stored_memory_link_from_row(row: &Row) -> Result<StoredMemoryLink> {
 }
 
 // ============================================================================
+// Memory Debt Snapshots (bd-3ap2m.2)
+// ============================================================================
+
+/// Input for one idempotent memory-debt trend snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateDebtSnapshotInput {
+    pub workspace_id: String,
+    pub snapshot_day: String,
+    pub generation: u64,
+    pub report_hash: String,
+    pub report_json: String,
+    pub item_count: u64,
+    pub total_score: f32,
+    pub created_at: String,
+}
+
+/// A stored debt_snapshots row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredDebtSnapshot {
+    pub workspace_id: String,
+    pub snapshot_day: String,
+    pub generation: u64,
+    pub report_hash: String,
+    pub report_json: String,
+    pub item_count: u64,
+    pub total_score: f32,
+    pub created_at: String,
+}
+
+impl DbConnection {
+    /// Insert one debt snapshot. Returns true when a new row was written.
+    pub fn insert_debt_snapshot(&self, input: &CreateDebtSnapshotInput) -> Result<bool> {
+        let rows = self.execute_for(
+            DbOperation::Execute,
+            "INSERT OR IGNORE INTO debt_snapshots (workspace_id, snapshot_day, generation, report_hash, report_json, item_count, total_score, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            &[
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.snapshot_day.clone()),
+                Value::BigInt(u64_to_i64(input.generation, "generation")?),
+                Value::Text(input.report_hash.clone()),
+                Value::Text(input.report_json.clone()),
+                Value::BigInt(u64_to_i64(input.item_count, "item_count")?),
+                Value::Float(input.total_score),
+                Value::Text(input.created_at.clone()),
+            ],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// List debt snapshots for one workspace, newest first.
+    pub fn list_debt_snapshots(
+        &self,
+        workspace_id: &str,
+        limit: u32,
+    ) -> Result<Vec<StoredDebtSnapshot>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, snapshot_day, generation, report_hash, report_json, item_count, total_score, created_at FROM debt_snapshots WHERE workspace_id = ?1 ORDER BY created_at DESC, generation DESC, snapshot_day DESC LIMIT ?2",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?;
+        rows.iter().map(stored_debt_snapshot_from_row).collect()
+    }
+}
+
+fn u64_to_i64(value: u64, column: &str) -> Result<i64> {
+    i64::try_from(value).map_err(|_| DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: format!("{column} must fit i64"),
+    })
+}
+
+fn stored_debt_snapshot_from_row(row: &Row) -> Result<StoredDebtSnapshot> {
+    Ok(StoredDebtSnapshot {
+        workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
+        snapshot_day: required_text(row, 1, DbOperation::Query, "snapshot_day")?.to_string(),
+        generation: required_u64(row, 2, DbOperation::Query, "generation")?,
+        report_hash: required_text(row, 3, DbOperation::Query, "report_hash")?.to_string(),
+        report_json: required_text(row, 4, DbOperation::Query, "report_json")?.to_string(),
+        item_count: required_u64(row, 5, DbOperation::Query, "item_count")?,
+        total_score: required_f64(row, 6, DbOperation::Query, "total_score")? as f32,
+        created_at: required_text(row, 7, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
+// ============================================================================
 // Pack Records (EE-151)
 // ============================================================================
 
@@ -24370,9 +24482,8 @@ mod tests {
             .ok_or_else(|| TestFailure::new("read-only query returned no body"))?;
         ensure_equal(&body, &"persistent rule", "read-only query body")?;
 
-        let insert_result = read_only.execute_raw(
-            "INSERT INTO memories (id, body) VALUES (2, 'must not write')",
-        );
+        let insert_result =
+            read_only.execute_raw("INSERT INTO memories (id, body) VALUES (2, 'must not write')");
         ensure(
             matches!(
                 insert_result,

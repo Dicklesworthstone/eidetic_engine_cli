@@ -338,6 +338,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `memory_drift_source_missing` | high | bd-1z1fd.3 |
 | `memory_drift_source_unverifiable` | medium | bd-1z1fd.3 |
 | `memory_drift_lock_contention` | warning | bd-1xpq9 (DRIFT) |
+| `memory_debt_audit_window_partial` | info | bd-3ap2m.2 - `ee curate doctor` scanned a bounded audit window and older read evidence may be outside the inspected rows |
 | `mesh_peer_human_explicit_filtered` | medium | bd-29ulx (SRR6.5) |
 | `mi_dedup_candidate_proposed` | info | bd-17c65.14.14 (N14) |
 | `mi_dedup_threshold_underpowered` | info | bd-17c65.14.14 (N14) |

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.curate.debt_trend.v1.json",
+  "title": "ee.curate.debt_trend.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "snapshots"],
+  "properties": {
+    "schema": { "type": "string", "const": "ee.curate.debt_trend.v1" },
+    "snapshots": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/snapshot" }
+    }
+  },
+  "$defs": {
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "snapshotDay",
+        "generation",
+        "reportHash",
+        "itemCount",
+        "totalScore",
+        "createdAt"
+      ],
+      "properties": {
+        "snapshotDay": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "generation": { "type": "integer", "minimum": 0 },
+        "reportHash": {
+          "type": "string",
+          "pattern": "^blake3:[A-Fa-f0-9]{32,64}$"
+        },
+        "itemCount": { "type": "integer", "minimum": 0 },
+        "totalScore": { "type": "number", "minimum": 0 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-3ap2m.2",
+    "emitter": "core_memory_debt"
+  }
+}

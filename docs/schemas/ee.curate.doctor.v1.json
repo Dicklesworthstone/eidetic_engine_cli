@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.curate.doctor.v1.json",
+  "title": "ee.curate.doctor.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "version",
+    "workspaceId",
+    "workspacePath",
+    "databasePath",
+    "generatedAt",
+    "filter",
+    "summary",
+    "queue",
+    "degraded",
+    "trend",
+    "nextActions"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ee.curate.doctor.v1" },
+    "command": { "type": "string", "const": "curate doctor" },
+    "version": { "type": "string", "minLength": 1 },
+    "workspaceId": { "type": "string", "minLength": 1 },
+    "workspacePath": { "type": "string", "minLength": 1 },
+    "databasePath": { "type": "string", "minLength": 1 },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class"],
+      "properties": {
+        "class": {
+          "type": ["string", "null"],
+          "enum": [
+            "stale_anchor",
+            "contradicted_unresolved",
+            "never_retrieved",
+            "orphan",
+            "low_trust_high_rank",
+            "decay_imminent_high_utility",
+            null
+          ]
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memoryCount",
+        "itemCount",
+        "returnedCount",
+        "limit",
+        "truncated",
+        "totalScore",
+        "classCounts"
+      ],
+      "properties": {
+        "memoryCount": { "type": "integer", "minimum": 0 },
+        "itemCount": { "type": "integer", "minimum": 0 },
+        "returnedCount": { "type": "integer", "minimum": 0 },
+        "limit": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "totalScore": { "type": "number", "minimum": 0 },
+        "classCounts": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "queue": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/item" }
+    },
+    "degraded": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/degraded" }
+    },
+    "trend": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "ee.curate.debt_trend.v1.json" }
+      ]
+    },
+    "nextActions": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "$defs": {
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memoryId",
+        "class",
+        "score",
+        "severity",
+        "reason",
+        "evidence",
+        "suggestedAction",
+        "memory"
+      ],
+      "properties": {
+        "memoryId": { "type": "string", "minLength": 1 },
+        "class": {
+          "type": "string",
+          "enum": [
+            "stale_anchor",
+            "contradicted_unresolved",
+            "never_retrieved",
+            "orphan",
+            "low_trust_high_rank",
+            "decay_imminent_high_utility"
+          ]
+        },
+        "score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "value"],
+            "properties": {
+              "kind": { "type": "string", "minLength": 1 },
+              "value": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "suggestedAction": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["command", "classifier"],
+          "properties": {
+            "command": { "type": "string", "minLength": 1 },
+            "classifier": {
+              "type": "string",
+              "enum": ["Empty", "Unknown", "Placeholder", "Template", "Actionable"]
+            }
+          }
+        },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "level",
+            "kind",
+            "confidence",
+            "utility",
+            "importance",
+            "trustClass",
+            "updatedAt"
+          ],
+          "properties": {
+            "level": { "type": "string", "minLength": 1 },
+            "kind": { "type": "string", "minLength": 1 },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+            "utility": { "type": "number", "minimum": 0, "maximum": 1 },
+            "importance": { "type": "number", "minimum": 0, "maximum": 1 },
+            "trustClass": { "type": "string", "minLength": 1 },
+            "updatedAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      }
+    },
+    "degraded": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "repair"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "repair": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-3ap2m.2",
+    "emitter": "core_memory_debt"
+  }
+}

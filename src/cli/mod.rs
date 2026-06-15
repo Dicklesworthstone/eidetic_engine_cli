@@ -110,6 +110,7 @@ use crate::core::environment_attestation::{
     EnvironmentAttestationReport, EnvironmentAttestationSourceStatus,
     collect_environment_attestation, environment_attestation_from_swarm_brief_with_inputs,
 };
+use crate::core::memory_debt::{MemoryDebtDoctorOptions, run_memory_debt_doctor};
 use crate::curate::{REFLECTION_RESULT_MAX_JSON_BYTES, ReflectionSourcePackageLimits};
 // `crate::core::doctor_runtime::CapabilitiesReport` is referenced via its
 // fully-qualified path at the single call site below to avoid colliding with
@@ -9121,6 +9122,8 @@ pub struct NoteArgs {
 pub enum CurateCommand {
     /// List curation candidates awaiting review.
     Candidates(CurateCandidatesArgs),
+    /// Diagnose memory-debt queues from persisted memory state.
+    Doctor(CurateDoctorArgs),
     /// Read-only inspect/preview of a single curation candidate (bd-18z8x).
     Show(CurateShowArgs),
     /// Validate one curation candidate and record the review decision.
@@ -9159,6 +9162,28 @@ pub enum CurateCommand {
     /// path. See bd-2r8vp.
     #[command(name = "auto-promote")]
     AutoPromote(CurateAutoPromoteArgs),
+}
+
+/// Arguments for `ee curate doctor`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct CurateDoctorArgs {
+    /// Optional debt class filter: stale_anchor, contradicted_unresolved,
+    /// never_retrieved, orphan, low_trust_high_rank, or
+    /// decay_imminent_high_utility.
+    #[arg(long = "class", value_name = "NAME")]
+    pub class_filter: Option<String>,
+
+    /// Maximum number of debt queue items to return.
+    #[arg(long, default_value_t = 50)]
+    pub limit: u32,
+
+    /// Include prior steward debt snapshots.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub trend: bool,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee curate auto-promote` (bd-2r8vp).
@@ -13330,6 +13355,9 @@ where
         Some(Command::Remember(ref args)) => handle_remember_command(&cli, args, stdout, stderr),
         Some(Command::Curate(CurateCommand::Candidates(ref args))) => {
             handle_curate_candidates(&cli, args, stdout, stderr)
+        }
+        Some(Command::Curate(CurateCommand::Doctor(ref args))) => {
+            handle_curate_doctor(&cli, args, stdout, stderr)
         }
         Some(Command::Curate(CurateCommand::Show(ref args))) => {
             handle_curate_show(&cli, args, stdout, stderr)
@@ -47188,6 +47216,56 @@ where
     }
 }
 
+fn handle_curate_doctor<W, E>(
+    cli: &Cli,
+    args: &CurateDoctorArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if let Some(exit_code) = reject_unsupported_mermaid_format(cli, "curate doctor", stdout, stderr)
+    {
+        return exit_code;
+    }
+
+    let workspace_path = cli.resolve_workspace();
+    let options = MemoryDebtDoctorOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        class_filter: args.class_filter.as_deref(),
+        limit: args.limit,
+        trend: args.trend,
+        now_rfc3339: None,
+        audit_scan_limit: None,
+    };
+
+    match run_memory_debt_doctor(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_output())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&report.data_json().to_string()) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::ResponseEnvelope::success()
+                    .data_raw(&report.data_json())
+                    .finish()
+                    + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn handle_curate_show<W, E>(
     cli: &Cli,
     args: &CurateShowArgs,
@@ -57261,6 +57339,7 @@ impl NormalizedInvocation {
                 },
                 Command::Curate(curate) => match curate {
                     CurateCommand::Candidates(_) => "curate candidates".to_string(),
+                    CurateCommand::Doctor(_) => "curate doctor".to_string(),
                     CurateCommand::Show(_) => "curate show".to_string(),
                     CurateCommand::Validate(_) => "curate validate".to_string(),
                     CurateCommand::Apply(_) => "curate apply".to_string(),

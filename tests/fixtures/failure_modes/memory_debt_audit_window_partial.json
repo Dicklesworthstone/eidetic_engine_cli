@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "memory_debt_audit_window_partial",
+  "introduced_by": {
+    "bead": "bd-3ap2m.2",
+    "epic_letter": "memory-debt"
+  },
+  "surfaces": [
+    "curate doctor"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "The memory-debt doctor scanned the bounded newest audit rows and hit the audit scan cap, so older read evidence may be outside the inspected window.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember --workspace . --level semantic --kind fact 'memory debt audit window seed' --json",
+      "record enough audit rows to reach the doctor audit scan cap"
+    ],
+    "invocation": "ee curate doctor --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "memory_debt_audit_window_partial",
+    "severity": "info",
+    "message_contains": [
+      "audit rows",
+      "older read evidence"
+    ],
+    "repair_contains": "ee curate doctor",
+    "repair_string": "ee curate doctor --workspace . --json",
+    "repair_command_regex": "(?<cmd>ee curate doctor --workspace \\. --json)"
+  }
+}

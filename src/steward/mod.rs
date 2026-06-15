@@ -33,6 +33,7 @@ use crate::core::curate::{
     CurateDispositionOptions, CurateDispositionReport, run_curation_disposition,
 };
 use crate::core::graph_telemetry::{CacheEvictEvent, CacheEvictReason, emit_cache_evict};
+use crate::core::memory_debt::{MemoryDebtSnapshotOptions, run_memory_debt_snapshot};
 use crate::curate::{CandidateSource, CandidateType};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, ApplyMemoryDecayDemotionInput, ApplyMemoryScoreUpdateInput,
@@ -502,6 +503,8 @@ pub enum JobType {
     IndexCoalesce,
     /// Apply time-based decay to memory confidence.
     DecaySweep,
+    /// Persist one memory-debt trend snapshot for curate doctor.
+    MemoryDebtSnapshot,
     /// Detect duplicate memories and create consolidation review candidates.
     ConsolidationPass,
     /// Process pending curation candidates.
@@ -542,6 +545,7 @@ impl JobType {
             Self::IndexRebuild => "index_rebuild",
             Self::IndexCoalesce => "index_coalesce",
             Self::DecaySweep => "decay_sweep",
+            Self::MemoryDebtSnapshot => "memory_debt_snapshot",
             Self::ConsolidationPass => "consolidation_pass",
             Self::CurationReview => "curation_review",
             Self::QuarantineSweep => "quarantine_sweep",
@@ -566,6 +570,7 @@ impl JobType {
             Self::IndexRebuild,
             Self::IndexCoalesce,
             Self::DecaySweep,
+            Self::MemoryDebtSnapshot,
             Self::ConsolidationPass,
             Self::CurationReview,
             Self::QuarantineSweep,
@@ -589,6 +594,7 @@ impl JobType {
             Self::IndexRebuild => "Rebuild search indexes from source of truth",
             Self::IndexCoalesce => "Process queued incremental search index jobs",
             Self::DecaySweep => "Apply time-based decay to memory confidence",
+            Self::MemoryDebtSnapshot => "Persist one memory-debt trend snapshot",
             Self::ConsolidationPass => {
                 "Detect duplicate memories and create consolidation review candidates"
             }
@@ -643,6 +649,7 @@ impl FromStr for JobType {
             "index_rebuild" => Ok(Self::IndexRebuild),
             "index_coalesce" => Ok(Self::IndexCoalesce),
             "decay_sweep" => Ok(Self::DecaySweep),
+            "memory_debt_snapshot" => Ok(Self::MemoryDebtSnapshot),
             "consolidation_pass" => Ok(Self::ConsolidationPass),
             "curation_review" => Ok(Self::CurationReview),
             "quarantine_sweep" => Ok(Self::QuarantineSweep),
@@ -1877,6 +1884,10 @@ pub fn default_budgets_for_job_type(job_type: JobType) -> Vec<ResourceBudget> {
         JobType::DecaySweep => vec![
             ResourceBudget::time_limit_ms(60_000), // 1 minute
             ResourceBudget::item_limit(10_000),
+        ],
+        JobType::MemoryDebtSnapshot => vec![
+            ResourceBudget::time_limit_ms(30_000), // 30 seconds
+            ResourceBudget::item_limit(500),
         ],
         JobType::ConsolidationPass => vec![
             ResourceBudget::time_limit_ms(120_000), // 2 minutes
@@ -3354,6 +3365,13 @@ impl ManualRunner {
                 Some(format!("chained after {}", job_type.as_str())),
             );
         }
+        if outcome == RunOutcome::Success && job_type == JobType::DecaySweep {
+            self.schedule(
+                JobType::MemoryDebtSnapshot,
+                JobPriority::Low,
+                Some(format!("chained after {}", job_type.as_str())),
+            );
+        }
 
         Some(JobRunResult {
             job_id: job_id.to_owned(),
@@ -3390,6 +3408,7 @@ impl ManualRunner {
             JobType::IndexRebuild => self.execute_index_rebuild(budget),
             JobType::IndexCoalesce => self.execute_index_coalesce(budget),
             JobType::DecaySweep => self.execute_decay_sweep(budget),
+            JobType::MemoryDebtSnapshot => self.execute_memory_debt_snapshot(budget),
             JobType::ConsolidationPass => self.execute_consolidation_pass(budget),
             JobType::CurationReview => self.execute_curation_review(budget),
             JobType::QuarantineSweep => self.execute_quarantine_sweep(budget),
@@ -4213,6 +4232,113 @@ impl ManualRunner {
         (
             RunOutcome::Success,
             Some(scanned_count),
+            None,
+            Some(report.data_json()),
+        )
+    }
+
+    fn execute_memory_debt_snapshot(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let Some(database_path) = self.resolve_database_path() else {
+            let message =
+                "Memory debt snapshot requires a database path or workspace path with .ee/ee.db"
+                    .to_owned();
+            return (
+                RunOutcome::Failed,
+                None,
+                Some(message.clone()),
+                Some(json!({
+                    "schema": "ee.steward.memory_debt_snapshot.error.v1",
+                    "code": "memory_debt_snapshot_database_unresolved",
+                    "severity": "medium",
+                    "message": message,
+                    "repair": "ee init --workspace .",
+                })),
+            );
+        };
+        if !database_path.exists() {
+            let message = format!(
+                "Memory debt snapshot database does not exist: {}",
+                database_path.display()
+            );
+            return (
+                RunOutcome::Failed,
+                None,
+                Some(message.clone()),
+                Some(json!({
+                    "schema": "ee.steward.memory_debt_snapshot.error.v1",
+                    "code": "memory_debt_snapshot_database_missing",
+                    "severity": "medium",
+                    "databasePath": database_path.display().to_string(),
+                    "message": message,
+                    "repair": "ee init --workspace .",
+                })),
+            );
+        }
+        let item_limit = match self.options.item_limit {
+            Some(limit) => match u32::try_from(limit) {
+                Ok(limit) => Some(limit),
+                Err(_) => {
+                    let message = "Memory debt snapshot item limit exceeds u32".to_owned();
+                    return (
+                        RunOutcome::Failed,
+                        None,
+                        Some(message.clone()),
+                        Some(json!({
+                            "schema": "ee.steward.memory_debt_snapshot.error.v1",
+                            "code": "memory_debt_snapshot_item_limit_too_large",
+                            "severity": "medium",
+                            "message": message,
+                        })),
+                    );
+                }
+            },
+            None => None,
+        };
+        if budget.should_cancel() {
+            return (
+                RunOutcome::Cancelled,
+                Some(0),
+                Some("memory debt snapshot cancelled by job budget".to_owned()),
+                Some(json!({
+                    "schema": "ee.steward.memory_debt_snapshot.cancelled.v1",
+                    "jobType": JobType::MemoryDebtSnapshot.as_str(),
+                    "durableMutation": false,
+                })),
+            );
+        }
+        let workspace_path = self.normalized_workspace_path();
+        let report = match run_memory_debt_snapshot(&MemoryDebtSnapshotOptions {
+            workspace_path: workspace_path.as_path(),
+            database_path: Some(database_path.as_path()),
+            now_rfc3339: self.options.as_of.as_deref(),
+            dry_run: self.options.dry_run,
+            limit: item_limit,
+        }) {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("Memory debt snapshot failed: {error}");
+                return (
+                    RunOutcome::Failed,
+                    None,
+                    Some(message.clone()),
+                    Some(json!({
+                        "schema": "ee.steward.memory_debt_snapshot.error.v1",
+                        "code": "memory_debt_snapshot_failed",
+                        "severity": "high",
+                        "message": message,
+                        "repair": "ee curate doctor --workspace . --json",
+                    })),
+                );
+            }
+        };
+        let items = report.item_count as u64;
+        budget.record(ResourceType::Items, items);
+        (
+            RunOutcome::Success,
+            Some(items),
             None,
             Some(report.data_json()),
         )
