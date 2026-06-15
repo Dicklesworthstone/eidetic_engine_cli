@@ -163,6 +163,41 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
         "ee.swarm_slo.coordination_event.v1.json",
     ),
     ("ee.mcp.manifest.v1", "ee.mcp.manifest.v1.json"),
+    // Session-feature schemas — not yet in docs_schemas_match_responses at ship time
+    (
+        "ee.curate.doctor.v1",
+        "ee.curate.doctor.v1.json",
+    ),
+    (
+        "ee.curate.debt_trend.v1",
+        "ee.curate.debt_trend.v1.json",
+    ),
+    (
+        "ee.scale_envelope.v1",
+        "ee.scale_envelope.v1.json",
+    ),
+    (
+        "ee.session_budget.plan.v1",
+        "ee.session_budget.plan.v1.json",
+    ),
+    (
+        "ee.decide.record.v1",
+        "ee.decide.record.v1.json",
+    ),
+    (
+        "ee.decide.list.v1",
+        "ee.decide.list.v1.json",
+    ),
+    (
+        "ee.decide.revisit.v1",
+        "ee.decide.revisit.v1.json",
+    ),
+    (
+        "ee.toolchain_provenance.v1",
+        "ee.toolchain_provenance.v1.json",
+    ),
+    ("ee.ask.v1", "ee.ask.v1.json"),
+    ("ee.recall.v1", "ee.recall.v1.json"),
 ];
 
 fn repo_root() -> PathBuf {
