@@ -1,0 +1,23 @@
+{
+  "name": "basic",
+  "surface": "decide_revisit",
+  "mcpTool": "ee_decide_revisit",
+  "seedDecision": true,
+  "cliArgs": [
+    "ee",
+    "decide",
+    "revisit",
+    "--workspace",
+    "__WORKSPACE__",
+    "--warning-days",
+    "30",
+    "--limit",
+    "10",
+    "--json"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "warningDays": 30,
+    "limit": 10
+  }
+}

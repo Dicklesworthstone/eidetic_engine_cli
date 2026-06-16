@@ -1,0 +1,21 @@
+{
+  "name": "basic",
+  "surface": "primer",
+  "mcpTool": "ee_primer",
+  "seedMemoryContent": "Workspace primer parity should surface important procedural rules.",
+  "cliArgs": [
+    "ee",
+    "primer",
+    "--workspace",
+    "__WORKSPACE__",
+    "--tokens",
+    "400",
+    "--no-persist",
+    "--json"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "tokens": 400,
+    "noPersist": true
+  }
+}

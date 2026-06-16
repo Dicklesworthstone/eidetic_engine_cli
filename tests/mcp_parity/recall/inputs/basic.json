@@ -1,0 +1,21 @@
+{
+  "name": "basic",
+  "surface": "recall",
+  "mcpTool": "ee_recall",
+  "cliArgs": [
+    "ee",
+    "recall",
+    "--path",
+    "src/mcp.rs",
+    "--workspace",
+    "__WORKSPACE__",
+    "--budget-tokens",
+    "400",
+    "--json"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "path": ["src/mcp.rs"],
+    "budgetTokens": 400
+  }
+}

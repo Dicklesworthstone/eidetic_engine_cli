@@ -1,0 +1,23 @@
+{
+  "name": "basic",
+  "surface": "decide_list",
+  "mcpTool": "ee_decide_list",
+  "seedDecision": true,
+  "cliArgs": [
+    "ee",
+    "decide",
+    "list",
+    "--workspace",
+    "__WORKSPACE__",
+    "--about",
+    "MCP parity",
+    "--limit",
+    "10",
+    "--json"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "about": "MCP parity",
+    "limit": 10
+  }
+}

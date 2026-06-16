@@ -29,6 +29,9 @@ const PARITY_TESTED_TOOLS: &[&str] = &[
     "ee_capabilities",
     "ee_search",
     "ee_context",
+    "ee_recall",
+    "ee_ask",
+    "ee_primer",
     "ee_insights",
     "ee_proximity",
     "ee_pack_dna_explain",
@@ -37,6 +40,10 @@ const PARITY_TESTED_TOOLS: &[&str] = &[
     "ee_why",
     "ee_remember",
     "ee_outcome",
+    "ee_journal_append",
+    "ee_decide_record",
+    "ee_decide_list",
+    "ee_decide_revisit",
     "ee_mesh_discovery_policy",
 ];
 
@@ -295,6 +302,47 @@ fn remember_test_memory(dir: &Path, content: &str) -> Result<String, String> {
         .ok_or_else(|| format!("seed remember response missing data.memory_id: {remember_json}"))
 }
 
+fn record_test_decision(dir: &Path) -> Result<String, String> {
+    let (decide_exit, decide_stdout, decide_stderr) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("decide"),
+        OsString::from("record"),
+        OsString::from("MCP parity decision"),
+        OsString::from("--workspace"),
+        OsString::from(dir),
+        OsString::from("--chosen"),
+        OsString::from("hand-written MCP registry"),
+        OsString::from("--alternative"),
+        OsString::from("implicit generation"),
+        OsString::from("--rationale"),
+        OsString::from("Effect metadata must be explicit."),
+        OsString::from("--revisit-by"),
+        OsString::from("+7d"),
+        OsString::from("--json"),
+    ]);
+    ensure(
+        decide_exit == ee::models::ProcessExitCode::Success,
+        format!(
+            "seed decide record failed: {}",
+            if decide_stderr.is_empty() {
+                decide_stdout.as_str()
+            } else {
+                decide_stderr.as_str()
+            }
+        ),
+    )?;
+
+    let decide_json: JsonValue = serde_json::from_str(&decide_stdout)
+        .map_err(|e| format!("seed decide JSON parse error: {e}"))?;
+    decide_json
+        .pointer("/data/decision/memoryId")
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            format!("seed decide response missing data.decision.memoryId: {decide_json}")
+        })
+}
+
 fn extract_mcp_tool_text(response: &JsonValue) -> Result<String, String> {
     response
         .get("result")
@@ -339,6 +387,8 @@ fn normalize_runtime_varying_fields(value: &mut JsonValue) {
                     || key == "memoryId"
                     || key == "audit_id"
                     || key == "auditId"
+                    || key == "entry_id"
+                    || key == "entryId"
                     || key == "workflow_id"
                     || key == "workflowId"
                     || key == "index_job_id"
@@ -558,6 +608,83 @@ fn mcp_parity_context_command() -> TestResult {
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "context")
 }
 
+/// Parity test: `ee recall --json` vs `ee_recall` MCP tool
+#[test]
+fn mcp_parity_recall_command() -> TestResult {
+    let fixture = load_parity_fixture("recall", "basic")?;
+    let dir = scenario_dir("recall")?;
+    init_workspace(&dir)?;
+
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI recall failed",
+    )?;
+
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "recall")
+}
+
+/// Parity test: `ee ask --json` vs `ee_ask` MCP tool
+#[test]
+fn mcp_parity_ask_command() -> TestResult {
+    let fixture = load_parity_fixture("ask", "basic")?;
+    let dir = scenario_dir("ask")?;
+    init_workspace(&dir)?;
+
+    if let Some(seed_content) = optional_fixture_str(&fixture, "seedMemoryContent")? {
+        remember_test_memory(&dir, seed_content)?;
+    }
+
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI ask failed",
+    )?;
+
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "ask")
+}
+
+/// Parity test: `ee primer --json` vs `ee_primer` MCP tool
+#[test]
+fn mcp_parity_primer_command() -> TestResult {
+    let fixture = load_parity_fixture("primer", "basic")?;
+    let dir = scenario_dir("primer")?;
+    init_workspace(&dir)?;
+
+    if let Some(seed_content) = optional_fixture_str(&fixture, "seedMemoryContent")? {
+        remember_test_memory(&dir, seed_content)?;
+    }
+
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI primer failed",
+    )?;
+
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "primer")
+}
+
 /// Parity test: `ee insights --json` vs `ee_insights` MCP tool
 #[test]
 fn mcp_parity_insights_command() -> TestResult {
@@ -765,6 +892,100 @@ fn mcp_parity_outcome_dry_run_command() -> TestResult {
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "outcome --dry-run")
+}
+
+/// Parity test: `ee journal append --json` vs `ee_journal_append` MCP tool.
+#[test]
+fn mcp_parity_journal_append_write_command() -> TestResult {
+    let fixture = load_parity_fixture("journal_append", "write")?;
+    let dir = scenario_dir("journal_append")?;
+    init_workspace(&dir)?;
+
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI journal append failed",
+    )?;
+
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "journal append")
+}
+
+/// Parity test: `ee decide record --dry-run --json` vs `ee_decide_record` MCP tool.
+#[test]
+fn mcp_parity_decide_record_dry_run_command() -> TestResult {
+    let fixture = load_parity_fixture("decide_record", "dry_run")?;
+    let dir = scenario_dir("decide_record")?;
+    init_workspace(&dir)?;
+
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI decide record --dry-run failed",
+    )?;
+
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "decide record --dry-run")
+}
+
+/// Parity test: `ee decide list --json` vs `ee_decide_list` MCP tool.
+#[test]
+fn mcp_parity_decide_list_command() -> TestResult {
+    let fixture = load_parity_fixture("decide_list", "basic")?;
+    let dir = scenario_dir("decide_list")?;
+    init_workspace(&dir)?;
+    let _memory_id = record_test_decision(&dir)?;
+
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI decide list failed",
+    )?;
+
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "decide list")
+}
+
+/// Parity test: `ee decide revisit --json` vs `ee_decide_revisit` MCP tool.
+#[test]
+fn mcp_parity_decide_revisit_command() -> TestResult {
+    let fixture = load_parity_fixture("decide_revisit", "basic")?;
+    let dir = scenario_dir("decide_revisit")?;
+    init_workspace(&dir)?;
+    let _memory_id = record_test_decision(&dir)?;
+
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI decide revisit failed",
+    )?;
+
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "decide revisit")
 }
 
 /// Parity test: `ee mesh discovery-policy --json` vs `ee_mesh_discovery_policy` MCP tool.

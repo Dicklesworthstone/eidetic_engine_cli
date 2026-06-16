@@ -1,0 +1,28 @@
+{
+  "name": "dry_run",
+  "surface": "decide_record",
+  "mcpTool": "ee_decide_record",
+  "cliArgs": [
+    "ee",
+    "decide",
+    "record",
+    "MCP parity decision",
+    "--workspace",
+    "__WORKSPACE__",
+    "--chosen",
+    "hand-written MCP registry",
+    "--alternative",
+    "implicit generation",
+    "--rationale",
+    "Effect metadata must be explicit.",
+    "--dry-run",
+    "--json"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "topic": "MCP parity decision",
+    "chosen": "hand-written MCP registry",
+    "alternative": ["implicit generation"],
+    "rationale": "Effect metadata must be explicit."
+  }
+}

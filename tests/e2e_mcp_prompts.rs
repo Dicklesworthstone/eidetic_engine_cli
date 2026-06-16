@@ -8,15 +8,15 @@
 //! spawns the real binary, and neither pins the per-variant prompt
 //! vocabulary (name + description) on its own.
 //!
-//! This file pins the three published prompt descriptors
-//! (`pre-task-context`, `record-lesson`, `review-session`) through the
+//! This file pins the four published prompt descriptors
+//! (`pre-task-context`, `pre-edit-recall`, `record-lesson`, `review-session`) through the
 //! real stdio loop, so any rename, description rewording, or
 //! required-flag flip on an argument trips a focused, attributable test.
 //! That vocabulary is what downstream agent harnesses match on; freezing
 //! it here prevents silent surface drift.
 //!
 //! The shape that must remain stable:
-//!   - exactly three prompts, in the order returned by `handle_prompts_list`
+//!   - exactly four prompts, in the order returned by `handle_prompts_list`
 //!   - each prompt's `name`, `description`, and `arguments[*].{name,required}`
 //!   - `arguments` for each prompt covers the expected named slots
 
@@ -54,12 +54,24 @@ struct ExpectedPrompt {
 const EXPECTED_PROMPTS: &[ExpectedPrompt] = &[
     ExpectedPrompt {
         name: "pre-task-context",
-        description: "Prepare an agent before a task by retrieving an ee context pack.",
+        description: "Prepare an agent before a task by retrieving a context pack with ee.",
         arguments: &[
             ("task", true),
             ("workspace", false),
             ("profile", false),
             ("maxTokens", false),
+        ],
+    },
+    ExpectedPrompt {
+        name: "pre-edit-recall",
+        description: "Recall code-anchored memories before editing files.",
+        arguments: &[
+            ("path", false),
+            ("symbol", false),
+            ("diff", false),
+            ("diffStaged", false),
+            ("workspace", false),
+            ("budgetTokens", false),
         ],
     },
     ExpectedPrompt {

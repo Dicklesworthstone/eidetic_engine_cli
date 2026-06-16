@@ -1,0 +1,24 @@
+{
+  "name": "basic",
+  "surface": "ask",
+  "mcpTool": "ee_ask",
+  "seedMemoryContent": "MCP write tools require allowWrite true before durable writes.",
+  "cliArgs": [
+    "ee",
+    "ask",
+    "What do MCP write tools require before durable writes?",
+    "--workspace",
+    "__WORKSPACE__",
+    "--limit-evidence",
+    "2",
+    "--min-confidence",
+    "0.1",
+    "--json"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "question": "What do MCP write tools require before durable writes?",
+    "limitEvidence": 2,
+    "minConfidence": 0.1
+  }
+}

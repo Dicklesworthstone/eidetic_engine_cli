@@ -14,7 +14,7 @@
         "protocolVersion": "2024-11-05",
         "serverInfo": {
           "name": "ee",
-          "version": "0.1.0"
+          "version": "0.9.1"
         },
         "capabilities": {
           "prompts": {},
@@ -58,6 +58,42 @@
               {
                 "name": "maxTokens",
                 "description": "Maximum context token budget",
+                "required": false
+              }
+            ]
+          },
+          {
+            "name": "pre-edit-recall",
+            "description": "Recall code-anchored memories before editing files.",
+            "arguments": [
+              {
+                "name": "path",
+                "description": "Workspace-relative path or glob to recall against",
+                "required": false
+              },
+              {
+                "name": "symbol",
+                "description": "Exact symbol name to recall against",
+                "required": false
+              },
+              {
+                "name": "diff",
+                "description": "Git ref for changed-path recall",
+                "required": false
+              },
+              {
+                "name": "diffStaged",
+                "description": "Recall against staged paths",
+                "required": false
+              },
+              {
+                "name": "workspace",
+                "description": "Workspace path; defaults to current directory",
+                "required": false
+              },
+              {
+                "name": "budgetTokens",
+                "description": "Recall token budget",
                 "required": false
               }
             ]

@@ -114,6 +114,7 @@ impl McpMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum McpPrompt {
     PreTaskContext,
+    PreEditRecall,
     RecordLesson,
     ReviewSession,
 }
@@ -122,6 +123,7 @@ impl McpPrompt {
     fn parse(name: &str) -> Option<Self> {
         match name {
             "pre-task-context" => Some(Self::PreTaskContext),
+            "pre-edit-recall" => Some(Self::PreEditRecall),
             "record-lesson" => Some(Self::RecordLesson),
             "review-session" => Some(Self::ReviewSession),
             _ => None,
@@ -131,6 +133,7 @@ impl McpPrompt {
     const fn name(self) -> &'static str {
         match self {
             Self::PreTaskContext => "pre-task-context",
+            Self::PreEditRecall => "pre-edit-recall",
             Self::RecordLesson => "record-lesson",
             Self::ReviewSession => "review-session",
         }
@@ -141,6 +144,7 @@ impl McpPrompt {
             Self::PreTaskContext => {
                 "Prepare an agent before a task by retrieving a context pack with ee."
             }
+            Self::PreEditRecall => "Recall code-anchored memories before editing files.",
             Self::RecordLesson => "Turn a durable lesson into an explicit ee remember workflow.",
             Self::ReviewSession => "Review a prior session and propose curation candidates.",
         }
@@ -216,6 +220,39 @@ const OUTCOME_TOOL_EFFECT: McpToolEffect = McpToolEffect {
     destructive: false,
 };
 
+const PRIMER_TOOL_EFFECT: McpToolEffect = McpToolEffect {
+    kind: "derived_cache_write",
+    write_surface: &["primer_cache"],
+    default_dry_run: false,
+    requires_allow_write_when_dry_run_false: false,
+    audit: "ee primer may update rebuildable primer_cache rows through the CLI core path",
+    redaction: "primer output is assembled from already-stored memories after policy screening",
+    idempotency: "cache entries are deterministic derived artifacts and can be rebuilt",
+    destructive: false,
+};
+
+const JOURNAL_APPEND_TOOL_EFFECT: McpToolEffect = McpToolEffect {
+    kind: "durable_write",
+    write_surface: &["journal_entries", "audit_log"],
+    default_dry_run: true,
+    requires_allow_write_when_dry_run_false: true,
+    audit: "ee journal append writes audit evidence through the CLI core path",
+    redaction: "policy screening runs before storage and secret-like spans are redacted first",
+    idempotency: "single-entry appends are not idempotent; JSONL batches use per-line semantics",
+    destructive: false,
+};
+
+const DECIDE_RECORD_TOOL_EFFECT: McpToolEffect = McpToolEffect {
+    kind: "durable_write",
+    write_surface: &["memories", "decision_chains", "audit_log"],
+    default_dry_run: true,
+    requires_allow_write_when_dry_run_false: true,
+    audit: "ee decide record writes decision memory and lifecycle audit rows through the CLI core path",
+    redaction: "decision topic, rationale, and options pass through memory policy screening before storage",
+    idempotency: "supersedes links converge decision chains; new durable records are otherwise not idempotent",
+    destructive: false,
+};
+
 const MESH_DISCOVERY_POLICY_TOOL_EFFECT: McpToolEffect = McpToolEffect {
     kind: "policy_write",
     write_surface: &[
@@ -281,6 +318,30 @@ const TOOL_REGISTRY: &[McpToolEntry] = &[
         args_builder: build_context_tool_args,
     },
     McpToolEntry {
+        name: "ee_recall",
+        description: "Run ee recall --json for code-anchored memory lookup",
+        input_schema: recall_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_recall_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_ask",
+        description: "Run ee ask --json for extractive answers; abstention stays in the response payload",
+        input_schema: ask_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_ask_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_primer",
+        description: "Run ee primer --json for workspace primer assembly; may update rebuildable primer cache rows",
+        input_schema: primer_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: Some(PRIMER_TOOL_EFFECT),
+        args_builder: build_primer_tool_args,
+    },
+    McpToolEntry {
         name: "ee_insights",
         description: "Run ee insights --json for graph-derived insight bundles",
         input_schema: insights_tool_schema,
@@ -343,6 +404,38 @@ const TOOL_REGISTRY: &[McpToolEntry] = &[
         annotations: WRITE_TOOL_ANNOTATIONS,
         effect: Some(OUTCOME_TOOL_EFFECT),
         args_builder: build_outcome_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_journal_append",
+        description: "Gated write tool for ee journal append --json; durable appends require dryRun=false and allowWrite=true",
+        input_schema: journal_append_tool_schema,
+        annotations: WRITE_TOOL_ANNOTATIONS,
+        effect: Some(JOURNAL_APPEND_TOOL_EFFECT),
+        args_builder: build_journal_append_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_decide_record",
+        description: "Gated write tool for ee decide record --json; use supersedes to advance an existing decision chain instead of forking topics",
+        input_schema: decide_record_tool_schema,
+        annotations: WRITE_TOOL_ANNOTATIONS,
+        effect: Some(DECIDE_RECORD_TOOL_EFFECT),
+        args_builder: build_decide_record_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_decide_list",
+        description: "Run ee decide list --json for current decision heads and optional superseded history",
+        input_schema: decide_list_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_decide_list_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_decide_revisit",
+        description: "Run ee decide revisit --json for decisions due or nearing their revisit window",
+        input_schema: decide_revisit_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_decide_revisit_tool_args,
     },
     McpToolEntry {
         name: "ee_mesh_discovery_policy",
@@ -520,6 +613,22 @@ fn prompt_descriptor(prompt: McpPrompt) -> Value {
             ),
             prompt_argument("maxTokens", "Maximum context token budget", false),
         ],
+        McpPrompt::PreEditRecall => vec![
+            prompt_argument(
+                "path",
+                "Workspace-relative path or glob to recall against",
+                false,
+            ),
+            prompt_argument("symbol", "Exact symbol name to recall against", false),
+            prompt_argument("diff", "Git ref for changed-path recall", false),
+            prompt_argument("diffStaged", "Recall against staged paths", false),
+            prompt_argument(
+                "workspace",
+                "Workspace path; defaults to current directory",
+                false,
+            ),
+            prompt_argument("budgetTokens", "Recall token budget", false),
+        ],
         McpPrompt::RecordLesson => vec![
             prompt_argument(
                 "lesson",
@@ -562,6 +671,7 @@ fn handle_prompts_list(id: Value) -> Value {
         json!({
             "prompts": [
                 prompt_descriptor(McpPrompt::PreTaskContext),
+                prompt_descriptor(McpPrompt::PreEditRecall),
                 prompt_descriptor(McpPrompt::RecordLesson),
                 prompt_descriptor(McpPrompt::ReviewSession)
             ]
@@ -633,6 +743,39 @@ fn render_pre_task_context_prompt(arguments: &Value) -> Result<String, String> {
     ))
 }
 
+fn render_pre_edit_recall_prompt(arguments: &Value) -> Result<String, String> {
+    let workspace = prompt_optional_string(arguments, &["workspace"])?.unwrap_or(".");
+    let path = prompt_optional_string(arguments, &["path"])?;
+    let symbol = prompt_optional_string(arguments, &["symbol"])?;
+    let diff = prompt_optional_string(arguments, &["diff"])?;
+    let diff_staged = prompt_optional_bool(arguments, &["diffStaged", "diff_staged"])?;
+    let budget_tokens = optional_u32(arguments, &["budgetTokens", "budget_tokens"])?
+        .map_or_else(|| "1200".to_string(), |value| value.to_string());
+
+    let mut selector_args = Vec::new();
+    if let Some(path) = path {
+        selector_args.push(format!("--path {path:?}"));
+    }
+    if let Some(symbol) = symbol {
+        selector_args.push(format!("--symbol {symbol:?}"));
+    }
+    if let Some(diff) = diff {
+        selector_args.push(format!("--diff {diff:?}"));
+    }
+    if diff_staged {
+        selector_args.push("--diff-staged".to_string());
+    }
+    let selectors = if selector_args.is_empty() {
+        "<add --path, --symbol, --diff, or --diff-staged>".to_string()
+    } else {
+        selector_args.join(" ")
+    };
+
+    Ok(format!(
+        "Recall relevant ee memories before editing the selected code surface.\n\nRecommended command:\n`ee recall {selectors} --workspace {workspace} --budget-tokens {budget_tokens} --json`\n\nInspect `data.recall.items[]`, provenance, stale-anchor repair hints, and `degraded[]` before changing files. If no selector was supplied, choose the narrowest path, symbol, or diff selector that matches the edit."
+    ))
+}
+
 fn render_record_lesson_prompt(arguments: &Value) -> Result<String, String> {
     let lesson = prompt_required_string(arguments, &["lesson"])?;
     let workspace = prompt_optional_string(arguments, &["workspace"])?.unwrap_or(".");
@@ -671,6 +814,7 @@ fn render_review_session_prompt(arguments: &Value) -> Result<String, String> {
 fn build_prompt_text(prompt: McpPrompt, arguments: &Value) -> Result<String, String> {
     match prompt {
         McpPrompt::PreTaskContext => render_pre_task_context_prompt(arguments),
+        McpPrompt::PreEditRecall => render_pre_edit_recall_prompt(arguments),
         McpPrompt::RecordLesson => render_record_lesson_prompt(arguments),
         McpPrompt::ReviewSession => render_review_session_prompt(arguments),
     }
@@ -874,6 +1018,123 @@ fn context_tool_schema() -> Value {
             }
         },
         "required": ["query"]
+    })
+}
+
+fn recall_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "path": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Workspace-relative path or fnmatch-style glob selector; repeatable"
+            },
+            "symbol": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Exact symbol-name selector; repeatable"
+            },
+            "diff": {
+                "type": "string",
+                "description": "Recall against changed paths from git diff <REF>"
+            },
+            "diffStaged": {
+                "type": "boolean",
+                "description": "Recall against staged changed paths"
+            },
+            "kind": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Memory kind filters; repeatable"
+            },
+            "level": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Memory level filters; repeatable"
+            },
+            "stale": {
+                "type": "boolean",
+                "description": "Keep only suspect/stale anchored items"
+            },
+            "budgetTokens": {
+                "type": "integer",
+                "description": "Token budget for recalled items"
+            },
+            "cursor": {
+                "type": "string",
+                "description": "Resume a budget-truncated recall page"
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            }
+        }
+    })
+}
+
+fn ask_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": "Question to answer extractively from stored memories"
+            },
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "limitEvidence": {
+                "type": "integer",
+                "description": "Maximum evidence spans to include"
+            },
+            "minConfidence": {
+                "type": "number",
+                "description": "Minimum confidence threshold"
+            },
+            "requireConfidence": {
+                "type": "number",
+                "description": "Fail-closed threshold; abstention still appears in the ee error payload"
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            }
+        },
+        "required": ["question"]
+    })
+}
+
+fn primer_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "tokens": {
+                "type": "integer",
+                "description": "Token budget for the assembled primer"
+            },
+            "refresh": {
+                "type": "boolean",
+                "description": "Force deterministic reassembly instead of using the cache"
+            },
+            "noPersist": {
+                "type": "boolean",
+                "description": "Assemble without writing rebuildable primer_cache rows"
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            }
+        }
     })
 }
 
@@ -1112,6 +1373,18 @@ fn outcome_tool_schema() -> Value {
                 "type": "string",
                 "description": "Target ID to receive feedback"
             },
+            "batch": {
+                "type": "boolean",
+                "description": "Request outcome JSONL batch mode; MCP currently rejects this because tools/call has no stdin stream"
+            },
+            "pack": {
+                "type": "string",
+                "description": "Persisted pack ID used with item to resolve the target memory"
+            },
+            "item": {
+                "type": "integer",
+                "description": "1-based pack item rank to grade; requires pack"
+            },
             "targetType": {
                 "type": "string",
                 "description": "Target type; defaults to memory"
@@ -1173,7 +1446,171 @@ fn outcome_tool_schema() -> Value {
                 "description": "Required and true when dryRun is false"
             }
         },
-        "required": ["targetId", "signal"]
+        "required": ["signal"]
+    })
+}
+
+fn journal_append_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "text": {
+                "type": "string",
+                "description": "Observation text to append"
+            },
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "kind": {
+                "type": "string",
+                "description": "Entry kind: observation, command_failure, surprise, or note"
+            },
+            "source": {
+                "type": "string",
+                "description": "Append source: hook, manual, or stdin"
+            },
+            "cmd": {
+                "type": "string",
+                "description": "Failing command line for the structured sidecar"
+            },
+            "exitCode": {
+                "type": "integer",
+                "description": "Exit code of the failing command"
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Working directory of the failing command"
+            },
+            "path": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Touched paths for the structured sidecar"
+            },
+            "stderrTail": {
+                "type": "string",
+                "description": "Trailing stderr excerpt for the structured sidecar"
+            },
+            "session": {
+                "type": "string",
+                "description": "Session or run key for later scoped distillation"
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            },
+            "dryRun": {
+                "type": "boolean",
+                "description": "Validate without writing; defaults to true"
+            },
+            "allowWrite": {
+                "type": "boolean",
+                "description": "Required and true when dryRun is false"
+            }
+        },
+        "required": ["text"]
+    })
+}
+
+fn decide_record_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "topic": {
+                "type": "string",
+                "description": "Decision topic; normalized to prevent accidental forks"
+            },
+            "chosen": {
+                "type": "string",
+                "description": "Chosen option"
+            },
+            "alternative": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Rejected options; repeatable"
+            },
+            "rationale": {
+                "type": "string",
+                "description": "Short rationale explaining why the chosen option won"
+            },
+            "revisitBy": {
+                "type": "string",
+                "description": "RFC3339 timestamp or relative interval such as +90d"
+            },
+            "supersedes": {
+                "type": "string",
+                "description": "Prior decision memory ID to supersede for the same normalized topic"
+            },
+            "actor": {
+                "type": "string",
+                "description": "Actor recorded in lifecycle/audit side effects"
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            },
+            "dryRun": {
+                "type": "boolean",
+                "description": "Validate without writing; defaults to true"
+            },
+            "allowWrite": {
+                "type": "boolean",
+                "description": "Required and true when dryRun is false"
+            }
+        },
+        "required": ["topic", "chosen", "alternative", "rationale"]
+    })
+}
+
+fn decide_list_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "about": {
+                "type": "string",
+                "description": "Case-insensitive substring to match against decision fields"
+            },
+            "includeSuperseded": {
+                "type": "boolean",
+                "description": "Include superseded decisions instead of only current heads"
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum decisions to return"
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            }
+        }
+    })
+}
+
+fn decide_revisit_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "warningDays": {
+                "type": "integer",
+                "description": "Override the configured near-due warning window in days"
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum decisions to return"
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            }
+        }
     })
 }
 
@@ -1299,6 +1736,47 @@ fn optional_string<'a>(arguments: &'a Value, names: &[&str]) -> Result<Option<&'
         .ok_or_else(|| format!("Argument '{name}' must be a string"))
 }
 
+fn optional_string_list(arguments: &Value, names: &[&str]) -> Result<Vec<String>, String> {
+    let name = argument_name(names)?;
+    let Some(value) = find_argument(arguments, names) else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    if let Some(single) = value.as_str() {
+        if single.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Ok(vec![single.to_string()]);
+    }
+    let Some(items) = value.as_array() else {
+        return Err(format!(
+            "Argument '{name}' must be a string or string array"
+        ));
+    };
+    let mut strings = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let Some(text) = item.as_str() else {
+            return Err(format!("Argument '{name}' item {index} must be a string"));
+        };
+        if text.is_empty() {
+            return Err(format!("Argument '{name}' item {index} must be non-empty"));
+        }
+        strings.push(text.to_string());
+    }
+    Ok(strings)
+}
+
+fn required_string_list(arguments: &Value, names: &[&str]) -> Result<Vec<String>, String> {
+    let name = argument_name(names)?;
+    let values = optional_string_list(arguments, names)?;
+    if values.is_empty() {
+        return Err(format!("Missing required argument '{name}'"));
+    }
+    Ok(values)
+}
+
 fn optional_bool(arguments: &Value, names: &[&str]) -> Result<bool, String> {
     let name = argument_name(names)?;
     let Some(value) = find_argument(arguments, names) else {
@@ -1402,6 +1880,19 @@ fn append_optional_string_flag(
     Ok(())
 }
 
+fn append_optional_string_list_flag(
+    args: &mut Vec<OsString>,
+    arguments: &Value,
+    names: &[&str],
+    flag: &str,
+) -> Result<(), String> {
+    for value in optional_string_list(arguments, names)? {
+        push_arg(args, flag);
+        push_arg(args, value);
+    }
+    Ok(())
+}
+
 fn append_optional_number_flag(
     args: &mut Vec<OsString>,
     arguments: &Value,
@@ -1481,6 +1972,67 @@ fn build_context_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Resul
     }
     append_optional_path_flag(args, arguments, &["database"], "--database")?;
     append_optional_path_flag(args, arguments, &["indexDir", "index_dir"], "--index-dir")?;
+    Ok(())
+}
+
+fn build_recall_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    push_arg(args, "recall");
+    append_optional_string_list_flag(args, arguments, &["path", "paths"], "--path")?;
+    append_optional_string_list_flag(args, arguments, &["symbol", "symbols"], "--symbol")?;
+    append_optional_string_flag(args, arguments, &["diff"], "--diff")?;
+    if optional_bool(arguments, &["diffStaged", "diff_staged"])? {
+        push_arg(args, "--diff-staged");
+    }
+    append_optional_string_list_flag(args, arguments, &["kind", "kinds"], "--kind")?;
+    append_optional_string_list_flag(args, arguments, &["level", "levels"], "--level")?;
+    if optional_bool(arguments, &["stale"])? {
+        push_arg(args, "--stale");
+    }
+    if let Some(budget_tokens) = optional_u32(arguments, &["budgetTokens", "budget_tokens"])? {
+        push_arg(args, "--budget-tokens");
+        push_arg(args, budget_tokens.to_string());
+    }
+    append_optional_string_flag(args, arguments, &["cursor"], "--cursor")?;
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
+    Ok(())
+}
+
+fn build_ask_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    push_arg(args, "ask");
+    push_arg(args, required_string(arguments, &["question"])?);
+    if let Some(limit_evidence) = optional_u32(arguments, &["limitEvidence", "limit_evidence"])? {
+        push_arg(args, "--limit-evidence");
+        push_arg(args, limit_evidence.to_string());
+    }
+    append_optional_number_flag(
+        args,
+        arguments,
+        &["minConfidence", "min_confidence"],
+        "--min-confidence",
+    )?;
+    append_optional_number_flag(
+        args,
+        arguments,
+        &["requireConfidence", "require_confidence"],
+        "--require-confidence",
+    )?;
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
+    Ok(())
+}
+
+fn build_primer_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    push_arg(args, "primer");
+    if let Some(tokens) = optional_u32(arguments, &["tokens"])? {
+        push_arg(args, "--tokens");
+        push_arg(args, tokens.to_string());
+    }
+    if optional_bool(arguments, &["refresh"])? {
+        push_arg(args, "--refresh");
+    }
+    if optional_bool(arguments, &["noPersist", "no_persist"])? {
+        push_arg(args, "--no-persist");
+    }
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
     Ok(())
 }
 
@@ -1625,11 +2177,30 @@ fn build_remember_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Resu
 
 fn build_outcome_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
     let dry_run = gated_write_dry_run("ee_outcome", arguments)?;
+    if optional_bool(arguments, &["batch"])? {
+        return Err(
+            "Tool ee_outcome cannot use --batch because MCP tools/call has no stdin stream"
+                .to_string(),
+        );
+    }
+    let target_id = optional_string(arguments, &["targetId", "target_id"])?;
+    let pack = optional_string(arguments, &["pack"])?;
+    let item = optional_u32(arguments, &["item"])?;
+    if target_id.is_none() && (pack.is_none() || item.is_none()) {
+        return Err("Tool ee_outcome requires targetId or both pack and item".to_string());
+    }
     push_arg(args, "outcome");
-    push_arg(
-        args,
-        required_string(arguments, &["targetId", "target_id"])?,
-    );
+    if let Some(target_id) = target_id {
+        push_arg(args, target_id);
+    }
+    if let Some(pack) = pack {
+        push_arg(args, "--pack");
+        push_arg(args, pack);
+    }
+    if let Some(item) = item {
+        push_arg(args, "--item");
+        push_arg(args, item.to_string());
+    }
     append_optional_string_flag(
         args,
         arguments,
@@ -1671,6 +2242,104 @@ fn build_outcome_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Resul
     if dry_run {
         push_arg(args, "--dry-run");
     }
+    Ok(())
+}
+
+fn build_journal_append_tool_args(
+    args: &mut Vec<OsString>,
+    arguments: &Value,
+) -> Result<(), String> {
+    let dry_run = gated_write_dry_run("ee_journal_append", arguments)?;
+    if dry_run {
+        return Err(
+            "Tool ee_journal_append dryRun=true requires ee journal append --dry-run support"
+                .to_string(),
+        );
+    }
+    push_arg(args, "journal");
+    push_arg(args, "append");
+    push_arg(args, required_string(arguments, &["text"])?);
+    append_optional_string_flag(args, arguments, &["kind"], "--kind")?;
+    append_optional_string_flag(args, arguments, &["source"], "--source")?;
+    append_optional_string_flag(args, arguments, &["cmd"], "--cmd")?;
+    if let Some(exit_code) = optional_number_string(arguments, &["exitCode", "exit_code"])? {
+        push_arg(args, "--exit-code");
+        push_arg(args, exit_code);
+    }
+    append_optional_string_flag(args, arguments, &["cwd"], "--cwd")?;
+    append_optional_string_list_flag(args, arguments, &["path", "paths"], "--path")?;
+    append_optional_string_flag(
+        args,
+        arguments,
+        &["stderrTail", "stderr_tail"],
+        "--stderr-tail",
+    )?;
+    append_optional_string_flag(args, arguments, &["session"], "--session")?;
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
+    Ok(())
+}
+
+fn build_decide_record_tool_args(
+    args: &mut Vec<OsString>,
+    arguments: &Value,
+) -> Result<(), String> {
+    let dry_run = gated_write_dry_run("ee_decide_record", arguments)?;
+    push_arg(args, "decide");
+    push_arg(args, "record");
+    push_arg(args, required_string(arguments, &["topic"])?);
+    push_arg(args, "--chosen");
+    push_arg(args, required_string(arguments, &["chosen"])?);
+    for alternative in required_string_list(arguments, &["alternative", "alternatives"])? {
+        push_arg(args, "--alternative");
+        push_arg(args, alternative);
+    }
+    push_arg(args, "--rationale");
+    push_arg(args, required_string(arguments, &["rationale"])?);
+    append_optional_string_flag(
+        args,
+        arguments,
+        &["revisitBy", "revisit_by"],
+        "--revisit-by",
+    )?;
+    append_optional_string_flag(args, arguments, &["supersedes"], "--supersedes")?;
+    append_optional_string_flag(args, arguments, &["actor"], "--actor")?;
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
+    if dry_run {
+        push_arg(args, "--dry-run");
+    }
+    Ok(())
+}
+
+fn build_decide_list_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    push_arg(args, "decide");
+    push_arg(args, "list");
+    append_optional_string_flag(args, arguments, &["about"], "--about")?;
+    if optional_bool(arguments, &["includeSuperseded", "include_superseded"])? {
+        push_arg(args, "--include-superseded");
+    }
+    if let Some(limit) = optional_u32(arguments, &["limit"])? {
+        push_arg(args, "--limit");
+        push_arg(args, limit.to_string());
+    }
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
+    Ok(())
+}
+
+fn build_decide_revisit_tool_args(
+    args: &mut Vec<OsString>,
+    arguments: &Value,
+) -> Result<(), String> {
+    push_arg(args, "decide");
+    push_arg(args, "revisit");
+    if let Some(warning_days) = optional_u32(arguments, &["warningDays", "warning_days"])? {
+        push_arg(args, "--warning-days");
+        push_arg(args, warning_days.to_string());
+    }
+    if let Some(limit) = optional_u32(arguments, &["limit"])? {
+        push_arg(args, "--limit");
+        push_arg(args, limit.to_string());
+    }
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
     Ok(())
 }
 
@@ -2823,7 +3492,8 @@ mod tests {
             prop_assert_ne!(
                 has_result,
                 has_error,
-                "response must contain exactly one of result or error: {response}"
+                "response must contain exactly one of result or error: {}",
+                response
             );
 
             let id = response
@@ -2884,6 +3554,7 @@ mod tests {
             .filter_map(|prompt| prompt.get("name").and_then(Value::as_str))
             .collect();
         assert!(prompt_names.contains(&"pre-task-context"));
+        assert!(prompt_names.contains(&"pre-edit-recall"));
         assert!(prompt_names.contains(&"record-lesson"));
         assert!(prompt_names.contains(&"review-session"));
         Ok(())
@@ -3029,6 +3700,41 @@ mod tests {
         assert!(text.contains("ee_context"));
         assert!(text.contains("ee pack"));
         assert!(text.contains("--max-tokens 3000"));
+        Ok(())
+    }
+
+    #[test]
+    fn handle_prompts_get_pre_edit_recall_renders_selectors() -> Result<(), String> {
+        let response = handle_prompts_get(
+            json!(1),
+            Some(&json!({
+                "name": "pre-edit-recall",
+                "arguments": {
+                    "workspace": ".",
+                    "path": "src/mcp.rs",
+                    "symbol": "McpToolEntry",
+                    "budgetTokens": 800
+                }
+            })),
+        );
+        let Some(result) = response.get("result") else {
+            return Err("pre-edit-recall response missing result".to_string());
+        };
+        let Some(messages) = result.get("messages").and_then(Value::as_array) else {
+            return Err("pre-edit-recall response missing messages array".to_string());
+        };
+        let Some(text) = messages
+            .first()
+            .and_then(|message| message.get("content"))
+            .and_then(|content| content.get("text"))
+            .and_then(Value::as_str)
+        else {
+            return Err("pre-edit-recall response missing text".to_string());
+        };
+        assert!(text.contains("ee recall"));
+        assert!(text.contains("--path \"src/mcp.rs\""));
+        assert!(text.contains("--symbol \"McpToolEntry\""));
+        assert!(text.contains("--budget-tokens 800"));
         Ok(())
     }
 
@@ -3232,12 +3938,19 @@ mod tests {
         assert!(tool_names.contains(&"ee_capabilities"));
         assert!(tool_names.contains(&"ee_insights"));
         assert!(tool_names.contains(&"ee_proximity"));
+        assert!(tool_names.contains(&"ee_recall"));
+        assert!(tool_names.contains(&"ee_ask"));
+        assert!(tool_names.contains(&"ee_primer"));
         assert!(tool_names.contains(&"ee_pack_dna_explain"));
         assert!(tool_names.contains(&"ee_revision_impact"));
         assert!(tool_names.contains(&"ee_memory_show"));
         assert!(tool_names.contains(&"ee_why"));
         assert!(tool_names.contains(&"ee_remember"));
         assert!(tool_names.contains(&"ee_outcome"));
+        assert!(tool_names.contains(&"ee_journal_append"));
+        assert!(tool_names.contains(&"ee_decide_record"));
+        assert!(tool_names.contains(&"ee_decide_list"));
+        assert!(tool_names.contains(&"ee_decide_revisit"));
 
         let Some(remember) = tools
             .iter()
@@ -3252,12 +3965,17 @@ mod tests {
             "ee_capabilities",
             "ee_search",
             "ee_context",
+            "ee_recall",
+            "ee_ask",
+            "ee_primer",
             "ee_insights",
             "ee_proximity",
             "ee_pack_dna_explain",
             "ee_revision_impact",
             "ee_memory_show",
             "ee_why",
+            "ee_decide_list",
+            "ee_decide_revisit",
         ] {
             let Some(tool) = tools
                 .iter()
@@ -3304,6 +4022,17 @@ mod tests {
                 .and_then(|effect| effect.get("defaultDryRun"))
                 .and_then(Value::as_bool),
             Some(true)
+        );
+        let primer = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("ee_primer"))
+            .ok_or_else(|| "ee_primer tool missing".to_string())?;
+        assert_eq!(
+            primer
+                .get("eeEffect")
+                .and_then(|effect| effect.get("kind"))
+                .and_then(Value::as_str),
+            Some("derived_cache_write")
         );
         Ok(())
     }
@@ -3571,6 +4300,294 @@ mod tests {
             ]
         );
         Ok(())
+    }
+
+    #[test]
+    fn build_cli_args_wave_read_tools_route_to_cli_commands() -> Result<(), String> {
+        let recall = os_args_to_strings(build_cli_args_for_tool(
+            registry_tool("ee_recall")?,
+            &json!({
+                "workspace": ".",
+                "path": ["src/mcp.rs", "tests/mcp_parity.rs"],
+                "symbol": "McpToolEntry",
+                "kind": ["rule"],
+                "budgetTokens": 900,
+                "stale": true
+            }),
+        )?)?;
+        assert_eq!(
+            recall,
+            vec![
+                "ee",
+                "--json",
+                "--workspace",
+                ".",
+                "recall",
+                "--path",
+                "src/mcp.rs",
+                "--path",
+                "tests/mcp_parity.rs",
+                "--symbol",
+                "McpToolEntry",
+                "--kind",
+                "rule",
+                "--stale",
+                "--budget-tokens",
+                "900",
+            ]
+        );
+
+        let ask = os_args_to_strings(build_cli_args_for_tool(
+            registry_tool("ee_ask")?,
+            &json!({
+                "question": "What MCP write tools require allowWrite?",
+                "limitEvidence": 4,
+                "minConfidence": 0.4,
+                "requireConfidence": 0.7,
+                "database": "/tmp/ee.db"
+            }),
+        )?)?;
+        assert_eq!(
+            ask,
+            vec![
+                "ee",
+                "--json",
+                "ask",
+                "What MCP write tools require allowWrite?",
+                "--limit-evidence",
+                "4",
+                "--min-confidence",
+                "0.4",
+                "--require-confidence",
+                "0.7",
+                "--database",
+                "/tmp/ee.db",
+            ]
+        );
+
+        let primer = os_args_to_strings(build_cli_args_for_tool(
+            registry_tool("ee_primer")?,
+            &json!({
+                "tokens": 700,
+                "refresh": true,
+                "noPersist": true
+            }),
+        )?)?;
+        assert_eq!(
+            primer,
+            vec![
+                "ee",
+                "--json",
+                "primer",
+                "--tokens",
+                "700",
+                "--refresh",
+                "--no-persist",
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_cli_args_decision_tools_route_to_cli_commands() -> Result<(), String> {
+        let record = os_args_to_strings(build_cli_args_for_tool(
+            registry_tool("ee_decide_record")?,
+            &json!({
+                "topic": "MCP wave parity",
+                "chosen": "hand-written registry entries",
+                "alternative": ["auto-generate wrappers", "leave MCP incomplete"],
+                "rationale": "MCP schemas must document effects explicitly",
+                "revisitBy": "+30d",
+                "actor": "mcp-test"
+            }),
+        )?)?;
+        assert_eq!(
+            record,
+            vec![
+                "ee",
+                "--json",
+                "decide",
+                "record",
+                "MCP wave parity",
+                "--chosen",
+                "hand-written registry entries",
+                "--alternative",
+                "auto-generate wrappers",
+                "--alternative",
+                "leave MCP incomplete",
+                "--rationale",
+                "MCP schemas must document effects explicitly",
+                "--revisit-by",
+                "+30d",
+                "--actor",
+                "mcp-test",
+                "--dry-run",
+            ]
+        );
+
+        let list = os_args_to_strings(build_cli_args_for_tool(
+            registry_tool("ee_decide_list")?,
+            &json!({
+                "about": "MCP",
+                "includeSuperseded": true,
+                "limit": 7
+            }),
+        )?)?;
+        assert_eq!(
+            list,
+            vec![
+                "ee",
+                "--json",
+                "decide",
+                "list",
+                "--about",
+                "MCP",
+                "--include-superseded",
+                "--limit",
+                "7",
+            ]
+        );
+
+        let revisit = os_args_to_strings(build_cli_args_for_tool(
+            registry_tool("ee_decide_revisit")?,
+            &json!({
+                "warningDays": 14,
+                "limit": 5
+            }),
+        )?)?;
+        assert_eq!(
+            revisit,
+            vec![
+                "ee",
+                "--json",
+                "decide",
+                "revisit",
+                "--warning-days",
+                "14",
+                "--limit",
+                "5",
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_cli_args_write_wave_tools_enforce_gates() -> Result<(), String> {
+        let journal_error = build_cli_args_for_tool(
+            registry_tool("ee_journal_append")?,
+            &json!({
+                "text": "Dry-run journal append remains safe by default."
+            }),
+        )
+        .expect_err("journal append default dry-run must not write");
+        assert_eq!(
+            journal_error,
+            "Tool ee_journal_append dryRun=true requires ee journal append --dry-run support"
+        );
+
+        let journal = os_args_to_strings(build_cli_args_for_tool(
+            registry_tool("ee_journal_append")?,
+            &json!({
+                "text": "durable only when explicitly allowed",
+                "kind": "note",
+                "source": "manual",
+                "path": ["src/mcp.rs"],
+                "dryRun": false,
+                "allowWrite": true
+            }),
+        )?)?;
+        assert_eq!(
+            journal,
+            vec![
+                "ee",
+                "--json",
+                "journal",
+                "append",
+                "durable only when explicitly allowed",
+                "--kind",
+                "note",
+                "--source",
+                "manual",
+                "--path",
+                "src/mcp.rs",
+            ]
+        );
+
+        let decide_error = build_cli_args_for_tool(
+            registry_tool("ee_decide_record")?,
+            &json!({
+                "topic": "MCP wave parity",
+                "chosen": "record",
+                "alternative": ["skip"],
+                "rationale": "writes need allowWrite",
+                "dryRun": false
+            }),
+        )
+        .expect_err("decide record durable write must require allowWrite");
+        assert_eq!(
+            decide_error,
+            "Write tool ee_decide_record requires allowWrite=true when dryRun=false"
+        );
+
+        let outcome = os_args_to_strings(build_cli_args_for_tool(
+            registry_tool("ee_outcome")?,
+            &json!({
+                "pack": "pack_01234567890123456789012345",
+                "item": 2,
+                "signal": "helpful"
+            }),
+        )?)?;
+        assert!(outcome.contains(&"--pack".to_string()));
+        assert!(outcome.contains(&"pack_01234567890123456789012345".to_string()));
+        assert!(outcome.contains(&"--item".to_string()));
+        assert!(outcome.contains(&"2".to_string()));
+        assert!(outcome.contains(&"--dry-run".to_string()));
+
+        let batch_error = build_cli_args_for_tool(
+            registry_tool("ee_outcome")?,
+            &json!({
+                "batch": true,
+                "signal": "helpful"
+            }),
+        )
+        .expect_err("outcome batch must not hang on stdin");
+        assert_eq!(
+            batch_error,
+            "Tool ee_outcome cannot use --batch because MCP tools/call has no stdin stream"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn every_write_tool_declares_effect_metadata() {
+        for tool in TOOL_REGISTRY {
+            if tool.annotations.read_only {
+                continue;
+            }
+            let effect = tool
+                .effect
+                .unwrap_or_else(|| panic!("write tool {} missing eeEffect metadata", tool.name));
+            assert!(
+                !effect.write_surface.is_empty(),
+                "write tool {} must declare write_surface",
+                tool.name
+            );
+            assert!(
+                !effect.audit.trim().is_empty(),
+                "write tool {} must declare audit effect text",
+                tool.name
+            );
+            assert!(
+                !effect.redaction.trim().is_empty(),
+                "write tool {} must declare redaction effect text",
+                tool.name
+            );
+            assert!(
+                !effect.idempotency.trim().is_empty(),
+                "write tool {} must declare idempotency effect text",
+                tool.name
+            );
+        }
     }
 
     #[test]

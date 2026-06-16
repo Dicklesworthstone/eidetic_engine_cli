@@ -1,0 +1,29 @@
+{
+  "name": "write",
+  "surface": "journal_append",
+  "mcpTool": "ee_journal_append",
+  "cliArgs": [
+    "ee",
+    "journal",
+    "append",
+    "MCP journal append parity entry.",
+    "--workspace",
+    "__WORKSPACE__",
+    "--kind",
+    "note",
+    "--source",
+    "manual",
+    "--path",
+    "src/mcp.rs",
+    "--json"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "text": "MCP journal append parity entry.",
+    "kind": "note",
+    "source": "manual",
+    "path": ["src/mcp.rs"],
+    "dryRun": false,
+    "allowWrite": true
+  }
+}
