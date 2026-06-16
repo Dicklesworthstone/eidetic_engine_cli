@@ -895,10 +895,13 @@ fn classify_topology_root(
 }
 
 fn path_starts_with(path: &Path, root: &Path) -> bool {
+    // A free fn (not a closure) so the elided output lifetime ties to each
+    // call's own &Path input; a closure unifies the input/output lifetimes
+    // across both calls below and fails to borrow-check.
     fn normalize_components(path: &Path) -> Vec<Component<'_>> {
         path.components()
             .filter(|component| !matches!(component, Component::CurDir))
-            .collect::<Vec<_>>()
+            .collect()
     }
     let path_components = normalize_components(path);
     let root_components = normalize_components(root);
@@ -907,6 +910,8 @@ fn path_starts_with(path: &Path, root: &Path) -> bool {
 
 fn franken_stack_sibling(normalized: &str) -> Option<&'static str> {
     let sibling = normalized.trim_start_matches("../").split('/').next()?;
+    // Return the matched static literal (not the borrowed `sibling` slice) so
+    // the &'static str contract holds; each arm is value-identical to `sibling`.
     match sibling {
         "asupersync" => Some("asupersync"),
         "franken_agent_detection" => Some("franken_agent_detection"),
