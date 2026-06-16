@@ -466,6 +466,9 @@ mod scale_envelope_schema;
 #[path = "contracts/write_group_commit_schema.rs"]
 mod write_group_commit_schema;
 
+#[path = "contracts/index_intake_schema.rs"]
+mod index_intake_schema;
+
 #[path = "contracts/scale_envelope_fixture_profiles.rs"]
 mod scale_envelope_fixture_profiles;
 

@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.index_intake.v1.json",
+  "title": "ee.index_intake.v1",
+  "description": "Redaction-safe telemetry for one search-index intake operation: the intake mode, document counts, rebuild-avoided savings, and any fallback-to-full reason. Counts and modes only; never stores document content or query text. See ADR 0078 (docs/adr/0078-incremental-index-intake.md).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "generatedAt",
+    "redactionStatus",
+    "intakeMode",
+    "docsTouched",
+    "baseDocCount",
+    "segmentDocCount",
+    "rebuildAvoidedCount",
+    "mergeCount",
+    "fallbackToFull"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.index_intake.v1",
+      "description": "Schema identifier."
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp when the intake telemetry was produced."
+    },
+    "redactionStatus": {
+      "type": "string",
+      "const": "counts_modes_no_content",
+      "description": "Redaction posture: this telemetry holds only counts and modes."
+    },
+    "intakeMode": {
+      "type": "string",
+      "enum": ["full_rebuild", "incremental", "segment_merge"],
+      "description": "How the index was advanced: full rebuild of all documents, incremental single/small-delta intake, or periodic segment/WAL merge maintenance."
+    },
+    "docsTouched": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of documents added, updated, or tombstoned by this intake."
+    },
+    "baseDocCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Document count in the compacted base index after this intake."
+    },
+    "segmentDocCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Document count in the uncompacted WAL/segment delta after this intake."
+    },
+    "rebuildAvoidedCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of full-index rebuilds avoided versus the full-rebuild-per-write baseline."
+    },
+    "mergeCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of segment/WAL merge (compaction) operations performed."
+    },
+    "fallbackToFull": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["occurred"],
+      "description": "Whether this intake fell back to a full rebuild, and the closed-set reason if so.",
+      "properties": {
+        "occurred": {
+          "type": "boolean",
+          "description": "True when the intake fell back to full_rebuild instead of an incremental delta."
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "index_absent",
+            "generation_skew",
+            "tier_unavailable",
+            "forced_reindex",
+            "delta_over_threshold"
+          ],
+          "description": "Closed-set reason for the fallback; present only when occurred is true."
+        }
+      }
+    }
+  }
+}

@@ -70,6 +70,25 @@ pub const WRITE_GROUP_COMMIT_FALLBACK_OVERSIZED: &str = "oversized";
 /// Group-commit fallback reason: only one writer was in flight, so no coalescing applied.
 pub const WRITE_GROUP_COMMIT_FALLBACK_SINGLE_WRITER: &str = "single_writer";
 
+/// Schema identifier for the incremental index-intake telemetry contract (bd-d67os.5).
+pub const INDEX_INTAKE_SCHEMA_V1: &str = "ee.index_intake.v1";
+/// Index-intake mode: full rebuild of the entire index from all documents.
+pub const INDEX_INTAKE_MODE_FULL_REBUILD: &str = "full_rebuild";
+/// Index-intake mode: incremental single-document or small-delta intake.
+pub const INDEX_INTAKE_MODE_INCREMENTAL: &str = "incremental";
+/// Index-intake mode: periodic segment/WAL merge maintenance.
+pub const INDEX_INTAKE_MODE_SEGMENT_MERGE: &str = "segment_merge";
+/// Index-intake fallback-to-full reason: no built index was present to update.
+pub const INDEX_INTAKE_FALLBACK_INDEX_ABSENT: &str = "index_absent";
+/// Index-intake fallback-to-full reason: index vs DB generation skew.
+pub const INDEX_INTAKE_FALLBACK_GENERATION_SKEW: &str = "generation_skew";
+/// Index-intake fallback-to-full reason: a persisted tier could not be reopened.
+pub const INDEX_INTAKE_FALLBACK_TIER_UNAVAILABLE: &str = "tier_unavailable";
+/// Index-intake fallback-to-full reason: a forced reindex was requested.
+pub const INDEX_INTAKE_FALLBACK_FORCED_REINDEX: &str = "forced_reindex";
+/// Index-intake fallback-to-full reason: the delta exceeded the incremental threshold.
+pub const INDEX_INTAKE_FALLBACK_DELTA_OVER_THRESHOLD: &str = "delta_over_threshold";
+
 /// All known schema identifiers for validation.
 pub const KNOWN_SCHEMAS: &[&str] = &[
     RESPONSE_SCHEMA_V0,
@@ -151,6 +170,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     SESSION_BUDGET_PLAN_SCHEMA_V1,
     SCALE_ENVELOPE_SCHEMA_V1,
     WRITE_GROUP_COMMIT_SCHEMA_V1,
+    INDEX_INTAKE_SCHEMA_V1,
     // Active learning agenda and experiment schemas (EE-440)
     LEARNING_QUESTION_SCHEMA_V1,
     UNCERTAINTY_ESTIMATE_SCHEMA_V1,
