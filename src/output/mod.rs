@@ -9743,6 +9743,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: scale_envelope_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::WRITE_GROUP_COMMIT_SCHEMA_V1,
+            version: "1",
+            description: "Redaction-safe group-commit write-intake telemetry: batch, coalescing, fsync-saved, commit-latency, and fallback-reason counts.",
+            category: "performance",
+            definition: write_group_commit_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.closeout_audit.v1",
             version: "1",
             description: "Closeout audit envelope emitted by scripts/closeout_audit.sh before marking a bead closed.",
@@ -11136,6 +11143,10 @@ fn cache_hotset_schema_definition() -> String {
 
 fn scale_envelope_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.scale_envelope.v1.json").to_string()
+}
+
+fn write_group_commit_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.write_group_commit.v1.json").to_string()
 }
 
 fn closeout_audit_schema_definition() -> String {

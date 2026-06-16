@@ -463,6 +463,9 @@ mod closeout_audit_schema;
 #[path = "contracts/scale_envelope_schema.rs"]
 mod scale_envelope_schema;
 
+#[path = "contracts/write_group_commit_schema.rs"]
+mod write_group_commit_schema;
+
 #[path = "contracts/scale_envelope_fixture_profiles.rs"]
 mod scale_envelope_fixture_profiles;
 

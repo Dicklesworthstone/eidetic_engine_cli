@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.write_group_commit.v1.json",
+  "title": "ee.write_group_commit.v1",
+  "description": "Redaction-safe telemetry for group-commit write intake: counts and latencies describing how concurrent durable writes were coalesced into shared transactions and fsyncs over an observation window. Counts and timings only; never stores written content, audit bodies, or query text. See ADR 0077 (docs/adr/0077-group-commit-write-intake.md).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "generatedAt",
+    "enabled",
+    "redactionStatus",
+    "batches",
+    "writesCoalesced",
+    "avgBatchSize",
+    "fsyncCount",
+    "fsyncSaved",
+    "commitLatencyP50Us",
+    "commitLatencyP99Us",
+    "fallbackCount",
+    "fallbackReasons"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.write_group_commit.v1",
+      "description": "Schema identifier."
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp when the window snapshot was produced."
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "Whether group-commit intake was enabled for this window. When false, every write took the per-write fallback path."
+    },
+    "redactionStatus": {
+      "type": "string",
+      "const": "counts_latencies_no_content",
+      "description": "Redaction posture: this telemetry holds only counts and latencies."
+    },
+    "batches": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of closed commit batches in the window."
+    },
+    "writesCoalesced": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of writes that shared a batch with at least one peer."
+    },
+    "avgBatchSize": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Mean number of writes per closed batch."
+    },
+    "fsyncCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of fsyncs actually issued in the window."
+    },
+    "fsyncSaved": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of fsyncs avoided versus the per-write baseline (writes minus fsyncCount)."
+    },
+    "commitLatencyP50Us": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Median commit latency in microseconds."
+    },
+    "commitLatencyP99Us": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "99th-percentile commit latency in microseconds."
+    },
+    "fallbackCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of writes that took the per-write fallback path instead of a coalesced batch."
+    },
+    "fallbackReasons": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-reason counts of fallbacks; the keys are the closed reason set.",
+      "properties": {
+        "disabled": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Group-commit was disabled by config."
+        },
+        "degraded": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "A degraded write-owner posture forced the per-write path."
+        },
+        "oversized": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "A single write exceeded the inflight byte ceiling and committed alone."
+        },
+        "single_writer": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Only one writer was in flight, so no coalescing applied."
+        }
+      }
+    }
+  }
+}

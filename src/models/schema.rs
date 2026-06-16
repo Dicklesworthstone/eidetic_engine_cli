@@ -59,6 +59,17 @@ pub const SCALE_FIXTURE_UNAVAILABLE_CODE: &str = "scale_fixture_unavailable";
 /// Scale-envelope degraded code for bounded probes that stop before full coverage.
 pub const SCALE_PROBE_BUDGET_EXCEEDED_CODE: &str = "scale_probe_budget_exceeded";
 
+/// Schema identifier for the group-commit write-intake telemetry contract (bd-d67os.1).
+pub const WRITE_GROUP_COMMIT_SCHEMA_V1: &str = "ee.write_group_commit.v1";
+/// Group-commit fallback reason: the feature is disabled by config.
+pub const WRITE_GROUP_COMMIT_FALLBACK_DISABLED: &str = "disabled";
+/// Group-commit fallback reason: a degraded write-owner posture forced the per-write path.
+pub const WRITE_GROUP_COMMIT_FALLBACK_DEGRADED: &str = "degraded";
+/// Group-commit fallback reason: a single write exceeded the inflight byte ceiling.
+pub const WRITE_GROUP_COMMIT_FALLBACK_OVERSIZED: &str = "oversized";
+/// Group-commit fallback reason: only one writer was in flight, so no coalescing applied.
+pub const WRITE_GROUP_COMMIT_FALLBACK_SINGLE_WRITER: &str = "single_writer";
+
 /// All known schema identifiers for validation.
 pub const KNOWN_SCHEMAS: &[&str] = &[
     RESPONSE_SCHEMA_V0,
@@ -139,6 +150,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     SESSION_BUDGET_SCHEMA_V1,
     SESSION_BUDGET_PLAN_SCHEMA_V1,
     SCALE_ENVELOPE_SCHEMA_V1,
+    WRITE_GROUP_COMMIT_SCHEMA_V1,
     // Active learning agenda and experiment schemas (EE-440)
     LEARNING_QUESTION_SCHEMA_V1,
     UNCERTAINTY_ESTIMATE_SCHEMA_V1,
