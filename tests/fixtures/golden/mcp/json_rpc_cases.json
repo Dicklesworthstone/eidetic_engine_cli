@@ -14,7 +14,7 @@
         "protocolVersion": "2024-11-05",
         "serverInfo": {
           "name": "ee",
-          "version": "0.9.1"
+          "version": "0.12.0"
         },
         "capabilities": {
           "prompts": {},
