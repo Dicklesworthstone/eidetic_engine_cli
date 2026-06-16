@@ -81,3 +81,4 @@ including rejected alternatives and verification hooks.
 - [ADR 0074: Embedding Model Lifecycle Readiness](0074-embedding-model-lifecycle-readiness.md)
 - [ADR 0076: Scale-Envelope Contract](0076-scale-envelope-contract.md)
 - [ADR 0077: Group-Commit Write Intake](0077-group-commit-write-intake.md)
+- [ADR 0078: Incremental Index Intake](0078-incremental-index-intake.md)
