@@ -35,6 +35,7 @@ pub mod claims;
 pub mod completion_audit;
 pub mod config_surface;
 pub mod conformal;
+pub mod contention;
 pub mod context;
 pub mod context_delta;
 pub mod contradiction_detect;

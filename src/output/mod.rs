@@ -9834,6 +9834,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: diag_plan_cache_schema_definition,
         },
         SchemaEntry {
+            id: "ee.diag.contention.v1",
+            version: "1",
+            description: "Read-only contention diagnostic: aggregated write-lock, read-pool, single-flight, and cache posture with ranked top contention.",
+            category: "ops",
+            definition: diag_contention_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.disk_pressure.agent_harness_log_classifier.v1",
             version: "1",
             description: "Read-only per-file classification for oversized agent-harness logs found by ee diag disk-pressure.",
@@ -11216,6 +11223,10 @@ fn docs_bootstrap_run_schema_definition() -> String {
 
 fn diag_plan_cache_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.diag.plan_cache.v1.json").to_string()
+}
+
+fn diag_contention_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.diag.contention.v1.json").to_string()
 }
 
 fn disk_pressure_agent_harness_log_classifier_schema_definition() -> String {

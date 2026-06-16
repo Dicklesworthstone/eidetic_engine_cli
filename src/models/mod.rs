@@ -7,6 +7,7 @@ pub mod bead_affinity_loader;
 pub mod causal;
 pub mod certificate;
 pub mod claims;
+pub mod contention;
 pub mod context_profile;
 pub mod decision;
 pub mod degradation;

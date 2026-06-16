@@ -1,0 +1,374 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.diag.contention.v1.json",
+  "title": "ee.diag.contention.v1",
+  "description": "Read-only diagnostic response envelope for `ee diag contention --json` (bd-d67os.11). Aggregates scattered hot-path concurrency signals — write-owner queue/wait, read-pool acquire-wait p99 and ad-hoc bypass, single-flight leader/follower posture, and (when present) group-commit / incremental-index / L2-cache stats — into one posture report with a deterministic, severity-ranked topContention list. The surface is read-only, embeds no wall-clock (only monotonic counters and measured wait nanoseconds), and never mutates any subsystem. Group-commit, index-intake, and L2 sub-reports are omit-safe future surfaces. NOTE: the `ee diag contention` command itself lands in bd-d67os.12; this schema documents the contract its read-only collectors (bd-d67os.11) already produce.",
+  "type": "object",
+  "required": ["schema", "success", "data", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v2"},
+    "success": {"type": "boolean"},
+    "data": {
+      "type": "object",
+      "required": ["command", "report"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {"type": "string", "const": "diag contention"},
+        "report": {"$ref": "#/$defs/contentionReport"}
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradedEntry"}
+    }
+  },
+  "field_presets": {
+    "minimal": ["command", "report.schemaTag", "report.overallPosture"],
+    "summary": [
+      "command",
+      "report.schemaTag",
+      "report.overallPosture",
+      "report.topContention",
+      "report.unavailableSources",
+      "degraded"
+    ],
+    "standard": ["command", "report", "degraded"],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "schema": "ee.response.v2",
+      "success": true,
+      "data": {
+        "command": "diag contention",
+        "report": {
+          "schemaTag": "ee.diag.contention.v1",
+          "overallPosture": "ok",
+          "writeLock": {
+            "running": true,
+            "queueDepth": 0,
+            "totalProcessed": 1024,
+            "avgWaitMs": 0.0,
+            "maxWaitMs": 0,
+            "posture": "ok"
+          },
+          "readPool": {
+            "maxSize": 4,
+            "active": 1,
+            "idle": 3,
+            "activePins": 1,
+            "expiredPins": 0,
+            "maxSeen": 2,
+            "drops": 0,
+            "releaseFailures": 0,
+            "adHocBypassCount": 0,
+            "acquireWaitSamples": 8,
+            "acquireWaitP50Ns": 1200,
+            "acquireWaitP99Ns": 4800,
+            "sizeWasZero": false,
+            "underized": false,
+            "posture": "ok"
+          },
+          "singleflight": {
+            "status": "idle",
+            "configuredSurfaceCount": 1,
+            "activeLeaderCount": 0,
+            "leaderStartCount": 0,
+            "followerWaitCount": 0,
+            "followerTimeoutCount": 0,
+            "leaderFailureCount": 0,
+            "reusedResultCount": 0,
+            "posture": "ok"
+          },
+          "topContention": [],
+          "unavailableSources": []
+        }
+      },
+      "degraded": []
+    },
+    {
+      "schema": "ee.response.v2",
+      "success": true,
+      "data": {
+        "command": "diag contention",
+        "report": {
+          "schemaTag": "ee.diag.contention.v1",
+          "overallPosture": "hot",
+          "writeLock": {
+            "running": true,
+            "queueDepth": 3,
+            "totalProcessed": 50321,
+            "avgWaitMs": 41.2,
+            "maxWaitMs": 180,
+            "posture": "warm"
+          },
+          "readPool": {
+            "maxSize": 4,
+            "active": 4,
+            "idle": 0,
+            "activePins": 4,
+            "expiredPins": 1,
+            "maxSeen": 12,
+            "drops": 0,
+            "releaseFailures": 0,
+            "adHocBypassCount": 37,
+            "acquireWaitSamples": 256,
+            "acquireWaitP50Ns": 2100000,
+            "acquireWaitP99Ns": 64000000,
+            "sizeWasZero": false,
+            "underized": true,
+            "posture": "hot"
+          },
+          "singleflight": {
+            "status": "active",
+            "configuredSurfaceCount": 3,
+            "activeLeaderCount": 2,
+            "leaderStartCount": 410,
+            "followerWaitCount": 1380,
+            "followerTimeoutCount": 0,
+            "leaderFailureCount": 0,
+            "reusedResultCount": 1380,
+            "coalesceEfficiency": 0.7709497206703911,
+            "posture": "warm"
+          },
+          "topContention": [
+            {
+              "source": "read_pool",
+              "severity": "hot",
+              "reasonCode": "read_pool_ad_hoc_bypass",
+              "detail": "read pool 4/4 active, 37 ad-hoc bypasses, acquire-wait p99 64000000 ns; readers are waiting or bypassing the pool",
+              "suggestedCommands": [
+                "raise EE_READ_POOL_SIZE for this workload",
+                "investigate long-held snapshot pins (EE_READ_POOL_MAX_PIN_SECONDS)",
+                "see bd-d67os.15 for read-pool FIFO fairness under storm"
+              ]
+            },
+            {
+              "source": "singleflight",
+              "severity": "warm",
+              "reasonCode": "singleflight_active_coalescing",
+              "detail": "single-flight: 2 active leaders, 1380 followers waiting, 0 timeouts, 0 leader failures",
+              "suggestedCommands": [
+                "informational: read coalescing is absorbing duplicate load"
+              ]
+            },
+            {
+              "source": "write_lock",
+              "severity": "warm",
+              "reasonCode": "write_lock_pressure",
+              "detail": "write-owner queue depth 3 (max wait 180 ms); concurrent writers are serializing behind the single write lock",
+              "suggestedCommands": [
+                "enable group-commit write batching (bd-d67os.1)",
+                "route heavy writers through the daemon write owner: ee daemon --foreground",
+                "reduce the number of concurrent durable writers"
+              ]
+            }
+          ],
+          "unavailableSources": []
+        }
+      },
+      "degraded": []
+    }
+  ],
+  "$defs": {
+    "posture": {
+      "type": "string",
+      "enum": ["ok", "warm", "hot", "contended"],
+      "description": "Coarse contention severity, ordered ok < warm < hot < contended."
+    },
+    "contentionReport": {
+      "type": "object",
+      "required": [
+        "schemaTag",
+        "overallPosture",
+        "writeLock",
+        "readPool",
+        "singleflight",
+        "topContention",
+        "unavailableSources"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schemaTag": {"type": "string", "const": "ee.diag.contention.v1"},
+        "overallPosture": {"$ref": "#/$defs/posture"},
+        "writeLock": {"$ref": "#/$defs/writeLock"},
+        "readPool": {"$ref": "#/$defs/readPool"},
+        "singleflight": {"$ref": "#/$defs/singleflight"},
+        "groupCommit": {"$ref": "#/$defs/groupCommit"},
+        "indexIntake": {"$ref": "#/$defs/indexIntake"},
+        "l2Cache": {"$ref": "#/$defs/l2Cache"},
+        "topContention": {
+          "type": "array",
+          "description": "Findings with posture >= warm, ranked by severity (desc) then source (asc).",
+          "items": {"$ref": "#/$defs/finding"}
+        },
+        "unavailableSources": {
+          "type": "array",
+          "description": "Core sources expected but not gathered this run, sorted by source.",
+          "items": {"$ref": "#/$defs/sourceGap"}
+        }
+      }
+    },
+    "writeLock": {
+      "type": "object",
+      "required": ["running", "queueDepth", "totalProcessed", "avgWaitMs", "maxWaitMs", "posture"],
+      "additionalProperties": false,
+      "properties": {
+        "running": {"type": "boolean"},
+        "queueDepth": {"type": "integer", "minimum": 0},
+        "totalProcessed": {"type": "integer", "minimum": 0},
+        "avgWaitMs": {"type": "number", "minimum": 0},
+        "maxWaitMs": {"type": "integer", "minimum": 0},
+        "lockWaitMsP50": {"type": "integer", "minimum": 0},
+        "lockWaitMsP99": {"type": "integer", "minimum": 0},
+        "posture": {"$ref": "#/$defs/posture"}
+      }
+    },
+    "readPool": {
+      "type": "object",
+      "required": [
+        "maxSize",
+        "active",
+        "idle",
+        "activePins",
+        "expiredPins",
+        "maxSeen",
+        "drops",
+        "releaseFailures",
+        "adHocBypassCount",
+        "acquireWaitSamples",
+        "acquireWaitP50Ns",
+        "acquireWaitP99Ns",
+        "sizeWasZero",
+        "underized",
+        "posture"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "maxSize": {"type": "integer", "minimum": 0},
+        "active": {"type": "integer", "minimum": 0},
+        "idle": {"type": "integer", "minimum": 0},
+        "activePins": {"type": "integer", "minimum": 0},
+        "expiredPins": {"type": "integer", "minimum": 0},
+        "maxSeen": {"type": "integer", "minimum": 0},
+        "drops": {"type": "integer", "minimum": 0},
+        "releaseFailures": {"type": "integer", "minimum": 0},
+        "adHocBypassCount": {"type": "integer", "minimum": 0},
+        "acquireWaitSamples": {"type": "integer", "minimum": 0},
+        "acquireWaitP50Ns": {"type": "integer", "minimum": 0},
+        "acquireWaitP99Ns": {"type": "integer", "minimum": 0},
+        "sizeWasZero": {"type": "boolean"},
+        "underized": {"type": "boolean"},
+        "posture": {"$ref": "#/$defs/posture"}
+      }
+    },
+    "singleflight": {
+      "type": "object",
+      "required": [
+        "status",
+        "configuredSurfaceCount",
+        "activeLeaderCount",
+        "leaderStartCount",
+        "followerWaitCount",
+        "followerTimeoutCount",
+        "leaderFailureCount",
+        "reusedResultCount",
+        "posture"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"type": "string"},
+        "configuredSurfaceCount": {"type": "integer", "minimum": 0},
+        "activeLeaderCount": {"type": "integer", "minimum": 0},
+        "leaderStartCount": {"type": "integer", "minimum": 0},
+        "followerWaitCount": {"type": "integer", "minimum": 0},
+        "followerTimeoutCount": {"type": "integer", "minimum": 0},
+        "leaderFailureCount": {"type": "integer", "minimum": 0},
+        "reusedResultCount": {"type": "integer", "minimum": 0},
+        "coalesceEfficiency": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "posture": {"$ref": "#/$defs/posture"}
+      }
+    },
+    "groupCommit": {
+      "type": "object",
+      "required": ["enabled", "batches", "writesCoalesced", "fsyncSaved", "avgBatchSize", "posture"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "batches": {"type": "integer", "minimum": 0},
+        "writesCoalesced": {"type": "integer", "minimum": 0},
+        "fsyncSaved": {"type": "integer", "minimum": 0},
+        "avgBatchSize": {"type": "number", "minimum": 0},
+        "posture": {"$ref": "#/$defs/posture"}
+      }
+    },
+    "indexIntake": {
+      "type": "object",
+      "required": ["intakeMode", "rebuilds", "swapStalls", "avgSwapMs", "posture"],
+      "additionalProperties": false,
+      "properties": {
+        "intakeMode": {"type": "string"},
+        "rebuilds": {"type": "integer", "minimum": 0},
+        "swapStalls": {"type": "integer", "minimum": 0},
+        "avgSwapMs": {"type": "number", "minimum": 0},
+        "posture": {"$ref": "#/$defs/posture"}
+      }
+    },
+    "l2Cache": {
+      "type": "object",
+      "required": ["hits", "misses", "evictions", "posture"],
+      "additionalProperties": false,
+      "properties": {
+        "hits": {"type": "integer", "minimum": 0},
+        "misses": {"type": "integer", "minimum": 0},
+        "evictions": {"type": "integer", "minimum": 0},
+        "hitRate": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "thrashRatio": {"type": "number", "minimum": 0.0},
+        "posture": {"$ref": "#/$defs/posture"}
+      }
+    },
+    "finding": {
+      "type": "object",
+      "required": ["source", "severity", "reasonCode", "detail", "suggestedCommands"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {"type": "string"},
+        "severity": {"$ref": "#/$defs/posture"},
+        "reasonCode": {"type": "string"},
+        "detail": {"type": "string"},
+        "suggestedCommands": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "sourceGap": {
+      "type": "object",
+      "required": ["source", "code"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {"type": "string"},
+        "code": {"type": "string"}
+      }
+    },
+    "degradedEntry": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": true,
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "write_owner_unavailable",
+            "read_pool_unavailable",
+            "singleflight_unavailable"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string"},
+        "repair": {"type": "string"}
+      }
+    }
+  }
+}

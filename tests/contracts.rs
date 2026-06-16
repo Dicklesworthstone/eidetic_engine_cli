@@ -1,6 +1,9 @@
 #[path = "contracts/dependency_contract_matrix.rs"]
 mod dependency_contract_matrix;
 
+#[path = "contracts/contention_schema.rs"]
+mod contention_schema;
+
 #[path = "contracts/cass_robot.rs"]
 mod cass_robot;
 
