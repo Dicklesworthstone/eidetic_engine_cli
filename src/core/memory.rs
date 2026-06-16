@@ -5666,9 +5666,7 @@ pub fn get_memory_details(options: &GetMemoryOptions<'_>) -> MemoryShowReport {
         }
         Ok(None) => None,
         Err(e) => {
-            return MemoryShowReport::error(format!(
-                "Failed to query typed memory fields: {e}"
-            ));
+            return MemoryShowReport::error(format!("Failed to query typed memory fields: {e}"));
         }
     };
 

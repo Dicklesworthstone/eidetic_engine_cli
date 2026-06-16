@@ -1512,9 +1512,8 @@ mod tests {
         assert_eq!(connection.mode(), crate::db::DatabaseOpenMode::ReadOnly);
         assert_eq!(snapshot_item_count(&connection), 1);
 
-        let write_result = connection.execute_raw(
-            "INSERT INTO snapshot_items (id, value) VALUES (2, 'must_not_write')",
-        );
+        let write_result = connection
+            .execute_raw("INSERT INTO snapshot_items (id, value) VALUES (2, 'must_not_write')");
         assert!(matches!(
             write_result,
             Err(crate::db::DbError::InvalidMode {
