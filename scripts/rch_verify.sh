@@ -56,6 +56,7 @@ Options:
                             ee binary to use for proof-broker admission
   --proof-broker-bypass <reason>
                             Continue despite a non-dispatch broker verdict, with degraded evidence
+  --worker-root-canary      Run a bounded read-only RCH worker topology canary; no verifier command required
   --json                    Accepted for symmetry; output is always JSON
   -h, --help                Show this help
 
@@ -111,6 +112,7 @@ PROOF_BROKER_LEDGER="${RCH_VERIFY_PROOF_BROKER_LEDGER:-}"
 PROOF_BROKER_EE_BIN="${RCH_VERIFY_PROOF_BROKER_EE_BIN:-}"
 PROOF_BROKER_BYPASS_REASON="${RCH_VERIFY_PROOF_BROKER_BYPASS_REASON:-}"
 PROOF_BROKER_JSON="null"
+WORKER_ROOT_CANARY=0
 RCH_VERIFY_ATTEMPT_TIMEOUT_MS="${RCH_VERIFY_ATTEMPT_TIMEOUT_MS:-1800000}"
 RCH_VERIFY_PREFLIGHT_TIMEOUT_MS="${RCH_VERIFY_PREFLIGHT_TIMEOUT_MS:-10000}"
 RCH_VERIFY_TAIL_BYTES="${RCH_VERIFY_TAIL_BYTES:-4000}"
@@ -219,6 +221,7 @@ while [ "$#" -gt 0 ]; do
         --proof-broker-ledger) PROOF_BROKER_LEDGER="${2:?--proof-broker-ledger requires a value}"; shift 2 ;;
         --proof-broker-ee-bin) PROOF_BROKER_EE_BIN="${2:?--proof-broker-ee-bin requires a value}"; shift 2 ;;
         --proof-broker-bypass) PROOF_BROKER_BYPASS_REASON="${2:?--proof-broker-bypass requires a value}"; shift 2 ;;
+        --worker-root-canary) WORKER_ROOT_CANARY=1; shift ;;
         --json) shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
@@ -230,7 +233,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-if [ "$#" -eq 0 ]; then
+if [ "$#" -eq 0 ] && [ "$WORKER_ROOT_CANARY" -ne 1 ]; then
     echo "rch_verify: verifier command is required after --" >&2
     usage >&2
     exit 2
@@ -2442,6 +2445,305 @@ now_ms() {
     python3 -c 'import time; print(int(time.time() * 1000))'
 }
 
+emit_worker_root_canary_json() {
+    WORKER_ROOT_CANARY_NOW="$(now_iso)" \
+    PROJECT_ROOT_PATH="$PROJECT_ROOT" \
+    RCH_BIN_PATH="$RCH_BIN" \
+    CANARY_TIMEOUT_MS="$RCH_VERIFY_PREFLIGHT_TIMEOUT_MS" \
+    CANARY_STATUS_JSON="${RCH_VERIFY_WORKER_ROOT_CANARY_STATUS_JSON:-}" \
+    CANARY_DIAGNOSE_JSON="${RCH_VERIFY_WORKER_ROOT_CANARY_DIAGNOSE_JSON:-}" \
+    CANARY_STATUS_TIMEOUT="${RCH_VERIFY_WORKER_ROOT_CANARY_STATUS_TIMEOUT:-0}" \
+    CANARY_DIAGNOSE_TIMEOUT="${RCH_VERIFY_WORKER_ROOT_CANARY_DIAGNOSE_TIMEOUT:-0}" \
+    python3 - <<'PY'
+import json
+import os
+import re
+import subprocess
+import time
+
+now = os.environ["WORKER_ROOT_CANARY_NOW"]
+project_root = os.environ.get("PROJECT_ROOT_PATH") or ""
+rch_bin = os.environ.get("RCH_BIN_PATH") or "rch"
+timeout_ms = int(os.environ.get("CANARY_TIMEOUT_MS") or "10000")
+
+def redact(text):
+    if text is None:
+        return None
+    text = str(text)
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    text = re.sub(r"/Users/[^\\s\"'`,;:]+", "/Users/<redacted>", text)
+    return text
+
+def probe(name, argv, env_var, timeout_var):
+    started = time.monotonic()
+    forced = os.environ.get(timeout_var) == "1"
+    injected = os.environ.get(env_var)
+    if forced:
+        return {
+            "status": "timeout",
+            "exit_code": 124,
+            "timed_out": True,
+            "elapsed_ms": timeout_ms,
+            "payload": None,
+            "raw_excerpt": "",
+        }
+    if injected:
+        try:
+            payload = json.loads(injected)
+        except Exception as error:
+            return {
+                "status": "unavailable",
+                "exit_code": 0,
+                "timed_out": False,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "payload": None,
+                "raw_excerpt": redact(f"{name} fixture JSON parse error: {error}"),
+            }
+        return {
+            "status": "ok",
+            "exit_code": 0,
+            "timed_out": False,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "payload": payload,
+            "raw_excerpt": "",
+        }
+    try:
+        result = subprocess.run(
+            argv,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_ms / 1000,
+        )
+    except subprocess.TimeoutExpired as error:
+        return {
+            "status": "timeout",
+            "exit_code": 124,
+            "timed_out": True,
+            "elapsed_ms": timeout_ms,
+            "payload": None,
+            "raw_excerpt": redact((error.stdout or "") + (error.stderr or ""))[-1200:],
+        }
+    except OSError as error:
+        return {
+            "status": "unavailable",
+            "exit_code": 126,
+            "timed_out": False,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "payload": None,
+            "raw_excerpt": redact(f"{type(error).__name__}: {error}")[-1200:],
+        }
+    raw = result.stdout or ""
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return {
+            "status": "unavailable",
+            "exit_code": result.returncode,
+            "timed_out": False,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "payload": None,
+            "raw_excerpt": redact((raw + (result.stderr or ""))[-1200:]),
+        }
+    return {
+        "status": "ok" if result.returncode == 0 else "unavailable",
+        "exit_code": result.returncode,
+        "timed_out": False,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "payload": payload,
+        "raw_excerpt": "" if result.returncode == 0 else redact((raw + (result.stderr or ""))[-1200:]),
+    }
+
+status_probe = probe(
+    "status",
+    [rch_bin, "status", "--workers", "--jobs", "--json"],
+    "CANARY_STATUS_JSON",
+    "CANARY_STATUS_TIMEOUT",
+)
+diagnose_probe = probe(
+    "diagnose",
+    [rch_bin, "diagnose", "--dry-run", "--json", "cargo", "check", "--lib"],
+    "CANARY_DIAGNOSE_JSON",
+    "CANARY_DIAGNOSE_TIMEOUT",
+)
+
+def payload_data(probe_payload):
+    payload = probe_payload.get("payload")
+    if not isinstance(payload, dict):
+        return {}
+    data = payload.get("data")
+    return data if isinstance(data, dict) else payload
+
+status_data = payload_data(status_probe)
+diagnose_data = payload_data(diagnose_probe)
+daemon_container = status_data.get("daemon") if isinstance(status_data.get("daemon"), dict) else {}
+daemon_workers = daemon_container.get("workers")
+if not isinstance(daemon_workers, list):
+    daemon_workers = []
+
+selection = diagnose_data.get("worker_selection") if isinstance(diagnose_data.get("worker_selection"), dict) else {}
+diagnostics = selection.get("diagnostics") if isinstance(selection.get("diagnostics"), dict) else {}
+diag_workers = diagnostics.get("workers") if isinstance(diagnostics.get("workers"), list) else []
+selected = selection.get("worker")
+if isinstance(selected, dict):
+    selected_worker = selected.get("id") or selected.get("worker_id")
+elif selected:
+    selected_worker = str(selected)
+else:
+    selected_worker = None
+
+workers_by_id = {}
+for worker in daemon_workers:
+    if isinstance(worker, dict) and worker.get("id"):
+        workers_by_id[str(worker.get("id"))] = {
+            "worker_id": str(worker.get("id")),
+            "status": worker.get("status"),
+            "pressure_state": worker.get("pressure_state"),
+            "available_slots": max(int(worker.get("total_slots") or 0) - int(worker.get("used_slots") or 0), 0),
+            "reason_codes": [],
+            "final_decision": None,
+            "final_reason": None,
+        }
+
+for worker in diag_workers:
+    if not isinstance(worker, dict):
+        continue
+    worker_id = str(worker.get("worker_id") or worker.get("id") or "")
+    if not worker_id:
+        continue
+    item = workers_by_id.setdefault(worker_id, {"worker_id": worker_id})
+    item["status"] = item.get("status") or worker.get("status")
+    item["pressure_state"] = item.get("pressure_state") or worker.get("pressure_state")
+    item["final_decision"] = worker.get("final_decision")
+    item["final_reason"] = redact(worker.get("final_reason"))
+    item["reason_codes"] = [
+        str(code)
+        for code in (worker.get("reason_codes") or [])
+        if code is not None
+    ]
+    if "available_slots" not in item:
+        try:
+            item["available_slots"] = int(worker.get("available_slots") or 0)
+        except (TypeError, ValueError):
+            item["available_slots"] = None
+
+def root_status(root_id, path):
+    return {
+        "id": root_id,
+        "path": path,
+        "status": "unknown",
+        "accepted_by_policy": None,
+        "worker_ids": [],
+        "evidence": [],
+    }
+
+roots = {
+    "projects_root": root_status("projects_root", "/data/projects"),
+    "dp_root": root_status("dp_root", "/dp"),
+    "isolated_sync_parent": root_status("isolated_sync_parent", "<worker-isolated-sync-parent>"),
+}
+degraded = []
+
+def mark(root_id, status, worker_id, evidence, accepted=None):
+    root = roots[root_id]
+    precedence = {
+        "unknown": 0,
+        "accepted": 1,
+        "active_project_exclusion": 2,
+        "missing_root": 3,
+        "outer_workspace_shadowed": 4,
+        "permission_denied": 5,
+        "timeout": 6,
+        "unavailable": 7,
+    }
+    if precedence.get(status, 0) >= precedence.get(root["status"], 0):
+        root["status"] = status
+        root["accepted_by_policy"] = accepted
+    if worker_id and worker_id not in root["worker_ids"]:
+        root["worker_ids"].append(worker_id)
+    if evidence and evidence not in root["evidence"]:
+        root["evidence"].append(evidence)
+
+if status_probe["timed_out"] or diagnose_probe["timed_out"]:
+    for root_id in roots:
+        mark(root_id, "timeout", None, "bounded canary probe timed out", False)
+    degraded.append("rch_worker_root_canary_timeout")
+elif status_probe["status"] != "ok" or diagnose_probe["status"] != "ok":
+    for root_id in roots:
+        mark(root_id, "unavailable", None, "RCH status or diagnose JSON unavailable", False)
+    degraded.append("rch_worker_root_canary_unavailable")
+elif selected_worker:
+    for root_id in roots:
+        mark(root_id, "accepted", selected_worker, "dry-run selected a worker for cargo check --lib", True)
+
+for worker_id, item in workers_by_id.items():
+    reason = item.get("final_reason") or ""
+    reason_lower = reason.lower()
+    codes = set(item.get("reason_codes") or [])
+    evidence = reason or ",".join(sorted(codes)) or "worker diagnostic row"
+    if "active_project_exclusion" in codes:
+        mark("isolated_sync_parent", "active_project_exclusion", worker_id, evidence, False)
+        degraded.append("rch_worker_root_canary_active_project_exclusion")
+    if "topology.preflight_failed" in codes or "topology" in reason_lower:
+        target = "dp_root" if "/dp" in reason_lower else "projects_root"
+        if "permission" in reason_lower or "denied" in reason_lower:
+            mark(target, "permission_denied", worker_id, evidence, False)
+            degraded.append("rch_worker_root_canary_permission_denied")
+        elif "missing" in reason_lower or "not found" in reason_lower or "no such" in reason_lower:
+            mark(target, "missing_root", worker_id, evidence, False)
+            degraded.append("rch_worker_root_canary_missing_root")
+        elif "alias_wrong_target" in reason_lower or "workspace" in reason_lower or "/users/" in reason_lower:
+            mark(target, "outer_workspace_shadowed", worker_id, evidence, False)
+            degraded.append("rch_worker_root_canary_outer_workspace_shadowed")
+        else:
+            mark(target, "missing_root", worker_id, evidence, False)
+            degraded.append("rch_worker_root_canary_missing_root")
+
+degraded = sorted(dict.fromkeys(degraded))
+root_values = [roots[key] for key in ("projects_root", "dp_root", "isolated_sync_parent")]
+
+if any(root["status"] in {"timeout"} for root in root_values):
+    status = "timeout"
+elif any(root["status"] in {"unavailable"} for root in root_values):
+    status = "unavailable"
+elif selected_worker and not degraded:
+    status = "healthy"
+else:
+    status = "blocked"
+
+repair_actions = []
+if "rch_worker_root_canary_missing_root" in degraded:
+    repair_actions.append({"kind": "operator", "command": "rch workers probe --all", "summary": "Confirm worker root inventory before retrying remote proof."})
+if "rch_worker_root_canary_outer_workspace_shadowed" in degraded:
+    repair_actions.append({"kind": "operator", "command": "rch diagnose --dry-run --json cargo check --lib", "summary": "Inspect alias/root preflight details; do not run local Cargo."})
+if "rch_worker_root_canary_active_project_exclusion" in degraded:
+    repair_actions.append({"kind": "wait", "command": "rch queue --json", "summary": "Wait for or inspect the active same-project remote build before launching another proof."})
+if "rch_worker_root_canary_timeout" in degraded:
+    repair_actions.append({"kind": "retry", "command": "scripts/rch_verify.sh --worker-root-canary --json", "summary": "Retry the bounded canary after RCH responds."})
+
+payload = {
+    "schema": "ee.rch.worker_root_canary.v1",
+    "success": True,
+    "generated_at": now,
+    "status": status,
+    "mode": "read_only_no_cargo",
+    "project_root": redact(project_root),
+    "timeout_ms": timeout_ms,
+    "selected_worker": selected_worker,
+    "required_roots": root_values,
+    "workers": [workers_by_id[key] for key in sorted(workers_by_id)],
+    "probes": {
+        "status": {key: status_probe[key] for key in ("status", "exit_code", "timed_out", "elapsed_ms", "raw_excerpt")},
+        "diagnose": {key: diagnose_probe[key] for key in ("status", "exit_code", "timed_out", "elapsed_ms", "raw_excerpt")},
+    },
+    "degraded_codes": degraded,
+    "repair_actions": repair_actions,
+}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
 rch_env_allowlist() {
     local required="CARGO_TARGET_DIR,TMPDIR"
     if [ -n "${RCH_ENV_ALLOWLIST:-}" ]; then
@@ -3633,6 +3935,11 @@ positive_integer_or_die "RCH_VERIFY_PREFLIGHT_TIMEOUT_MS" "$RCH_VERIFY_PREFLIGHT
 positive_integer_or_die "RCH_VERIFY_TAIL_BYTES" "$RCH_VERIFY_TAIL_BYTES"
 positive_integer_or_die "RCH_VERIFY_DEFAULT_BUILD_TIMEOUT_SEC" "$RCH_VERIFY_DEFAULT_BUILD_TIMEOUT_SEC"
 positive_integer_or_die "RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC" "$RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC"
+
+if [ "$WORKER_ROOT_CANARY" -eq 1 ]; then
+    emit_worker_root_canary_json
+    exit 0
+fi
 
 COMMAND_KIND="$(classify_command)"
 apply_default_remote_timeouts
