@@ -83,9 +83,9 @@ use crate::models::degradation::{
 };
 use crate::models::{
     AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
-    AgentContextProfileCounts, MemoryId, MemoryScope, MemoryScopeStats, MemorySentinelResultStatus,
-    PACK_SCHEMA_V2, PackId, ProvenanceUri, RedactionLevel, TrustClass, UnitScore, WorkspaceId,
-    posture_for_trust_class,
+    AgentContextProfileCounts, GLOBAL_MEMORY_SCOPE_TAG, MemoryId, MemoryScope, MemoryScopeStats,
+    MemorySentinelResultStatus, PACK_SCHEMA_V2, PackId, ProvenanceUri, RedactionLevel, TrustClass,
+    UnitScore, WorkspaceId, posture_for_trust_class,
 };
 use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
@@ -2345,11 +2345,14 @@ fn run_context_pack_with_performance_inner(
         options.strict_scope,
     );
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+    let global_store_memory_ids = global_store_search_memory_ids(&search_report);
     let scope_stats = filter_candidates_by_memory_scope(
         read_connection,
         &mut candidates,
         &scope_context,
         &mut degraded,
+        Some(&search_preloaded_memories),
+        &global_store_memory_ids,
     );
     if scope_stats.candidates_excluded_by_scope > 0 {
         candidate_metrics.scope_filtered_candidates = candidate_metrics
@@ -8434,6 +8437,8 @@ fn filter_candidates_by_memory_scope(
     candidates: &mut Vec<PackCandidate>,
     scope_context: &MemoryScopeContext,
     degraded: &mut Vec<ContextResponseDegradation>,
+    preloaded_memories: Option<&BTreeMap<String, StoredMemory>>,
+    global_store_memory_ids: &BTreeSet<String>,
 ) -> MemoryScopeStats {
     let mut stats = scope_context.stats();
     if candidates.is_empty() {
@@ -8473,11 +8478,20 @@ fn filter_candidates_by_memory_scope(
         .collect();
     let candidate_memory_refs: Vec<&str> =
         candidate_memory_ids.iter().map(String::as_str).collect();
-    let (scope_memories, read_error): (BTreeMap<String, StoredMemory>, Option<String>) =
+    let (mut scope_memories, read_error): (BTreeMap<String, StoredMemory>, Option<String>) =
         match connection.get_memories_batch(&candidate_memory_refs) {
             Ok(memories) => (memories, None),
             Err(error) => (BTreeMap::new(), Some(error.to_string())),
         };
+    if let Some(preloaded) = preloaded_memories {
+        for memory_id in &candidate_memory_ids {
+            if let Some(memory) = preloaded.get(memory_id) {
+                scope_memories
+                    .entry(memory_id.clone())
+                    .or_insert_with(|| memory.clone());
+            }
+        }
+    }
     let (scope_tags, tag_read_error): (BTreeMap<String, Vec<String>>, Option<String>) =
         if matches!(scope_context.scope, MemoryScope::Global) {
             match connection.get_memory_tags_batch(&candidate_memory_refs) {
@@ -8489,11 +8503,18 @@ fn filter_candidates_by_memory_scope(
         };
 
     let mut scoped = Vec::with_capacity(candidates.len());
+    let global_scope_tags = [GLOBAL_MEMORY_SCOPE_TAG.to_owned()];
     for candidate in std::mem::take(candidates) {
         let memory_id = candidate.memory_id.to_string();
         match scope_memories.get(&memory_id) {
             Some(memory) => {
-                let tags = scope_tags.get(&memory_id).map(Vec::as_slice).unwrap_or(&[]);
+                let tags = if matches!(scope_context.scope, MemoryScope::Global)
+                    && global_store_memory_ids.contains(&memory_id)
+                {
+                    global_scope_tags.as_slice()
+                } else {
+                    scope_tags.get(&memory_id).map(Vec::as_slice).unwrap_or(&[])
+                };
                 let in_scope = scope_context.memory_in_scope_with_tags(memory, tags);
                 stats.record_candidate_id(in_scope, Some(&memory_id));
                 if in_scope {
@@ -8559,6 +8580,24 @@ fn filter_candidates_by_memory_scope(
 
     *candidates = scoped;
     stats
+}
+
+fn global_store_search_memory_ids(
+    search_report: &crate::core::search::SearchReport,
+) -> BTreeSet<String> {
+    search_report
+        .results
+        .iter()
+        .filter(|hit| {
+            hit.metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("storeLane"))
+                .and_then(serde_json::Value::as_str)
+                == Some(crate::core::global_store::GLOBAL_PROVENANCE_LANE)
+        })
+        .filter_map(|hit| MemoryId::from_str(&hit.doc_id).ok())
+        .map(|memory_id| memory_id.to_string())
+        .collect()
 }
 
 fn filter_candidates_by_required_fresh_sentinels(
