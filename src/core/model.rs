@@ -3154,12 +3154,10 @@ fn default_model_store_root() -> Result<PathBuf, DomainError> {
 // Honesty (epic HARD CONSTRAINT — no silent fallback): the declared entry is
 // registered as `Unavailable` until the artifact is actually present. The
 // download→`Available` flip is performed by the index-build path
-// (`ensure_active_embedding_registry_record`, src/core/index.rs), which inserts
-// an `Available` entry once the active fast embedder reports `is_semantic()`.
-// Reconciling an existing `Unavailable` declared entry up to `Available` on a
-// later download needs a registry status-update/upsert (none exists yet); that
-// reconcile + the `ee model fetch` embedding pre-download trigger are the
-// remaining bd-1et0v.3 wiring (tracked, this is the code-first foundation).
+// (`ensure_active_embedding_registry_record`, src/core/index.rs) and by the
+// explicit `ee model fetch embedding-default` pre-download path, both through
+// the registry upsert keyed by `(Model2Vec, potion-multilingual-128M,
+// Embedding)`.
 // ---------------------------------------------------------------------------
 
 /// Registry id of the bundled default embedding model (ADR 0080).
