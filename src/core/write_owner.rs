@@ -1320,6 +1320,22 @@ pub fn write_group_commit_telemetry(workspace_path: Option<&Path>) -> WriteGroup
     write_group_commit_telemetry_for_config(config.enabled)
 }
 
+/// Reset process-local group-commit telemetry for integration tests.
+#[doc(hidden)]
+pub fn reset_write_group_commit_telemetry_for_test() {
+    WRITE_GROUP_COMMIT_BATCHES.store(0, Ordering::Release);
+    WRITE_GROUP_COMMIT_BATCH_WRITES.store(0, Ordering::Release);
+    WRITE_GROUP_COMMIT_WRITES_COALESCED.store(0, Ordering::Release);
+    WRITE_GROUP_COMMIT_FSYNC_COUNT.store(0, Ordering::Release);
+    WRITE_GROUP_COMMIT_FSYNC_SAVED.store(0, Ordering::Release);
+    WRITE_GROUP_COMMIT_LATENCY_TOTAL_US.store(0, Ordering::Release);
+    WRITE_GROUP_COMMIT_LATENCY_MAX_US.store(0, Ordering::Release);
+    WRITE_GROUP_COMMIT_FALLBACK_DISABLED.store(0, Ordering::Release);
+    WRITE_GROUP_COMMIT_FALLBACK_DEGRADED.store(0, Ordering::Release);
+    WRITE_GROUP_COMMIT_FALLBACK_OVERSIZED.store(0, Ordering::Release);
+    WRITE_GROUP_COMMIT_FALLBACK_SINGLE_WRITER.store(0, Ordering::Release);
+}
+
 /// Run a one-shot durable write through the group-commit intake accounting.
 ///
 /// One-shot CLI invocations normally close as a single-writer fallback because
