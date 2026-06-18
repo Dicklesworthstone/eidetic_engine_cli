@@ -26,7 +26,8 @@ The JSON payload uses `data.schema == "ee.ask.v1"`. Important fields:
 Known degraded rows:
 
 - `ask_semantic_degraded`: semantic span scoring is unavailable and the weight
-  is renormalized into lexical scoring.
+  is renormalized into lexical scoring. On default installs this is a degraded
+  fallback from the bundled local Model2Vec path, not the expected steady state.
 - `ask_conflicting_evidence`: top evidence clusters oppose each other and the
   payload emits `sides[]`.
 - `no_confident_answer`: no span reached the confidence threshold; use

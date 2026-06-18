@@ -77,10 +77,10 @@ verify = { type = "test", path = "tests/contracts/audit_event_coverage.rs" }
 [[invariant]]
 id = "rfm-005-frankensearch-model-delegation"
 readme_section = "Design Philosophy"
-readme_line_anchor = 146
-sentence_hash = "blake3:ea1813c91f6a60221b6fe15c78f9e681d455e5ad77bdb32e1961b4514ff82793"
+readme_line_anchor = 201
+sentence_hash = "blake3:bfb5f29bd851663f02637d57d9188bbdb93db58c739481bea954e0e5761b19e5"
 classification = "invariant"
-verify = { type = "defer_bead", id = "bd-3usjw.62", defer_until = "2026-08-13" }
+verify = { type = "test", path = "tests/model_bundled_embedding_cli_e2e.rs" }
 
 [[invariant]]
 id = "rfm-006-harness-loop-non-control"

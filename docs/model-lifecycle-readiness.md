@@ -6,6 +6,12 @@ It is reported inside `ee model status --json` as `data.modelLifecycle` and is
 also reusable by search and recall code paths that already hold a workspace
 database connection.
 
+Default builds are expected to report semantic readiness through the
+Frankensearch Model2Vec fast tier once the pinned `potion-multilingual-128M`
+asset is cached or the first-use download is pending/complete. Deterministic
+hash embedding remains the fallback posture for offline, blocked, corrupt, or
+fault-injected model-loading paths; it is no longer the normal happy path.
+
 ## Offline Local Readiness
 
 A workspace is semantically ready only when the registry, model asset, and
@@ -27,7 +33,8 @@ as `hashed:<12-hex>` identifiers otherwise. The `redactionStatus` is pinned to
 
 - Treat `semanticReadiness.state == "available"` and
   `semanticReadiness.mode == "semantic"` as the only semantic-ready posture.
-- Treat `lexical_fallback` as usable retrieval, not semantic readiness.
+- Treat `lexical_fallback` as usable retrieval, not semantic readiness; for a
+  default install it means the bundled local model path needs attention.
 - Run `ee index reembed --workspace .` when the state is
   `dimension_mismatch` or `stale_index_model`.
 - Run `ee model status --json` before weakening search or recall behavior; the

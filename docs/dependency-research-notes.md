@@ -188,8 +188,8 @@ Workspace edition: 2024. Workspace `rust-version`: 1.95.
 `fastembed-reranker`, `ann`, `download`, `api`, `semantic`, `hybrid`,
 `persistent`, `durable`, `full`, `full-fts5`.
 
-**EE feature mapping (from AGENTS.md `[features]`):**
-- `embed-fast` → `frankensearch/model2vec`.
+**EE feature mapping (from `Cargo.toml` `[features]`):**
+- `embed-fast` → `frankensearch/model2vec` + `frankensearch/download`.
 - `lexical-bm25` → `frankensearch/lexical`.
 
 `embed-quality` is intentionally not exposed in `ee` yet. Enabling
@@ -267,7 +267,7 @@ Per AGENTS.md the default feature set is
 
 - `fsqlite-ext-fts5` enabled (covered by `fsqlite/fts5`).
 - `fsqlite-ext-json` enabled (covered by `fsqlite/json`).
-- `frankensearch/model2vec` enabled.
+- `frankensearch/model2vec` and `frankensearch/download` enabled.
 - `frankensearch/lexical` enabled.
 
 The `fsqlite/linux-asupersync-uring` default needs an explicit decision: it is

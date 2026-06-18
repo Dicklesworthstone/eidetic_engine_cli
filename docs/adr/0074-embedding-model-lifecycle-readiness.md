@@ -23,6 +23,11 @@ but valid model from missing assets, corrupt assets, dimension mismatches,
 indexes built with a stale model, unsupported build features, and honest
 lexical fallback.
 
+ADR 0080 makes the normal default model concrete for this lifecycle contract:
+`potion-multilingual-128M` via Frankensearch Model2Vec. The lifecycle report
+still observes rather than selects models, but default-install docs and doctor
+messages should treat that model as the expected local semantic path.
+
 ## Decision
 
 ### 1. Add `ee.model_lifecycle.v1`
@@ -117,7 +122,9 @@ one lifecycle state per model/index/readiness row.
 
 - **Model registry remains source of truth for local model rows.** The
   lifecycle report consumes registry fields; it does not create a second model
-  registry or infer model identity from paths.
+  registry or infer model identity from arbitrary paths. The ee-managed bundled
+  row for `potion-multilingual-128M` is the expected default row when the
+  neural-local path is healthy.
 - **Frankensearch still owns model choice and vector search.** This ADR does
   not add an `ee` embedding trait, custom vector store, custom BM25/RRF, or
   model selection config. It only records whether the selected/observed

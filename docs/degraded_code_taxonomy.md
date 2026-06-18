@@ -263,7 +263,7 @@ memory bodies in `sources[]`.
 | Code | Surface | Notes |
 |------|---------|-------|
 | `cass_unavailable` | doctor, import cass | Build-time: `cass` not on PATH at install. Response-time: PATH check fails per call. After E5, presence in capabilities.available[]; per-call resolution failure stays in degraded[]. |
-| `embed_model_unavailable` | search, context | Build-time: no dense embedder feature compiled. Response-time: embedder/model load failed or active embedder is `frankensearch_hash_fallback` with `semantic=false` while lexical fallback remains available. |
+| `embed_model_unavailable` | search, context | Build-time/capability: the default `embed-fast` path should compile Frankensearch Model2Vec plus download support; absence is a capability gap, not the normal response path. Response-time: the pinned bundled model cannot be loaded/downloaded, `EE_EMBED_MODEL_PATH` explicitly points at a missing fault-injection path, or the active embedder has fallen back to deterministic hash (`semantic=false`) while lexical fallback remains available. |
 | `graph_unavailable` | doctor, diag graph | Build-time: `fnx-*` feature. Response-time: snapshot generation failed. Split per E5. |
 | `search_unavailable` | status, dependency contract | Build-time: `frankensearch`. Response-time: index manifest missing. Split per E5. |
 

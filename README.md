@@ -60,7 +60,7 @@ warnings. Each item carries an evidence pointer and a score breakdown.
 
 | Capability | What you get |
 |---|---|
-| **Hybrid retrieval** | BM25 + vector search via Frankensearch's `TwoTierSearcher`, with deterministic ranking and fusion; local RRF-shaped data is diagnostic-only and never owns final ordering |
+| **Hybrid retrieval** | BM25 + neural-local vector search via Frankensearch's `TwoTierSearcher`; default builds use the pinned `potion-multilingual-128M` Model2Vec embedder, with deterministic hash fallback only when the local model path is unavailable |
 | **Explainable scores** | Every returned memory shows component scores, freshness, confidence, and which sources support it |
 | **Typed memory fields** | Registry-backed sidecars for failures, decisions, commands, rules, conventions, risks, and anti-patterns; search filters use stable field names instead of prose parsing |
 | **Procedural rules with decay** | Confidence ages out, harmful feedback demotes faster than helpful feedback promotes |
@@ -69,7 +69,7 @@ warnings. Each item carries an evidence pointer and a score breakdown.
 | **Graph-aware** | PageRank, HITS, PPR, Gomory-Hu proximity, dominance, causal paths, structural health, Pack DNA, and skyline views |
 | **CASS session import** | Mines your existing `cass` corpus (Claude Code, Codex, Cursor, Gemini, ChatGPT) for evidence |
 | **Context profiles** | `compact`, `balanced`, `grounding`, `orientation`, `thorough`, and `submodular` quota/objective mixes |
-| **Local-first** | No cloud. No paid LLM APIs required. Embeddings run locally through Frankensearch |
+| **Local-first** | No cloud service or paid LLM API is required. Embeddings run locally through Frankensearch, with one-time pinned model download and offline hash fallback |
 | **Stable JSON contract** | Every machine-facing command emits versioned JSON with `schema` field for parsing and validation |
 | **Deterministic** | Same DB + indexes + config + query → identical pack hash |
 | **Cancellation-aware core** | Runtime-facing async APIs use Asupersync `&Cx` and `Outcome` |
@@ -84,7 +84,7 @@ For agent use, the core rhythm is small and repetitive:
 ```bash
 ee orient "<task>" --workspace . --include-primer --fast --json
 ee swarm brief --workspace . --json
-ee pack "<task>" --workspace . --read-only --source-mode lexical_only --max-tokens 4000 --format markdown
+ee pack "<task>" --workspace . --read-only --max-tokens 4000 --format markdown
 ee recall --path <path> --workspace . --budget-tokens 400 --format markdown
 ee search "<specific question>" --workspace . --limit 20 --explain --json
 ee ask "<direct question>" --workspace . --json
@@ -99,7 +99,7 @@ ee outcome <memory-id> --workspace . --signal helpful --reason "<what it changed
 | Starting from a cold agent session | `ee orient "<task>" --workspace . --include-primer --fast --json` |
 | You want the standing workspace charter | `ee primer --workspace . --format markdown` |
 | AGENTS.md might be lying about the rules | `ee diag agentsmd-drift --workspace . --json` |
-| Starting substantive work | `ee pack "<task>" --workspace . --read-only --source-mode lexical_only --max-tokens 4000 --format markdown` |
+| Starting substantive work | `ee pack "<task>" --workspace . --read-only --max-tokens 4000 --format markdown` |
 | About to edit known files or a diff | `ee recall --path <path> --workspace . --budget-tokens 400 --format markdown` |
 | Joining a crowded checkout | `ee swarm brief --workspace . --json` |
 | Learning a durable rule | `ee remember "<text>" --workspace . --level procedural --kind rule --json` |
@@ -123,7 +123,7 @@ $ ee init --workspace .
 ✓ database opened at ~/.local/share/ee/ee.db
 ✓ workspace registered: eidetic_engine_cli (a7f2c19e)
 ✓ index dir ready: ~/.local/share/ee/indexes/combined
-✓ semantic backend: frankensearch ready (local)
+✓ semantic backend: ready (neural_local, potion-multilingual-128M)
 
 # 2. Capture a durable rule you just learned
 $ ee remember --workspace . --level procedural --kind rule \
@@ -198,7 +198,7 @@ The code and tests back these contracts where they can.
 
 ### 1. Local First
 
-All primary data lives on your machine. No cloud dependency is required. Remote APIs and model downloads are explicit opt-in. Frankensearch handles embedding so `ee` never decides which model you run.
+All primary data lives on your machine. No cloud dependency is required. Remote APIs stay explicit opt-in; the default local embedding model is a pinned, verified Frankensearch download cached under ee's data directory, with deterministic hash fallback for offline runs.
 
 ### 2. Harness Agnostic
 
@@ -566,7 +566,7 @@ Common red flags:
 | `data.posture.overall = "blocked"` | Run `ee doctor --json` and follow the failing check repair |
 | `data.posture.overall = "degraded_required"` | Read `degraded[]` and `error.details.recovery[]` |
 | `search_index_stale` | `ee index rebuild --workspace .` |
-| `embed_model_unavailable` | Continue lexical-only or run `ee index reembed --workspace .` |
+| `embed_model_unavailable` | Continue lexical fallback, inspect bundled-model cache/download posture, or run `ee index reembed --workspace .` |
 | `graph_snapshot_stale` | Continue retrieval, then refresh graph snapshots when graph scores matter |
 | `pack_budget_too_small` | Raise `--max-tokens` or switch to `--profile compact` |
 | `output_budget_unsatisfiable` | Raise `--max-output-tokens` or narrow the `--fields` preset; the page failed closed rather than lie |
@@ -1273,6 +1273,9 @@ since   = "90d"                     # CASS lookback for import planning and poli
 default_speed   = "balanced"         # fast | balanced | thorough
 lexical_weight  = 0.45
 semantic_weight = 0.45
+# Wired for default hybrid retrieval. `semantic_weight` applies to the
+# neural-local Model2Vec arm when the bundled model is available; it
+# deterministically renormalizes to lexical scoring when hash fallback is active.
 graph_weight    = 0.10
 query_plan_cache_entries = 1024
 query_miss_retention_days = 30        # retained hash-only miss demand for `ee learn gaps`
@@ -1375,7 +1378,7 @@ Feature flags:
 | `default` | active | `fts5`, `json`, `embed-fast`, `lexical-bm25`, `graph` |
 | `fts5` | active | Frankensearch FTS5 lexical fallback |
 | `json` | reserved | JSON output is unconditional today; flag is reserved for a minimal profile |
-| `embed-fast` | active | Frankensearch `model2vec` semantic embedder |
+| `embed-fast` | active | Frankensearch `model2vec` semantic embedder plus the asupersync-backed model download path |
 | `lexical-bm25` | active | Frankensearch BM25 scorer |
 | `graph` | active | Default-on graph analytics surface |
 | `differential-networkx` | active test gate | Heavy Python NetworkX differential suite |
@@ -1689,7 +1692,7 @@ Add to your `AGENTS.md` or hook setup:
 Before starting substantial work, run:
   ee swarm brief --workspace . --json
   ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json
-  ee pack "<task>" --workspace . --read-only --source-mode lexical_only --max-tokens 4000 --format markdown
+  ee pack "<task>" --workspace . --read-only --max-tokens 4000 --format markdown
 
 Before editing known files or a diff:
   ee recall --path <path> --workspace . --budget-tokens 400 --format markdown
@@ -2004,14 +2007,19 @@ ee --workspace <name> pack "..."
 
 ### `error: embed model not loaded`
 
-The semantic stack is in degraded lexical-only mode. Frankensearch owns model
-selection; configure it there, then re-embed:
+The semantic stack is in degraded lexical-fallback mode because the bundled
+local Model2Vec model could not be loaded or an explicit fault-injection path
+was set. Default installs use the pinned `potion-multilingual-128M` model from
+Frankensearch; pre-populate `EE_EMBED_MODEL_DIR` for air-gapped hosts or allow
+the one-time download, then re-embed:
 
 ```bash
 ee index reembed --workspace .
 ```
 
-You can also keep running lexical-only; `ee status` shows the degraded capability.
+You can also keep running lexical fallback; `ee status` and `ee doctor --full`
+show the degraded capability. `EE_EMBED_MODEL_PATH` is a diagnostics/fault
+injection knob, not the model loader.
 
 ### `ee doctor` reports a repair plan
 
@@ -2075,7 +2083,7 @@ Boundaries to know:
 | Agent loop | `ee` stores and retrieves memory. Claude Code, Codex, or another harness still owns tools, approvals, and the prompt loop. |
 | User interface | The primary interface is the CLI. Graph exports are CLI artifacts, not an interactive web app. |
 | Retention model | Forgetting and decay are product features. Export JSONL into git when you need sealed long-term records. |
-| Model choice | Embeddings are delegated to Frankensearch. Semantic quality follows the model and index Frankensearch is configured to use. |
+| Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
 | Release distribution | Signed multi-platform release binaries ship on every GitHub release (macOS, Linux gnu+musl, Windows) via the `curl | bash` installer; Homebrew and crates.io publication are still planned. |
 | Mesh | Mesh exchanges redaction-safe rows and posture under policy. FrankenSQLite remains the local source of truth. |
@@ -2090,9 +2098,11 @@ Boundaries to know:
 No. It is the durable memory those harnesses call. The harness owns the loop; `ee` owns memory.
 
 **Does it phone home or call any external API?**
-`ee` itself makes no network calls. Embedding is delegated to Frankensearch,
-which runs locally by default. Configuring Frankensearch to use a remote model
-is an explicit operator choice.
+`ee` itself does not call paid model APIs or remote embedding services. The
+default embedding path delegates to Frankensearch's local Model2Vec backend,
+which may perform one pinned, verified download into the local model cache; it
+runs from disk afterward. Configuring Frankensearch to use a remote model is an
+explicit operator choice.
 
 **Why no Tokio?**
 The runtime is Asupersync, which gives us structured concurrency, capability narrowing, deterministic tests via `LabRuntime`, and an `Outcome` lattice. Tokio is forbidden in the dep tree, audited by CI.

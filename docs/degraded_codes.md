@@ -4923,7 +4923,7 @@ ee diag search 'cargo fmt' --workspace . --all-arms --inject-duplicate-hit --jso
 
 **Introduced by:** bd-3qs2i.4.1 (epic F4)
 
-**Trigger.** The embedding model or semantic embedder feature is unavailable while the lexical search arm remains functional. This includes explicit missing-model configuration and the default frankensearch_hash_fallback posture where the active embedder reports semantic=false.
+**Trigger.** The default semantic path is neural-local via Frankensearch Model2Vec (`potion-multilingual-128M`), but that bundled model cannot be loaded or downloaded while the lexical search arm remains functional. This also covers explicit `EE_EMBED_MODEL_PATH` fault injection and the rare deterministic-hash fallback posture where the active embedder reports `semantic=false`.
 
 **Setup.**
 
