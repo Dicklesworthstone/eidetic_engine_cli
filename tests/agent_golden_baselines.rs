@@ -1680,12 +1680,12 @@ fn fixture_lexical_ram_tier() -> LexicalRamTierResult {
     )
 }
 
-fn fixture_write_group_commit() -> crate::core::write_owner::WriteGroupCommitTelemetry {
-    crate::core::write_owner::WriteGroupCommitTelemetry {
-        schema: crate::models::WRITE_GROUP_COMMIT_SCHEMA_V1,
+fn fixture_write_group_commit() -> ee::core::write_owner::WriteGroupCommitTelemetry {
+    ee::core::write_owner::WriteGroupCommitTelemetry {
+        schema: ee::models::WRITE_GROUP_COMMIT_SCHEMA_V1,
         generated_at: "2026-06-15T04:22:00Z".to_owned(),
         enabled: false,
-        redaction_status: crate::core::write_owner::WRITE_GROUP_COMMIT_REDACTION_STATUS,
+        redaction_status: ee::core::write_owner::WRITE_GROUP_COMMIT_REDACTION_STATUS,
         batches: 0,
         writes_coalesced: 0,
         avg_batch_size: 0.0,
@@ -1694,7 +1694,7 @@ fn fixture_write_group_commit() -> crate::core::write_owner::WriteGroupCommitTel
         commit_latency_p50_us: 0,
         commit_latency_p99_us: 0,
         fallback_count: 0,
-        fallback_reasons: crate::core::write_owner::WriteGroupCommitFallbackReasons::default(),
+        fallback_reasons: ee::core::write_owner::WriteGroupCommitFallbackReasons::default(),
     }
 }
 
