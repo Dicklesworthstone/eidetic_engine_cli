@@ -450,6 +450,7 @@ impl Default for PackLodBudgetShares {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackAssemblyOptions {
     pub include_coverage_fill: bool,
+    pub include_anti_pattern_first: bool,
     pub output_redaction_enabled: bool,
     pub redaction_level: RedactionLevel,
     /// Budget shares for level-of-detail pack rendering.
@@ -473,6 +474,7 @@ impl Default for PackAssemblyOptions {
     fn default() -> Self {
         Self {
             include_coverage_fill: true,
+            include_anti_pattern_first: true,
             output_redaction_enabled: true,
             redaction_level: RedactionLevel::Minimal,
             lod_budget_shares: Some(PackLodBudgetShares::default()),
@@ -5502,7 +5504,8 @@ fn assemble_mmr_draft(
     let mut selected_memory_ids = BTreeSet::new();
     let mut objective_value = 0.0_f32;
 
-    if let Some(candidate_index) = anti_pattern_first_mmr_candidate_index(
+    if options.include_anti_pattern_first
+        && let Some(candidate_index) = anti_pattern_first_mmr_candidate_index(
         &candidates,
         &scratch.max_selected_similarities,
         used_tokens,
@@ -5913,7 +5916,8 @@ fn assemble_mmr_draft_reusing_workspace(
     let mut selected_memory_ids = BTreeSet::new();
     let mut objective_value = 0.0_f32;
 
-    if let Some(candidate_index) = anti_pattern_first_mmr_candidate_index(
+    if options.include_anti_pattern_first
+        && let Some(candidate_index) = anti_pattern_first_mmr_candidate_index(
         &candidates,
         &scratch.max_selected_similarities,
         used_tokens,
@@ -6301,7 +6305,8 @@ fn assemble_facility_location_draft(
     let mut scratch = PackDraftScratch::with_candidate_capacity(candidate_count);
     let mut objective_value = 0.0_f32;
 
-    if let Some(profile_index) = anti_pattern_first_facility_candidate_index(
+    if options.include_anti_pattern_first
+        && let Some(profile_index) = anti_pattern_first_facility_candidate_index(
         &candidates,
         &active,
         &current_coverages,
@@ -6597,7 +6602,8 @@ fn assemble_facility_location_draft_reusing_workspace(
     let mut next_rank = 1_u32;
     let mut objective_value = 0.0_f32;
 
-    if let Some(profile_index) = anti_pattern_first_facility_candidate_index(
+    if options.include_anti_pattern_first
+        && let Some(profile_index) = anti_pattern_first_facility_candidate_index(
         &candidates,
         &active,
         &current_coverages,
@@ -11944,6 +11950,70 @@ mod tests {
                 .first()
                 .is_some_and(|step| step.objective_value > 0.0),
             "reserved anti-pattern contributes to the selection audit objective",
+        )
+    }
+
+    #[test]
+    fn anti_pattern_first_can_be_disabled_without_filtering_failures() -> TestResult {
+        let budget =
+            TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let anti_pattern = candidate_in_section(
+            92,
+            PackSection::Failures,
+            0.60,
+            0.90,
+            10,
+            "Do not skip the provenance check before applying a remembered fix.",
+        )?
+        .with_diversity_key("anti-pattern:provenance");
+        let primary_rule = candidate_in_section(
+            5,
+            PackSection::ProceduralRules,
+            1.00,
+            0.80,
+            15,
+            "Check source provenance before applying memory-derived fixes.",
+        )?
+        .with_diversity_key("rule:provenance");
+
+        let draft = assemble_draft_with_profile_and_options(
+            ContextPackProfile::Balanced,
+            "apply remembered fix",
+            budget,
+            vec![anti_pattern, primary_rule],
+            PackAssemblyOptions {
+                include_anti_pattern_first: false,
+                lod_budget_shares: None,
+                ..PackAssemblyOptions::default()
+            },
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        ensure_equal(
+            &draft.items.first().map(|item| item.memory_id),
+            &Some(memory_id(5)),
+            "disabled reserved slice leaves ordinary MMR ranking in charge",
+        )?;
+        ensure(
+            draft
+                .items
+                .iter()
+                .any(|item| item.memory_id == memory_id(92)),
+            "disabled reserved slice must not filter failure memories out",
+        )?;
+        ensure(
+            draft
+                .items
+                .iter()
+                .all(|item| item.selected_in != PackSelectionPhase::AntiPatternFirst),
+            "disabled reserved slice emits no anti-pattern-first marker",
+        )?;
+        ensure(
+            draft
+                .items
+                .iter()
+                .all(|item| !item.why.contains("What NOT to do:")),
+            "disabled reserved slice does not rewrite why text",
         )
     }
 

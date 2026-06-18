@@ -339,6 +339,7 @@ fn pack_options() -> impl Strategy<Value = PackAssemblyOptions> {
             |(include_coverage_fill, output_redaction_enabled, redaction_level_raw)| {
                 PackAssemblyOptions {
                     include_coverage_fill,
+                    include_anti_pattern_first: true,
                     output_redaction_enabled,
                     redaction_level: redaction_level_for(redaction_level_raw),
                     lod_budget_shares: None,
@@ -426,6 +427,7 @@ struct DeterminismRegressionConfig {
     profile: String,
     max_tokens: u32,
     include_coverage_fill: bool,
+    include_anti_pattern_first: bool,
     output_redaction_enabled: bool,
     redaction_level: String,
 }
@@ -523,6 +525,7 @@ fn regression_input_for_pack_case(
             profile: format!("{profile:?}"),
             max_tokens: budget.max_tokens(),
             include_coverage_fill: options.include_coverage_fill,
+            include_anti_pattern_first: options.include_anti_pattern_first,
             output_redaction_enabled: options.output_redaction_enabled,
             redaction_level: format!("{:?}", options.redaction_level),
         },
@@ -619,6 +622,7 @@ fn replay_pack_case_input_bytes(input: &serde_json::Value) -> Result<Vec<u8>, St
     let budget = TokenBudget::new(input.config.max_tokens).map_err(|error| format!("{error:?}"))?;
     let options = PackAssemblyOptions {
         include_coverage_fill: input.config.include_coverage_fill,
+        include_anti_pattern_first: input.config.include_anti_pattern_first,
         output_redaction_enabled: input.config.output_redaction_enabled,
         redaction_level: parse_regression_redaction_level(&input.config.redaction_level)?,
         lod_budget_shares: None,
@@ -1299,6 +1303,7 @@ fn determinism_regression_fixture_captures_structured_pack_input() -> Result<(),
     let budget = TokenBudget::new(64).map_err(|error| format!("{error:?}"))?;
     let options = PackAssemblyOptions {
         include_coverage_fill: false,
+        include_anti_pattern_first: true,
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
         lod_budget_shares: None,
@@ -1342,6 +1347,7 @@ fn determinism_regression_fixture_captures_structured_pack_input() -> Result<(),
     assert_eq!(fixture.input["config"]["profile"], "Balanced");
     assert_eq!(fixture.input["config"]["max_tokens"], 64);
     assert_eq!(fixture.input["config"]["include_coverage_fill"], false);
+    assert_eq!(fixture.input["config"]["include_anti_pattern_first"], true);
     assert_eq!(fixture.input["config"]["output_redaction_enabled"], true);
     assert_eq!(fixture.input["config"]["redaction_level"], "Strict");
     assert_eq!(fixture.input["candidate_specs"][0]["estimated_tokens"], 8);
@@ -1355,6 +1361,7 @@ fn determinism_regression_fixture_replays_structured_pack_input() -> Result<(), 
     let budget = TokenBudget::new(64).map_err(|error| format!("{error:?}"))?;
     let options = PackAssemblyOptions {
         include_coverage_fill: true,
+        include_anti_pattern_first: true,
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
         lod_budget_shares: None,
@@ -1392,6 +1399,7 @@ fn determinism_regression_fixture_persists_pack_case_mismatches_only() -> Result
     let budget = TokenBudget::new(64).map_err(|error| format!("{error:?}"))?;
     let options = PackAssemblyOptions {
         include_coverage_fill: true,
+        include_anti_pattern_first: true,
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
         lod_budget_shares: None,
@@ -1453,6 +1461,7 @@ fn determinism_regression_fixture_verifies_replayed_expected_hash() -> Result<()
     let budget = TokenBudget::new(64).map_err(|error| format!("{error:?}"))?;
     let options = PackAssemblyOptions {
         include_coverage_fill: true,
+        include_anti_pattern_first: true,
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
         lod_budget_shares: None,
@@ -1499,6 +1508,7 @@ fn determinism_regression_fixture_replay_rejects_diff_window_drift() -> Result<(
         ContextPackProfile::Balanced,
         PackAssemblyOptions {
             include_coverage_fill: true,
+            include_anti_pattern_first: true,
             output_redaction_enabled: true,
             redaction_level: RedactionLevel::Strict,
             lod_budget_shares: None,
@@ -1549,6 +1559,7 @@ fn determinism_regression_fixture_verifies_loaded_replay_hashes() -> Result<(), 
         ContextPackProfile::Balanced,
         PackAssemblyOptions {
             include_coverage_fill: true,
+            include_anti_pattern_first: true,
             output_redaction_enabled: true,
             redaction_level: RedactionLevel::Strict,
             lod_budget_shares: None,
@@ -2338,6 +2349,7 @@ fn determinism_preflight_event_replays_loaded_fixtures_and_flags_stale() -> Resu
     let budget = TokenBudget::new(64).map_err(|error| format!("{error:?}"))?;
     let options = PackAssemblyOptions {
         include_coverage_fill: true,
+        include_anti_pattern_first: true,
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
         lod_budget_shares: None,
@@ -2404,6 +2416,7 @@ fn determinism_preflight_event_rejects_replay_hash_drift_before_sampling() -> Re
     let budget = TokenBudget::new(64).map_err(|error| format!("{error:?}"))?;
     let options = PackAssemblyOptions {
         include_coverage_fill: true,
+        include_anti_pattern_first: true,
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
         lod_budget_shares: None,

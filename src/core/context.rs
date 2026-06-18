@@ -2587,6 +2587,7 @@ fn run_context_pack_with_performance_inner(
         crate::pack::PackAssemblyOptions {
             redaction_level: options.redaction_level,
             include_coverage_fill: options.output_options.include_coverage_fill,
+            include_anti_pattern_first: true,
             output_redaction_enabled,
             // bd-1n0np.5.2: apply the [pack.lod_*] tier-ratio config override when
             // all three basis points are configured (and fit u16); otherwise keep
