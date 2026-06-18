@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "rch_worker_pressure_advisory",
+  "introduced_by": {
+    "bead": "bd-1et0v.14",
+    "epic_letter": "doctor-health"
+  },
+  "surfaces": [
+    "doctor"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Running default `ee doctor --json` or exhaustive `ee doctor --full --json` while remote-compilation workers are healthy but pressure blocks build admission. RCH is build-offload developer infrastructure, not memory liveness, so default doctor omits the worker-pressure detail and the full report keeps it as informational advisory detail.",
+    "setup_commands": [
+      "# configure RCH worker telemetry with healthy_but_pressure_blocked"
+    ],
+    "invocation": "ee doctor --full --json"
+  },
+  "expected_emission": {
+    "code": "rch_worker_pressure_advisory",
+    "severity": "info",
+    "message_contains": [
+      "RCH reports healthy workers",
+      "pressure blocks admission",
+      "rch_worker_pressure_advisory"
+    ],
+    "repair_contains": "rch status --workers --jobs --json",
+    "repair_string": "rch status --workers --jobs --json"
+  }
+}

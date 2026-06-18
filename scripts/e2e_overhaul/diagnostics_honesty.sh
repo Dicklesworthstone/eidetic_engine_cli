@@ -296,13 +296,30 @@ fi
 # Doctor and status top-lines must agree that advisory-only issues are visible
 # but non-blocking, while core memory-loop issues drive the verdict.
 # ------------------------------------------------------------
-printf '%s\n' "bd-1et0v.12 e2e: running ee doctor --json" >&2
+printf '%s\n' "bd-1et0v.12/bd-1et0v.14 e2e: running concise and full ee doctor JSON" >&2
 e2e_log_note "bd_1et0v_12_step=run_doctor_json"
-BD12_DOCTOR_JSON=$(ee_workspace doctor --json || true)
+BD14_DOCTOR_CONCISE_JSON=$(ee_workspace doctor --json || true)
+assert_jq "$BD14_DOCTOR_CONCISE_JSON" '.schema' "ee.response.v2" \
+    "bd14_doctor_concise_response_schema"
+assert_jq "$BD14_DOCTOR_CONCISE_JSON" '.success' "true" \
+    "bd14_doctor_concise_response_success"
+assert_jq "$BD14_DOCTOR_CONCISE_JSON" '.fields' "doctor_concise" \
+    "bd14_doctor_default_is_concise"
+assert_jq "$BD14_DOCTOR_CONCISE_JSON" '(.data | has("rchWorkerPressure"))' "false" \
+    "bd14_doctor_default_omits_rch_worker_pressure_object"
+assert_jq "$BD14_DOCTOR_CONCISE_JSON" \
+    '((.data.advisorySummary.summary // "") | contains("rch_worker_pressure") | not)' \
+    "true" "bd14_doctor_default_summary_omits_rch_worker_pressure_name"
+
+BD12_DOCTOR_JSON=$(ee_workspace doctor --full --json || true)
 assert_jq "$BD12_DOCTOR_JSON" '.schema' "ee.response.v2" \
-    "bd12_doctor_response_schema"
+    "bd12_doctor_full_response_schema"
 assert_jq "$BD12_DOCTOR_JSON" '.success' "true" \
-    "bd12_doctor_response_success"
+    "bd12_doctor_full_response_success"
+assert_jq "$BD12_DOCTOR_JSON" '.fields' "full" \
+    "bd12_doctor_full_fields"
+assert_jq "$BD12_DOCTOR_JSON" '(.data | has("rchWorkerPressure"))' "true" \
+    "bd14_doctor_full_includes_rch_worker_pressure_object"
 assert_jq "$BD12_DOCTOR_JSON" \
     '([.data.checks[]?.tier | select(. != "core" and . != "advisory")] | length)' \
     "0" "bd12_doctor_check_tiers_classified"
@@ -316,6 +333,22 @@ assert_jq "$BD12_DOCTOR_JSON" \
 assert_jq "$BD12_DOCTOR_JSON" \
     '([.data.checks[]? | select(.name == "embedding_posture")][0].tier)' \
     "advisory" "bd12_doctor_embedding_posture_tier_advisory"
+
+BD14_CASS_MESSAGE=$(printf '%s' "$BD12_DOCTOR_JSON" \
+    | jq -r '[.data.checks[]? | select(.name == "cass")][0].message // ""' \
+    2>/dev/null || echo "")
+BD14_CASS_SEVERITY=$(printf '%s' "$BD12_DOCTOR_JSON" \
+    | jq -r '[.data.checks[]? | select(.name == "cass")][0].severity // ""' \
+    2>/dev/null || echo "")
+if printf '%s' "$BD14_CASS_MESSAGE" | grep -q 'capabilities are limited'; then
+    e2e_log_assert_eq "$BD14_CASS_SEVERITY" "ok" \
+        "bd14_cass_limited_is_info_not_warning"
+    assert_jq "$BD12_DOCTOR_JSON" \
+        '([.data.checks[]? | select(.name == "cass")][0].message | contains("explicit ee remember/search/pack remain available"))' \
+        "true" "bd14_cass_limited_message_names_unaffected_memory_path"
+else
+    e2e_log_note "bd_1et0v_14_cass_limited_absent=true"
+fi
 
 BD12_DOCTOR_POSTURE=$(printf '%s' "$BD12_DOCTOR_JSON" \
     | jq -r '.data.posture // empty' 2>/dev/null || echo "")

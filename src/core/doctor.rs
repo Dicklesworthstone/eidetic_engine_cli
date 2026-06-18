@@ -73,6 +73,8 @@ pub const DEPENDENCY_MATRIX_DEFAULT_FEATURE_PROFILE: &str = "default";
 pub const INTEGRITY_CANARY_MEMORY_ID: &str = "mem_integritycanary00000000000";
 const INTEGRITY_CANARY_CONTENT: &str = "EE integrity canary memory. Safe to ignore; verifies memory table write/read/provenance chain.";
 pub const DOCTOR_MESH_AUTO_ENROLLMENT_SCHEMA_V1: &str = "ee.doctor.mesh_auto_enrollment.v1";
+const CASS_LIMITED_ADVISORY_CODE: &str = "cass_limited";
+const RCH_WORKER_PRESSURE_ADVISORY_CODE: &str = "rch_worker_pressure_advisory";
 
 pub const FORBIDDEN_CRATES: &[&str] = &[
     "tokio",
@@ -3339,16 +3341,25 @@ fn format_static_codes(codes: &[&'static str]) -> String {
 }
 
 fn check_cass() -> CheckResult {
+    cass_check_from_capability(probe_cass_capability())
+}
+
+fn cass_check_from_capability(capability: crate::models::CapabilityStatus) -> CheckResult {
     use crate::models::CapabilityStatus;
-    match probe_cass_capability() {
+    match capability {
         CapabilityStatus::Ready => {
             CheckResult::ok("cass", "CASS binary discovered and accessible.")
         }
-        CapabilityStatus::Degraded => CheckResult::warning(
-            "cass",
-            "CASS binary found but capabilities are limited.",
-            error_codes::CASS_DEGRADED,
-        ),
+        CapabilityStatus::Degraded => CheckResult {
+            name: "cass",
+            severity: CheckSeverity::Ok,
+            message: format!(
+                "CASS binary found but capabilities are limited; optional CASS import evidence may be degraded, but explicit ee remember/search/pack remain available. Advisory code: {CASS_LIMITED_ADVISORY_CODE}."
+            ),
+            error_code: Some(error_codes::CASS_DEGRADED),
+            repair: error_codes::CASS_DEGRADED.default_repair,
+            tier: CheckTier::Core,
+        },
         CapabilityStatus::Pending => CheckResult::warning(
             "cass",
             "CASS binary not found in trusted locations.",
@@ -3377,9 +3388,9 @@ fn check_rch_worker_pressure(report: &RchWorkerPressureReport) -> CheckResult {
         ),
         "healthy_but_pressure_blocked" => CheckResult {
             name: "rch_worker_pressure",
-            severity: CheckSeverity::Warning,
+            severity: CheckSeverity::Ok,
             message: format!(
-                "RCH reports healthy workers, but pressure blocks admission on {} of {} worker(s).",
+                "RCH reports healthy workers, but pressure blocks admission on {} of {} worker(s). Advisory code: {RCH_WORKER_PRESSURE_ADVISORY_CODE}.",
                 report.blocked_worker_count, report.worker_count
             ),
             error_code: None,
@@ -3388,17 +3399,19 @@ fn check_rch_worker_pressure(report: &RchWorkerPressureReport) -> CheckResult {
         },
         "pressure_policy_denied" => CheckResult {
             name: "rch_worker_pressure",
-            severity: CheckSeverity::Warning,
-            message: "RCH worker admission was denied by pressure policy.".to_string(),
+            severity: CheckSeverity::Ok,
+            message: format!(
+                "RCH worker admission was denied by pressure policy. Advisory code: {RCH_WORKER_PRESSURE_ADVISORY_CODE}."
+            ),
             error_code: None,
             repair: Some("rch status --workers --jobs --json"),
             tier: CheckTier::Core,
         },
         "telemetry_stale" => CheckResult {
             name: "rch_worker_pressure",
-            severity: CheckSeverity::Warning,
+            severity: CheckSeverity::Ok,
             message: format!(
-                "RCH worker pressure telemetry is stale for {} of {} worker(s).",
+                "RCH worker pressure telemetry is stale for {} of {} worker(s). Advisory code: {RCH_WORKER_PRESSURE_ADVISORY_CODE}.",
                 report.stale_worker_count, report.worker_count
             ),
             error_code: None,
@@ -3407,9 +3420,9 @@ fn check_rch_worker_pressure(report: &RchWorkerPressureReport) -> CheckResult {
         },
         "pressure_degraded" => CheckResult {
             name: "rch_worker_pressure",
-            severity: CheckSeverity::Warning,
+            severity: CheckSeverity::Ok,
             message: format!(
-                "RCH worker pressure is degraded; {} usable, {} blocked, {} stale.",
+                "RCH worker pressure is degraded; {} usable, {} blocked, {} stale. Advisory code: {RCH_WORKER_PRESSURE_ADVISORY_CODE}.",
                 report.usable_worker_count, report.blocked_worker_count, report.stale_worker_count
             ),
             error_code: None,
@@ -4509,7 +4522,42 @@ mod tests {
     }
 
     #[test]
-    fn rch_worker_pressure_check_warns_on_blocked_workers() -> TestResult {
+    fn cass_limited_capability_is_info_not_warning() -> TestResult {
+        let check = cass_check_from_capability(crate::models::CapabilityStatus::Degraded);
+
+        ensure(check.name, "cass", "check name")?;
+        ensure(
+            check.severity,
+            CheckSeverity::Ok,
+            "limited CASS is optional evidence, not memory-health degradation",
+        )?;
+        ensure(
+            check.message.contains(CASS_LIMITED_ADVISORY_CODE),
+            true,
+            "message keeps a stable advisory code for fixture visibility",
+        )?;
+        ensure(
+            check
+                .message
+                .contains("explicit ee remember/search/pack remain available"),
+            true,
+            "message names unaffected memory path",
+        )?;
+        ensure(
+            check.error_code,
+            Some(error_codes::CASS_DEGRADED),
+            "full report still exposes CASS diagnostic code",
+        )?;
+        ensure(check.repair, Some("cass health"), "repair command")?;
+        ensure(
+            check.advisory().is_topline_healthy(),
+            true,
+            "limited CASS cannot flip the doctor top-line",
+        )
+    }
+
+    #[test]
+    fn rch_worker_pressure_blocked_is_info_and_repairable() -> TestResult {
         let report = RchWorkerPressureReport {
             schema: super::super::swarm_brief::RCH_WORKER_PRESSURE_SCHEMA_V1,
             status: "healthy_but_pressure_blocked".to_string(),
@@ -4524,7 +4572,16 @@ mod tests {
         let check = check_rch_worker_pressure(&report);
 
         ensure(check.name, "rch_worker_pressure", "check name")?;
-        ensure(check.severity, CheckSeverity::Warning, "check severity")?;
+        ensure(
+            check.severity,
+            CheckSeverity::Ok,
+            "build-offload pressure is informational for memory health",
+        )?;
+        ensure(
+            check.message.contains(RCH_WORKER_PRESSURE_ADVISORY_CODE),
+            true,
+            "message preserves advisory code for full report observability",
+        )?;
         ensure(
             check.error_code,
             None,

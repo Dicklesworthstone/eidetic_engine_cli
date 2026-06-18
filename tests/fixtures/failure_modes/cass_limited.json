@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "cass_limited",
+  "introduced_by": {
+    "bead": "bd-1et0v.14",
+    "epic_letter": "doctor-health"
+  },
+  "surfaces": [
+    "doctor"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Running `ee doctor --full --json` when the external cass binary is present but its capability probe reports a degraded/limited contract. CASS is optional evidence: explicit ee remember/search/pack still work, so the doctor check is informational and advisory, not a memory-health warning.",
+    "setup_commands": [
+      "# install or configure a cass binary whose capability probe returns degraded"
+    ],
+    "invocation": "ee doctor --full --json"
+  },
+  "expected_emission": {
+    "code": "cass_limited",
+    "severity": "info",
+    "message_contains": [
+      "CASS binary found",
+      "capabilities are limited",
+      "explicit ee remember/search/pack remain available"
+    ],
+    "repair_contains": "cass health",
+    "repair_string": "cass health"
+  }
+}
