@@ -14373,10 +14373,61 @@ mod tests {
         hit
     }
 
+    fn rerank_test_report(
+        results: Vec<SearchHit>,
+        degraded: Vec<SearchDegradation>,
+    ) -> SearchReport {
+        SearchReport {
+            status: SearchStatus::Success,
+            query: "release formatting policy".to_string(),
+            requested_limit: 10,
+            results,
+            elapsed_ms: 12.3,
+            errors: Vec::new(),
+            degraded,
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            query_assist: None,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        }
+    }
+
     #[test]
     fn reranked_score_kind_is_stable() {
         assert_eq!(ScoreSource::Reranked.score_kind(), "reranked");
         assert_eq!(synthetic_reranked_hit("mem_rerank", 0.91).score_kind(), "reranked");
+    }
+
+    #[test]
+    fn search_report_data_json_builds_rerank_posture_from_visible_results() {
+        let report = rerank_test_report(
+            vec![
+                synthetic_reranked_hit("mem_reranked", 0.93),
+                synthetic_hybrid_hit("mem_fusion", 2.0 / 61.0),
+            ],
+            Vec::new(),
+        );
+
+        let json = report.data_json();
+
+        assert_eq!(json["resultCount"], 2);
+        assert_eq!(json["rerank"]["schema"], "ee.rerank_posture.v1");
+        assert_eq!(json["rerank"]["mode"], "reranked");
+        assert_eq!(json["rerank"]["rerankScoreCount"], 1);
+        assert_eq!(json["rerank"]["scoreKind"], "reranked");
+        assert_eq!(json["rerank"]["available"], true);
+        assert!(json["rerank"]["degradedCode"].is_null());
+        assert_eq!(json["results"][0]["scoreKind"], "reranked");
+        assert!(json["results"][0].get("rerankScore").is_some());
+        assert_eq!(json["results"][1]["scoreKind"], "rrf_fused");
+        assert!(json["results"][1].get("rerankScore").is_none());
     }
 
     #[test]
@@ -14395,6 +14446,53 @@ mod tests {
     }
 
     #[test]
+    fn rerank_posture_reports_empty_fusion_only_without_degradation() {
+        let posture = search_rerank_posture_json(&[], &[]);
+
+        assert_eq!(posture["schema"], "ee.rerank_posture.v1");
+        assert_eq!(posture["mode"], "fusion_only");
+        assert_eq!(posture["rerankScoreCount"], 0);
+        assert_eq!(posture["scoreKind"], "rrf_fused");
+        assert_eq!(posture["available"], false);
+        assert!(posture["degradedCode"].is_null());
+    }
+
+    #[test]
+    fn rerank_posture_counts_mixed_reranked_hits_only() {
+        let reranked_a = synthetic_reranked_hit("mem_reranked_a", 0.98);
+        let fusion = synthetic_hybrid_hit("mem_fusion", 2.0 / 61.0);
+        let reranked_b = synthetic_reranked_hit("mem_reranked_b", 0.74);
+        let hits = vec![&reranked_a, &fusion, &reranked_b];
+
+        let posture = search_rerank_posture_json(&hits, &[]);
+
+        assert_eq!(posture["mode"], "reranked");
+        assert_eq!(posture["rerankScoreCount"], 2);
+        assert_eq!(posture["scoreKind"], "reranked");
+        assert_eq!(posture["available"], true);
+        assert!(posture["degradedCode"].is_null());
+    }
+
+    #[test]
+    fn rerank_posture_ignores_unrelated_degradation() {
+        let hit = synthetic_hybrid_hit("mem_fusion", 2.0 / 61.0);
+        let degraded = vec![SearchDegradation {
+            code: "index_stale".to_string(),
+            severity: "warning".to_string(),
+            message: "Index generation is behind the database.".to_string(),
+            repair: Some("ee index rebuild --workspace .".to_string()),
+        }];
+
+        let posture = search_rerank_posture_json(&[&hit], &degraded);
+
+        assert_eq!(posture["mode"], "fusion_only");
+        assert_eq!(posture["rerankScoreCount"], 0);
+        assert_eq!(posture["scoreKind"], "rrf_fused");
+        assert_eq!(posture["available"], false);
+        assert!(posture["degradedCode"].is_null());
+    }
+
+    #[test]
     fn rerank_posture_reports_fusion_only_degraded() {
         let hit = synthetic_hybrid_hit("mem_fusion", 2.0 / 61.0);
         let degraded = vec![SearchDegradation::rerank_model_unavailable(
@@ -14406,6 +14504,26 @@ mod tests {
         assert_eq!(posture["scoreKind"], "rrf_fused");
         assert_eq!(posture["available"], false);
         assert_eq!(posture["degradedCode"], "rerank_model_unavailable");
+    }
+
+    #[test]
+    fn search_report_data_json_reports_degraded_rerank_on_empty_results() {
+        let report = rerank_test_report(
+            Vec::new(),
+            vec![SearchDegradation::rerank_model_unavailable(
+                "No available reranker model is registered for this workspace.",
+            )],
+        );
+
+        let json = report.data_json();
+
+        assert_eq!(json["resultCount"], 0);
+        assert_eq!(json["rerank"]["mode"], "fusion_only_degraded");
+        assert_eq!(json["rerank"]["rerankScoreCount"], 0);
+        assert_eq!(json["rerank"]["scoreKind"], "rrf_fused");
+        assert_eq!(json["rerank"]["available"], false);
+        assert_eq!(json["rerank"]["degradedCode"], "rerank_model_unavailable");
+        assert_eq!(json["degraded"][0]["code"], "rerank_model_unavailable");
     }
 
     #[test]
