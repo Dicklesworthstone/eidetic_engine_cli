@@ -85,6 +85,7 @@ set -euo pipefail
 #   6.11 House Rules E2E       - scripts/e2e_house_rules.sh
 #   6.12 Ask E2E               - scripts/e2e_ask.sh
 #   6.127 Ergonomics E2E       - scripts/e2e_ergonomics.sh
+#   6.1295 Embedding Native E2E - scripts/e2e_embedding_native.sh
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
@@ -1152,6 +1153,13 @@ run_stage "Doctor Concise E2E (bd-1et0v.15)" "EE_E2E_TMPDIR=/private/tmp ./scrip
 # compact, --full retains exhaustive advisory/host-calibration diagnostics, and
 # synthetic CASS/RCH advisory failures do not flip the top-line posture.
 run_stage "Doctor Health E2E (bd-1et0v.21)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_doctor_health.sh"
+
+# Gate 6.1295: embedding-native retrieval real-binary E2E (bd-2vq2z.19).
+# No-Cargo and no-download: uses EE_EMBED_MODEL_FIXTURE_DIR when a
+# pre-provisioned model cache is available, otherwise asserts the explicit
+# hash/lexical degradation path. Covers similar, remember-time dedupe,
+# curation dedupe proposals, rerank posture, and eval precision metrics.
+run_stage "Embedding Native E2E (bd-2vq2z.19)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_embedding_native.sh"
 
 # Gate 6.13: Dueling Wizards docs-bootstrap real-binary E2E (bd-1n0np.11.5).
 # Proves ee bootstrap docs --dry-run structural candidates (spans/hashes/anchors/

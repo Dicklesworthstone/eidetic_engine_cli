@@ -467,6 +467,23 @@ Normal installer `--verify` stays concise and does not download the model unless
 exercise the documented hash-fallback path separately, or use an explicitly
 pre-provisioned model cache before running the same smoke.
 
+### Embedding-Native Retrieval E2E
+
+`scripts/e2e_embedding_native.sh` is the dedicated real-binary test for the
+embedding-native retrieval track. The default verification runner invokes it
+with `EE_E2E_TMPDIR=/private/tmp`; the script does not run Cargo and never
+downloads model artifacts. If `EE_EMBED_MODEL_FIXTURE_DIR` points at a
+pre-provisioned `potion-multilingual-128M` cache, the script asserts the
+semantic `ee similar` path. Without that fixture it asserts the explicit
+hash/lexical fallback path and records that no download was attempted.
+
+The same run also pins remember-time `near_duplicates[]`, human duplicate
+warnings, persisted embedding-dedup curation proposals, rerank posture
+(`reranked` when a local reranker exists, otherwise deterministic
+`fusion_only_degraded`), and eval precision metrics. Each command writes
+`ee.test_event.v1` rows with stdout/stderr artifact hashes, retrieval order,
+degraded codes, and the measured top-1 precision delta.
+
 ## Determinism Rules
 
 Tests must make nondeterminism impossible to miss:
