@@ -10054,6 +10054,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: cache_hotset_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::HOTSET_MANIFEST_SCHEMA_V1,
+            version: "1",
+            description: "Read-only swarm hotset manifest contract for redaction-safe prewarm candidate planning.",
+            category: "ops",
+            definition: hotset_manifest_schema_definition,
+        },
+        SchemaEntry {
             id: crate::models::SCALE_ENVELOPE_SCHEMA_V1,
             version: "1",
             description: "Redaction-safe scale-envelope posture covering corpus, store, WAL, index, SLO, degraded-code, and recovery-action evidence.",
@@ -11511,6 +11518,10 @@ fn audit_lane_schema_definition() -> String {
 
 fn cache_hotset_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.cache.hotset.v1.json").to_string()
+}
+
+fn hotset_manifest_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.hotset_manifest.v1.json").to_string()
 }
 
 fn scale_envelope_schema_definition() -> String {

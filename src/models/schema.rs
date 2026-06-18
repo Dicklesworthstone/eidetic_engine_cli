@@ -89,6 +89,9 @@ pub const INDEX_INTAKE_FALLBACK_FORCED_REINDEX: &str = "forced_reindex";
 /// Index-intake fallback-to-full reason: the delta exceeded the incremental threshold.
 pub const INDEX_INTAKE_FALLBACK_DELTA_OVER_THRESHOLD: &str = "delta_over_threshold";
 
+/// Schema identifier for the read-only swarm hotset manifest contract (bd-ty3pl.1).
+pub const HOTSET_MANIFEST_SCHEMA_V1: &str = "ee.hotset_manifest.v1";
+
 /// Schema identifier for the active embedding posture block (bd-1et0v.1).
 pub const EMBEDDING_POSTURE_SCHEMA_V1: &str = "ee.embedding_posture.v1";
 /// Embedding posture mode: local neural semantic model is active.
@@ -201,6 +204,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     SCALE_ENVELOPE_SCHEMA_V1,
     WRITE_GROUP_COMMIT_SCHEMA_V1,
     INDEX_INTAKE_SCHEMA_V1,
+    HOTSET_MANIFEST_SCHEMA_V1,
     EMBEDDING_POSTURE_SCHEMA_V1,
     AMBIENT_CONTEXT_SCHEMA_V1,
     PROVENANCE_HEALTH_SCHEMA_V1,

@@ -1,0 +1,1068 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.hotset_manifest.v1.json",
+  "title": "ee.hotset_manifest.v1",
+  "description": "Read-only, redaction-safe hotset plan manifest for swarm prewarm candidates. The manifest explains selected paths, memories, search/index shards, graph neighborhoods, read-pool targets, pack L2 candidates, and lexical RAM-tier candidates with source snapshot hashes, bounded evidence, freshness, confidence, resource class, and invalidation reasons. It never executes prewarm, mutates coordination state, stores raw mail or memory content, or stores host-private absolute paths. See ADR 0084.",
+  "type": "object",
+  "additionalProperties": false,
+  "x-ee-status": {
+    "shipped": true,
+    "available_in_build": true,
+    "producer_available": false,
+    "tracking_bead": "bd-ty3pl.1",
+    "notes": "This bead ships the ADR, schema, and public schema-registry export. Read-only collectors and prewarm execution are separate follow-up tasks."
+  },
+  "required": [
+    "schema",
+    "manifestId",
+    "generatedAt",
+    "workspace",
+    "redactionStatus",
+    "readOnly",
+    "sideEffectFree",
+    "mutationPolicy",
+    "resourceProfile",
+    "sourceSnapshots",
+    "summary",
+    "items",
+    "failClosed",
+    "ordering",
+    "provenanceHash",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.hotset_manifest.v1"
+    },
+    "manifestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Stable manifest id, for example hotset-<blake3-16>. It must not be derived from raw query text, mail bodies, or host-private paths."
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "workspace": {
+      "$ref": "#/$defs/workspace"
+    },
+    "redactionStatus": {
+      "type": "string",
+      "const": "hashes_counts_bounded_labels_no_content"
+    },
+    "readOnly": {
+      "type": "boolean",
+      "const": true
+    },
+    "sideEffectFree": {
+      "type": "boolean",
+      "const": true
+    },
+    "mutationPolicy": {
+      "type": "string",
+      "const": "never_mutates_or_prewarms"
+    },
+    "resourceProfile": {
+      "$ref": "#/$defs/resourceProfile"
+    },
+    "sourceSnapshots": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/sourceSnapshot"
+      }
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "$ref": "#/$defs/item"
+      }
+    },
+    "failClosed": {
+      "$ref": "#/$defs/failClosed"
+    },
+    "ordering": {
+      "$ref": "#/$defs/ordering"
+    },
+    "provenanceHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degraded"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "failClosed": {
+            "properties": {
+              "status": {
+                "const": "fail_closed"
+              }
+            },
+            "required": ["status"]
+          }
+        },
+        "required": ["failClosed"]
+      },
+      "then": {
+        "properties": {
+          "failClosed": {
+            "properties": {
+              "blockedExecution": {
+                "const": true
+              },
+              "reasons": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceLabel", "workspaceIdHash"],
+      "properties": {
+        "workspaceLabel": {
+          "$ref": "#/$defs/boundedLabel",
+          "description": "Repo-relative or symbolic label. Host-private absolute paths are forbidden."
+        },
+        "workspaceIdHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "sourceRootHash": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "resourceProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "effective", "supported", "unsupportedReason"],
+      "properties": {
+        "requested": {
+          "$ref": "#/$defs/resourceClass"
+        },
+        "effective": {
+          "$ref": "#/$defs/resourceClass"
+        },
+        "supported": {
+          "type": "boolean"
+        },
+        "unsupportedReason": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/invalidationReason"
+            }
+          ]
+        }
+      }
+    },
+    "sourceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "status",
+        "authoritative",
+        "schemaId",
+        "snapshotHash",
+        "capturedAt",
+        "freshness",
+        "degraded"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/sourceKind"
+        },
+        "status": {
+          "$ref": "#/$defs/sourceStatus"
+        },
+        "authoritative": {
+          "type": "boolean",
+          "description": "True only when the source is fresh enough to support plan selection. Consumers must not execute prewarm when a required source is non-authoritative."
+        },
+        "schemaId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "snapshotHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "capturedAt": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "freshness": {
+          "$ref": "#/$defs/freshness"
+        },
+        "degraded": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/degraded"
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "itemCount",
+        "admittedCount",
+        "advisoryCount",
+        "failClosedCount",
+        "classCounts"
+      ],
+      "properties": {
+        "itemCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "admittedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "advisoryCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failClosedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "classCounts": {
+          "$ref": "#/$defs/classCounts"
+        }
+      }
+    },
+    "classCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "memory",
+        "searchIndexShard",
+        "graphNeighborhood",
+        "readPoolTarget",
+        "packL2Candidate",
+        "lexicalRamTierCandidate"
+      ],
+      "properties": {
+        "path": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "memory": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "searchIndexShard": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "graphNeighborhood": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "readPoolTarget": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "packL2Candidate": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lexicalRamTierCandidate": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "itemId",
+        "itemClass",
+        "keyHash",
+        "label",
+        "freshness",
+        "confidence",
+        "resourceClass",
+        "invalidationReason",
+        "admission",
+        "evidence"
+      ],
+      "properties": {
+        "itemId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "itemClass": {
+          "$ref": "#/$defs/itemClass"
+        },
+        "keyHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "label": {
+          "$ref": "#/$defs/boundedLabel",
+          "description": "Bounded repo-relative or symbolic label. Use hashes for sensitive paths; do not use raw host-private absolute paths."
+        },
+        "freshness": {
+          "$ref": "#/$defs/freshness"
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "resourceClass": {
+          "$ref": "#/$defs/resourceClass"
+        },
+        "invalidationReason": {
+          "$ref": "#/$defs/invalidationReason"
+        },
+        "admission": {
+          "$ref": "#/$defs/admission"
+        },
+        "estimatedCost": {
+          "$ref": "#/$defs/estimatedCost"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/evidenceRef"
+          }
+        }
+      }
+    },
+    "freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "capturedAt", "ageMs", "staleAfterMs", "generation"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["fresh", "bounded_stale", "stale", "unknown"]
+        },
+        "capturedAt": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ageMs": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "staleAfterMs": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "generation": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      }
+    },
+    "confidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score", "basis", "reasonCodes"],
+      "properties": {
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "basis": {
+          "type": "string",
+          "enum": [
+            "observed_frequency",
+            "source_authority",
+            "replay_slo",
+            "explicit_evidence",
+            "conservative_default"
+          ]
+        },
+        "reasonCodes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 96
+          },
+          "maxItems": 16,
+          "uniqueItems": true
+        }
+      }
+    },
+    "admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "reasonCodes"],
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": ["admit", "advisory", "skip", "fail_closed"]
+        },
+        "reasonCodes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 96
+          },
+          "maxItems": 16,
+          "uniqueItems": true
+        }
+      }
+    },
+    "estimatedCost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "readPoolSlots", "expectedMs"],
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "readPoolSlots": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expectedMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "evidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidenceId",
+        "source",
+        "schemaId",
+        "refHash",
+        "subjectPreview",
+        "redactionStatus"
+      ],
+      "properties": {
+        "evidenceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "source": {
+          "$ref": "#/$defs/sourceKind"
+        },
+        "schemaId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "refHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "subjectPreview": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "description": "Bounded subject-like metadata only. Raw mail bodies, memory bodies, query text, and source snippets are forbidden."
+        },
+        "redactionStatus": {
+          "type": "string",
+          "const": "bounded_preview_no_content"
+        }
+      }
+    },
+    "failClosed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "blockedExecution", "reasons"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["clear", "advisory_only", "fail_closed"]
+        },
+        "blockedExecution": {
+          "type": "boolean",
+          "description": "True when a prewarm executor must not act on this manifest."
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/invalidationReason"
+          },
+          "maxItems": 16,
+          "uniqueItems": true
+        }
+      }
+    },
+    "ordering": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceSnapshots", "items", "evidence"],
+      "properties": {
+        "sourceSnapshots": {
+          "type": "string",
+          "const": "source ascending, schemaId ascending, snapshotHash ascending"
+        },
+        "items": {
+          "type": "string",
+          "const": "itemClass ascending, itemId ascending"
+        },
+        "evidence": {
+          "type": "string",
+          "const": "evidenceId ascending"
+        }
+      }
+    },
+    "degraded": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["code", "severity", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "repair": {
+          "type": ["string", "null"],
+          "maxLength": 240
+        },
+        "details": {
+          "type": "object"
+        }
+      }
+    },
+    "sourceKind": {
+      "type": "string",
+      "enum": [
+        "agent_mail",
+        "beads",
+        "bv",
+        "cache_hotset",
+        "git",
+        "graph",
+        "lexical_ram_tier",
+        "pack_l2",
+        "rch",
+        "read_pool",
+        "replay_slo",
+        "resource_admission",
+        "search_index",
+        "source_authority",
+        "support_bundle",
+        "workspace_hygiene"
+      ]
+    },
+    "sourceStatus": {
+      "type": "string",
+      "enum": [
+        "ready",
+        "degraded_read_only",
+        "stale_fallback",
+        "unavailable",
+        "timed_out",
+        "contradicted"
+      ]
+    },
+    "itemClass": {
+      "type": "string",
+      "enum": [
+        "path",
+        "memory",
+        "search_index_shard",
+        "graph_neighborhood",
+        "read_pool_target",
+        "pack_l2_candidate",
+        "lexical_ram_tier_candidate"
+      ]
+    },
+    "resourceClass": {
+      "type": "string",
+      "enum": ["tiny", "small", "standard", "swarm_heavy", "unsupported"]
+    },
+    "invalidationReason": {
+      "type": "string",
+      "enum": [
+        "none",
+        "source_snapshot_stale",
+        "beads_stale",
+        "agent_mail_degraded",
+        "dirty_checkout_overlap",
+        "rch_proof_missing",
+        "unsupported_resource_profile",
+        "generation_mismatch",
+        "evidence_missing",
+        "contradicted",
+        "resource_budget_exceeded",
+        "redaction_violation"
+      ]
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^(blake3|sha256):[0-9a-f]{16,64}$"
+    },
+    "boundedLabel": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^(?!/)(?![A-Za-z]:).+$"
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.hotset_manifest.v1",
+      "manifestId": "hotset-cold-0001",
+      "generatedAt": "2026-06-18T20:00:00Z",
+      "workspace": {
+        "workspaceLabel": ".",
+        "workspaceIdHash": "blake3:11111111111111111111111111111111"
+      },
+      "redactionStatus": "hashes_counts_bounded_labels_no_content",
+      "readOnly": true,
+      "sideEffectFree": true,
+      "mutationPolicy": "never_mutates_or_prewarms",
+      "resourceProfile": {
+        "requested": "small",
+        "effective": "small",
+        "supported": true,
+        "unsupportedReason": null
+      },
+      "sourceSnapshots": [
+        {
+          "source": "source_authority",
+          "status": "ready",
+          "authoritative": true,
+          "schemaId": "ee.source_authority.snapshot.v1",
+          "snapshotHash": "blake3:22222222222222222222222222222222",
+          "capturedAt": "2026-06-18T19:59:58Z",
+          "freshness": {
+            "state": "fresh",
+            "capturedAt": "2026-06-18T19:59:58Z",
+            "ageMs": 2000,
+            "staleAfterMs": 60000,
+            "generation": 12
+          },
+          "degraded": []
+        }
+      ],
+      "summary": {
+        "itemCount": 0,
+        "admittedCount": 0,
+        "advisoryCount": 0,
+        "failClosedCount": 0,
+        "classCounts": {
+          "path": 0,
+          "memory": 0,
+          "searchIndexShard": 0,
+          "graphNeighborhood": 0,
+          "readPoolTarget": 0,
+          "packL2Candidate": 0,
+          "lexicalRamTierCandidate": 0
+        }
+      },
+      "items": [],
+      "failClosed": {
+        "status": "clear",
+        "blockedExecution": false,
+        "reasons": []
+      },
+      "ordering": {
+        "sourceSnapshots": "source ascending, schemaId ascending, snapshotHash ascending",
+        "items": "itemClass ascending, itemId ascending",
+        "evidence": "evidenceId ascending"
+      },
+      "provenanceHash": "blake3:33333333333333333333333333333333",
+      "degraded": []
+    },
+    {
+      "schema": "ee.hotset_manifest.v1",
+      "manifestId": "hotset-hot-0001",
+      "generatedAt": "2026-06-18T20:05:00Z",
+      "workspace": {
+        "workspaceLabel": ".",
+        "workspaceIdHash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sourceRootHash": "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "redactionStatus": "hashes_counts_bounded_labels_no_content",
+      "readOnly": true,
+      "sideEffectFree": true,
+      "mutationPolicy": "never_mutates_or_prewarms",
+      "resourceProfile": {
+        "requested": "swarm_heavy",
+        "effective": "standard",
+        "supported": true,
+        "unsupportedReason": null
+      },
+      "sourceSnapshots": [
+        {
+          "source": "agent_mail",
+          "status": "ready",
+          "authoritative": true,
+          "schemaId": "ee.agent_mail.snapshot.v1",
+          "snapshotHash": "blake3:cccccccccccccccccccccccccccccccc",
+          "capturedAt": "2026-06-18T20:04:55Z",
+          "freshness": {
+            "state": "fresh",
+            "capturedAt": "2026-06-18T20:04:55Z",
+            "ageMs": 5000,
+            "staleAfterMs": 60000,
+            "generation": 41
+          },
+          "degraded": []
+        },
+        {
+          "source": "lexical_ram_tier",
+          "status": "ready",
+          "authoritative": true,
+          "schemaId": "ee.status.search.lexical_ram_tier.v1",
+          "snapshotHash": "blake3:dddddddddddddddddddddddddddddddd",
+          "capturedAt": "2026-06-18T20:04:56Z",
+          "freshness": {
+            "state": "fresh",
+            "capturedAt": "2026-06-18T20:04:56Z",
+            "ageMs": 4000,
+            "staleAfterMs": 120000,
+            "generation": 41
+          },
+          "degraded": []
+        }
+      ],
+      "summary": {
+        "itemCount": 3,
+        "admittedCount": 3,
+        "advisoryCount": 0,
+        "failClosedCount": 0,
+        "classCounts": {
+          "path": 1,
+          "memory": 1,
+          "searchIndexShard": 0,
+          "graphNeighborhood": 0,
+          "readPoolTarget": 0,
+          "packL2Candidate": 0,
+          "lexicalRamTierCandidate": 1
+        }
+      },
+      "items": [
+        {
+          "itemId": "item-memory-release-rules",
+          "itemClass": "memory",
+          "keyHash": "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "label": "mem:release-rules",
+          "freshness": {
+            "state": "fresh",
+            "capturedAt": "2026-06-18T20:04:50Z",
+            "ageMs": 10000,
+            "staleAfterMs": 300000,
+            "generation": 41
+          },
+          "confidence": {
+            "score": 0.91,
+            "basis": "source_authority",
+            "reasonCodes": ["pack_hits:8", "validated_rule"]
+          },
+          "resourceClass": "small",
+          "invalidationReason": "none",
+          "admission": {
+            "decision": "admit",
+            "reasonCodes": ["fresh_authority", "within_budget"]
+          },
+          "estimatedCost": {
+            "bytes": 8192,
+            "readPoolSlots": 0,
+            "expectedMs": 3
+          },
+          "evidence": [
+            {
+              "evidenceId": "ev-pack-l2-release",
+              "source": "pack_l2",
+              "schemaId": "ee.cache.hotset.v1",
+              "refHash": "blake3:ffffffffffffffffffffffffffffffff",
+              "subjectPreview": "pack L2 release section hit count",
+              "redactionStatus": "bounded_preview_no_content"
+            }
+          ]
+        },
+        {
+          "itemId": "item-path-src-core-context",
+          "itemClass": "path",
+          "keyHash": "blake3:12121212121212121212121212121212",
+          "label": "src/core/context.rs",
+          "freshness": {
+            "state": "fresh",
+            "capturedAt": "2026-06-18T20:04:53Z",
+            "ageMs": 7000,
+            "staleAfterMs": 60000,
+            "generation": 41
+          },
+          "confidence": {
+            "score": 0.84,
+            "basis": "observed_frequency",
+            "reasonCodes": ["recent_handoff_refs", "high_recall_path"]
+          },
+          "resourceClass": "standard",
+          "invalidationReason": "none",
+          "admission": {
+            "decision": "admit",
+            "reasonCodes": ["no_dirty_overlap", "reservation_clear"]
+          },
+          "evidence": [
+            {
+              "evidenceId": "ev-agent-mail-path-counts",
+              "source": "agent_mail",
+              "schemaId": "ee.agent_mail.snapshot.v1",
+              "refHash": "blake3:34343434343434343434343434343434",
+              "subjectPreview": "bounded path mention counts",
+              "redactionStatus": "bounded_preview_no_content"
+            }
+          ]
+        },
+        {
+          "itemId": "item-lexical-tier-release",
+          "itemClass": "lexical_ram_tier_candidate",
+          "keyHash": "blake3:56565656565656565656565656565656",
+          "label": "lexical-tier:release",
+          "freshness": {
+            "state": "fresh",
+            "capturedAt": "2026-06-18T20:04:56Z",
+            "ageMs": 4000,
+            "staleAfterMs": 120000,
+            "generation": 41
+          },
+          "confidence": {
+            "score": 0.79,
+            "basis": "replay_slo",
+            "reasonCodes": ["lexical_ram_hit_rate_high"]
+          },
+          "resourceClass": "standard",
+          "invalidationReason": "none",
+          "admission": {
+            "decision": "admit",
+            "reasonCodes": ["ram_budget_available"]
+          },
+          "estimatedCost": {
+            "bytes": 1048576,
+            "readPoolSlots": 1,
+            "expectedMs": 12
+          },
+          "evidence": [
+            {
+              "evidenceId": "ev-lexical-ram-tier",
+              "source": "lexical_ram_tier",
+              "schemaId": "ee.status.search.lexical_ram_tier.v1",
+              "refHash": "blake3:78787878787878787878787878787878",
+              "subjectPreview": "lexical RAM tier warm candidate",
+              "redactionStatus": "bounded_preview_no_content"
+            }
+          ]
+        }
+      ],
+      "failClosed": {
+        "status": "clear",
+        "blockedExecution": false,
+        "reasons": []
+      },
+      "ordering": {
+        "sourceSnapshots": "source ascending, schemaId ascending, snapshotHash ascending",
+        "items": "itemClass ascending, itemId ascending",
+        "evidence": "evidenceId ascending"
+      },
+      "provenanceHash": "blake3:90909090909090909090909090909090",
+      "degraded": []
+    },
+    {
+      "schema": "ee.hotset_manifest.v1",
+      "manifestId": "hotset-degraded-0001",
+      "generatedAt": "2026-06-18T20:10:00Z",
+      "workspace": {
+        "workspaceLabel": ".",
+        "workspaceIdHash": "blake3:abababababababababababababababab"
+      },
+      "redactionStatus": "hashes_counts_bounded_labels_no_content",
+      "readOnly": true,
+      "sideEffectFree": true,
+      "mutationPolicy": "never_mutates_or_prewarms",
+      "resourceProfile": {
+        "requested": "swarm_heavy",
+        "effective": "unsupported",
+        "supported": false,
+        "unsupportedReason": "unsupported_resource_profile"
+      },
+      "sourceSnapshots": [
+        {
+          "source": "beads",
+          "status": "stale_fallback",
+          "authoritative": false,
+          "schemaId": "br.ready.v1",
+          "snapshotHash": "blake3:bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc",
+          "capturedAt": "2026-06-18T19:40:00Z",
+          "freshness": {
+            "state": "stale",
+            "capturedAt": "2026-06-18T19:40:00Z",
+            "ageMs": 1800000,
+            "staleAfterMs": 60000,
+            "generation": 39
+          },
+          "degraded": [
+            {
+              "code": "coordination_source_stale",
+              "severity": "low",
+              "message": "Beads evidence is stale.",
+              "repair": "Refresh Beads and rerun the hotset manifest collector."
+            }
+          ]
+        },
+        {
+          "source": "rch",
+          "status": "unavailable",
+          "authoritative": false,
+          "schemaId": "ee.verification_evidence.v1",
+          "snapshotHash": "blake3:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "capturedAt": null,
+          "freshness": {
+            "state": "unknown",
+            "capturedAt": null,
+            "ageMs": null,
+            "staleAfterMs": 60000,
+            "generation": null
+          },
+          "degraded": [
+            {
+              "code": "verification_evidence_not_found",
+              "severity": "low",
+              "message": "Required RCH proof was not found.",
+              "repair": "Run the required RCH proof before executing prewarm."
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "itemCount": 1,
+        "admittedCount": 0,
+        "advisoryCount": 0,
+        "failClosedCount": 1,
+        "classCounts": {
+          "path": 0,
+          "memory": 0,
+          "searchIndexShard": 1,
+          "graphNeighborhood": 0,
+          "readPoolTarget": 0,
+          "packL2Candidate": 0,
+          "lexicalRamTierCandidate": 0
+        }
+      },
+      "items": [
+        {
+          "itemId": "item-search-shard-release",
+          "itemClass": "search_index_shard",
+          "keyHash": "blake3:dededededededededededededededede",
+          "label": "search-shard:release",
+          "freshness": {
+            "state": "stale",
+            "capturedAt": "2026-06-18T19:40:00Z",
+            "ageMs": 1800000,
+            "staleAfterMs": 60000,
+            "generation": 39
+          },
+          "confidence": {
+            "score": 0.21,
+            "basis": "conservative_default",
+            "reasonCodes": ["beads_stale", "rch_proof_missing"]
+          },
+          "resourceClass": "unsupported",
+          "invalidationReason": "rch_proof_missing",
+          "admission": {
+            "decision": "fail_closed",
+            "reasonCodes": ["missing_remote_proof", "unsupported_resource_profile"]
+          },
+          "evidence": [
+            {
+              "evidenceId": "ev-stale-beads-release",
+              "source": "beads",
+              "schemaId": "br.ready.v1",
+              "refHash": "blake3:efefefefefefefefefefefefefefefef",
+              "subjectPreview": "stale Beads hotset hint",
+              "redactionStatus": "bounded_preview_no_content"
+            }
+          ]
+        }
+      ],
+      "failClosed": {
+        "status": "fail_closed",
+        "blockedExecution": true,
+        "reasons": [
+          "beads_stale",
+          "rch_proof_missing",
+          "unsupported_resource_profile"
+        ]
+      },
+      "ordering": {
+        "sourceSnapshots": "source ascending, schemaId ascending, snapshotHash ascending",
+        "items": "itemClass ascending, itemId ascending",
+        "evidence": "evidenceId ascending"
+      },
+      "provenanceHash": "blake3:fafafafafafafafafafafafafafafafa",
+      "degraded": [
+        {
+          "code": "coordination_source_stale",
+          "severity": "low",
+          "message": "One or more coordination sources were stale.",
+          "repair": "Refresh source snapshots before executing prewarm."
+        },
+        {
+          "code": "verification_evidence_not_found",
+          "severity": "low",
+          "message": "Required RCH verification evidence was missing.",
+          "repair": "Run RCH verification before treating this manifest as executable."
+        }
+      ]
+    }
+  ]
+}
