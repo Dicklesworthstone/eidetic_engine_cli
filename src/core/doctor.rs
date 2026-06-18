@@ -4403,6 +4403,43 @@ mod tests {
     }
 
     #[test]
+    fn ee_install_path_omits_extra_advisory_findings_deterministically() -> TestResult {
+        let mut report = install_report_with_shadowed_path();
+        report.findings.extend([
+            InstallFinding::warning(
+                InstallFindingCode::InstalledBinaryStale,
+                "UNIQUE_OMITTED_STALE_SENTINEL installed binary is stale",
+                "adopt a verified artifact",
+            ),
+            InstallFinding::warning(
+                InstallFindingCode::InstalledVersionUnknown,
+                "UNIQUE_OMITTED_UNKNOWN_SENTINEL installed version is unknown",
+                "run the intended PATH binary directly",
+            ),
+        ]);
+
+        let check = ee_install_path_check_from_report(&report);
+
+        ensure(
+            check
+                .message
+                .contains("2 additional install advisory finding(s) omitted"),
+            true,
+            "omitted advisory finding count included",
+        )?;
+        ensure(
+            check.message.contains("UNIQUE_OMITTED_STALE_SENTINEL"),
+            false,
+            "fourth advisory finding detail omitted",
+        )?;
+        ensure(
+            check.message.contains("UNIQUE_OMITTED_UNKNOWN_SENTINEL"),
+            false,
+            "fifth advisory finding detail omitted",
+        )
+    }
+
+    #[test]
     fn ee_install_path_non_path_install_errors_do_not_become_doctor_degradations() -> TestResult {
         let mut report = clean_install_report();
         report.findings = vec![InstallFinding::error(

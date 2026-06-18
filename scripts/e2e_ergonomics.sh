@@ -421,6 +421,9 @@ assert_json_file "path_shadow_is_advisory_tier" "${DOCTOR_SHADOW_JSON}" \
     'any(.data.checks[]?; .name == "ee_install_path" and .tier == "advisory" and .severity == "warning")'
 assert_json_file "path_shadow_repair_hint_present" "${DOCTOR_SHADOW_JSON}" \
     'any(.data.checks[]?; .name == "ee_install_path" and ((.repair // "") | contains("ee install check --json --offline")) and ((.repair // "") | contains("do not use local Cargo")))'
+step "assert_network_free_shadow_contract" "PATH-shadow advisory must document offline/no-network evidence"
+assert_json_file "path_shadow_network_free_contract" "${DOCTOR_SHADOW_JSON}" \
+    'any(.data.checks[]?; .name == "ee_install_path" and ((.message // "") | contains("no network lookup")) and ((.repair // "") | contains("--offline")))'
 assert_json_file "path_shadow_fixture_not_used_for_non_version_command" "${DOCTOR_SHADOW_JSON}" \
     '.success == true'
 if grep -q "shadow fixture should only be used" "${ROOT}/06_doctor_shadow.stderr.txt"; then
@@ -483,6 +486,7 @@ assert_event_log_contract() {
         and any(.[]; .kind == "assert_ok" and .fields.label == "path_shadow_does_not_change_top_line")
         and any(.[]; .kind == "note" and .fields.label == "run_context_alias" and .fields.status == "step")
         and any(.[]; .kind == "note" and .fields.label == "doctor_shadow" and .fields.status == "step")
+        and any(.[]; .kind == "note" and .fields.label == "assert_network_free_shadow_contract" and .fields.status == "step")
     ' "${EVENT_LOG}" >/dev/null 2>&1; then
         pass "${label}" "event log has complete command/assert evidence"
     else
