@@ -2846,17 +2846,19 @@ pub fn capture_suggestions(
             &session,
             &evidence_by_id,
             dedupe_status,
+            &prepared.workspace_path,
         ));
     }
 
     let candidate_count = suggestions.len();
     let suppressed_count = suppressed.len();
+    let workspace_arg = shell_quote_command_arg(&prepared.workspace_path.display().to_string());
+    let session_arg = shell_quote_command_arg(&session.cass_session_id);
     let next_action = if candidate_count == 0 {
         "no capture suggestions proposed".to_owned()
     } else {
         format!(
-            "ee review session {} --propose --json; then ee curate accept <candidate-id> --json",
-            session.cass_session_id
+            "ee review session {session_arg} --workspace {workspace_arg} --propose --json; then ee curate accept <candidate-id> --workspace {workspace_arg} --json"
         )
     };
 
@@ -3609,6 +3611,7 @@ fn capture_suggestion_from_review_candidate(
     session: &StoredSession,
     evidence_by_id: &BTreeMap<&str, &StoredEvidenceSpan>,
     dedupe_status: CaptureSuggestionDedupeStatus,
+    workspace_path: &Path,
 ) -> CaptureSuggestion {
     let kind = capture_suggestion_memory_kind(candidate);
     let mut tags = BTreeSet::from([
@@ -3641,14 +3644,16 @@ fn capture_suggestion_from_review_candidate(
             .then_with(|| left.end_line.cmp(&right.end_line))
             .then_with(|| left.evidence_span_id.cmp(&right.evidence_span_id))
     });
-    let review_command = format!("ee review session {} --propose --json", session.cass_session_id);
+    let workspace_arg = shell_quote_command_arg(&workspace_path.display().to_string());
+    let session_arg = shell_quote_command_arg(&session.cass_session_id);
+    let candidate_arg = shell_quote_command_arg(&candidate.candidate_id);
+    let review_command =
+        format!("ee review session {session_arg} --workspace {workspace_arg} --propose --json");
     let accept_command = format!(
-        "{review_command} && ee curate accept {} --json",
-        candidate.candidate_id
+        "{review_command} && ee curate accept {candidate_arg} --workspace {workspace_arg} --json"
     );
     let reject_command = format!(
-        "{review_command} && ee curate reject {} --json",
-        candidate.candidate_id
+        "{review_command} && ee curate reject {candidate_arg} --workspace {workspace_arg} --json"
     );
 
     CaptureSuggestion {
@@ -17251,9 +17256,26 @@ mod tests {
         assert_eq!(suggestion.proposed_fields.level, "procedural");
         assert!(suggestion.proposed_fields.tags.contains(&"ambient-capture".to_owned()));
         assert!(!suggestion.evidence.is_empty());
-        assert!(suggestion.review_command.contains("ee review session cass-review-session-a"));
-        assert!(suggestion.accept_command.contains("ee curate accept"));
-        assert!(suggestion.reject_command.contains("ee curate reject"));
+        let workspace_arg =
+            super::shell_quote_command_arg(&fixture.workspace_path.display().to_string());
+        let session_arg = super::shell_quote_command_arg("cass-review-session-a");
+        let candidate_arg = super::shell_quote_command_arg(&suggestion.candidate_id);
+        let expected_review = format!(
+            "ee review session {session_arg} --workspace {workspace_arg} --propose --json"
+        );
+        assert_eq!(suggestion.review_command, expected_review);
+        assert_eq!(
+            suggestion.accept_command,
+            format!(
+                "{expected_review} && ee curate accept {candidate_arg} --workspace {workspace_arg} --json"
+            )
+        );
+        assert_eq!(
+            suggestion.reject_command,
+            format!(
+                "{expected_review} && ee curate reject {candidate_arg} --workspace {workspace_arg} --json"
+            )
+        );
 
         let connection =
             DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
