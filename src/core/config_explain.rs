@@ -460,6 +460,51 @@ mod tests {
     }
 
     #[test]
+    fn explain_data_json_keeps_required_shape_when_values_are_absent() {
+        let explanation = explain(MESH_ENABLED_KEY, None, None).expect("known key explains");
+        let value = explanation.data_json();
+
+        assert_eq!(value["schema"], CONFIG_EXPLAIN_SCHEMA_V1);
+        assert_eq!(value["key"], MESH_ENABLED_KEY);
+        assert_eq!(value["category"], "mesh");
+        assert_eq!(value["status"], "active");
+        assert_eq!(value["caveat"], Value::Null);
+        assert_eq!(value["effectiveValue"], Value::Null);
+        assert_eq!(value["sourceLayer"], "unknown");
+        assert!(
+            value["effect"].as_str().is_some_and(|text| !text.is_empty()),
+            "effect must be populated for human-facing explain output"
+        );
+        assert!(
+            value["validRange"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
+            "valid range must be populated for human-facing explain output"
+        );
+        assert_eq!(
+            value["lintFindings"].as_array().map(Vec::len),
+            Some(0),
+            "lintFindings is always present, even when empty"
+        );
+    }
+
+    #[test]
+    fn explain_source_layer_tokens_match_merge_sources() {
+        for (source, expected) in [
+            (ConfigValueSource::Cli, "cli"),
+            (ConfigValueSource::Environment, "environment"),
+            (ConfigValueSource::Project, "project"),
+            (ConfigValueSource::User, "user"),
+            (ConfigValueSource::Default, "default"),
+        ] {
+            let explanation = explain(MESH_ENABLED_KEY, Some("true".to_owned()), Some(source))
+                .expect("known key explains");
+            assert_eq!(explanation.source_layer, expected);
+            assert_eq!(explanation.data_json()["sourceLayer"], expected);
+        }
+    }
+
+    #[test]
     fn explain_can_attach_key_scoped_lint_findings() {
         let facts = ConfigLintFacts {
             semantic_weight: Some(0.45),
@@ -500,6 +545,44 @@ mod tests {
     }
 
     #[test]
+    fn explain_ignores_empty_and_non_matching_lint_findings() {
+        let unrelated = ConfigLintFinding::advisory(
+            LINT_UNKNOWN_ENV_VAR,
+            "EMBEDDING_MODEL",
+            "foreign env var has no effect",
+        );
+
+        let empty = explain(
+            MESH_ENABLED_KEY,
+            Some("false".to_owned()),
+            Some(ConfigValueSource::User),
+        )
+        .expect("known key explains")
+        .with_lint_findings(&[]);
+        assert!(empty.lint_findings.is_empty());
+        assert_eq!(
+            empty.data_json()["lintFindings"].as_array().map(Vec::len),
+            Some(0)
+        );
+
+        let unrelated = explain(
+            MESH_ENABLED_KEY,
+            Some("false".to_owned()),
+            Some(ConfigValueSource::User),
+        )
+        .expect("known key explains")
+        .with_lint_findings(&[unrelated]);
+        assert!(
+            unrelated.lint_findings.is_empty(),
+            "findings for other keys/env vars must not leak into this key"
+        );
+        assert_eq!(
+            unrelated.data_json()["lintFindings"].as_array().map(Vec::len),
+            Some(0)
+        );
+    }
+
+    #[test]
     fn lint_flags_semantic_weight_without_neural_tier() {
         let finding = lint_semantic_weight_without_neural_tier(Some(0.45), false)
             .expect("a weight without a neural tier is suspicious");
@@ -525,6 +608,8 @@ mod tests {
             lint_embedding_model_path_missing("embedding.model_path", Some("/exists"), true)
                 .is_none()
         );
+        // Unconfigured path → no finding, regardless of the path existence probe.
+        assert!(lint_embedding_model_path_missing("embedding.model_path", None, false).is_none());
     }
 
     #[test]
@@ -567,6 +652,28 @@ mod tests {
         // Deterministic ordering by (code, key).
         let again = run_config_lint(&facts);
         assert_eq!(findings, again);
+    }
+
+    #[test]
+    fn run_config_lint_orders_same_code_findings_by_key() {
+        let facts = ConfigLintFacts {
+            semantic_weight: None,
+            neural_tier_active: false,
+            search_mode: None,
+            embedding_model_path: None,
+            env_vars: vec![
+                ("EEZ_UNUSED".to_owned(), false),
+                ("EEA_UNUSED".to_owned(), false),
+                ("EE_REAL".to_owned(), true),
+            ],
+        };
+        let findings = run_config_lint(&facts);
+
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0].code, LINT_UNKNOWN_ENV_VAR);
+        assert_eq!(findings[0].key.as_str(), "EEA_UNUSED");
+        assert_eq!(findings[1].code, LINT_UNKNOWN_ENV_VAR);
+        assert_eq!(findings[1].key.as_str(), "EEZ_UNUSED");
     }
 
     #[test]
