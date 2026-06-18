@@ -278,6 +278,7 @@ pub struct IndexReembedReport {
     pub memories_indexed: u32,
     pub sessions_indexed: u32,
     pub artifacts_indexed: u32,
+    pub documents_embedded: u32,
     pub documents_total: u32,
     pub index_dir: PathBuf,
     pub elapsed_ms: f64,
@@ -578,6 +579,10 @@ impl IndexReembedReport {
         output.push_str(&format!("  Memories: {}\n", self.memories_indexed));
         output.push_str(&format!("  Sessions: {}\n", self.sessions_indexed));
         output.push_str(&format!("  Artifacts: {}\n", self.artifacts_indexed));
+        output.push_str(&format!(
+            "  Embedded documents: {}/{}\n",
+            self.documents_embedded, self.documents_total
+        ));
         output.push_str(&format!("  Total documents: {}\n", self.documents_total));
         output.push_str(&format!(
             "  Index directory: {}\n",
@@ -609,6 +614,7 @@ impl IndexReembedReport {
             "memories_indexed": self.memories_indexed,
             "sessions_indexed": self.sessions_indexed,
             "artifacts_indexed": self.artifacts_indexed,
+            "documents_embedded": self.documents_embedded,
             "documents_total": self.documents_total,
             "index_dir": self.index_dir.to_string_lossy(),
             "elapsed_ms": self.elapsed_ms,
@@ -656,6 +662,11 @@ impl ReembedEmbeddingSummary {
             "selected_registry_model": self.selected_registry_model.as_ref().map(ReembedRegistryModelSummary::data_json),
             "source": self.source,
         })
+    }
+
+    #[must_use]
+    pub fn documents_embedded(&self) -> u32 {
+        u32::try_from(self.posture.vector_coverage.embedded).unwrap_or(u32::MAX)
     }
 }
 
@@ -1065,6 +1076,7 @@ pub fn reembed_index(
 
     if options.dry_run {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let documents_embedded = embedding.documents_embedded();
         return Ok(IndexReembedReport {
             status: IndexReembedStatus::DryRun,
             job_id: None,
@@ -1076,6 +1088,7 @@ pub fn reembed_index(
             memories_indexed,
             sessions_indexed,
             artifacts_indexed,
+            documents_embedded,
             documents_total,
             index_dir,
             elapsed_ms,
@@ -1115,6 +1128,7 @@ pub fn reembed_index(
             memories_indexed: 0,
             sessions_indexed: 0,
             artifacts_indexed: 0,
+            documents_embedded: 0,
             documents_total: 0,
             index_dir,
             elapsed_ms,
@@ -1162,6 +1176,7 @@ pub fn reembed_index(
                         .clone()
                         .with_vector_coverage(published_coverage),
                 );
+                let documents_embedded = published_embedding.documents_embedded();
 
                 Ok(IndexReembedReport {
                     status: IndexReembedStatus::Success,
@@ -1174,6 +1189,7 @@ pub fn reembed_index(
                     memories_indexed,
                     sessions_indexed,
                     artifacts_indexed,
+                    documents_embedded,
                     documents_total,
                     index_dir,
                     elapsed_ms,
@@ -1195,6 +1211,7 @@ pub fn reembed_index(
                         "failed to mark re-embedding job failed: {fail_error}"
                     ));
                 }
+                let documents_embedded = embedding.documents_embedded();
 
                 Ok(IndexReembedReport {
                     status: IndexReembedStatus::IndexError,
@@ -1207,6 +1224,7 @@ pub fn reembed_index(
                     memories_indexed,
                     sessions_indexed,
                     artifacts_indexed,
+                    documents_embedded,
                     documents_total,
                     index_dir,
                     elapsed_ms,
@@ -5913,6 +5931,7 @@ mod tests {
             memories_indexed: 5,
             sessions_indexed: 3,
             artifacts_indexed: 2,
+            documents_embedded: 0,
             documents_total: 10,
             index_dir: PathBuf::from("/tmp/index"),
             elapsed_ms: 123.4,
@@ -5943,6 +5962,7 @@ mod tests {
         assert_eq!(json["memories_indexed"], 5);
         assert_eq!(json["sessions_indexed"], 3);
         assert_eq!(json["artifacts_indexed"], 2);
+        assert_eq!(json["documents_embedded"], 0);
         assert_eq!(json["documents_total"], 10);
         assert_eq!(json["dry_run"], false);
     }
@@ -5976,6 +5996,7 @@ mod tests {
             "dry-run job status",
         )?;
         ensure(report.documents_total == 1, "dry-run document count")?;
+        ensure(report.documents_embedded == 0, "dry-run embedded count")?;
 
         let connection = DbConnection::open_file(database).map_err(|e| e.to_string())?;
         let jobs = connection
@@ -6020,6 +6041,11 @@ mod tests {
             "embedding scope should cover all documents",
         )?;
         ensure(report.documents_total == 1, "document count")?;
+        ensure(report.documents_embedded == 1, "embedded document count")?;
+        ensure(
+            report.embedding.posture.vector_coverage == EmbeddingVectorCoverage::new(1, 1),
+            "published vector coverage",
+        )?;
         ensure(
             index_dir.join(INDEX_METADATA_FILE).is_file(),
             "reembed should publish index metadata",

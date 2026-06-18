@@ -612,7 +612,7 @@ impl EnvVar {
                 "Override the bundled embedding model cache directory used by ee."
             }
             Self::EmbedModelPath => {
-                "Override the embedder model path used by search-time embedder availability checks."
+                "Fault-injection path used to simulate an unavailable search embedder; this does not load alternate models."
             }
             Self::ExperimentalTriad => {
                 "Compatibility no-op for the promoted ee pack/note/why aliases."

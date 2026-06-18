@@ -71,7 +71,7 @@ data:
     EE_EMBED_DEDUP_HAMMING_K,embeddings,Set the maximum SimHash Hamming distance admitted to dedup cosine confirmation.,"12",false,registry_default
     EE_EMBED_DOWNLOAD,embeddings,Control bundled embedding model download behavior with auto or off.,auto,false,registry_default
     EE_EMBED_MODEL_DIR,embeddings,Override the bundled embedding model cache directory used by ee.,null,false,unset
-    EE_EMBED_MODEL_PATH,embeddings,Override the embedder model path used by search-time embedder availability checks.,null,false,unset
+    EE_EMBED_MODEL_PATH,embeddings,Fault-injection path used to simulate an unavailable search embedder; this does not load alternate models.,null,false,unset
     EE_EXPERIMENTAL_TRIAD,output,Compatibility no-op for the promoted ee pack/note/why aliases.,null,false,unset
     EE_FLIGHT_RECORDER,diagnostics,Enable the redacted command flight recorder for ee subcommands.,"false",false,registry_default
     EE_FLIGHT_RECORDER_DIR,paths,Override the directory where flight recorder traces are written.,null,false,unset
