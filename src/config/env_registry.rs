@@ -117,6 +117,10 @@ pub enum EnvVar {
     EmbedDedupEnabled,
     /// `EE_EMBED_DEDUP_HAMMING_K`
     EmbedDedupHammingK,
+    /// `EE_EMBED_DOWNLOAD`
+    EmbedDownload,
+    /// `EE_EMBED_MODEL_DIR`
+    EmbedModelDir,
     /// `EE_EMBED_MODEL_PATH`
     EmbedModelPath,
     /// `EE_EXPERIMENTAL_TRIAD`
@@ -320,6 +324,8 @@ impl EnvVar {
             Self::EmbedDedupCosineFloor,
             Self::EmbedDedupEnabled,
             Self::EmbedDedupHammingK,
+            Self::EmbedDownload,
+            Self::EmbedModelDir,
             Self::EmbedModelPath,
             Self::ExperimentalTriad,
             Self::FlightRecorder,
@@ -438,6 +444,8 @@ impl EnvVar {
             Self::EmbedDedupCosineFloor => "EE_EMBED_DEDUP_COSINE_FLOOR",
             Self::EmbedDedupEnabled => "EE_EMBED_DEDUP_ENABLED",
             Self::EmbedDedupHammingK => "EE_EMBED_DEDUP_HAMMING_K",
+            Self::EmbedDownload => "EE_EMBED_DOWNLOAD",
+            Self::EmbedModelDir => "EE_EMBED_MODEL_DIR",
             Self::EmbedModelPath => "EE_EMBED_MODEL_PATH",
             Self::ExperimentalTriad => "EE_EXPERIMENTAL_TRIAD",
             Self::FlightRecorder => "EE_FLIGHT_RECORDER",
@@ -596,6 +604,12 @@ impl EnvVar {
             }
             Self::EmbedDedupHammingK => {
                 "Set the maximum SimHash Hamming distance admitted to dedup cosine confirmation."
+            }
+            Self::EmbedDownload => {
+                "Control bundled embedding model download behavior with auto or off."
+            }
+            Self::EmbedModelDir => {
+                "Override the bundled embedding model cache directory used by ee."
             }
             Self::EmbedModelPath => {
                 "Override the embedder model path used by search-time embedder availability checks."
@@ -821,6 +835,7 @@ impl EnvVar {
             Self::EmbedDedupCosineFloor => Some("0.97"),
             Self::EmbedDedupEnabled => Some("false"),
             Self::EmbedDedupHammingK => Some("12"),
+            Self::EmbedDownload => Some("auto"),
             Self::FlightRecorder => Some("false"),
             Self::FlightRecorderRetentionDays => Some("7"),
             Self::LexicalIndexHugepages => Some("false"),
@@ -913,6 +928,8 @@ impl EnvVar {
             Self::EmbedDedupCosineFloor
             | Self::EmbedDedupEnabled
             | Self::EmbedDedupHammingK
+            | Self::EmbedDownload
+            | Self::EmbedModelDir
             | Self::EmbedModelPath => "embeddings",
             Self::MeshEnabled
             | Self::MeshMode
@@ -1394,6 +1411,35 @@ mod tests {
         }
         if EnvVar::EmbedDedupEnabled.category() != "embeddings" {
             return Err("embed dedup vars must be categorized as embeddings".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn embed_download_env_vars_are_registered_with_safe_defaults() -> TestResult {
+        if !EnvVar::all().contains(&EnvVar::EmbedDownload) {
+            return Err("EE_EMBED_DOWNLOAD missing from registry order".to_owned());
+        }
+        if !EnvVar::all().contains(&EnvVar::EmbedModelDir) {
+            return Err("EE_EMBED_MODEL_DIR missing from registry order".to_owned());
+        }
+        if EnvVar::EmbedDownload.name() != "EE_EMBED_DOWNLOAD" {
+            return Err("EE_EMBED_DOWNLOAD name mismatch".to_owned());
+        }
+        if EnvVar::EmbedModelDir.name() != "EE_EMBED_MODEL_DIR" {
+            return Err("EE_EMBED_MODEL_DIR name mismatch".to_owned());
+        }
+        if EnvVar::EmbedDownload.default_value() != Some("auto") {
+            return Err("EE_EMBED_DOWNLOAD must default to auto".to_owned());
+        }
+        if EnvVar::EmbedModelDir.default_value().is_some() {
+            return Err("EE_EMBED_MODEL_DIR must not have a baked-in path default".to_owned());
+        }
+        if EnvVar::EmbedDownload.category() != "embeddings" {
+            return Err("EE_EMBED_DOWNLOAD must be categorized as embeddings".to_owned());
+        }
+        if EnvVar::EmbedModelDir.category() != "embeddings" {
+            return Err("EE_EMBED_MODEL_DIR must be categorized as embeddings".to_owned());
         }
         Ok(())
     }
