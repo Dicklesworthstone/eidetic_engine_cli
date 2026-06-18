@@ -2447,6 +2447,12 @@ pub fn list_curation_candidates(
         })?;
     let mut stored = stored;
     if should_synthesize_mi_dedup_candidates(candidate_type.as_deref(), status.as_deref()) {
+        append_embedding_dedup_candidates(
+            &connection,
+            &prepared.workspace_id,
+            target_memory_id.as_deref(),
+            &mut stored,
+        )?;
         append_mi_dedup_candidates(
             &connection,
             &prepared.workspace_id,
@@ -3213,6 +3219,324 @@ fn append_mi_dedup_candidates(
         stored.push(proposal);
     }
     Ok(())
+}
+
+fn append_embedding_dedup_candidates(
+    connection: &DbConnection,
+    workspace_id: &str,
+    target_memory_id: Option<&str>,
+    stored: &mut Vec<StoredCurationCandidate>,
+) -> Result<(), DomainError> {
+    let memories = connection
+        .list_memories(workspace_id, None, false)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load memories for embedding dedup: {error}"),
+            repair: Some("ee memory list --json".to_owned()),
+        })?
+        .into_iter()
+        .take(MI_DEDUP_MAX_MEMORIES)
+        .collect::<Vec<_>>();
+    let memory_ids = memories
+        .iter()
+        .map(|memory| memory.id.as_str())
+        .collect::<Vec<_>>();
+    let links = connection
+        .list_memory_links_for_memories(&memory_ids, Some(MemoryLinkRelation::Related))
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load memory links for embedding dedup: {error}"),
+            repair: Some("ee memory link list <memory-id> --json".to_owned()),
+        })?;
+
+    let existing_ids = stored
+        .iter()
+        .map(|candidate| candidate.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut appended_count = 0_usize;
+    for proposal in embedding_dedup_proposals_from_links(workspace_id, &memories, &links) {
+        if existing_ids.contains(&proposal.id) {
+            continue;
+        }
+        if target_memory_id.is_some_and(|target| {
+            proposal.target_memory_id.as_deref() != Some(target)
+                && !proposal
+                    .source_id
+                    .as_deref()
+                    .unwrap_or_default()
+                    .split(',')
+                    .any(|id| id == target)
+        }) {
+            continue;
+        }
+        stored.push(proposal);
+        appended_count = appended_count.saturating_add(1);
+    }
+
+    tracing::debug!(
+        target: "ee::curate",
+        surface = "curate_dedupe",
+        proposal_source = "embedding_dedup",
+        workspace_id,
+        memory_count = memories.len(),
+        link_count = links.len(),
+        proposal_count = appended_count,
+        "synthesized embedding dedup curation candidates"
+    );
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct EmbeddingDedupLinkSignal {
+    link_id: String,
+    src_memory_id: String,
+    dst_memory_id: String,
+    left_memory_id: String,
+    right_memory_id: String,
+    cosine_similarity: f32,
+    cosine_floor: f32,
+    hamming_distance: u32,
+}
+
+fn embedding_dedup_proposals_from_links(
+    workspace_id: &str,
+    memories: &[StoredMemory],
+    links: &[StoredMemoryLink],
+) -> Vec<StoredCurationCandidate> {
+    let memory_by_id = memories
+        .iter()
+        .map(|memory| (memory.id.clone(), memory))
+        .collect::<BTreeMap<_, _>>();
+    let signals = links
+        .iter()
+        .filter_map(embedding_dedup_signal_from_link)
+        .filter(|signal| {
+            memory_by_id.contains_key(&signal.left_memory_id)
+                && memory_by_id.contains_key(&signal.right_memory_id)
+        })
+        .collect::<Vec<_>>();
+    let mut adjacency: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for signal in &signals {
+        adjacency
+            .entry(signal.left_memory_id.clone())
+            .or_default()
+            .insert(signal.right_memory_id.clone());
+        adjacency
+            .entry(signal.right_memory_id.clone())
+            .or_default()
+            .insert(signal.left_memory_id.clone());
+    }
+
+    let mut visited = BTreeSet::new();
+    let mut proposals = Vec::new();
+    for seed in adjacency.keys() {
+        if visited.contains(seed) {
+            continue;
+        }
+        let mut stack = vec![seed.clone()];
+        let mut member_ids = BTreeSet::new();
+        while let Some(memory_id) = stack.pop() {
+            if !visited.insert(memory_id.clone()) {
+                continue;
+            }
+            member_ids.insert(memory_id.clone());
+            if let Some(neighbors) = adjacency.get(&memory_id) {
+                for neighbor in neighbors.iter().rev() {
+                    if !visited.contains(neighbor) {
+                        stack.push(neighbor.clone());
+                    }
+                }
+            }
+        }
+        if member_ids.len() < 2 {
+            continue;
+        }
+        let cluster_signals = signals
+            .iter()
+            .filter(|signal| {
+                member_ids.contains(&signal.left_memory_id)
+                    && member_ids.contains(&signal.right_memory_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(candidate) = embedding_dedup_candidate_from_cluster(
+            workspace_id,
+            &member_ids,
+            &memory_by_id,
+            &cluster_signals,
+        ) {
+            proposals.push(candidate);
+        }
+    }
+
+    proposals.sort_by(|left, right| {
+        right
+            .confidence
+            .total_cmp(&left.confidence)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    proposals
+}
+
+fn embedding_dedup_candidate_from_cluster(
+    workspace_id: &str,
+    member_ids: &BTreeSet<String>,
+    memory_by_id: &BTreeMap<String, &StoredMemory>,
+    signals: &[EmbeddingDedupLinkSignal],
+) -> Option<StoredCurationCandidate> {
+    let best_signal = signals.iter().max_by(|left, right| {
+        left.cosine_similarity
+            .total_cmp(&right.cosine_similarity)
+            .then_with(|| right.hamming_distance.cmp(&left.hamming_distance))
+            .then_with(|| right.link_id.cmp(&left.link_id))
+    })?;
+    let target_memory_id = best_signal.dst_memory_id.clone();
+    let canonical_memory = memory_by_id.get(&target_memory_id)?;
+    let ids = member_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let member_csv = ids.join(",");
+    let id = deterministic_curate_id(&[
+        "embedding_dedup",
+        workspace_id,
+        CandidateType::ParaphraseDedupProposal.as_str(),
+        &member_csv,
+    ]);
+    let recommendation = embedding_dedup_recommendation(best_signal.cosine_similarity, ids.len());
+    let reason = format!(
+        "Embedding dedup proposal: cosine_similarity={:.3}, cosine_floor={:.3}, hamming_distance={}, recommendation={recommendation}, source_link={}; members={}.",
+        best_signal.cosine_similarity,
+        best_signal.cosine_floor,
+        best_signal.hamming_distance,
+        best_signal.link_id.as_str(),
+        ids.len()
+    );
+
+    Some(StoredCurationCandidate {
+        id,
+        workspace_id: workspace_id.to_owned(),
+        candidate_type: CandidateType::ParaphraseDedupProposal.as_str().to_owned(),
+        target_memory_id: Some(target_memory_id.clone()),
+        proposed_content: Some(canonical_memory.content.clone()),
+        proposed_confidence: Some(best_signal.cosine_similarity.clamp(0.0, 1.0)),
+        proposed_trust_class: Some("derived".to_owned()),
+        source_type: CandidateSource::RuleEngine.as_str().to_owned(),
+        source_id: Some(member_csv),
+        reason,
+        confidence: best_signal.cosine_similarity.clamp(0.0, 1.0),
+        status: CandidateStatus::Pending.as_str().to_owned(),
+        created_at: MI_DEDUP_CANDIDATE_CREATED_AT.to_owned(),
+        reviewed_at: None,
+        reviewed_by: None,
+        applied_at: None,
+        ttl_expires_at: None,
+        review_state: ReviewQueueState::New.as_str().to_owned(),
+        snoozed_until: None,
+        merged_into_candidate_id: None,
+        state_entered_at: Some(MI_DEDUP_CANDIDATE_CREATED_AT.to_owned()),
+        last_action_at: Some(MI_DEDUP_CANDIDATE_CREATED_AT.to_owned()),
+        ttl_policy_id: Some(
+            default_curation_ttl_policy_id_for_review_state(ReviewQueueState::New.as_str())
+                .to_owned(),
+        ),
+        derivation_source_refs_json: None,
+        derivation_metadata_json: Some(embedding_dedup_metadata_json(
+            &target_memory_id,
+            &ids,
+            signals,
+        )),
+    })
+}
+
+fn embedding_dedup_signal_from_link(link: &StoredMemoryLink) -> Option<EmbeddingDedupLinkSignal> {
+    if link.relation_enum() != Some(MemoryLinkRelation::Related)
+        || link.source_enum() != Some(MemoryLinkSource::Auto)
+    {
+        return None;
+    }
+    let metadata: serde_json::Value = serde_json::from_str(link.metadata_json.as_deref()?).ok()?;
+    if metadata.get("relationship").and_then(serde_json::Value::as_str)
+        != Some("embedding_reuse")
+    {
+        return None;
+    }
+    if metadata.get("schema").and_then(serde_json::Value::as_str)
+        != Some("ee.embed_dedup.link.v1")
+    {
+        return None;
+    }
+    let mut pair = [link.src_memory_id.clone(), link.dst_memory_id.clone()];
+    pair.sort();
+    Some(EmbeddingDedupLinkSignal {
+        link_id: link.id.clone(),
+        src_memory_id: link.src_memory_id.clone(),
+        dst_memory_id: link.dst_memory_id.clone(),
+        left_memory_id: pair[0].clone(),
+        right_memory_id: pair[1].clone(),
+        cosine_similarity: json_f32_field(&metadata, "cosineSimilarity")?,
+        cosine_floor: json_f32_field(&metadata, "cosineFloor")?,
+        hamming_distance: json_u32_field(&metadata, "hammingDistance")?,
+    })
+}
+
+fn embedding_dedup_metadata_json(
+    target_memory_id: &str,
+    member_ids: &[&str],
+    signals: &[EmbeddingDedupLinkSignal],
+) -> String {
+    let source_memory_ids = member_ids
+        .iter()
+        .filter(|id| *id != target_memory_id)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut ordered_signals = signals.to_vec();
+    ordered_signals.sort_by(|left, right| left.link_id.cmp(&right.link_id));
+    let pairwise_scores = ordered_signals
+        .iter()
+        .map(|signal| {
+            serde_json::json!({
+                "linkId": signal.link_id.as_str(),
+                "srcMemoryId": signal.src_memory_id.as_str(),
+                "dstMemoryId": signal.dst_memory_id.as_str(),
+                "leftMemoryId": signal.left_memory_id.as_str(),
+                "rightMemoryId": signal.right_memory_id.as_str(),
+                "cosineSimilarity": signal.cosine_similarity,
+                "cosineFloor": signal.cosine_floor,
+                "hammingDistance": signal.hamming_distance,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema": "ee.dedupe_candidates.v1",
+        "dedupeSource": "embedding",
+        "clusters": [{
+            "memberMemoryIds": member_ids,
+            "sourceLinkIds": ordered_signals.iter().map(|signal| signal.link_id.clone()).collect::<Vec<_>>(),
+        }],
+        "pairwiseScores": pairwise_scores,
+        "proposedMerges": [{
+            "targetMemoryId": target_memory_id,
+            "sourceMemoryIds": source_memory_ids,
+        }],
+    })
+    .to_string()
+}
+
+fn embedding_dedup_recommendation(cosine_similarity: f32, member_count: usize) -> &'static str {
+    if cosine_similarity >= 0.995 {
+        "suppress_duplicates"
+    } else if member_count > 2 || cosine_similarity >= 0.97 {
+        "merge"
+    } else {
+        "keep_canonical"
+    }
+}
+
+fn json_f32_field(value: &serde_json::Value, key: &str) -> Option<f32> {
+    let number = value.get(key)?.as_f64()?;
+    let value = number as f32;
+    value.is_finite().then_some(value)
+}
+
+fn json_u32_field(value: &serde_json::Value, key: &str) -> Option<u32> {
+    let number = value.get(key)?.as_u64()?;
+    u32::try_from(number).ok()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -12699,6 +13023,14 @@ fn proposed_kind_for_candidate_type(candidate_type: &str) -> Option<String> {
     }
 }
 
+fn curation_candidate_dedupe_source(stored: &StoredCurationCandidate) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(stored.derivation_metadata_json.as_deref()?)
+        .ok()?
+        .get("dedupeSource")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 fn proposal_source_for_candidate(stored: &StoredCurationCandidate) -> String {
     if source_contains_peer_evidence(stored.source_id.as_deref()) {
         "peer_evidence".to_owned()
@@ -12710,6 +13042,11 @@ fn proposal_source_for_candidate(stored: &StoredCurationCandidate) -> String {
         && stored.source_type == CandidateSource::FeedbackEvent.as_str()
     {
         "auto_propose_from_cluster".to_owned()
+    } else if stored.candidate_type == CandidateType::ParaphraseDedupProposal.as_str()
+        && stored.source_type == CandidateSource::RuleEngine.as_str()
+        && curation_candidate_dedupe_source(stored).as_deref() == Some("embedding")
+    {
+        "embedding_dedup".to_owned()
     } else if stored.candidate_type == CandidateType::ParaphraseDedupProposal.as_str()
         && stored.source_type == CandidateSource::RuleEngine.as_str()
     {
@@ -12732,6 +13069,7 @@ fn proposed_by_for_candidate(proposal_source: &str) -> String {
     match proposal_source {
         "auto_propose_from_cluster" => "auto_proposer:v1".to_owned(),
         "playbook_rule_extraction" => "rule_engine:v1".to_owned(),
+        "embedding_dedup" => "embedding_dedup:v1".to_owned(),
         "mutual_information_dedup" => "mi_dedup:v1".to_owned(),
         "session_review_proposal" => "review_session:v1".to_owned(),
         "peer_evidence" => "peer_evidence:v1".to_owned(),
@@ -12748,6 +13086,7 @@ fn effective_candidate_trust_class(
         let entries = peer_evidence_entries_from_source(stored.source_id.as_deref());
         Some(peer_evidence_trust_cap(&entries).to_owned())
     } else if proposal_source == "auto_propose_from_cluster"
+        || proposal_source == "embedding_dedup"
         || proposal_source == "mutual_information_dedup"
     {
         Some("derived".to_owned())
@@ -12974,7 +13313,11 @@ fn proposed_tags_for_candidate(
     } else if stored.candidate_type == CandidateType::ParaphraseDedupProposal.as_str() {
         tags.insert("dedup".to_owned());
         tags.insert("paraphrase".to_owned());
-        tags.insert("mutual-information".to_owned());
+        if curation_candidate_dedupe_source(stored).as_deref() == Some("embedding") {
+            tags.insert("embedding".to_owned());
+        } else {
+            tags.insert("mutual-information".to_owned());
+        }
     }
     if !member_memory_ids.is_empty() {
         tags.insert("cluster".to_owned());
@@ -16736,8 +17079,8 @@ mod tests {
             vec![memory_one.clone(), memory_two.clone()]
         );
         assert_eq!(
-            candidate.evidence_summary.member_memory_ids,
-            candidate.member_memory_ids
+            &candidate.evidence_summary.member_memory_ids,
+            &candidate.member_memory_ids
         );
         assert_eq!(candidate.evidence_summary.support_count, 2);
         assert_eq!(candidate.tombstoned_member_count, 2);
@@ -17510,6 +17853,209 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert!(member_sets.contains(&vec![memory_ids[0].clone(), memory_ids[1].clone()]));
         assert!(member_sets.contains(&vec![memory_ids[2].clone(), memory_ids[3].clone()]));
+        Ok(())
+    }
+
+    #[test]
+    fn list_curation_candidates_synthesizes_embedding_dedup_clusters_from_links() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_ids = [
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x8_201)).to_string(),
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x8_202)).to_string(),
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x8_203)).to_string(),
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x8_204)).to_string(),
+        ];
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("embedding-dedup-clusters".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for (memory_id, content) in [
+            (&memory_ids[0], "canonical alpha cedar remote proof"),
+            (&memory_ids[1], "bravo basalt semantic guard"),
+            (&memory_ids[2], "crimson delta ambient signal"),
+            (&memory_ids[3], "manual unrelated related edge"),
+        ] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.7,
+                        utility: 0.6,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        for (link_id, src, cosine, hamming) in [
+            (
+                "link_embeddingdedup000000000001",
+                memory_ids[1].as_str(),
+                0.988_f32,
+                4_u32,
+            ),
+            (
+                "link_embeddingdedup000000000002",
+                memory_ids[2].as_str(),
+                0.991_f32,
+                2_u32,
+            ),
+        ] {
+            connection
+                .insert_memory_link(
+                    link_id,
+                    &CreateMemoryLinkInput {
+                        src_memory_id: src.to_owned(),
+                        dst_memory_id: memory_ids[0].clone(),
+                        relation: MemoryLinkRelation::Related,
+                        weight: 1.0,
+                        confidence: cosine,
+                        directed: true,
+                        evidence_count: 2,
+                        last_reinforced_at: None,
+                        source: MemoryLinkSource::Auto,
+                        created_by: Some("ee remember".to_owned()),
+                        metadata_json: Some(
+                            serde_json::json!({
+                                "schema": "ee.embed_dedup.link.v1",
+                                "relationship": "embedding_reuse",
+                                "targetMemoryId": memory_ids[0].as_str(),
+                                "hammingDistance": hamming,
+                                "cosineSimilarity": cosine,
+                                "cosineFloor": 0.97,
+                                "decision": "reuse",
+                                "reason": "simhash_within_threshold_and_cosine_confirmed",
+                            })
+                            .to_string(),
+                        ),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .insert_memory_link(
+                "link_embeddingdedupmanual00000001",
+                &CreateMemoryLinkInput {
+                    src_memory_id: memory_ids[3].clone(),
+                    dst_memory_id: memory_ids[0].clone(),
+                    relation: MemoryLinkRelation::Related,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: true,
+                    evidence_count: 2,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Human,
+                    created_by: Some("human".to_owned()),
+                    metadata_json: Some(
+                        serde_json::json!({
+                            "schema": "ee.embed_dedup.link.v1",
+                            "relationship": "embedding_reuse",
+                            "hammingDistance": 0,
+                            "cosineSimilarity": 1.0,
+                            "cosineFloor": 0.97,
+                        })
+                        .to_string(),
+                    ),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_type: Some("dedup"),
+            status: Some("pending"),
+            target_memory_id: None,
+            limit: 10,
+            offset: 0,
+            sort: "confidence",
+            group_duplicates: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.total_count, 1);
+        assert_eq!(report.returned_count, 1);
+        let candidate = &report.candidates[0];
+        assert_eq!(candidate.candidate_type, "paraphrase_dedup_proposal");
+        assert_eq!(candidate.proposal_source, "embedding_dedup");
+        assert_eq!(candidate.audit.proposed_by, "embedding_dedup:v1");
+        assert_eq!(candidate.trust_class.as_deref(), Some("derived"));
+        assert_eq!(candidate.target_memory_id.as_deref(), Some(memory_ids[0].as_str()));
+        assert_eq!(
+            candidate.member_memory_ids,
+            vec![
+                memory_ids[0].clone(),
+                memory_ids[1].clone(),
+                memory_ids[2].clone()
+            ]
+        );
+        assert_eq!(
+            candidate.evidence_summary.member_memory_ids,
+            candidate.member_memory_ids
+        );
+        assert_eq!(candidate.evidence_summary.support_count, 3);
+        assert!(candidate.proposed_tags.contains(&"dedup".to_owned()));
+        assert!(candidate.proposed_tags.contains(&"embedding".to_owned()));
+        assert!(
+            !candidate
+                .proposed_tags
+                .contains(&"mutual-information".to_owned())
+        );
+        assert!(candidate.reason.contains("cosine_similarity=0.991"));
+        assert!(
+            candidate
+                .reason
+                .contains("source_link=link_embeddingdedup000000000002")
+        );
+
+        let target_filtered = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_type: Some("dedup"),
+            status: Some("pending"),
+            target_memory_id: Some(&memory_ids[1]),
+            limit: 10,
+            offset: 0,
+            sort: "confidence",
+            group_duplicates: false,
+        })
+        .map_err(|error| error.message())?;
+        let manual_only_filtered = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_type: Some("dedup"),
+            status: Some("pending"),
+            target_memory_id: Some(&memory_ids[3]),
+            limit: 10,
+            offset: 0,
+            sort: "confidence",
+            group_duplicates: false,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(target_filtered.returned_count, 1);
+        assert_eq!(manual_only_filtered.returned_count, 0);
         Ok(())
     }
 
