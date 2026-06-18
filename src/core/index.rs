@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -964,7 +964,7 @@ pub fn rebuild_index(
             .collect();
 
         let stack = default_embedder_stack();
-        ensure_active_embedding_registry_record(&db, &workspace_id, &stack)?;
+        let registry_stack = stack.clone();
 
         let build_result = build_index_sync(&staging_dir, stack, indexable_docs);
 
@@ -972,6 +972,7 @@ pub fn rebuild_index(
 
         match build_result {
             Ok(stats) => {
+                ensure_active_embedding_registry_record(&db, &workspace_id, &registry_stack)?;
                 let published_generation =
                     source_generation.unwrap_or_else(|| u64::from(documents_total));
                 write_index_metadata(&staging_dir, published_generation, documents_total)?;
@@ -1032,7 +1033,6 @@ pub fn reembed_index(
     let sessions = db.list_sessions(&workspace_id)?;
     let artifacts = db.list_artifacts(&workspace_id, None)?;
     let stack = default_embedder_stack();
-    ensure_active_embedding_registry_record(&db, &workspace_id, &stack)?;
 
     let memory_docs = memory_documents_with_anchors(&db, &memories)?;
     let session_docs: Vec<CanonicalSearchDocument> =
@@ -1128,11 +1128,13 @@ pub fn reembed_index(
             .map(|doc| doc.into_indexable())
             .collect();
 
+        let registry_stack = stack.clone();
         let build_result = build_index_sync(&staging_dir, stack, indexable_docs);
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         match build_result {
             Ok(stats) => {
+                ensure_active_embedding_registry_record(&db, &workspace_id, &registry_stack)?;
                 db.update_search_index_job_progress(&job_id, documents_total)?;
                 let published_generation =
                     source_generation.unwrap_or_else(|| u64::from(documents_total));
@@ -2774,9 +2776,16 @@ fn build_index_sync(
 }
 
 const EE_MODEL_CACHE_SUBDIR: &str = "models";
-const DEFAULT_MODEL2VEC_REVISION: &str = "a28f4eebecd4dc585034f605e52d414878a0417c";
+const EMBEDDING_REGISTRY_FINGERPRINT_SCHEMA: &str = "ee.embedding_registry_fingerprint.v1";
+static DEFAULT_SEARCH_EMBEDDER_STACK: OnceLock<EmbedderStack> = OnceLock::new();
 
 pub(crate) fn default_search_embedder_stack() -> EmbedderStack {
+    DEFAULT_SEARCH_EMBEDDER_STACK
+        .get_or_init(detect_default_search_embedder_stack)
+        .clone()
+}
+
+fn detect_default_search_embedder_stack() -> EmbedderStack {
     let model_root = default_embedder_model_root();
     match EmbedderStack::auto_detect_with(Some(&model_root)) {
         Ok(stack) => stack_with_hash_quality_fallback(stack),
@@ -2797,7 +2806,7 @@ fn default_embedder_stack() -> EmbedderStack {
 }
 
 fn stack_with_hash_quality_fallback(stack: EmbedderStack) -> EmbedderStack {
-    if stack.quality().is_some() {
+    if stack.quality().is_some() || stack.fast().is_semantic() {
         return stack;
     }
     let fast_embedder = stack.fast_arc();
@@ -2815,8 +2824,29 @@ fn hash_fallback_embedder_stack() -> EmbedderStack {
 
 fn default_embedder_model_root() -> PathBuf {
     process_ee_data_dir()
-        .unwrap_or_else(|| default_workspace_root(Path::new(".")))
+        .unwrap_or_else(stable_ee_data_dir_fallback)
         .join(EE_MODEL_CACHE_SUBDIR)
+}
+
+fn stable_ee_data_dir_fallback() -> PathBuf {
+    if cfg!(windows) {
+        if let Some(local_app_data) = non_empty_os_env("LOCALAPPDATA") {
+            return PathBuf::from(local_app_data).join("ee");
+        }
+        if let Some(user_profile) = non_empty_os_env("USERPROFILE") {
+            return PathBuf::from(user_profile)
+                .join("AppData")
+                .join("Local")
+                .join("ee");
+        }
+    } else if let Some(home) = non_empty_os_env("HOME") {
+        return PathBuf::from(home).join(".local").join("share").join("ee");
+    }
+    std::env::temp_dir().join("ee")
+}
+
+fn non_empty_os_env(name: &str) -> Option<OsString> {
+    std::env::var_os(name).filter(|value| !value.is_empty())
 }
 
 fn process_ee_data_dir() -> Option<PathBuf> {
@@ -2845,6 +2875,15 @@ fn ensure_active_embedding_registry_record(
         return Ok(());
     }
     let provider = provider_for_embedder(fast_embedder);
+    if !fast_embedder.is_ready() {
+        tracing::warn!(
+            target: "ee::index::embedder",
+            provider = provider.as_str(),
+            model = fast_embedder.id(),
+            "semantic embedder is not loaded yet; deferring Available registry write"
+        );
+        return Ok(());
+    }
     if db
         .find_model_registry_entry(
             workspace_id,
@@ -2857,20 +2896,36 @@ fn ensure_active_embedding_registry_record(
         return Ok(());
     }
 
+    let Some(input) = active_embedding_registry_input(workspace_id, fast_embedder)? else {
+        return Ok(());
+    };
+    db.insert_embedding_metadata_record(&generate_model_registry_id(), &input)?;
+    Ok(())
+}
+
+fn active_embedding_registry_input(
+    workspace_id: &str,
+    fast_embedder: &dyn crate::search::Embedder,
+) -> Result<Option<crate::db::CreateEmbeddingMetadataInput>, IndexRebuildError> {
+    if !fast_embedder.is_semantic() || !fast_embedder.is_ready() {
+        return Ok(None);
+    }
+
+    let provider = provider_for_embedder(fast_embedder);
     let dimension = u32::try_from(fast_embedder.dimension()).map_err(|_| {
         IndexRebuildError::Index(format!(
             "active embedder dimension {} exceeds model registry bounds",
             fast_embedder.dimension()
         ))
     })?;
+    let fingerprint = active_embedder_fingerprint(fast_embedder, provider);
     let mut metadata = EmbeddingMetadataRecord::new(dimension, ModelDistanceMetric::Cosine);
     metadata.pooling = EmbeddingPooling::ModelDefault;
     metadata.tokenizer = Some("tokenizer.json".to_owned());
-    metadata.model_revision =
-        (provider == ModelProvider::Model2Vec).then_some(DEFAULT_MODEL2VEC_REVISION.to_owned());
+    metadata.model_revision = Some(fingerprint.revision.clone());
     metadata.deterministic = true;
 
-    let input = crate::db::CreateEmbeddingMetadataInput {
+    Ok(Some(crate::db::CreateEmbeddingMetadataInput {
         workspace_id: workspace_id.to_owned(),
         provider,
         model_name: fast_embedder.id().to_owned(),
@@ -2883,12 +2938,130 @@ fn ensure_active_embedding_registry_record(
             provider = provider.as_str(),
             model = fast_embedder.id()
         )),
-        content_hash: None,
+        content_hash: Some(fingerprint.content_hash),
         metadata,
         last_checked_at: None,
-    };
-    db.insert_embedding_metadata_record(&generate_model_registry_id(), &input)?;
-    Ok(())
+    }))
+}
+
+struct ActiveEmbedderFingerprint {
+    revision: String,
+    content_hash: String,
+}
+
+fn active_embedder_fingerprint(
+    embedder: &dyn crate::search::Embedder,
+    provider: ModelProvider,
+) -> ActiveEmbedderFingerprint {
+    let manifest = manifest_for_embedder(embedder, provider);
+    let content_hash = active_embedder_content_hash(embedder, provider, manifest.as_ref());
+    let revision = manifest
+        .as_ref()
+        .map(|manifest| manifest.revision.trim())
+        .filter(|revision| !revision.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| derived_revision_from_content_hash(&content_hash));
+    ActiveEmbedderFingerprint {
+        revision,
+        content_hash,
+    }
+}
+
+fn active_embedder_content_hash(
+    embedder: &dyn crate::search::Embedder,
+    provider: ModelProvider,
+    manifest: Option<&frankensearch::embed::ModelManifest>,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hash_fingerprint_field(&mut hasher, "schema", EMBEDDING_REGISTRY_FINGERPRINT_SCHEMA);
+    hash_fingerprint_field(&mut hasher, "provider", provider.as_str());
+    hash_fingerprint_field(&mut hasher, "model_id", embedder.id());
+    hash_fingerprint_field(&mut hasher, "model_name", embedder.model_name());
+    hash_fingerprint_field(&mut hasher, "dimension", &embedder.dimension().to_string());
+    hash_fingerprint_field(&mut hasher, "category", &embedder.category().to_string());
+    hash_fingerprint_field(
+        &mut hasher,
+        "semantic",
+        if embedder.is_semantic() {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    hash_fingerprint_field(
+        &mut hasher,
+        "ready",
+        if embedder.is_ready() { "true" } else { "false" },
+    );
+
+    if let Some(manifest) = manifest {
+        hash_fingerprint_field(&mut hasher, "manifest_id", &manifest.id);
+        hash_fingerprint_field(&mut hasher, "manifest_version", &manifest.version);
+        hash_fingerprint_field(&mut hasher, "manifest_repo", &manifest.repo);
+        hash_fingerprint_field(&mut hasher, "manifest_revision", &manifest.revision);
+        hash_fingerprint_field(&mut hasher, "manifest_license", &manifest.license);
+        if let Some(dimension) = manifest.dimension {
+            hash_fingerprint_field(&mut hasher, "manifest_dimension", &dimension.to_string());
+        }
+        let mut files = manifest.files.clone();
+        files.sort_by(|left, right| left.name.cmp(&right.name));
+        for file in files {
+            hash_fingerprint_field(&mut hasher, "manifest_file_name", &file.name);
+            hash_fingerprint_field(&mut hasher, "manifest_file_sha256", &file.sha256);
+            hash_fingerprint_field(&mut hasher, "manifest_file_size", &file.size.to_string());
+        }
+    }
+
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn hash_fingerprint_field(hasher: &mut blake3::Hasher, name: &str, value: &str) {
+    hasher.update(name.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(value.as_bytes());
+    hasher.update(&[0xff]);
+}
+
+fn derived_revision_from_content_hash(content_hash: &str) -> String {
+    let digest = content_hash.strip_prefix("blake3:").unwrap_or(content_hash);
+    let prefix: String = digest.chars().take(16).collect();
+    format!("derived-blake3-{prefix}")
+}
+
+fn manifest_for_embedder(
+    embedder: &dyn crate::search::Embedder,
+    provider: ModelProvider,
+) -> Option<frankensearch::embed::ModelManifest> {
+    match provider {
+        ModelProvider::Model2Vec | ModelProvider::FastEmbed => {
+            let normalized_id = normalized_embedder_manifest_key(embedder.id());
+            frankensearch::embed::ModelManifest::builtin_catalog()
+                .models
+                .into_iter()
+                .find(|manifest| {
+                    manifest.dimension == u32::try_from(embedder.dimension()).ok()
+                        && (normalized_embedder_manifest_key(&manifest.id) == normalized_id
+                            || normalized_embedder_manifest_key(&manifest.repo)
+                                .contains(&normalized_id)
+                            || manifest
+                                .display_name
+                                .as_deref()
+                                .is_some_and(|display_name| {
+                                    normalized_embedder_manifest_key(display_name)
+                                        .contains(&normalized_id)
+                                }))
+                })
+        }
+        _ => None,
+    }
+}
+
+fn normalized_embedder_manifest_key(input: &str) -> String {
+    input
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn provider_for_embedder(embedder: &dyn crate::search::Embedder) -> ModelProvider {
@@ -4243,6 +4416,7 @@ mod tests {
     struct TestSemanticEmbedder {
         id: String,
         dimension: usize,
+        ready: bool,
     }
 
     impl TestSemanticEmbedder {
@@ -4250,6 +4424,15 @@ mod tests {
             Self {
                 id: id.to_owned(),
                 dimension,
+                ready: true,
+            }
+        }
+
+        fn not_ready(id: &str, dimension: usize) -> Self {
+            Self {
+                id: id.to_owned(),
+                dimension,
+                ready: false,
             }
         }
     }
@@ -4273,6 +4456,10 @@ mod tests {
 
         fn model_name(&self) -> &str {
             &self.id
+        }
+
+        fn is_ready(&self) -> bool {
+            self.ready
         }
 
         fn is_semantic(&self) -> bool {
@@ -4336,6 +4523,134 @@ mod tests {
     }
 
     #[test]
+    fn semantic_stack_remains_fast_only_without_hash_quality_graft() -> TestResult {
+        let stack = stack_with_hash_quality_fallback(EmbedderStack::from_parts(
+            Arc::new(TestSemanticEmbedder::new("potion-multilingual-128M", 256))
+                as Arc<dyn crate::search::Embedder>,
+            None,
+        ));
+
+        ensure(stack.fast().is_semantic(), "fast tier should stay semantic")?;
+        ensure(
+            stack.quality().is_none(),
+            "semantic stack must not graft a hash quality tier",
+        )
+    }
+
+    #[test]
+    fn default_search_embedder_stack_reuses_process_cached_arcs() -> TestResult {
+        let first = default_search_embedder_stack();
+        let second = default_search_embedder_stack();
+
+        ensure(
+            Arc::ptr_eq(&first.fast_arc(), &second.fast_arc()),
+            "default search embedder stack should reuse the same fast Arc within one process",
+        )
+    }
+
+    #[test]
+    fn stable_embedder_data_dir_fallback_is_not_cwd_relative() -> TestResult {
+        let fallback = stable_ee_data_dir_fallback();
+        let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+
+        ensure(
+            fallback.is_absolute(),
+            "fallback data dir should be absolute",
+        )?;
+        ensure(
+            !fallback.starts_with(&cwd),
+            "fallback data dir must not depend on the process cwd",
+        )
+    }
+
+    #[test]
+    fn active_registry_input_requires_ready_semantic_embedder() -> TestResult {
+        let stack = EmbedderStack::from_parts(
+            Arc::new(TestSemanticEmbedder::not_ready("lazy-potion-test", 256))
+                as Arc<dyn crate::search::Embedder>,
+            None,
+        );
+
+        let input =
+            active_embedding_registry_input("wsp_readygate000000000000000000", stack.fast())
+                .map_err(|error| error.to_string())?;
+        ensure(
+            input.is_none(),
+            "unloaded semantic embedders must not produce Available registry input",
+        )
+    }
+
+    #[test]
+    fn unavailable_semantic_embedder_does_not_create_available_registry_row() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_lazyfail000000000000000000";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-lazy-fail-test".to_owned(),
+                    name: Some("lazy fail test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let stack = EmbedderStack::from_parts(
+            Arc::new(TestSemanticEmbedder::not_ready("lazy-potion-test", 256))
+                as Arc<dyn crate::search::Embedder>,
+            None,
+        );
+
+        ensure_active_embedding_registry_record(&connection, workspace_id, &stack)
+            .map_err(|error| error.to_string())?;
+        let records = connection
+            .list_embedding_metadata_records(workspace_id)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            records.is_empty(),
+            "lazy-load failure must not leave an Available registry row",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn active_registry_input_records_derived_revision_and_content_hash() -> TestResult {
+        let stack = EmbedderStack::from_parts(
+            Arc::new(TestSemanticEmbedder::new("fixture-semantic-model", 256))
+                as Arc<dyn crate::search::Embedder>,
+            None,
+        );
+
+        let input = active_embedding_registry_input("wsp_hash000000000000000000000", stack.fast())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "ready semantic embedder should produce registry input".to_owned())?;
+        let content_hash = input
+            .content_hash
+            .as_deref()
+            .ok_or_else(|| "registry content hash should be present".to_owned())?;
+        let version = input
+            .version
+            .as_deref()
+            .ok_or_else(|| "registry version should be present".to_owned())?;
+
+        ensure(
+            input.status == ModelRegistryStatus::Available,
+            "ready semantic embedder should be Available",
+        )?;
+        ensure(
+            content_hash.starts_with("blake3:") && content_hash.len() == "blake3:".len() + 64,
+            "content hash should be a blake3 digest",
+        )?;
+        ensure(
+            Some(version) == input.metadata.model_revision.as_deref(),
+            "registry version and metadata model_revision should match",
+        )?;
+        ensure(
+            version.starts_with("derived-blake3-"),
+            "non-manifest fixtures should derive revision from content hash",
+        )
+    }
+
+    #[test]
     fn reembed_summary_reflects_registered_semantic_fast_tier() -> TestResult {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
@@ -4371,8 +4686,8 @@ mod tests {
             "summary should use the semantic fast model id",
         )?;
         ensure(
-            summary.quality_model_id == Some(HashEmbedder::default_384().id().to_owned()),
-            "summary should retain hash quality fallback metadata",
+            summary.quality_model_id.is_none(),
+            "semantic fast-only stack should not report a hash quality model",
         )?;
         ensure(
             summary.registered_model_count == 1 && summary.available_model_count == 1,
@@ -5070,6 +5385,13 @@ mod tests {
             .list_search_index_jobs("wsp_01234567890123456789012345", None)
             .map_err(|e| e.to_string())?;
         ensure(jobs.is_empty(), "dry-run must not queue search index jobs")?;
+        let embedding_records = connection
+            .list_embedding_metadata_records("wsp_01234567890123456789012345")
+            .map_err(|e| e.to_string())?;
+        ensure(
+            embedding_records.is_empty(),
+            "dry-run must not mutate the embedding model registry",
+        )?;
         connection.close().map_err(|e| e.to_string())
     }
 
