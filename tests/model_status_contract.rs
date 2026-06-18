@@ -528,7 +528,7 @@ fn model_list_returns_entries_in_stable_order() -> TestResult {
         "second entry should be model2vec provider",
     )?;
     ensure(
-        report.entries[2].model_id == BUNDLED_EMBEDDING_MODEL_ID,
+        report.entries[2].model_name == BUNDLED_EMBEDDING_MODEL_ID,
         "bundled model should be auto-declared",
     )?;
     ensure(report.degradations.is_empty(), "no degradations expected")?;
