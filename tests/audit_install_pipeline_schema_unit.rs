@@ -458,6 +458,13 @@ fn release_workflow_inventory_present() -> TestResult {
     )?;
     ensure(
         workflow
+            .get("smoke_requires_semantic_smoke")
+            .and_then(Value::as_bool)
+            == Some(true),
+        "audit: release smoke install does not require semantic model readiness",
+    )?;
+    ensure(
+        workflow
             .get("release_notes_use_release_assets")
             .and_then(Value::as_bool)
             == Some(true),

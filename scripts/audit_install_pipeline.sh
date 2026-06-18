@@ -313,6 +313,12 @@ release_workflow_assets() {
             echo '  "smoke_uses_release_installer_asset": false'
         fi
         echo ','
+        if [ "$(grep -cF 'EE_INSTALL_SEMANTIC_SMOKE=require' "$yml" 2>/dev/null || true)" -ge 2 ]; then
+            echo '  "smoke_requires_semantic_smoke": true'
+        else
+            echo '  "smoke_requires_semantic_smoke": false'
+        fi
+        echo ','
         if grep -qF 'releases/download/%s/install.sh' "$yml" 2>/dev/null \
             && grep -qF 'releases/download/%s/install.ps1' "$yml" 2>/dev/null; then
             echo '  "release_notes_use_release_assets": true'
