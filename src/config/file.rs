@@ -13,8 +13,8 @@ use regex_lite::Regex;
 use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::models::{
-    RedactionLevel, TaskLens, TaskLensInput, TaskLensOverlay, TrustClass,
-    MAX_WORKSPACE_TASK_LENSES, TASK_LENS_VERSION,
+    MAX_WORKSPACE_TASK_LENSES, RedactionLevel, TASK_LENS_VERSION, TaskLens, TaskLensInput,
+    TaskLensOverlay, TrustClass,
 };
 
 use super::path::{PathExpander, PathExpansionError};
@@ -53,6 +53,7 @@ fn normalized_config_enum_token(input: &str) -> String {
 pub struct ConfigFile {
     pub storage: StorageConfig,
     pub runtime: RuntimeConfig,
+    pub write: WriteConfig,
     pub cass: CassConfig,
     pub search: SearchConfig,
     pub pack: PackConfig,
@@ -112,6 +113,7 @@ impl ConfigFile {
         Ok(Self {
             storage: StorageConfig::parse(&document, expander)?,
             runtime: RuntimeConfig::parse(&document)?,
+            write: WriteConfig::parse(&document)?,
             cass: CassConfig::parse(&document)?,
             search: SearchConfig::parse(&document)?,
             pack: PackConfig::parse(&document)?,
@@ -197,6 +199,25 @@ impl RuntimeConfig {
             daemon: optional_bool(document, "runtime", "daemon")?,
             job_budget_ms: optional_u64(document, "runtime", "job_budget_ms")?,
             import_batch_size: optional_u64(document, "runtime", "import_batch_size")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WriteConfig {
+    pub group_commit_enabled: Option<bool>,
+    pub batch_window_ms: Option<u64>,
+    pub max_batch_size: Option<u64>,
+    pub max_inflight_bytes: Option<u64>,
+}
+
+impl WriteConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            group_commit_enabled: optional_bool(document, "write", "group_commit_enabled")?,
+            batch_window_ms: optional_u64(document, "write", "batch_window_ms")?,
+            max_batch_size: optional_u64(document, "write", "max_batch_size")?,
+            max_inflight_bytes: optional_u64(document, "write", "max_inflight_bytes")?,
         })
     }
 }
@@ -2388,8 +2409,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        optional_string_array, ConfigFile, ConfigParseError, MeshCommandMode, MeshLane,
-        MeshLaneDecision, MeshRedactionDecision, MeshTrustLane, PathExpander, SearchSpeed,
+        ConfigFile, ConfigParseError, MeshCommandMode, MeshLane, MeshLaneDecision,
+        MeshRedactionDecision, MeshTrustLane, PathExpander, SearchSpeed, optional_string_array,
     };
     use crate::models::{RedactionLevel, TrustClass};
 
@@ -2440,6 +2461,12 @@ pin_snapshot = true
 daemon = false
 job_budget_ms = 5000
 import_batch_size = 200
+
+[write]
+group_commit_enabled = false
+batch_window_ms = 2
+max_batch_size = 64
+max_inflight_bytes = 4194304
 
 [cass]
 enabled = true
@@ -2654,6 +2681,26 @@ prompt_injection_guard = true
             "read pool snapshot pinning",
         )?;
         ensure_equal(&config.runtime.job_budget_ms, &Some(5000), "job budget")?;
+        ensure_equal(
+            &config.write.group_commit_enabled,
+            &Some(false),
+            "write group commit enabled",
+        )?;
+        ensure_equal(
+            &config.write.batch_window_ms,
+            &Some(2),
+            "write group commit batch window",
+        )?;
+        ensure_equal(
+            &config.write.max_batch_size,
+            &Some(64),
+            "write group commit max batch size",
+        )?;
+        ensure_equal(
+            &config.write.max_inflight_bytes,
+            &Some(4_194_304),
+            "write group commit max inflight bytes",
+        )?;
         ensure_equal(&config.cass.binary.as_deref(), &Some("cass"), "cass binary")?;
         ensure_equal(
             &config.search.default_speed,
@@ -3028,6 +3075,26 @@ prompt_injection_guard = true
             "read pool pin snapshot",
         )?;
         ensure_equal(&config.runtime.daemon, &None, "runtime daemon")?;
+        ensure_equal(
+            &config.write.group_commit_enabled,
+            &None,
+            "write group commit enabled",
+        )?;
+        ensure_equal(
+            &config.write.batch_window_ms,
+            &None,
+            "write group commit batch window",
+        )?;
+        ensure_equal(
+            &config.write.max_batch_size,
+            &None,
+            "write group commit max batch size",
+        )?;
+        ensure_equal(
+            &config.write.max_inflight_bytes,
+            &None,
+            "write group commit max inflight bytes",
+        )?;
         ensure_equal(&config.search.default_speed, &None, "search default speed")?;
         ensure_equal(
             &config.search.lexical_ram_tier.enabled,

@@ -55,6 +55,7 @@ use serde::Serialize;
 
 use super::duration_millis_saturating;
 
+use crate::config::WriteConfig;
 use crate::models::DomainError;
 use crate::search::HashEmbedder;
 
@@ -147,10 +148,13 @@ pub const DEFAULT_WRITE_STREAM_OBSERVATION_CAPACITY: usize = 4_096;
 pub const DEFAULT_WRITE_HOT_PATH_V2_QUEUE_CAPACITY: usize = DEFAULT_SPOOL_MAX_PENDING;
 
 /// Default maximum rows coalesced into one WAL group commit.
-pub const DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_ROWS: usize = 256;
+pub const DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_ROWS: usize = 64;
 
 /// Default maximum group-commit dwell time in microseconds.
-pub const DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_US: u64 = 1_000;
+pub const DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_US: u64 = 2_000;
+
+/// Default pending payload byte ceiling for write-hot-path group commit.
+pub const DEFAULT_WRITE_HOT_PATH_V2_MAX_INFLIGHT_BYTES: usize = DEFAULT_SPOOL_MAX_PENDING_BYTES;
 
 /// Default shard count for reader-visible RCU snapshots.
 pub const DEFAULT_WRITE_HOT_PATH_V2_SNAPSHOT_SHARDS: usize = 16;
@@ -1783,6 +1787,8 @@ pub struct WriteHotPathConfig {
     pub group_commit_max_rows: usize,
     /// Maximum group-commit dwell time in microseconds.
     pub group_commit_max_us: u64,
+    /// Maximum pending payload bytes admitted to group-commit intake.
+    pub max_inflight_bytes: usize,
     /// Number of independently published reader snapshot shards.
     pub snapshot_shards: usize,
 }
@@ -1794,6 +1800,7 @@ impl Default for WriteHotPathConfig {
             queue_capacity: DEFAULT_WRITE_HOT_PATH_V2_QUEUE_CAPACITY,
             group_commit_max_rows: DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_ROWS,
             group_commit_max_us: DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_US,
+            max_inflight_bytes: DEFAULT_WRITE_HOT_PATH_V2_MAX_INFLIGHT_BYTES,
             snapshot_shards: DEFAULT_WRITE_HOT_PATH_V2_SNAPSHOT_SHARDS,
         }
     }
@@ -1813,20 +1820,56 @@ impl WriteHotPathConfig {
             queue_capacity,
             group_commit_max_rows,
             group_commit_max_us,
+            max_inflight_bytes: DEFAULT_WRITE_HOT_PATH_V2_MAX_INFLIGHT_BYTES,
             snapshot_shards,
+        }
+    }
+
+    /// Resolve the merged `[write]` config into hot-path limits.
+    ///
+    /// Invalid zero or overflowing bounds disable group commit and preserve
+    /// the existing per-write path even when the master switch requested it.
+    #[must_use]
+    pub fn from_write_config(config: &WriteConfig) -> Self {
+        let batch_window_us = config
+            .batch_window_ms
+            .and_then(|value| value.checked_mul(1_000))
+            .filter(|value| *value > 0);
+        let max_batch_size = nonzero_usize(config.max_batch_size);
+        let max_inflight_bytes = nonzero_usize(config.max_inflight_bytes);
+        let enabled = config.group_commit_enabled.unwrap_or(false)
+            && batch_window_us.is_some()
+            && max_batch_size.is_some()
+            && max_inflight_bytes.is_some();
+
+        Self {
+            enabled,
+            queue_capacity: DEFAULT_WRITE_HOT_PATH_V2_QUEUE_CAPACITY,
+            group_commit_max_rows: max_batch_size
+                .unwrap_or(DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_ROWS),
+            group_commit_max_us: batch_window_us
+                .unwrap_or(DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_US),
+            max_inflight_bytes: max_inflight_bytes
+                .unwrap_or(DEFAULT_WRITE_HOT_PATH_V2_MAX_INFLIGHT_BYTES),
+            snapshot_shards: DEFAULT_WRITE_HOT_PATH_V2_SNAPSHOT_SHARDS,
         }
     }
 
     /// Translate the group-commit row budget into the existing spool model.
     #[must_use]
     pub fn spool_config(&self) -> WriteSpoolConfig {
+        let max_queue_age_ms = self.group_commit_max_us.saturating_add(999) / 1_000;
         WriteSpoolConfig::new(
             self.queue_capacity.max(1),
             self.group_commit_max_rows.max(1),
-            DEFAULT_SPOOL_MAX_PENDING_BYTES,
-            DEFAULT_SPOOL_QUEUE_TIMEOUT_MS,
+            self.max_inflight_bytes.max(1),
+            max_queue_age_ms.max(1),
         )
     }
+}
+
+fn nonzero_usize(value: Option<u64>) -> Option<usize> {
+    usize::try_from(value?).ok().filter(|value| *value > 0)
 }
 
 /// One accepted producer item with a deterministic global sequence.
@@ -3618,6 +3661,10 @@ mod tests {
             DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_US
         );
         assert_eq!(
+            default_config.max_inflight_bytes,
+            DEFAULT_WRITE_HOT_PATH_V2_MAX_INFLIGHT_BYTES
+        );
+        assert_eq!(
             default_config.snapshot_shards,
             DEFAULT_WRITE_HOT_PATH_V2_SNAPSHOT_SHARDS
         );
@@ -3627,6 +3674,41 @@ mod tests {
         let spool_config = enabled.spool_config();
         assert_eq!(spool_config.max_pending, 4);
         assert_eq!(spool_config.max_batch_size, 7);
+        assert_eq!(
+            spool_config.max_pending_bytes,
+            DEFAULT_WRITE_HOT_PATH_V2_MAX_INFLIGHT_BYTES
+        );
+        assert_eq!(spool_config.max_queue_age_ms, 1);
+    }
+
+    #[test]
+    fn write_hot_path_config_resolves_write_config_and_fails_safe() {
+        let resolved = WriteHotPathConfig::from_write_config(&WriteConfig {
+            group_commit_enabled: Some(true),
+            batch_window_ms: Some(2),
+            max_batch_size: Some(64),
+            max_inflight_bytes: Some(1_048_576),
+        });
+        assert!(resolved.enabled);
+        assert_eq!(resolved.group_commit_max_rows, 64);
+        assert_eq!(resolved.group_commit_max_us, 2_000);
+        assert_eq!(resolved.max_inflight_bytes, 1_048_576);
+        let spool_config = resolved.spool_config();
+        assert_eq!(spool_config.max_batch_size, 64);
+        assert_eq!(spool_config.max_pending_bytes, 1_048_576);
+        assert_eq!(spool_config.max_queue_age_ms, 2);
+
+        let invalid = WriteHotPathConfig::from_write_config(&WriteConfig {
+            group_commit_enabled: Some(true),
+            batch_window_ms: Some(0),
+            max_batch_size: Some(64),
+            max_inflight_bytes: Some(1_048_576),
+        });
+        assert!(!invalid.enabled);
+        assert_eq!(
+            invalid.group_commit_max_us,
+            DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_US
+        );
     }
 
     #[test]

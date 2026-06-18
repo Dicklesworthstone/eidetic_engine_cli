@@ -285,6 +285,14 @@ pub enum EnvVar {
     WorkspaceHygieneScratchPatterns,
     /// `EE_WAL_CHECKPOINT_BYTES_THRESHOLD`
     WalCheckpointBytesThreshold,
+    /// `EE_WRITE_GROUP_COMMIT_ENABLED`
+    WriteGroupCommitEnabled,
+    /// `EE_WRITE_GROUP_COMMIT_BATCH_WINDOW_MS`
+    WriteGroupCommitBatchWindowMs,
+    /// `EE_WRITE_GROUP_COMMIT_MAX_BATCH_SIZE`
+    WriteGroupCommitMaxBatchSize,
+    /// `EE_WRITE_GROUP_COMMIT_MAX_INFLIGHT_BYTES`
+    WriteGroupCommitMaxInflightBytes,
     /// `EE_WORKSPACE`
     Workspace,
     /// `EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S`
@@ -408,6 +416,10 @@ impl EnvVar {
             Self::WorkspaceHygieneLocalMachinePatterns,
             Self::WorkspaceHygieneScratchPatterns,
             Self::WalCheckpointBytesThreshold,
+            Self::WriteGroupCommitEnabled,
+            Self::WriteGroupCommitBatchWindowMs,
+            Self::WriteGroupCommitMaxBatchSize,
+            Self::WriteGroupCommitMaxInflightBytes,
             Self::Workspace,
             Self::WorkspaceCloseDrainTimeoutSeconds,
             Self::WorkspaceRegistry,
@@ -534,6 +546,10 @@ impl EnvVar {
             }
             Self::WorkspaceHygieneScratchPatterns => "EE_WORKSPACE_HYGIENE_SCRATCH_PATTERNS",
             Self::WalCheckpointBytesThreshold => "EE_WAL_CHECKPOINT_BYTES_THRESHOLD",
+            Self::WriteGroupCommitEnabled => "EE_WRITE_GROUP_COMMIT_ENABLED",
+            Self::WriteGroupCommitBatchWindowMs => "EE_WRITE_GROUP_COMMIT_BATCH_WINDOW_MS",
+            Self::WriteGroupCommitMaxBatchSize => "EE_WRITE_GROUP_COMMIT_MAX_BATCH_SIZE",
+            Self::WriteGroupCommitMaxInflightBytes => "EE_WRITE_GROUP_COMMIT_MAX_INFLIGHT_BYTES",
             Self::Workspace => "EE_WORKSPACE",
             Self::WorkspaceCloseDrainTimeoutSeconds => "EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S",
             Self::WorkspaceRegistry => "EE_WORKSPACE_REGISTRY",
@@ -566,6 +582,18 @@ impl EnvVar {
             }
             Self::WalCheckpointBytesThreshold => {
                 "Override the WAL checkpoint warning threshold in bytes."
+            }
+            Self::WriteGroupCommitEnabled => {
+                "Enable bounded group-commit coalescing for durable writes."
+            }
+            Self::WriteGroupCommitBatchWindowMs => {
+                "Override the maximum group-commit batch dwell time in milliseconds."
+            }
+            Self::WriteGroupCommitMaxBatchSize => {
+                "Override the maximum durable writes coalesced into one group commit."
+            }
+            Self::WriteGroupCommitMaxInflightBytes => {
+                "Override the pending payload byte ceiling for group-commit intake."
             }
             Self::CassBinary => "Override the trusted cass import binary path.",
             Self::CurationAutoPromoteConfidenceFloor => {
@@ -854,6 +882,10 @@ impl EnvVar {
             Self::ReadPoolAcquireTimeoutMs => Some("5000"),
             Self::ReadPoolMaxPinSeconds => Some("30"),
             Self::WalCheckpointBytesThreshold => Some("67108864"),
+            Self::WriteGroupCommitEnabled => Some("false"),
+            Self::WriteGroupCommitBatchWindowMs => Some("2"),
+            Self::WriteGroupCommitMaxBatchSize => Some("64"),
+            Self::WriteGroupCommitMaxInflightBytes => Some("4194304"),
             Self::WorkspaceCloseDrainTimeoutSeconds => Some("5"),
             Self::IndexPublishLockRetryAttempts => Some("200"),
             Self::CurationAutoPromoteConfidenceFloor => Some("0.80"),
@@ -987,6 +1019,10 @@ impl EnvVar {
             | Self::ReadPoolMaxPinSeconds
             | Self::ReadPoolSize
             | Self::WalCheckpointBytesThreshold
+            | Self::WriteGroupCommitEnabled
+            | Self::WriteGroupCommitBatchWindowMs
+            | Self::WriteGroupCommitMaxBatchSize
+            | Self::WriteGroupCommitMaxInflightBytes
             | Self::WorkspaceCloseDrainTimeoutSeconds
             | Self::DisableAdaptive
             | Self::DisableRememberSearchNeighbors

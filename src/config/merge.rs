@@ -25,7 +25,7 @@ use super::file::{
     PackL2CacheConfig, PolicyConfig, PrimerConfig, PrivacyConfig, ReadPoolConfig, RedactionConfig,
     RedactionDefaultsConfig, RuntimeConfig, SearchConfig, SearchLexicalRamTierConfig,
     SearchRerankMode, SearchSpeed, SecretDetectorConfig, StorageConfig, SwarmAdaptiveConfig,
-    SwarmConfig, TaskLensConfig, TrustConfig,
+    SwarmConfig, TaskLensConfig, TrustConfig, WriteConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -42,6 +42,10 @@ pub const STORAGE_READ_POOL_PIN_SNAPSHOT_KEY: &str = "storage.read_pool.pin_snap
 pub const RUNTIME_DAEMON_KEY: &str = "runtime.daemon";
 pub const RUNTIME_JOB_BUDGET_MS_KEY: &str = "runtime.job_budget_ms";
 pub const RUNTIME_IMPORT_BATCH_SIZE_KEY: &str = "runtime.import_batch_size";
+pub const WRITE_GROUP_COMMIT_ENABLED_KEY: &str = "write.group_commit_enabled";
+pub const WRITE_BATCH_WINDOW_MS_KEY: &str = "write.batch_window_ms";
+pub const WRITE_MAX_BATCH_SIZE_KEY: &str = "write.max_batch_size";
+pub const WRITE_MAX_INFLIGHT_BYTES_KEY: &str = "write.max_inflight_bytes";
 pub const CASS_ENABLED_KEY: &str = "cass.enabled";
 pub const CASS_BINARY_KEY: &str = "cass.binary";
 pub const CASS_SINCE_KEY: &str = "cass.since";
@@ -297,6 +301,36 @@ impl MergedConfig {
                 RUNTIME_IMPORT_BATCH_SIZE_KEY,
                 batch.to_string(),
                 self.source(RUNTIME_IMPORT_BATCH_SIZE_KEY),
+            ));
+        }
+
+        // Write section
+        if let Some(enabled) = self.values.write.group_commit_enabled {
+            entries.push(ConfigShowEntry::new(
+                WRITE_GROUP_COMMIT_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(WRITE_GROUP_COMMIT_ENABLED_KEY),
+            ));
+        }
+        if let Some(window_ms) = self.values.write.batch_window_ms {
+            entries.push(ConfigShowEntry::new(
+                WRITE_BATCH_WINDOW_MS_KEY,
+                window_ms.to_string(),
+                self.source(WRITE_BATCH_WINDOW_MS_KEY),
+            ));
+        }
+        if let Some(max_batch_size) = self.values.write.max_batch_size {
+            entries.push(ConfigShowEntry::new(
+                WRITE_MAX_BATCH_SIZE_KEY,
+                max_batch_size.to_string(),
+                self.source(WRITE_MAX_BATCH_SIZE_KEY),
+            ));
+        }
+        if let Some(max_inflight_bytes) = self.values.write.max_inflight_bytes {
+            entries.push(ConfigShowEntry::new(
+                WRITE_MAX_INFLIGHT_BYTES_KEY,
+                max_inflight_bytes.to_string(),
+                self.source(WRITE_MAX_INFLIGHT_BYTES_KEY),
             ));
         }
 
@@ -1033,6 +1067,12 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             job_budget_ms: Some(5000),
             import_batch_size: Some(200),
         },
+        write: WriteConfig {
+            group_commit_enabled: Some(false),
+            batch_window_ms: Some(2),
+            max_batch_size: Some(64),
+            max_inflight_bytes: Some(4_194_304),
+        },
         cass: CassConfig {
             enabled: Some(true),
             binary: Some("cass".to_string()),
@@ -1252,6 +1292,18 @@ pub fn config_from_env(
             },
         },
         runtime: RuntimeConfig::default(),
+        write: WriteConfig {
+            group_commit_enabled: optional_env_bool_flag(
+                env,
+                EnvVar::WriteGroupCommitEnabled.name(),
+            )?,
+            batch_window_ms: optional_env_u64(env, EnvVar::WriteGroupCommitBatchWindowMs.name())?,
+            max_batch_size: optional_env_u64(env, EnvVar::WriteGroupCommitMaxBatchSize.name())?,
+            max_inflight_bytes: optional_env_u64(
+                env,
+                EnvVar::WriteGroupCommitMaxInflightBytes.name(),
+            )?,
+        },
         cass: CassConfig::default(),
         search: SearchConfig {
             query_miss_retention_days: optional_env_u64(
@@ -1528,6 +1580,44 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.runtime.import_batch_size,
                 &layers.user.runtime.import_batch_size,
                 &layers.defaults.runtime.import_batch_size,
+            ),
+        },
+        write: WriteConfig {
+            group_commit_enabled: pick_field(
+                &mut sources,
+                WRITE_GROUP_COMMIT_ENABLED_KEY,
+                &layers.cli.write.group_commit_enabled,
+                &layers.environment.write.group_commit_enabled,
+                &layers.project.write.group_commit_enabled,
+                &layers.user.write.group_commit_enabled,
+                &layers.defaults.write.group_commit_enabled,
+            ),
+            batch_window_ms: pick_field(
+                &mut sources,
+                WRITE_BATCH_WINDOW_MS_KEY,
+                &layers.cli.write.batch_window_ms,
+                &layers.environment.write.batch_window_ms,
+                &layers.project.write.batch_window_ms,
+                &layers.user.write.batch_window_ms,
+                &layers.defaults.write.batch_window_ms,
+            ),
+            max_batch_size: pick_field(
+                &mut sources,
+                WRITE_MAX_BATCH_SIZE_KEY,
+                &layers.cli.write.max_batch_size,
+                &layers.environment.write.max_batch_size,
+                &layers.project.write.max_batch_size,
+                &layers.user.write.max_batch_size,
+                &layers.defaults.write.max_batch_size,
+            ),
+            max_inflight_bytes: pick_field(
+                &mut sources,
+                WRITE_MAX_INFLIGHT_BYTES_KEY,
+                &layers.cli.write.max_inflight_bytes,
+                &layers.environment.write.max_inflight_bytes,
+                &layers.project.write.max_inflight_bytes,
+                &layers.user.write.max_inflight_bytes,
+                &layers.defaults.write.max_inflight_bytes,
             ),
         },
         cass: CassConfig {
@@ -2617,10 +2707,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        built_in_config, config_from_env, merge_config, ConfigLayers, ConfigValueSource,
-        EnvironmentConfigError, CACHE_PACK_L2_DIRECTORY_KEY, CACHE_PACK_L2_ENABLED_KEY,
-        CACHE_PACK_L2_MAX_AGE_DAYS_KEY, CACHE_PACK_L2_MAX_BYTES_KEY, CURATION_SPECIFICITY_MIN_KEY,
-        GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY,
+        CACHE_PACK_L2_DIRECTORY_KEY, CACHE_PACK_L2_ENABLED_KEY, CACHE_PACK_L2_MAX_AGE_DAYS_KEY,
+        CACHE_PACK_L2_MAX_BYTES_KEY, CURATION_SPECIFICITY_MIN_KEY, ConfigLayers, ConfigValueSource,
+        EnvironmentConfigError, GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY,
         GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY, GRAPH_CURATE_ONION_DECAY_MAX_KEY,
         GRAPH_FEATURE_PPR_ENABLED_KEY, GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
         GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY, GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY,
@@ -2641,7 +2730,9 @@ mod tests {
         STORAGE_READ_POOL_PIN_SNAPSHOT_KEY, STORAGE_READ_POOL_SIZE_KEY, SWARM_ADAPTIVE_ENABLED_KEY,
         SWARM_ADAPTIVE_NOISY_NEIGHBOR_BACKOFF_MS_KEY, SWARM_ADAPTIVE_NOISY_NEIGHBOR_P99_MS_KEY,
         SWARM_ADAPTIVE_PREFETCH_BUDGET_MS_KEY, SWARM_ADAPTIVE_PREFETCH_TOP_K_KEY,
-        SWARM_ADAPTIVE_SIMILARITY_THRESHOLD_KEY,
+        SWARM_ADAPTIVE_SIMILARITY_THRESHOLD_KEY, WRITE_BATCH_WINDOW_MS_KEY,
+        WRITE_GROUP_COMMIT_ENABLED_KEY, WRITE_MAX_BATCH_SIZE_KEY, WRITE_MAX_INFLIGHT_BYTES_KEY,
+        built_in_config, config_from_env, merge_config,
     };
     use crate::config::file::TaskLensConfig;
     use crate::config::{
@@ -2650,7 +2741,7 @@ mod tests {
         GraphPprConfig, LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig, PackConfig,
         PackL2CacheConfig, PathExpander, PolicyConfig, ReadPoolConfig, SearchConfig,
         SearchLexicalRamTierConfig, SearchRerankMode, SearchSpeed, SecretDetectorConfig,
-        StorageConfig, SwarmAdaptiveConfig, SwarmConfig,
+        StorageConfig, SwarmAdaptiveConfig, SwarmConfig, WriteConfig,
     };
     use crate::models::{TaskLens, TaskLensInput, TaskLensOverlay};
 
@@ -2720,6 +2811,26 @@ mod tests {
             "index dir",
         )?;
         ensure_equal(&defaults.runtime.job_budget_ms, &Some(5000), "job budget")?;
+        ensure_equal(
+            &defaults.write.group_commit_enabled,
+            &Some(false),
+            "write group commit default disabled",
+        )?;
+        ensure_equal(
+            &defaults.write.batch_window_ms,
+            &Some(2),
+            "write group commit batch window default",
+        )?;
+        ensure_equal(
+            &defaults.write.max_batch_size,
+            &Some(64),
+            "write group commit max batch size default",
+        )?;
+        ensure_equal(
+            &defaults.write.max_inflight_bytes,
+            &Some(4_194_304),
+            "write group commit max inflight bytes default",
+        )?;
         ensure_equal(
             &defaults.search.default_speed,
             &Some(SearchSpeed::Balanced),
@@ -2970,6 +3081,22 @@ mod tests {
         );
         env.insert("EE_PROFILE".to_string(), OsString::from("thorough"));
         env.insert("EE_MAX_TOKENS".to_string(), OsString::from("8192"));
+        env.insert(
+            "EE_WRITE_GROUP_COMMIT_ENABLED".to_string(),
+            OsString::from("true"),
+        );
+        env.insert(
+            "EE_WRITE_GROUP_COMMIT_BATCH_WINDOW_MS".to_string(),
+            OsString::from("2"),
+        );
+        env.insert(
+            "EE_WRITE_GROUP_COMMIT_MAX_BATCH_SIZE".to_string(),
+            OsString::from("64"),
+        );
+        env.insert(
+            "EE_WRITE_GROUP_COMMIT_MAX_INFLIGHT_BYTES".to_string(),
+            OsString::from("1048576"),
+        );
 
         let parsed =
             config_from_env(&env, &expander()).map_err(|error| format!("env failed: {error}"))?;
@@ -2993,6 +3120,26 @@ mod tests {
             &parsed.pack.default_max_tokens,
             &Some(8192),
             "env max tokens",
+        )?;
+        ensure_equal(
+            &parsed.write.group_commit_enabled,
+            &Some(true),
+            "env write group commit enabled",
+        )?;
+        ensure_equal(
+            &parsed.write.batch_window_ms,
+            &Some(2),
+            "env write group commit batch window",
+        )?;
+        ensure_equal(
+            &parsed.write.max_batch_size,
+            &Some(64),
+            "env write group commit max batch size",
+        )?;
+        ensure_equal(
+            &parsed.write.max_inflight_bytes,
+            &Some(1_048_576),
+            "env write group commit max inflight bytes",
         )?;
         ensure_equal(
             &parsed.storage.read_pool.size,
@@ -3214,6 +3361,10 @@ mod tests {
                 query_miss_retention_days: Some(14),
                 ..SearchConfig::default()
             },
+            write: WriteConfig {
+                max_batch_size: Some(32),
+                ..WriteConfig::default()
+            },
             task_lens: TaskLensConfig {
                 overrides: vec![user_bugfix, user_custom.clone()],
             },
@@ -3235,6 +3386,12 @@ mod tests {
                     populate_on_open: Some(false),
                 },
                 ..SearchConfig::default()
+            },
+            write: WriteConfig {
+                group_commit_enabled: Some(true),
+                batch_window_ms: Some(4),
+                max_batch_size: Some(64),
+                ..WriteConfig::default()
             },
             pack: PackConfig {
                 adaptive_budget: Some(true),
@@ -3349,6 +3506,11 @@ mod tests {
                 },
                 ..SearchConfig::default()
             },
+            write: WriteConfig {
+                group_commit_enabled: Some(false),
+                batch_window_ms: Some(2),
+                ..WriteConfig::default()
+            },
             ..ConfigFile::default()
         };
         let cli = ConfigFile {
@@ -3368,6 +3530,10 @@ mod tests {
                     prefetch_top_k: Some(5),
                     ..SwarmAdaptiveConfig::default()
                 },
+            },
+            write: WriteConfig {
+                max_inflight_bytes: Some(1_048_576),
+                ..WriteConfig::default()
             },
             ..ConfigFile::default()
         };
@@ -3449,6 +3615,46 @@ mod tests {
             &merged.source(SEARCH_RERANK_TOP_K_KEY),
             &Some(ConfigValueSource::Project),
             "rerank top-k source",
+        )?;
+        ensure_equal(
+            &merged.values.write.group_commit_enabled,
+            &Some(false),
+            "env disables project group commit",
+        )?;
+        ensure_equal(
+            &merged.source(WRITE_GROUP_COMMIT_ENABLED_KEY),
+            &Some(ConfigValueSource::Environment),
+            "write group commit enabled source",
+        )?;
+        ensure_equal(
+            &merged.values.write.batch_window_ms,
+            &Some(2),
+            "env write batch window",
+        )?;
+        ensure_equal(
+            &merged.source(WRITE_BATCH_WINDOW_MS_KEY),
+            &Some(ConfigValueSource::Environment),
+            "write batch window source",
+        )?;
+        ensure_equal(
+            &merged.values.write.max_batch_size,
+            &Some(64),
+            "project write max batch size",
+        )?;
+        ensure_equal(
+            &merged.source(WRITE_MAX_BATCH_SIZE_KEY),
+            &Some(ConfigValueSource::Project),
+            "write max batch size source",
+        )?;
+        ensure_equal(
+            &merged.values.write.max_inflight_bytes,
+            &Some(1_048_576),
+            "cli write max inflight bytes",
+        )?;
+        ensure_equal(
+            &merged.source(WRITE_MAX_INFLIGHT_BYTES_KEY),
+            &Some(ConfigValueSource::Cli),
+            "write max inflight bytes source",
         )?;
         ensure_equal(
             &merged.values.storage.read_pool.acquire_timeout_ms,
@@ -3868,6 +4074,10 @@ mod tests {
             SEARCH_LEXICAL_RAM_TIER_POPULATE_ON_OPEN_KEY,
             SEARCH_RERANK_KEY,
             SEARCH_RERANK_TOP_K_KEY,
+            WRITE_GROUP_COMMIT_ENABLED_KEY,
+            WRITE_BATCH_WINDOW_MS_KEY,
+            WRITE_MAX_BATCH_SIZE_KEY,
+            WRITE_MAX_INFLIGHT_BYTES_KEY,
         ] {
             if !keys.contains(&expected) {
                 return Err(format!("show report missing {expected}"));
