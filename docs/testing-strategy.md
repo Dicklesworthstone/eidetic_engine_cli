@@ -242,6 +242,22 @@ The smoke must not run Cargo, must not delete retained workspaces, and must not
 emit raw node keys, Tailscale IPs, MagicDNS names, memory bodies, or remote
 workspace paths. Logs use short hashes for peer and route identifiers.
 
+### Ergonomics E2E
+
+`scripts/e2e_ergonomics.sh` is the `bd-1et0v.22` real-binary, no-Cargo
+ergonomics harness. It emits `ee.test_event.v1` JSONL and retains its temporary
+workspace/artifacts. The script proves:
+
+- `ee context` and canonical `ee pack` produce the same selected pack content
+  for the same workspace/query, while only `ee context` reports the
+  `deprecated_alias` info degradation with an `ee pack` repair hint.
+- A stale `ee` fixture earlier on PATH is reported by `ee doctor` as an
+  advisory-only `ee_install_path` finding that names the shadowed binary and
+  offline/no-network repair path.
+- The PATH-shadow scenario does not change the clean doctor top-line posture;
+  if upstream doctor-health work is not yet green, the script records that as a
+  skipped green assertion and still enforces non-degrading parity.
+
 ### RCH Stranded-Result Recovery
 
 Remote verification can produce useful RCH artifacts even when the local wrapper

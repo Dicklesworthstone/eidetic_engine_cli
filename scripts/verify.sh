@@ -84,6 +84,7 @@ set -euo pipefail
 #   6.10 LOD Packing E2E       - scripts/e2e_lod_packing.sh
 #   6.11 House Rules E2E       - scripts/e2e_house_rules.sh
 #   6.12 Ask E2E               - scripts/e2e_ask.sh
+#   6.127 Ergonomics E2E       - scripts/e2e_ergonomics.sh
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
@@ -1133,6 +1134,12 @@ run_stage "Ask E2E (bd-169v0.5)" "./scripts/e2e_ask.sh"
 # search, pack-item outcome feedback, and outcome trace with ee.test_event.v1
 # evidence.
 run_stage "Journal Capture E2E (bd-1pi9m.6)" "./scripts/e2e_journal_capture.sh"
+
+# Gate 6.127: Ergonomics real-binary E2E (bd-1et0v.22). No-Cargo:
+# proves `ee context` remains an alias for canonical `ee pack` while carrying
+# the deprecated_alias info row, and proves PATH-shadow doctor findings are
+# advisory-only and offline/no-network.
+run_stage "Ergonomics E2E (bd-1et0v.22)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_ergonomics.sh"
 
 # Gate 6.13: Dueling Wizards docs-bootstrap real-binary E2E (bd-1n0np.11.5).
 # Proves ee bootstrap docs --dry-run structural candidates (spans/hashes/anchors/
