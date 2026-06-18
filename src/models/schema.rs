@@ -109,6 +109,9 @@ pub const PROVENANCE_HEALTH_SCHEMA_V1: &str = "ee.provenance_health.v1";
 /// Schema identifier for trust calibration diagnostics (bd-2vq2z.3).
 pub const TRUST_REPORT_SCHEMA_V1: &str = "ee.trust_report.v1";
 
+/// Schema identifier for the user-global memory store-metadata block (bd-2vq2z.13).
+pub const GLOBAL_MEMORY_SCHEMA_V1: &str = "ee.global_memory.v1";
+
 /// All known schema identifiers for validation.
 pub const KNOWN_SCHEMAS: &[&str] = &[
     RESPONSE_SCHEMA_V0,
@@ -196,6 +199,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     AMBIENT_CONTEXT_SCHEMA_V1,
     PROVENANCE_HEALTH_SCHEMA_V1,
     TRUST_REPORT_SCHEMA_V1,
+    GLOBAL_MEMORY_SCHEMA_V1,
     // Active learning agenda and experiment schemas (EE-440)
     LEARNING_QUESTION_SCHEMA_V1,
     UNCERTAINTY_ESTIMATE_SCHEMA_V1,
@@ -434,6 +438,20 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn global_memory_schema_is_registered() -> TestResult {
+        ensure(
+            is_known_schema(GLOBAL_MEMORY_SCHEMA_V1),
+            true,
+            "global memory schema should be known",
+        )?;
+        ensure(
+            validate_schema(GLOBAL_MEMORY_SCHEMA_V1),
+            Ok(()),
+            "global memory schema should validate",
+        )
     }
 
     #[test]

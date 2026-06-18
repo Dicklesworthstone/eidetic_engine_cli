@@ -16,7 +16,7 @@
 //! This deliberately **supersedes** ADR 0069's rejection of a separate global
 //! DB for the user-global tier (ADR 0069 chose a `scope` column inside one
 //! store; bd-1bfwa.2, its storage engine, is blocked). See
-//! `docs/adr/0081-user-global-memory-store.md`. The existing scope/quota
+//! `docs/adr/0083-user-global-memory-store.md`. The existing scope/quota
 //! machinery is **reused, not broken**: `MemoryScope::Global` selects the
 //! global store, and the house-rules quota
 //! ([`crate::core::house_rules`]) bounds the fan-in budget so global rules
@@ -55,8 +55,7 @@ use crate::core::house_rules::{
     HouseRulesQuotaInput, house_rules_quota, select_within_house_rules_quota,
 };
 
-/// Schema identifier for the user-global memory store-metadata block.
-pub const GLOBAL_MEMORY_SCHEMA_V1: &str = "ee.global_memory.v1";
+pub use crate::models::GLOBAL_MEMORY_SCHEMA_V1;
 
 /// Degraded code emitted when the global tier is not contributing/consuming
 /// (disabled store-wide, the workspace is not participating, or no store exists
@@ -595,6 +594,15 @@ mod tests {
     }
 
     #[test]
+    fn empty_conflict_input_returns_empty_marker_list() {
+        let conflicts = surface_lane_conflicts(&[]);
+        assert!(
+            conflicts.is_empty(),
+            "empty candidate sets must not fabricate global/workspace conflicts"
+        );
+    }
+
+    #[test]
     fn conflict_surfacing_is_insertion_order_independent() {
         let forward = surface_lane_conflicts(&[
             candidate("ws1", MemoryLane::Workspace, "k", "a"),
@@ -632,6 +640,17 @@ mod tests {
         assert!(!fan.enabled);
         assert_eq!(fan.cap_tokens, 0);
         assert!(fan.selected.is_empty());
+    }
+
+    #[test]
+    fn fan_in_zero_budget_selects_nothing_even_when_enabled() {
+        let fan = bounded_global_fan_in(&[1, 2, 3], 0, DEFAULT_GLOBAL_FAN_IN_BASIS_POINTS, false);
+        assert!(fan.enabled);
+        assert_eq!(fan.cap_tokens, 0);
+        assert!(
+            fan.selected.is_empty(),
+            "zero-token packs cannot admit global memories"
+        );
     }
 
     #[test]

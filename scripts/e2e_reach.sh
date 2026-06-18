@@ -31,6 +31,11 @@ ee_has_config_explain() {
     "$EE_BIN" config --help 2>&1 | grep -qE '(^|[[:space:]])explain([[:space:]]|$)'
 }
 
+ee_has_global_tier_cli() {
+    "$EE_BIN" remember --help 2>&1 | grep -q -- "--global" \
+        && "$EE_BIN" pack --help 2>&1 | grep -q -- "--no-global"
+}
+
 with_temp_workspace WS
 
 step "init isolated workspace"
@@ -93,6 +98,127 @@ if printf '%s' "$doctor_out" | jq -e '
     ' "doctor top-line posture is not blocked by advisory config-lint"
 else
     log_drop 1 "doctor config-lint block pending for bd-2vq2z.15: when wired, assert config_* findings are advisory and never flip top-line doctor health"
+fi
+
+step "user-global memory tier is local, provenance-tagged, and opt-out capable"
+if ee_has_global_tier_cli; then
+    WS_A="$WS/reach-global-a"
+    WS_B="$WS/reach-global-b"
+    USER_DATA="$WS/user-data"
+    USER_HOME="$WS/home"
+    WS_A_DB="$WS_A/.ee/ee.db"
+    WS_A_INDEX="$WS_A/.ee/index"
+    WS_B_DB="$WS_B/.ee/ee.db"
+    WS_B_INDEX="$WS_B/.ee/index"
+    GLOBAL_DB="$USER_DATA/ee/global/ee.db"
+    mkdir -p "$WS_A/.ee" "$WS_B/.ee" "$USER_DATA" "$USER_HOME"
+
+    log_event "global_memory_e2e_setup" \
+        bead "bd-2vq2z.13" \
+        userData "$USER_DATA" \
+        globalDb "$GLOBAL_DB" \
+        workspaceA "$WS_A" \
+        workspaceB "$WS_B"
+
+    init_a="$(
+        HOME="$USER_HOME" XDG_DATA_HOME="$USER_DATA" \
+            EE_DATABASE_PATH="$WS_A_DB" EE_INDEX_DIR="$WS_A_INDEX" \
+            ee_json init --workspace "$WS_A" --json
+    )"
+    init_b="$(
+        HOME="$USER_HOME" XDG_DATA_HOME="$USER_DATA" \
+            EE_DATABASE_PATH="$WS_B_DB" EE_INDEX_DIR="$WS_B_INDEX" \
+            ee_json init --workspace "$WS_B" --json
+    )"
+    assert_jq "$init_a" '.schema == "ee.response.v2" and .success == true' \
+        "global tier workspace A init succeeds"
+    assert_jq "$init_b" '.schema == "ee.response.v2" and .success == true' \
+        "global tier workspace B init succeeds"
+
+    global_rule="Global rule: before cross-repo release work, run remote RCH verification only."
+    workspace_conflict="Workspace rule: before cross-repo release work, do not run local cargo; wait for central verify."
+
+    remember_global="$(
+        HOME="$USER_HOME" XDG_DATA_HOME="$USER_DATA" \
+            EE_DATABASE_PATH="$WS_A_DB" EE_INDEX_DIR="$WS_A_INDEX" \
+            ee_json remember "$global_rule" \
+            --workspace "$WS_A" \
+            --global \
+            --level procedural \
+            --kind rule \
+            --source "test://bd-2vq2z.13/global-rule" \
+            --json
+    )"
+    assert_jq "$remember_global" '.schema == "ee.response.v2" and .success == true' \
+        "remember --global stores a global rule"
+    assert_jq "$remember_global" '
+        ((.data.globalMemory.schema // .data.global.schema // .data.memory.global.schema // "") == "ee.global_memory.v1")
+        or ((.data.provenance.lane // .data.memory.provenanceLane // .data.lane // "") == "global")
+    ' "remember --global reports global store metadata or global provenance lane"
+    assert_jq "$remember_global" "
+        ([.. | scalars | tostring | select(contains(\"$GLOBAL_DB\"))] | length) >= 1
+        or ([.. | objects | select(((.databasePath? // \"\") | contains(\"/global/ee.db\")))] | length) >= 1
+    " "remember --global reports the separate user-global database path"
+
+    remember_conflict="$(
+        HOME="$USER_HOME" XDG_DATA_HOME="$USER_DATA" \
+            EE_DATABASE_PATH="$WS_B_DB" EE_INDEX_DIR="$WS_B_INDEX" \
+            ee_json remember "$workspace_conflict" \
+            --workspace "$WS_B" \
+            --level procedural \
+            --kind rule \
+            --source "test://bd-2vq2z.13/workspace-conflict" \
+            --json
+    )"
+    assert_jq "$remember_conflict" '.schema == "ee.response.v2" and .success == true' \
+        "workspace conflicting rule stores locally"
+
+    pack_default="$(
+        HOME="$USER_HOME" XDG_DATA_HOME="$USER_DATA" \
+            EE_DATABASE_PATH="$WS_B_DB" EE_INDEX_DIR="$WS_B_INDEX" \
+            ee_json pack "prepare cross-repo release verification" \
+            --workspace "$WS_B" \
+            --max-tokens 800 \
+            --read-only \
+            --json
+    )"
+    assert_jq "$pack_default" '.schema == "ee.response.v2" and .success == true' \
+        "pack includes global tier by default"
+    assert_jq "$pack_default" '
+        ([.. | objects | select(((.schema? // "") == "ee.global_memory.v1"))] | length) >= 1
+        or ([.. | objects | select(((.lane? // .provenanceLane? // .memoryLane? // "") == "global"))] | length) >= 1
+    ' "default pack exposes global store metadata or global provenance lane"
+    assert_jq "$pack_default" "
+        ([.. | scalars | tostring | select(contains(\"$GLOBAL_DB\"))] | length) >= 1
+        or ([.. | objects | select(((.databasePath? // \"\") | contains(\"/global/ee.db\")))] | length) >= 1
+    " "default pack identifies the separate user-global store"
+    assert_jq "$pack_default" '
+        ([.. | objects | select(((.uri? // "") == "test://bd-2vq2z.13/global-rule"))] | length) >= 1
+        or ((.data.pack.text // "") | contains("remote RCH verification"))
+    ' "default pack includes the remembered global rule with provenance"
+    assert_jq "$pack_default" '
+        ([.. | objects | select(((.kind? // .conflictKind? // .globalConflictKind? // "") == "contradiction")
+            or ((.conflictKey? // "") | test("release|verification")))] | length) >= 1
+    ' "conflicting workspace/global rules are surfaced, not silently resolved"
+
+    pack_no_global="$(
+        HOME="$USER_HOME" XDG_DATA_HOME="$USER_DATA" \
+            EE_DATABASE_PATH="$WS_B_DB" EE_INDEX_DIR="$WS_B_INDEX" \
+            ee_json pack "prepare cross-repo release verification" \
+            --workspace "$WS_B" \
+            --no-global \
+            --max-tokens 800 \
+            --read-only \
+            --json
+    )"
+    assert_jq "$pack_no_global" '.schema == "ee.response.v2" and .success == true' \
+        "--no-global pack still succeeds"
+    assert_jq "$pack_no_global" '
+        ([.. | objects | select(((.lane? // .provenanceLane? // .memoryLane? // "") == "global"))] | length) == 0
+        and ((.data.pack.text // "") | contains("remote RCH verification") | not)
+    ' "--no-global excludes global-tier memories"
+else
+    log_drop 1 "bd-2vq2z.13 global-tier CLI flags absent: when wired, assert remember --global writes the separate ~/.local/share/ee/global store, default pack includes global provenance/conflicts, and --no-global excludes it"
 fi
 
 end_temp_workspace

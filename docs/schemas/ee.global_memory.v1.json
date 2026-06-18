@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.global_memory.v1.json",
   "title": "ee.global_memory.v1",
-  "description": "Redaction-safe store-metadata for the user-global memory tier: the separate local store at <user-data-root>/global/ (its own ee.db + index) that follows the user across every workspace. Paths, flags, schema version, and a content census only; never memory content. See ADR 0081 (docs/adr/0081-user-global-memory-store.md) and bd-2vq2z.13.",
+  "description": "Redaction-safe store-metadata for the user-global memory tier: the separate local store at <user-data-root>/global/ (its own ee.db + index) that follows the user across every workspace. Paths, flags, schema version, and a content census only; never memory content. See ADR 0083 (docs/adr/0083-user-global-memory-store.md) and bd-2vq2z.13.",
   "type": "object",
   "additionalProperties": false,
   "required": [
