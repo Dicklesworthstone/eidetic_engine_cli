@@ -16,14 +16,19 @@ use sha2::{Digest, Sha256};
 
 use crate::config::workspace_fingerprint;
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
-use crate::core::index::{IndexHealth, IndexStatusOptions, get_index_status_with_connection};
-use crate::db::{CreateModelRegistryInput, DbConnection, DbError, StoredModelRegistryEntry};
+use crate::core::index::{
+    DEFAULT_INDEX_SUBDIR, EmbeddingPosture, IndexHealth, IndexStatusOptions,
+    current_embedding_posture, get_index_status_with_connection,
+};
+use crate::db::{
+    CreateEmbeddingMetadataInput, CreateModelRegistryInput, DbConnection, DbError,
+    StoredModelRegistryEntry,
+};
 use crate::models::DomainError;
 use crate::models::model_registry::{
-    EmbeddingMetadataRecord, ModelProvider, ModelPurpose, ModelRegistryStatus,
+    EmbeddingMetadataRecord, EmbeddingPooling, ModelDistanceMetric, ModelProvider, ModelPurpose,
+    ModelRegistryStatus,
 };
-use crate::search::HashEmbedder;
-use frankensearch::Embedder;
 
 /// Convert a DbError to DomainError, preserving MigrationDrift as a distinct error code.
 ///
@@ -273,6 +278,7 @@ impl ModelRegistryEntryView {
 /// Resolved active embedder shaped for public output.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelStatusActive {
+    pub posture: EmbeddingPosture,
     pub fast_model_id: String,
     pub fast_dimension: usize,
     pub quality_model_id: Option<String>,
@@ -284,8 +290,26 @@ pub struct ModelStatusActive {
 }
 
 impl ModelStatusActive {
+    fn from_embedding_posture(
+        posture: EmbeddingPosture,
+        selected_registry_entry: Option<ModelRegistryEntryView>,
+    ) -> Self {
+        Self {
+            fast_model_id: posture.fast_model_id.clone(),
+            fast_dimension: posture.fast_dimension,
+            quality_model_id: posture.quality_model_id.clone(),
+            quality_dimension: posture.quality_dimension,
+            semantic: posture.semantic,
+            deterministic: posture.deterministic,
+            source: posture.source.clone(),
+            selected_registry_entry,
+            posture,
+        }
+    }
+
     fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
+            "posture": self.posture.data_json(),
             "fastModelId": self.fast_model_id,
             "fastDimension": self.fast_dimension,
             "qualityModelId": self.quality_model_id,
@@ -2218,9 +2242,6 @@ pub fn build_model_status_report(
         .iter()
         .find(|entry| entry_is_available_embedding(entry))
         .cloned();
-    let selected_registry_entry = selected_embedding_entry
-        .clone()
-        .map(ModelRegistryEntryView::from_stored);
 
     let reranker_registered_count = entries
         .iter()
@@ -2245,23 +2266,30 @@ pub fn build_model_status_report(
         fetch_command: format!("ee model fetch {DEFAULT_RERANK_MODEL_ALIAS}"),
     };
 
-    let fast_embedder = HashEmbedder::default_256();
-    let quality_embedder = HashEmbedder::default_384();
-
-    let active = ModelStatusActive {
-        fast_model_id: fast_embedder.id().to_string(),
-        fast_dimension: fast_embedder.dimension(),
-        quality_model_id: Some(quality_embedder.id().to_string()),
-        quality_dimension: Some(quality_embedder.dimension()),
-        semantic: fast_embedder.is_semantic() || quality_embedder.is_semantic(),
-        deterministic: true,
-        source: if selected_registry_entry.is_some() {
-            "registry_observed".to_string()
-        } else {
-            "frankensearch_hash_fallback".to_string()
-        },
-        selected_registry_entry,
-    };
+    let embedding_posture = current_embedding_posture(
+        &connection,
+        &workspace_id,
+        &workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR),
+    )
+    .map_err(|error| {
+        db_error_to_domain(
+            error,
+            "Failed to build embedding posture",
+            Some("ee index reembed --workspace .".to_string()),
+        )
+    })?;
+    let selected_registry_entry = embedding_posture
+        .selected_registry_model
+        .as_ref()
+        .and_then(|selected| {
+            entries
+                .iter()
+                .find(|entry| entry.id == selected.id)
+                .cloned()
+        })
+        .map(ModelRegistryEntryView::from_stored);
+    let active =
+        ModelStatusActive::from_embedding_posture(embedding_posture, selected_registry_entry);
 
     let mut degradations = Vec::new();
     if registered_count == 0 {
@@ -2876,6 +2904,124 @@ fn default_model_store_root() -> Result<PathBuf, DomainError> {
         .join("models"))
 }
 
+// ---------------------------------------------------------------------------
+// Bundled default embedding model registration (bd-1et0v.3).
+//
+// ADR 0080 selects `minishlab/potion-multilingual-128M` (256-dimension,
+// Apache-2.0, deterministic model2vec static embedder) as the bundled,
+// on-by-default local embedding model. This block is the single source of
+// truth for that model's registry identity, plus an idempotent registrar so a
+// fresh workspace has `registered_model_count >= 1` for the bundled model with
+// NO operator action — the discoverability fix the 12 West analyst asked for.
+//
+// Honesty (epic HARD CONSTRAINT — no silent fallback): the declared entry is
+// registered as `Unavailable` until the artifact is actually present. The
+// download→`Available` flip is performed by the index-build path
+// (`ensure_active_embedding_registry_record`, src/core/index.rs), which inserts
+// an `Available` entry once the active fast embedder reports `is_semantic()`.
+// Reconciling an existing `Unavailable` declared entry up to `Available` on a
+// later download needs a registry status-update/upsert (none exists yet); that
+// reconcile + the `ee model fetch` embedding pre-download trigger are the
+// remaining bd-1et0v.3 wiring (tracked, this is the code-first foundation).
+// ---------------------------------------------------------------------------
+
+/// Registry id of the bundled default embedding model (ADR 0080).
+pub const BUNDLED_EMBEDDING_MODEL_ID: &str = "potion-multilingual-128M";
+
+/// Output dimension of the bundled default embedding model (ADR 0080).
+pub const BUNDLED_EMBEDDING_DIMENSION: u32 = 256;
+
+/// Pinned revision of the bundled model2vec artifact (ADR 0080). Mirrors
+/// `src/core/index.rs::DEFAULT_MODEL2VEC_REVISION`; a `bundled_revision_matches`
+/// test guards against drift. (Follow-up: unify into one exported constant.)
+pub const BUNDLED_EMBEDDING_MODEL_REVISION: &str = "a28f4eebecd4dc585034f605e52d414878a0417c";
+
+/// Canonical, redaction-safe embedding-metadata record for the bundled model.
+///
+/// Deterministic by construction: the same ADR-pinned identity always yields a
+/// byte-identical record, so callers (registrar, status report, golden tests)
+/// share one source of truth. The record is schema-valid by
+/// [`EmbeddingMetadataRecord::validate`].
+#[must_use]
+pub fn bundled_embedding_metadata_record() -> EmbeddingMetadataRecord {
+    let mut metadata =
+        EmbeddingMetadataRecord::new(BUNDLED_EMBEDDING_DIMENSION, ModelDistanceMetric::Cosine);
+    metadata.pooling = EmbeddingPooling::ModelDefault;
+    metadata.tokenizer = Some("tokenizer.json".to_owned());
+    metadata.model_revision = Some(BUNDLED_EMBEDDING_MODEL_REVISION.to_owned());
+    // model2vec is a static distilled embedder: same input → same output.
+    metadata.deterministic = true;
+    metadata
+}
+
+/// Build the registry-insert input for the bundled embedding model at `status`.
+///
+/// `status` carries the honest availability: [`ModelRegistryStatus::Available`]
+/// only when the artifact is actually loadable, otherwise
+/// [`ModelRegistryStatus::Unavailable`] (declared-but-not-downloaded). The
+/// `dimension == metadata.dimension` registry invariant is upheld by
+/// construction.
+#[must_use]
+pub fn bundled_embedding_registry_input(
+    workspace_id: &str,
+    status: ModelRegistryStatus,
+) -> CreateEmbeddingMetadataInput {
+    let metadata = bundled_embedding_metadata_record();
+    CreateEmbeddingMetadataInput {
+        workspace_id: workspace_id.to_owned(),
+        provider: ModelProvider::Model2Vec,
+        model_name: BUNDLED_EMBEDDING_MODEL_ID.to_owned(),
+        dimension: BUNDLED_EMBEDDING_DIMENSION,
+        distance_metric: ModelDistanceMetric::Cosine,
+        status,
+        version: Some(BUNDLED_EMBEDDING_MODEL_REVISION.to_owned()),
+        source_uri: Some(format!(
+            "frankensearch://{provider}/{model}",
+            provider = ModelProvider::Model2Vec.as_str(),
+            model = BUNDLED_EMBEDDING_MODEL_ID
+        )),
+        content_hash: None,
+        metadata,
+        last_checked_at: None,
+    }
+}
+
+/// Idempotently register the bundled default embedding model in the registry so
+/// a fresh workspace reports `registered_model_count >= 1` out of the box.
+///
+/// Insert-if-absent on the `(Model2Vec, potion-multilingual-128M, Embedding)`
+/// key, so it never duplicates an entry the index-build path already created and
+/// never downgrades an existing `Available` entry. Returns `true` when it
+/// inserted a new declared entry, `false` when one already existed.
+///
+/// The declared entry is registered `Unavailable` (honest: the artifact may not
+/// be downloaded yet); the index-build path flips a fresh registry to
+/// `Available` once the model is actually loaded.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the registry lookup or insert fails.
+pub fn ensure_bundled_embedding_model_registered(
+    db: &DbConnection,
+    workspace_id: &str,
+) -> Result<bool, DbError> {
+    if db
+        .find_model_registry_entry(
+            workspace_id,
+            ModelProvider::Model2Vec,
+            BUNDLED_EMBEDDING_MODEL_ID,
+            ModelPurpose::Embedding,
+        )?
+        .is_some()
+    {
+        return Ok(false);
+    }
+
+    let input = bundled_embedding_registry_input(workspace_id, ModelRegistryStatus::Unavailable);
+    db.insert_embedding_metadata_record(&generate_model_registry_id(), &input)?;
+    Ok(true)
+}
+
 fn generate_model_registry_id() -> String {
     let simple = uuid::Uuid::now_v7().simple().to_string();
     format!("mdl_{}", &simple[..26])
@@ -2906,9 +3052,14 @@ fn is_https_uri(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::index::{EmbeddingPosture, EmbeddingVectorCoverage, ReembedEmbeddingSummary};
     use crate::db::{CreateModelRegistryInput, CreateWorkspaceInput};
     use crate::models::model_registry::{
         ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
+    };
+    use crate::models::{
+        EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
+        EMBEDDING_POSTURE_SCHEMA_V1,
     };
     use std::fs;
 
@@ -2997,6 +3148,216 @@ mod tests {
             .map_err(|error| format!("insert registry entry: {error}"))
     }
 
+    #[test]
+    fn bundled_descriptor_is_canonical_and_valid() -> TestResult {
+        let metadata = bundled_embedding_metadata_record();
+        ensure(
+            metadata.dimension == BUNDLED_EMBEDDING_DIMENSION && metadata.dimension == 256,
+            "bundled dimension is the ADR-pinned 256",
+        )?;
+        ensure(
+            metadata.distance_metric == ModelDistanceMetric::Cosine,
+            "bundled distance metric is cosine",
+        )?;
+        ensure(
+            metadata.pooling == EmbeddingPooling::ModelDefault,
+            "bundled pooling is model_default",
+        )?;
+        ensure(metadata.deterministic, "model2vec is deterministic")?;
+        ensure(
+            metadata.model_revision.as_deref() == Some(BUNDLED_EMBEDDING_MODEL_REVISION),
+            "bundled record carries the pinned revision",
+        )?;
+        // The canonical record must be durably storable.
+        metadata
+            .validate()
+            .map_err(|error| format!("bundled metadata must be schema-valid: {error}"))
+    }
+
+    #[test]
+    fn bundled_revision_is_the_adr_pinned_artifact() -> TestResult {
+        // Drift guard: ADR 0080 pins this revision; it mirrors
+        // index.rs::DEFAULT_MODEL2VEC_REVISION. A bump must touch both.
+        ensure(
+            BUNDLED_EMBEDDING_MODEL_REVISION == "a28f4eebecd4dc585034f605e52d414878a0417c",
+            "bundled revision matches ADR 0080",
+        )?;
+        ensure(
+            BUNDLED_EMBEDDING_MODEL_ID == "potion-multilingual-128M",
+            "bundled model id matches ADR 0080",
+        )
+    }
+
+    #[test]
+    fn bundled_registry_input_upholds_invariants() -> TestResult {
+        let input = bundled_embedding_registry_input("wsp_x", ModelRegistryStatus::Unavailable);
+        ensure(
+            input.dimension == input.metadata.dimension,
+            "registry dimension must equal metadata dimension (db invariant)",
+        )?;
+        ensure(
+            input.provider == ModelProvider::Model2Vec,
+            "bundled provider is model2vec",
+        )?;
+        ensure(
+            input.model_name == BUNDLED_EMBEDDING_MODEL_ID,
+            "bundled model name is the ADR id",
+        )?;
+        ensure(
+            input.status == ModelRegistryStatus::Unavailable,
+            "status passes through verbatim",
+        )?;
+        ensure(
+            input
+                .source_uri
+                .as_deref()
+                .is_some_and(|uri| uri.contains(BUNDLED_EMBEDDING_MODEL_ID)),
+            "source uri names the bundled model",
+        )?;
+        // A passed Available status is honored (download path uses it).
+        let available = bundled_embedding_registry_input("wsp_x", ModelRegistryStatus::Available);
+        ensure(
+            available.status == ModelRegistryStatus::Available,
+            "available status passes through too",
+        )
+    }
+
+    #[test]
+    fn ensure_bundled_registers_once_and_is_idempotent() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+        let connection = DbConnection::open_file(&database_path)
+            .map_err(|error| format!("open db: {error}"))?;
+
+        // Fresh workspace: registers exactly one declared bundled entry.
+        let inserted = ensure_bundled_embedding_model_registered(&connection, &workspace_id)
+            .map_err(|error| format!("first ensure: {error}"))?;
+        ensure(inserted, "first call registers the bundled model")?;
+
+        let records = connection
+            .list_embedding_metadata_records(&workspace_id)
+            .map_err(|error| format!("list records: {error}"))?;
+        ensure(
+            records.len() == 1,
+            format!(
+                "registered_model_count >= 1 out of the box, got {}",
+                records.len()
+            ),
+        )?;
+
+        let entry = connection
+            .find_model_registry_entry(
+                &workspace_id,
+                ModelProvider::Model2Vec,
+                BUNDLED_EMBEDDING_MODEL_ID,
+                ModelPurpose::Embedding,
+            )
+            .map_err(|error| format!("find: {error}"))?
+            .ok_or("bundled entry must exist after ensure")?;
+        ensure(
+            entry.status == ModelRegistryStatus::Unavailable,
+            "declared entry is honestly Unavailable until downloaded",
+        )?;
+
+        // Idempotent: a second call inserts nothing and does not duplicate.
+        let again = ensure_bundled_embedding_model_registered(&connection, &workspace_id)
+            .map_err(|error| format!("second ensure: {error}"))?;
+        ensure(!again, "second call is a no-op")?;
+        let after = connection
+            .list_embedding_metadata_records(&workspace_id)
+            .map_err(|error| format!("list after: {error}"))?;
+        ensure(after.len() == 1, "no duplicate bundled entry")
+    }
+
+    #[test]
+    fn ensure_bundled_does_not_downgrade_an_available_entry() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+
+        // Simulate the index-build path having already registered the model
+        // Available (the real artifact is loaded).
+        insert_registry_entry(
+            &database_path,
+            &workspace_id,
+            "mdl_preexisting_available",
+            ModelProvider::Model2Vec,
+            BUNDLED_EMBEDDING_MODEL_ID,
+            ModelRegistryStatus::Available,
+        )?;
+
+        let connection = DbConnection::open_file(&database_path)
+            .map_err(|error| format!("open db: {error}"))?;
+        let inserted = ensure_bundled_embedding_model_registered(&connection, &workspace_id)
+            .map_err(|error| format!("ensure: {error}"))?;
+        ensure(!inserted, "ensure is a no-op when an entry already exists")?;
+
+        let entry = connection
+            .find_model_registry_entry(
+                &workspace_id,
+                ModelProvider::Model2Vec,
+                BUNDLED_EMBEDDING_MODEL_ID,
+                ModelPurpose::Embedding,
+            )
+            .map_err(|error| format!("find: {error}"))?
+            .ok_or("entry must still exist")?;
+        ensure(
+            entry.status == ModelRegistryStatus::Available,
+            "ensure must never downgrade an existing Available entry",
+        )
+    }
+
+    fn insert_embedding_metadata_entry(
+        database_path: &Path,
+        workspace_id: &str,
+        id: &str,
+        provider: ModelProvider,
+        name: &str,
+        status: ModelRegistryStatus,
+    ) -> TestResult {
+        insert_embedding_metadata_entry_with_dimension(
+            database_path,
+            workspace_id,
+            id,
+            provider,
+            name,
+            status,
+            384,
+        )
+    }
+
+    fn insert_embedding_metadata_entry_with_dimension(
+        database_path: &Path,
+        workspace_id: &str,
+        id: &str,
+        provider: ModelProvider,
+        name: &str,
+        status: ModelRegistryStatus,
+        dimension: u32,
+    ) -> TestResult {
+        let connection = DbConnection::open_file(database_path)
+            .map_err(|error| format!("reopen db: {error}"))?;
+        let mut metadata = EmbeddingMetadataRecord::new(dimension, ModelDistanceMetric::Cosine);
+        metadata.deterministic = matches!(provider, ModelProvider::Hash | ModelProvider::Model2Vec);
+        connection
+            .insert_embedding_metadata_record(
+                id,
+                &CreateEmbeddingMetadataInput {
+                    workspace_id: workspace_id.to_string(),
+                    provider,
+                    model_name: name.to_string(),
+                    dimension,
+                    distance_metric: ModelDistanceMetric::Cosine,
+                    status,
+                    version: Some("v1".to_string()),
+                    source_uri: None,
+                    content_hash: None,
+                    metadata,
+                    last_checked_at: None,
+                },
+            )
+            .map_err(|error| format!("insert embedding metadata entry: {error}"))
+    }
+
     fn insert_reranker_entry(
         database_path: &Path,
         workspace_id: &str,
@@ -3055,6 +3416,33 @@ mod tests {
             selected_registry_entry: None,
             manifest,
             fetch_command: format!("ee model fetch {DEFAULT_RERANK_MODEL_ALIAS}"),
+        }
+    }
+
+    fn fixture_embedding_posture(
+        semantic: bool,
+        source: &str,
+        fast_model_id: &str,
+        fast_dimension: usize,
+    ) -> EmbeddingPosture {
+        EmbeddingPosture {
+            schema: EMBEDDING_POSTURE_SCHEMA_V1,
+            mode: if semantic {
+                EMBEDDING_POSTURE_MODE_NEURAL_LOCAL
+            } else {
+                EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH
+            },
+            semantic,
+            source: source.to_owned(),
+            fast_model_id: fast_model_id.to_owned(),
+            fast_dimension,
+            quality_model_id: None,
+            quality_dimension: None,
+            deterministic: true,
+            registered_model_count: usize::from(semantic),
+            available_model_count: usize::from(semantic),
+            selected_registry_model: None,
+            vector_coverage: EmbeddingVectorCoverage::new(0, 0),
         }
     }
 
@@ -3381,7 +3769,7 @@ mod tests {
     fn status_picks_first_available_registry_entry() -> TestResult {
         let (_temp, workspace_path) = make_workspace()?;
         let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
-        insert_registry_entry(
+        insert_embedding_metadata_entry(
             &database_path,
             &workspace_id,
             "mdl_01HQ3K5Z000000000000000001",
@@ -3476,7 +3864,7 @@ mod tests {
     fn status_marks_oversized_available_embedding_model() -> TestResult {
         let (_temp, workspace_path) = make_workspace()?;
         let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
-        insert_registry_entry_with_dimension(
+        insert_embedding_metadata_entry_with_dimension(
             &database_path,
             &workspace_id,
             "mdl_01HQ3K5Z000000000000000006",
@@ -3538,16 +3926,10 @@ mod tests {
             schema: MODEL_STATUS_SCHEMA_V2,
             workspace_path: workspace_path.clone(),
             database_path: workspace_path.join(".ee").join("ee.db"),
-            active: ModelStatusActive {
-                fast_model_id: "hash:deterministic".to_string(),
-                fast_dimension: 384,
-                quality_model_id: None,
-                quality_dimension: None,
-                semantic: false,
-                deterministic: true,
-                source: "unit_fixture".to_string(),
-                selected_registry_entry: None,
-            },
+            active: ModelStatusActive::from_embedding_posture(
+                fixture_embedding_posture(false, "unit_fixture", "hash:deterministic", 384),
+                None,
+            ),
             reranker: empty_reranker_status(),
             model_lifecycle: fixture_model_lifecycle_report(&workspace_path),
             registered_count: 2,
@@ -3627,16 +4009,10 @@ mod tests {
             schema: MODEL_STATUS_SCHEMA_V2,
             workspace_path: workspace_path.clone(),
             database_path: workspace_path.join(".ee").join("ee.db"),
-            active: ModelStatusActive {
-                fast_model_id: "registry:private-model".to_owned(),
-                fast_dimension: 384,
-                quality_model_id: None,
-                quality_dimension: None,
-                semantic: true,
-                deterministic: true,
-                source: "registry_observed".to_owned(),
-                selected_registry_entry: Some(entry.clone()),
-            },
+            active: ModelStatusActive::from_embedding_posture(
+                fixture_embedding_posture(true, "registry_observed", "registry:private-model", 384),
+                Some(entry.clone()),
+            ),
             reranker: empty_reranker_status(),
             model_lifecycle: fixture_model_lifecycle_report(&workspace_path),
             registered_count: 1,
@@ -3664,6 +4040,29 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn model_status_and_reembed_share_byte_identical_embedding_posture() -> TestResult {
+        let posture =
+            fixture_embedding_posture(true, "registry_observed", "potion-multilingual-128M", 256)
+                .with_vector_coverage(EmbeddingVectorCoverage::new(7, 11));
+        let active = ModelStatusActive::from_embedding_posture(posture.clone(), None);
+        let reembed = ReembedEmbeddingSummary::from_posture(posture);
+
+        ensure(
+            active.data_json()["posture"] == reembed.data_json()["posture"],
+            "model status active and index reembed should emit byte-identical posture JSON",
+        )?;
+        ensure(
+            active.data_json()["posture"]["schema"] == EMBEDDING_POSTURE_SCHEMA_V1,
+            "shared posture schema should be pinned",
+        )?;
+        ensure(
+            active.data_json()["posture"]["vector_coverage"]
+                == serde_json::json!({"embedded": 7, "total": 11}),
+            "shared posture should carry vector coverage",
+        )
     }
 
     #[test]
