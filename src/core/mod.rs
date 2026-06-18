@@ -128,6 +128,7 @@ pub mod streams;
 pub mod subscribe;
 pub mod support_bundle;
 pub mod swarm_brief;
+pub mod trust_report;
 pub mod swarm_brief_delta;
 pub mod swarm_next_action;
 pub mod symbol_graph;
