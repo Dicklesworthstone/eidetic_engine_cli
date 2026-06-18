@@ -11,7 +11,8 @@ use std::path::PathBuf;
 
 use ee::models::{
     EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
-    EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED, EMBEDDING_POSTURE_SCHEMA_V1, KNOWN_SCHEMAS,
+    EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED,
+    EMBEDDING_POSTURE_SCHEMA_V1, KNOWN_SCHEMAS,
 };
 use ee::output::{public_schemas, render_schema_export_json};
 use serde_json::Value;
@@ -117,6 +118,7 @@ fn embedding_posture_required_fields_and_modes_are_closed() -> TestResult {
     let modes = string_set(&schema, "/properties/mode/enum")?;
     let expected_modes: BTreeSet<String> = [
         EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
+        EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING,
         EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH,
         EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED,
     ]

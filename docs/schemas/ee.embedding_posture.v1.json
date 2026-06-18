@@ -28,7 +28,7 @@
     },
     "mode": {
       "type": "string",
-      "enum": ["neural_local", "deterministic_hash", "neural_remote_blocked"],
+      "enum": ["neural_local", "neural_local_pending", "deterministic_hash", "neural_remote_blocked"],
       "description": "Active retrieval embedding posture."
     },
     "semantic": {

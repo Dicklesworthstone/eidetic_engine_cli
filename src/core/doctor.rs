@@ -34,7 +34,9 @@ use crate::mesh::repair_action_graph::{
     RepairAction, RepairActionGraph, build_repair_action_graph,
 };
 use crate::models::error_codes::{self, ErrorCode};
-use crate::models::{SingleFlightPostureReport, TrustClass};
+use crate::models::{
+    EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, SingleFlightPostureReport, TrustClass,
+};
 use crate::search::lexical_ram_tier::{
     LEXICAL_RAM_TIER_HUGEPAGES_ENV, LEXICAL_RAM_TIER_PIN_RAM_ENV, LexicalRamTierConfig,
     LexicalRamTierResult, pin_lexical_index_files,
@@ -2838,7 +2840,7 @@ fn embedding_env_trap_note(trap_present: &[&str], mode: &str) -> Option<String> 
 /// Always [`CheckTier::Advisory`] — it discloses the active retrieval mode and
 /// the env trap but MUST NOT flip the top-line memory-health verdict (per the
 /// doctor-health tiering leaf, bd-1et0v.12). Semantic-ready is `Ok` (info);
-/// hash fallback is `Warning` (still advisory).
+/// hash fallback and pending first-use downloads are `Warning` (still advisory).
 fn embedding_posture_check_result(
     semantic: bool,
     mode: &str,
@@ -2858,6 +2860,24 @@ fn embedding_posture_check_result(
             message.push_str(&note);
         }
         CheckResult::ok("embedding_posture", message)
+    } else if mode == EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING {
+        let mut message = format!(
+            "Semantic retrieval: bundled neural model pending first-use download (mode={mode}, {fast_model_id}, {fast_dimension}d). This is degraded-but-improving and is not deterministic-hash fallback."
+        );
+        if let Some(note) = trap_note {
+            message.push(' ');
+            message.push_str(&note);
+        }
+        CheckResult {
+            name: "embedding_posture",
+            severity: CheckSeverity::Warning,
+            message,
+            error_code: None,
+            repair: Some(
+                "Run an embedding operation or pre-download the bundled model with `ee model fetch`; use EE_EMBED_DOWNLOAD=off only for intentional offline hash fallback.",
+            ),
+            tier: CheckTier::Advisory,
+        }
     } else {
         let mut message = format!(
             "Semantic retrieval: deterministic-hash fallback (non-semantic) — the bundled neural model is not active (mode={mode}, {fast_model_id}, {fast_dimension}d). Degraded code: embed_model_unavailable."
@@ -5406,6 +5426,25 @@ mod tests {
         assert!(check.is_topline_healthy());
         assert!(check.message.contains("deterministic-hash fallback"));
         assert!(check.message.contains("embed_model_unavailable"));
+        assert!(check.repair.is_some());
+    }
+
+    #[test]
+    fn embedding_posture_pending_download_is_advisory_warning_not_hash_fallback() {
+        let check = embedding_posture_check_result(
+            false,
+            EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING,
+            "potion-multilingual-128M",
+            256,
+            true,
+            &[],
+        );
+        assert_eq!(check.severity, CheckSeverity::Warning);
+        assert_eq!(check.tier, CheckTier::Advisory);
+        assert!(check.is_topline_healthy());
+        assert!(check.message.contains("pending first-use download"));
+        assert!(check.message.contains("degraded-but-improving"));
+        assert!(!check.message.contains("Degraded code: embed_model_unavailable"));
         assert!(check.repair.is_some());
     }
 

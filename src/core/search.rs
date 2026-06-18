@@ -37,7 +37,8 @@ use crate::runtime::determinism::{Deterministic, Seed};
 use super::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use super::index::{
     EmbeddingPosture, IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport,
-    current_embedding_posture, get_index_status_with_connection,
+    current_embedding_posture, embedder_reports_pending_model2vec_download,
+    get_index_status_with_connection,
 };
 use super::memory_drift::{
     MemoryDriftSelectionHint, memory_drift_selection_hint_from_provenance_status,
@@ -341,11 +342,7 @@ impl SimilarReport {
                 );
                 request.insert(
                     "similarityMode".to_string(),
-                    serde_json::json!(if self.semantic_available {
-                        "semantic_knn"
-                    } else {
-                        "lexical_fallback"
-                    }),
+                    serde_json::json!(similarity_mode_for_posture(&self.embedding_posture)),
                 );
             }
         }
@@ -406,6 +403,7 @@ struct SourceModeResolution {
 struct SearchTierState<'a> {
     lexical_available: bool,
     embed_model_unavailable: Option<&'a str>,
+    semantic_embedder_pending: Option<&'a str>,
     semantic_embedder_degraded: Option<&'a str>,
 }
 
@@ -5798,12 +5796,13 @@ pub fn run_similar(options: &SimilarOptions) -> Result<SimilarReport, SimilarErr
             memory_id: options.memory_id.clone(),
         })?;
     let index_dir = options.resolve_index_dir();
-    let embedding_posture = current_embedding_posture(&connection, &target.workspace_id, &index_dir)?;
-    let semantic_available = embedding_posture.semantic;
-    let lexical_fallback = !semantic_available;
+    let mut embedding_posture =
+        current_embedding_posture(&connection, &target.workspace_id, &index_dir)?;
+    let initial_semantic_request_capable = similar_semantic_request_capable(&embedding_posture);
+    let lexical_fallback = !initial_semantic_request_capable;
     let requested_limit = options.limit;
     let retrieval_limit = requested_limit.saturating_add(1).max(1);
-    let source_mode = if semantic_available {
+    let source_mode = if initial_semantic_request_capable {
         SearchSourceMode::SemanticOnly
     } else {
         SearchSourceMode::LexicalOnly
@@ -5839,18 +5838,27 @@ pub fn run_similar(options: &SimilarOptions) -> Result<SimilarReport, SimilarErr
         true,
         None,
     )?;
+    if initial_semantic_request_capable
+        && !embedding_posture.semantic
+        && let Ok(updated) = current_embedding_posture(&connection, &target.workspace_id, &index_dir)
+    {
+        embedding_posture = updated;
+    }
+    let semantic_available = embedding_posture.semantic;
     report.query = target.id.clone();
     report.requested_limit = requested_limit;
     remove_similar_target_and_truncate(&mut report, &target.id, requested_limit);
     sanitize_similar_target_query_degradations(&mut report, &target.id);
-    if lexical_fallback {
+    if lexical_fallback || (!semantic_available && !embedding_posture.semantic_pending()) {
         let reason = similar_semantic_unavailable_reason(&embedding_posture);
         report
             .degraded
             .push(SearchDegradation::embed_model_unavailable(&reason));
         report.source_mode_requested = SearchSourceMode::SemanticOnly;
-        report.source_mode_applied = SearchSourceMode::LexicalOnly;
-        report.source_mode_fallback = true;
+        if lexical_fallback {
+            report.source_mode_applied = SearchSourceMode::LexicalOnly;
+            report.source_mode_fallback = true;
+        }
     }
     if let Err(error) = connection.close() {
         tracing::warn!(
@@ -5894,6 +5902,20 @@ fn sanitize_similar_target_query_degradations(report: &mut SearchReport, target_
             );
             degradation.repair = Some("Lower --min-score or rebuild the index after adding related memories.".to_string());
         }
+    }
+}
+
+fn similar_semantic_request_capable(posture: &EmbeddingPosture) -> bool {
+    posture.semantic || posture.semantic_pending()
+}
+
+fn similarity_mode_for_posture(posture: &EmbeddingPosture) -> &'static str {
+    if posture.semantic {
+        "semantic_knn"
+    } else if posture.semantic_pending() {
+        "semantic_pending"
+    } else {
+        "lexical_fallback"
     }
 }
 
@@ -6747,10 +6769,15 @@ fn resolve_source_mode(
         .is_none()
         .then(semantic_retrieval_unavailable_reason)
         .flatten();
+    let semantic_pending = embed_model_unavailable
+        .is_none()
+        .then(semantic_retrieval_pending_reason)
+        .flatten();
     let lexical_available = lexical_search_available(index_dir);
     let tiers = SearchTierState {
         lexical_available,
         embed_model_unavailable: embed_model_unavailable.as_deref(),
+        semantic_embedder_pending: semantic_pending.as_deref(),
         semantic_embedder_degraded: semantic_unavailable
             .as_deref()
             .filter(|_| lexical_available),
@@ -6765,6 +6792,22 @@ fn resolve_source_mode_with_tiers(
 ) -> Result<SourceModeResolution, SearchError> {
     let requested = options.source_mode;
     let lexical_available = tiers.lexical_available;
+
+    if let Some(reason) = tiers.semantic_embedder_pending
+        && matches!(
+            requested,
+            SearchSourceMode::Hybrid | SearchSourceMode::SemanticOnly
+        )
+    {
+        tracing::info!(
+            target: "ee::search::embedder_pending",
+            model_id = EMBED_MODEL_UNAVAILABLE_MODEL_ID,
+            feature_flag = EMBED_MODEL_UNAVAILABLE_FEATURE_FLAG,
+            lexical_available,
+            reason,
+            "semantic embedder is pending first-use download; keeping semantic path enabled"
+        );
+    }
 
     if let Some(reason) = tiers.embed_model_unavailable {
         match requested {
@@ -6881,28 +6924,50 @@ fn resolve_source_mode_with_tiers(
     }
 }
 
-fn active_search_embedder_is_semantic() -> bool {
-    crate::core::index::default_search_embedder_stack()
-        .fast()
-        .is_semantic()
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveSearchEmbedderState {
+    ReadySemantic,
+    PendingLocalDownload,
+    HashFallback,
+}
+
+fn active_search_embedder_state() -> ActiveSearchEmbedderState {
+    let stack = crate::core::index::default_search_embedder_stack();
+    let fast = stack.fast();
+    if fast.is_semantic() {
+        ActiveSearchEmbedderState::ReadySemantic
+    } else if embedder_reports_pending_model2vec_download(fast) {
+        ActiveSearchEmbedderState::PendingLocalDownload
+    } else {
+        ActiveSearchEmbedderState::HashFallback
+    }
 }
 
 /// One-line, agent-actionable hint for turning on semantic retrieval.
 pub(crate) const SEMANTIC_ENABLE_HINT: &str = "run `ee index reembed --workspace .`; default builds use Frankensearch model2vec download unless FRANKENSEARCH_OFFLINE blocks it";
 
 /// Posture probe for onboarding/diagnostic surfaces (e.g. `ee init`).
-/// Returns `None` when semantic retrieval is active, or `Some(reason)`
-/// describing why retrieval is degraded to lexical-only. The same condition
-/// surfaces per-query as the `embed_model_unavailable` degradation; this lets
-/// the one-time onboarding path nudge the agent before the first search.
+/// Returns `None` when semantic retrieval is active or pending first-use
+/// download, or `Some(reason)` when retrieval is degraded to lexical-only. The
+/// same degraded condition surfaces per-query as `embed_model_unavailable`;
+/// this lets the one-time onboarding path nudge the agent before search.
 /// (agent-UX item 6)
 pub(crate) fn semantic_retrieval_unavailable_reason() -> Option<String> {
-    if active_search_embedder_is_semantic() {
-        return None;
+    match active_search_embedder_state() {
+        ActiveSearchEmbedderState::ReadySemantic
+        | ActiveSearchEmbedderState::PendingLocalDownload => None,
+        ActiveSearchEmbedderState::HashFallback => Some(
+            embed_model_unavailable_reason_from_env()
+                .unwrap_or_else(|| HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON.to_string()),
+        ),
     }
-    Some(
-        embed_model_unavailable_reason_from_env()
-            .unwrap_or_else(|| HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON.to_string()),
+}
+
+fn semantic_retrieval_pending_reason() -> Option<String> {
+    (active_search_embedder_state() == ActiveSearchEmbedderState::PendingLocalDownload).then(
+        || {
+            "ee-managed bundled model2vec download is pending; the first embedding operation will download and load the local model".to_string()
+        },
     )
 }
 
@@ -8965,6 +9030,27 @@ mod tests {
         }
     }
 
+    fn fixture_pending_embedding_posture_for_search() -> EmbeddingPosture {
+        EmbeddingPosture {
+            schema: crate::models::EMBEDDING_POSTURE_SCHEMA_V1,
+            mode: crate::models::EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING,
+            semantic: false,
+            source: "ee_model2vec_download_pending".to_owned(),
+            fast_model_id: "potion-multilingual-128M".to_owned(),
+            fast_dimension: 256,
+            quality_model_id: None,
+            quality_dimension: None,
+            deterministic: true,
+            registered_model_count: 0,
+            available_model_count: 0,
+            selected_registry_model: None,
+            vector_coverage: crate::core::index::EmbeddingVectorCoverage {
+                embedded: 0,
+                total: 3,
+            },
+        }
+    }
+
     fn source_mode_test_options(
         source_mode: SearchSourceMode,
         strict_source_mode: bool,
@@ -9061,7 +9147,7 @@ mod tests {
         assert_eq!(json["results"][0]["schema"], serde_json::Value::Null);
         assert_eq!(
             json["request"]["similarityMode"],
-            serde_json::json!("semantic_knn")
+            serde_json::json!("lexical_fallback")
         );
     }
 
@@ -9136,6 +9222,20 @@ mod tests {
         assert_eq!(
             similar_semantic_unavailable_reason(&posture),
             "embedding posture mode=deterministic_hash source=frankensearch_hash_fallback semantic=false"
+        );
+    }
+
+    #[test]
+    fn similar_pending_posture_is_distinct_from_hash_fallback() {
+        let posture = fixture_pending_embedding_posture_for_search();
+
+        assert!(!posture.semantic);
+        assert!(posture.semantic_pending());
+        assert!(similar_semantic_request_capable(&posture));
+        assert_eq!(similarity_mode_for_posture(&posture), "semantic_pending");
+        assert_eq!(
+            similar_semantic_unavailable_reason(&posture),
+            "embedding posture mode=neural_local_pending source=ee_model2vec_download_pending semantic=false"
         );
     }
 
@@ -10822,6 +10922,7 @@ mod tests {
             SearchTierState {
                 lexical_available: true,
                 embed_model_unavailable: Some("missing model fixture"),
+                semantic_embedder_pending: None,
                 semantic_embedder_degraded: None,
             },
         )
@@ -10848,6 +10949,7 @@ mod tests {
             SearchTierState {
                 lexical_available: false,
                 embed_model_unavailable: None,
+                semantic_embedder_pending: None,
                 semantic_embedder_degraded: None,
             },
         )
@@ -10874,6 +10976,7 @@ mod tests {
             SearchTierState {
                 lexical_available: false,
                 embed_model_unavailable: Some("missing model fixture"),
+                semantic_embedder_pending: None,
                 semantic_embedder_degraded: None,
             },
         )
@@ -10900,6 +11003,7 @@ mod tests {
             SearchTierState {
                 lexical_available: true,
                 embed_model_unavailable: None,
+                semantic_embedder_pending: None,
                 semantic_embedder_degraded: Some(HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON),
             },
         )
@@ -10929,6 +11033,7 @@ mod tests {
             SearchTierState {
                 lexical_available: true,
                 embed_model_unavailable: None,
+                semantic_embedder_pending: None,
                 semantic_embedder_degraded: Some(HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON),
             },
         ) {
@@ -10953,6 +11058,29 @@ mod tests {
     }
 
     #[test]
+    fn pending_auto_download_keeps_semantic_source_mode_enabled() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+        let mut degraded = Vec::new();
+        let resolution = resolve_source_mode_with_tiers(
+            &options,
+            &mut degraded,
+            SearchTierState {
+                lexical_available: true,
+                embed_model_unavailable: None,
+                semantic_embedder_pending: Some("pending first-use download"),
+                semantic_embedder_degraded: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(resolution.applied, SearchSourceMode::Hybrid);
+        assert!(!resolution.fallback_applied);
+        assert!(!resolution.unavailable_no_results);
+        assert!(degraded.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn real_semantic_embedder_posture_does_not_emit_hash_fallback_warning() -> TestResult {
         let options = source_mode_test_options(SearchSourceMode::Hybrid, false);
         let mut degraded = Vec::new();
@@ -10962,6 +11090,7 @@ mod tests {
             SearchTierState {
                 lexical_available: true,
                 embed_model_unavailable: None,
+                semantic_embedder_pending: None,
                 semantic_embedder_degraded: None,
             },
         )

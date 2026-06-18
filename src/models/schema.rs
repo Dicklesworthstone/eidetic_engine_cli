@@ -93,6 +93,8 @@ pub const INDEX_INTAKE_FALLBACK_DELTA_OVER_THRESHOLD: &str = "delta_over_thresho
 pub const EMBEDDING_POSTURE_SCHEMA_V1: &str = "ee.embedding_posture.v1";
 /// Embedding posture mode: local neural semantic model is active.
 pub const EMBEDDING_POSTURE_MODE_NEURAL_LOCAL: &str = "neural_local";
+/// Embedding posture mode: the bundled local neural model is download-capable but not loaded yet.
+pub const EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING: &str = "neural_local_pending";
 /// Embedding posture mode: deterministic hash fallback is active.
 pub const EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH: &str = "deterministic_hash";
 /// Embedding posture mode: a neural model exists but download/load policy blocked it.

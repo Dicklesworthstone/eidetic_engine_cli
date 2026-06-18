@@ -21,7 +21,7 @@ use crate::models::model_registry::{
 };
 use crate::models::{
     EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
-    EMBEDDING_POSTURE_SCHEMA_V1,
+    EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, EMBEDDING_POSTURE_SCHEMA_V1,
 };
 use crate::search::{
     CanonicalSearchDocument, Embedder, EmbedderStack, HashEmbedder, IndexBuilder,
@@ -686,6 +686,11 @@ impl EmbeddingPosture {
     pub fn with_vector_coverage(mut self, vector_coverage: EmbeddingVectorCoverage) -> Self {
         self.vector_coverage = vector_coverage;
         self
+    }
+
+    #[must_use]
+    pub fn semantic_pending(&self) -> bool {
+        self.mode == EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING
     }
 }
 
@@ -3006,6 +3011,16 @@ impl EeLazyModel2VecEmbedder {
     }
 }
 
+pub(crate) fn embedder_reports_pending_model2vec_download(
+    embedder: &dyn crate::search::Embedder,
+) -> bool {
+    !embedder.is_ready()
+        && !embedder.is_semantic()
+        && embedder.id() == POTION_MODEL_NAME
+        && embedder.category() == ModelCategory::StaticEmbedder
+        && embedder.tier() == ModelTier::Fast
+}
+
 impl crate::search::Embedder for EeLazyModel2VecEmbedder {
     fn embed<'a>(
         &'a self,
@@ -3495,17 +3510,23 @@ fn embedding_posture_from_records(
         .iter()
         .filter(|record| record.registry.status.as_str() == "available")
         .count();
-    let source = if selected_registry_model.is_some() {
+    let semantic = fast_embedder.is_semantic()
+        || quality_embedder.is_some_and(|embedder| embedder.is_semantic());
+    let pending_local_download =
+        !semantic && embedder_reports_pending_model2vec_download(fast_embedder);
+    let source = if semantic && selected_registry_model.is_some() {
         "registry_observed"
-    } else if fast_embedder.is_semantic() {
+    } else if semantic {
         "neural_local"
+    } else if pending_local_download {
+        "ee_model2vec_download_pending"
     } else {
         "frankensearch_hash_fallback"
     };
-    let semantic = fast_embedder.is_semantic()
-        || quality_embedder.is_some_and(|embedder| embedder.is_semantic());
     let mode = if semantic {
         EMBEDDING_POSTURE_MODE_NEURAL_LOCAL
+    } else if pending_local_download {
+        EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING
     } else {
         EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH
     };
@@ -5069,6 +5090,73 @@ mod tests {
         ensure(
             embedder.category() == ModelCategory::HashEmbedder,
             "failed lazy model should disclose hash fallback category",
+        )
+    }
+
+    #[test]
+    fn pending_lazy_model2vec_posture_is_not_hash_fallback() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_lazypending0000000000000000";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-lazy-pending-posture-test".to_owned(),
+                    name: Some("lazy pending posture test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let lazy = Arc::new(EeLazyModel2VecEmbedder::new(unique_test_dir(
+            "lazy-model-pending-posture",
+        )));
+        let stack = EmbedderStack::from_parts(
+            lazy.clone() as Arc<dyn crate::search::Embedder>,
+            None,
+        );
+        let pending = embedding_posture_from_stack(
+            &connection,
+            workspace_id,
+            &stack,
+            EmbeddingVectorCoverage::new(0, 3),
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure(!pending.semantic, "pending download is not semantic-ready")?;
+        ensure(
+            pending.semantic_pending(),
+            "pending download should have a distinct posture state",
+        )?;
+        ensure(
+            pending.mode == EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING,
+            "pending download should use neural_local_pending mode",
+        )?;
+        ensure(
+            pending.source == "ee_model2vec_download_pending",
+            "pending download should not be reported as hash fallback",
+        )?;
+        ensure(
+            pending.fast_model_id == POTION_MODEL_NAME,
+            "pending posture should disclose the intended bundled model id",
+        )?;
+
+        lazy.mark_failed();
+        let failed = embedding_posture_from_stack(
+            &connection,
+            workspace_id,
+            &stack,
+            EmbeddingVectorCoverage::new(0, 3),
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(!failed.semantic_pending(), "failed load is no longer pending")?;
+        ensure(
+            failed.mode == EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH,
+            "failed load should become deterministic hash fallback",
+        )?;
+        ensure(
+            failed.source == "frankensearch_hash_fallback",
+            "failed load should report hash fallback source",
         )
     }
 
