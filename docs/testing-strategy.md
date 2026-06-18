@@ -272,6 +272,24 @@ temporary workspace/artifacts. The script proves:
   15-row mesh auto-enrollment report, RCH worker pressure, and verification
   posture/ledger blocks.
 
+### Doctor Health E2E
+
+`scripts/e2e_doctor_health.sh` is the `bd-1et0v.21` real-binary, no-Cargo
+doctor-health harness. It emits `ee.test_event.v1` JSONL and retains its
+temporary workspace/artifacts. The script proves:
+
+- An initialized workspace reports a green top-line posture from default
+  `ee doctor --json` while keeping the default response compact and
+  core-focused.
+- `ee doctor --full --json` preserves the exhaustive checks, advisory blocks,
+  host-calibration budget deltas, RCH worker pressure, verification posture,
+  and mesh auto-enrollment diagnostics.
+- Synthetic CASS-limited and RCH pressure-blocked worker probes remain
+  advisory-only and do not flip the top-line doctor posture.
+- `ee diag host-profile --json` stays a real-binary, side-effect-free raw host
+  probe with redacted path posture; derived budget deltas are asserted through
+  full doctor host calibration.
+
 ### RCH Stranded-Result Recovery
 
 Remote verification can produce useful RCH artifacts even when the local wrapper

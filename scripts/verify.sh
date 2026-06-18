@@ -1147,6 +1147,12 @@ run_stage "Ergonomics E2E (bd-1et0v.22)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e
 # retains the exhaustive mesh/RCH/verification diagnostic blocks.
 run_stage "Doctor Concise E2E (bd-1et0v.15)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_doctor_concise.sh"
 
+# Gate 6.129: doctor-health real-binary E2E (bd-1et0v.21). No-Cargo:
+# proves initialized workspaces are green by default, concise output stays
+# compact, --full retains exhaustive advisory/host-calibration diagnostics, and
+# synthetic CASS/RCH advisory failures do not flip the top-line posture.
+run_stage "Doctor Health E2E (bd-1et0v.21)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_doctor_health.sh"
+
 # Gate 6.13: Dueling Wizards docs-bootstrap real-binary E2E (bd-1n0np.11.5).
 # Proves ee bootstrap docs --dry-run structural candidates (spans/hashes/anchors/
 # specificity), determinism, guard-rail rejection (oversize/symlink/missing as
