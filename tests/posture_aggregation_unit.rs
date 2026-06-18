@@ -1,4 +1,4 @@
-use ee::core::doctor::{CheckResult, Posture as DoctorPosture};
+use ee::core::doctor::{CheckResult, CheckTier, Posture as DoctorPosture};
 use ee::models::error_codes::INDEX_STALE;
 use ee::models::posture::{
     OperationPostureReport, SubsystemPostureReport, SubsystemPostureStatus, WorkspacePostureReport,
@@ -152,6 +152,43 @@ fn advisory_errors_remain_visible_without_blocking_topline() -> TestResult {
         }),
         true,
         "status advisory blocked subsystem remains visible",
+    )
+}
+
+#[test]
+fn embedding_posture_warning_is_advisory_boundary() -> TestResult {
+    let checks = vec![
+        CheckResult::ok("runtime", "ok"),
+        CheckResult::ok("workspace", "ok"),
+        CheckResult::ok("database", "ok"),
+        CheckResult::ok("search_index", "ok"),
+        CheckResult::warning(
+            "embedding_posture",
+            "hash fallback active but retrieval remains usable",
+            INDEX_STALE,
+        )
+        .advisory(),
+    ];
+
+    let embedding_check = checks
+        .iter()
+        .find(|check| check.name == "embedding_posture")
+        .ok_or_else(|| "missing embedding_posture fixture check".to_string())?;
+
+    ensure_equal(
+        embedding_check.tier,
+        CheckTier::Advisory,
+        "embedding posture check tier",
+    )?;
+    ensure_equal(
+        embedding_check.is_topline_healthy(),
+        true,
+        "embedding posture warning stays top-line healthy",
+    )?;
+    ensure_equal(
+        DoctorPosture::from_checks(&checks, None),
+        DoctorPosture::Ok,
+        "embedding posture warning does not degrade doctor posture",
     )
 }
 

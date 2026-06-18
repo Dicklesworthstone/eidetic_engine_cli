@@ -308,6 +308,14 @@ assert_jq "$BD12_DOCTOR_JSON" \
     "0" "bd12_doctor_check_tiers_classified"
 assert_jq "$BD12_DOCTOR_JSON" '(.data.advisories | type)' "array" \
     "bd12_doctor_advisories_array"
+printf '%s\n' "bd-1et0v.12 e2e: validating embedding_posture advisory tier" >&2
+e2e_log_note "bd_1et0v_12_step=validate_embedding_posture_tier"
+assert_jq "$BD12_DOCTOR_JSON" \
+    '([.data.checks[]? | select(.name == "embedding_posture")] | length)' \
+    "1" "bd12_doctor_embedding_posture_check_present_once"
+assert_jq "$BD12_DOCTOR_JSON" \
+    '([.data.checks[]? | select(.name == "embedding_posture")][0].tier)' \
+    "advisory" "bd12_doctor_embedding_posture_tier_advisory"
 
 BD12_DOCTOR_POSTURE=$(printf '%s' "$BD12_DOCTOR_JSON" \
     | jq -r '.data.posture // empty' 2>/dev/null || echo "")
