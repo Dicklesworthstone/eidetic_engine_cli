@@ -18,12 +18,20 @@ use crate::search::{
     artifact_to_document, memory_to_document_with_context_anchors_and_typed_fields,
     session_to_document,
 };
+#[cfg(feature = "lexical-bm25")]
+use crate::search::{LexicalSearch, TantivyIndex};
+use frankensearch::VectorIndex;
 use sqlmodel_core::Value as SqlValue;
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 const INDEX_METADATA_FILE: &str = "meta.json";
 const INDEX_STAGING_PREFIX: &str = ".publish-";
 const INDEX_RETAINED_SUFFIX: &str = ".previous";
+const VECTOR_INDEX_FAST_FILE: &str = "vector.fast.idx";
+const VECTOR_INDEX_QUALITY_FILE: &str = "vector.quality.idx";
+const VECTOR_INDEX_FALLBACK_FILE: &str = "vector.idx";
+#[cfg(feature = "lexical-bm25")]
+const LEXICAL_INDEX_SUBDIR: &str = "lexical";
 
 /// Maximum bytes inspected when reading `<workspace>/.ee/index/meta.json`.
 /// Real index metadata is a single tiny JSON object (`generation`,
@@ -333,6 +341,7 @@ pub struct IndexProcessingJobReport {
     pub document_id: Option<String>,
     pub outcome: String,
     pub processing_mode: String,
+    pub fallback_to_full: Option<String>,
     pub documents_total: u32,
     pub documents_indexed: u32,
     pub error: Option<String>,
@@ -604,6 +613,7 @@ impl IndexProcessingJobReport {
             "document_id": self.document_id,
             "outcome": self.outcome,
             "processing_mode": self.processing_mode,
+            "fallback_to_full": self.fallback_to_full,
             "documents_total": self.documents_total,
             "documents_indexed": self.documents_indexed,
             "error": self.error,
@@ -1079,6 +1089,7 @@ pub fn process_index_jobs(
                 document_id: job.document_id.clone(),
                 outcome: "planned".to_owned(),
                 processing_mode: processing_mode_for_job(job).to_owned(),
+                fallback_to_full: None,
                 documents_total: job.documents_total,
                 documents_indexed: job.documents_indexed,
                 error: None,
@@ -1187,6 +1198,7 @@ pub(crate) fn process_pending_index_jobs_coalesced(
                 document_id: job.document_id.clone(),
                 outcome: "skipped".to_owned(),
                 processing_mode: COALESCED_MODE.to_owned(),
+                fallback_to_full: None,
                 documents_total: job.documents_total,
                 documents_indexed: job.documents_indexed,
                 error: Some("search index job was not pending".to_owned()),
@@ -1213,6 +1225,7 @@ pub(crate) fn process_pending_index_jobs_coalesced(
                 document_id: job.document_id.clone(),
                 outcome: "completed_no_documents".to_owned(),
                 processing_mode: COALESCED_MODE.to_owned(),
+                fallback_to_full: None,
                 documents_total: 0,
                 documents_indexed: 0,
                 error: None,
@@ -1255,6 +1268,7 @@ pub(crate) fn process_pending_index_jobs_coalesced(
                     document_id: job.document_id.clone(),
                     outcome: "completed".to_owned(),
                     processing_mode: COALESCED_MODE.to_owned(),
+                    fallback_to_full: None,
                     documents_total,
                     documents_indexed: documents_total,
                     error: None,
@@ -1275,6 +1289,7 @@ pub(crate) fn process_pending_index_jobs_coalesced(
                     document_id: job.document_id.clone(),
                     outcome: "failed".to_owned(),
                     processing_mode: COALESCED_MODE.to_owned(),
+                    fallback_to_full: None,
                     documents_total,
                     documents_indexed: 0,
                     error: Some(error_message),
@@ -1301,7 +1316,7 @@ fn process_one_index_job(
     job: &StoredSearchIndexJob,
     index_dir: &Path,
 ) -> Result<IndexProcessingJobReport, IndexRebuildError> {
-    let processing_mode = processing_mode_for_job(job).to_owned();
+    let mut processing_mode = processing_mode_for_job(job).to_owned();
     if !db.start_search_index_job(&job.id)? {
         return Ok(IndexProcessingJobReport {
             job_id: job.id.clone(),
@@ -1310,6 +1325,7 @@ fn process_one_index_job(
             document_id: job.document_id.clone(),
             outcome: "skipped".to_owned(),
             processing_mode,
+            fallback_to_full: None,
             documents_total: job.documents_total,
             documents_indexed: job.documents_indexed,
             error: Some("search index job was not pending".to_owned()),
@@ -1320,7 +1336,19 @@ fn process_one_index_job(
         collect_workspace_indexable_documents(db, &job.workspace_id)?;
     db.update_search_index_job_total(&job.id, documents_total)?;
 
-    if documents_total == 0 {
+    let incremental_target = incremental_document_id_for_job(job);
+    let incremental_document = incremental_target.and_then(|document_id| {
+        indexable_docs
+            .iter()
+            .find(|document| document.id == document_id)
+            .cloned()
+    });
+    let should_try_incremental = matches!(
+        job.job_type_enum(),
+        Some(SearchIndexJobType::Incremental | SearchIndexJobType::SingleDocument)
+    );
+
+    if documents_total == 0 && (!should_try_incremental || incremental_target.is_none()) {
         db.complete_search_index_job(&job.id, 0)?;
         return Ok(IndexProcessingJobReport {
             job_id: job.id.clone(),
@@ -1329,6 +1357,7 @@ fn process_one_index_job(
             document_id: job.document_id.clone(),
             outcome: "completed_no_documents".to_owned(),
             processing_mode,
+            fallback_to_full: None,
             documents_total: 0,
             documents_indexed: 0,
             error: None,
@@ -1353,14 +1382,80 @@ fn process_one_index_job(
 
     let result = (|| -> Result<IndexProcessingJobReport, IndexRebuildError> {
         let _recovery_action = recover_interrupted_publish(index_dir)?;
-        let staging_dir = create_publish_staging_dir(index_dir)?;
-        let build_result = build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs)
-            .and_then(|stats| {
-                write_index_metadata(&staging_dir, published_generation, documents_total)
-                    .and_then(|()| publish_staged_index(index_dir, &staging_dir))
-                    .map_err(|error| error.to_string())?;
-                Ok(stats)
-            });
+        let incremental_outcome = if should_try_incremental {
+            match incremental_target {
+                Some(document_id) => apply_incremental_index_change_sync(
+                    index_dir,
+                    default_embedder_stack(),
+                    document_id,
+                    incremental_document.clone(),
+                    published_generation,
+                    documents_total,
+                ),
+                None => IncrementalApplyOutcome::Fallback {
+                    reason: missing_incremental_target_reason(job),
+                    detail: "incremental search index job did not include a document_id".to_owned(),
+                },
+            }
+        } else {
+            IncrementalApplyOutcome::FullRebuildRequired
+        };
+
+        let fallback_to_full = match incremental_outcome {
+            IncrementalApplyOutcome::Applied { documents_indexed } => {
+                db.update_search_index_job_progress(&job.id, documents_indexed)?;
+                db.complete_search_index_job(&job.id, documents_indexed)?;
+                return Ok(IndexProcessingJobReport {
+                    job_id: job.id.clone(),
+                    job_type: job.job_type.clone(),
+                    document_source: job.document_source.clone(),
+                    document_id: job.document_id.clone(),
+                    outcome: "completed".to_owned(),
+                    processing_mode,
+                    fallback_to_full: None,
+                    documents_total,
+                    documents_indexed,
+                    error: None,
+                });
+            }
+            IncrementalApplyOutcome::Fallback { reason, detail } => {
+                tracing::info!(
+                    target: "ee::index",
+                    job_id = %job.id,
+                    job_type = %job.job_type,
+                    document_source = ?job.document_source,
+                    document_id = ?job.document_id,
+                    fallback_to_full = reason.as_str(),
+                    detail = %detail,
+                    "incremental index intake fell back to full rebuild"
+                );
+                processing_mode.push_str("_fallback_to_full");
+                if documents_total == 0 && reason == IncrementalFallbackReason::IndexAbsent {
+                    db.complete_search_index_job(&job.id, 0)?;
+                    return Ok(IndexProcessingJobReport {
+                        job_id: job.id.clone(),
+                        job_type: job.job_type.clone(),
+                        document_source: job.document_source.clone(),
+                        document_id: job.document_id.clone(),
+                        outcome: "completed_no_documents".to_owned(),
+                        processing_mode,
+                        fallback_to_full: Some(reason.as_str().to_owned()),
+                        documents_total: 0,
+                        documents_indexed: 0,
+                        error: None,
+                    });
+                }
+                Some(reason.as_str().to_owned())
+            }
+            IncrementalApplyOutcome::FullRebuildRequired => None,
+        };
+
+        let build_result = publish_full_index_generation(
+            index_dir,
+            indexable_docs,
+            published_generation,
+            documents_total,
+        );
 
         match build_result {
             Ok(stats) => {
@@ -1379,6 +1474,7 @@ fn process_one_index_job(
                     document_id: job.document_id.clone(),
                     outcome: "completed".to_owned(),
                     processing_mode,
+                    fallback_to_full: fallback_to_full.clone(),
                     documents_total,
                     documents_indexed: documents_total,
                     error: if errors.is_empty() {
@@ -1401,6 +1497,7 @@ fn process_one_index_job(
                     document_id: job.document_id.clone(),
                     outcome: "failed".to_owned(),
                     processing_mode,
+                    fallback_to_full,
                     documents_total,
                     documents_indexed: 0,
                     error: Some(error_message),
@@ -1411,6 +1508,508 @@ fn process_one_index_job(
 
     release_index_publish_lock(db, &job.workspace_id, &holder_id);
     result
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IncrementalFallbackReason {
+    IndexAbsent,
+    GenerationSkew,
+    TierUnavailable,
+    ForcedReindex,
+    DeltaOverThreshold,
+}
+
+impl IncrementalFallbackReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::IndexAbsent => "index_absent",
+            Self::GenerationSkew => "generation_skew",
+            Self::TierUnavailable => "tier_unavailable",
+            Self::ForcedReindex => "forced_reindex",
+            Self::DeltaOverThreshold => "delta_over_threshold",
+        }
+    }
+}
+
+#[derive(Debug)]
+enum IncrementalApplyOutcome {
+    Applied {
+        documents_indexed: u32,
+    },
+    Fallback {
+        reason: IncrementalFallbackReason,
+        detail: String,
+    },
+    FullRebuildRequired,
+}
+
+#[derive(Debug)]
+struct IncrementalFallback {
+    reason: IncrementalFallbackReason,
+    detail: String,
+}
+
+fn incremental_document_id_for_job(job: &StoredSearchIndexJob) -> Option<&str> {
+    job.document_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|document_id| !document_id.is_empty())
+}
+
+fn missing_incremental_target_reason(job: &StoredSearchIndexJob) -> IncrementalFallbackReason {
+    if job.documents_total > 1 {
+        IncrementalFallbackReason::DeltaOverThreshold
+    } else {
+        IncrementalFallbackReason::ForcedReindex
+    }
+}
+
+fn incremental_fallback(
+    reason: IncrementalFallbackReason,
+    detail: impl Into<String>,
+) -> IncrementalFallback {
+    IncrementalFallback {
+        reason,
+        detail: detail.into(),
+    }
+}
+
+fn publish_full_index_generation(
+    index_dir: &Path,
+    indexable_docs: Vec<crate::search::IndexableDocument>,
+    generation: u64,
+    documents_total: u32,
+) -> Result<BuildStats, String> {
+    let staging_dir = create_publish_staging_dir(index_dir).map_err(|error| error.to_string())?;
+    build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs).and_then(|stats| {
+        write_index_metadata(&staging_dir, generation, documents_total)
+            .and_then(|()| publish_staged_index(index_dir, &staging_dir))
+            .map_err(|error| error.to_string())?;
+        Ok(stats)
+    })
+}
+
+fn apply_incremental_index_change_sync(
+    index_dir: &Path,
+    stack: EmbedderStack,
+    document_id: &str,
+    document: Option<crate::search::IndexableDocument>,
+    generation: u64,
+    documents_total: u32,
+) -> IncrementalApplyOutcome {
+    let index_dir_owned = index_dir.to_path_buf();
+    let document_id_owned = document_id.to_owned();
+    let result_holder: Arc<Mutex<Option<IncrementalApplyOutcome>>> = Arc::new(Mutex::new(None));
+    let task_result = Arc::clone(&result_holder);
+    let runtime_error_result = Arc::clone(&result_holder);
+
+    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let runtime_result = crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            let outcome = match apply_incremental_index_change(
+                &cx,
+                &index_dir_owned,
+                stack,
+                &document_id_owned,
+                document,
+                generation,
+                documents_total,
+            )
+            .await
+            {
+                Ok(documents_indexed) => IncrementalApplyOutcome::Applied { documents_indexed },
+                Err(fallback) => IncrementalApplyOutcome::Fallback {
+                    reason: fallback.reason,
+                    detail: fallback.detail,
+                },
+            };
+            if let Ok(mut guard) = task_result.lock() {
+                *guard = Some(outcome);
+            }
+        });
+
+        if let Err(error) = runtime_result
+            && let Ok(mut guard) = runtime_error_result.lock()
+        {
+            *guard = Some(IncrementalApplyOutcome::Fallback {
+                reason: IncrementalFallbackReason::ForcedReindex,
+                detail: format!("incremental index runtime failed: {error}"),
+            });
+        }
+    }));
+
+    if panic_result.is_err() {
+        return IncrementalApplyOutcome::Fallback {
+            reason: IncrementalFallbackReason::ForcedReindex,
+            detail: "incremental index intake panicked".to_owned(),
+        };
+    }
+
+    result_holder
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take())
+        .unwrap_or_else(|| IncrementalApplyOutcome::Fallback {
+            reason: IncrementalFallbackReason::ForcedReindex,
+            detail: "incremental index result was not captured".to_owned(),
+        })
+}
+
+async fn apply_incremental_index_change(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    stack: EmbedderStack,
+    document_id: &str,
+    document: Option<crate::search::IndexableDocument>,
+    generation: u64,
+    documents_total: u32,
+) -> Result<u32, IncrementalFallback> {
+    validate_incremental_index_metadata(index_dir, generation)?;
+
+    match document {
+        Some(document) => {
+            upsert_incremental_document(cx, index_dir, stack, &document).await?;
+            write_index_metadata(index_dir, generation, documents_total).map_err(|error| {
+                incremental_fallback(
+                    IncrementalFallbackReason::TierUnavailable,
+                    format!("failed to write incremental index metadata: {error}"),
+                )
+            })?;
+            Ok(1)
+        }
+        None => {
+            delete_incremental_document(cx, index_dir, document_id).await?;
+            write_index_metadata(index_dir, generation, documents_total).map_err(|error| {
+                incremental_fallback(
+                    IncrementalFallbackReason::TierUnavailable,
+                    format!("failed to write incremental index metadata: {error}"),
+                )
+            })?;
+            Ok(0)
+        }
+    }
+}
+
+fn validate_incremental_index_metadata(
+    index_dir: &Path,
+    generation: u64,
+) -> Result<(), IncrementalFallback> {
+    ensure_index_path_has_no_symlinks(index_dir, "apply incremental index intake").map_err(
+        |error| {
+            incremental_fallback(
+                IncrementalFallbackReason::TierUnavailable,
+                error.to_string(),
+            )
+        },
+    )?;
+    match std::fs::symlink_metadata(index_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(incremental_fallback(
+                IncrementalFallbackReason::TierUnavailable,
+                format!(
+                    "active index path is not a directory: {}",
+                    index_dir.display()
+                ),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(incremental_fallback(
+                IncrementalFallbackReason::IndexAbsent,
+                format!("active index directory is absent: {}", index_dir.display()),
+            ));
+        }
+        Err(error) => {
+            return Err(incremental_fallback(
+                IncrementalFallbackReason::TierUnavailable,
+                format!("failed to inspect active index directory: {error}"),
+            ));
+        }
+    }
+
+    let metadata_path = index_dir.join(INDEX_METADATA_FILE);
+    let Some(content) = read_index_metadata_contents(&metadata_path).map_err(|error| {
+        incremental_fallback(
+            IncrementalFallbackReason::GenerationSkew,
+            format!("failed to read index metadata: {error}"),
+        )
+    })?
+    else {
+        return Err(incremental_fallback(
+            IncrementalFallbackReason::IndexAbsent,
+            format!("index metadata is absent: {}", metadata_path.display()),
+        ));
+    };
+    let json: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+        incremental_fallback(
+            IncrementalFallbackReason::GenerationSkew,
+            format!("failed to parse index metadata: {error}"),
+        )
+    })?;
+    let index_generation = json
+        .get("generation")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            incremental_fallback(
+                IncrementalFallbackReason::GenerationSkew,
+                "index metadata does not contain a numeric generation",
+            )
+        })?;
+    if index_generation > generation {
+        return Err(incremental_fallback(
+            IncrementalFallbackReason::GenerationSkew,
+            format!(
+                "index generation {index_generation} is ahead of database generation {generation}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+async fn upsert_incremental_document(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    stack: EmbedderStack,
+    document: &crate::search::IndexableDocument,
+) -> Result<(), IncrementalFallback> {
+    let fast_embedder = stack.fast_arc();
+    let fast_vector = fast_embedder
+        .embed(cx, &document.content)
+        .await
+        .map_err(|error| {
+            incremental_fallback(
+                IncrementalFallbackReason::TierUnavailable,
+                format!("fast-tier embedding failed: {error}"),
+            )
+        })?;
+    let mut fast_index = open_fast_vector_index(index_dir)?;
+    fast_index
+        .append(&document.id, &fast_vector)
+        .map_err(|error| {
+            incremental_fallback(
+                IncrementalFallbackReason::TierUnavailable,
+                format!("fast-tier vector upsert failed: {error}"),
+            )
+        })?;
+    compact_incremental_vector_index(&mut fast_index, "fast")?;
+
+    if let Some(quality_embedder) = stack.quality_arc() {
+        let quality_vector = quality_embedder
+            .embed(cx, &document.content)
+            .await
+            .map_err(|error| {
+                incremental_fallback(
+                    IncrementalFallbackReason::TierUnavailable,
+                    format!("quality-tier embedding failed: {error}"),
+                )
+            })?;
+        let mut quality_index = open_quality_vector_index(index_dir)?.ok_or_else(|| {
+            incremental_fallback(
+                IncrementalFallbackReason::TierUnavailable,
+                "quality-tier vector index is absent for a two-tier embedder stack",
+            )
+        })?;
+        quality_index
+            .append(&document.id, &quality_vector)
+            .map_err(|error| {
+                incremental_fallback(
+                    IncrementalFallbackReason::TierUnavailable,
+                    format!("quality-tier vector upsert failed: {error}"),
+                )
+            })?;
+        compact_incremental_vector_index(&mut quality_index, "quality")?;
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    {
+        let lexical = open_lexical_index(index_dir)?;
+        lexical
+            .index_document(cx, document)
+            .await
+            .map_err(|error| {
+                incremental_fallback(
+                    IncrementalFallbackReason::TierUnavailable,
+                    format!("lexical upsert failed: {error}"),
+                )
+            })?;
+        lexical.commit(cx).await.map_err(|error| {
+            incremental_fallback(
+                IncrementalFallbackReason::TierUnavailable,
+                format!("lexical commit failed: {error}"),
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+async fn delete_incremental_document(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    document_id: &str,
+) -> Result<(), IncrementalFallback> {
+    let mut fast_index = open_fast_vector_index(index_dir)?;
+    if fast_index.soft_delete(document_id).map_err(|error| {
+        incremental_fallback(
+            IncrementalFallbackReason::TierUnavailable,
+            format!("fast-tier vector delete failed: {error}"),
+        )
+    })? {
+        vacuum_incremental_vector_index(&mut fast_index, "fast")?;
+    }
+
+    if let Some(mut quality_index) = open_quality_vector_index(index_dir)?
+        && quality_index.soft_delete(document_id).map_err(|error| {
+            incremental_fallback(
+                IncrementalFallbackReason::TierUnavailable,
+                format!("quality-tier vector delete failed: {error}"),
+            )
+        })?
+    {
+        vacuum_incremental_vector_index(&mut quality_index, "quality")?;
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    {
+        let lexical = open_lexical_index(index_dir)?;
+        lexical
+            .delete_document(cx, document_id)
+            .await
+            .map_err(|error| {
+                incremental_fallback(
+                    IncrementalFallbackReason::TierUnavailable,
+                    format!("lexical delete failed: {error}"),
+                )
+            })?;
+        lexical.commit(cx).await.map_err(|error| {
+            incremental_fallback(
+                IncrementalFallbackReason::TierUnavailable,
+                format!("lexical commit failed: {error}"),
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn open_fast_vector_index(index_dir: &Path) -> Result<VectorIndex, IncrementalFallback> {
+    let fast_path = index_dir.join(VECTOR_INDEX_FAST_FILE);
+    let fallback_path = index_dir.join(VECTOR_INDEX_FALLBACK_FILE);
+    let path = if path_is_regular_file_no_follow(&fast_path) {
+        fast_path
+    } else if path_is_regular_file_no_follow(&fallback_path) {
+        fallback_path
+    } else {
+        return Err(incremental_fallback(
+            IncrementalFallbackReason::IndexAbsent,
+            format!(
+                "no fast vector tier found at {} or {}",
+                fast_path.display(),
+                fallback_path.display()
+            ),
+        ));
+    };
+    VectorIndex::open(&path).map_err(|error| {
+        incremental_fallback(
+            IncrementalFallbackReason::TierUnavailable,
+            format!(
+                "failed to open fast vector tier {}: {error}",
+                path.display()
+            ),
+        )
+    })
+}
+
+fn open_quality_vector_index(index_dir: &Path) -> Result<Option<VectorIndex>, IncrementalFallback> {
+    let path = index_dir.join(VECTOR_INDEX_QUALITY_FILE);
+    if !path_exists_no_follow(&path) {
+        return Ok(None);
+    }
+    if !path_is_regular_file_no_follow(&path) {
+        return Err(incremental_fallback(
+            IncrementalFallbackReason::TierUnavailable,
+            format!(
+                "quality vector tier is not a regular file: {}",
+                path.display()
+            ),
+        ));
+    }
+    VectorIndex::open(&path).map(Some).map_err(|error| {
+        incremental_fallback(
+            IncrementalFallbackReason::TierUnavailable,
+            format!(
+                "failed to open quality vector tier {}: {error}",
+                path.display()
+            ),
+        )
+    })
+}
+
+fn compact_incremental_vector_index(
+    index: &mut VectorIndex,
+    tier: &str,
+) -> Result<(), IncrementalFallback> {
+    if index.wal_record_count() == 0 {
+        return Ok(());
+    }
+    let stats = index.compact().map_err(|error| {
+        incremental_fallback(
+            IncrementalFallbackReason::TierUnavailable,
+            format!("{tier}-tier vector compaction failed: {error}"),
+        )
+    })?;
+    tracing::info!(
+        target: "ee::index",
+        tier,
+        main_records_before = stats.main_records_before,
+        wal_records = stats.wal_records,
+        total_records_after = stats.total_records_after,
+        elapsed_ms = stats.elapsed_ms,
+        "incremental vector WAL compacted"
+    );
+    Ok(())
+}
+
+fn vacuum_incremental_vector_index(
+    index: &mut VectorIndex,
+    tier: &str,
+) -> Result<(), IncrementalFallback> {
+    let stats = index.vacuum().map_err(|error| {
+        incremental_fallback(
+            IncrementalFallbackReason::TierUnavailable,
+            format!("{tier}-tier vector vacuum failed: {error}"),
+        )
+    })?;
+    tracing::info!(
+        target: "ee::index",
+        tier,
+        records_before = stats.records_before,
+        records_after = stats.records_after,
+        tombstones_removed = stats.tombstones_removed,
+        duration_ms = duration_millis_saturating(stats.duration),
+        "incremental vector tombstones vacuumed"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "lexical-bm25")]
+fn open_lexical_index(index_dir: &Path) -> Result<TantivyIndex, IncrementalFallback> {
+    let lexical_path = index_dir.join(LEXICAL_INDEX_SUBDIR);
+    if !path_exists_no_follow(&lexical_path) {
+        return Err(incremental_fallback(
+            IncrementalFallbackReason::TierUnavailable,
+            format!("lexical tier is absent: {}", lexical_path.display()),
+        ));
+    }
+    TantivyIndex::open(&lexical_path).map_err(|error| {
+        incremental_fallback(
+            IncrementalFallbackReason::TierUnavailable,
+            format!(
+                "failed to open lexical tier {}: {error}",
+                lexical_path.display()
+            ),
+        )
+    })
 }
 
 fn collect_workspace_indexable_documents(
@@ -3510,6 +4109,46 @@ mod tests {
         connection.close().map_err(|e| e.to_string())
     }
 
+    fn test_indexable_doc(id: &str, content: &str) -> crate::search::IndexableDocument {
+        crate::search::IndexableDocument::new(id, content)
+            .with_title(format!("title-{id}"))
+            .with_metadata("fixture", "incremental-index")
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct VectorSnapshotRow {
+        doc_id: String,
+        fast_bits: Vec<u32>,
+        quality_bits: Option<Vec<u32>>,
+    }
+
+    fn vector_index_snapshot(index_dir: &Path) -> Result<Vec<VectorSnapshotRow>, String> {
+        let index =
+            frankensearch::TwoTierIndex::open(index_dir, frankensearch::TwoTierConfig::default())
+                .map_err(|error| error.to_string())?;
+        let mut rows = Vec::new();
+        for position in 0..index.doc_count() {
+            let doc_id = index
+                .doc_id_at(position)
+                .map_err(|error| error.to_string())?
+                .to_owned();
+            let fast = index
+                .fast_vector_for_doc_id(&doc_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("missing fast vector for {doc_id}"))?;
+            let quality = index
+                .quality_vector_for_doc_id(&doc_id)
+                .map_err(|error| error.to_string())?;
+            rows.push(VectorSnapshotRow {
+                doc_id,
+                fast_bits: fast.iter().map(|value| value.to_bits()).collect(),
+                quality_bits: quality
+                    .map(|values| values.iter().map(|value| value.to_bits()).collect()),
+            });
+        }
+        Ok(rows)
+    }
+
     fn read_marker(dir: &Path, file: &str) -> Result<String, String> {
         std::fs::read_to_string(dir.join(file)).map_err(|e| e.to_string())
     }
@@ -3546,6 +4185,138 @@ mod tests {
         assert_eq!(json["artifacts_indexed"], 2);
         assert_eq!(json["documents_total"], 10);
         assert_eq!(json["dry_run"], false);
+    }
+
+    #[test]
+    fn incremental_fallback_reason_strings_are_stable() {
+        assert_eq!(
+            IncrementalFallbackReason::IndexAbsent.as_str(),
+            "index_absent"
+        );
+        assert_eq!(
+            IncrementalFallbackReason::GenerationSkew.as_str(),
+            "generation_skew"
+        );
+        assert_eq!(
+            IncrementalFallbackReason::TierUnavailable.as_str(),
+            "tier_unavailable"
+        );
+        assert_eq!(
+            IncrementalFallbackReason::ForcedReindex.as_str(),
+            "forced_reindex"
+        );
+        assert_eq!(
+            IncrementalFallbackReason::DeltaOverThreshold.as_str(),
+            "delta_over_threshold"
+        );
+    }
+
+    #[test]
+    fn incremental_missing_index_reports_index_absent_fallback() {
+        let root = unique_test_dir("incremental-missing-index");
+        let index_dir = root.join("index");
+        let document = test_indexable_doc("doc-alpha", "alpha content");
+
+        let outcome = apply_incremental_index_change_sync(
+            &index_dir,
+            default_embedder_stack(),
+            "doc-alpha",
+            Some(document),
+            1,
+            1,
+        );
+
+        match outcome {
+            IncrementalApplyOutcome::Fallback { reason, detail } => {
+                assert_eq!(reason, IncrementalFallbackReason::IndexAbsent);
+                assert!(detail.contains("active index directory is absent"));
+            }
+            other => panic!("unexpected incremental outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn incremental_upsert_and_delete_match_full_rebuild_vectors() -> TestResult {
+        let root = unique_test_dir("incremental-equivalence");
+        let incremental_dir = root.join("incremental-index");
+        let full_dir = root.join("full-index");
+        let initial_docs = vec![
+            test_indexable_doc("doc-alpha", "alpha release workflow"),
+            test_indexable_doc("doc-beta", "beta old notes"),
+        ];
+        let final_docs = vec![
+            test_indexable_doc("doc-beta", "beta updated notes"),
+            test_indexable_doc("doc-gamma", "gamma new notes"),
+        ];
+
+        build_index_sync(
+            &incremental_dir,
+            default_embedder_stack(),
+            initial_docs.clone(),
+        )?;
+        write_index_metadata(&incremental_dir, 1, 2).map_err(|error| error.to_string())?;
+
+        let beta_outcome = apply_incremental_index_change_sync(
+            &incremental_dir,
+            default_embedder_stack(),
+            "doc-beta",
+            Some(test_indexable_doc("doc-beta", "beta updated notes")),
+            2,
+            2,
+        );
+        ensure(
+            matches!(
+                beta_outcome,
+                IncrementalApplyOutcome::Applied {
+                    documents_indexed: 1
+                }
+            ),
+            format!("unexpected beta outcome: {beta_outcome:?}"),
+        )?;
+
+        let gamma_outcome = apply_incremental_index_change_sync(
+            &incremental_dir,
+            default_embedder_stack(),
+            "doc-gamma",
+            Some(test_indexable_doc("doc-gamma", "gamma new notes")),
+            3,
+            3,
+        );
+        ensure(
+            matches!(
+                gamma_outcome,
+                IncrementalApplyOutcome::Applied {
+                    documents_indexed: 1
+                }
+            ),
+            format!("unexpected gamma outcome: {gamma_outcome:?}"),
+        )?;
+
+        let alpha_outcome = apply_incremental_index_change_sync(
+            &incremental_dir,
+            default_embedder_stack(),
+            "doc-alpha",
+            None,
+            4,
+            2,
+        );
+        ensure(
+            matches!(
+                alpha_outcome,
+                IncrementalApplyOutcome::Applied {
+                    documents_indexed: 0
+                }
+            ),
+            format!("unexpected alpha outcome: {alpha_outcome:?}"),
+        )?;
+
+        build_index_sync(&full_dir, default_embedder_stack(), final_docs)?;
+        write_index_metadata(&full_dir, 4, 2).map_err(|error| error.to_string())?;
+
+        ensure(
+            vector_index_snapshot(&incremental_dir)? == vector_index_snapshot(&full_dir)?,
+            "incremental vector snapshot should match full rebuild snapshot",
+        )
     }
 
     #[test]
