@@ -2957,6 +2957,61 @@ def sync_closure_root_counts(text):
             })
     return counts
 
+def remote_setup_kill_details(proof, combined_tail):
+    def int_value(value, default=0):
+        if isinstance(value, bool) or value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    exit_code = int_value(proof.get("exit_code"), None)
+    stdout_bytes = int_value(proof.get("stdout_bytes"))
+    if exit_code != 241 or stdout_bytes != 0:
+        return None
+
+    text = combined_tail or ""
+    verifier_output_patterns = (
+        r"\bCompiling\b",
+        r"\bChecking\b",
+        r"\bFinished\b",
+        r"\bRunning\b",
+        r"\bDoc-tests?\b",
+        r"\brunning\s+\d+\s+tests?\b",
+        r"\btest result:",
+        r"\berror(?:\[[^\]]+\])?:",
+        r"\bwarning(?:\[[^\]]+\])?:",
+        r"\bcould not compile\b",
+        r"\bfailed to compile\b",
+    )
+    if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in verifier_output_patterns):
+        return None
+
+    elapsed_ms = int_value(proof.get("elapsed_ms"))
+    stderr_bytes = int_value(proof.get("stderr_bytes"))
+    elapsed_seconds = round(elapsed_ms / 1000, 3)
+    return {
+        "schema": "ee.rch.remote_setup_kill.v1",
+        "signature": "exit_241_no_verifier_stdout",
+        "stage": "rch_sync_or_setup",
+        "exit_code": exit_code,
+        "elapsed_ms": elapsed_ms,
+        "elapsed_seconds": elapsed_seconds,
+        "stdout_bytes": stdout_bytes,
+        "stderr_bytes": stderr_bytes,
+        "worker_id": proof.get("worker_id"),
+        "message": (
+            f"remote killed at {elapsed_seconds:g}s with exit 241 and "
+            "0 verifier stdout bytes; RCH ended before Cargo/test output, "
+            "likely during rsync or dependency-sync setup"
+        ),
+        "next_action": (
+            "inspect RCH client/worker sync setup, worker disk, and daemon "
+            "timeout posture; do not treat this as source verification failure"
+        ),
+    }
+
 def parse_time(value):
     if not value:
         return None
@@ -3561,6 +3616,17 @@ if sync_closure_counts:
 
 exit_code = proof.get("exit_code")
 degraded = list(proof.get("degraded_codes") or [])
+remote_setup_kill = remote_setup_kill_details(proof, combined_tail)
+if remote_setup_kill:
+    proof["remote_setup_kill"] = remote_setup_kill
+    for code in (
+        "rch_verify_remote_command_failed",
+        "rch_verify_remote_transport_timeout",
+        "rch_verify_capacity_or_timeout",
+    ):
+        if code not in degraded:
+            degraded.append(code)
+    proof["degraded_codes"] = degraded
 proof_broker = proof.get("proof_broker") if isinstance(proof.get("proof_broker"), dict) else {}
 source_state_degraded = list(proof.get("source_state_degraded_codes") or [])
 source_state_code_set = set(source_state_degraded)
@@ -3720,6 +3786,16 @@ if runtime.get("status") not in (None, "not_checked"):
         f"- rch_runtime: `{runtime.get('status')}`"
         f" client=`{runtime.get('client_version') or 'unknown'}`"
         f" daemon=`{runtime.get('daemon_version') or 'unknown'}`"
+    )
+remote_setup_kill = proof.get("remote_setup_kill") or {}
+if isinstance(remote_setup_kill, dict) and remote_setup_kill.get("signature"):
+    summary_lines.append(
+        f"- remote_setup_kill: `{remote_setup_kill.get('signature')}`"
+        f" stage=`{remote_setup_kill.get('stage') or 'unknown'}`"
+        f" elapsed_s=`{remote_setup_kill.get('elapsed_seconds')}`"
+        f" stdout_bytes=`{remote_setup_kill.get('stdout_bytes')}`"
+        f" stderr_bytes=`{remote_setup_kill.get('stderr_bytes')}`"
+        f" next_action=`{remote_setup_kill.get('next_action') or 'unknown'}`"
     )
 local_cargo_status = local_cargo_processes.get("status")
 if local_cargo_status not in (None, "not_run"):
