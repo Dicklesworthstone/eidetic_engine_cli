@@ -5872,15 +5872,82 @@ pub fn run_context_search_with_preloaded_memories_and_workspace_state(
     })
 }
 
+/// Resolve the `ee similar` seed memory through the same workspace,
+/// `--memory-scope` trust lane, and validity gating search applies to every
+/// other candidate (bd-2vq2z.25; same bypass class as bd-2vq2z.4). A raw
+/// `get_memory(id)` lets a seed from another workspace, an out-of-scope trust
+/// lane, or a tombstoned / expired / not-yet-valid row silently drive the
+/// query. Mirrors the search candidate-admission path
+/// ([`MemoryScopeContext::memory_in_scope_with_tags`] + tombstone/validity
+/// windows) and returns `MemoryNotFound` when the seed is not admissible under
+/// the requested workspace and scope. The seed body is never emitted (only its
+/// id), so this closes the lookup-side bypass without leaking redacted bodies.
+fn resolve_similar_seed_memory(
+    connection: &DbConnection,
+    options: &SimilarOptions,
+    workspace_id: &str,
+    scope_context: &MemoryScopeContext,
+) -> Result<StoredMemory, SimilarError> {
+    let memory = connection
+        .get_memory(&options.memory_id)?
+        .ok_or_else(|| SimilarError::MemoryNotFound {
+            memory_id: options.memory_id.clone(),
+        })?;
+    let tags = connection.get_memory_tags(&options.memory_id)?;
+
+    // Workspace + scope trust lane: the seed must belong to the requested
+    // workspace (or be globally scoped) and pass the active `--memory-scope`,
+    // exactly like every other search candidate.
+    let workspace_candidate = memory.workspace_id == workspace_id
+        || crate::models::memory_tags_include_global_scope(&tags);
+    let admissible = workspace_candidate && scope_context.memory_in_scope_with_tags(&memory, &tags);
+
+    // Validity: honor tombstone / expiry / future windows the same way the
+    // search candidate path does, so an excluded seed cannot drive retrieval.
+    let validity_ok = if memory.tombstoned_at.is_some() && !options.include_tombstoned {
+        false
+    } else {
+        let reference_time = options.as_of.unwrap_or_else(Utc::now);
+        matches!(
+            memory_validity_visibility(
+                memory.valid_from.as_deref(),
+                memory.valid_to.as_deref(),
+                reference_time,
+                options.include_expired,
+                options.include_future,
+            ),
+            MemoryValidityVisibility::Visible
+        )
+    };
+
+    if admissible && validity_ok {
+        Ok(memory)
+    } else {
+        Err(SimilarError::MemoryNotFound {
+            memory_id: options.memory_id.clone(),
+        })
+    }
+}
+
 pub fn run_similar(options: &SimilarOptions) -> Result<SimilarReport, SimilarError> {
     let database_path = options.resolve_database_path();
     let connection = DbConnection::open_file(&database_path)?;
-    let target =
-        connection
-            .get_memory(&options.memory_id)?
-            .ok_or_else(|| SimilarError::MemoryNotFound {
-                memory_id: options.memory_id.clone(),
-            })?;
+    // Resolve the requested workspace and memory scope BEFORE the seed lookup so
+    // the seed is admitted through the same workspace / `--memory-scope` /
+    // validity gating search uses for every other candidate (bd-2vq2z.25).
+    // Workspaces are keyed by the raw `workspace_path` everywhere they are
+    // written (init/remember) and where search builds its scope context, so the
+    // lookup uses the same raw path rather than a canonical root.
+    let workspace_id = connection
+        .get_workspace_by_path(&options.workspace_path.to_string_lossy())?
+        .map(|workspace| workspace.id)
+        .unwrap_or_else(|| crate::core::curate::stable_workspace_id(&options.workspace_path));
+    let scope_context = MemoryScopeContext::for_workspace(
+        &options.workspace_path,
+        options.memory_scope,
+        options.strict_scope,
+    );
+    let target = resolve_similar_seed_memory(&connection, options, &workspace_id, &scope_context)?;
     let index_dir = options.resolve_index_dir();
     let mut embedding_posture =
         current_embedding_posture(&connection, &target.workspace_id, &index_dir)?;
