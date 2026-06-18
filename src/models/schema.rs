@@ -89,6 +89,15 @@ pub const INDEX_INTAKE_FALLBACK_FORCED_REINDEX: &str = "forced_reindex";
 /// Index-intake fallback-to-full reason: the delta exceeded the incremental threshold.
 pub const INDEX_INTAKE_FALLBACK_DELTA_OVER_THRESHOLD: &str = "delta_over_threshold";
 
+/// Schema identifier for the active embedding posture block (bd-1et0v.1).
+pub const EMBEDDING_POSTURE_SCHEMA_V1: &str = "ee.embedding_posture.v1";
+/// Embedding posture mode: local neural semantic model is active.
+pub const EMBEDDING_POSTURE_MODE_NEURAL_LOCAL: &str = "neural_local";
+/// Embedding posture mode: deterministic hash fallback is active.
+pub const EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH: &str = "deterministic_hash";
+/// Embedding posture mode: a neural model exists but download/load policy blocked it.
+pub const EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED: &str = "neural_remote_blocked";
+
 /// All known schema identifiers for validation.
 pub const KNOWN_SCHEMAS: &[&str] = &[
     RESPONSE_SCHEMA_V0,
@@ -171,6 +180,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     SCALE_ENVELOPE_SCHEMA_V1,
     WRITE_GROUP_COMMIT_SCHEMA_V1,
     INDEX_INTAKE_SCHEMA_V1,
+    EMBEDDING_POSTURE_SCHEMA_V1,
     // Active learning agenda and experiment schemas (EE-440)
     LEARNING_QUESTION_SCHEMA_V1,
     UNCERTAINTY_ESTIMATE_SCHEMA_V1,

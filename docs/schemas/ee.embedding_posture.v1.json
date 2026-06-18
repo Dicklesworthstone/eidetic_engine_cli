@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.embedding_posture.v1.json",
+  "title": "ee.embedding_posture.v1",
+  "description": "Redaction-safe active embedding posture block shared by retrieval observability surfaces. It reports whether semantic retrieval is active, which model tier is selected, registry availability counts, and vector coverage. It never includes memory content, query text, or raw embeddings. See ADR 0080 (docs/adr/0080-bundled-default-embedder.md).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "mode",
+    "semantic",
+    "source",
+    "fast_model_id",
+    "fast_dimension",
+    "quality_model_id",
+    "quality_dimension",
+    "deterministic",
+    "registered_model_count",
+    "available_model_count",
+    "selected_registry_model",
+    "vector_coverage"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.embedding_posture.v1",
+      "description": "Schema identifier."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["neural_local", "deterministic_hash", "neural_remote_blocked"],
+      "description": "Active retrieval embedding posture."
+    },
+    "semantic": {
+      "type": "boolean",
+      "description": "True only when the active fast or quality embedder is a real semantic model."
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short deterministic source label explaining how the posture was selected, for example registry_observed, frankensearch_hash_fallback, download_blocked, or model_load_failed."
+    },
+    "fast_model_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Active fast-tier embedder identifier, including the deterministic hash fallback id when no neural fast tier is active."
+    },
+    "fast_dimension": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Fast-tier embedding dimension."
+    },
+    "quality_model_id": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Active quality-tier embedder identifier, or null when no quality tier is active."
+    },
+    "quality_dimension": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "Quality-tier embedding dimension, or null when no quality tier is active."
+    },
+    "deterministic": {
+      "type": "boolean",
+      "description": "True when repeated embeddings from the active local model stack are deterministic for the same inputs and model assets."
+    },
+    "registered_model_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of embedding model registry records for this workspace."
+    },
+    "available_model_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of embedding model registry records that are available for use."
+    },
+    "selected_registry_model": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "provider",
+            "model_name",
+            "status",
+            "dimension",
+            "deterministic"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Registry row id for the selected embedding model."
+            },
+            "provider": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Registry provider label."
+            },
+            "model_name": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Registry model name."
+            },
+            "status": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Registry status for the selected model."
+            },
+            "dimension": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Declared embedding dimension for the selected registry model."
+            },
+            "deterministic": {
+              "type": "boolean",
+              "description": "Whether the selected registry model is declared deterministic."
+            }
+          }
+        }
+      ],
+      "description": "Selected available embedding registry model, or null when the posture comes from fallback or direct frankensearch auto-detection."
+    },
+    "vector_coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["embedded", "total"],
+      "description": "How much of the indexable document set currently has vectors for the active posture.",
+      "properties": {
+        "embedded": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of documents with vectors for the active posture."
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total number of documents considered for vector coverage."
+        }
+      }
+    }
+  }
+}

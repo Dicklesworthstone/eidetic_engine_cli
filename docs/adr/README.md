@@ -82,3 +82,4 @@ including rejected alternatives and verification hooks.
 - [ADR 0076: Scale-Envelope Contract](0076-scale-envelope-contract.md)
 - [ADR 0077: Group-Commit Write Intake](0077-group-commit-write-intake.md)
 - [ADR 0078: Incremental Index Intake](0078-incremental-index-intake.md)
+- [ADR 0080: Downloaded Default Local Embedder](0080-bundled-default-embedder.md)

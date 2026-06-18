@@ -9757,6 +9757,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: index_intake_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::EMBEDDING_POSTURE_SCHEMA_V1,
+            version: "1",
+            description: "Redaction-safe active embedding posture block: semantic mode, model ids, registry counts, and vector coverage.",
+            category: "search",
+            definition: embedding_posture_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.closeout_audit.v1",
             version: "1",
             description: "Closeout audit envelope emitted by scripts/closeout_audit.sh before marking a bead closed.",
@@ -11165,6 +11172,10 @@ fn write_group_commit_schema_definition() -> String {
 
 fn index_intake_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.index_intake.v1.json").to_string()
+}
+
+fn embedding_posture_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.embedding_posture.v1.json").to_string()
 }
 
 fn closeout_audit_schema_definition() -> String {
