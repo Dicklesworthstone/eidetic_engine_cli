@@ -5993,14 +5993,17 @@ fn resolve_source_mode(
     degraded: &mut Vec<SearchDegradation>,
 ) -> Result<SourceModeResolution, SearchError> {
     let embed_model_unavailable = embed_model_unavailable_reason_from_env();
+    let semantic_unavailable = embed_model_unavailable
+        .is_none()
+        .then(semantic_retrieval_unavailable_reason)
+        .flatten();
     let lexical_available = lexical_search_available(index_dir);
     let tiers = SearchTierState {
         lexical_available,
         embed_model_unavailable: embed_model_unavailable.as_deref(),
-        semantic_embedder_degraded: embed_model_unavailable
-            .is_none()
-            .then_some(HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON)
-            .filter(|_| lexical_available && !active_search_embedder_is_semantic()),
+        semantic_embedder_degraded: semantic_unavailable
+            .as_deref()
+            .filter(|_| lexical_available),
     };
     resolve_source_mode_with_tiers(options, degraded, tiers)
 }
@@ -6129,19 +6132,20 @@ fn resolve_source_mode_with_tiers(
 }
 
 fn active_search_embedder_is_semantic() -> bool {
-    HashEmbedder::default_256().is_semantic()
+    crate::core::index::default_search_embedder_stack()
+        .fast()
+        .is_semantic()
 }
 
 /// One-line, agent-actionable hint for turning on semantic retrieval.
-pub(crate) const SEMANTIC_ENABLE_HINT: &str = "point EE_EMBED_MODEL_PATH at a local embedding model, then run `ee index reembed --workspace .` (release builds ship with the embed-fast feature)";
+pub(crate) const SEMANTIC_ENABLE_HINT: &str = "run `ee index reembed --workspace .`; default builds use Frankensearch model2vec download unless FRANKENSEARCH_OFFLINE blocks it";
 
 /// Posture probe for onboarding/diagnostic surfaces (e.g. `ee init`).
 /// Returns `None` when semantic retrieval is active, or `Some(reason)`
-/// describing why retrieval is degraded to lexical-only — either a missing
-/// `EE_EMBED_MODEL_PATH` model file or the hash-fallback embedder. The
-/// same condition surfaces per-query as the `embed_model_unavailable`
-/// degradation; this lets the one-time onboarding path nudge the agent
-/// before the first search. (agent-UX item 6)
+/// describing why retrieval is degraded to lexical-only. The same condition
+/// surfaces per-query as the `embed_model_unavailable` degradation; this lets
+/// the one-time onboarding path nudge the agent before the first search.
+/// (agent-UX item 6)
 pub(crate) fn semantic_retrieval_unavailable_reason() -> Option<String> {
     if active_search_embedder_is_semantic() {
         return None;
@@ -6275,7 +6279,7 @@ fn diag_search_sync(
             let candidate_limit = limit
                 .max(1)
                 .saturating_mul(config.candidate_multiplier.max(1));
-            let fast_embedder = Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>;
+            let fast_embedder = crate::core::index::default_search_embedder_stack().fast_arc();
             let lexical = match open_lexical_searcher_for_diag(&index_dir_owned) {
                 Ok(lexical) => lexical,
                 Err(error) => {
@@ -7062,7 +7066,7 @@ fn search_sync_with_performance(
             };
 
             let embedder_start = Instant::now();
-            let fast_embedder = Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>;
+            let fast_embedder = crate::core::index::default_search_embedder_stack().fast_arc();
             push_search_performance_timing(
                 &async_timings,
                 "searchSync::embedderInit",

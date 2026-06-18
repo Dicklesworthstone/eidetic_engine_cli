@@ -96,6 +96,27 @@ const FORBIDDEN_AI_CRATES: &[&str] = &[
     "cohere",
 ];
 
+#[test]
+fn frankensearch_default_features_enable_model2vec_download_without_fastembed() {
+    let manifest = std::fs::read_to_string(manifest_path())
+        .expect("Cargo.toml should be readable for feature guard");
+    let dependency_line = manifest
+        .lines()
+        .find(|line| line.trim_start().starts_with("frankensearch ="))
+        .expect("Cargo.toml must declare frankensearch dependency");
+
+    for required in ["\"hash\"", "\"storage\"", "\"model2vec\"", "\"download\""] {
+        assert!(
+            dependency_line.contains(required),
+            "frankensearch dependency must include {required}: {dependency_line}"
+        );
+    }
+    assert!(
+        !dependency_line.contains("\"fastembed\""),
+        "fastembed remains forbidden-dependency-blocked and must not be enabled by default: {dependency_line}"
+    );
+}
+
 fn manifest_path() -> String {
     format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"))
 }

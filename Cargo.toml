@@ -75,7 +75,7 @@ fts5 = ["frankensearch/fts5"]
 # Reserved (status: reserved). No cfg-gates in src/ today. Reserved for a
 # future "JSON-only minimal output" build profile. See docs/feature_flag_registry.md.
 json = []
-embed-fast = ["frankensearch/model2vec"]
+embed-fast = ["frankensearch/model2vec", "frankensearch/download"]
 # Blocked: frankensearch/fastembed currently pulls reqwest/tokio/hyper/tower.
 # Do not expose an embed-quality feature until that tree is forbidden-dep clean.
 lexical-bm25 = ["frankensearch/lexical"]
@@ -112,7 +112,7 @@ clap_complete = { version = "4.6.1" }
 fnx-algorithms = { version = "0.1.0", path = "../franken_networkx/crates/fnx-algorithms" }
 fnx-classes = { version = "0.1.0", path = "../franken_networkx/crates/fnx-classes" }
 fnx-runtime = { version = "0.1.0", path = "../franken_networkx/crates/fnx-runtime", default-features = false, features = ["asupersync-integration"] }
-frankensearch = { version = "0.3.0", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage"] }
+frankensearch = { version = "0.3.0", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage", "model2vec", "download"] }
 getrandom = { version = "0.4.2" }
 regex-lite = { version = "0.1" }
 # Direct libc remains available for low-level platform adapters; daemon gates
