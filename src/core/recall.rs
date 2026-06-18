@@ -13,14 +13,21 @@
 //! edit, so everything here degrades instead of erroring.
 
 use crate::models::{MemoryAnchorFreshnessState, MemoryAnchorKind};
+use crate::output::governor::{
+    CURSOR_SCHEMA_V1, CursorPayload, CursorRejection, decode_cursor, derive_workspace_mac_key,
+    encode_cursor,
+};
 use crate::search::scoring::{freshness_drift_multiplier, stale_anchor_floor};
 
 /// Response payload schema carried under `ee.response.v2` `data.recall`.
 pub const RECALL_SCHEMA_V1: &str = "ee.recall.v1";
 
-/// Continuation cursor schema/prefix. Superseded by the ADR 0063 governor
-/// cursor vocabulary once that surface lands; the wire shape here is stable
-/// and tamper-evident in the meantime.
+/// Domain-separation salt for the recall continuation-cursor params hash
+/// ([`recall_query_hash`]). The cursor WIRE form is the shared ADR 0063
+/// governor codec (`ee.cursor.v1`, see [`crate::output::governor`]); this
+/// constant is retained only as a stable hashing salt so the bound query hash
+/// stays byte-stable across the migration (bd-36l0c). The bespoke
+/// `ee.recall.cursor.v1` wire schema is superseded.
 pub const RECALL_CURSOR_SCHEMA_V1: &str = "ee.recall.cursor.v1";
 
 /// The reverse index has no rows for this workspace (nothing anchored yet).
@@ -427,115 +434,44 @@ pub fn recall_query_hash(query: &RecallQuery) -> String {
     hasher.finalize().to_hex().chars().take(12).collect()
 }
 
-/// Why a continuation cursor was rejected.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RecallCursorError {
-    Malformed,
-    SignatureMismatch,
-    QueryMismatch,
-    StaleGeneration { cursor: i64, current: i64 },
+/// Deterministic MAC-key scope for recall budget-continuation cursors.
+///
+/// Recall's cursor was never workspace-scoped — the prior bespoke
+/// `cursor_signature` used a fixed BLAKE3 context. The per-page query binding
+/// is carried by the cursor `paramsHash` ([`recall_query_hash`]) and the
+/// `dbGeneration` bind-check, exactly as before. This fixed scope preserves
+/// that behavior while moving the wire form onto the shared `ee.cursor.v1`
+/// governor codec (bd-36l0c).
+const RECALL_CURSOR_MAC_SCOPE: &str = "ee.recall.budget-continuation cursor mac v1";
+
+fn recall_cursor_mac_key() -> [u8; 32] {
+    derive_workspace_mac_key(RECALL_CURSOR_MAC_SCOPE)
 }
 
-impl std::fmt::Display for RecallCursorError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Malformed => formatter.write_str("recall cursor is malformed"),
-            Self::SignatureMismatch => formatter.write_str("recall cursor signature mismatch"),
-            Self::QueryMismatch => {
-                formatter.write_str("recall cursor was issued for a different query")
-            }
-            Self::StaleGeneration { cursor, current } => write!(
-                formatter,
-                "recall cursor generation {cursor} is stale (current {current})"
-            ),
-        }
-    }
-}
-
-/// A decoded continuation cursor. Encoding is tamper-evident (BLAKE3
-/// signature over the payload) and generation-bound: a cursor issued against
-/// an older DB generation is rejected rather than silently reordering.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecallCursor {
-    pub offset: usize,
-    pub query_hash: String,
-    pub db_generation: i64,
-}
-
-impl RecallCursor {
-    #[must_use]
-    pub fn encode(&self) -> String {
-        let payload = format!(
-            "{RECALL_CURSOR_SCHEMA_V1}:g{}:o{}:q{}",
-            self.db_generation, self.offset, self.query_hash
-        );
-        format!("{payload}:s{}", cursor_signature(&payload))
-    }
-
-    /// Decode and structurally validate a cursor string (schema, field
-    /// shapes, signature). Query/generation binding is checked by
-    /// [`Self::validate`].
-    pub fn decode(encoded: &str) -> Result<Self, RecallCursorError> {
-        let (payload, signature) = encoded
-            .rsplit_once(":s")
-            .ok_or(RecallCursorError::Malformed)?;
-        if cursor_signature(payload) != signature {
-            return Err(RecallCursorError::SignatureMismatch);
-        }
-        let rest = payload
-            .strip_prefix(RECALL_CURSOR_SCHEMA_V1)
-            .and_then(|rest| rest.strip_prefix(':'))
-            .ok_or(RecallCursorError::Malformed)?;
-        let mut parts = rest.split(':');
-        let generation = parts
-            .next()
-            .and_then(|part| part.strip_prefix('g'))
-            .and_then(|raw| raw.parse::<i64>().ok())
-            .ok_or(RecallCursorError::Malformed)?;
-        let offset = parts
-            .next()
-            .and_then(|part| part.strip_prefix('o'))
-            .and_then(|raw| raw.parse::<usize>().ok())
-            .ok_or(RecallCursorError::Malformed)?;
-        let query_hash = parts
-            .next()
-            .and_then(|part| part.strip_prefix('q'))
-            .ok_or(RecallCursorError::Malformed)?
-            .to_owned();
-        if parts.next().is_some() {
-            return Err(RecallCursorError::Malformed);
-        }
-        Ok(Self {
-            offset,
-            query_hash,
-            db_generation: generation,
-        })
-    }
-
-    /// Bind-check a decoded cursor against the live query and DB generation.
-    pub fn validate(
-        &self,
-        expected_query_hash: &str,
-        current_db_generation: i64,
-    ) -> Result<(), RecallCursorError> {
-        if self.query_hash != expected_query_hash {
-            return Err(RecallCursorError::QueryMismatch);
-        }
-        if self.db_generation != current_db_generation {
-            return Err(RecallCursorError::StaleGeneration {
-                cursor: self.db_generation,
-                current: current_db_generation,
-            });
-        }
-        Ok(())
-    }
-}
-
-fn cursor_signature(payload: &str) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"ee.recall.cursor.v1\0sig\0");
-    hasher.update(payload.as_bytes());
-    hasher.finalize().to_hex().chars().take(12).collect()
+/// Encode a recall budget-continuation cursor onto the shared `ee.cursor.v1`
+/// governor codec. `next_offset` is the rank offset the continuation page
+/// resumes from; recall pages the flat `data.recall.items[]` array by rank
+/// offset, so the offset rides in the payload `positionKey`. `dropped_count`
+/// is the honest count of ranked items still unemitted when the cursor was
+/// issued (governor `droppedCount`). Returns `None` only on the practically
+/// unreachable serialization failure, in which case the page is reported
+/// truncated without a continuation token.
+#[must_use]
+fn encode_recall_cursor(
+    query: &RecallQuery,
+    next_offset: usize,
+    dropped_count: usize,
+    db_generation: i64,
+) -> Option<String> {
+    let payload = CursorPayload {
+        schema: CURSOR_SCHEMA_V1.to_owned(),
+        target_schema: RECALL_SCHEMA_V1.to_owned(),
+        db_generation: u64::try_from(db_generation).unwrap_or(0),
+        position_key: next_offset.to_string(),
+        dropped_count: u64::try_from(dropped_count).unwrap_or(0),
+        params_hash: recall_query_hash(query),
+    };
+    encode_cursor(&payload, &recall_cursor_mac_key()).ok()
 }
 
 /// Evaluate a recall query over candidate rows (ADR 0064 §§2–5).
@@ -685,14 +621,11 @@ pub fn evaluate_recall(
     };
 
     let truncated = dropped_count > 0;
-    let continuation_cursor = truncated.then(|| {
-        RecallCursor {
-            offset: query.offset + items.len(),
-            query_hash: recall_query_hash(query),
-            db_generation,
-        }
-        .encode()
-    });
+    let continuation_cursor = if truncated {
+        encode_recall_cursor(query, query.offset + items.len(), dropped_count, db_generation)
+    } else {
+        None
+    };
 
     RecallReport {
         schema: RECALL_SCHEMA_V1,
@@ -955,7 +888,7 @@ pub fn collect_diff_paths_via_git(
 }
 
 /// Outcome of resolving an optional `--cursor` flag against the live query
-/// and DB generation (budget-continuation lane, `ee.recall.cursor.v1`).
+/// and DB generation (budget-continuation lane, shared `ee.cursor.v1` codec).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecallCursorResolution {
     /// No cursor supplied; start at rank offset zero.
@@ -985,17 +918,32 @@ pub fn resolve_recall_cursor(
     let Some(encoded) = encoded else {
         return RecallCursorResolution::Fresh;
     };
-    match RecallCursor::decode(encoded) {
-        Err(_) => RecallCursorResolution::RejectedInvalid,
-        Ok(cursor) => match cursor.validate(&recall_query_hash(query), current_db_generation) {
-            Ok(()) => RecallCursorResolution::Resume(cursor.offset),
-            Err(RecallCursorError::StaleGeneration { cursor, current }) => {
-                RecallCursorResolution::RejectedStale {
-                    cursor_generation: cursor,
-                    current_generation: current,
-                }
-            }
+    let expected_params_hash = recall_query_hash(query);
+    let current_generation = u64::try_from(current_db_generation).unwrap_or(0);
+    match decode_cursor(
+        encoded,
+        &recall_cursor_mac_key(),
+        &expected_params_hash,
+        current_generation,
+    ) {
+        // A cursor minted for another governed surface (shared MAC scope,
+        // improbable params collision) must never page recall items.
+        Ok(payload) if payload.target_schema != RECALL_SCHEMA_V1 => {
+            RecallCursorResolution::RejectedInvalid
+        }
+        // The rank offset rides in `positionKey`; a non-numeric key is a
+        // tampered or foreign cursor.
+        Ok(payload) => match payload.position_key.parse::<usize>() {
+            Ok(offset) => RecallCursorResolution::Resume(offset),
             Err(_) => RecallCursorResolution::RejectedInvalid,
+        },
+        Err(CursorRejection::Invalid) => RecallCursorResolution::RejectedInvalid,
+        Err(CursorRejection::Stale {
+            cursor_generation,
+            current_generation,
+        }) => RecallCursorResolution::RejectedStale {
+            cursor_generation: i64::try_from(cursor_generation).unwrap_or(i64::MAX),
+            current_generation: i64::try_from(current_generation).unwrap_or(i64::MAX),
         },
     }
 }
@@ -1343,13 +1291,9 @@ mod cli_surface_tests {
             RecallCursorResolution::Fresh
         );
 
-        let cursor = RecallCursor {
-            offset: 3,
-            query_hash: recall_query_hash(&query),
-            db_generation: 7,
-        };
+        let cursor = encode_recall_cursor(&query, 3, 1, 7).expect("cursor encodes");
         assert_eq!(
-            resolve_recall_cursor(Some(&cursor.encode()), &query, 7),
+            resolve_recall_cursor(Some(cursor.as_str()), &query, 7),
             RecallCursorResolution::Resume(3)
         );
         assert_eq!(
@@ -1357,7 +1301,7 @@ mod cli_surface_tests {
             RecallCursorResolution::RejectedInvalid
         );
         assert_eq!(
-            resolve_recall_cursor(Some(&cursor.encode()), &query, 9),
+            resolve_recall_cursor(Some(cursor.as_str()), &query, 9),
             RecallCursorResolution::RejectedStale {
                 cursor_generation: 7,
                 current_generation: 9,
@@ -1369,7 +1313,7 @@ mod cli_surface_tests {
             ..RecallQuery::default()
         };
         assert_eq!(
-            resolve_recall_cursor(Some(&cursor.encode()), &other_query, 7),
+            resolve_recall_cursor(Some(cursor.as_str()), &other_query, 7),
             RecallCursorResolution::RejectedInvalid
         );
     }
@@ -1847,14 +1791,13 @@ mod tests {
             .clone()
             .expect("cursor present");
 
-        let cursor = RecallCursor::decode(&encoded).expect("cursor decodes");
-        cursor
-            .validate(&recall_query_hash(&query), 7)
-            .expect("cursor validates");
-        assert_eq!(cursor.offset, 2);
+        assert_eq!(
+            resolve_recall_cursor(Some(encoded.as_str()), &query, 7),
+            RecallCursorResolution::Resume(2)
+        );
 
         let mut second_query = query.clone();
-        second_query.offset = cursor.offset;
+        second_query.offset = 2;
         let second_page = evaluate_recall(&second_query, &rows, Some(7), 7);
         assert_eq!(second_page.items.len(), 2);
         assert!(!second_page.truncated);
@@ -1875,39 +1818,56 @@ mod tests {
 
     #[test]
     fn cursor_rejects_tamper_query_mismatch_and_stale_generation() {
-        let cursor = RecallCursor {
-            offset: 2,
-            query_hash: "abcdefabcdef".to_owned(),
-            db_generation: 7,
+        let query = RecallQuery {
+            paths: vec!["src/db/mod.rs".to_owned()],
+            ..RecallQuery::default()
         };
-        let encoded = cursor.encode();
-        assert_eq!(RecallCursor::decode(&encoded), Ok(cursor.clone()));
-
-        // Tampered payload -> signature mismatch.
-        let tampered = encoded.replace(":o2:", ":o9:");
+        let encoded = encode_recall_cursor(&query, 2, 1, 7).expect("cursor encodes");
+        // Round-trips against the same query and generation.
         assert_eq!(
-            RecallCursor::decode(&tampered),
-            Err(RecallCursorError::SignatureMismatch)
-        );
-        assert_eq!(
-            RecallCursor::decode("garbage"),
-            Err(RecallCursorError::Malformed)
+            resolve_recall_cursor(Some(encoded.as_str()), &query, 7),
+            RecallCursorResolution::Resume(2)
         );
 
-        // Wrong query hash -> query mismatch.
+        // Tampered wire form -> BLAKE3 MAC fails -> invalid (never a silent
+        // resume of a forged offset).
+        let tampered = if encoded.starts_with('A') {
+            format!("B{}", &encoded[1..])
+        } else {
+            format!("A{}", &encoded[1..])
+        };
         assert_eq!(
-            cursor.validate("000000000000", 7),
-            Err(RecallCursorError::QueryMismatch)
+            resolve_recall_cursor(Some(tampered.as_str()), &query, 7),
+            RecallCursorResolution::RejectedInvalid
         );
-        // Generation moved -> stale rejection, never silent reordering.
         assert_eq!(
-            cursor.validate("abcdefabcdef", 9),
-            Err(RecallCursorError::StaleGeneration {
-                cursor: 7,
-                current: 9
-            })
+            resolve_recall_cursor(Some("garbage"), &query, 7),
+            RecallCursorResolution::RejectedInvalid
         );
-        assert_eq!(cursor.validate("abcdefabcdef", 7), Ok(()));
+
+        // Wrong query -> invalid (paramsHash mismatch), not stale.
+        let other_query = RecallQuery {
+            paths: vec!["src/core/recall.rs".to_owned()],
+            ..RecallQuery::default()
+        };
+        assert_eq!(
+            resolve_recall_cursor(Some(encoded.as_str()), &other_query, 7),
+            RecallCursorResolution::RejectedInvalid
+        );
+
+        // Generation moved forward -> stale rejection, never silent reordering.
+        assert_eq!(
+            resolve_recall_cursor(Some(encoded.as_str()), &query, 9),
+            RecallCursorResolution::RejectedStale {
+                cursor_generation: 7,
+                current_generation: 9,
+            }
+        );
+        // Same query and generation still validates.
+        assert_eq!(
+            resolve_recall_cursor(Some(encoded.as_str()), &query, 7),
+            RecallCursorResolution::Resume(2)
+        );
     }
 
     #[test]

@@ -2,13 +2,13 @@ source: src/core/recall.rs, src/cli/mod.rs
 assertion: code-anchored recall reverse lookup from paths/symbols/diff to anchored memories (ADR 0064 / bd-u875s.2 / bd-u875s.3)
 schema:
   payload: ee.recall.v1 (under ee.response.v2 data.recall)
-  cursor: ee.recall.cursor.v1 (budget continuation lane)
+  cursor: ee.cursor.v1 (budget continuation lane, shared ADR 0063 governor codec)
 contracts:
   - at least one selector (--path, --symbol, --diff, --diff-staged) is required; an unselected invocation is a usage error (exit 1), never a silent empty result
   - selector families compose as OR with dedup by memory id, keeping the freshest anchor per memory; --kind/--level filter conjunctively BEFORE ranking; --stale keeps only suspect/stale anchors and adds per-item repair hints
   - ranking is deterministic: freshness_multiplier x confidence x level_tilt with a x1.15 kind bonus for failure|risk|anti-pattern; ties break by ascending memory id; same inputs yield byte-identical output
   - --diff/--diff-staged shell out to git READ-ONLY (path extraction only); git failure degrades to recall_git_unavailable (warning) with an empty diff path set and never blocks; option-shaped refs are refused before the shell-out
-  - --budget-tokens keeps the longest ranked prefix under budget; truncation reports the governor vocabulary output_truncated_budget (info) with details.droppedCount and details.continuationCursor (ee.recall.cursor.v1)
+  - --budget-tokens keeps the longest ranked prefix under budget; truncation reports the governor vocabulary output_truncated_budget (info) with details.droppedCount and details.continuationCursor (ee.cursor.v1)
   - --cursor resumes a budget page sequence; rejected cursors emit cursor_invalid/cursor_stale (low) with an EMPTY page (never a restarted one), so a page sequence cannot duplicate or skip items across writes
   - a smaller budget yields a strict prefix of a larger budget's items (prefix stability)
   - tombstoned memories are excluded at query time regardless of index hygiene
