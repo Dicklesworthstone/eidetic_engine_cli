@@ -19,11 +19,11 @@ use crate::core::degraded_aggregation::{
 };
 use crate::core::degraded_honesty::{RepairCommandKind, classify_repair_command};
 use crate::core::doctor::{
-    DependencyBlockedFeature, DependencyContractEntry, DependencyDiagnosticsReport,
-    DependencyFeatureProfile, DependencyOptionalFeatureProfile, DependencySource,
-    DoctorMeshAutoEnrollmentReport, DoctorReport, FixPlan, FrankenDependencyHealth,
-    FrankenHealthReport, IntegrityCanaryReport, IntegrityDiagnosticCheck,
-    IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport,
+    CheckResult, CheckTier, DependencyBlockedFeature, DependencyContractEntry,
+    DependencyDiagnosticsReport, DependencyFeatureProfile, DependencyOptionalFeatureProfile,
+    DependencySource, DoctorMeshAutoEnrollmentReport, DoctorReport, FixPlan,
+    FrankenDependencyHealth, FrankenHealthReport, IntegrityCanaryReport,
+    IntegrityDiagnosticCheck, IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport,
 };
 use crate::core::health::{HealthReport, StructuralHealthDegradation, StructuralHealthReport};
 use crate::core::memory::{
@@ -4942,19 +4942,49 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
         render_rch_verify_ledger_status_json(d, &report.verification_ledger);
         render_host_calibration_posture_json(d, report.host_calibration.as_ref());
         d.field_raw("meshAutoEnrollment", &mesh_auto_enrollment);
+        render_doctor_advisories_json(d, &report.checks, true, true);
         d.field_array_of_objects("checks", &report.checks, |obj, check| {
-            obj.field_str("name", check.name);
-            obj.field_str("severity", check.severity.as_str());
-            obj.field_str("message", &check.message);
-            if let Some(code) = check.error_code {
-                obj.field_str("errorCode", code.id);
-            }
-            if let Some(repair) = check.repair {
-                obj.field_str("repair", repair);
-            }
+            render_doctor_check_json(obj, check, true, true);
         });
     });
     b.finish()
+}
+
+fn render_doctor_advisories_json(
+    parent: &mut JsonBuilder,
+    checks: &[CheckResult],
+    include_message: bool,
+    include_verbose_details: bool,
+) {
+    let advisories = checks
+        .iter()
+        .filter(|check| check.tier == CheckTier::Advisory && !check.severity.is_healthy())
+        .collect::<Vec<_>>();
+    parent.field_array_of_objects("advisories", &advisories, |obj, check| {
+        render_doctor_check_json(obj, check, include_message, include_verbose_details);
+    });
+}
+
+fn render_doctor_check_json(
+    obj: &mut JsonBuilder,
+    check: &CheckResult,
+    include_message: bool,
+    include_verbose_details: bool,
+) {
+    obj.field_str("name", check.name);
+    obj.field_str("tier", check.tier.as_str());
+    obj.field_str("severity", check.severity.as_str());
+    if include_message {
+        obj.field_str("message", &check.message);
+    }
+    if include_verbose_details {
+        if let Some(code) = check.error_code {
+            obj.field_str("errorCode", code.id);
+        }
+        if let Some(repair) = check.repair {
+            obj.field_str("repair", repair);
+        }
+    }
 }
 
 /// Render a doctor report as human-readable text.
@@ -14051,20 +14081,19 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
         }
 
         if profile.include_arrays() {
+            render_doctor_advisories_json(
+                d,
+                &report.checks,
+                profile.include_summary_metrics(),
+                profile.include_verbose_details(),
+            );
             d.field_array_of_objects("checks", &report.checks, |obj, check| {
-                obj.field_str("name", check.name);
-                obj.field_str("severity", check.severity.as_str());
-                if profile.include_summary_metrics() {
-                    obj.field_str("message", &check.message);
-                }
-                if profile.include_verbose_details() {
-                    if let Some(code) = check.error_code {
-                        obj.field_str("errorCode", code.id);
-                    }
-                    if let Some(repair) = check.repair {
-                        obj.field_str("repair", repair);
-                    }
-                }
+                render_doctor_check_json(
+                    obj,
+                    check,
+                    profile.include_summary_metrics(),
+                    profile.include_verbose_details(),
+                );
             });
         }
     });
@@ -17676,8 +17705,9 @@ mod tests {
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::degraded_aggregation::AggregatedDegradation;
     use crate::core::doctor::{
-        DependencyContractEntry, DependencyDiagnosticsReport, DependencyDiagnosticsSummary,
-        DependencyDriftPolicy, DependencyFeatureProfile, DependencySource, DoctorReport,
+        CheckResult, CheckSeverity, CheckTier, DependencyContractEntry, DependencyDiagnosticsReport,
+        DependencyDiagnosticsSummary, DependencyDriftPolicy, DependencyFeatureProfile,
+        DependencySource, DoctorReport, Posture,
         IntegrityCanaryReport, IntegrityDiagnosticCheck, IntegrityDiagnosticDegradation,
         IntegrityDiagnosticsReport, IntegrityDiagnosticsStatus,
     };
@@ -21632,6 +21662,50 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn render_doctor_json_exposes_check_tier_and_advisory_summary() -> TestResult {
+        let mut report = DoctorReport::gather();
+        report.overall_healthy = true;
+        report.posture = Posture::Ok;
+        report.checks = vec![
+            CheckResult::ok("runtime", "runtime ok"),
+            CheckResult {
+                name: "cass",
+                severity: CheckSeverity::Warning,
+                message: "CASS binary found but capabilities are limited.".to_string(),
+                error_code: None,
+                repair: Some("Inspect `ee import cass --dry-run --json`."),
+                tier: CheckTier::Advisory,
+            },
+        ];
+
+        let json = render_doctor_json_filtered(&report, FieldProfile::Standard);
+        let value = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("doctor JSON should parse: {error}"))?;
+        ensure_equal(&value["data"]["healthy"], &serde_json::json!(true), "healthy")?;
+        ensure_equal(&value["data"]["posture"], &serde_json::json!("ok"), "posture")?;
+        ensure_equal(
+            &value["data"]["checks"][0]["tier"],
+            &serde_json::json!("core"),
+            "core check tier",
+        )?;
+        ensure_equal(
+            &value["data"]["checks"][1]["tier"],
+            &serde_json::json!("advisory"),
+            "advisory check tier",
+        )?;
+        ensure_equal(
+            &value["data"]["advisories"][0]["name"],
+            &serde_json::json!("cass"),
+            "advisory summary keeps cass warning visible",
+        )?;
+        ensure_equal(
+            &value["data"]["advisories"][0]["tier"],
+            &serde_json::json!("advisory"),
+            "advisory summary classifies tier",
+        )
     }
 
     #[test]

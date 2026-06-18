@@ -12,7 +12,7 @@
     "fields": {"type": "string"},
     "data": {
       "type": "object",
-      "required": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "meshAutoEnrollment", "checks"],
+      "required": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "meshAutoEnrollment", "advisories", "checks"],
       "additionalProperties": false,
       "properties": {
         "command": {"type": "string", "const": "doctor"},
@@ -27,20 +27,13 @@
         "verificationLedger": {"$ref": "#/$defs/verificationLedger"},
         "hostCalibration": {"type": "object", "additionalProperties": true},
         "meshAutoEnrollment": {"$ref": "#/$defs/meshAutoEnrollment"},
+        "advisories": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/doctorCheck"}
+        },
         "checks": {
           "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["name", "severity", "message"],
-            "additionalProperties": false,
-            "properties": {
-              "name": {"type": "string"},
-              "severity": {"type": "string", "enum": ["ok", "warning", "error"]},
-              "message": {"type": "string"},
-              "errorCode": {"type": "string"},
-              "repair": {"type": "string"}
-            }
-          }
+          "items": {"$ref": "#/$defs/doctorCheck"}
         }
       }
     }
@@ -55,6 +48,19 @@
     "singleFlightStatus": {
       "type": "string",
       "enum": ["idle", "active", "observed_failures", "state_poisoned", "unconfigured"]
+    },
+    "doctorCheck": {
+      "type": "object",
+      "required": ["name", "tier", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "tier": {"type": "string", "enum": ["core", "advisory"]},
+        "severity": {"type": "string", "enum": ["ok", "warning", "error"]},
+        "message": {"type": "string"},
+        "errorCode": {"type": "string"},
+        "repair": {"type": "string"}
+      }
     },
     "qosStatus": {
       "type": "object",
