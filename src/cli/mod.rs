@@ -236,10 +236,11 @@ use crate::core::rule::{
 };
 use crate::core::search::{
     SearchDedupMode, SearchDegradation, SearchOptions, SearchReport,
-    SearchScoreRecalibrationReport, SearchSourceMode, TypedMemoryFieldFilter,
+    SearchScoreRecalibrationReport, SearchSourceMode, SimilarError, SimilarOptions, SimilarReport,
+    TypedMemoryFieldFilter,
     apply_memory_kind_and_typed_field_filters_to_report, elapsed_timing_json,
     normalize_memory_kind_filter, recalibrate_search_score_calibration, run_diag_search,
-    run_search, run_search_with_performance,
+    run_search, run_search_with_performance, run_similar,
 };
 use crate::core::sentinel::{SentinelCheckContext, observe_sentinel_explicit};
 use crate::core::session_budget::{
@@ -352,6 +353,7 @@ const HELP_PRELUDE: &str = concat!(
     "  init          Initialize an ee workspace\n",
     "  remember      Capture an explicit memory\n",
     "  search        Fine-grained memory retrieval\n",
+    "  similar       Find semantic neighbors for a memory\n",
     "  pack          Assemble a task-specific context pack\n",
     "  primer        Deterministic cached workspace charter (session-start knowledge)\n",
     "  lens          Inspect reusable task lens policies for pack/search\n",
@@ -362,7 +364,7 @@ const HELP_PRELUDE: &str = concat!(
     "\n",
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
-    "  Inspect:        status, doctor, capabilities, insights, impact, lens, why-not, recall, memory show, memory history\n",
+    "  Inspect:        status, doctor, capabilities, insights, impact, lens, why-not, recall, similar, memory show, memory history\n",
     "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome, journal\n",
     "  Curate:         curate (candidates|validate|apply), reflect, playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
@@ -1017,6 +1019,8 @@ pub enum Command {
     Schema(SchemaCommand),
     /// Search indexed memories and sessions.
     Search(SearchArgs),
+    /// Find memories semantically similar to a selected memory.
+    Similar(SimilarArgs),
     /// Attach, explain, and run deterministic memory sentinel checks.
     #[command(subcommand)]
     Sentinel(SentinelCommand),
@@ -8572,6 +8576,69 @@ pub struct SearchArgs {
     pub cursor: Option<String>,
 }
 
+/// Arguments for `ee similar`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+#[command(
+    after_help = "With --json, similar documents live at data.results; target metadata lives at data.targetMemory."
+)]
+pub struct SimilarArgs {
+    /// Memory ID to use as the semantic neighbor seed.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Maximum number of neighbors to return.
+    #[arg(long, short = 'n', default_value_t = 10)]
+    pub limit: u32,
+
+    /// Minimum similarity score (0.0..=1.0) for a neighbor to be included.
+    #[arg(long, value_name = "FLOAT", value_parser = parse_unit_float_arg)]
+    pub min_score: Option<f32>,
+
+    /// Retrieval speed/quality budget: instant, default, or quality.
+    #[arg(long, value_parser = parse_speed_mode_arg, default_value = "default")]
+    pub speed: crate::search::SpeedMode,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    #[arg(long, value_name = "PATH")]
+    pub index_dir: Option<PathBuf>,
+
+    /// Include score explanations in output.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub explain: bool,
+
+    /// Include tombstoned memories in neighbor results.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
+
+    /// Evaluate validity windows at this RFC3339 timestamp.
+    #[arg(long, value_name = "RFC3339", value_parser = parse_rfc3339_arg)]
+    pub as_of: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Include memories whose valid_to is before the validity reference time.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_expired: bool,
+
+    /// Include memories whose valid_from is after the validity reference time.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_future: bool,
+
+    /// Include memories marked with stale validity status when present in index metadata.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_stale: bool,
+
+    /// Trust lane to apply before returning memories: self, team, global, workspace, verified, or swarm.
+    #[arg(long, value_parser = parse_memory_scope_arg, default_value = "swarm")]
+    pub memory_scope: MemoryScope,
+
+    /// Fail closed when relevant evidence exists outside the requested memory scope.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_scope: bool,
+}
+
 /// Arguments for `ee impact`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 #[command(after_help = "With --json, impact results live at data.results.")]
@@ -13554,6 +13621,7 @@ where
         }
         Some(Command::Impact(ref args)) => handle_impact(&cli, args, stdout, stderr),
         Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
+        Some(Command::Similar(ref args)) => handle_similar(&cli, args, stdout, stderr),
         Some(Command::Sentinel(ref command)) => handle_sentinel(&cli, command, stdout, stderr),
         Some(Command::Share(ref command)) => share::handle_share(&cli, command, stdout, stderr),
         Some(Command::Mesh(ref command)) => mesh::handle_mesh(&cli, command, stdout, stderr),
@@ -33881,6 +33949,15 @@ fn parse_search_dedup_mode_arg(value: &str) -> Result<SearchDedupMode, String> {
     }
 }
 
+fn parse_unit_float_arg(value: &str) -> Result<f32, String> {
+    match value.trim().parse::<f32>() {
+        Ok(score) if score.is_finite() && (0.0..=1.0).contains(&score) => Ok(score),
+        _ => Err(format!(
+            "Invalid score '{value}'. Expected a finite number from 0.0 to 1.0."
+        )),
+    }
+}
+
 fn parse_memory_scope_arg(value: &str) -> Result<MemoryScope, String> {
     MemoryScope::parse(value).ok_or_else(|| {
         format!(
@@ -40714,6 +40791,91 @@ where
             )
         }
     }
+}
+
+fn handle_similar<W, E>(
+    cli: &Cli,
+    args: &SimilarArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if let Some(exit_code) = reject_unsupported_mermaid_format(cli, "similar", stdout, stderr) {
+        return exit_code;
+    }
+
+    let options = SimilarOptions {
+        workspace_path: cli.resolve_workspace(),
+        database_path: args.database.clone(),
+        index_dir: args.index_dir.clone(),
+        memory_id: args.memory_id.clone(),
+        limit: args.limit,
+        min_score: args.min_score,
+        speed: args.speed,
+        explain: args.explain,
+        as_of: args.as_of,
+        include_tombstoned: args.include_tombstoned,
+        include_expired: args.include_expired,
+        include_future: args.include_future,
+        include_stale: args.include_stale,
+        memory_scope: args.memory_scope,
+        strict_scope: args.strict_scope,
+    };
+
+    match run_similar(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(format_similar_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(format_similar_json(&report) + "\n"))
+            }
+        },
+        Err(error) => {
+            let domain_error = similar_error_to_domain_error(&error);
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn similar_error_to_domain_error(error: &SimilarError) -> DomainError {
+    match error {
+        SimilarError::Search(error) => DomainError::SearchIndex {
+            message: error.to_string(),
+            repair: error.repair_hint().map(str::to_owned),
+        },
+        SimilarError::Storage(error) => DomainError::Storage {
+            message: format!("Failed to run similar retrieval: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        },
+        SimilarError::MemoryNotFound { memory_id } => DomainError::NotFound {
+            resource: "memory".to_owned(),
+            id: memory_id.clone(),
+            repair: Some("ee memory list --json".to_owned()),
+        },
+    }
+}
+
+fn format_similar_json(report: &SimilarReport) -> String {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": report.data_json(),
+    })
+    .to_string()
+}
+
+fn format_similar_toon(report: &SimilarReport) -> String {
+    output::render_toon_from_json(&format_similar_json(report))
 }
 
 #[cfg(test)]
@@ -58095,6 +58257,7 @@ impl NormalizedInvocation {
                 },
                 Command::Impact(_) => "impact".to_string(),
                 Command::Search(_) => "search".to_string(),
+                Command::Similar(_) => "similar".to_string(),
                 Command::Sentinel(command) => match command {
                     SentinelCommand::Check(_) => "sentinel check".to_string(),
                     SentinelCommand::Explain => "sentinel explain".to_string(),
@@ -71254,6 +71417,99 @@ mod tests {
             Some(Command::Search(ref args)) => ensure_equal(&args.limit, &25, "search limit"),
             _ => Err("expected Search command".to_string()),
         }
+    }
+
+    #[test]
+    fn similar_command_parses_advertised_flags() -> TestResult {
+        let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x4_000))
+            .to_string();
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "similar",
+            memory_id.as_str(),
+            "--limit",
+            "7",
+            "--min-score",
+            "0.42",
+            "--speed",
+            "instant",
+            "--database",
+            "/tmp/ee.db",
+            "--index-dir",
+            "/tmp/ee-index",
+            "--explain",
+            "--include-tombstoned",
+            "--as-of",
+            "2026-05-13T00:00:00Z",
+            "--include-expired",
+            "--include-future",
+            "--include-stale",
+            "--memory-scope",
+            "workspace",
+            "--strict-scope",
+        ])
+        .map_err(|e| format!("failed to parse similar command: {:?}", e.kind()))?;
+
+        let expected_as_of = chrono::DateTime::parse_from_rfc3339("2026-05-13T00:00:00Z")
+            .expect("test timestamp")
+            .with_timezone(&chrono::Utc);
+        match parsed.command {
+            Some(Command::Similar(ref args)) => {
+                ensure_equal(&args.memory_id, &memory_id, "similar memory id")?;
+                ensure_equal(&args.limit, &7, "similar limit")?;
+                ensure(
+                    args.min_score
+                        .is_some_and(|score| (score - 0.42).abs() < 1.0e-6),
+                    "similar min score",
+                )?;
+                ensure_equal(
+                    &args.speed,
+                    &crate::search::SpeedMode::Instant,
+                    "similar speed",
+                )?;
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("/tmp/ee.db")),
+                    "similar database",
+                )?;
+                ensure_equal(
+                    &args.index_dir,
+                    &Some(std::path::PathBuf::from("/tmp/ee-index")),
+                    "similar index dir",
+                )?;
+                ensure_equal(&args.explain, &true, "similar explain")?;
+                ensure_equal(
+                    &args.include_tombstoned,
+                    &true,
+                    "similar include tombstoned",
+                )?;
+                ensure_equal(&args.as_of, &Some(expected_as_of), "similar as_of")?;
+                ensure_equal(&args.include_expired, &true, "similar include expired")?;
+                ensure_equal(&args.include_future, &true, "similar include future")?;
+                ensure_equal(&args.include_stale, &true, "similar include stale")?;
+                ensure_equal(
+                    &args.memory_scope,
+                    &MemoryScope::Workspace,
+                    "similar memory scope",
+                )?;
+                ensure_equal(&args.strict_scope, &true, "similar strict scope")
+            }
+            other => Err(format!("expected Similar command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn similar_help_mentions_min_score_and_json_surface() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "help", "similar"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "similar help exit")?;
+        ensure_contains(&stdout, "Find memories semantically similar", "similar help")?;
+        ensure_contains(&stdout, "--min-score", "similar help min score")?;
+        ensure_contains(&stdout, "--json", "similar help json")?;
+        ensure(
+            stderr.is_empty(),
+            "similar help should not emit stderr noise",
+        )
     }
 
     #[test]

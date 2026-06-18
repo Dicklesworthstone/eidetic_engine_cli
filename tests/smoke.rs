@@ -2490,6 +2490,55 @@ fn curate_candidates_json_lists_empty_pending_queue() -> TestResult {
 
 #[cfg(unix)]
 #[test]
+fn similar_json_reaches_handler_before_database_error() -> TestResult {
+    let workspace = unique_artifact_dir("similar-missing-db")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let memory_id = ee::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x4_001)).to_string();
+
+    let run = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "similar",
+        memory_id.as_str(),
+        "--limit",
+        "3",
+        "--min-score",
+        "0.2",
+        "--explain",
+    ])?;
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+
+    ensure(
+        !run.status.success(),
+        "similar without a database should fail after CLI dispatch",
+    )?;
+    ensure(stderr.is_empty(), "similar JSON error stderr clean")?;
+    ensure_no_ansi(&stdout, "similar JSON error stdout")?;
+    let json: serde_json::Value = serde_json::from_slice(&run.stdout)
+        .map_err(|error| format!("similar stdout must be JSON: {error}; stdout={stdout}"))?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.error.v2"),
+        "similar error schema",
+    )?;
+    ensure(
+        json["error"]["code"].as_str() != Some("usage"),
+        format!("similar must not fail as an unknown command; got {json}"),
+    )?;
+    ensure(
+        !json["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("unrecognized subcommand"),
+        format!("similar must reach its handler; got {json}"),
+    )
+}
+
+#[cfg(unix)]
+#[test]
 fn curate_candidates_after_seed_matches_snapshot() -> TestResult {
     let workspace = unique_artifact_dir("curate-candidates-seed")?;
     fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
