@@ -86,6 +86,8 @@ pub const CURATE_AUTO_PROMOTE_SCHEMA_V1: &str = "ee.curate.auto_promote.v1";
 pub const REVIEW_WORKSPACE_SCHEMA_V1: &str = "ee.review.workspace.v1";
 /// Stable schema for ambient capture suggestion reports.
 pub const CAPTURE_SUGGESTIONS_SCHEMA_V1: &str = "ee.capture_suggestions.v1";
+/// Stable schema for failed-to-fixed session arc metadata.
+pub const SESSION_ARC_SCHEMA_V1: &str = "ee.session_arc.v1";
 /// Stable schema for explicit propose-derived candidate reports (bd-kxm0c).
 pub const CURATE_PROPOSE_DERIVED_SCHEMA_V1: &str = "ee.curate.propose_derived.v1";
 /// Stable schema for reflect request proposal reports.
@@ -671,7 +673,45 @@ pub struct ReviewSessionCandidate {
     pub reason: String,
     pub confidence: f32,
     pub content_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_arc: Option<ReviewSessionArcMetadata>,
     pub persisted: bool,
+}
+
+/// Linked failed-to-fixed arc metadata attached to session-arc review candidates.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSessionArcMetadata {
+    pub schema: &'static str,
+    pub arc_id: String,
+    pub role: String,
+    pub linked_candidate_id: String,
+    pub proposed_anti_pattern_candidate_id: String,
+    pub proposed_rule_candidate_id: String,
+    pub failure_span: ReviewSessionArcSpan,
+    pub resolution_span: ReviewSessionArcSpan,
+    pub linkage: String,
+    pub session_provenance: ReviewSessionArcProvenance,
+}
+
+/// A CASS evidence span participating in a failed-to-fixed arc.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSessionArcSpan {
+    pub evidence_span_id: String,
+    pub cass_span_id: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub content_hash: String,
+    pub excerpt: String,
+}
+
+/// Session provenance for a failed-to-fixed arc.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSessionArcProvenance {
+    pub session_id: String,
+    pub cass_session_id: String,
 }
 
 /// Result of read-only ambient capture suggestion.
@@ -3095,6 +3135,12 @@ fn build_review_session_candidates(
         evidence_spans,
         min_confidence,
     ));
+    candidates.extend(build_session_arc_candidates(
+        workspace_id,
+        session,
+        evidence_spans,
+        min_confidence,
+    ));
 
     candidates.sort_by(|left, right| {
         right
@@ -3112,6 +3158,10 @@ fn build_review_session_candidates(
 /// can recognize "propose a NEW memory" candidates without re-classifying
 /// the span content.
 pub const REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY: &str = "propose_new_memory";
+pub const REVIEW_CANDIDATE_KIND_SESSION_ARC_ANTI_PATTERN: &str =
+    "session_arc_anti_pattern";
+pub const REVIEW_CANDIDATE_KIND_SESSION_ARC_RULE: &str = "session_arc_rule";
+const SESSION_ARC_CANDIDATE_CONFIDENCE: f32 = 0.82;
 
 /// Build review candidates from evidence spans that the linker rejected
 /// because they carry no `memory_id` (typical for fresh `ee import cass`
@@ -3209,6 +3259,7 @@ fn build_bootstrap_candidate(
         reason,
         confidence,
         content_hash,
+        session_arc: None,
         persisted: false,
     })
 }
@@ -3268,8 +3319,289 @@ fn build_review_candidate(
         reason,
         confidence,
         content_hash,
+        session_arc: None,
         persisted: false,
     })
+}
+
+fn build_session_arc_candidates(
+    workspace_id: &str,
+    session: &StoredSession,
+    evidence_spans: &[StoredEvidenceSpan],
+    min_confidence: f32,
+) -> Vec<ReviewSessionCandidate> {
+    if SESSION_ARC_CANDIDATE_CONFIDENCE < min_confidence {
+        return Vec::new();
+    }
+
+    let mut grouped: BTreeMap<String, Vec<&StoredEvidenceSpan>> = BTreeMap::new();
+    for span in evidence_spans {
+        let topic_key = review_topic_key(&span.excerpt);
+        if topic_key == "noise" {
+            continue;
+        }
+        grouped.entry(topic_key).or_default().push(span);
+    }
+
+    let mut candidates = Vec::new();
+    for (topic_key, mut spans) in grouped {
+        spans.sort_by(|left, right| {
+            left.start_line
+                .cmp(&right.start_line)
+                .then_with(|| left.end_line.cmp(&right.end_line))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let Some((failure_span, resolution_span)) = first_failed_to_fixed_arc(&spans) else {
+            continue;
+        };
+        candidates.extend(build_session_arc_candidate_pair(
+            workspace_id,
+            session,
+            &topic_key,
+            failure_span,
+            resolution_span,
+        ));
+    }
+    candidates
+}
+
+fn first_failed_to_fixed_arc<'a>(
+    spans: &[&'a StoredEvidenceSpan],
+) -> Option<(&'a StoredEvidenceSpan, &'a StoredEvidenceSpan)> {
+    let mut failure = None;
+    for span in spans {
+        if failure.is_none() && session_arc_failure_signal(&span.excerpt) {
+            failure = Some(*span);
+            continue;
+        }
+        if let Some(failure_span) = failure
+            && session_arc_resolution_signal(&span.excerpt)
+            && session_arc_span_order(failure_span, span).is_lt()
+        {
+            return Some((failure_span, *span));
+        }
+    }
+    None
+}
+
+fn build_session_arc_candidate_pair(
+    workspace_id: &str,
+    session: &StoredSession,
+    topic_key: &str,
+    failure_span: &StoredEvidenceSpan,
+    resolution_span: &StoredEvidenceSpan,
+) -> Vec<ReviewSessionCandidate> {
+    let arc_id = session_arc_id(
+        workspace_id,
+        session,
+        topic_key,
+        failure_span,
+        resolution_span,
+    );
+    let anti_pattern_content = format!(
+        "Anti-pattern for `{topic_key}`: this session hit a failure after `{}`. The later fix was `{}`.",
+        compact_excerpt(&failure_span.excerpt),
+        compact_excerpt(&resolution_span.excerpt)
+    );
+    let rule_content = format!(
+        "Rule for `{topic_key}`: when `{}` appears, apply the later repair: `{}`.",
+        compact_excerpt(&failure_span.excerpt),
+        compact_excerpt(&resolution_span.excerpt)
+    );
+    let anti_pattern_hash = content_hash_for_candidate(&anti_pattern_content);
+    let rule_hash = content_hash_for_candidate(&rule_content);
+    let anti_pattern_id = deterministic_curate_id(&[
+        workspace_id,
+        session.id.as_str(),
+        session.cass_session_id.as_str(),
+        "session_arc",
+        arc_id.as_str(),
+        "anti_pattern",
+        anti_pattern_hash.as_str(),
+    ]);
+    let rule_id = deterministic_curate_id(&[
+        workspace_id,
+        session.id.as_str(),
+        session.cass_session_id.as_str(),
+        "session_arc",
+        arc_id.as_str(),
+        "rule",
+        rule_hash.as_str(),
+    ]);
+    let source_ids = vec![failure_span.id.clone(), resolution_span.id.clone()];
+    let anti_metadata = session_arc_metadata(
+        &arc_id,
+        "anti_pattern",
+        &rule_id,
+        &anti_pattern_id,
+        &rule_id,
+        session,
+        failure_span,
+        resolution_span,
+    );
+    let rule_metadata = session_arc_metadata(
+        &arc_id,
+        "rule",
+        &anti_pattern_id,
+        &anti_pattern_id,
+        &rule_id,
+        session,
+        failure_span,
+        resolution_span,
+    );
+    let anti_reason = format!(
+        "Session arc {arc_id} linked failed span {} to later resolution span {} for topic `{topic_key}`; this anti-pattern candidate is paired with {rule_id}.",
+        failure_span.id, resolution_span.id
+    );
+    let rule_reason = format!(
+        "Session arc {arc_id} linked failed span {} to later resolution span {} for topic `{topic_key}`; this rule candidate is paired with {anti_pattern_id}.",
+        failure_span.id, resolution_span.id
+    );
+
+    vec![
+        ReviewSessionCandidate {
+            candidate_id: anti_pattern_id,
+            candidate_type: CandidateType::CreateDerivedMemory.as_str().to_owned(),
+            candidate_kind: REVIEW_CANDIDATE_KIND_SESSION_ARC_ANTI_PATTERN.to_owned(),
+            topic_key: topic_key.to_owned(),
+            target_memory_id: None,
+            proposed_content: anti_pattern_content,
+            proposed_confidence: SESSION_ARC_CANDIDATE_CONFIDENCE,
+            source_type: CandidateSource::AgentInference.as_str().to_owned(),
+            source_ids: source_ids.clone(),
+            reason: anti_reason,
+            confidence: SESSION_ARC_CANDIDATE_CONFIDENCE,
+            content_hash: anti_pattern_hash,
+            session_arc: Some(anti_metadata),
+            persisted: false,
+        },
+        ReviewSessionCandidate {
+            candidate_id: rule_id,
+            candidate_type: CandidateType::CreateDerivedMemory.as_str().to_owned(),
+            candidate_kind: REVIEW_CANDIDATE_KIND_SESSION_ARC_RULE.to_owned(),
+            topic_key: topic_key.to_owned(),
+            target_memory_id: None,
+            proposed_content: rule_content,
+            proposed_confidence: SESSION_ARC_CANDIDATE_CONFIDENCE,
+            source_type: CandidateSource::AgentInference.as_str().to_owned(),
+            source_ids,
+            reason: rule_reason,
+            confidence: SESSION_ARC_CANDIDATE_CONFIDENCE,
+            content_hash: rule_hash,
+            session_arc: Some(rule_metadata),
+            persisted: false,
+        },
+    ]
+}
+
+fn session_arc_id(
+    workspace_id: &str,
+    session: &StoredSession,
+    topic_key: &str,
+    failure_span: &StoredEvidenceSpan,
+    resolution_span: &StoredEvidenceSpan,
+) -> String {
+    deterministic_curate_id(&[
+        workspace_id,
+        session.id.as_str(),
+        session.cass_session_id.as_str(),
+        "session_arc",
+        topic_key,
+        failure_span.id.as_str(),
+        resolution_span.id.as_str(),
+    ])
+    .replacen("curate_", "arc_", 1)
+}
+
+fn session_arc_metadata(
+    arc_id: &str,
+    role: &str,
+    linked_candidate_id: &str,
+    anti_pattern_candidate_id: &str,
+    rule_candidate_id: &str,
+    session: &StoredSession,
+    failure_span: &StoredEvidenceSpan,
+    resolution_span: &StoredEvidenceSpan,
+) -> ReviewSessionArcMetadata {
+    ReviewSessionArcMetadata {
+        schema: SESSION_ARC_SCHEMA_V1,
+        arc_id: arc_id.to_owned(),
+        role: role.to_owned(),
+        linked_candidate_id: linked_candidate_id.to_owned(),
+        proposed_anti_pattern_candidate_id: anti_pattern_candidate_id.to_owned(),
+        proposed_rule_candidate_id: rule_candidate_id.to_owned(),
+        failure_span: session_arc_span(failure_span),
+        resolution_span: session_arc_span(resolution_span),
+        linkage: "failed_to_fixed".to_owned(),
+        session_provenance: ReviewSessionArcProvenance {
+            session_id: session.id.clone(),
+            cass_session_id: session.cass_session_id.clone(),
+        },
+    }
+}
+
+fn session_arc_span(span: &StoredEvidenceSpan) -> ReviewSessionArcSpan {
+    ReviewSessionArcSpan {
+        evidence_span_id: span.id.clone(),
+        cass_span_id: span.cass_span_id.clone(),
+        start_line: span.start_line,
+        end_line: span.end_line,
+        content_hash: span.content_hash.clone(),
+        excerpt: compact_excerpt(&span.excerpt),
+    }
+}
+
+fn content_hash_for_candidate(content: &str) -> String {
+    format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex())
+}
+
+fn session_arc_failure_signal(excerpt: &str) -> bool {
+    let tokens = normalized_review_tokens(excerpt);
+    tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "blocked"
+                | "broken"
+                | "denied"
+                | "error"
+                | "failed"
+                | "failure"
+                | "flaky"
+                | "panic"
+                | "red"
+                | "regression"
+                | "timeout"
+            )
+    }) || excerpt.to_ascii_lowercase().contains("wrong approach")
+}
+
+fn session_arc_resolution_signal(excerpt: &str) -> bool {
+    let tokens = normalized_review_tokens(excerpt);
+    tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "fixed"
+                | "fix"
+                | "green"
+                | "passed"
+                | "passing"
+                | "repair"
+                | "repaired"
+                | "resolved"
+                | "verified"
+                | "works"
+            )
+    })
+}
+
+fn session_arc_span_order(
+    left: &StoredEvidenceSpan,
+    right: &StoredEvidenceSpan,
+) -> std::cmp::Ordering {
+    left.start_line
+        .cmp(&right.start_line)
+        .then_with(|| left.end_line.cmp(&right.end_line))
+        .then_with(|| left.id.cmp(&right.id))
 }
 
 fn capture_suggestion_from_review_candidate(
@@ -6589,6 +6921,7 @@ pub fn run_review_workspace(
                 reason: "Workspace evidence review".to_owned(),
                 confidence: memory.confidence,
                 content_hash,
+                session_arc: None,
                 persisted: false,
             };
             if !options.dry_run {
@@ -8709,42 +9042,46 @@ fn review_bootstrap_derivation_package(
         )));
     }
 
+    let memory_kind = review_candidate_derived_memory_kind(candidate);
+    let trust_subclass = review_candidate_derived_trust_subclass(candidate);
+    let tags = review_candidate_derived_tags(candidate, memory_kind);
+    let mut producer_payload = serde_json::json!({
+        "candidateId": candidate.candidate_id.as_str(),
+        "candidateKind": candidate.candidate_kind.as_str(),
+        "contentHash": candidate.content_hash.as_str(),
+        "sourceIds": &candidate.source_ids,
+        "topicKey": candidate.topic_key.as_str(),
+        "sessionId": session.map(|session| session.id.as_str()),
+        "cassSessionId": session.map(|session| session.cass_session_id.as_str()),
+        "proposedMemory": {
+            "level": "procedural",
+            "kind": memory_kind,
+            "contentHash": candidate.content_hash.as_str(),
+        },
+    });
+    if let Some(session_arc) = candidate.session_arc.as_ref()
+        && let Some(object) = producer_payload.as_object_mut()
+    {
+        object.insert("sessionArc".to_owned(), serde_json::json!(session_arc));
+    }
     let metadata = DerivationMetadata {
         memory_spec: DerivationMemorySpec {
             level: "procedural".to_owned(),
-            kind: "rule".to_owned(),
+            kind: memory_kind.to_owned(),
             workflow_id: None,
             confidence: Some(candidate.proposed_confidence),
             utility: None,
             importance: None,
             provenance_uri: None,
             trust_class: Some("agent_assertion".to_owned()),
-            trust_subclass: Some("review_session_bootstrap".to_owned()),
-            tags: vec![
-                "review-session".to_owned(),
-                "cass".to_owned(),
-                "bootstrap".to_owned(),
-                candidate.topic_key.clone(),
-            ],
+            trust_subclass: Some(trust_subclass.to_owned()),
+            tags,
             valid_from: None,
             valid_to: None,
         },
         producer: DerivationProducerMetadata {
             producer: "review_session".to_owned(),
-            producer_payload: Some(serde_json::json!({
-                "candidateId": candidate.candidate_id.as_str(),
-                "candidateKind": candidate.candidate_kind.as_str(),
-                "contentHash": candidate.content_hash.as_str(),
-                "sourceIds": &candidate.source_ids,
-                "topicKey": candidate.topic_key.as_str(),
-                "sessionId": session.map(|session| session.id.as_str()),
-                "cassSessionId": session.map(|session| session.cass_session_id.as_str()),
-                "proposedMemory": {
-                    "level": "procedural",
-                    "kind": "rule",
-                    "contentHash": candidate.content_hash.as_str(),
-                },
-            })),
+            producer_payload: Some(producer_payload),
         },
     };
     let metadata_json = canonical_derivation_metadata_json(&metadata).map_err(|error| {
@@ -8754,6 +9091,39 @@ fn review_bootstrap_derivation_package(
     })?;
 
     Ok((source_refs_json, metadata_json))
+}
+
+fn review_candidate_derived_memory_kind(candidate: &ReviewSessionCandidate) -> &'static str {
+    match candidate.candidate_kind.as_str() {
+        REVIEW_CANDIDATE_KIND_SESSION_ARC_ANTI_PATTERN => "anti-pattern",
+        _ => "rule",
+    }
+}
+
+fn review_candidate_derived_trust_subclass(candidate: &ReviewSessionCandidate) -> &'static str {
+    if candidate.session_arc.is_some() {
+        "review_session_arc"
+    } else {
+        "review_session_bootstrap"
+    }
+}
+
+fn review_candidate_derived_tags(
+    candidate: &ReviewSessionCandidate,
+    memory_kind: &str,
+) -> Vec<String> {
+    let mut tags = BTreeSet::from([
+        "review-session".to_owned(),
+        "cass".to_owned(),
+        candidate.topic_key.clone(),
+        memory_kind.to_owned(),
+    ]);
+    if candidate.session_arc.is_some() {
+        tags.insert("session-arc".to_owned());
+    } else {
+        tags.insert("bootstrap".to_owned());
+    }
+    tags.into_iter().collect()
 }
 
 fn review_bootstrap_derivation_error(message: String) -> DomainError {
@@ -14252,8 +14622,9 @@ mod tests {
         CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
         REFLECTION_INGEST_SCHEMA_V1, REFLECTION_PROPOSE_SCHEMA_V1,
         REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY,
+        REVIEW_CANDIDATE_KIND_SESSION_ARC_ANTI_PATTERN, REVIEW_CANDIDATE_KIND_SESSION_ARC_RULE,
         REVIEW_SESSION_SCHEMA_V1, REVIEW_WORKSPACE_SCHEMA_V1, ReflectionIngestOptions,
-        ReflectionProposeOptions, ReflectionRequestDurableLedgerOutcome,
+        ReflectionProposeOptions, ReflectionRequestDurableLedgerOutcome, SESSION_ARC_SCHEMA_V1,
         ReflectionRequestLedgerDiagnosticsOptions, ReflectionResultDurableIngestOutcome,
         ReviewSessionCandidate, ReviewSessionOptions, ReviewSessionReport, ReviewWorkspaceOptions,
         apply_curation_candidate, build_bootstrap_session_candidates,
@@ -17623,6 +17994,7 @@ mod tests {
                         .to_owned(),
                 confidence: 0.61,
                 content_hash: "blake3:review-golden-hash".to_owned(),
+                session_arc: None,
                 persisted: false,
             }],
             degraded: Vec::new(),
@@ -17669,6 +18041,7 @@ mod tests {
                         .to_owned(),
                 confidence: 0.58,
                 content_hash: "blake3:review-bootstrap-golden-hash".to_owned(),
+                session_arc: None,
                 persisted: false,
             }],
             degraded: Vec::new(),
@@ -23391,6 +23764,122 @@ mod tests {
         assert!(
             bootstrap.is_empty(),
             "bootstrap pass must skip spans with non-empty memory_id (those are linker territory)"
+        );
+    }
+
+    #[test]
+    fn review_session_candidates_link_failed_fixed_arc_pair() {
+        let session = synthetic_stored_session();
+        let mut failure = synthetic_span(
+            "span_arc_failure000000000000000",
+            None,
+            "The capture hook cargo test failed with red error output.",
+        );
+        failure.start_line = 10;
+        failure.end_line = 11;
+        let mut resolution = synthetic_span(
+            "span_arc_resolution000000000000",
+            None,
+            "Fixed the capture hook and cargo test passed green.",
+        );
+        resolution.start_line = 20;
+        resolution.end_line = 21;
+
+        let candidates = build_review_session_candidates(
+            "wsp_test00000000000000000000000",
+            &session,
+            &[failure.clone(), resolution.clone()],
+            0.80,
+            10,
+        );
+
+        let anti_pattern = candidates
+            .iter()
+            .find(|candidate| {
+                candidate.candidate_kind == REVIEW_CANDIDATE_KIND_SESSION_ARC_ANTI_PATTERN
+            })
+            .expect("session arc anti-pattern candidate");
+        let rule = candidates
+            .iter()
+            .find(|candidate| candidate.candidate_kind == REVIEW_CANDIDATE_KIND_SESSION_ARC_RULE)
+            .expect("session arc rule candidate");
+        assert_eq!(
+            anti_pattern.candidate_type,
+            CandidateType::CreateDerivedMemory.as_str()
+        );
+        assert_eq!(
+            rule.candidate_type,
+            CandidateType::CreateDerivedMemory.as_str()
+        );
+        assert_eq!(anti_pattern.target_memory_id, None);
+        assert_eq!(rule.target_memory_id, None);
+        assert_eq!(
+            anti_pattern.source_ids,
+            vec![failure.id.clone(), resolution.id.clone()]
+        );
+        assert_eq!(rule.source_ids, anti_pattern.source_ids);
+        assert!(anti_pattern.proposed_content.contains("Anti-pattern"));
+        assert!(anti_pattern.proposed_content.contains("failed"));
+        assert!(rule.proposed_content.contains("passed green"));
+
+        let anti_arc = anti_pattern
+            .session_arc
+            .as_ref()
+            .expect("anti-pattern arc metadata");
+        let rule_arc = rule.session_arc.as_ref().expect("rule arc metadata");
+        assert_eq!(anti_arc.schema, SESSION_ARC_SCHEMA_V1);
+        assert_eq!(rule_arc.schema, SESSION_ARC_SCHEMA_V1);
+        assert_eq!(anti_arc.arc_id, rule_arc.arc_id);
+        assert_eq!(anti_arc.role, "anti_pattern");
+        assert_eq!(rule_arc.role, "rule");
+        assert_eq!(anti_arc.linked_candidate_id, rule.candidate_id);
+        assert_eq!(rule_arc.linked_candidate_id, anti_pattern.candidate_id);
+        assert_eq!(
+            anti_arc.proposed_anti_pattern_candidate_id,
+            anti_pattern.candidate_id
+        );
+        assert_eq!(anti_arc.proposed_rule_candidate_id, rule.candidate_id);
+        assert_eq!(anti_arc.failure_span.evidence_span_id, failure.id);
+        assert_eq!(anti_arc.resolution_span.evidence_span_id, resolution.id);
+        assert_eq!(anti_arc.linkage, "failed_to_fixed");
+        assert_eq!(anti_arc.session_provenance.session_id, session.id);
+        assert_eq!(
+            anti_arc.session_provenance.cass_session_id,
+            session.cass_session_id
+        );
+    }
+
+    #[test]
+    fn review_session_candidates_do_not_invent_arc_without_later_resolution() {
+        let session = synthetic_stored_session();
+        let mut resolution = synthetic_span(
+            "span_arc_resolution_first0000000",
+            None,
+            "Fixed the capture hook and cargo test passed green.",
+        );
+        resolution.start_line = 5;
+        resolution.end_line = 6;
+        let mut failure = synthetic_span(
+            "span_arc_failure_late0000000000",
+            None,
+            "The capture hook cargo test failed with red error output.",
+        );
+        failure.start_line = 20;
+        failure.end_line = 21;
+
+        let candidates = build_review_session_candidates(
+            "wsp_test00000000000000000000000",
+            &session,
+            &[resolution, failure],
+            0.0,
+            10,
+        );
+
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.session_arc.is_none()),
+            "session arc candidates require failure evidence followed by a later resolution"
         );
     }
 
