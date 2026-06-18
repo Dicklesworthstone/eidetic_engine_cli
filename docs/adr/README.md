@@ -83,3 +83,6 @@ including rejected alternatives and verification hooks.
 - [ADR 0077: Group-Commit Write Intake](0077-group-commit-write-intake.md)
 - [ADR 0078: Incremental Index Intake](0078-incremental-index-intake.md)
 - [ADR 0080: Downloaded Default Local Embedder](0080-bundled-default-embedder.md)
+- [ADR 0081: Doctor / Status Core-vs-Advisory Health Aggregation](0081-doctor-core-vs-advisory-health.md)
+- [ADR 0082: Code-Anchor Drift is a Flag, Not a Rank Penalty](0082-stale-anchor-flag-not-penalize.md)
+- [ADR 0083: User-Global Memory Store (Separate Local Store)](0083-user-global-memory-store.md)

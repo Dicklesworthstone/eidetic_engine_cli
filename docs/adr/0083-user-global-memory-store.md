@@ -1,4 +1,4 @@
-# ADR 0081: User-Global Memory Store (Separate Local Store)
+# ADR 0083: User-Global Memory Store (Separate Local Store)
 
 Status: accepted
 Date: 2026-06-17
