@@ -4343,7 +4343,7 @@ mod tests {
             "second model2vec",
         )?;
         ensure(
-            report.entries[2].model_id == BUNDLED_EMBEDDING_MODEL_ID,
+            report.entries[2].model_name == BUNDLED_EMBEDDING_MODEL_ID,
             "bundled model auto-declared",
         )?;
         ensure(report.degradations.is_empty(), "no degradations")
