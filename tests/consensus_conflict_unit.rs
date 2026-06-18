@@ -62,6 +62,7 @@ fn item(
         redactions: Vec::new(),
         tombstoned_at: None,
         lifecycle: valid_from.map(lifecycle),
+        freshness_facets: Vec::new(),
         selected_in: PackSelectionPhase::StrictMmr,
     }
 }

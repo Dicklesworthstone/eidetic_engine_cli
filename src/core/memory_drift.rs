@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -451,8 +452,9 @@ impl MemoryDriftStatus {
     #[must_use]
     pub const fn degraded_code(self) -> Option<&'static str> {
         match self {
-            Self::Current | Self::StaleAnchor | Self::Suppressed => None,
+            Self::Current | Self::Suppressed => None,
             Self::Changed => Some("memory_drift_source_changed"),
+            Self::StaleAnchor => Some("memory_drift_source_changed"),
             Self::MissingSource => Some("memory_drift_source_missing"),
             Self::Unverifiable => Some("memory_drift_source_unverifiable"),
         }
@@ -466,6 +468,17 @@ impl MemoryDriftStatus {
             Self::Changed => 550_000,
             Self::MissingSource => 700_000,
         }
+    }
+}
+
+#[must_use]
+pub const fn memory_drift_freshness_label(status: MemoryDriftStatus) -> &'static str {
+    match status {
+        MemoryDriftStatus::Current => "fresh",
+        MemoryDriftStatus::Changed | MemoryDriftStatus::StaleAnchor => "drifted",
+        MemoryDriftStatus::MissingSource => "missing",
+        MemoryDriftStatus::Unverifiable => "unknown",
+        MemoryDriftStatus::Suppressed => "suppressed",
     }
 }
 
@@ -671,14 +684,34 @@ impl MemoryDriftReportMode {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MemoryDriftCodeAnchor {
+    pub anchor_kind: String,
+    pub anchor_value_hash: String,
+    pub redacted_anchor_value: String,
+    pub captured_span_hash: String,
+    pub freshness_state: String,
+    pub freshness: String,
+    pub generation: i64,
+    pub stale_anchor: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MemoryDriftSelectionHint {
     pub memory_id: String,
     pub drift_status: MemoryDriftStatus,
+    pub freshness: String,
     pub top_reason: String,
     pub evidence_count: u32,
     pub revalidation_command: String,
     pub degraded_code: Option<String>,
     pub severity: String,
+    pub stale_anchor: bool,
+    pub captured_at_commit: Option<String>,
+    pub current_commit: Option<String>,
+    pub commit_distance: Option<u32>,
+    pub changed_regions: Vec<String>,
+    pub anchors: Vec<MemoryDriftCodeAnchor>,
 }
 
 impl MemoryDriftSelectionHint {
@@ -694,21 +727,64 @@ impl MemoryDriftSelectionHint {
             revalidation_command: format!("ee memory drift {memory_id} --json"),
             memory_id,
             drift_status,
+            freshness: memory_drift_freshness_label(drift_status).to_owned(),
             top_reason: normalized_non_empty(Some(top_reason))
                 .unwrap_or_else(|| drift_status.default_reason().to_owned()),
             evidence_count,
             degraded_code: drift_status.degraded_code().map(str::to_owned),
             severity: drift_status.report_severity().to_owned(),
+            stale_anchor: drift_status == MemoryDriftStatus::StaleAnchor,
+            captured_at_commit: None,
+            current_commit: None,
+            commit_distance: None,
+            changed_regions: Vec::new(),
+            anchors: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_code_anchor_context(
+        mut self,
+        anchors: Vec<MemoryDriftCodeAnchor>,
+        captured_at_commit: Option<String>,
+        current_commit: Option<String>,
+        commit_distance: Option<u32>,
+        changed_regions: Vec<String>,
+        stale_anchor: bool,
+    ) -> Self {
+        self.evidence_count = self
+            .evidence_count
+            .saturating_add(u32::try_from(anchors.len()).unwrap_or(u32::MAX));
+        self.stale_anchor = self.stale_anchor || stale_anchor;
+        if self.stale_anchor && self.drift_status == MemoryDriftStatus::Current {
+            self.drift_status = MemoryDriftStatus::StaleAnchor;
+            self.freshness = memory_drift_freshness_label(self.drift_status).to_owned();
+            self.top_reason = "code_anchor_stale".to_owned();
+            self.degraded_code = self.drift_status.degraded_code().map(str::to_owned);
+            self.severity = self.drift_status.report_severity().to_owned();
+        }
+        if self.stale_anchor && self.degraded_code.is_none() {
+            self.degraded_code = MemoryDriftStatus::StaleAnchor
+                .degraded_code()
+                .map(str::to_owned);
+        }
+        self.captured_at_commit = captured_at_commit;
+        self.current_commit = current_commit;
+        self.commit_distance = commit_distance;
+        self.changed_regions = changed_regions;
+        self.anchors = anchors;
+        self
     }
 
     #[must_use]
     pub fn compact_json(&self) -> serde_json::Value {
         serde_json::json!({
             "driftStatus": self.drift_status.as_str(),
+            "freshness": &self.freshness,
             "topReason": &self.top_reason,
             "evidenceCount": self.evidence_count,
             "revalidationCommand": &self.revalidation_command,
+            "staleAnchor": self.stale_anchor,
         })
     }
 
@@ -1161,6 +1237,7 @@ fn build_memory_drift_report_with_connection(
     let items = match options.mode {
         MemoryDriftReportMode::AllMemories => memory_drift_report_all_memories(
             connection,
+            &workspace_path,
             &workspace_id,
             limit,
             options.include_tombstoned,
@@ -1172,13 +1249,17 @@ fn build_memory_drift_report_with_connection(
             })?;
             vec![memory_drift_report_one_memory(
                 connection,
+                &workspace_path,
                 memory_id,
                 options.include_tombstoned,
             )?]
         }
-        MemoryDriftReportMode::RecentPackItems => {
-            memory_drift_report_recent_pack_items(connection, &workspace_id, limit)?
-        }
+        MemoryDriftReportMode::RecentPackItems => memory_drift_report_recent_pack_items(
+            connection,
+            &workspace_path,
+            &workspace_id,
+            limit,
+        )?,
     };
 
     Ok(MemoryDriftReport::new(options.mode, None, items))
@@ -1199,6 +1280,7 @@ fn open_memory_drift_database(database_path: &Path) -> Result<DbConnection, Doma
 
 fn memory_drift_report_all_memories(
     connection: &DbConnection,
+    workspace_path: &Path,
     workspace_id: &str,
     limit: u32,
     include_tombstoned: bool,
@@ -1209,15 +1291,16 @@ fn memory_drift_report_all_memories(
             message: format!("Failed to list memories for drift report: {error}"),
             repair: Some("ee doctor --json".to_owned()),
         })?;
-    Ok(memories
+    memories
         .iter()
         .take(limit as usize)
-        .map(memory_drift_report_hint_from_memory)
-        .collect())
+        .map(|memory| memory_drift_report_hint_from_memory(connection, workspace_path, memory))
+        .collect()
 }
 
 fn memory_drift_report_one_memory(
     connection: &DbConnection,
+    workspace_path: &Path,
     memory_id: &str,
     include_tombstoned: bool,
 ) -> Result<MemoryDriftSelectionHint, DomainError> {
@@ -1239,11 +1322,12 @@ fn memory_drift_report_one_memory(
             repair: Some("rerun with --include-tombstoned or list active memories".to_owned()),
         });
     }
-    Ok(memory_drift_report_hint_from_memory(&memory))
+    memory_drift_report_hint_from_memory(connection, workspace_path, &memory)
 }
 
 fn memory_drift_report_recent_pack_items(
     connection: &DbConnection,
+    workspace_path: &Path,
     workspace_id: &str,
     limit: u32,
 ) -> Result<Vec<MemoryDriftSelectionHint>, DomainError> {
@@ -1260,7 +1344,11 @@ fn memory_drift_report_recent_pack_items(
             continue;
         }
         match connection.get_memory(&item.memory_id) {
-            Ok(Some(memory)) => hints.push(memory_drift_report_hint_from_memory(&memory)),
+            Ok(Some(memory)) => hints.push(memory_drift_report_hint_from_memory(
+                connection,
+                workspace_path,
+                &memory,
+            )?),
             Ok(None) => hints.push(MemoryDriftSelectionHint::new(
                 &item.memory_id,
                 MemoryDriftStatus::MissingSource,
@@ -1281,12 +1369,243 @@ fn memory_drift_report_recent_pack_items(
     Ok(hints)
 }
 
-fn memory_drift_report_hint_from_memory(memory: &StoredMemory) -> MemoryDriftSelectionHint {
-    memory_drift_report_hint_from_provenance_status(
+pub fn memory_drift_selection_hint_for_memory(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    memory: &StoredMemory,
+) -> Result<Option<MemoryDriftSelectionHint>, DomainError> {
+    let hint = memory_drift_report_hint_from_memory(connection, workspace_path, memory)?;
+    let provenance_selection = matches!(
+        memory.provenance_verification_status.trim(),
+        "mismatch" | "missing" | "skipped"
+    );
+    let anchor_selection = hint.stale_anchor
+        || hint
+            .anchors
+            .iter()
+            .any(|anchor| anchor.freshness_state != "current");
+    if provenance_selection || anchor_selection {
+        Ok(Some(hint))
+    } else {
+        Ok(None)
+    }
+}
+
+fn memory_drift_report_hint_from_memory(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    memory: &StoredMemory,
+) -> Result<MemoryDriftSelectionHint, DomainError> {
+    let anchors = connection
+        .list_memory_anchors(&memory.id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list memory anchors for drift report: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    Ok(memory_drift_report_hint_from_memory_and_anchors(
+        workspace_path,
+        memory,
+        anchors,
+    ))
+}
+
+fn memory_drift_report_hint_from_memory_and_anchors(
+    workspace_path: &Path,
+    memory: &StoredMemory,
+    anchors: Vec<StoredMemoryAnchor>,
+) -> MemoryDriftSelectionHint {
+    let mut hint = memory_drift_report_hint_from_provenance_status(
         &memory.id,
         &memory.provenance_verification_status,
         memory.provenance_chain_hash.as_deref(),
+    );
+    let anchor_status = memory_drift_status_from_stored_anchors(&anchors);
+    if let Some((status, reason)) = anchor_status
+        && status.severity_rank() > hint.drift_status.severity_rank()
+    {
+        hint = MemoryDriftSelectionHint::new(&memory.id, status, reason, 0);
+    }
+    let stale_anchor = !anchors.is_empty()
+        && (anchor_status.is_some()
+            || matches!(
+                hint.drift_status,
+                MemoryDriftStatus::Changed
+                    | MemoryDriftStatus::MissingSource
+                    | MemoryDriftStatus::StaleAnchor
+            ));
+    let captured_commit = captured_commit_for_memory(memory, &anchors);
+    let current_commit = if anchors.is_empty() && captured_commit.is_none() {
+        None
+    } else {
+        current_git_commit(workspace_path)
+    };
+    let commit_distance = captured_commit
+        .as_deref()
+        .zip(current_commit.as_deref())
+        .and_then(|(captured, current)| git_commit_distance(workspace_path, captured, current));
+    let code_anchors = memory_drift_code_anchors(&anchors, hint.drift_status);
+    let mut changed_regions = if stale_anchor {
+        code_anchors
+            .iter()
+            .map(|anchor| anchor.redacted_anchor_value.clone())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    changed_regions.sort();
+    changed_regions.dedup();
+
+    hint.with_code_anchor_context(
+        code_anchors,
+        captured_commit,
+        current_commit,
+        commit_distance,
+        changed_regions,
+        stale_anchor,
     )
+}
+
+fn memory_drift_status_from_stored_anchors(
+    anchors: &[StoredMemoryAnchor],
+) -> Option<(MemoryDriftStatus, &'static str)> {
+    if anchors
+        .iter()
+        .any(|anchor| anchor.freshness_state == MemoryAnchorFreshnessState::Stale)
+    {
+        return Some((MemoryDriftStatus::StaleAnchor, "code_anchor_stale"));
+    }
+    if anchors
+        .iter()
+        .any(|anchor| anchor.freshness_state == MemoryAnchorFreshnessState::Suspect)
+    {
+        return Some((MemoryDriftStatus::Unverifiable, "code_anchor_suspect"));
+    }
+    None
+}
+
+fn memory_drift_code_anchors(
+    anchors: &[StoredMemoryAnchor],
+    drift_status: MemoryDriftStatus,
+) -> Vec<MemoryDriftCodeAnchor> {
+    let mut output = anchors
+        .iter()
+        .map(|anchor| {
+            let freshness = memory_drift_anchor_freshness_label(anchor, drift_status);
+            let stale_anchor = matches!(
+                anchor.freshness_state,
+                MemoryAnchorFreshnessState::Stale | MemoryAnchorFreshnessState::Suspect
+            ) || matches!(
+                drift_status,
+                MemoryDriftStatus::Changed
+                    | MemoryDriftStatus::MissingSource
+                    | MemoryDriftStatus::StaleAnchor
+            );
+            MemoryDriftCodeAnchor {
+                anchor_kind: anchor.anchor_kind.as_str().to_owned(),
+                anchor_value_hash: anchor.anchor_value_hash.clone(),
+                redacted_anchor_value: anchor.redacted_anchor_value.clone(),
+                captured_span_hash: anchor.captured_span_hash.clone(),
+                freshness_state: anchor.freshness_state.as_str().to_owned(),
+                freshness: freshness.to_owned(),
+                generation: anchor.generation,
+                stale_anchor,
+            }
+        })
+        .collect::<Vec<_>>();
+    output.sort_by(|left, right| {
+        left.anchor_kind
+            .cmp(&right.anchor_kind)
+            .then_with(|| left.anchor_value_hash.cmp(&right.anchor_value_hash))
+    });
+    output
+}
+
+fn memory_drift_anchor_freshness_label(
+    anchor: &StoredMemoryAnchor,
+    drift_status: MemoryDriftStatus,
+) -> &'static str {
+    match anchor.freshness_state {
+        MemoryAnchorFreshnessState::Stale => "drifted",
+        MemoryAnchorFreshnessState::Suspect => "unknown",
+        MemoryAnchorFreshnessState::Current => memory_drift_freshness_label(drift_status),
+    }
+}
+
+fn captured_commit_for_memory(
+    memory: &StoredMemory,
+    anchors: &[StoredMemoryAnchor],
+) -> Option<String> {
+    memory
+        .provenance_uri
+        .as_deref()
+        .and_then(first_hex_commit)
+        .or_else(|| first_hex_commit(&memory.content))
+        .or_else(|| {
+            anchors
+                .iter()
+                .find_map(|anchor| first_hex_commit(&anchor.provenance))
+        })
+}
+
+fn current_git_commit(workspace_path: &Path) -> Option<String> {
+    git_output(workspace_path, &["rev-parse", "--verify", "HEAD"])
+        .and_then(|output| first_hex_commit(&output))
+}
+
+fn git_commit_distance(workspace_path: &Path, captured: &str, current: &str) -> Option<u32> {
+    if captured == current {
+        return Some(0);
+    }
+    if !is_hex_commit(captured) || !is_hex_commit(current) {
+        return None;
+    }
+    git_output(
+        workspace_path,
+        &["rev-list", "--count", &format!("{captured}..{current}")],
+    )
+    .and_then(|output| output.trim().parse::<u32>().ok())
+}
+
+fn git_output(workspace_path: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace_path)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+fn first_hex_commit(input: &str) -> Option<String> {
+    let mut current = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_hexdigit() {
+            current.push(ch.to_ascii_lowercase());
+            if current.len() == 40 {
+                return Some(current);
+            }
+        } else if let Some(commit) = finish_hex_commit(&current) {
+            return Some(commit);
+        } else {
+            current.clear();
+        }
+    }
+    finish_hex_commit(&current)
+}
+
+fn finish_hex_commit(candidate: &str) -> Option<String> {
+    if is_hex_commit(candidate) {
+        Some(candidate.to_owned())
+    } else {
+        None
+    }
+}
+
+fn is_hex_commit(candidate: &str) -> bool {
+    (7..=40).contains(&candidate.len()) && candidate.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 fn memory_drift_support_summary_item(item: &MemoryDriftSelectionHint) -> serde_json::Value {
@@ -1329,6 +1648,8 @@ fn memory_drift_support_source_kind(item: &MemoryDriftSelectionHint) -> &'static
     let reason = item.top_reason.as_str();
     if reason.starts_with("provenance_chain_") || reason.starts_with("provenance_") {
         "provenance_chain"
+    } else if reason.starts_with("code_anchor_") || item.stale_anchor {
+        "code_anchor"
     } else if reason.starts_with("pack_item_") {
         "pack_record"
     } else if reason.contains("schema") {
@@ -2320,9 +2641,11 @@ mod tests {
             changed.compact_json(),
             serde_json::json!({
                 "driftStatus": "changed",
+                "freshness": "drifted",
                 "topReason": "provenance_chain_mismatch",
                 "evidenceCount": 1,
                 "revalidationCommand": "ee memory drift mem_changed --json",
+                "staleAnchor": false,
             })
         );
 
@@ -2348,6 +2671,121 @@ mod tests {
     }
 
     #[test]
+    fn code_anchor_report_exposes_commit_distance_and_changed_regions() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let repo = tempdir.path();
+        std::fs::create_dir_all(repo.join("src")).map_err(|error| error.to_string())?;
+        run_memory_drift_git(repo, &["init", "-q", "-b", "main"])?;
+        run_memory_drift_git(repo, &["config", "user.email", "ee-test@example.test"])?;
+        run_memory_drift_git(repo, &["config", "user.name", "ee test"])?;
+        std::fs::write(repo.join("src/lib.rs"), "pub fn trust_probe() {}\n")
+            .map_err(|error| error.to_string())?;
+        run_memory_drift_git(repo, &["add", "src/lib.rs"])?;
+        run_memory_drift_git(
+            repo,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "baseline",
+            ],
+        )?;
+        let captured = git_output(repo, &["rev-parse", "--verify", "HEAD"])
+            .and_then(|output| first_hex_commit(&output))
+            .ok_or_else(|| "captured commit should be available".to_owned())?;
+        std::fs::write(repo.join("src/lib.rs"), "pub fn trust_probe_changed() {}\n")
+            .map_err(|error| error.to_string())?;
+        run_memory_drift_git(repo, &["add", "src/lib.rs"])?;
+        run_memory_drift_git(
+            repo,
+            &["-c", "commit.gpgsign=false", "commit", "-q", "-m", "change"],
+        )?;
+        let current = git_output(repo, &["rev-parse", "--verify", "HEAD"])
+            .and_then(|output| first_hex_commit(&output))
+            .ok_or_else(|| "current commit should be available".to_owned())?;
+        assert_ne!(captured, current);
+
+        let anchor_hash = crate::models::memory_anchor_value_hash(
+            crate::models::MemoryAnchorKind::Path,
+            "src/lib.rs",
+        );
+        let anchor = StoredMemoryAnchor {
+            memory_id: "mem_anchor".to_owned(),
+            anchor_kind: crate::models::MemoryAnchorKind::Path,
+            anchor_value_hash: anchor_hash.clone(),
+            redacted_anchor_value: "path:lib.rs:abcdef12".to_owned(),
+            confidence: 1.0,
+            source: crate::models::MemoryAnchorSource::Explicit,
+            provenance: format!("git-sha://{captured}"),
+            captured_span_hash: anchor_hash,
+            freshness_state: MemoryAnchorFreshnessState::Current,
+            generation: 7,
+            created_at: "2026-06-18T00:00:00Z".to_owned(),
+            updated_at: "2026-06-18T00:00:00Z".to_owned(),
+        };
+        let memory = StoredMemory {
+            id: "mem_anchor".to_owned(),
+            workspace_id: "wsp_anchor".to_owned(),
+            level: "episodic".to_owned(),
+            kind: "fact".to_owned(),
+            content: format!("Memory captured at commit {captured} for ee-anchor:path:src/lib.rs."),
+            workflow_id: None,
+            confidence: 0.8,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: Some(format!("git-sha://{captured}")),
+            trust_class: "agent_assertion".to_owned(),
+            trust_subclass: None,
+            provenance_chain_hash: Some("blake3:changed".to_owned()),
+            provenance_chain_hash_version: "v1".to_owned(),
+            provenance_verification_status: "mismatch".to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+            created_at: "2026-06-18T00:00:00Z".to_owned(),
+            updated_at: "2026-06-18T00:00:00Z".to_owned(),
+            tombstoned_at: None,
+            valid_from: None,
+            valid_to: None,
+        };
+
+        let hint = memory_drift_report_hint_from_memory_and_anchors(repo, &memory, vec![anchor]);
+        assert_eq!(hint.drift_status, MemoryDriftStatus::Changed);
+        assert_eq!(hint.freshness, "drifted");
+        assert!(hint.stale_anchor);
+        assert_eq!(hint.captured_at_commit.as_deref(), Some(captured.as_str()));
+        assert_eq!(hint.current_commit.as_deref(), Some(current.as_str()));
+        assert_eq!(hint.commit_distance, Some(1));
+        assert_eq!(hint.changed_regions, vec!["path:lib.rs:abcdef12"]);
+        assert_eq!(hint.anchors.len(), 1);
+        assert_eq!(hint.anchors[0].freshness_state, "current");
+        assert_eq!(hint.anchors[0].freshness, "drifted");
+        assert!(hint.anchors[0].stale_anchor);
+        assert_eq!(
+            hint.compact_json()
+                .pointer("/staleAnchor")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    fn run_memory_drift_git(repo: &Path, args: &[&str]) -> Result<(), String> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).to_string())
+        }
+    }
+
+    #[test]
     fn selection_hint_compact_json_is_field_bounded() {
         let changed = memory_drift_report_hint_from_provenance_status(
             "mem_changed",
@@ -2356,18 +2794,20 @@ mod tests {
         );
         let compact = changed.compact_json();
         let compact_object = compact.as_object().expect("compact hint is an object");
-        assert_eq!(compact_object.len(), 4);
+        assert_eq!(compact_object.len(), 6);
         assert!(compact_object.contains_key("driftStatus"));
+        assert!(compact_object.contains_key("freshness"));
         assert!(compact_object.contains_key("topReason"));
         assert!(compact_object.contains_key("evidenceCount"));
         assert!(compact_object.contains_key("revalidationCommand"));
+        assert!(compact_object.contains_key("staleAnchor"));
         assert!(!compact_object.contains_key("memoryId"));
         assert!(!compact_object.contains_key("degradedCode"));
         assert!(!compact_object.contains_key("severity"));
 
         let rendered = serde_json::to_string(&compact).expect("compact hint serializes");
         assert!(
-            rendered.len() <= 160,
+            rendered.len() <= 210,
             "compact drift hint exceeded budget: {rendered}"
         );
         assert!(!rendered.contains("blake3:changed"));

@@ -56,9 +56,7 @@ use crate::config::{
 };
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
-use crate::core::memory_drift::{
-    MemoryDriftSelectionHint, memory_drift_selection_hint_from_provenance_status,
-};
+use crate::core::memory_drift::{MemoryDriftSelectionHint, memory_drift_selection_hint_for_memory};
 use crate::core::memory_scope::{
     MemoryScopeContext, MeshDisplayProvenance, MeshQueryVisibility, mesh_query_visibility,
 };
@@ -93,8 +91,9 @@ use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
     ContextRequest, ContextRequestInput, ContextResponse, ContextResponseDegradation,
     ContextResponseSeverity, PackAdmissionPosture, PackAssemblySlo, PackAssemblySloActuals,
-    PackCandidate, PackCandidateInput, PackCoordinationSnapshot, PackDraft, PackItemLifecycle,
-    PackOmission, PackOmissionReason, PackProvenance, PackRejectionStage, PackResourceProfile,
+    PackCandidate, PackCandidateInput, PackCoordinationSnapshot, PackDraft,
+    PackFreshnessAnchorFacet, PackFreshnessFacet, PackItemLifecycle, PackOmission,
+    PackOmissionReason, PackProvenance, PackRejectionStage, PackResourceProfile,
     PackScoreBreakdown, PackSection, PackTrustSignal, TokenBudget, WhyNotSelectedInput,
     WhyNotSelectedReport, assemble_draft_with_profile_and_options_seeded,
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
@@ -2670,7 +2669,12 @@ fn run_context_pack_with_performance_inner(
         .filter(|item| item.tombstoned_at.is_some())
         .count();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    push_selected_context_memory_drift_degradations(read_connection, &draft, &mut degraded);
+    push_selected_context_memory_drift_degradations(
+        read_connection,
+        &options.workspace_path,
+        &mut draft,
+        &mut degraded,
+    );
     push_context_read_pool_degradations(&mut degraded, &read_pool.stats());
     if options.include_tombstoned
         && tombstoned_item_count > 0
@@ -3412,20 +3416,23 @@ fn push_search_degradations(
 
 fn push_selected_context_memory_drift_degradations(
     connection: &DbConnection,
-    draft: &PackDraft,
+    workspace_path: &Path,
+    draft: &mut PackDraft,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) {
     let mut hints = Vec::new();
     let mut read_errors = 0usize;
-    for item in &draft.items {
+    for item in &mut draft.items {
         match connection.get_memory(&item.memory_id.to_string()) {
             Ok(Some(memory)) => {
-                if let Some(hint) = memory_drift_selection_hint_from_provenance_status(
-                    &memory.id,
-                    &memory.provenance_verification_status,
-                    memory.provenance_chain_hash.as_deref(),
-                ) {
-                    hints.push(hint);
+                match memory_drift_selection_hint_for_memory(connection, workspace_path, &memory) {
+                    Ok(Some(hint)) => {
+                        item.freshness_facets
+                            .push(pack_freshness_facet_from_memory_drift_hint(&hint));
+                        hints.push(hint);
+                    }
+                    Ok(None) => {}
+                    Err(_) => read_errors = read_errors.saturating_add(1),
                 }
             }
             Ok(None) => {}
@@ -3464,6 +3471,43 @@ fn push_selected_context_memory_drift_degradations(
             ),
             Some("ee doctor --json".to_owned()),
         );
+    }
+}
+
+fn pack_freshness_facet_from_memory_drift_hint(
+    hint: &MemoryDriftSelectionHint,
+) -> PackFreshnessFacet {
+    PackFreshnessFacet {
+        kind: if hint.stale_anchor {
+            "stale_anchor".to_owned()
+        } else {
+            "memory_drift".to_owned()
+        },
+        freshness: hint.freshness.clone(),
+        stale_anchor: hint.stale_anchor,
+        drift_status: hint.drift_status.as_str().to_owned(),
+        severity: hint.severity.clone(),
+        top_reason: hint.top_reason.clone(),
+        degraded_code: hint.degraded_code.clone(),
+        revalidation_command: hint.revalidation_command.clone(),
+        captured_at_commit: hint.captured_at_commit.clone(),
+        current_commit: hint.current_commit.clone(),
+        commit_distance: hint.commit_distance,
+        changed_regions: hint.changed_regions.clone(),
+        anchors: hint
+            .anchors
+            .iter()
+            .map(|anchor| PackFreshnessAnchorFacet {
+                anchor_kind: anchor.anchor_kind.clone(),
+                anchor_value_hash: anchor.anchor_value_hash.clone(),
+                redacted_anchor_value: anchor.redacted_anchor_value.clone(),
+                captured_span_hash: anchor.captured_span_hash.clone(),
+                freshness_state: anchor.freshness_state.clone(),
+                freshness: anchor.freshness.clone(),
+                generation: anchor.generation,
+                stale_anchor: anchor.stale_anchor,
+            })
+            .collect(),
     }
 }
 
@@ -5877,6 +5921,54 @@ fn compute_pack_hash_components(
             for hasher in [&mut draft_hasher, &mut composite_hasher] {
                 hasher.update(redaction.reason.as_bytes());
                 hasher.update(redaction.placeholder.as_bytes());
+            }
+        }
+        for facet in &item.freshness_facets {
+            for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                hasher.update(facet.kind.as_bytes());
+                hasher.update(facet.freshness.as_bytes());
+                hasher.update(&[u8::from(facet.stale_anchor)]);
+                hasher.update(facet.drift_status.as_bytes());
+                hasher.update(facet.severity.as_bytes());
+                hasher.update(facet.top_reason.as_bytes());
+                hasher.update(facet.revalidation_command.as_bytes());
+            }
+            if let Some(degraded_code) = &facet.degraded_code {
+                for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                    hasher.update(degraded_code.as_bytes());
+                }
+            }
+            if let Some(captured_at_commit) = &facet.captured_at_commit {
+                for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                    hasher.update(captured_at_commit.as_bytes());
+                }
+            }
+            if let Some(current_commit) = &facet.current_commit {
+                for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                    hasher.update(current_commit.as_bytes());
+                }
+            }
+            if let Some(commit_distance) = facet.commit_distance {
+                for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                    hasher.update(&commit_distance.to_le_bytes());
+                }
+            }
+            for changed_region in &facet.changed_regions {
+                for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                    hasher.update(changed_region.as_bytes());
+                }
+            }
+            for anchor in &facet.anchors {
+                for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                    hasher.update(anchor.anchor_kind.as_bytes());
+                    hasher.update(anchor.anchor_value_hash.as_bytes());
+                    hasher.update(anchor.redacted_anchor_value.as_bytes());
+                    hasher.update(anchor.captured_span_hash.as_bytes());
+                    hasher.update(anchor.freshness_state.as_bytes());
+                    hasher.update(anchor.freshness.as_bytes());
+                    hasher.update(&anchor.generation.to_le_bytes());
+                    hasher.update(&[u8::from(anchor.stale_anchor)]);
+                }
             }
         }
     }
@@ -15014,11 +15106,12 @@ pub fn unrelated_context() -> u64 {{
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
         let workspace_id = "wsp_01234567890123456789033333";
+        let workspace_path = Path::new("/tmp/ee-context-memory-drift");
         connection
             .insert_workspace(
                 workspace_id,
                 &CreateWorkspaceInput {
-                    path: "/tmp/ee-context-memory-drift".to_string(),
+                    path: workspace_path.display().to_string(),
                     name: Some("context memory drift".to_string()),
                 },
             )
@@ -15097,12 +15190,13 @@ pub fn unrelated_context() -> u64 {{
                 redactions: Vec::new(),
                 tombstoned_at: None,
                 lifecycle: None,
+                freshness_facets: Vec::new(),
                 selected_in: PackSelectionPhase::StrictMmr,
             })
         }
 
         let budget = TokenBudget::default_context();
-        let draft = PackDraft {
+        let mut draft = PackDraft {
             query: "memory drift".to_string(),
             budget,
             used_tokens: 16,
@@ -15140,7 +15234,12 @@ pub fn unrelated_context() -> u64 {{
             .collect::<Vec<_>>();
 
         let mut degraded = Vec::new();
-        super::push_selected_context_memory_drift_degradations(&connection, &draft, &mut degraded);
+        super::push_selected_context_memory_drift_degradations(
+            &connection,
+            workspace_path,
+            &mut draft,
+            &mut degraded,
+        );
 
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, "memory_drift_source_missing");
@@ -15161,6 +15260,12 @@ pub fn unrelated_context() -> u64 {{
                 .contains("reason=provenance_chain_missing")
         );
         assert!(degraded[0].message.contains("evidenceCount=1"));
+        assert_eq!(draft.items[0].freshness_facets.len(), 1);
+        assert_eq!(draft.items[0].freshness_facets[0].kind, "memory_drift");
+        assert_eq!(draft.items[0].freshness_facets[0].freshness, "drifted");
+        assert_eq!(draft.items[1].freshness_facets.len(), 1);
+        assert_eq!(draft.items[1].freshness_facets[0].kind, "memory_drift");
+        assert_eq!(draft.items[1].freshness_facets[0].freshness, "missing");
         assert_eq!(
             draft
                 .items
@@ -15219,6 +15324,7 @@ pub fn unrelated_context() -> u64 {{
             redactions: Vec::new(),
             tombstoned_at: None,
             lifecycle: None,
+            freshness_facets: Vec::new(),
             selected_in: PackSelectionPhase::StrictMmr,
         };
 

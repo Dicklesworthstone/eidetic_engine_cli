@@ -4487,6 +4487,7 @@ fn search_hit_pack_item(index: usize, hit: &SearchHit) -> Option<PackDraftItem> 
         redactions: Vec::new(),
         tombstoned_at: metadata_string(metadata, "tombstoned_at").map(str::to_string),
         lifecycle,
+        freshness_facets: Vec::new(),
         selected_in: PackSelectionPhase::FacilityLocation,
     })
 }

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # bd-2vq2z.18 - Trust freshness lifecycle e2e (real binary, no mocks).
 #
-# This is the cross-track route pin for drift/provenance/calibration trust
-# signals. It exercises the current public surfaces for real:
+# This is the cross-track real-binary proof for drift/provenance/calibration
+# trust signals. It exercises the current public surfaces for real:
 #   - `ee why` provenance freshness degradations for present -> moved -> missing.
+#   - `ee diag provenance` for present/moved/missing/unverifiable rollups.
 #   - `ee verify provenance` audited mutation/candidate accounting.
 #   - `ee memory drift` read-only posture after provenance verification.
-# Pending public routes (`ee diag provenance`, `ee trust report`) are explicit
-# no-silent-cap drops until their CLI/schema files are available to this lane.
+#   - `ee trust report` calibration error, reliability leaders, and proposals.
 #
 # NOTE: no `set -e` - assert_* helpers accumulate failures and harness_summary
 # decides the exit code, so a single failing assertion cannot prevent artifacts
@@ -44,16 +44,33 @@ json_scalar() {
     printf '%s' "$json" | jq -r "$filter" 2>/dev/null || true
 }
 
+git_fixture() {
+    log_event "trust_freshness_git" command "git -C <workspace> $*"
+    git -C "$WS" "$@"
+}
+
 with_temp_workspace WS
 
 step "seed workspace files for provenance freshness"
 mkdir -p "$WS/src" "$WS/docs"
-printf 'pub fn trust_probe() -> &'\''static str {\n    "trusted-freshness-v1"\n}\n' \
+git_fixture init -q -b main
+git_fixture config user.email ee-e2e@example.test
+git_fixture config user.name "ee e2e"
+printf 'pub fn trust_probe_seed() -> &'\''static str {\n    "seed"\n}\n' \
     >"$WS/src/trust_probe.rs"
+git_fixture add src/trust_probe.rs
+git_fixture -c commit.gpgsign=false commit -q -m "seed trust freshness"
+base_commit="$(git -C "$WS" rev-parse --verify HEAD)"
+memory_text="trusted-freshness-v1 stale anchor ee-anchor:path:src/trust_probe.rs ee-anchor:symbol:trust_probe Captured at commit $base_commit"
+printf '// %s\npub fn trust_probe() -> &'\''static str {\n    "trusted-freshness-v1"\n}\n' \
+    "$memory_text" >"$WS/src/trust_probe.rs"
+git_fixture add src/trust_probe.rs
+git_fixture -c commit.gpgsign=false commit -q -m "add trust freshness memory source"
 printf 'calibration evidence fixture\n' >"$WS/docs/calibration.md"
 log_event "trust_freshness_fixture" \
     workspaceHash "$(printf '%s' "$WS" | shasum -a 256 | awk '{print $1}')" \
     source "src/trust_probe.rs" \
+    capturedCommit "$base_commit" \
     bead "bd-2vq2z.18"
 
 step "init isolated workspace"
@@ -63,15 +80,15 @@ assert_jq "$init_out" '.schema == "ee.response.v2" and .success == true' \
 
 step "remember a file-backed memory for provenance freshness"
 remember_out="$(ee_json remember \
-    "trusted-freshness-v1" \
+    "$memory_text" \
     --workspace "$WS" --level episodic --kind fact \
-    --source "file://src/trust_probe.rs#L2-L2" --json)"
+    --source "file://src/trust_probe.rs#L1-L1" --json)"
 assert_jq "$remember_out" '.schema == "ee.response.v2" and .success == true' \
     "remember with file provenance succeeds"
 mem_id="$(json_scalar "$remember_out" '.data.memory_id // .data.memoryId // empty')"
 assert_eq "$([ -n "$mem_id" ] && echo present || echo missing)" "present" \
     "remember returns a memory id"
-log_event "trust_freshness_memory" memoryId "$mem_id" provenance "file://src/trust_probe.rs#L2-L2"
+log_event "trust_freshness_memory" memoryId "$mem_id" provenance "file://src/trust_probe.rs#L1-L1"
 
 step "remember cass-backed provenance; absent verifier is unverifiable, not missing"
 cass_out="$(ee_json remember \
@@ -112,6 +129,13 @@ assert_jq "$why_moved" '.schema == "ee.response.v2" and .success == true' \
 assert_jq "$why_moved" '
     any((.data.degraded // [])[]?; .code == "why_provenance_freshness_moved")
 ' "why flags moved provenance"
+diag_moved="$(ee_json diag provenance --workspace "$WS" --json)"
+assert_jq "$diag_moved" '.schema == "ee.response.v2" and .success == true and .data.schema == "ee.provenance_health.v1"' \
+    "diag provenance returns a success provenance-health envelope for moved source"
+assert_jq "$diag_moved" '
+    any(.data.entries[]?; .memoryId == "'"$mem_id"'" and .health == "moved"
+        and any(.pointers[]?; .status == "moved"))
+' "diag provenance flags moved file-backed provenance"
 
 step "restore the file; why returns to present provenance"
 mv "$WS/src/trust_probe_moved.rs" "$WS/src/trust_probe.rs"
@@ -123,10 +147,18 @@ assert_jq "$why_restored" '
     [(.data.degraded // [])[]? | select((.code // "") | startswith("why_provenance_freshness_"))]
     | length == 0
 ' "why clears provenance freshness degradation after restore"
+diag_restored="$(ee_json diag provenance --workspace "$WS" --json)"
+assert_jq "$diag_restored" '
+    .schema == "ee.response.v2" and .success == true
+    and any(.data.entries[]?; .memoryId == "'"$mem_id"'" and .health == "present")
+' "diag provenance returns file-backed memory to present after restore"
 
 step "change the cited evidence; why and verify provenance expose drift/missing trust"
 printf 'pub fn trust_probe() -> &'\''static str {\n    "trusted-freshness-v2"\n}\n' \
     >"$WS/src/trust_probe.rs"
+git_fixture add src/trust_probe.rs
+git_fixture -c commit.gpgsign=false commit -q -m "change trust freshness source"
+current_commit="$(git -C "$WS" rev-parse --verify HEAD)"
 log_event "trust_freshness_transition" memoryId "$mem_id" transition "content_changed"
 why_missing="$(ee_json why "$mem_id" --workspace "$WS" --json)"
 assert_jq "$why_missing" '.schema == "ee.response.v2" and .success == true' \
@@ -147,55 +179,109 @@ assert_jq "$verify_out" 'all(.data.referents[]?; .status != "removed")' \
 
 step "memory drift read-only report reflects provenance verification status"
 drift_out="$(ee_json memory drift "$mem_id" --workspace "$WS" --json)"
-assert_jq "$drift_out" '.schema == "ee.memory_drift.report.v1"' \
-    "memory drift emits report schema"
-assert_jq "$drift_out" '.mode == "one_memory" and .summary.totalMemories == 1' \
+assert_jq "$drift_out" '.schema == "ee.response.v2" and .success == true and .data.schema == "ee.memory_drift.report.v1"' \
+    "memory drift emits enveloped report schema"
+assert_jq "$drift_out" '.data.mode == "one_memory" and .data.summary.totalMemories == 1' \
     "memory drift reports the requested memory only"
 assert_jq "$drift_out" '
-    any(.items[]?; .memoryId == "'"$mem_id"'" and (.driftStatus == "changed" or .driftStatus == "missing_source" or .driftStatus == "unverifiable"))
+    any(.data.items[]?; .memoryId == "'"$mem_id"'" and (.driftStatus == "changed" or .driftStatus == "missing_source" or .driftStatus == "unverifiable"))
 ' "memory drift reports an affected or unverifiable provenance state"
+assert_jq "$drift_out" '
+    any(.data.items[]?;
+        .memoryId == "'"$mem_id"'"
+        and .freshness == "drifted"
+        and .staleAnchor == true
+        and .capturedAtCommit == "'"$base_commit"'"
+        and .currentCommit == "'"$current_commit"'"
+        and ((.commitDistance // 0) >= 1)
+        and ((.changedRegions // []) | length >= 1)
+        and any((.anchors // [])[]?; .staleAnchor == true and .freshness == "drifted")
+    )
+' "memory drift exposes code-anchor commit distance and stale-anchor details"
 
 step "pack stale-anchor signal route pin"
 pack_out="$(ee_json pack "trust freshness stale anchor" --workspace "$WS" --max-tokens 1200 --json)"
-if printf '%s' "$pack_out" | jq -e '.schema == "ee.response.v2" and .success == true' >/dev/null 2>&1; then
-    if printf '%s' "$pack_out" | jq -e '
-        any(.. | objects;
-            (((.freshness? // "") | tostring | test("stale|drift|anchor"))
-             or (((.degradedCode? // "") | tostring) | test("stale_anchor|memory_drift")))
+assert_jq "$pack_out" '.schema == "ee.response.v2" and .success == true' \
+    "pack returns a success response envelope for stale-anchor route"
+log_event "trust_freshness_stale_anchor_pack_assert" \
+    memoryId "$mem_id" \
+    capturedCommit "$base_commit" \
+    currentCommit "$current_commit"
+assert_jq "$pack_out" '
+    any(.data.pack.items[]?;
+        .memoryId == "'"$mem_id"'"
+        and any((.freshnessFacets // [])[]?;
+            .kind == "stale_anchor"
+            and .freshness == "drifted"
+            and .staleAnchor == true
+            and .capturedAtCommit == "'"$base_commit"'"
+            and .currentCommit == "'"$current_commit"'"
+            and ((.commitDistance // 0) >= 1)
+            and ((.changedRegions // []) | length >= 1)
+            and any((.anchors // [])[]?; .staleAnchor == true and .freshness == "drifted")
         )
-    ' >/dev/null 2>&1; then
-        _harness_pass "pack exposes a stale-anchor or drift freshness signal"
-    else
-        log_drop 1 "pack succeeded but stale_anchor freshness facet is pending: assert stale_anchor once pack exposes anchor freshness in JSON"
-    fi
-else
-    log_drop 1 "pack route unavailable for stale_anchor assertion; keep this route pin until pack freshness JSON is wired"
-fi
+    )
+' "pack keeps the drifted memory and exposes a stale_anchor freshness facet"
 
-step "diag provenance route pin"
-if ee_supports diag provenance; then
-    diag_out="$(ee_json diag provenance --workspace "$WS" --json)"
-    assert_jq "$diag_out" '.schema == "ee.response.v2" and .success == true' \
-        "diag provenance returns a success envelope"
-    assert_jq "$diag_out" '.data.schema == "ee.provenance_health.v1"' \
-        "diag provenance emits provenance health schema"
-    assert_jq "$diag_out" '(.data.summary.movedCount + .data.summary.missingCount + .data.summary.unverifiableCount) >= 1' \
-        "diag provenance reports at least one non-present pointer"
-else
-    log_drop 1 "ee diag provenance CLI is pending/blocked: when wired, assert ee.provenance_health.v1 moved/missing/unverifiable summary for this memory"
-fi
+step "diag provenance reports changed file provenance and cass unverifiable"
+diag_changed="$(ee_json diag provenance --workspace "$WS" --json)"
+assert_jq "$diag_changed" '.schema == "ee.response.v2" and .success == true' \
+    "diag provenance returns a success envelope"
+assert_jq "$diag_changed" '.data.schema == "ee.provenance_health.v1"' \
+    "diag provenance emits provenance health schema"
+assert_jq "$diag_changed" '
+    any(.data.entries[]?; .memoryId == "'"$mem_id"'" and .health == "missing"
+        and any(.pointers[]?; .status == "missing"))
+' "diag provenance reports mismatched file evidence as missing"
+assert_jq "$diag_changed" '
+    any(.data.entries[]?; .memoryId == "'"$cass_id"'" and .health == "unverifiable"
+        and any(.pointers[]?; .status == "unverifiable"))
+' "diag provenance reports cass-backed provenance as unverifiable, not missing"
 
-step "calibration/trust report route pin"
-if ee_supports trust report; then
-    trust_out="$(ee_json trust report --workspace "$WS" --json)"
-    assert_jq "$trust_out" '.schema == "ee.response.v2" and .success == true' \
-        "trust report returns a success envelope"
-    assert_jq "$trust_out" '.data.schema == "ee.trust_report.v1"' \
-        "trust report emits calibration schema"
-    assert_jq "$trust_out" '(.data.recommendations // []) | type == "array"' \
-        "trust report recommendations are proposal-only data"
-else
-    log_drop 1 "ee trust report CLI is pending/blocked: when wired, seed outcomes and assert calibration error, reliability leaderboard, and proposal-only recommendations"
-fi
+step "seed outcome feedback for calibration/trust report"
+helpful_out="$(ee_json remember \
+    "low confidence trust report fixture that proved helpful" \
+    --workspace "$WS" --level episodic --kind fact --confidence 0.2 \
+    --source "file://docs/calibration.md#L1-L1" --json)"
+assert_jq "$helpful_out" '.schema == "ee.response.v2" and .success == true' \
+    "remember low-confidence helpful calibration fixture succeeds"
+helpful_id="$(json_scalar "$helpful_out" '.data.memory_id // .data.memoryId // empty')"
+assert_eq "$([ -n "$helpful_id" ] && echo present || echo missing)" "present" \
+    "helpful calibration fixture returns a memory id"
+
+harmful_out="$(ee_json remember \
+    "high confidence trust report fixture that proved harmful" \
+    --workspace "$WS" --level episodic --kind fact --confidence 0.9 \
+    --source "file://docs/calibration.md#L1-L1" --json)"
+assert_jq "$harmful_out" '.schema == "ee.response.v2" and .success == true' \
+    "remember high-confidence harmful calibration fixture succeeds"
+harmful_id="$(json_scalar "$harmful_out" '.data.memory_id // .data.memoryId // empty')"
+assert_eq "$([ -n "$harmful_id" ] && echo present || echo missing)" "present" \
+    "harmful calibration fixture returns a memory id"
+
+helpful_feedback="$(ee_json outcome "$helpful_id" --workspace "$WS" --signal helpful --weight 1.0 --source-id trust-report-e2e --json)"
+assert_jq "$helpful_feedback" '.schema == "ee.response.v2" and .success == true' \
+    "helpful outcome feedback is recorded"
+harmful_feedback="$(ee_json outcome "$harmful_id" --workspace "$WS" --signal harmful --weight 1.0 --source-id trust-report-e2e --json)"
+assert_jq "$harmful_feedback" '.schema == "ee.response.v2" and .success == true' \
+    "harmful outcome feedback is recorded"
+log_event "trust_report_fixture" helpfulMemoryId "$helpful_id" harmfulMemoryId "$harmful_id" expectedEce "0.85"
+
+step "calibration/trust report asserts real outcomes"
+trust_out="$(ee_json trust report --workspace "$WS" --json)"
+assert_jq "$trust_out" '.schema == "ee.response.v2" and .success == true' \
+    "trust report returns a success envelope"
+assert_jq "$trust_out" '.data.schema == "ee.trust_report.v1"' \
+    "trust report emits calibration schema"
+assert_jq "$trust_out" '.data.outcomeEvents.helpful == 1 and .data.outcomeEvents.harmful == 1' \
+    "trust report counts scripted helpful and harmful outcomes"
+assert_jq "$trust_out" '.data.calibration.expectedCalibrationError == 0.85' \
+    "trust report expected calibration error matches seeded outcomes"
+assert_jq "$trust_out" '.data.reliability.mostHelpful[0].memoryId == "'"$helpful_id"'"' \
+    "trust report most-helpful leaderboard is outcome-backed"
+assert_jq "$trust_out" '.data.reliability.mostHarmful[0].memoryId == "'"$harmful_id"'"' \
+    "trust report most-harmful leaderboard is outcome-backed"
+assert_jq "$trust_out" '(.data.recommendations // []) | type == "array"' \
+    "trust report recommendations are proposal-only data"
 
 harness_summary

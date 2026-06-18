@@ -15,11 +15,18 @@
     {
       "memoryId": "mem_changed",
       "driftStatus": "changed",
+      "freshness": "drifted",
       "topReason": "provenance_chain_mismatch",
       "evidenceCount": 1,
       "revalidationCommand": "ee memory drift mem_changed --json",
       "degradedCode": "memory_drift_source_changed",
-      "severity": "medium"
+      "severity": "medium",
+      "staleAnchor": false,
+      "capturedAtCommit": null,
+      "currentCommit": null,
+      "commitDistance": null,
+      "changedRegions": [],
+      "anchors": []
     }
   ],
   "recoveryActions": [

@@ -5108,7 +5108,37 @@ pub struct PackDraftItem {
     pub redactions: Vec<PackItemRedaction>,
     pub tombstoned_at: Option<String>,
     pub lifecycle: Option<PackItemLifecycle>,
+    pub freshness_facets: Vec<PackFreshnessFacet>,
     pub selected_in: PackSelectionPhase,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackFreshnessFacet {
+    pub kind: String,
+    pub freshness: String,
+    pub stale_anchor: bool,
+    pub drift_status: String,
+    pub severity: String,
+    pub top_reason: String,
+    pub degraded_code: Option<String>,
+    pub revalidation_command: String,
+    pub captured_at_commit: Option<String>,
+    pub current_commit: Option<String>,
+    pub commit_distance: Option<u32>,
+    pub changed_regions: Vec<String>,
+    pub anchors: Vec<PackFreshnessAnchorFacet>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackFreshnessAnchorFacet {
+    pub anchor_kind: String,
+    pub anchor_value_hash: String,
+    pub redacted_anchor_value: String,
+    pub captured_span_hash: String,
+    pub freshness_state: String,
+    pub freshness: String,
+    pub generation: i64,
+    pub stale_anchor: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5168,6 +5198,7 @@ impl PackDraftItem {
             redactions,
             tombstoned_at,
             lifecycle,
+            freshness_facets: Vec::new(),
             selected_in,
         }
     }

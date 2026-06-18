@@ -84,6 +84,44 @@ fn run_ee(workspace: &str, args: &[&str]) -> Result<Output, String> {
     Ok(output)
 }
 
+fn run_git(workspace: &str, args: &[&str]) -> Result<Output, String> {
+    log_event(
+        "git_command_start",
+        json!({
+            "args": args,
+            "workspace": workspace,
+        }),
+    );
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to run git {}: {error}", args.join(" ")))?;
+    log_event(
+        "git_command_end",
+        json!({
+            "args": args,
+            "exitCode": output.status.code(),
+            "stdoutBytes": output.stdout.len(),
+            "stderrBytes": output.stderr.len(),
+        }),
+    );
+    ensure_equal(
+        &output.status.code(),
+        &Some(0),
+        &format!("git {}", args.join(" ")),
+    )?;
+    Ok(output)
+}
+
+fn git_stdout(workspace: &str, args: &[&str]) -> Result<String, String> {
+    let output = run_git(workspace, args)?;
+    String::from_utf8(output.stdout)
+        .map(|stdout| stdout.trim().to_owned())
+        .map_err(|error| format!("git {} stdout was not UTF-8: {error}", args.join(" ")))
+}
+
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     let message = message.into();
     log_event(
@@ -178,6 +216,14 @@ fn write_probe(path: &Path, marker: &str) -> Result<(), String> {
     .map_err(|error| format!("failed to write {}: {error}", path.display()))
 }
 
+fn write_probe_with_anchor_comment(path: &Path, anchor: &str, marker: &str) -> Result<(), String> {
+    fs::write(
+        path,
+        format!("// {anchor}\npub fn trust_probe() -> &'static str {{\n    \"{marker}\"\n}}\n"),
+    )
+    .map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
 #[test]
 fn why_verify_and_drift_pin_trust_freshness_transitions() -> TestResult {
     let workspace = workspace_dir()?;
@@ -186,7 +232,39 @@ fn why_verify_and_drift_pin_trust_freshness_transitions() -> TestResult {
         .map_err(|error| format!("failed to create src dir: {error}"))?;
     let source = Path::new(&workspace).join("src/trust_probe.rs");
     let moved = Path::new(&workspace).join("src/trust_probe_moved.rs");
-    write_probe(&source, "trusted-freshness-rust-v1")?;
+    run_git(&workspace, &["init", "-q", "-b", "main"])?;
+    run_git(&workspace, &["config", "user.email", "ee-e2e@example.test"])?;
+    run_git(&workspace, &["config", "user.name", "ee e2e"])?;
+    write_probe(&source, "seed")?;
+    run_git(&workspace, &["add", "src/trust_probe.rs"])?;
+    run_git(
+        &workspace,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "seed trust freshness",
+        ],
+    )?;
+    let base_commit = git_stdout(&workspace, &["rev-parse", "--verify", "HEAD"])?;
+    let memory_text = format!(
+        "trusted-freshness-rust-v1 stale anchor ee-anchor:path:src/trust_probe.rs ee-anchor:symbol:trust_probe Captured at commit {base_commit}"
+    );
+    write_probe_with_anchor_comment(&source, &memory_text, "trusted-freshness-rust-v1")?;
+    run_git(&workspace, &["add", "src/trust_probe.rs"])?;
+    run_git(
+        &workspace,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "add trust freshness memory source",
+        ],
+    )?;
 
     let init = run_ee(&workspace, &["init", "--json"])?;
     let _init_json = assert_success_json(&init, "init")?;
@@ -195,13 +273,13 @@ fn why_verify_and_drift_pin_trust_freshness_transitions() -> TestResult {
         &workspace,
         &[
             "remember",
-            "trusted-freshness-rust-v1",
+            memory_text.as_str(),
             "--level",
             "episodic",
             "--kind",
             "fact",
             "--source",
-            "file://src/trust_probe.rs#L2-L2",
+            "file://src/trust_probe.rs#L1-L1",
             "--json",
         ],
     )?;
@@ -211,7 +289,8 @@ fn why_verify_and_drift_pin_trust_freshness_transitions() -> TestResult {
         "memory_created",
         json!({
             "memoryId": file_memory_id,
-            "provenance": "file://src/trust_probe.rs#L2-L2",
+            "provenance": "file://src/trust_probe.rs#L1-L1",
+            "capturedCommit": base_commit,
         }),
     );
 
@@ -289,9 +368,26 @@ fn why_verify_and_drift_pin_trust_freshness_transitions() -> TestResult {
     )?;
 
     write_probe(&source, "trusted-freshness-rust-v2")?;
+    run_git(&workspace, &["add", "src/trust_probe.rs"])?;
+    run_git(
+        &workspace,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "change trust freshness source",
+        ],
+    )?;
+    let current_commit = git_stdout(&workspace, &["rev-parse", "--verify", "HEAD"])?;
     log_event(
         "transition",
-        json!({ "memoryId": file_memory_id, "state": "content_changed" }),
+        json!({
+            "memoryId": file_memory_id,
+            "state": "content_changed",
+            "currentCommit": current_commit,
+        }),
     );
     let why_missing = run_ee(&workspace, &["why", &file_memory_id, "--json"])?;
     let why_missing_json = assert_success_json(&why_missing, "why changed provenance")?;
@@ -356,13 +452,14 @@ fn why_verify_and_drift_pin_trust_freshness_transitions() -> TestResult {
         ),
     )?;
     let drift_json = stdout_json(&drift, "memory drift")?;
+    let drift_data = drift_json.pointer("/data").unwrap_or(&drift_json);
     ensure_equal(
-        &drift_json["schema"],
+        &drift_data["schema"],
         &json!("ee.memory_drift.report.v1"),
         "memory drift schema",
     )?;
     ensure(
-        drift_json
+        drift_data
             .pointer("/items")
             .and_then(Value::as_array)
             .is_some_and(|items| {
@@ -375,6 +472,104 @@ fn why_verify_and_drift_pin_trust_freshness_transitions() -> TestResult {
                 })
             }),
         "memory drift reports affected provenance state",
+    )?;
+    ensure(
+        drift_data
+            .pointer("/items")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.get("memoryId").and_then(Value::as_str) == Some(file_memory_id.as_str())
+                        && item.get("freshness").and_then(Value::as_str) == Some("drifted")
+                        && item.get("staleAnchor").and_then(Value::as_bool) == Some(true)
+                        && item.get("capturedAtCommit").and_then(Value::as_str)
+                            == Some(base_commit.as_str())
+                        && item.get("currentCommit").and_then(Value::as_str)
+                            == Some(current_commit.as_str())
+                        && item
+                            .get("commitDistance")
+                            .and_then(Value::as_u64)
+                            .is_some_and(|distance| distance >= 1)
+                        && item
+                            .get("changedRegions")
+                            .and_then(Value::as_array)
+                            .is_some_and(|regions| !regions.is_empty())
+                        && item
+                            .get("anchors")
+                            .and_then(Value::as_array)
+                            .is_some_and(|anchors| {
+                                anchors.iter().any(|anchor| {
+                                    anchor.get("staleAnchor").and_then(Value::as_bool) == Some(true)
+                                        && anchor.get("freshness").and_then(Value::as_str)
+                                            == Some("drifted")
+                                })
+                            })
+                })
+            }),
+        "memory drift exposes code-anchor commit distance and stale-anchor details",
+    )?;
+
+    let pack = run_ee(
+        &workspace,
+        &[
+            "pack",
+            "trust freshness stale anchor",
+            "--max-tokens",
+            "1200",
+            "--json",
+        ],
+    )?;
+    let pack_json = assert_success_json(&pack, "pack stale anchor")?;
+    ensure(
+        pack_json
+            .pointer("/data/pack/items")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.get("memoryId").and_then(Value::as_str) == Some(file_memory_id.as_str())
+                        && item
+                            .get("freshnessFacets")
+                            .and_then(Value::as_array)
+                            .is_some_and(|facets| {
+                                facets.iter().any(|facet| {
+                                    facet.get("kind").and_then(Value::as_str)
+                                        == Some("stale_anchor")
+                                        && facet.get("freshness").and_then(Value::as_str)
+                                            == Some("drifted")
+                                        && facet.get("staleAnchor").and_then(Value::as_bool)
+                                            == Some(true)
+                                        && facet.get("capturedAtCommit").and_then(Value::as_str)
+                                            == Some(base_commit.as_str())
+                                        && facet.get("currentCommit").and_then(Value::as_str)
+                                            == Some(current_commit.as_str())
+                                        && facet
+                                            .get("commitDistance")
+                                            .and_then(Value::as_u64)
+                                            .is_some_and(|distance| distance >= 1)
+                                        && facet
+                                            .get("changedRegions")
+                                            .and_then(Value::as_array)
+                                            .is_some_and(|regions| !regions.is_empty())
+                                        && facet
+                                            .get("anchors")
+                                            .and_then(Value::as_array)
+                                            .is_some_and(|anchors| {
+                                                anchors.iter().any(|anchor| {
+                                                    anchor
+                                                        .get("staleAnchor")
+                                                        .and_then(Value::as_bool)
+                                                        == Some(true)
+                                                        && anchor
+                                                            .get("freshness")
+                                                            .and_then(Value::as_str)
+                                                            == Some("drifted")
+                                                })
+                                            })
+                                })
+                            })
+                })
+            }),
+        "pack exposes stale_anchor freshness facet for the drifted memory",
     )?;
 
     Ok(())

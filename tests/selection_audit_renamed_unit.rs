@@ -50,6 +50,7 @@ fn response() -> ContextResponse {
         redactions: Vec::new(),
         tombstoned_at: None,
         lifecycle: None,
+        freshness_facets: Vec::new(),
         selected_in: PackSelectionPhase::StrictMmr,
     };
     let selected_items = vec![PackSelectedItem {

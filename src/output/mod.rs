@@ -58,8 +58,9 @@ use crate::pack::{
     ConflictEntry, ConsensusEntry, ConsensusProducer, ContextResponse, ContextResponseDegradation,
     ContextResponseSeverity, PACK_BUDGET_TOO_SMALL_CODE, PACK_CONCURRENT_LIMIT_REACHED_CODE,
     PackAdmissionPosture, PackAdvisoryBanner, PackAdvisoryNote, PackAssemblySlo,
-    PackItemProvenance, PackOmission, PackOmissionMetrics, PackQualityMetrics, PackSectionMetric,
-    PackSelectedItem, PackSelectionAudit, PackSelectionStep, RenderedPackProvenance,
+    PackFreshnessAnchorFacet, PackFreshnessFacet, PackItemProvenance, PackOmission,
+    PackOmissionMetrics, PackQualityMetrics, PackSectionMetric, PackSelectedItem,
+    PackSelectionAudit, PackSelectionStep, RenderedPackProvenance,
 };
 use crate::steward::{
     MAINTENANCE_JOB_LIST_SCHEMA_V1, MAINTENANCE_JOB_ROW_SCHEMA_V1, MAINTENANCE_JOB_SHOW_SCHEMA_V1,
@@ -2525,6 +2526,13 @@ pub fn render_context_response_json_with_options(
                 });
                 let provenance = item.rendered_provenance();
                 obj.field_array_of_objects("provenance", &provenance, build_rendered_provenance);
+                if !item.freshness_facets.is_empty() {
+                    obj.field_array_of_objects(
+                        "freshnessFacets",
+                        &item.freshness_facets,
+                        build_pack_freshness_facet,
+                    );
+                }
                 if !item.redactions.is_empty() {
                     obj.field_array_of_objects(
                         "redactions",
@@ -3577,6 +3585,50 @@ fn build_rendered_provenance(obj: &mut JsonBuilder, source: &RenderedPackProvena
         obj.field_str("locator", locator);
     }
     obj.field_str("note", &source.note);
+}
+
+fn build_pack_freshness_facet(obj: &mut JsonBuilder, facet: &PackFreshnessFacet) {
+    obj.field_str("kind", &facet.kind);
+    obj.field_str("freshness", &facet.freshness);
+    obj.field_bool("staleAnchor", facet.stale_anchor);
+    obj.field_str("driftStatus", &facet.drift_status);
+    obj.field_str("severity", &facet.severity);
+    obj.field_str("topReason", &facet.top_reason);
+    obj.field_raw(
+        "degradedCode",
+        &serde_json::to_string(&facet.degraded_code).unwrap_or_else(|_| "null".to_owned()),
+    );
+    obj.field_str("revalidationCommand", &facet.revalidation_command);
+    obj.field_raw(
+        "capturedAtCommit",
+        &serde_json::to_string(&facet.captured_at_commit).unwrap_or_else(|_| "null".to_owned()),
+    );
+    obj.field_raw(
+        "currentCommit",
+        &serde_json::to_string(&facet.current_commit).unwrap_or_else(|_| "null".to_owned()),
+    );
+    obj.field_raw(
+        "commitDistance",
+        &facet
+            .commit_distance
+            .map_or_else(|| "null".to_owned(), |distance| distance.to_string()),
+    );
+    obj.field_raw(
+        "changedRegions",
+        &string_array_json(facet.changed_regions.iter()),
+    );
+    obj.field_array_of_objects("anchors", &facet.anchors, build_pack_freshness_anchor_facet);
+}
+
+fn build_pack_freshness_anchor_facet(obj: &mut JsonBuilder, anchor: &PackFreshnessAnchorFacet) {
+    obj.field_str("anchorKind", &anchor.anchor_kind);
+    obj.field_str("anchorValueHash", &anchor.anchor_value_hash);
+    obj.field_str("redactedAnchorValue", &anchor.redacted_anchor_value);
+    obj.field_str("capturedSpanHash", &anchor.captured_span_hash);
+    obj.field_str("freshnessState", &anchor.freshness_state);
+    obj.field_str("freshness", &anchor.freshness);
+    obj.field_raw("generation", &anchor.generation.to_string());
+    obj.field_bool("staleAnchor", anchor.stale_anchor);
 }
 
 #[allow(dead_code)]
@@ -18007,9 +18059,9 @@ mod tests {
     };
     use crate::pack::{
         ContextRequest, ContextResponse, PACK_BUDGET_TOO_SMALL_CODE, PackAssemblySlo,
-        PackAssemblySloActuals, PackCandidate, PackCandidateInput, PackProvenance,
-        PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal, TokenBudget,
-        assemble_draft,
+        PackAssemblySloActuals, PackCandidate, PackCandidateInput, PackFreshnessAnchorFacet,
+        PackFreshnessFacet, PackProvenance, PackResourceProfile, PackScoreBreakdown, PackSection,
+        PackTrustSignal, TokenBudget, assemble_draft,
         budget_classifier::{AdaptiveBudgetInput, classify_adaptive_budget},
     };
 
@@ -20149,6 +20201,55 @@ mod tests {
             "item trust posture",
         )?;
         ensure_contains(&json, "\"relevance\":0.800000", "stable relevance")
+    }
+
+    #[test]
+    fn context_response_json_renders_pack_item_freshness_facets() -> TestResult {
+        let mut response = context_response_fixture()?;
+        response.data.pack.items[0]
+            .freshness_facets
+            .push(PackFreshnessFacet {
+                kind: "stale_anchor".to_owned(),
+                freshness: "drifted".to_owned(),
+                stale_anchor: true,
+                drift_status: "changed".to_owned(),
+                severity: "medium".to_owned(),
+                top_reason: "code_anchor_provenance_changed".to_owned(),
+                degraded_code: Some("memory_drift_source_changed".to_owned()),
+                revalidation_command: "ee memory drift mem_fixture --json".to_owned(),
+                captured_at_commit: Some("abcdef0".to_owned()),
+                current_commit: Some("abcdef1".to_owned()),
+                commit_distance: Some(1),
+                changed_regions: vec!["path:lib.rs:abcdef12".to_owned()],
+                anchors: vec![PackFreshnessAnchorFacet {
+                    anchor_kind: "path".to_owned(),
+                    anchor_value_hash:
+                        "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .to_owned(),
+                    redacted_anchor_value: "path:lib.rs:abcdef12".to_owned(),
+                    captured_span_hash:
+                        "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .to_owned(),
+                    freshness_state: "current".to_owned(),
+                    freshness: "drifted".to_owned(),
+                    generation: 7,
+                    stale_anchor: true,
+                }],
+            });
+
+        let json = render_context_response_json(&response);
+        ensure_contains(&json, "\"freshnessFacets\":[{", "freshness facets array")?;
+        ensure_contains(&json, "\"kind\":\"stale_anchor\"", "freshness kind")?;
+        ensure_contains(&json, "\"staleAnchor\":true", "stale anchor flag")?;
+        ensure_contains(&json, "\"capturedAtCommit\":\"abcdef0\"", "captured commit")?;
+        ensure_contains(&json, "\"currentCommit\":\"abcdef1\"", "current commit")?;
+        ensure_contains(&json, "\"commitDistance\":1", "commit distance")?;
+        ensure_contains(
+            &json,
+            "\"changedRegions\":[\"path:lib.rs:abcdef12\"]",
+            "changed regions",
+        )?;
+        ensure_contains(&json, "\"anchors\":[{", "anchor facets")
     }
 
     #[test]
