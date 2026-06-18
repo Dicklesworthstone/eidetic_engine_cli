@@ -16,7 +16,7 @@ No command is removed in the promotion milestone. The triad becomes the preferre
 - `ee pack "<task>"` for common retrieval plus context packing.
 - `ee why <id>` for storage, retrieval, history, and link explanation.
 
-Verbose commands stay available for explicit workflows, debugging, audit, and human operation. `ee pack "<task>"` is the canonical context-pack surface. `ee context "<task>"` is retained as a soft-deprecated compatibility alias routed through the same `run_context_pack` engine, and emits an info-severity `deprecated_alias` degraded entry so agent harnesses can migrate intentionally.
+Verbose commands stay available for explicit workflows, debugging, audit, and human operation. `ee pack "<task>"` is the canonical context-pack surface. `ee context "<task>"` is retained only as a soft-deprecated compatibility alias routed through the same `run_context_pack` engine, and emits an info-severity `deprecated_alias` degraded entry so agent harnesses can migrate intentionally.
 
 ## Disposition Table
 
@@ -33,7 +33,7 @@ Verbose commands stay available for explicit workflows, debugging, audit, and hu
 | `ee certificate` | kept | Certificate inspection remains explicit. |
 | `ee causal` | kept | Causal tracing remains an advanced surface. |
 | `ee claim` | kept | Executable claim management remains explicit. |
-| `ee context "<task>"` | soft-deprecated alias | Runs the identical `run_context_pack` engine as `ee pack "<task>"` and emits an info-severity `deprecated_alias` degraded entry. Prefer `ee pack` in new scripts. |
+| `ee context "<task>"` | soft-deprecated alias | Runs the identical `run_context_pack` engine as canonical `ee pack "<task>"` and emits an info-severity `deprecated_alias` degraded entry. Prefer `ee pack` in new scripts, harnesses, and docs. |
 | `ee completion` | kept | Shell completion generation remains explicit. |
 | `ee curate` | kept | Curation review and apply workflows remain explicit. |
 | `ee diag` | kept | Diagnostics remain explicit. |
@@ -119,9 +119,9 @@ These subcommands stay because they expose detail that the triad intentionally s
 ## Alias Compatibility
 
 The `ee context` compatibility alias remains available as a soft-deprecated
-surface. It emits a `deprecated_alias` degraded entry while executing the same
-retrieval and packing behavior as `ee pack "<task>"`. New agent harnesses,
-scripts, docs, and examples should use `ee pack`.
+surface only. It emits a `deprecated_alias` degraded entry while executing the
+same retrieval and packing behavior as canonical `ee pack "<task>"`. New agent
+harnesses, scripts, docs, and examples should use `ee pack`.
 
 Other explicit commands keep their existing semantic contract. For example, `ee remember` remains explicit: provided `--level`, `--kind`, and `--tags` values are honored exactly, and `ee note` inference is not applied behind the user's back.
 

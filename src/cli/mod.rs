@@ -811,7 +811,11 @@ pub enum Command {
     /// Manage and verify executable claims.
     #[command(subcommand)]
     Claim(ClaimCommand),
-    /// Soft-deprecated alias for `ee pack`.
+    /// Soft-deprecated compatibility alias for canonical `ee pack`.
+    #[command(
+        about = "Soft-deprecated compatibility alias for canonical `ee pack`",
+        after_help = "Canonical command: ee pack \"<task>\". This alias runs the same context-pack engine and emits an info-severity deprecated_alias entry in JSON responses; use ee pack in new harnesses, scripts, and docs."
+    )]
     Context(ContextArgs),
     /// Retrieve a previously persisted context pack by ID.
     ///
@@ -3013,7 +3017,7 @@ pub struct PackArgs {
     #[command(subcommand)]
     pub command: Option<PackCommand>,
 
-    /// Agent-facing task query. Equivalent to `ee context "<task>"` with smart defaults.
+    /// Agent-facing task query for the canonical context-pack surface.
     #[arg(value_name = "QUERY")]
     pub query: Option<String>,
 
@@ -3021,7 +3025,7 @@ pub struct PackArgs {
     #[arg(long = "error-log", value_name = "TEXT")]
     pub error_log: Option<String>,
 
-    /// Suppress data.pack.packDna in --explain JSON output (parity with `ee context`).
+    /// Suppress data.pack.packDna in --explain JSON output.
     #[arg(long = "no-pack-dna")]
     pub no_pack_dna: bool,
 
@@ -34706,6 +34710,10 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
     out
 }
 
+const CONTEXT_DEPRECATED_ALIAS_MESSAGE: &str = "`ee context` is a soft-deprecated compatibility alias for canonical `ee pack`; both run the same context-pack engine.";
+const CONTEXT_DEPRECATED_ALIAS_REPAIR: &str =
+    "Use `ee pack \"<task>\" ...` in new harnesses, scripts, and docs.";
+
 fn handle_context_pack_query<W, E>(
     cli: &Cli,
     args: &ContextArgs,
@@ -34816,14 +34824,14 @@ where
                 let entry = ContextResponseDegradation::new(
                     "deprecated_alias",
                     ContextResponseSeverity::Info,
-                    "`ee context` is a soft-deprecated alias for `ee pack`.",
-                    Some("Use `ee pack \"<task>\" ...` in new harnesses.".to_string()),
+                    CONTEXT_DEPRECATED_ALIAS_MESSAGE,
+                    Some(CONTEXT_DEPRECATED_ALIAS_REPAIR.to_string()),
                 )
                 .unwrap_or(ContextResponseDegradation {
                     code: "deprecated_alias".to_string(),
                     severity: ContextResponseSeverity::Info,
-                    message: "`ee context` is a soft-deprecated alias for `ee pack`.".to_string(),
-                    repair: Some("Use `ee pack \"<task>\" ...` in new harnesses.".to_string()),
+                    message: CONTEXT_DEPRECATED_ALIAS_MESSAGE.to_string(),
+                    repair: Some(CONTEXT_DEPRECATED_ALIAS_REPAIR.to_string()),
                 });
                 response.data.degraded.push(entry);
             }
@@ -66556,6 +66564,34 @@ mod tests {
             "help lists soft-deprecated context alias after canonical why",
         )?;
         ensure(stderr.is_empty(), "help stderr must be empty")
+    }
+
+    #[test]
+    fn context_help_marks_pack_canonical_and_alias_deprecated() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "context", "--help"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "context help exit")?;
+        ensure_contains(
+            &stdout,
+            "Soft-deprecated compatibility alias for canonical `ee pack`",
+            "context help about",
+        )?;
+        ensure_contains(
+            &stdout,
+            "Canonical command: ee pack \"<task>\"",
+            "context help canonical command",
+        )?;
+        ensure_contains(&stdout, "deprecated_alias", "context help degraded entry")?;
+        ensure_contains(
+            super::CONTEXT_DEPRECATED_ALIAS_MESSAGE,
+            "canonical `ee pack`",
+            "deprecated alias message names canonical pack",
+        )?;
+        ensure_contains(
+            super::CONTEXT_DEPRECATED_ALIAS_REPAIR,
+            "new harnesses, scripts, and docs",
+            "deprecated alias repair names new surfaces",
+        )?;
+        ensure(stderr.is_empty(), "context help stderr must be empty")
     }
 
     #[test]

@@ -433,9 +433,9 @@ Current top-level groups:
 
 | Group | Commands |
 |---|---|
-| Core memory loop | `init`, `remember`, `decide`, `search`, `ask`, `context`, `why`, `status`, `doctor`, `capabilities`, `check`, `health` |
+| Core memory loop | `init`, `remember`, `decide`, `search`, `ask`, `pack`, `why`, `status`, `doctor`, `capabilities`, `check`, `health` |
 | Memory lifecycle | `memory`, `rule`, `curate`, `review`, `playbook`, `procedure`, `workflow`, `outcome`, `outcome-quarantine` |
-| Packing and retrieval | `pack`, `recall`, `lens`, `context-show`, `show`, `link`, `tag`, `history`, `proximity`, `insights`, `subscribe` |
+| Packing and retrieval | `recall`, `lens`, `context-show`, `show`, `link`, `tag`, `history`, `proximity`, `insights`, `subscribe` |
 | Graph and structure | `graph`, `causal`, `economy`, `focus`, `learn`, `lab`, `rehearse`, `rationale`, `situation`, `task-frame` |
 | Storage and derived assets | `db`, `migrate`, `index`, `model`, `schema`, `backup`, `export`, `artifact`, `config`, `workspace` |
 | Diagnostics and release gates | `diag`, `eval`, `perf`, `preflight`, `tripwire`, `verify`, `verification`, `audit`, `claim`, `certificate`, `demo` |
@@ -456,7 +456,7 @@ Current top-level groups:
 | `ee export agentsmd [--file AGENTS.md] [--create] [--dry-run]` | Render the primer rules+warnings into a marker-delimited managed block; never edits outside its markers, backs up before mutating, refuses hand-edited blocks without `--force-managed-block` |
 | `ee import agentsmd [--apply] [--json]` | Parse rule-like statements outside the ee markers into curation candidates (trust capped at agent_assertion, `file://<path>#L<n>` provenance); dry-run by default |
 | `ee diag agentsmd-drift [--json]` | Read-only audit of AGENTS.md vs memory: stale export, file-vs-memory contradictions, missing rules, suggested commands |
-| `ee pack "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the headline command) |
+| `ee pack "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the canonical headline command; `ee context "<task>"` remains a soft-deprecated compatibility alias) |
 | `ee lens list --json` / `ee lens explain <id> --json` | Inspect named task lenses such as `bugfix`, `code-review`, and `release-readiness` before applying them |
 | `ee search "<query>" [--limit N] [--explain] [--json]` | Hybrid retrieval over memories, sessions, rules, evidence |
 | `ee ask "<question>" [--require-confidence T] [--json]` | Direct extractive answer from stored memories, with citations, conflict sides, calibrated abstention, and exit 6 fail-closed mode |
@@ -1997,7 +1997,7 @@ explicitly:
 ```bash
 ee workspace list
 ee workspace alias --pick <id> --as <name>
-ee --workspace <name> context "..."
+ee --workspace <name> pack "..."
 ```
 
 ### `error: embed model not loaded`
