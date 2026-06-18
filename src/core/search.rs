@@ -5810,7 +5810,7 @@ pub fn run_similar(options: &SimilarOptions) -> Result<SimilarReport, SimilarErr
     let search_options = SearchOptions {
         workspace_path: options.workspace_path.clone(),
         database_path: Some(database_path.clone()),
-        index_dir: Some(index_dir),
+        index_dir: Some(index_dir.clone()),
         query: target.content.clone(),
         limit: retrieval_limit,
         speed: options.speed,
