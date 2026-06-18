@@ -14969,6 +14969,69 @@ mod tests {
     }
 
     #[test]
+    fn default_reranker_offline_provision_reports_network_unavailable() {
+        // bd-2vq2z.24/.26: first-use auto-provision routes through the shared
+        // model provisioning entry point. In builds without a network model
+        // fetch it must return an actionable offline error (so search degrades
+        // honestly to fusion-only) rather than silently succeeding.
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace = tempdir.path();
+        let database_path = workspace.join("registry.db");
+        let manifest = crate::core::model::bundled_rerank_model_manifest().expect("manifest");
+        let fetch_options = crate::core::model::ModelFetchOptions {
+            workspace_path: workspace,
+            database_path: Some(&database_path),
+            model_id: manifest.model_id.as_str(),
+            from_file: None,
+            model_store_root: None,
+        };
+        let error = crate::core::model::fetch_rerank_model(&fetch_options)
+            .expect_err("offline auto-provision must not succeed without artifact or network");
+        assert!(
+            error.to_string().contains("Network model fetch is not available"),
+            "expected offline network-unavailable error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn auto_provision_default_reranker_entry_degrades_offline() {
+        // bd-2vq2z.24/.26: the search-side first-use auto-provision helper
+        // returns an actionable Err (not a silent Ok) when no reranker can be
+        // provisioned, so resolve_search_rerank_runtime degrades to fusion-only
+        // with an honest rerank_model_unavailable note.
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace = tempdir.path().to_path_buf();
+        let database_path = workspace.join("registry.db");
+        let options = SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database_path.clone()),
+            index_dir: None,
+            query: "rerank auto-provision".to_string(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        };
+        let error =
+            auto_provision_default_reranker_entry(&options, "ws_rerank_test", &database_path)
+                .expect_err("offline auto-provision helper must return Err");
+        assert!(
+            error.contains("Network model fetch is not available"),
+            "expected offline network-unavailable error, got: {error}"
+        );
+    }
+
+    #[test]
     fn rerank_stored_path_metadata_reads_stable_field() -> TestResult {
         let path = reranker_stored_path_from_metadata(r#"{"storedPath":"/tmp/reranker"}"#)
             .ok_or_else(|| "storedPath should be parsed".to_string())?;
