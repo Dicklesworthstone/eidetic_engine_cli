@@ -12,7 +12,7 @@ use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_d
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DbConnection, DbError,
-    DbOperation, SearchIndexJobType, StoredSearchIndexJob,
+    DbOperation, ModelRegistryUpsertOutcome, SearchIndexJobType, StoredSearchIndexJob,
 };
 use crate::models::MemoryId;
 use crate::models::model_registry::{
@@ -3284,51 +3284,30 @@ pub(crate) fn ensure_loaded_embedding_registry_record(
         return Ok(());
     };
 
-    if let Some(existing) = db
-        .find_model_registry_entry(
-            workspace_id,
-            provider,
-            fast_embedder.id(),
-            ModelPurpose::Embedding,
-        )?
-    {
-        if registry_entry_matches_embedding_input(&existing, &input) {
-            return Ok(());
+    match db.upsert_embedding_metadata_record(&generate_model_registry_id(), &input)? {
+        ModelRegistryUpsertOutcome::Inserted => {
+            tracing::info!(
+                target: "ee::index::embedder",
+                provider = provider.as_str(),
+                model = fast_embedder.id(),
+                dimension = input.dimension,
+                content_hash = input.content_hash.as_deref().unwrap_or(""),
+                "registered active embedding model registry entry"
+            );
         }
-        let updated = db.update_embedding_metadata_record(&existing.id, &input)?;
-        if !updated {
-            return Err(IndexRebuildError::Index(format!(
-                "active embedding registry entry {} vanished before update",
-                existing.id
-            )));
+        ModelRegistryUpsertOutcome::Updated => {
+            tracing::info!(
+                target: "ee::index::embedder",
+                provider = provider.as_str(),
+                model = fast_embedder.id(),
+                dimension = input.dimension,
+                content_hash = input.content_hash.as_deref().unwrap_or(""),
+                "reconciled active embedding model registry entry"
+            );
         }
-        tracing::info!(
-            target: "ee::index::embedder",
-            provider = provider.as_str(),
-            model = fast_embedder.id(),
-            registry_id = existing.id,
-            "updated active embedding model registry entry"
-        );
-        return Ok(());
+        ModelRegistryUpsertOutcome::Unchanged => {}
     }
-
-    db.insert_embedding_metadata_record(&generate_model_registry_id(), &input)?;
     Ok(())
-}
-
-fn registry_entry_matches_embedding_input(
-    entry: &crate::db::StoredModelRegistryEntry,
-    input: &crate::db::CreateEmbeddingMetadataInput,
-) -> bool {
-    entry.provider == input.provider
-        && entry.model_name == input.model_name
-        && entry.purpose == ModelPurpose::Embedding
-        && entry.dimension == Some(input.dimension)
-        && entry.distance_metric == Some(input.distance_metric)
-        && entry.status == input.status
-        && entry.version == input.version
-        && entry.source_uri == input.source_uri
-        && entry.content_hash == input.content_hash
 }
 
 fn active_embedding_registry_input(

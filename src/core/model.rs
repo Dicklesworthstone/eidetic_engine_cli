@@ -24,7 +24,7 @@ use crate::core::index::{
 };
 use crate::db::{
     CreateEmbeddingMetadataInput, CreateModelRegistryInput, DbConnection, DbError,
-    StoredModelRegistryEntry,
+    ModelRegistryUpsertOutcome, StoredModelRegistryEntry,
 };
 use crate::models::DomainError;
 use crate::models::model_registry::{
@@ -3226,10 +3226,11 @@ pub fn bundled_embedding_registry_input(
 /// Idempotently register the bundled default embedding model in the registry so
 /// a fresh workspace reports `registered_model_count >= 1` out of the box.
 ///
-/// Insert-if-absent on the `(Model2Vec, potion-multilingual-128M, Embedding)`
-/// key, so it never duplicates an entry the index-build path already created and
-/// never downgrades an existing `Available` entry. Returns `true` when it
-/// inserted a new declared entry, `false` when one already existed.
+/// Reconcile by the `(Model2Vec, potion-multilingual-128M, Embedding)` key, so
+/// it never duplicates an entry the index-build path already created and never
+/// downgrades an existing `Available` entry. Explicitly `Disabled` rows are also
+/// preserved. Returns `true` when it inserted a new declared entry, `false`
+/// when one already existed and was preserved or reconciled.
 ///
 /// The declared entry is registered `Unavailable` (honest: the artifact may not
 /// be downloaded yet); the index-build path flips a fresh registry to
@@ -3242,21 +3243,22 @@ pub fn ensure_bundled_embedding_model_registered(
     db: &DbConnection,
     workspace_id: &str,
 ) -> Result<bool, DbError> {
-    if db
-        .find_model_registry_entry(
-            workspace_id,
-            ModelProvider::Model2Vec,
-            BUNDLED_EMBEDDING_MODEL_ID,
-            ModelPurpose::Embedding,
-        )?
-        .is_some()
-    {
-        return Ok(false);
+    if let Some(existing) = db.find_model_registry_entry(
+        workspace_id,
+        ModelProvider::Model2Vec,
+        BUNDLED_EMBEDDING_MODEL_ID,
+        ModelPurpose::Embedding,
+    )? {
+        if existing.status != ModelRegistryStatus::Unavailable {
+            return Ok(false);
+        }
     }
 
     let input = bundled_embedding_registry_input(workspace_id, ModelRegistryStatus::Unavailable);
-    db.insert_embedding_metadata_record(&generate_model_registry_id(), &input)?;
-    Ok(true)
+    match db.upsert_embedding_metadata_record(&generate_model_registry_id(), &input)? {
+        ModelRegistryUpsertOutcome::Inserted => Ok(true),
+        ModelRegistryUpsertOutcome::Updated | ModelRegistryUpsertOutcome::Unchanged => Ok(false),
+    }
 }
 
 fn generate_model_registry_id() -> String {
@@ -3540,6 +3542,121 @@ mod tests {
         ensure(
             entry.status == ModelRegistryStatus::Available,
             "ensure must never downgrade an existing Available entry",
+        )
+    }
+
+    #[test]
+    fn ensure_bundled_reconciles_stale_unavailable_entry() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+
+        insert_embedding_metadata_entry_with_dimension(
+            &database_path,
+            &workspace_id,
+            "mdl_stale_bundled_unavailable",
+            ModelProvider::Model2Vec,
+            BUNDLED_EMBEDDING_MODEL_ID,
+            ModelRegistryStatus::Unavailable,
+            128,
+        )?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| format!("open db: {error}"))?;
+        let inserted = ensure_bundled_embedding_model_registered(&connection, &workspace_id)
+            .map_err(|error| format!("ensure: {error}"))?;
+        ensure(
+            !inserted,
+            "stale declared row is reconciled in place, not reinserted",
+        )?;
+
+        let entry = connection
+            .find_model_registry_entry(
+                &workspace_id,
+                ModelProvider::Model2Vec,
+                BUNDLED_EMBEDDING_MODEL_ID,
+                ModelPurpose::Embedding,
+            )
+            .map_err(|error| format!("find: {error}"))?
+            .ok_or("bundled entry must still exist")?;
+        ensure(
+            entry.id == "mdl_stale_bundled_unavailable",
+            "reconcile keeps stable registry id",
+        )?;
+        ensure(
+            entry.status == ModelRegistryStatus::Unavailable,
+            "declared row remains honestly unavailable",
+        )?;
+        ensure(
+            entry.dimension == Some(BUNDLED_EMBEDDING_DIMENSION),
+            "stale dimension is reconciled to bundled dimension",
+        )?;
+        ensure(
+            entry.version.as_deref() == Some(BUNDLED_EMBEDDING_MODEL_REVISION),
+            "stale revision is reconciled to bundled revision",
+        )?;
+        ensure(
+            entry
+                .source_uri
+                .as_deref()
+                .is_some_and(|uri| uri.contains(BUNDLED_EMBEDDING_MODEL_ID)),
+            "source uri is reconciled to bundled source",
+        )?;
+
+        let metadata = connection
+            .get_embedding_metadata_record(&entry.id)
+            .map_err(|error| format!("get metadata: {error}"))?
+            .ok_or("bundled metadata must parse after reconcile")?;
+        ensure(
+            metadata.metadata.dimension == BUNDLED_EMBEDDING_DIMENSION,
+            "parsed metadata dimension is reconciled",
+        )?;
+        ensure(
+            metadata.metadata.model_revision.as_deref() == Some(BUNDLED_EMBEDDING_MODEL_REVISION),
+            "parsed metadata revision is reconciled",
+        )?;
+        let records = connection
+            .list_embedding_metadata_records(&workspace_id)
+            .map_err(|error| format!("list records: {error}"))?;
+        ensure(records.len() == 1, "reconcile must not duplicate rows")
+    }
+
+    #[test]
+    fn ensure_bundled_preserves_disabled_entry() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+
+        insert_embedding_metadata_entry_with_dimension(
+            &database_path,
+            &workspace_id,
+            "mdl_disabled_bundled_entry",
+            ModelProvider::Model2Vec,
+            BUNDLED_EMBEDDING_MODEL_ID,
+            ModelRegistryStatus::Disabled,
+            128,
+        )?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| format!("open db: {error}"))?;
+        let inserted = ensure_bundled_embedding_model_registered(&connection, &workspace_id)
+            .map_err(|error| format!("ensure: {error}"))?;
+        ensure(!inserted, "disabled row is preserved")?;
+
+        let entry = connection
+            .find_model_registry_entry(
+                &workspace_id,
+                ModelProvider::Model2Vec,
+                BUNDLED_EMBEDDING_MODEL_ID,
+                ModelPurpose::Embedding,
+            )
+            .map_err(|error| format!("find: {error}"))?
+            .ok_or("disabled entry must still exist")?;
+        ensure(
+            entry.status == ModelRegistryStatus::Disabled,
+            "status/list declaration must not silently re-enable a disabled model",
+        )?;
+        ensure(
+            entry.dimension == Some(128),
+            "disabled entry metadata is not silently mutated",
         )
     }
 
