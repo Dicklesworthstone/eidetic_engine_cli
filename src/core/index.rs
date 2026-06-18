@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, OnceLock,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU8, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -29,7 +30,12 @@ use crate::search::{
 };
 #[cfg(feature = "lexical-bm25")]
 use crate::search::{LexicalSearch, TantivyIndex};
-use frankensearch::{ModelCategory, VectorIndex};
+use asupersync::sync::OnceCell as AsyncOnceCell;
+use frankensearch::embed::{
+    ConsentSource, DownloadConsent, DownloadProgress, ModelDownloader, ModelLifecycle,
+    ModelManifest,
+};
+use frankensearch::{Model2VecEmbedder, ModelCategory, ModelTier, SearchError, VectorIndex};
 use sqlmodel_core::Value as SqlValue;
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
@@ -898,10 +904,10 @@ pub fn rebuild_index(
 
     let db = DbConnection::open_file(&database_path)?;
     let workspace_id = get_default_workspace_id(&db)?;
-    let (_, _, db_generation) = get_db_stats(&db)?;
+    let db_stats = get_db_stats(&db)?;
     let source_generation = db
         .get_workspace_generation(&workspace_id)?
-        .or(db_generation);
+        .or(db_stats.generation);
 
     let memories = db.list_memories_for_retrieval_with_global(&workspace_id, None, false)?;
     let sessions = db.list_sessions(&workspace_id)?;
@@ -1024,10 +1030,10 @@ pub fn reembed_index(
 
     let db = DbConnection::open_file(&database_path)?;
     let workspace_id = get_default_workspace_id(&db)?;
-    let (_, _, db_generation) = get_db_stats(&db)?;
+    let db_stats = get_db_stats(&db)?;
     let source_generation = db
         .get_workspace_generation(&workspace_id)?
-        .or(db_generation);
+        .or(db_stats.generation);
 
     let memories = db.list_memories_for_retrieval_with_global(&workspace_id, None, false)?;
     let sessions = db.list_sessions(&workspace_id)?;
@@ -1387,7 +1393,7 @@ pub(crate) fn process_pending_index_jobs_coalesced(
 
     let published_generation = db
         .get_workspace_generation(workspace_id)?
-        .or(get_db_stats(db)?.2)
+        .or(get_db_stats(db)?.generation)
         .unwrap_or_else(|| u64::from(documents_total));
 
     let holder_id = generate_index_holder_id();
@@ -1524,7 +1530,7 @@ fn process_one_index_job(
     // though the job had already applied synchronously. (agent-UX item 5)
     let published_generation = db
         .get_workspace_generation(&job.workspace_id)?
-        .or(get_db_stats(db)?.2)
+        .or(get_db_stats(db)?.generation)
         .unwrap_or_else(|| u64::from(documents_total));
 
     // Acquire index publish lock to prevent concurrent publish races.
@@ -2777,7 +2783,25 @@ fn build_index_sync(
 
 const EE_MODEL_CACHE_SUBDIR: &str = "models";
 const EMBEDDING_REGISTRY_FINGERPRINT_SCHEMA: &str = "ee.embedding_registry_fingerprint.v1";
+const POTION_MODEL_NAME: &str = "potion-multilingual-128M";
+const EE_EMBED_DOWNLOAD_AUTO: &str = "auto";
+const EE_EMBED_DOWNLOAD_OFF: &str = "off";
+const EE_DOWNLOAD_STATE_PENDING: u8 = 0;
+const EE_DOWNLOAD_STATE_READY: u8 = 1;
+const EE_DOWNLOAD_STATE_FAILED: u8 = 2;
 static DEFAULT_SEARCH_EMBEDDER_STACK: OnceLock<EmbedderStack> = OnceLock::new();
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EeEmbedderSettings {
+    model_root: PathBuf,
+    download_mode: EeEmbedDownloadMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EeEmbedDownloadMode {
+    Auto,
+    Off,
+}
 
 pub(crate) fn default_search_embedder_stack() -> EmbedderStack {
     DEFAULT_SEARCH_EMBEDDER_STACK
@@ -2786,17 +2810,46 @@ pub(crate) fn default_search_embedder_stack() -> EmbedderStack {
 }
 
 fn detect_default_search_embedder_stack() -> EmbedderStack {
-    let model_root = default_embedder_model_root();
-    match EmbedderStack::auto_detect_with(Some(&model_root)) {
-        Ok(stack) => stack_with_hash_quality_fallback(stack),
+    let settings = default_embedder_settings();
+    search_embedder_stack_for_settings(&settings)
+}
+
+fn search_embedder_stack_for_settings(settings: &EeEmbedderSettings) -> EmbedderStack {
+    tracing::info!(
+        target: "ee::index::embedder",
+        model_root = %settings.model_root.display(),
+        download_mode = ?settings.download_mode,
+        "ee embedding model policy resolved"
+    );
+
+    if settings.download_mode == EeEmbedDownloadMode::Off {
+        tracing::info!(
+            target: "ee::index::embedder",
+            model_root = %settings.model_root.display(),
+            "EE_EMBED_DOWNLOAD=off; using deterministic hash fallback"
+        );
+        return hash_fallback_embedder_stack();
+    }
+
+    match EmbedderStack::auto_detect_with(Some(&settings.model_root)) {
+        Ok(stack) if stack.fast().is_semantic() => stack_with_hash_quality_fallback(stack),
+        Ok(stack) => {
+            tracing::info!(
+                target: "ee::index::embedder",
+                detected_fast = stack.fast().id(),
+                model_root = %settings.model_root.display(),
+                "semantic model not present locally; enabling ee-managed first-use download"
+            );
+            ee_auto_download_embedder_stack(settings.model_root.clone())
+        }
         Err(error) => {
             tracing::warn!(
                 target: "ee::index::embedder",
                 error = %error,
-                model_root = %model_root.display(),
-                "Frankensearch default embedder auto-detect failed; using deterministic hash fallback"
+                model_root = %settings.model_root.display(),
+                "Frankensearch default embedder auto-detect failed; enabling ee-managed first-use download"
             );
-            hash_fallback_embedder_stack()
+            ee_auto_download_embedder_stack(settings.model_root.clone())
         }
     }
 }
@@ -2822,10 +2875,312 @@ fn hash_fallback_embedder_stack() -> EmbedderStack {
     EmbedderStack::from_parts(fast_embedder, Some(quality_embedder))
 }
 
+fn ee_auto_download_embedder_stack(model_root: PathBuf) -> EmbedderStack {
+    let fast_embedder =
+        Arc::new(EeLazyModel2VecEmbedder::new(model_root)) as Arc<dyn crate::search::Embedder>;
+    EmbedderStack::from_parts(fast_embedder, None)
+}
+
+fn default_embedder_settings() -> EeEmbedderSettings {
+    EeEmbedderSettings {
+        model_root: default_embedder_model_root(),
+        download_mode: default_embed_download_mode(),
+    }
+}
+
 fn default_embedder_model_root() -> PathBuf {
+    if let Some(model_dir) = configured_embedder_model_root() {
+        return model_dir;
+    }
     process_ee_data_dir()
         .unwrap_or_else(stable_ee_data_dir_fallback)
         .join(EE_MODEL_CACHE_SUBDIR)
+}
+
+fn configured_embedder_model_root() -> Option<PathBuf> {
+    crate::config::env_registry::read_os(crate::config::env_registry::EnvVar::EmbedModelDir)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn default_embed_download_mode() -> EeEmbedDownloadMode {
+    let raw = crate::config::env_registry::read_or_default(
+        crate::config::env_registry::EnvVar::EmbedDownload,
+    );
+    parse_embed_download_mode(raw.as_deref())
+}
+
+fn parse_embed_download_mode(raw: Option<&str>) -> EeEmbedDownloadMode {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return EeEmbedDownloadMode::Auto;
+    };
+
+    if value.eq_ignore_ascii_case(EE_EMBED_DOWNLOAD_AUTO) {
+        return EeEmbedDownloadMode::Auto;
+    }
+    if value.eq_ignore_ascii_case(EE_EMBED_DOWNLOAD_OFF)
+        || value == "0"
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("no")
+    {
+        return EeEmbedDownloadMode::Off;
+    }
+
+    tracing::warn!(
+        target: "ee::index::embedder",
+        value,
+        "invalid EE_EMBED_DOWNLOAD value; falling back to auto"
+    );
+    EeEmbedDownloadMode::Auto
+}
+
+struct EeLazyModel2VecEmbedder {
+    model_root: PathBuf,
+    fallback: Arc<dyn crate::search::Embedder>,
+    state: AtomicU8,
+    inner: AsyncOnceCell<Arc<dyn crate::search::Embedder>>,
+}
+
+impl EeLazyModel2VecEmbedder {
+    fn new(model_root: PathBuf) -> Self {
+        Self {
+            model_root,
+            fallback: Arc::new(HashEmbedder::default_256()) as Arc<dyn crate::search::Embedder>,
+            state: AtomicU8::new(EE_DOWNLOAD_STATE_PENDING),
+            inner: AsyncOnceCell::new(),
+        }
+    }
+
+    async fn try_load(
+        &self,
+        cx: &asupersync::Cx,
+    ) -> Result<Arc<dyn crate::search::Embedder>, SearchError> {
+        let embedder = self
+            .inner
+            .get_or_try_init(|| async { self.initialize(cx).await })
+            .await?;
+        self.state.store(EE_DOWNLOAD_STATE_READY, Ordering::Release);
+        Ok(Arc::clone(embedder))
+    }
+
+    async fn initialize(
+        &self,
+        cx: &asupersync::Cx,
+    ) -> Result<Arc<dyn crate::search::Embedder>, SearchError> {
+        let destination = potion_model_destination_dir(&self.model_root);
+        if let Ok(embedder) = Model2VecEmbedder::load_with_name(&destination, POTION_MODEL_NAME) {
+            return Ok(Arc::new(embedder) as Arc<dyn crate::search::Embedder>);
+        }
+
+        let manifest = ModelManifest::potion_128m();
+        emit_embedding_download_notice(&destination, manifest.total_size_bytes());
+        let reporter = EeModelDownloadReporter::new(POTION_MODEL_NAME);
+        let downloader = ModelDownloader::with_defaults();
+        let consent = DownloadConsent::granted(ConsentSource::Programmatic);
+        let mut lifecycle = ModelLifecycle::new(manifest.clone(), consent);
+        let staged = downloader
+            .download_model(cx, &manifest, &destination, &mut lifecycle, |progress| {
+                reporter.report(progress);
+            })
+            .await?;
+        let backup = manifest.promote_verified_installation(&staged, &destination)?;
+        reporter.finish_success();
+        tracing::info!(
+            target: "ee::index::embedder",
+            model = POTION_MODEL_NAME,
+            destination = %destination.display(),
+            backup = backup.as_ref().map(|path| path.display().to_string()).as_deref().unwrap_or(""),
+            "ee-managed embedding model download completed"
+        );
+        Model2VecEmbedder::load_with_name(&destination, POTION_MODEL_NAME)
+            .map(|embedder| Arc::new(embedder) as Arc<dyn crate::search::Embedder>)
+    }
+
+    fn mark_failed(&self) {
+        self.state
+            .store(EE_DOWNLOAD_STATE_FAILED, Ordering::Release);
+    }
+
+    fn failed(&self) -> bool {
+        self.state.load(Ordering::Acquire) == EE_DOWNLOAD_STATE_FAILED
+    }
+}
+
+impl crate::search::Embedder for EeLazyModel2VecEmbedder {
+    fn embed<'a>(
+        &'a self,
+        cx: &'a asupersync::Cx,
+        text: &'a str,
+    ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+        Box::pin(async move {
+            if self.failed() {
+                return self.fallback.embed(cx, text).await;
+            }
+            match self.try_load(cx).await {
+                Ok(embedder) => embedder.embed(cx, text).await,
+                Err(error) => {
+                    self.mark_failed();
+                    tracing::warn!(
+                        target: "ee::index::embedder",
+                        error = %error,
+                        model = POTION_MODEL_NAME,
+                        "ee-managed embedding model download failed; using deterministic hash fallback for this process"
+                    );
+                    self.fallback.embed(cx, text).await
+                }
+            }
+        })
+    }
+
+    fn embed_batch<'a>(
+        &'a self,
+        cx: &'a asupersync::Cx,
+        texts: &'a [&'a str],
+    ) -> frankensearch::SearchFuture<'a, Vec<Vec<f32>>> {
+        Box::pin(async move {
+            if self.failed() {
+                return self.fallback.embed_batch(cx, texts).await;
+            }
+            match self.try_load(cx).await {
+                Ok(embedder) => embedder.embed_batch(cx, texts).await,
+                Err(error) => {
+                    self.mark_failed();
+                    tracing::warn!(
+                        target: "ee::index::embedder",
+                        error = %error,
+                        model = POTION_MODEL_NAME,
+                        "ee-managed embedding model download failed; using deterministic hash fallback for this process"
+                    );
+                    self.fallback.embed_batch(cx, texts).await
+                }
+            }
+        })
+    }
+
+    fn dimension(&self) -> usize {
+        256
+    }
+
+    fn id(&self) -> &str {
+        if self.failed() {
+            return self.fallback.id();
+        }
+        POTION_MODEL_NAME
+    }
+
+    fn model_name(&self) -> &str {
+        if self.failed() {
+            return self.fallback.model_name();
+        }
+        POTION_MODEL_NAME
+    }
+
+    fn is_ready(&self) -> bool {
+        self.state.load(Ordering::Acquire) == EE_DOWNLOAD_STATE_READY
+    }
+
+    fn is_semantic(&self) -> bool {
+        !self.failed()
+    }
+
+    fn category(&self) -> ModelCategory {
+        if self.failed() {
+            return self.fallback.category();
+        }
+        ModelCategory::StaticEmbedder
+    }
+
+    fn tier(&self) -> ModelTier {
+        ModelTier::Fast
+    }
+
+    fn supports_mrl(&self) -> bool {
+        !self.failed()
+    }
+}
+
+fn potion_model_destination_dir(model_root: &Path) -> PathBuf {
+    if model_root.ends_with(POTION_MODEL_NAME) {
+        return model_root.to_path_buf();
+    }
+    model_root.join(POTION_MODEL_NAME)
+}
+
+fn emit_embedding_download_notice(destination: &Path, bytes: u64) {
+    eprintln!(
+        "ee is downloading the local embedding model {POTION_MODEL_NAME} ({}) once; it will be cached at {}. Set EE_EMBED_DOWNLOAD=off for lexical-only.",
+        format_bytes(bytes),
+        destination.display()
+    );
+}
+
+struct EeModelDownloadReporter {
+    model_name: &'static str,
+    stderr_is_tty: bool,
+    last_percent: AtomicU8,
+}
+
+impl EeModelDownloadReporter {
+    fn new(model_name: &'static str) -> Self {
+        Self {
+            model_name,
+            stderr_is_tty: io::stderr().is_terminal(),
+            last_percent: AtomicU8::new(0),
+        }
+    }
+
+    fn report(&self, progress: &DownloadProgress) {
+        if !self.stderr_is_tty {
+            return;
+        }
+        let percent = download_progress_percent(progress);
+        let previous = self.last_percent.load(Ordering::Relaxed);
+        if percent <= previous {
+            return;
+        }
+        if self
+            .last_percent
+            .compare_exchange(previous, percent, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            eprint!(
+                "\ree model download {model}: {percent:>3}% {downloaded}/{}",
+                progress
+                    .total_bytes
+                    .map_or_else(|| "?".to_owned(), format_bytes),
+                model = self.model_name,
+                downloaded = format_bytes(progress.bytes_downloaded),
+            );
+            let _ = io::stderr().flush();
+        }
+    }
+
+    fn finish_success(&self) {
+        if self.stderr_is_tty {
+            eprintln!();
+        }
+    }
+}
+
+fn download_progress_percent(progress: &DownloadProgress) -> u8 {
+    let files_total = u64::try_from(progress.files_total).unwrap_or(1).max(1);
+    let completed = u64::try_from(progress.files_completed)
+        .unwrap_or(0)
+        .min(files_total);
+    let file_share = 100_u64 / files_total;
+    let completed_percent = completed.saturating_mul(file_share);
+    let current_percent = progress
+        .total_bytes
+        .filter(|total| *total > 0)
+        .map(|total| {
+            progress
+                .bytes_downloaded
+                .min(total)
+                .saturating_mul(file_share)
+                / total
+        })
+        .unwrap_or(0);
+    u8::try_from((completed_percent + current_percent).min(100)).unwrap_or(100)
 }
 
 fn stable_ee_data_dir_fallback() -> PathBuf {
@@ -3790,13 +4145,7 @@ pub(crate) fn get_index_status_with_connection(
     // Check index directory
     let (index_exists, index_file_count, index_size_bytes) = inspect_index_dir(&index_dir)?;
 
-    // Fast-path degraded states: when the index is missing/corrupt, we can
-    // report health without scanning DB tables for counts/generation.
-    let (db_memory_count, db_session_count, db_generation, embedding) = if !index_exists
-        || index_file_count == 0
-    {
-        (0, 0, None, None)
-    } else if database_path.exists() {
+    let (db_stats, embedding) = if database_path.exists() {
         let owned_connection;
         let db = if let Some(connection) = connection {
             connection
@@ -3804,12 +4153,21 @@ pub(crate) fn get_index_status_with_connection(
             owned_connection = DbConnection::open_file(&database_path)?;
             &owned_connection
         };
-        let (memory_count, session_count, generation) = get_db_stats(db)?;
-        let embedding = index_status_embedding_posture(db, &options.workspace_path, &index_dir)?;
-        (memory_count, session_count, generation, embedding)
+
+        let db_stats = get_db_stats(db)?;
+        let embedding = if index_exists && index_file_count > 0 {
+            index_status_embedding_posture(db, &options.workspace_path, &index_dir)?
+        } else {
+            None
+        };
+        (Some(db_stats), embedding)
     } else {
-        (0, 0, None, None)
+        (None, None)
     };
+    let db_memory_count = db_stats.as_ref().map_or(0, |stats| stats.memory_count);
+    let db_session_count = db_stats.as_ref().map_or(0, |stats| stats.session_count);
+    let db_generation = db_stats.as_ref().and_then(|stats| stats.generation);
+    let source_document_count = db_stats.as_ref().map(|stats| stats.source_document_count);
 
     // Read index metadata if available.
     let (index_generation, last_rebuild_at, last_check_error) = read_index_metadata(&index_dir);
@@ -3821,6 +4179,7 @@ pub(crate) fn get_index_status_with_connection(
         db_generation,
         index_generation,
         last_check_error.is_some(),
+        source_document_count,
     );
 
     let repair_hint = match health {
@@ -4215,7 +4574,14 @@ fn inspect_index_dir(index_dir: &Path) -> Result<(bool, u32, u64), std::io::Erro
     Ok((true, file_count, total_size))
 }
 
-fn get_db_stats(db: &DbConnection) -> Result<(u32, u32, Option<u64>), DbError> {
+struct IndexDbStats {
+    memory_count: u32,
+    session_count: u32,
+    source_document_count: u64,
+    generation: Option<u64>,
+}
+
+fn get_db_stats(db: &DbConnection) -> Result<IndexDbStats, DbError> {
     let memory_count = db
         .query("SELECT COUNT(*) FROM memories", &[])?
         .first()
@@ -4277,7 +4643,12 @@ fn get_db_stats(db: &DbConnection) -> Result<(u32, u32, Option<u64>), DbError> {
 
     let generation = workspace_generation.or(Some(source_document_count.max(audit_count)));
 
-    Ok((memory_count, session_count, generation))
+    Ok(IndexDbStats {
+        memory_count,
+        session_count,
+        source_document_count,
+        generation,
+    })
 }
 
 fn read_index_metadata(index_dir: &Path) -> (Option<u64>, Option<String>, Option<String>) {
@@ -4414,13 +4785,18 @@ fn determine_health(
     db_generation: Option<u64>,
     index_generation: Option<u64>,
     metadata_corrupt: bool,
+    source_document_count: Option<u64>,
 ) -> IndexHealth {
     if metadata_corrupt {
         return IndexHealth::Corrupt;
     }
 
     if !index_exists || index_file_count == 0 {
-        return IndexHealth::Missing;
+        return if source_document_count == Some(0) {
+            IndexHealth::Ready
+        } else {
+            IndexHealth::Missing
+        };
     }
 
     match (db_generation, index_generation) {
@@ -4601,6 +4977,90 @@ mod tests {
         ensure(
             !fallback.starts_with(&cwd),
             "fallback data dir must not depend on the process cwd",
+        )
+    }
+
+    #[test]
+    fn embed_download_mode_parser_defaults_to_auto_and_accepts_off() -> TestResult {
+        ensure(
+            parse_embed_download_mode(None) == EeEmbedDownloadMode::Auto,
+            "unset EE_EMBED_DOWNLOAD should default to auto",
+        )?;
+        ensure(
+            parse_embed_download_mode(Some("auto")) == EeEmbedDownloadMode::Auto,
+            "auto should enable ee-managed first-use download",
+        )?;
+        ensure(
+            parse_embed_download_mode(Some("OFF")) == EeEmbedDownloadMode::Off,
+            "off should disable downloads case-insensitively",
+        )?;
+        ensure(
+            parse_embed_download_mode(Some("0")) == EeEmbedDownloadMode::Off,
+            "0 should be accepted as an offline opt-out",
+        )?;
+        ensure(
+            parse_embed_download_mode(Some("surprise")) == EeEmbedDownloadMode::Auto,
+            "invalid values should fall back to the default auto policy",
+        )
+    }
+
+    #[test]
+    fn embed_model_destination_respects_prepopulated_model_dir() -> TestResult {
+        let root = unique_test_dir("embed-model-dir");
+        ensure(
+            potion_model_destination_dir(&root) == root.join(POTION_MODEL_NAME),
+            "plain cache roots should place the model in a named child directory",
+        )?;
+        let direct_model_dir = root.join(POTION_MODEL_NAME);
+        ensure(
+            potion_model_destination_dir(&direct_model_dir) == direct_model_dir,
+            "pre-populated model directories should be honored directly",
+        )
+    }
+
+    #[test]
+    fn embed_download_off_keeps_hash_fallback_stack() -> TestResult {
+        let settings = EeEmbedderSettings {
+            model_root: unique_test_dir("embed-download-off"),
+            download_mode: EeEmbedDownloadMode::Off,
+        };
+        let stack = search_embedder_stack_for_settings(&settings);
+
+        ensure(
+            !stack.fast().is_semantic(),
+            "EE_EMBED_DOWNLOAD=off should keep the deterministic hash fast tier",
+        )?;
+        ensure(
+            stack
+                .quality()
+                .is_some_and(|quality| !quality.is_semantic()),
+            "offline opt-out should retain the hash quality fallback",
+        )
+    }
+
+    #[test]
+    fn embed_download_auto_uses_lazy_semantic_stack_for_empty_cache() -> TestResult {
+        let settings = EeEmbedderSettings {
+            model_root: unique_test_dir("embed-download-auto-empty"),
+            download_mode: EeEmbedDownloadMode::Auto,
+        };
+        let stack = search_embedder_stack_for_settings(&settings);
+
+        ensure(
+            stack.fast().is_semantic(),
+            "auto mode should expose the lazy local semantic fast tier before first embed",
+        )?;
+        ensure(
+            stack.fast().id() == POTION_MODEL_NAME,
+            "auto mode should select the bundled potion model id",
+        )?;
+        ensure(
+            !stack.fast().is_ready(),
+            "lazy semantic tier should not claim ready before first load/download",
+        )?;
+        ensure(
+            stack.quality().is_none(),
+            "lazy semantic fast tier should not graft a misleading hash quality tier",
         )
     }
 
@@ -5265,9 +5725,9 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let (_, _, generation) = get_db_stats(&connection).map_err(|error| error.to_string())?;
+        let stats = get_db_stats(&connection).map_err(|error| error.to_string())?;
         ensure(
-            generation == Some(1),
+            stats.generation == Some(1),
             "source generation should include unaudited source documents",
         )?;
 
@@ -5309,8 +5769,9 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let (_, _, generation_before) =
-            get_db_stats(&connection).map_err(|error| error.to_string())?;
+        let generation_before = get_db_stats(&connection)
+            .map_err(|error| error.to_string())?
+            .generation;
         ensure(
             generation_before == Some(1),
             "baseline generation should track the single source document",
@@ -5332,8 +5793,9 @@ mod tests {
                 .map_err(|error| error.to_string())?;
         }
 
-        let (_, _, generation_after) =
-            get_db_stats(&connection).map_err(|error| error.to_string())?;
+        let generation_after = get_db_stats(&connection)
+            .map_err(|error| error.to_string())?
+            .generation;
         ensure(
             generation_after == generation_before,
             format!(
@@ -5671,59 +6133,78 @@ mod tests {
 
     #[test]
     fn cache_invalidation_missing_index_detected() {
-        let health = determine_health(false, 0, Some(10), Some(10), false);
+        let health = determine_health(false, 0, Some(10), Some(10), false, Some(1));
         assert_eq!(health, IndexHealth::Missing);
         assert_eq!(health.degradation_code(), Some("index_missing"));
     }
 
     #[test]
-    fn cache_invalidation_empty_index_detected() {
-        let health = determine_health(true, 0, Some(10), Some(10), false);
+    fn cache_invalidation_missing_index_ready_for_empty_workspace() {
+        let health = determine_health(false, 0, Some(10), None, false, Some(0));
+        assert_eq!(health, IndexHealth::Ready);
+        assert_eq!(health.degradation_code(), None);
+    }
+
+    #[test]
+    fn cache_invalidation_missing_index_degraded_when_db_unknown() {
+        let health = determine_health(false, 0, None, None, false, None);
         assert_eq!(health, IndexHealth::Missing);
     }
 
     #[test]
+    fn cache_invalidation_empty_index_detected() {
+        let health = determine_health(true, 0, Some(10), Some(10), false, Some(1));
+        assert_eq!(health, IndexHealth::Missing);
+    }
+
+    #[test]
+    fn cache_invalidation_empty_index_ready_for_empty_workspace() {
+        let health = determine_health(true, 0, Some(10), None, false, Some(0));
+        assert_eq!(health, IndexHealth::Ready);
+    }
+
+    #[test]
     fn cache_invalidation_stale_when_db_ahead() {
-        let health = determine_health(true, 5, Some(12), Some(9), false);
+        let health = determine_health(true, 5, Some(12), Some(9), false, Some(1));
         assert_eq!(health, IndexHealth::Stale);
         assert_eq!(health.degradation_code(), Some("index_stale"));
     }
 
     #[test]
     fn cache_invalidation_stale_when_index_has_no_generation() {
-        let health = determine_health(true, 5, Some(12), None, false);
+        let health = determine_health(true, 5, Some(12), None, false, Some(1));
         assert_eq!(health, IndexHealth::Stale);
     }
 
     #[test]
     fn cache_invalidation_corrupt_when_metadata_parse_fails() {
-        let health = determine_health(true, 5, Some(12), None, true);
+        let health = determine_health(true, 5, Some(12), None, true, Some(0));
         assert_eq!(health, IndexHealth::Corrupt);
         assert_eq!(health.degradation_code(), Some("index_corrupt"));
     }
 
     #[test]
     fn cache_invalidation_ready_when_generations_match() {
-        let health = determine_health(true, 5, Some(10), Some(10), false);
+        let health = determine_health(true, 5, Some(10), Some(10), false, Some(1));
         assert_eq!(health, IndexHealth::Ready);
         assert_eq!(health.degradation_code(), None);
     }
 
     #[test]
     fn cache_invalidation_ready_when_index_ahead() {
-        let health = determine_health(true, 5, Some(8), Some(10), false);
+        let health = determine_health(true, 5, Some(8), Some(10), false, Some(1));
         assert_eq!(health, IndexHealth::Ready);
     }
 
     #[test]
     fn cache_invalidation_ready_when_no_generations_tracked() {
-        let health = determine_health(true, 5, None, None, false);
+        let health = determine_health(true, 5, None, None, false, Some(1));
         assert_eq!(health, IndexHealth::Ready);
     }
 
     #[test]
     fn cache_invalidation_ready_when_db_has_no_generation() {
-        let health = determine_health(true, 5, None, Some(10), false);
+        let health = determine_health(true, 5, None, Some(10), false, Some(1));
         assert_eq!(health, IndexHealth::Ready);
     }
 
@@ -5816,6 +6297,41 @@ mod tests {
     }
 
     #[test]
+    fn index_status_report_ready_empty_workspace_has_no_rebuild_hint() {
+        let report = IndexStatusReport {
+            health: IndexHealth::Ready,
+            index_dir: PathBuf::from("/tmp/index"),
+            database_path: PathBuf::from("/tmp/ee.db"),
+            embedding: None,
+            index_exists: true,
+            index_file_count: 0,
+            index_size_bytes: 0,
+            db_memory_count: 0,
+            db_session_count: 0,
+            db_generation: Some(0),
+            index_generation: None,
+            last_rebuild_at: None,
+            last_check_error: None,
+            repair_hint: None,
+            elapsed_ms: 1.0,
+        };
+
+        let json = report.data_json();
+        assert_eq!(json["health"], "ready");
+        assert!(json["degradationCode"].is_null());
+        assert!(
+            json["degraded"]
+                .as_array()
+                .is_some_and(std::vec::Vec::is_empty)
+        );
+        assert!(json["repairHint"].is_null());
+
+        let summary = report.human_summary();
+        assert!(summary.contains("READY"));
+        assert!(!summary.contains("rebuild"));
+    }
+
+    #[test]
     fn index_status_embedding_posture_uses_requested_workspace_path() -> TestResult {
         let root = unique_test_dir("status-workspace-selector");
         let workspace_a = root.join("workspace-a");
@@ -5887,7 +6403,8 @@ mod tests {
     #[test]
     fn cache_invalidation_boundary_condition_equal_generations() {
         for generation in [0_u64, 1, 100, u64::MAX] {
-            let health = determine_health(true, 1, Some(generation), Some(generation), false);
+            let health =
+                determine_health(true, 1, Some(generation), Some(generation), false, Some(1));
             assert_eq!(
                 health,
                 IndexHealth::Ready,
@@ -5898,7 +6415,7 @@ mod tests {
 
     #[test]
     fn cache_invalidation_boundary_condition_db_one_ahead() {
-        let health = determine_health(true, 1, Some(1), Some(0), false);
+        let health = determine_health(true, 1, Some(1), Some(0), false, Some(1));
         assert_eq!(health, IndexHealth::Stale);
     }
 
