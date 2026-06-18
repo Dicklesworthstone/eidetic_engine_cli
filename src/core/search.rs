@@ -2243,6 +2243,7 @@ impl SearchReport {
             })
             .collect();
         let consensus_conflicts = search_consensus_conflict_report(&self.query, &visible_results);
+        let rerank_hits = visible_results.iter().collect::<Vec<_>>();
 
         let mut data = serde_json::json!({
             "command": "search",
@@ -2261,7 +2262,7 @@ impl SearchReport {
             "resultCount": visible_results.len(),
             "elapsedMs": self.elapsed_ms,
             "metrics": metrics,
-            "rerank": search_rerank_posture_json(&visible_results, &self.degraded),
+            "rerank": search_rerank_posture_json(&rerank_hits, &self.degraded),
             "profileRuntime": self.runtime_profile.data_json(),
             "errors": self.errors,
             "degraded": search_degraded_data_json("search", &self.degraded),
