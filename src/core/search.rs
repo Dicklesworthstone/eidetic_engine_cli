@@ -13,8 +13,8 @@ use crate::core::why::{DedupLinkEvidence, find_embed_dedup_link};
 #[cfg(test)]
 use crate::db::generate_audit_id_seeded;
 use crate::db::{
-    CreateAuditInput, DbConnection, FeedbackEventsFingerprint, StoredFeedbackEvent, StoredMemory,
-    audit_actions, generate_audit_id,
+    CreateAuditInput, DbConnection, DbError, FeedbackEventsFingerprint, StoredFeedbackEvent,
+    StoredMemory, audit_actions, generate_audit_id,
 };
 use crate::models::degradation::{
     CONFORMAL_CALIBRATION_INSUFFICIENT_CODE, SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE,
@@ -36,8 +36,8 @@ use crate::runtime::determinism::{Deterministic, Seed};
 
 use super::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use super::index::{
-    IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport,
-    get_index_status_with_connection,
+    EmbeddingPosture, IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport,
+    current_embedding_posture, get_index_status_with_connection,
 };
 use super::memory_drift::{
     MemoryDriftSelectionHint, memory_drift_selection_hint_from_provenance_status,
@@ -231,6 +231,120 @@ pub struct SearchOptions {
     pub memory_scope: MemoryScope,
     /// Fail closed when relevant evidence exists outside the requested scope.
     pub strict_scope: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SimilarOptions {
+    pub workspace_path: PathBuf,
+    pub database_path: Option<PathBuf>,
+    pub index_dir: Option<PathBuf>,
+    pub memory_id: String,
+    pub limit: u32,
+    pub min_score: Option<f32>,
+    pub speed: SpeedMode,
+    pub explain: bool,
+    /// Evaluate validity windows at this timestamp. Defaults to now.
+    pub as_of: Option<DateTime<Utc>>,
+    /// Include tombstoned memories in neighbor results.
+    pub include_tombstoned: bool,
+    /// Include memories whose valid_to is before the validity reference time.
+    pub include_expired: bool,
+    /// Include memories whose valid_from is after the validity reference time.
+    pub include_future: bool,
+    /// Include search hits whose indexed validity metadata is stale.
+    pub include_stale: bool,
+    /// Trust lane applied to retrieved memories.
+    pub memory_scope: MemoryScope,
+    /// Fail closed when relevant evidence exists outside the requested scope.
+    pub strict_scope: bool,
+}
+
+impl SimilarOptions {
+    fn resolve_database_path(&self) -> PathBuf {
+        self.database_path
+            .clone()
+            .unwrap_or_else(|| default_workspace_database_path(&self.workspace_path))
+    }
+
+    fn resolve_index_dir(&self) -> PathBuf {
+        self.index_dir
+            .clone()
+            .unwrap_or_else(|| default_workspace_index_dir(&self.workspace_path))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SimilarReport {
+    pub target_memory_id: String,
+    pub target_level: String,
+    pub target_kind: String,
+    pub semantic_available: bool,
+    pub lexical_fallback: bool,
+    pub embedding_posture: EmbeddingPosture,
+    pub report: SearchReport,
+}
+
+impl SimilarReport {
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut summary = self.report.human_summary();
+        if summary.starts_with("Search results for ") {
+            summary = summary.replacen("Search results for ", "Similar memories for ", 1);
+        } else if summary.starts_with("No results for ") {
+            summary = summary.replacen("No results for ", "No similar memories for ", 1);
+        }
+        summary
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        let mut data = self.report.data_json();
+        if let Some(data_object) = data.as_object_mut() {
+            data_object.insert("command".to_string(), serde_json::json!("similar"));
+            data_object.insert(
+                "targetMemoryId".to_string(),
+                serde_json::json!(&self.target_memory_id),
+            );
+            data_object.insert(
+                "targetMemory".to_string(),
+                serde_json::json!({
+                    "memoryId": &self.target_memory_id,
+                    "level": &self.target_level,
+                    "kind": &self.target_kind,
+                }),
+            );
+            data_object.insert(
+                "semanticAvailable".to_string(),
+                serde_json::json!(self.semantic_available),
+            );
+            data_object.insert(
+                "lexicalFallback".to_string(),
+                serde_json::json!(self.lexical_fallback),
+            );
+            data_object.insert(
+                "embeddingPosture".to_string(),
+                self.embedding_posture.data_json(),
+            );
+            if let Some(request) = data_object
+                .get_mut("request")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                request.insert(
+                    "targetMemoryId".to_string(),
+                    serde_json::json!(&self.target_memory_id),
+                );
+                request.insert(
+                    "similarityMode".to_string(),
+                    serde_json::json!(if self.semantic_available {
+                        "semantic_knn"
+                    } else {
+                        "lexical_fallback"
+                    }),
+                );
+            }
+        }
+        data
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -4360,6 +4474,50 @@ impl std::fmt::Display for SearchError {
 
 impl std::error::Error for SearchError {}
 
+#[derive(Debug)]
+pub enum SimilarError {
+    Search(SearchError),
+    Storage(DbError),
+    MemoryNotFound { memory_id: String },
+}
+
+impl SimilarError {
+    #[must_use]
+    pub fn repair_hint(&self) -> Option<&str> {
+        match self {
+            Self::Search(error) => error.repair_hint(),
+            Self::Storage(_) => Some("ee doctor --json"),
+            Self::MemoryNotFound { .. } => Some("ee memory list --json"),
+        }
+    }
+}
+
+impl From<SearchError> for SimilarError {
+    fn from(error: SearchError) -> Self {
+        Self::Search(error)
+    }
+}
+
+impl From<DbError> for SimilarError {
+    fn from(error: DbError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl std::fmt::Display for SimilarError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Search(error) => write!(f, "{error}"),
+            Self::Storage(error) => write!(f, "Storage error: {error}"),
+            Self::MemoryNotFound { memory_id } => {
+                write!(f, "Target memory not found: {memory_id}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SimilarError {}
+
 impl ScoreExplanation {
     #[must_use]
     pub fn generate(hit: &SearchHit) -> Self {
@@ -5194,6 +5352,121 @@ pub fn run_context_search_with_preloaded_memories_and_workspace_state(
         preloaded_memories,
         performance: run.performance,
     })
+}
+
+pub fn run_similar(options: &SimilarOptions) -> Result<SimilarReport, SimilarError> {
+    let database_path = options.resolve_database_path();
+    let connection = DbConnection::open_file(&database_path)?;
+    let target = connection
+        .get_memory(&options.memory_id)?
+        .ok_or_else(|| SimilarError::MemoryNotFound {
+            memory_id: options.memory_id.clone(),
+        })?;
+    let index_dir = options.resolve_index_dir();
+    let embedding_posture = current_embedding_posture(&connection, &target.workspace_id, &index_dir)?;
+    let semantic_available = embedding_posture.semantic;
+    let lexical_fallback = !semantic_available;
+    let requested_limit = options.limit;
+    let retrieval_limit = requested_limit.saturating_add(1).max(1);
+    let source_mode = if semantic_available {
+        SearchSourceMode::SemanticOnly
+    } else {
+        SearchSourceMode::LexicalOnly
+    };
+    let search_options = SearchOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: Some(database_path.clone()),
+        index_dir: Some(index_dir),
+        query: target.content.clone(),
+        limit: retrieval_limit,
+        speed: options.speed,
+        explain: options.explain,
+        as_of: options.as_of,
+        include_tombstoned: options.include_tombstoned,
+        include_expired: options.include_expired,
+        include_future: options.include_future,
+        include_stale: options.include_stale,
+        relevance_floor: options.min_score,
+        dedup_mode: SearchDedupMode::DocId,
+        source_mode,
+        strict_source_mode: false,
+        memory_scope: options.memory_scope,
+        strict_scope: options.strict_scope,
+    };
+    let determinism = Deterministic::from_seed(0);
+    let mut audit_ids = SearchAuditIdSource::Ambient;
+    let mut report = run_search_inner(
+        &search_options,
+        Some(&connection),
+        &determinism,
+        &mut audit_ids,
+        Some(&connection),
+        true,
+        None,
+    )?;
+    report.query = target.id.clone();
+    report.requested_limit = requested_limit;
+    remove_similar_target_and_truncate(&mut report, &target.id, requested_limit);
+    sanitize_similar_target_query_degradations(&mut report, &target.id);
+    if lexical_fallback {
+        let reason = similar_semantic_unavailable_reason(&embedding_posture);
+        report
+            .degraded
+            .push(SearchDegradation::embed_model_unavailable(&reason));
+        report.source_mode_requested = SearchSourceMode::SemanticOnly;
+        report.source_mode_applied = SearchSourceMode::LexicalOnly;
+        report.source_mode_fallback = true;
+    }
+    if let Err(error) = connection.close() {
+        tracing::warn!(
+            target: "ee::search::similar",
+            event = "similar_connection_close_failed",
+            database_path = %database_path.display(),
+            error = %error,
+        );
+    }
+
+    Ok(SimilarReport {
+        target_memory_id: target.id,
+        target_level: target.level,
+        target_kind: target.kind,
+        semantic_available,
+        lexical_fallback,
+        embedding_posture,
+        report,
+    })
+}
+
+fn remove_similar_target_and_truncate(report: &mut SearchReport, target_memory_id: &str, limit: u32) {
+    report
+        .results
+        .retain(|hit| hit.memory_id() != Some(target_memory_id));
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    if report.results.len() > limit {
+        report.results.truncate(limit);
+    }
+    if report.results.is_empty() && report.status == SearchStatus::Success {
+        report.status = SearchStatus::NoResults;
+    }
+}
+
+fn sanitize_similar_target_query_degradations(report: &mut SearchReport, target_memory_id: &str) {
+    let floor = report.relevance_floor_applied.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
+    for degradation in &mut report.degraded {
+        if degradation.code == "no_relevant_results" {
+            degradation.message = format!(
+                "No memories scored above similarity floor {floor:.4} for target memory `{target_memory_id}`."
+            );
+            degradation.repair = Some("Lower --min-score or rebuild the index after adding related memories.".to_string());
+        }
+    }
+}
+
+fn similar_semantic_unavailable_reason(posture: &EmbeddingPosture) -> String {
+    format!(
+        "embedding posture mode={} source={} semantic=false",
+        posture.mode, posture.source
+    )
 }
 
 fn run_search_inner(
@@ -8006,7 +8279,6 @@ mod tests {
     use crate::db::{
         CreateFeedbackEventInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
     };
-    #[cfg(feature = "lexical-bm25")]
     use crate::search::{EmbedderStack, IndexBuilder, IndexableDocument};
 
     type TestResult = Result<(), String>;
@@ -8176,6 +8448,46 @@ mod tests {
         MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0)
     }
 
+    fn test_memory_input(workspace_id: &str, content: &str) -> CreateMemoryInput {
+        CreateMemoryInput {
+            workspace_id: workspace_id.to_owned(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: content.to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.7,
+            importance: 0.6,
+            provenance_uri: Some("test://similar".to_owned()),
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: None,
+            tags: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
+    fn fixture_hash_embedding_posture_for_search() -> EmbeddingPosture {
+        EmbeddingPosture {
+            schema: crate::models::EMBEDDING_POSTURE_SCHEMA_V1,
+            mode: crate::models::EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH,
+            semantic: false,
+            source: "frankensearch_hash_fallback".to_owned(),
+            fast_model_id: "hash-256".to_owned(),
+            fast_dimension: 256,
+            quality_model_id: None,
+            quality_dimension: None,
+            deterministic: true,
+            registered_model_count: 0,
+            available_model_count: 0,
+            selected_registry_model: None,
+            vector_coverage: crate::core::index::EmbeddingVectorCoverage {
+                embedded: 3,
+                total: 3,
+            },
+        }
+    }
+
     fn source_mode_test_options(
         source_mode: SearchSourceMode,
         strict_source_mode: bool,
@@ -8216,6 +8528,262 @@ mod tests {
         assert_eq!(SearchSourceMode::LexicalOnly.as_str(), "lexical_only");
         assert_eq!(SearchSourceMode::SemanticOnly.as_str(), "semantic_only");
         assert_eq!(SearchSourceMode::Hybrid.as_str(), "hybrid");
+    }
+
+    #[test]
+    fn similar_report_data_json_reuses_search_result_shape() {
+        let mut report = SearchReport {
+            status: SearchStatus::Success,
+            query: "mem_00000000000000000000000001".to_string(),
+            requested_limit: 1,
+            results: vec![SearchHit {
+                doc_id: "mem_00000000000000000000000002".to_string(),
+                score: 0.91,
+                source: ScoreSource::SemanticFast,
+                fast_score: Some(0.91),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: None,
+                explanation: None,
+            }],
+            elapsed_ms: 2.0,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: Some(0.05),
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::SemanticOnly,
+            source_mode_applied: SearchSourceMode::SemanticOnly,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+        remove_similar_target_and_truncate(&mut report, "mem_00000000000000000000000001", 1);
+        let similar = SimilarReport {
+            target_memory_id: "mem_00000000000000000000000001".to_string(),
+            target_level: "procedural".to_string(),
+            target_kind: "rule".to_string(),
+            semantic_available: true,
+            lexical_fallback: false,
+            embedding_posture: fixture_hash_embedding_posture_for_search(),
+            report,
+        };
+
+        let json = similar.data_json();
+
+        assert_eq!(json["command"], "similar");
+        assert_eq!(
+            json["targetMemoryId"],
+            serde_json::json!("mem_00000000000000000000000001")
+        );
+        assert_eq!(json["results"][0]["memoryId"], "mem_00000000000000000000000002");
+        assert_eq!(json["results"][0]["schema"], serde_json::Value::Null);
+        assert_eq!(
+            json["request"]["similarityMode"],
+            serde_json::json!("semantic_knn")
+        );
+    }
+
+    #[test]
+    fn similar_removes_seed_memory_and_truncates_neighbors() {
+        let mut report = SearchReport {
+            status: SearchStatus::Success,
+            query: "release checks".to_string(),
+            requested_limit: 2,
+            results: vec![
+                SearchHit {
+                    doc_id: "mem_seed".to_string(),
+                    score: 1.0,
+                    source: ScoreSource::SemanticFast,
+                    fast_score: Some(1.0),
+                    quality_score: None,
+                    lexical_score: None,
+                    rerank_score: None,
+                    metadata: None,
+                    explanation: None,
+                },
+                SearchHit {
+                    doc_id: "mem_related_a".to_string(),
+                    score: 0.8,
+                    source: ScoreSource::SemanticFast,
+                    fast_score: Some(0.8),
+                    quality_score: None,
+                    lexical_score: None,
+                    rerank_score: None,
+                    metadata: None,
+                    explanation: None,
+                },
+                SearchHit {
+                    doc_id: "mem_related_b".to_string(),
+                    score: 0.7,
+                    source: ScoreSource::SemanticFast,
+                    fast_score: Some(0.7),
+                    quality_score: None,
+                    lexical_score: None,
+                    rerank_score: None,
+                    metadata: None,
+                    explanation: None,
+                },
+            ],
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: Some(0.0),
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::SemanticOnly,
+            source_mode_applied: SearchSourceMode::SemanticOnly,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+
+        remove_similar_target_and_truncate(&mut report, "mem_seed", 1);
+
+        assert_eq!(report.status, SearchStatus::Success);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].doc_id, "mem_related_a");
+    }
+
+    #[test]
+    fn similar_hash_posture_reason_is_stable() {
+        let posture = fixture_hash_embedding_posture_for_search();
+
+        assert_eq!(
+            similar_semantic_unavailable_reason(&posture),
+            "embedding posture mode=deterministic_hash source=frankensearch_hash_fallback semantic=false"
+        );
+    }
+
+    #[test]
+    fn run_similar_hash_embedder_falls_back_to_lexical_and_excludes_seed() -> TestResult {
+        let temp = tempfile::Builder::new()
+            .prefix("ee-similar-hash")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        let workspace = temp.path().to_path_buf();
+        let database_path = workspace.join("ee.db");
+        let index_dir = workspace.join("index");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_similar_hash";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("similar-hash".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let memories = [
+            (
+                "mem_00000000000000000000000001",
+                "Before release run cargo fmt and cargo clippy checks.",
+            ),
+            (
+                "mem_00000000000000000000000002",
+                "Release checklist requires cargo fmt before cargo clippy.",
+            ),
+            (
+                "mem_00000000000000000000000003",
+                "Design review notes for onboarding copy and screenshots.",
+            ),
+        ];
+        for (memory_id, content) in memories {
+            connection
+                .insert_memory(memory_id, &test_memory_input(workspace_id, content))
+                .map_err(|error| error.to_string())?;
+        }
+        let documents = memories
+            .into_iter()
+            .map(|(memory_id, content)| IndexableDocument::new(memory_id, content))
+            .collect::<Vec<_>>();
+        let build_index_dir = index_dir.clone();
+        crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            let stack = EmbedderStack::from_parts(
+                Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>,
+                None,
+            );
+            IndexBuilder::new(&build_index_dir)
+                .with_embedder_stack(stack)
+                .add_documents(documents)
+                .build(&cx)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())??;
+
+        let similar = run_similar(&SimilarOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database_path),
+            index_dir: Some(index_dir),
+            memory_id: "mem_00000000000000000000000001".to_string(),
+            limit: 2,
+            min_score: Some(0.0),
+            speed: SpeedMode::Default,
+            explain: true,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        })
+        .map_err(|error| error.to_string())?;
+
+        assert!(!similar.semantic_available);
+        assert!(similar.lexical_fallback);
+        assert_eq!(similar.report.source_mode_requested, SearchSourceMode::SemanticOnly);
+        assert_eq!(similar.report.source_mode_applied, SearchSourceMode::LexicalOnly);
+        assert!(similar.report.source_mode_fallback);
+        assert!(
+            similar
+                .report
+                .degraded
+                .iter()
+                .any(|degradation| degradation.code == "embed_model_unavailable")
+        );
+        assert!(
+            similar
+                .report
+                .results
+                .iter()
+                .all(|hit| hit.doc_id != "mem_00000000000000000000000001")
+        );
+        #[cfg(feature = "lexical-bm25")]
+        {
+            let neighbor_ids = similar
+                .report
+                .results
+                .iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect::<Vec<_>>();
+            assert!(
+                neighbor_ids.contains(&"mem_00000000000000000000000002"),
+                "related release-check memory should be a lexical fallback neighbor: {neighbor_ids:?}"
+            );
+            assert!(
+                !neighbor_ids.contains(&"mem_00000000000000000000000003")
+                    || neighbor_ids
+                        .iter()
+                        .position(|id| *id == "mem_00000000000000000000000002")
+                        <= neighbor_ids
+                            .iter()
+                            .position(|id| *id == "mem_00000000000000000000000003"),
+                "related release-check memory should not rank after unrelated design copy: {neighbor_ids:?}"
+            );
+        }
+        Ok(())
     }
 
     #[test]
