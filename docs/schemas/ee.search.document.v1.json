@@ -39,7 +39,8 @@
       "type": "string",
       "enum": [
         "unit_normalized",
-        "rrf_fused"
+        "rrf_fused",
+        "reranked"
       ],
       "description": "Interpretation tag for the raw score field. Use relevanceScore for cross-source relevance; score remains the retrieval engine's raw ranking score."
     },

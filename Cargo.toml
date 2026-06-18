@@ -112,7 +112,7 @@ clap_complete = { version = "4.6.1" }
 fnx-algorithms = { version = "0.1.0", path = "../franken_networkx/crates/fnx-algorithms" }
 fnx-classes = { version = "0.1.0", path = "../franken_networkx/crates/fnx-classes" }
 fnx-runtime = { version = "0.1.0", path = "../franken_networkx/crates/fnx-runtime", default-features = false, features = ["asupersync-integration"] }
-frankensearch = { version = "0.3.0", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage", "model2vec", "download"] }
+frankensearch = { version = "0.3.0", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage", "model2vec", "download", "rerank"] }
 getrandom = { version = "0.4.2" }
 regex-lite = { version = "0.1" }
 # Direct libc remains available for low-level platform adapters; daemon gates

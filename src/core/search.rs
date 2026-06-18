@@ -14,12 +14,13 @@ use crate::core::why::{DedupLinkEvidence, find_embed_dedup_link};
 use crate::db::generate_audit_id_seeded;
 use crate::db::{
     CreateAuditInput, DbConnection, DbError, FeedbackEventsFingerprint, StoredFeedbackEvent,
-    StoredMemory, audit_actions, generate_audit_id,
+    StoredMemory, StoredModelRegistryEntry, audit_actions, generate_audit_id,
 };
 use crate::models::degradation::{
     CONFORMAL_CALIBRATION_INSUFFICIENT_CODE, SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE,
     SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE, SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE,
 };
+use crate::models::model_registry::{ModelPurpose, ModelRegistryStatus};
 use crate::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use crate::models::{
     MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri, TrustClass, UnitScore,
@@ -58,7 +59,8 @@ use crate::search::plan_cache::{
     compute_search_config_hash, lookup_or_insert_process_plan,
 };
 use crate::search::{
-    Embedder, HashEmbedder, SpeedMode, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
+    Embedder, FlashRankReranker, HashEmbedder, Reranker, SpeedMode, TwoTierConfig, TwoTierIndex,
+    TwoTierSearcher,
 };
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 use frankensearch::LexicalSearch;
@@ -88,6 +90,12 @@ const SEARCH_ANALYSIS_UTILITY_KEY: &str = "_ee_analysis_utility";
 const SEARCH_ANALYSIS_PROVENANCE_URI_KEY: &str = "_ee_analysis_provenance_uri";
 const SEARCH_ANALYSIS_CREATED_AT_KEY: &str = "_ee_analysis_created_at";
 const EMBED_MODEL_UNAVAILABLE_MODEL_ID: &str = "EE_EMBED_MODEL_PATH";
+const DEFAULT_SEARCH_RERANK_TOP_K: usize = 50;
+const RERANK_MODEL_UNAVAILABLE_REPAIR: &str =
+    "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst";
+const RERANK_MODEL_ONNX_SUBDIR: &str = "onnx/model.onnx";
+const RERANK_MODEL_ONNX_LEGACY: &str = "model.onnx";
+const RERANK_MODEL_TOKENIZER: &str = "tokenizer.json";
 const EMBED_MODEL_UNAVAILABLE_FEATURE_FLAG: &str = "embed-fast";
 const HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON: &str =
     "active embedder source frankensearch_hash_fallback reports semantic=false";
@@ -1313,6 +1321,18 @@ impl SearchDegradation {
     }
 
     #[must_use]
+    fn rerank_model_unavailable(reason: &str) -> Self {
+        Self {
+            code: "rerank_model_unavailable".to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "Search rerank is in auto mode, but the local reranker is unavailable; returning fusion-only ranking. {reason}"
+            ),
+            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_string()),
+        }
+    }
+
+    #[must_use]
     fn stale_index(db_generation: Option<u64>, index_generation: Option<u64>) -> Self {
         let generation_detail = match (db_generation, index_generation) {
             (Some(db_generation), Some(index_generation)) => format!(
@@ -1926,14 +1946,14 @@ impl ScoreSource {
     /// `unit_normalized`. `Hybrid` carries an RRF-fused magnitude that tops out
     /// near [`RRF_HYBRID_TYPICAL_MAX`] (`~0.033`), so `rrf_fused` — the tag tells
     /// an agent the raw `score` is *not* a probability and must be read via
-    /// `relevanceScore`, not at face value.
+    /// `relevanceScore`, not at face value. `Reranked` means the raw score is
+    /// the cross-encoder score carried in `rerankScore`.
     #[must_use]
     pub const fn score_kind(self) -> &'static str {
         match self {
             Self::Hybrid => "rrf_fused",
-            Self::Lexical | Self::SemanticFast | Self::SemanticQuality | Self::Reranked => {
-                "unit_normalized"
-            }
+            Self::Reranked => "reranked",
+            Self::Lexical | Self::SemanticFast | Self::SemanticQuality => "unit_normalized",
         }
     }
 }
@@ -2241,6 +2261,7 @@ impl SearchReport {
             "resultCount": visible_results.len(),
             "elapsedMs": self.elapsed_ms,
             "metrics": metrics,
+            "rerank": search_rerank_posture_json(&visible_results, &self.degraded),
             "profileRuntime": self.runtime_profile.data_json(),
             "errors": self.errors,
             "degraded": search_degraded_data_json("search", &self.degraded),
@@ -4783,6 +4804,36 @@ pub fn elapsed_timing_json(elapsed_ms: f64) -> serde_json::Value {
     })
 }
 
+fn search_rerank_posture_json(
+    hits: &[&SearchHit],
+    degraded: &[SearchDegradation],
+) -> serde_json::Value {
+    let rerank_score_count = hits
+        .iter()
+        .filter(|hit| hit.rerank_score.is_some())
+        .count();
+    let unavailable = degraded
+        .iter()
+        .find(|degradation| degradation.code == "rerank_model_unavailable");
+    let mode = if rerank_score_count > 0 {
+        "reranked"
+    } else if unavailable.is_some() {
+        "fusion_only_degraded"
+    } else {
+        "fusion_only"
+    };
+    serde_json::json!({
+        "schema": "ee.rerank_posture.v1",
+        "mode": mode,
+        "configured": "auto",
+        "topK": DEFAULT_SEARCH_RERANK_TOP_K,
+        "rerankScoreCount": rerank_score_count,
+        "scoreKind": if rerank_score_count > 0 { "reranked" } else { "rrf_fused" },
+        "available": rerank_score_count > 0,
+        "degradedCode": unavailable.map(|degradation| degradation.code.as_str()),
+    })
+}
+
 fn search_performance_timing_json(timing: &SearchPerformanceTiming) -> serde_json::Value {
     let mut value = elapsed_timing_json(timing.elapsed.as_secs_f64() * 1000.0);
     if let Some(object) = value.as_object_mut() {
@@ -5926,6 +5977,293 @@ fn similar_semantic_unavailable_reason(posture: &EmbeddingPosture) -> String {
     )
 }
 
+#[derive(Clone)]
+struct SearchRerankRuntime {
+    reranker: Option<Arc<dyn Reranker>>,
+    text_provider: Option<SearchRerankTextProvider>,
+    model_id: Option<String>,
+    top_k: usize,
+}
+
+impl SearchRerankRuntime {
+    fn disabled() -> Self {
+        Self {
+            reranker: None,
+            text_provider: None,
+            model_id: None,
+            top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+        }
+    }
+
+    fn enabled(
+        reranker: Arc<dyn Reranker>,
+        text_provider: SearchRerankTextProvider,
+        model_id: String,
+    ) -> Self {
+        Self {
+            reranker: Some(reranker),
+            text_provider: Some(text_provider),
+            model_id: Some(model_id),
+            top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.reranker.is_some() && self.text_provider.is_some()
+    }
+
+    fn collect_limit(&self, requested_limit: usize) -> usize {
+        if self.is_enabled() {
+            requested_limit.max(self.top_k)
+        } else {
+            requested_limit
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SearchRerankTextProvider {
+    database_path: PathBuf,
+    scope_context: MemoryScopeContext,
+    cache: Arc<Mutex<HashMap<String, Option<String>>>>,
+}
+
+impl SearchRerankTextProvider {
+    fn new(database_path: PathBuf, workspace_path: &Path, options: &SearchOptions) -> Self {
+        Self {
+            database_path,
+            scope_context: MemoryScopeContext::for_workspace(
+                workspace_path,
+                options.memory_scope,
+                options.strict_scope,
+            ),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn text_for_doc(&self, doc_id: &str) -> Option<String> {
+        if !doc_id.starts_with("mem_") {
+            return None;
+        }
+        if let Ok(cache) = self.cache.lock()
+            && let Some(cached) = cache.get(doc_id)
+        {
+            return cached.clone();
+        }
+
+        let resolved = self.load_scoped_memory_text(doc_id);
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(doc_id.to_string(), resolved.clone());
+        }
+        resolved
+    }
+
+    fn load_scoped_memory_text(&self, doc_id: &str) -> Option<String> {
+        let connection = DbConnection::open_file(&self.database_path).ok()?;
+        let memory = connection.get_memory(doc_id).ok().flatten()?;
+        let tags = if matches!(self.scope_context.scope, MemoryScope::Global) {
+            connection.get_memory_tags(doc_id).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if self.scope_context.memory_in_scope_with_tags(&memory, &tags) {
+            Some(memory.content)
+        } else {
+            None
+        }
+    }
+}
+
+fn resolve_search_rerank_runtime(
+    options: &SearchOptions,
+    source_mode: SearchSourceMode,
+    connection: Option<&DbConnection>,
+    degraded: &mut Vec<SearchDegradation>,
+) -> SearchRerankRuntime {
+    if source_mode == SearchSourceMode::LexicalOnly {
+        return SearchRerankRuntime::disabled();
+    }
+
+    let database_path = options.resolve_database_path();
+    let workspace_root = default_workspace_root(&options.workspace_path);
+    let workspace_id = crate::core::curate::stable_workspace_id(&workspace_root);
+    let entry_result = match connection {
+        Some(connection) => selected_available_reranker_entry(connection, &workspace_id),
+        None => {
+            if !database_path.exists() {
+                Err(format!(
+                    "model registry database {} does not exist",
+                    database_path.display()
+                ))
+            } else {
+                DbConnection::open_file(&database_path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|connection| {
+                        selected_available_reranker_entry(&connection, &workspace_id)
+                    })
+            }
+        }
+    };
+
+    let entry = match entry_result {
+        Ok(Some(entry)) => entry,
+        Ok(None) => {
+            degraded.push(SearchDegradation::rerank_model_unavailable(
+                "No available reranker model is registered for this workspace.",
+            ));
+            return SearchRerankRuntime::disabled();
+        }
+        Err(error) => {
+            degraded.push(SearchDegradation::rerank_model_unavailable(&format!(
+                "Could not inspect the reranker registry: {error}."
+            )));
+            return SearchRerankRuntime::disabled();
+        }
+    };
+
+    match load_search_reranker(&entry) {
+        Ok(reranker) => {
+            tracing::info!(
+                target: "ee::search::rerank",
+                event = "rerank_model_resolved",
+                model_id = %entry.model_name,
+                top_k = DEFAULT_SEARCH_RERANK_TOP_K,
+            );
+            SearchRerankRuntime::enabled(
+                reranker,
+                SearchRerankTextProvider::new(database_path, &options.workspace_path, options),
+                entry.model_name,
+            )
+        }
+        Err(error) => {
+            degraded.push(SearchDegradation::rerank_model_unavailable(&error));
+            SearchRerankRuntime::disabled()
+        }
+    }
+}
+
+fn selected_available_reranker_entry(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> Result<Option<StoredModelRegistryEntry>, String> {
+    let mut entries = connection
+        .list_model_registry_entries(workspace_id)
+        .map_err(|error| error.to_string())?;
+    entries.retain(|entry| {
+        entry.purpose == ModelPurpose::Reranker && entry.status == ModelRegistryStatus::Available
+    });
+    entries.sort_by(|left, right| {
+        left.model_name
+            .cmp(&right.model_name)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(entries.into_iter().next())
+}
+
+fn load_search_reranker(entry: &StoredModelRegistryEntry) -> Result<Arc<dyn Reranker>, String> {
+    verify_reranker_registry_hash(entry)?;
+    let source_path = reranker_entry_source_path(entry)?;
+    let model_dir = unpacked_rerank_model_dir(&source_path)?;
+    let reranker = FlashRankReranker::load(&model_dir).map_err(|error| {
+        format!(
+            "Failed to load rerank model {} from {}: {error}",
+            entry.model_name,
+            model_dir.display()
+        )
+    })?;
+    Ok(Arc::new(reranker))
+}
+
+fn verify_reranker_registry_hash(entry: &StoredModelRegistryEntry) -> Result<(), String> {
+    let manifest = crate::core::model::bundled_rerank_model_manifest()
+        .map_err(|error| format!("Could not read bundled rerank model manifest: {error}"))?;
+    let expected = format!("blake3:{}", manifest.hash_blake3);
+    match entry.content_hash.as_deref() {
+        Some(hash) if hash == expected => Ok(()),
+        Some(hash) => Err(format!(
+            "Registered reranker hash {hash} does not match bundled manifest hash {expected}."
+        )),
+        None => Err("Registered reranker is missing a content hash.".to_string()),
+    }
+}
+
+fn reranker_entry_source_path(entry: &StoredModelRegistryEntry) -> Result<PathBuf, String> {
+    if let Some(path) = entry
+        .metadata_json
+        .as_deref()
+        .and_then(reranker_stored_path_from_metadata)
+    {
+        return Ok(path);
+    }
+    let source = entry
+        .source_uri
+        .as_deref()
+        .ok_or_else(|| "Registered reranker has no source path.".to_string())?;
+    if source.contains("://") {
+        return Err(format!(
+            "Registered reranker source `{source}` is remote; fetch/cache it locally first."
+        ));
+    }
+    Ok(PathBuf::from(source))
+}
+
+fn reranker_stored_path_from_metadata(raw: &str) -> Option<PathBuf> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    value
+        .get("storedPath")
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+}
+
+fn unpacked_rerank_model_dir(source_path: &Path) -> Result<PathBuf, String> {
+    if source_path.is_dir() {
+        return ensure_rerank_model_dir_ready(source_path);
+    }
+    if !source_path.exists() {
+        return Err(format!(
+            "Registered reranker artifact {} does not exist.",
+            source_path.display()
+        ));
+    }
+    if let Some(unpacked) = rerank_archive_sibling_dir(source_path)
+        && unpacked.is_dir()
+    {
+        return ensure_rerank_model_dir_ready(&unpacked);
+    }
+    Err(format!(
+        "Registered reranker artifact {} is cached but not unpacked into a loadable model directory.",
+        source_path.display()
+    ))
+}
+
+fn rerank_archive_sibling_dir(source_path: &Path) -> Option<PathBuf> {
+    let file_name = source_path.file_name()?.to_str()?;
+    let stem = file_name.strip_suffix(".tar.zst")?;
+    Some(source_path.parent()?.join(stem))
+}
+
+fn ensure_rerank_model_dir_ready(model_dir: &Path) -> Result<PathBuf, String> {
+    let has_model = model_dir.join(RERANK_MODEL_ONNX_SUBDIR).is_file()
+        || model_dir.join(RERANK_MODEL_ONNX_LEGACY).is_file();
+    let has_tokenizer = model_dir.join(RERANK_MODEL_TOKENIZER).is_file();
+    if has_model && has_tokenizer {
+        Ok(model_dir.to_path_buf())
+    } else {
+        Err(format!(
+            "Rerank model directory {} is missing tokenizer.json or ONNX model files.",
+            model_dir.display()
+        ))
+    }
+}
+
+fn truncate_hits_to_limit(hits: &mut Vec<SearchHit>, limit: u32) {
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    if hits.len() > limit {
+        hits.truncate(limit);
+    }
+}
+
 fn run_search_inner(
     options: &SearchOptions,
     read_connection: Option<&DbConnection>,
@@ -5999,6 +6337,10 @@ fn run_search_inner_with_performance(
     let source_mode = resolve_source_mode(options, &index_dir, &mut degraded)?;
     push_model_lifecycle_search_degradation(options, read_connection, &mut degraded);
     trace.record_elapsed("search::sourceModeResolve", source_mode_start);
+    let rerank_resolve_start = Instant::now();
+    let rerank_runtime =
+        resolve_search_rerank_runtime(options, source_mode.applied, read_connection, &mut degraded);
+    trace.record_elapsed("search::rerankResolve", rerank_resolve_start);
     if source_mode.unavailable_no_results {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         trace.record_elapsed("search::total", start);
@@ -6040,6 +6382,7 @@ fn run_search_inner_with_performance(
         options.explain,
         source_mode.applied,
         determinism,
+        rerank_runtime,
         &mut trace,
     );
     trace.record_elapsed("search::retrieve", retrieve_start);
@@ -6127,6 +6470,9 @@ fn run_search_inner_with_performance(
                 &mut degraded,
             );
             trace.record_elapsed("search::scoreCalibration", calibration_start);
+            let truncate_start = Instant::now();
+            truncate_hits_to_limit(&mut above_floor, effective_limit);
+            trace.record_elapsed("search::truncate", truncate_start);
             let kept = above_floor.len();
 
             // Representative floor for degradation reporting + metrics:
@@ -7737,6 +8083,7 @@ fn search_sync(
         explain,
         source_mode,
         determinism,
+        SearchRerankRuntime::disabled(),
         &mut trace,
     )
 }
@@ -7750,6 +8097,7 @@ fn search_sync_with_performance(
     explain: bool,
     source_mode: SearchSourceMode,
     determinism: &Deterministic<Seed>,
+    rerank_runtime: SearchRerankRuntime,
     trace: &mut SearchPerformanceTrace,
 ) -> Result<(Vec<SearchHit>, Vec<String>), String> {
     let plan_cache_key =
@@ -7771,6 +8119,7 @@ fn search_sync_with_performance(
 
     let index_dir_owned = index_dir.to_path_buf();
     let query_owned = plan_lookup.plan.parsed_query.q.clone();
+    let rerank_runtime_owned = rerank_runtime.clone();
     let rerank_seed = determinism.shared_child("search.rerank");
     tracing::debug!(
         target: "ee::search::determinism",
@@ -7888,13 +8237,13 @@ fn search_sync_with_performance(
                 embedder_start.elapsed(),
             );
             let searcher_build_start = Instant::now();
-            let searcher = TwoTierSearcher::new(index, fast_embedder, config);
+            let mut searcher = TwoTierSearcher::new(index, fast_embedder, config);
             push_search_performance_timing(
                 &async_timings,
                 "searchSync::searcherBuild",
                 searcher_build_start.elapsed(),
             );
-            let searcher = if source_mode == SearchSourceMode::Hybrid {
+            searcher = if source_mode == SearchSourceMode::Hybrid {
                 let attach_start = Instant::now();
                 match attach_lexical_searcher(searcher, &index_dir_owned) {
                     Ok(searcher) => {
@@ -7921,8 +8270,28 @@ fn search_sync_with_performance(
                 searcher
             };
 
+            if let Some(reranker) = rerank_runtime_owned.reranker.clone() {
+                let attach_start = Instant::now();
+                searcher = searcher.with_reranker(reranker);
+                push_search_performance_timing(
+                    &async_timings,
+                    "searchSync::attachReranker",
+                    attach_start.elapsed(),
+                );
+            }
+
             let collect_start = Instant::now();
-            let search_result = searcher.search_collect(&cx, &query_owned, limit).await;
+            let collect_limit = rerank_runtime_owned.collect_limit(limit);
+            let search_result = if let Some(text_provider) = rerank_runtime_owned.text_provider.clone()
+            {
+                searcher
+                    .search_collect_with_text(&cx, &query_owned, collect_limit, move |doc_id| {
+                        text_provider.text_for_doc(doc_id)
+                    })
+                    .await
+            } else {
+                searcher.search_collect(&cx, &query_owned, collect_limit).await
+            };
             push_search_performance_timing(
                 &async_timings,
                 "searchSync::searchCollect",
@@ -7932,6 +8301,23 @@ fn search_sync_with_performance(
             let convert_start = Instant::now();
             let converted = match search_result {
                 Ok((results, _metrics)) => {
+                    let reranked_count = results
+                        .iter()
+                        .filter(|result| result.rerank_score.is_some())
+                        .count();
+                    if rerank_runtime_owned.is_enabled() {
+                        tracing::info!(
+                            target: "ee::search::rerank",
+                            event = "rerank_stage_completed",
+                            model_id = rerank_runtime_owned
+                                .model_id
+                                .as_deref()
+                                .unwrap_or("unknown"),
+                            requested_top_k = rerank_runtime_owned.top_k,
+                            collect_limit,
+                            reranked_count,
+                        );
+                    }
                     let mut hits: Vec<SearchHit> = results
                         .into_iter()
                         .map(|result| search_hit_from_scored_result(result, explain))
@@ -13931,7 +14317,6 @@ mod tests {
             ScoreSource::Lexical,
             ScoreSource::SemanticFast,
             ScoreSource::SemanticQuality,
-            ScoreSource::Reranked,
         ] {
             assert!(
                 (normalized_relevance_score(source, 0.42) - 0.42).abs() < f32::EPSILON,
@@ -13939,6 +14324,11 @@ mod tests {
             );
             assert_eq!(source.score_kind(), "unit_normalized", "{source:?}");
         }
+        assert_eq!(ScoreSource::Reranked.score_kind(), "reranked");
+        assert!(
+            (normalized_relevance_score(ScoreSource::Reranked, 0.42) - 0.42).abs()
+                < f32::EPSILON
+        );
         assert!((normalized_relevance_score(ScoreSource::Lexical, 1.5) - 1.0).abs() < f32::EPSILON);
         assert!((normalized_relevance_score(ScoreSource::Lexical, -0.3) - 0.0).abs() < f32::EPSILON);
     }
@@ -13973,6 +14363,113 @@ mod tests {
         let mut hit = synthetic_hit(doc_id, score);
         hit.source = ScoreSource::Hybrid;
         hit
+    }
+
+    fn synthetic_reranked_hit(doc_id: &str, score: f32) -> SearchHit {
+        let mut hit = synthetic_hit(doc_id, score);
+        hit.source = ScoreSource::Reranked;
+        hit.rerank_score = Some(score);
+        hit
+    }
+
+    #[test]
+    fn reranked_score_kind_is_stable() {
+        assert_eq!(ScoreSource::Reranked.score_kind(), "reranked");
+        assert_eq!(synthetic_reranked_hit("mem_rerank", 0.91).score_kind(), "reranked");
+    }
+
+    #[test]
+    fn rerank_posture_reports_reranked_scores() {
+        let hit = synthetic_reranked_hit("mem_reranked", 0.91);
+        let posture = search_rerank_posture_json(&[&hit], &[]);
+
+        assert_eq!(posture["schema"], "ee.rerank_posture.v1");
+        assert_eq!(posture["mode"], "reranked");
+        assert_eq!(posture["configured"], "auto");
+        assert_eq!(posture["topK"], DEFAULT_SEARCH_RERANK_TOP_K);
+        assert_eq!(posture["rerankScoreCount"], 1);
+        assert_eq!(posture["scoreKind"], "reranked");
+        assert_eq!(posture["available"], true);
+        assert!(posture["degradedCode"].is_null());
+    }
+
+    #[test]
+    fn rerank_posture_reports_fusion_only_degraded() {
+        let hit = synthetic_hybrid_hit("mem_fusion", 2.0 / 61.0);
+        let degraded = vec![SearchDegradation::rerank_model_unavailable(
+            "No available reranker model is registered for this workspace.",
+        )];
+        let posture = search_rerank_posture_json(&[&hit], &degraded);
+
+        assert_eq!(posture["mode"], "fusion_only_degraded");
+        assert_eq!(posture["scoreKind"], "rrf_fused");
+        assert_eq!(posture["available"], false);
+        assert_eq!(posture["degradedCode"], "rerank_model_unavailable");
+    }
+
+    #[test]
+    fn rerank_model_unavailable_degradation_is_stable() {
+        let degraded = SearchDegradation::rerank_model_unavailable("offline fixture");
+
+        assert_eq!(degraded.code, "rerank_model_unavailable");
+        assert_eq!(degraded.severity, "low");
+        assert!(degraded.message.contains("Search rerank is in auto mode"));
+        assert!(degraded.message.contains("fusion-only ranking"));
+        assert_eq!(
+            degraded.repair.as_deref(),
+            Some(RERANK_MODEL_UNAVAILABLE_REPAIR)
+        );
+    }
+
+    #[test]
+    fn rerank_stored_path_metadata_reads_stable_field() -> TestResult {
+        let path = reranker_stored_path_from_metadata(r#"{"storedPath":"/tmp/reranker"}"#)
+            .ok_or_else(|| "storedPath should be parsed".to_string())?;
+
+        assert_eq!(path, PathBuf::from("/tmp/reranker"));
+        assert!(reranker_stored_path_from_metadata(r#"{"storedPath":""}"#).is_none());
+        assert!(reranker_stored_path_from_metadata("not-json").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn rerank_archive_sibling_dir_strips_tar_zst() -> TestResult {
+        let archive = PathBuf::from("/tmp/ee-models/rerank-default-v1.tar.zst");
+        let sibling = rerank_archive_sibling_dir(&archive)
+            .ok_or_else(|| "tar.zst archive should resolve to sibling dir".to_string())?;
+
+        assert_eq!(sibling, PathBuf::from("/tmp/ee-models/rerank-default-v1"));
+        assert!(rerank_archive_sibling_dir(Path::new("/tmp/model.onnx")).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn unpacked_rerank_model_dir_requires_tokenizer_and_model() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let model_dir = temp.path().join("rerank-default-v1");
+        std::fs::create_dir_all(model_dir.join("onnx")).map_err(|error| error.to_string())?;
+        std::fs::write(model_dir.join(RERANK_MODEL_TOKENIZER), "{}")
+            .map_err(|error| error.to_string())?;
+        std::fs::write(model_dir.join(RERANK_MODEL_ONNX_SUBDIR), b"onnx")
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(unpacked_rerank_model_dir(&model_dir)?, model_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn truncate_hits_to_limit_caps_expanded_rerank_pool() {
+        let mut hits = vec![
+            synthetic_reranked_hit("mem_a", 0.91),
+            synthetic_reranked_hit("mem_b", 0.82),
+            synthetic_reranked_hit("mem_c", 0.73),
+        ];
+
+        truncate_hits_to_limit(&mut hits, 2);
+
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].doc_id, "mem_a");
+        assert_eq!(hits[1].doc_id, "mem_b");
     }
 
     fn test_effective_floor(user_floor_override: Option<f32>, source: ScoreSource) -> f32 {
