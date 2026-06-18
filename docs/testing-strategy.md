@@ -242,6 +242,27 @@ The smoke must not run Cargo, must not delete retained workspaces, and must not
 emit raw node keys, Tailscale IPs, MagicDNS names, memory bodies, or remote
 workspace paths. Logs use short hashes for peer and route identifiers.
 
+### Capture Track E2E
+
+`scripts/e2e_capture.sh` is the `bd-2vq2z.20` real-binary, no-Cargo harness
+for the capture track. It emits `ee.test_event.v1` JSONL, runs under
+`EE_E2E_TMPDIR=/private/tmp` in the default verifier, and retains its temporary
+workspace/artifacts.
+
+The script proves:
+
+- `ee capture suggest` is read-only, returns `ee.capture_suggestions.v1`,
+  emits explicit accept/reject commands, and preserves the source workspace in
+  every returned command.
+- `ee review session --propose` creates curation proposals for a fixture CASS
+  session without silently storing memories.
+- `ee remember --from-commit` and `--from-diff` are dry-run-first unless
+  `--apply` is supplied, derive memory text from git evidence, include
+  file/symbol anchors plus a BLAKE3 drift fingerprint, redact secret-like diff
+  evidence, and assert the audited apply path.
+- A rerun after accepted capture suppresses duplicate takeover loops instead of
+  silently storing or reproposing already-covered lessons.
+
 ### Ergonomics E2E
 
 `scripts/e2e_ergonomics.sh` is the `bd-1et0v.22` real-binary, no-Cargo

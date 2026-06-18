@@ -17,6 +17,10 @@ E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EE_BIN="${EE_BIN:-ee}"
 export EE_BIN
 
+# Capture proofs are forensic artifacts for review/convergence. Retain the
+# isolated workspace by default; callers can opt out explicitly.
+export EE_E2E_KEEP="${EE_E2E_KEEP:-1}"
+
 # shellcheck source=scripts/e2e_lib.sh
 # shellcheck disable=SC1091
 source "$E2E_DIR/e2e_lib.sh"
@@ -225,6 +229,12 @@ if capture_suggest_available; then
     assert_jq "$suggest_out" '
         .data.candidates[0].rejectCommand | contains("ee curate")
     ' "capture suggest exposes an explicit reject command"
+    assert_jq "$suggest_out" ".data.candidates[0].acceptCommand | contains(\"--workspace\") and contains(\"$WS\")" \
+        "capture suggest accept command preserves source workspace"
+    assert_jq "$suggest_out" ".data.candidates[0].rejectCommand | contains(\"--workspace\") and contains(\"$WS\")" \
+        "capture suggest reject command preserves source workspace"
+    assert_jq "$suggest_out" ".data.nextAction | contains(\"--workspace\") and contains(\"$WS\")" \
+        "capture suggest next action preserves source workspace"
     after_suggest_candidates="$(candidate_count "$WS")"
     assert_eq "$after_suggest_candidates" "$before_suggest_candidates" \
         "capture suggest does not persist curation candidates by itself"
@@ -316,13 +326,15 @@ RS
 )
 if remember_git_capture_available; then
     before_git_memories="$(memory_list_count "$WS")"
-    dry_commit="$(ee_json --workspace "$FIXTURE_REPO" remember --from-commit HEAD --dry-run --json)"
+    dry_commit="$(ee_json --workspace "$FIXTURE_REPO" remember --from-commit HEAD --json)"
     assert_jq "$dry_commit" '.schema == "ee.response.v2" and .success == true' \
-        "remember --from-commit dry-run succeeds"
+        "remember --from-commit default dry-run succeeds"
     assert_jq "$dry_commit" '
-        (.data.schema == "ee.remember.git_capture.v1" or .data.gitCapture.schema == "ee.remember.git_capture.v1")
-        and ((.data.dryRun // .data.dry_run // false) == true)
-        and ((.data.persisted // false) == false)
+        .data.command == "remember"
+        and (.data.dry_run == true)
+        and (.data.persisted == false)
+        and (.data.content | contains("Mode: commit."))
+        and (.data.content | contains("Diff fingerprint: blake3:"))
     ' "remember --from-commit defaults to no stored memory under dry-run"
     after_dry_git_memories="$(memory_list_count "$WS")"
     assert_eq "$after_dry_git_memories" "$before_git_memories" \
@@ -333,23 +345,28 @@ if remember_git_capture_available; then
         "remember --from-commit --apply succeeds"
     assert_jq "$apply_commit" '
         ((.data.persisted // false) == true)
+        and ((.data.dry_run // true) == false)
         and ((.data.content // .data.memory.content // "") | test("capture: redact secret-bearing diff evidence|redact secret"; "i"))
     ' "git capture derives memory text from commit message"
     assert_jq "$apply_commit" '
-        tostring | test("src/capture.rs")
-        and (tostring | test("capture_lesson|redacted_secret_marker|symbol|anchor"; "i"))
-        and (tostring | test("drift|fingerprint|blake3"; "i"))
+        (.data.content | contains("src/capture.rs"))
+        and (.data.content | contains("ee-anchor:path:src/capture.rs"))
+        and (.data.content | test("ee-anchor:symbol:(capture_lesson|redacted_secret_marker)"))
+        and (.data.content | contains("Diff fingerprint: blake3:"))
     ' "git capture includes file/symbol anchors and drift fingerprint"
     assert_jq "$apply_commit" "tostring | contains(\"$SECRET\") | not" \
         "git capture redacts secret-like diff evidence"
     assert_audit_mentions_capture "$FIXTURE_REPO" "from-commit apply"
 
-    diff_dry="$(ee_json --workspace "$FIXTURE_REPO" remember --from-diff HEAD~1 --dry-run --json)"
+    diff_dry="$(ee_json --workspace "$FIXTURE_REPO" remember --from-diff HEAD~1 --json)"
     assert_jq "$diff_dry" '.schema == "ee.response.v2" and .success == true' \
-        "remember --from-diff dry-run succeeds"
+        "remember --from-diff default dry-run succeeds"
     assert_jq "$diff_dry" '
-        (.data.schema == "ee.remember.git_capture.v1" or .data.gitCapture.schema == "ee.remember.git_capture.v1")
-        and ((.data.persisted // false) == false)
+        .data.command == "remember"
+        and (.data.persisted == false)
+        and (.data.dry_run == true)
+        and (.data.content | contains("Mode: diff."))
+        and (.data.content | contains("Diff fingerprint: blake3:"))
     ' "remember --from-diff is proposal-only unless --apply is supplied"
 else
     log_drop 1 "bd-2vq2z.8 remember --from-commit/--from-diff apply route absent: when wired, assert dry-run default, --apply persistence, file/symbol anchors, drift fingerprint, audit row, and secret redaction"

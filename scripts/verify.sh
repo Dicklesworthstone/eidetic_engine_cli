@@ -84,6 +84,7 @@ set -euo pipefail
 #   6.10 LOD Packing E2E       - scripts/e2e_lod_packing.sh
 #   6.11 House Rules E2E       - scripts/e2e_house_rules.sh
 #   6.12 Ask E2E               - scripts/e2e_ask.sh
+#   6.1265 Capture Track E2E   - scripts/e2e_capture.sh
 #   6.127 Ergonomics E2E       - scripts/e2e_ergonomics.sh
 #   6.1295 Embedding Native E2E - scripts/e2e_embedding_native.sh
 #   6.1296 Bundled Embeddings E2E - scripts/e2e_bundled_embeddings.sh
@@ -1136,6 +1137,12 @@ run_stage "Ask E2E (bd-169v0.5)" "./scripts/e2e_ask.sh"
 # search, pack-item outcome feedback, and outcome trace with ee.test_event.v1
 # evidence.
 run_stage "Journal Capture E2E (bd-1pi9m.6)" "./scripts/e2e_journal_capture.sh"
+
+# Gate 6.1265: Capture-track real-binary E2E (bd-2vq2z.20). No-Cargo:
+# proves ambient capture suggestions are read-only and workspace-stable,
+# from-commit/from-diff remember capture is dry-run-first with anchors,
+# redaction and audit checks, and session-arc proposals stay curation-gated.
+run_stage "Capture Track E2E (bd-2vq2z.20)" "EE_E2E_TMPDIR=/private/tmp EE_E2E_KEEP=1 ./scripts/e2e_capture.sh"
 
 # Gate 6.127: Ergonomics real-binary E2E (bd-1et0v.22). No-Cargo:
 # proves `ee context` remains an alias for canonical `ee pack` while carrying
