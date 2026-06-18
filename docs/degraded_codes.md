@@ -9323,7 +9323,7 @@ ee status --workspace . --json
 
 **Introduced by:** bd-ldstd (epic swarmx.4)
 
-**Trigger.** Running `ee status --json` or `ee doctor --json` on Linux while the swarmx.4 scaffold ships without the real libc::mbind / MAP_POPULATE syscall path. The scaffold reports the snapshot was not actually pinned and surfaces this code so an operator knows the optimization is announced but not yet wired. The wiring slice under bd-1prrl.3 deletes this code and replaces it with a true success path; until then this is the honest signal.
+**Trigger.** Running `ee status --json` or `ee doctor --json` on Linux while the swarmx.4 scaffold ships without the real libc::mbind / MAP_POPULATE syscall path. The scaffold reports the snapshot was not actually pinned and surfaces this code so an operator knows the optimization is announced but not yet wired. Doctor reports this as not-applicable/info instead of a warning because it has no effect on ee memory storage or retrieval. The wiring slice under bd-1prrl.3 deletes this code and replaces it with a true success path; until then this is the honest signal.
 
 **Setup.**
 
@@ -9337,7 +9337,7 @@ ee init --workspace .
 ee status --workspace . --json
 ```
 
-**Expected emission.** Message contains: `NUMA ... Linux`
+**Expected emission.** Message contains: `NUMA ... Linux ... no effect on ee memory`
 
 **Repair hint.** `bd-1prrl.3`
 

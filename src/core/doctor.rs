@@ -25,8 +25,8 @@ use crate::db::{
     },
 };
 use crate::graph::numa_pin::{
-    NUMA_PIN_DISABLE_ENV, NUMA_PIN_NODE_ENV, NUMA_PIN_POPULATE_ENV, NumaPinConfig, NumaPinResult,
-    pin_snapshot_blob,
+    NUMA_PIN_DISABLE_ENV, NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE, NUMA_PIN_NODE_ENV,
+    NUMA_PIN_POPULATE_ENV, NumaPinConfig, NumaPinPlatform, NumaPinResult, pin_snapshot_blob,
 };
 use crate::mesh::hello_responder::HelloResponderStatusReport;
 use crate::mesh::repair_action_graph::{
@@ -3194,6 +3194,21 @@ fn graph_numa_pin_check_from_result(result: &NumaPinResult) -> CheckResult {
         );
     }
 
+    if graph_numa_pin_is_linux_not_applicable(result) {
+        return CheckResult {
+            name: "graph_numa_pin",
+            severity: CheckSeverity::Ok,
+            message: format!(
+                "Graph NUMA pinning is not implemented on this Linux platform yet for {snapshot_path}; no effect on ee memory storage or retrieval. The graph loader falls back without functional regression. Degraded code: {NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE}."
+            ),
+            error_code: None,
+            repair: Some(
+                "Track the libc::mbind syscall slice under bd-1prrl.3 follow-ups; until that ships this not-applicable optimization has no effect on memory correctness.",
+            ),
+            tier: CheckTier::Core,
+        };
+    }
+
     CheckResult {
         name: "graph_numa_pin",
         severity: CheckSeverity::Warning,
@@ -3205,6 +3220,14 @@ fn graph_numa_pin_check_from_result(result: &NumaPinResult) -> CheckResult {
         repair: Some("Inspect `ee status --json` graph.numaPin and graph NUMA env/config."),
         tier: CheckTier::Core,
     }
+}
+
+fn graph_numa_pin_is_linux_not_applicable(result: &NumaPinResult) -> bool {
+    result.platform == NumaPinPlatform::Linux
+        && result.degraded_codes.len() == 1
+        && result
+            .degraded_codes
+            .contains(&NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE)
 }
 
 fn graph_numa_pin_config_for_doctor() -> NumaPinConfig {
@@ -4669,15 +4692,80 @@ mod tests {
         )
     }
 
+    fn graph_numa_pin_result_with_codes(codes: Vec<&'static str>) -> NumaPinResult {
+        NumaPinResult {
+            schema: crate::graph::numa_pin::STATUS_GRAPH_NUMA_PIN_SCHEMA_V1,
+            platform: crate::graph::numa_pin::NumaPinPlatform::Linux,
+            supported: true,
+            enabled: true,
+            attempted: true,
+            succeeded: false,
+            preferred_node: std::borrow::Cow::Borrowed(
+                crate::graph::numa_pin::NUMA_PIN_PREFERRED_NODE_AUTO,
+            ),
+            populate_requested: true,
+            bytes_resident: 0,
+            populated: false,
+            fallback_path: crate::graph::numa_pin::NumaPinFallbackPath::SoftwareNotImplemented,
+            snapshot_path: Some(PathBuf::from(".ee/graph")),
+            degraded_codes: codes,
+        }
+    }
+
     #[test]
-    fn graph_numa_pin_check_warns_when_enabled_but_degraded() -> TestResult {
-        let check = check_graph_numa_pin_with_config(None, NumaPinConfig::default());
+    fn graph_numa_pin_linux_not_implemented_is_ok_not_applicable() -> TestResult {
+        let result = graph_numa_pin_result_with_codes(vec![NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE]);
+        let check = graph_numa_pin_check_from_result(&result);
+
+        ensure(check.name, "graph_numa_pin", "check name")?;
+        ensure(
+            check.severity,
+            CheckSeverity::Ok,
+            "linux scaffold is not applicable, not warning",
+        )?;
+        ensure(
+            check
+                .message
+                .contains("not implemented on this Linux platform"),
+            true,
+            "message explains platform not-applicable status",
+        )?;
+        ensure(
+            check
+                .message
+                .contains("no effect on ee memory storage or retrieval"),
+            true,
+            "message separates graph optimization from memory health",
+        )?;
+        ensure(
+            check.message.contains(NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE),
+            true,
+            "message preserves degraded code for observability",
+        )?;
+        ensure(
+            check.is_topline_healthy(),
+            true,
+            "not-applicable scaffold cannot degrade top-line",
+        )?;
+        ensure(
+            check
+                .repair
+                .is_some_and(|repair| repair.contains("bd-1prrl.3")),
+            true,
+            "repair points at syscall follow-up",
+        )
+    }
+
+    #[test]
+    fn graph_numa_pin_check_warns_when_enabled_real_failure_degrades() -> TestResult {
+        let result = graph_numa_pin_result_with_codes(vec!["numa_pin_syscall_failed"]);
+        let check = graph_numa_pin_check_from_result(&result);
 
         ensure(check.name, "graph_numa_pin", "check name")?;
         ensure(
             check.severity,
             CheckSeverity::Warning,
-            "enabled scaffold degrades",
+            "enabled real failure warns",
         )?;
         ensure(
             check.message.contains("degraded codes:"),

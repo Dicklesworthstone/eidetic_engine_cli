@@ -426,3 +426,31 @@ if [ -n "${BD12_DOCTOR_CORE_CLEAR:-}" ] && [ -n "${BD12_STATUS_CORE_CLEAR:-}" ];
         "status_core_nonok_count" "$BD12_STATUS_CORE_NONOK_COUNT" \
         "doctor_status_core_clear_agreement" "$BD12_DOCTOR_CORE_CLEAR"
 fi
+
+# ------------------------------------------------------------
+# bd-1et0v.13 — graph_numa_pin Linux scaffold is not-applicable:
+# The Linux mbind scaffold must stay visible, but it is not a memory-health
+# warning while the syscall slice is intentionally absent.
+# ------------------------------------------------------------
+printf '%s\n' "bd-1et0v.13 e2e: validating graph_numa_pin not-applicable posture" >&2
+e2e_log_note "bd_1et0v_13_step=validate_graph_numa_pin_not_applicable"
+assert_jq "$BD12_DOCTOR_JSON" \
+    '([.data.checks[]? | select(.name == "graph_numa_pin")] | length)' \
+    "1" "bd13_doctor_graph_numa_pin_check_present_once"
+
+BD13_GRAPH_NUMA_MESSAGE=$(printf '%s' "$BD12_DOCTOR_JSON" \
+    | jq -r '[.data.checks[]? | select(.name == "graph_numa_pin")][0].message // ""' \
+    2>/dev/null || echo "")
+BD13_GRAPH_NUMA_SEVERITY=$(printf '%s' "$BD12_DOCTOR_JSON" \
+    | jq -r '[.data.checks[]? | select(.name == "graph_numa_pin")][0].severity // ""' \
+    2>/dev/null || echo "")
+if printf '%s' "$BD13_GRAPH_NUMA_MESSAGE" \
+    | grep -q 'numa_pin_linux_not_implemented'; then
+    e2e_log_assert_eq "$BD13_GRAPH_NUMA_SEVERITY" "ok" \
+        "bd13_linux_numa_not_implemented_is_ok"
+    assert_jq "$BD12_DOCTOR_JSON" \
+        '([.data.checks[]? | select(.name == "graph_numa_pin")][0].message | contains("no effect on ee memory storage or retrieval"))' \
+        "true" "bd13_linux_numa_message_mentions_no_memory_effect"
+else
+    e2e_log_note "bd_1et0v_13_linux_numa_not_applicable_absent=true"
+fi
