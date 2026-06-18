@@ -1232,6 +1232,10 @@ impl EffectManifest {
                 "Diagnose memory debt from persisted memory state",
             ),
             CommandEffect::read_only_db(
+                "health scorecard",
+                "Summarize memory-store health from debt, gaps, trust, redundancy, and graph signals",
+            ),
+            CommandEffect::read_only_db(
                 "curate show",
                 "Inspect a single curation candidate read-only with apply preview",
             ),

@@ -11,11 +11,18 @@ workspace for a high-risk task.
 ## Weekly Workflow
 
 ```bash
+ee health scorecard --workspace . --json
 ee curate doctor --workspace . --limit 5 --trend --json
 ee learn gaps --workspace . --limit 10 --json
 ```
 
-First read the `curate doctor` queue. Each item is read-only and carries a
+First read `health scorecard` for the single trend-aware posture: the composite
+score combines coverage, freshness, trust, redundancy, and graph health, then
+lists the top three next actions. Use `--record-snapshot` only when you
+deliberately want to append a memory-debt trend baseline; ordinary scorecard
+reads are read-only.
+
+Then read the `curate doctor` queue. Each item is read-only and carries a
 suggested action that routes through an existing audited surface such as
 `ee outcome`, `ee curate disposition`, `ee recall`, or conflict resolution.
 Execute only the actions you have reviewed.
@@ -51,6 +58,7 @@ memory id. Report rows are evidence, not mutations.
 | Surface | Evidence stream | Use it for |
 | --- | --- | --- |
 | `ee doctor` | Environment, DB, index, and capability checks | Fixing local readiness problems. |
+| `ee health scorecard` | Memory-debt snapshots, learn gaps, trust/provenance fields, duplicate content, and structural graph health | Answering whether the memory store is improving or rotting and choosing the next hygiene action. |
 | `ee curate doctor` | Persisted content, links, feedback, audit rows, and decay projections | Prioritizing memory-debt repairs. |
 | `ee insights --section knowledgeGaps` | Graph-structural gaps | Finding weak topology or missing graph support. |
 | `ee learn gaps` | Query-miss and ask-abstention demand | Capturing knowledge agents keep asking for. |
@@ -77,6 +85,7 @@ health:
 
 ```bash
 ee steward run --job memory_debt_snapshot --workspace . --json
+ee health scorecard --workspace . --json
 ee curate doctor --workspace . --trend --json
 ```
 
