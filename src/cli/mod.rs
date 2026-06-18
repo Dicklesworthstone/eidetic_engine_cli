@@ -62587,6 +62587,8 @@ mod tests {
                 crate::core::profile::OperatingProfile::Workstation,
                 "test_fixture",
             ),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: 50,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,

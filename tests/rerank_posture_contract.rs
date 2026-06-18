@@ -22,6 +22,8 @@ fn empty_search_report(degraded: Vec<SearchDegradation>) -> SearchReport {
         errors: Vec::new(),
         degraded,
         runtime_profile: runtime_profile(),
+        rerank_configured_mode: ee::config::SearchRerankMode::Auto,
+        rerank_configured_top_k: 50,
         relevance_floor_applied: Some(0.0),
         candidates_below_floor: 0,
         query_assist: None,
@@ -63,6 +65,8 @@ fn empty_results_with_repeated_rerank_degradations_stay_fusion_only_degraded() {
     assert_eq!(json["resultCount"], 0);
     assert_eq!(json["rerank"]["schema"], "ee.rerank_posture.v1");
     assert_eq!(json["rerank"]["mode"], "fusion_only_degraded");
+    assert_eq!(json["rerank"]["configured"], "auto");
+    assert_eq!(json["rerank"]["topK"], 50);
     assert_eq!(json["rerank"]["available"], false);
     assert_eq!(json["rerank"]["rerankScoreCount"], 0);
     assert_eq!(

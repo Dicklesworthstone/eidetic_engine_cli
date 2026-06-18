@@ -516,6 +516,8 @@ fn search_surface_normalizes_legacy_content_preview_metadata() -> TestResult {
             OperatingProfile::Workstation,
             "test_fixture",
         ),
+        rerank_configured_mode: ee::config::SearchRerankMode::Auto,
+        rerank_configured_top_k: 50,
         relevance_floor_applied: None,
         candidates_below_floor: 0,
         query_assist: None,

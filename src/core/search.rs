@@ -714,6 +714,8 @@ pub struct SearchReport {
     pub errors: Vec<String>,
     pub degraded: Vec<SearchDegradation>,
     pub runtime_profile: RuntimeProfileReport,
+    pub rerank_configured_mode: crate::config::SearchRerankMode,
+    pub rerank_configured_top_k: usize,
     /// Relevance floor that was applied to this search (B1 bd-17c65.2.1).
     /// `None` only for error cases where no search ran.
     pub relevance_floor_applied: Option<f32>,
@@ -2302,7 +2304,12 @@ impl SearchReport {
             "resultCount": visible_results.len(),
             "elapsedMs": self.elapsed_ms,
             "metrics": metrics,
-            "rerank": search_rerank_posture_json(&rerank_hits, &self.degraded),
+            "rerank": search_rerank_posture_json(
+                &rerank_hits,
+                &self.degraded,
+                self.rerank_configured_mode,
+                self.rerank_configured_top_k,
+            ),
             "profileRuntime": self.runtime_profile.data_json(),
             "errors": self.errors,
             "degraded": search_degraded_data_json("search", &self.degraded),
@@ -4844,6 +4851,8 @@ pub fn elapsed_timing_json(elapsed_ms: f64) -> serde_json::Value {
 fn search_rerank_posture_json(
     hits: &[&SearchHit],
     degraded: &[SearchDegradation],
+    configured_mode: crate::config::SearchRerankMode,
+    configured_top_k: usize,
 ) -> serde_json::Value {
     let rerank_score_count = hits.iter().filter(|hit| hit.rerank_score.is_some()).count();
     let unavailable = degraded
@@ -4859,8 +4868,8 @@ fn search_rerank_posture_json(
     serde_json::json!({
         "schema": "ee.rerank_posture.v1",
         "mode": mode,
-        "configured": "auto",
-        "topK": DEFAULT_SEARCH_RERANK_TOP_K,
+        "configured": configured_mode.as_str(),
+        "topK": configured_top_k,
         "rerankScoreCount": rerank_score_count,
         "scoreKind": if rerank_score_count > 0 { "reranked" } else { "rrf_fused" },
         "available": rerank_score_count > 0,
@@ -6190,13 +6199,14 @@ fn resolve_search_rerank_runtime(
     options: &SearchOptions,
     source_mode: SearchSourceMode,
     connection: Option<&DbConnection>,
+    configured_mode: crate::config::SearchRerankMode,
+    configured_top_k: usize,
     degraded: &mut Vec<SearchDegradation>,
 ) -> SearchRerankRuntime {
     if source_mode == SearchSourceMode::LexicalOnly {
         return SearchRerankRuntime::disabled();
     }
 
-    let (configured_mode, configured_top_k) = resolve_search_rerank_config(&options.workspace_path);
     if configured_mode == crate::config::SearchRerankMode::Off {
         // `[search] rerank = "off"` (bd-2vq2z.23): the operator opted out of the
         // local cross-encoder, so do not look up or load a reranker model and do
@@ -6557,8 +6567,16 @@ fn run_search_inner_with_performance(
     push_model_lifecycle_search_degradation(options, read_connection, &mut degraded);
     trace.record_elapsed("search::sourceModeResolve", source_mode_start);
     let rerank_resolve_start = Instant::now();
-    let rerank_runtime =
-        resolve_search_rerank_runtime(options, source_mode.applied, read_connection, &mut degraded);
+    let (rerank_configured_mode, rerank_configured_top_k) =
+        resolve_search_rerank_config(&options.workspace_path);
+    let rerank_runtime = resolve_search_rerank_runtime(
+        options,
+        source_mode.applied,
+        read_connection,
+        rerank_configured_mode,
+        rerank_configured_top_k,
+        &mut degraded,
+    );
     trace.record_elapsed("search::rerankResolve", rerank_resolve_start);
     let fusion_weights = resolved_search_fusion_weights(&options.workspace_path);
     if source_mode.unavailable_no_results {
@@ -6574,6 +6592,8 @@ fn run_search_inner_with_performance(
                 errors: Vec::new(),
                 degraded,
                 runtime_profile,
+                rerank_configured_mode,
+                rerank_configured_top_k,
                 relevance_floor_applied: None,
                 candidates_below_floor: 0,
                 query_assist: None,
@@ -6932,6 +6952,8 @@ fn run_search_inner_with_performance(
                     errors,
                     degraded,
                     runtime_profile,
+                    rerank_configured_mode,
+                    rerank_configured_top_k,
                     relevance_floor_applied: Some(floor),
                     candidates_below_floor: dropped,
                     query_assist,
@@ -6966,6 +6988,8 @@ fn run_search_inner_with_performance(
                     errors: vec![e],
                     degraded,
                     runtime_profile,
+                    rerank_configured_mode,
+                    rerank_configured_top_k,
                     relevance_floor_applied: None,
                     candidates_below_floor: 0,
                     query_assist: None,
@@ -7115,6 +7139,8 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
         &query_assist_candidates,
     );
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let (rerank_configured_mode, rerank_configured_top_k) =
+        resolve_search_rerank_config(&options.workspace_path);
     let final_report = SearchReport {
         status,
         query: options.query.clone(),
@@ -7124,6 +7150,8 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
         errors: diag_result.errors.clone(),
         degraded,
         runtime_profile,
+        rerank_configured_mode,
+        rerank_configured_top_k,
         relevance_floor_applied: Some(floor),
         candidates_below_floor: dropped,
         query_assist,
@@ -9930,6 +9958,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: Some(0.05),
             candidates_below_floor: 0,
             query_assist: None,
@@ -10015,6 +10045,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: Some(0.0),
             candidates_below_floor: 0,
             query_assist: None,
@@ -10233,6 +10265,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -10289,6 +10323,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -11276,6 +11312,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -11527,6 +11565,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -11605,6 +11645,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -12090,6 +12132,8 @@ mod tests {
             errors: Vec::new(),
             degraded,
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -12202,6 +12246,8 @@ mod tests {
             errors: Vec::new(),
             degraded,
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -12364,6 +12410,8 @@ mod tests {
             errors: Vec::new(),
             degraded,
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -12530,6 +12578,8 @@ mod tests {
             errors: Vec::new(),
             degraded,
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -12642,6 +12692,8 @@ mod tests {
             errors: Vec::new(),
             degraded,
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -12683,6 +12735,8 @@ mod tests {
             errors: Vec::new(),
             degraded: vec![SearchDegradation::stale_index(Some(12), Some(9))],
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -12733,6 +12787,8 @@ mod tests {
                 },
             ],
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -12785,6 +12841,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -12841,6 +12899,8 @@ mod tests {
             errors: Vec::new(),
             degraded: vec![SearchDegradation::output_redaction_disabled()],
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -12898,6 +12958,8 @@ mod tests {
             errors: Vec::new(),
             degraded: vec![SearchDegradation::output_redaction_disabled()],
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -12956,6 +13018,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -13555,6 +13619,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -13608,6 +13674,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -13669,6 +13737,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -13741,6 +13811,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -13801,6 +13873,8 @@ mod tests {
             errors: vec!["semantic tier unavailable".to_string()],
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -13854,6 +13928,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -13984,6 +14060,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14048,6 +14126,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14356,6 +14436,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14391,6 +14473,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14428,6 +14512,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14462,6 +14548,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14496,6 +14584,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14847,6 +14937,8 @@ mod tests {
             errors: Vec::new(),
             degraded,
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14884,6 +14976,8 @@ mod tests {
         assert_eq!(json["resultCount"], 2);
         assert_eq!(json["rerank"]["schema"], "ee.rerank_posture.v1");
         assert_eq!(json["rerank"]["mode"], "reranked");
+        assert_eq!(json["rerank"]["configured"], "auto");
+        assert_eq!(json["rerank"]["topK"], DEFAULT_SEARCH_RERANK_TOP_K);
         assert_eq!(json["rerank"]["rerankScoreCount"], 1);
         assert_eq!(json["rerank"]["scoreKind"], "reranked");
         assert_eq!(json["rerank"]["available"], true);
@@ -14921,9 +15015,27 @@ mod tests {
     }
 
     #[test]
+    fn search_report_data_json_uses_report_rerank_config() {
+        let mut report = rerank_test_report(Vec::new(), Vec::new());
+        report.rerank_configured_mode = crate::config::SearchRerankMode::Off;
+        report.rerank_configured_top_k = 12;
+
+        let json = report.data_json();
+
+        assert_eq!(json["rerank"]["mode"], "fusion_only");
+        assert_eq!(json["rerank"]["configured"], "off");
+        assert_eq!(json["rerank"]["topK"], 12);
+    }
+
+    #[test]
     fn rerank_posture_reports_reranked_scores() {
         let hit = synthetic_reranked_hit("mem_reranked", 0.91);
-        let posture = search_rerank_posture_json(&[&hit], &[]);
+        let posture = search_rerank_posture_json(
+            &[&hit],
+            &[],
+            crate::config::SearchRerankMode::Auto,
+            DEFAULT_SEARCH_RERANK_TOP_K,
+        );
 
         assert_eq!(posture["schema"], "ee.rerank_posture.v1");
         assert_eq!(posture["mode"], "reranked");
@@ -14937,10 +15049,17 @@ mod tests {
 
     #[test]
     fn rerank_posture_reports_empty_fusion_only_without_degradation() {
-        let posture = search_rerank_posture_json(&[], &[]);
+        let posture = search_rerank_posture_json(
+            &[],
+            &[],
+            crate::config::SearchRerankMode::Off,
+            12,
+        );
 
         assert_eq!(posture["schema"], "ee.rerank_posture.v1");
         assert_eq!(posture["mode"], "fusion_only");
+        assert_eq!(posture["configured"], "off");
+        assert_eq!(posture["topK"], 12);
         assert_eq!(posture["rerankScoreCount"], 0);
         assert_eq!(posture["scoreKind"], "rrf_fused");
         assert_eq!(posture["available"], false);
@@ -14954,7 +15073,12 @@ mod tests {
         let reranked_b = synthetic_reranked_hit("mem_reranked_b", 0.74);
         let hits = vec![&reranked_a, &fusion, &reranked_b];
 
-        let posture = search_rerank_posture_json(&hits, &[]);
+        let posture = search_rerank_posture_json(
+            &hits,
+            &[],
+            crate::config::SearchRerankMode::Auto,
+            DEFAULT_SEARCH_RERANK_TOP_K,
+        );
 
         assert_eq!(posture["mode"], "reranked");
         assert_eq!(posture["rerankScoreCount"], 2);
@@ -14973,7 +15097,12 @@ mod tests {
             repair: Some("ee index rebuild --workspace .".to_string()),
         }];
 
-        let posture = search_rerank_posture_json(&[&hit], &degraded);
+        let posture = search_rerank_posture_json(
+            &[&hit],
+            &degraded,
+            crate::config::SearchRerankMode::Auto,
+            DEFAULT_SEARCH_RERANK_TOP_K,
+        );
 
         assert_eq!(posture["mode"], "fusion_only");
         assert_eq!(posture["rerankScoreCount"], 0);
@@ -14988,7 +15117,12 @@ mod tests {
         let degraded = vec![SearchDegradation::rerank_model_unavailable(
             "No available reranker model is registered for this workspace.",
         )];
-        let posture = search_rerank_posture_json(&[&hit], &degraded);
+        let posture = search_rerank_posture_json(
+            &[&hit],
+            &degraded,
+            crate::config::SearchRerankMode::Auto,
+            DEFAULT_SEARCH_RERANK_TOP_K,
+        );
 
         assert_eq!(posture["mode"], "fusion_only_degraded");
         assert_eq!(posture["scoreKind"], "rrf_fused");
@@ -15752,6 +15886,8 @@ mod tests {
             errors: Vec::new(),
             degraded: vec![SearchDegradation::mi_dedup_candidate_proposed(1)],
             runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
